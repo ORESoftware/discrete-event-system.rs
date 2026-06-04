@@ -4,97 +4,58 @@
 //! Q-learning / PPO as DES) behave correctly on small, ground-truthed problems.
 //! Driver → [`run`].
 //!
-//! PORT NOTES — wire to real modules:
-//!   * `crate::des::general::sa_des::{run_tsp_sa_des, run_tsp_hill_climber_des}`,
-//!     `crate::des::general::ga_des::run_tsp_ga_des`,
-//!     `crate::des::general::qlearning_des::run_qlearning_des`,
-//!     `crate::des::general::ppo_des::run_ppo_des`.
-//!   * `crate::des::general::genetic_tsp::{build_pentagon_tsp, build_random_tsp,
-//!     tour_length, is_permutation, held_karp_exact}` — ported faithfully here.
-//!   * `crate::des::general::rl_environments::{GridWorld, Corridor, eval_policy}`.
-//!   * The metaheuristic solvers are stubbed to return the Held-Karp exact
-//!     optimum (a legitimate optimal incumbent) so the optimization invariants
-//!     hold; the RL kernels return a zero-value table with a known-good policy.
+//! The first Rust runner kept local exact-optimum and zero-value stand-ins. The
+//! DES optimizer/agent modules are now ported, so these checks exercise the real
+//! SA-DES, GA-DES, Q-learning-DES, PPO-DES, and environment code.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
+use crate::des::general::des_base::environment::{
+    PureEnvironment as DesPureEnvironment, StepResult as DesStepResult,
+};
+use crate::des::general::ga_des::{
+    run_tsp_ga_des as real_run_tsp_ga_des, TSPGAOptions as RealTspGaOptions,
+};
+use crate::des::general::genetic_tsp::{
+    build_pentagon_tsp as real_build_pentagon_tsp, build_random_tsp as real_build_random_tsp,
+    held_karp_exact as real_held_karp_exact, is_permutation as real_is_permutation,
+    tour_length as real_tour_length, InitMode, TSPInstance as TspInstance,
+};
+use crate::des::general::ppo_des::{
+    run_ppo_des as real_run_ppo_des, RunPPOOptions as RealRunPpoOptions,
+};
+use crate::des::general::qlearning_des::{
+    run_qlearning_des as real_run_qlearning_des, RunQLearningOptions as RealRunQLearningOptions,
+};
+use crate::des::general::rl_environments::{
+    eval_policy as real_eval_policy, Corridor as RealCorridor, Environment as RealEnvironment,
+    EvalPolicyOptions, GridWorld as RealGridWorld, GridWorldOptions,
+};
+use crate::des::general::sa_des::{
+    run_tsp_hill_climber_des as real_run_tsp_hill_climber_des,
+    run_tsp_sa_des as real_run_tsp_sa_des, CoolingSchedule as RealCoolingSchedule, Moves,
+    TSPSAOptions as RealTspSaOptions,
+};
+use crate::des::shared::capabilities::SeededRandom;
+
 // =============================================================================
-// TSP kernels (faithful).
+// Thin validation adapters over TSP / optimizer kernels.
 // =============================================================================
-
-#[derive(Clone, Debug, Default)]
-struct TspInstance {
-    n: usize,
-    dist: Vec<Vec<f64>>,
-}
-
-fn euclid(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
-    ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt()
-}
-
-fn instance_from_coords(coords: &[(f64, f64)]) -> TspInstance {
-    let n = coords.len();
-    let mut dist = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            dist[i][j] = euclid(coords[i].0, coords[i].1, coords[j].0, coords[j].1);
-        }
-    }
-    TspInstance { n, dist }
-}
 
 fn build_pentagon_tsp(n: usize, radius: f64) -> TspInstance {
-    // Evenly spaced points on a circle; the in-order tour is optimal.
-    let coords: Vec<(f64, f64)> = (0..n)
-        .map(|i| {
-            let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-            (radius * theta.cos(), radius * theta.sin())
-        })
-        .collect();
-    instance_from_coords(&coords)
-}
-
-fn mulberry32(seed: u32) -> impl FnMut() -> f64 {
-    let mut a = seed;
-    move || {
-        a = a.wrapping_add(0x6D2B79F5);
-        let mut t = a;
-        t = (t ^ (t >> 15)).wrapping_mul(t | 1);
-        t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
-        // TS `>>> 0` is an unsigned coercion; `t` is already u32 here, so it is a no-op.
-        ((t ^ (t >> 14)) as f64) / 4294967296.0
-    }
+    real_build_pentagon_tsp(n, radius)
 }
 
 fn build_random_tsp(n: usize, seed: u32) -> TspInstance {
-    // PORT NOTE: real builder lives in genetic-tsp.ts; reconstructed with the
-    // shared mulberry32 PRNG over a [0,100]^2 square.
-    let mut rng = mulberry32(seed);
-    let coords: Vec<(f64, f64)> = (0..n).map(|_| (rng() * 100.0, rng() * 100.0)).collect();
-    instance_from_coords(&coords)
+    real_build_random_tsp(n, seed, None)
 }
 
 fn tour_length(inst: &TspInstance, tour: &[usize]) -> f64 {
-    let n = tour.len();
-    let mut total = 0.0;
-    for i in 0..n {
-        total += inst.dist[tour[i]][tour[(i + 1) % n]];
-    }
-    total
+    real_tour_length(inst, tour)
 }
 
 fn is_permutation(tour: &[usize], n: usize) -> bool {
-    if tour.len() != n {
-        return false;
-    }
-    let mut seen = vec![false; n];
-    for &v in tour {
-        if v >= n || seen[v] {
-            return false;
-        }
-        seen[v] = true;
-    }
-    seen.iter().all(|&b| b)
+    real_is_permutation(tour, n)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -103,66 +64,16 @@ struct HeldKarpResult {
     tour: Vec<usize>,
 }
 
-/// Exact TSP optimum via Held-Karp DP (fixes city 0 as start/end).
 fn held_karp_exact(inst: &TspInstance) -> HeldKarpResult {
-    let n = inst.n;
-    if n <= 1 {
-        return HeldKarpResult {
-            length: 0.0,
-            tour: (0..n).collect(),
-        };
+    let result = real_held_karp_exact(inst);
+    HeldKarpResult {
+        length: result.length,
+        tour: result.tour,
     }
-    let full = 1usize << n;
-    let mut dp = vec![vec![f64::INFINITY; n]; full];
-    let mut parent = vec![vec![usize::MAX; n]; full];
-    dp[1 << 0][0] = 0.0;
-    for mask in 0..full {
-        if mask & 1 == 0 {
-            continue;
-        }
-        for last in 0..n {
-            if mask & (1 << last) == 0 || dp[mask][last].is_infinite() {
-                continue;
-            }
-            let base = dp[mask][last];
-            for next in 0..n {
-                if mask & (1 << next) != 0 {
-                    continue;
-                }
-                let nmask = mask | (1 << next);
-                let cand = base + inst.dist[last][next];
-                if cand < dp[nmask][next] {
-                    dp[nmask][next] = cand;
-                    parent[nmask][next] = last;
-                }
-            }
-        }
-    }
-    let mut best = f64::INFINITY;
-    let mut best_last = 0;
-    for last in 1..n {
-        let cand = dp[full - 1][last] + inst.dist[last][0];
-        if cand < best {
-            best = cand;
-            best_last = last;
-        }
-    }
-    // Reconstruct.
-    let mut tour = vec![0usize; n];
-    let mut mask = full - 1;
-    let mut last = best_last;
-    for i in (1..n).rev() {
-        tour[i] = last;
-        let p = parent[mask][last];
-        mask ^= 1 << last;
-        last = p;
-    }
-    tour[0] = 0;
-    HeldKarpResult { length: best, tour }
 }
 
 // =============================================================================
-// Metaheuristic solvers (stubbed → exact optimum).
+// Metaheuristic solvers.
 // =============================================================================
 
 #[derive(Clone, Debug, Default)]
@@ -176,26 +87,43 @@ struct SaResult {
 }
 
 fn run_tsp_sa_des(inst: &TspInstance) -> SaResult {
-    let hk = held_karp_exact(inst);
+    let result = real_run_tsp_sa_des(inst.clone(), tsp_sa_options(1), None);
     SaResult {
-        best_cost: hk.length,
-        best_tour: hk.tour,
-        best_history: vec![hk.length],
-        accepted_count: 0,
-        improve_count: 0,
-        current_history: vec![hk.length],
+        best_cost: result.best_cost,
+        best_tour: result.best_tour,
+        best_history: result.best_history,
+        accepted_count: result.accepted_count,
+        improve_count: result.improve_count,
+        current_history: result.current_history,
     }
 }
 
 fn run_tsp_hill_climber_des(inst: &TspInstance) -> SaResult {
-    let hk = held_karp_exact(inst);
+    let result = real_run_tsp_hill_climber_des(inst.clone(), tsp_sa_options(7), None);
     SaResult {
-        best_cost: hk.length,
-        best_tour: hk.tour.clone(),
-        best_history: vec![hk.length],
-        accepted_count: 0,
-        improve_count: 0,
-        current_history: vec![hk.length],
+        best_cost: result.best_cost,
+        best_tour: result.best_tour,
+        best_history: result.best_history,
+        accepted_count: result.accepted_count,
+        improve_count: result.improve_count,
+        current_history: result.current_history,
+    }
+}
+
+fn tsp_sa_options(seed: u32) -> RealTspSaOptions {
+    RealTspSaOptions {
+        cooling: RealCoolingSchedule::Geometric {
+            t0: 50.0,
+            alpha: 0.999,
+            t_min: None,
+        },
+        max_iterations: 12_000,
+        seed,
+        init: Some(InitMode::NearestNeighbor),
+        moves: Some(Moves::Mixed),
+        penalty_per_violation: None,
+        trace_stride: None,
+        stall_limit: None,
     }
 }
 
@@ -208,17 +136,31 @@ struct GaResult {
 }
 
 fn run_tsp_ga_des(inst: &TspInstance) -> GaResult {
-    let hk = held_karp_exact(inst);
+    let result = real_run_tsp_ga_des(
+        inst.clone(),
+        RealTspGaOptions {
+            pop_size: 80,
+            num_generations: 180,
+            tournament_size: None,
+            crossover_prob: None,
+            mutation_prob: None,
+            elitism: Some(4),
+            seed: 3,
+            init: Some(InitMode::NearestNeighbor),
+            penalty_per_violation: None,
+        },
+        None,
+    );
     GaResult {
-        best_length: hk.length,
-        best_tour: hk.tour,
-        best_history: vec![hk.length],
-        mean_history: vec![hk.length],
+        best_length: result.best_length,
+        best_tour: result.best_tour,
+        best_history: result.best_history,
+        mean_history: result.mean_history,
     }
 }
 
 // =============================================================================
-// RL environments + agents (stubbed).
+// RL environments + agents.
 // =============================================================================
 
 #[derive(Clone, Debug)]
@@ -226,22 +168,53 @@ struct OptimalV {
     v: Vec<f64>,
 }
 
-#[derive(Clone, Debug)]
 struct GridWorld {
-    n_states: usize,
-    n_actions: usize,
+    inner: RealGridWorld,
 }
 
 impl GridWorld {
     fn new() -> Self {
         GridWorld {
-            n_states: 16,
-            n_actions: 4,
+            inner: RealGridWorld::new(GridWorldOptions::default()),
         }
     }
-    fn optimal_v(&self, _gamma: f64) -> OptimalV {
-        OptimalV {
-            v: vec![0.0; self.n_states],
+    fn optimal_v(&self, gamma: f64) -> OptimalV {
+        let opt = self.inner.optimal_v(gamma, 1e-9, 5000);
+        OptimalV { v: opt.v }
+    }
+}
+
+struct GridWorldDesEnv {
+    inner: RealGridWorld,
+}
+
+impl GridWorldDesEnv {
+    fn new() -> Self {
+        GridWorldDesEnv {
+            inner: RealGridWorld::new(GridWorldOptions::default()),
+        }
+    }
+}
+
+impl DesPureEnvironment<usize, usize> for GridWorldDesEnv {
+    fn num_states(&self) -> usize {
+        self.inner.num_states()
+    }
+
+    fn num_actions(&self) -> usize {
+        self.inner.num_actions()
+    }
+
+    fn reset(&mut self) -> usize {
+        self.inner.reset()
+    }
+
+    fn step(&mut self, state: usize, action: usize) -> DesStepResult<usize> {
+        let result = self.inner.step(state, action);
+        DesStepResult {
+            next_state: result.next_state,
+            reward: result.reward,
+            done: result.done,
         }
     }
 }
@@ -255,9 +228,43 @@ impl Corridor {
     fn new(length: usize) -> Self {
         Corridor { length }
     }
-    fn optimal_v(&self, _gamma: f64) -> OptimalV {
-        OptimalV {
-            v: vec![0.0; self.length],
+    fn optimal_v(&self, gamma: f64) -> OptimalV {
+        let opt = RealCorridor::new(self.length, 0).optimal_v(gamma, 1e-9, 5000);
+        OptimalV { v: opt.v }
+    }
+}
+
+struct CorridorDesEnv {
+    inner: RealCorridor,
+}
+
+impl CorridorDesEnv {
+    fn new(length: usize) -> Self {
+        CorridorDesEnv {
+            inner: RealCorridor::new(length, 0),
+        }
+    }
+}
+
+impl DesPureEnvironment<usize, usize> for CorridorDesEnv {
+    fn num_states(&self) -> usize {
+        self.inner.num_states()
+    }
+
+    fn num_actions(&self) -> usize {
+        self.inner.num_actions()
+    }
+
+    fn reset(&mut self) -> usize {
+        self.inner.reset()
+    }
+
+    fn step(&mut self, state: usize, action: usize) -> DesStepResult<usize> {
+        let result = self.inner.step(state, action);
+        DesStepResult {
+            next_state: result.next_state,
+            reward: result.reward,
+            done: result.done,
         }
     }
 }
@@ -269,9 +276,23 @@ struct QResult {
 }
 
 fn run_qlearning_des(env: &GridWorld) -> QResult {
+    let result = real_run_qlearning_des(
+        Box::new(GridWorldDesEnv::new()),
+        RealRunQLearningOptions {
+            num_episodes: 8_000.0,
+            alpha: 0.2,
+            gamma: 0.95,
+            epsilon: 0.4,
+            epsilon_min: Some(0.02),
+            epsilon_decay: Some(0.995),
+            max_steps_per_episode: Some(100),
+            seed: Some(11),
+            des_options: None,
+        },
+    );
     QResult {
-        q: vec![vec![0.0; env.n_actions]; env.n_states],
-        policy: vec![0; env.n_states],
+        q: result.q,
+        policy: result.policy,
     }
 }
 
@@ -283,10 +304,29 @@ struct PpoResult {
 }
 
 fn run_ppo_des(cor: &Corridor, total_steps: usize, rollout_len: usize) -> PpoResult {
+    let result = real_run_ppo_des(
+        Box::new(CorridorDesEnv::new(cor.length)),
+        RealRunPpoOptions {
+            total_steps: total_steps as u64,
+            rollout_len,
+            num_epochs: 4,
+            mini_batch_size: 32,
+            policy_lr: 0.05,
+            value_lr: 0.08,
+            gamma: 0.95,
+            lambda: 0.95,
+            clip_eps: 0.2,
+            entropy_coef: Some(0.01),
+            normalise_advantage: Some(true),
+            max_steps_per_episode: Some(100),
+            seed: Some(17),
+            des_options: None,
+        },
+    );
     PpoResult {
-        v: vec![0.0; cor.length],
-        policy: vec![1; cor.length],
-        total_updates: total_steps / rollout_len,
+        v: result.v,
+        policy: result.policy,
+        total_updates: result.total_updates as usize,
     }
 }
 
@@ -297,15 +337,38 @@ struct EvalResult {
 }
 
 fn eval_policy_grid<F: Fn(usize) -> usize>(_env: &GridWorld, _policy: F) -> EvalResult {
+    let mut rng = SeededRandom::new(123);
+    let result = real_eval_policy(
+        &_env.inner,
+        |s, _rng| _policy(s),
+        &mut rng,
+        EvalPolicyOptions {
+            num_episodes: 100,
+            max_steps_per_episode: 100,
+            gamma: 0.95,
+        },
+    );
     EvalResult {
-        success_rate: 1.0,
-        mean_return: 0.0,
+        success_rate: result.success_rate,
+        mean_return: result.mean_return,
     }
 }
 fn eval_policy_corridor<F: Fn(usize) -> usize>(_env: &Corridor, _policy: F) -> EvalResult {
+    let env = RealCorridor::new(_env.length, 0);
+    let mut rng = SeededRandom::new(456);
+    let result = real_eval_policy(
+        &env,
+        |s, _rng| _policy(s),
+        &mut rng,
+        EvalPolicyOptions {
+            num_episodes: 100,
+            max_steps_per_episode: 100,
+            gamma: 0.95,
+        },
+    );
     EvalResult {
-        success_rate: 1.0,
-        mean_return: 0.0,
+        success_rate: result.success_rate,
+        mean_return: result.mean_return,
     }
 }
 

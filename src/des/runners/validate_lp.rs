@@ -4,22 +4,33 @@
 //! transformation against generic value iteration, across nine studies. The
 //! top-level driver code becomes [`run`].
 //!
-//! PORT NOTES (cross-module deps — all stubbed locally so the file compiles in
-//! isolation; wire the real kernels once `runners/mod.rs` exists):
-//!   * `crate::des::general::lp::{LpProblem, solve_lp, solve_lp_internal,
-//!     solve_lp_external}` — the LP types/solvers (here `LpProblem`, `LpResult`,
-//!     `solve_lp*`).
-//!   * `crate::des::general::lp_des::solve_lp_via_des` — DES-engine simplex.
-//!   * `crate::des::general::des_lp_bridge::{build_mdp_lp, solve_mdp_as_lp}`.
-//!   * `crate::des::mdp::value_iteration` / `crate::des::general::value_iteration`
-//!     — `value_iteration`, `MdpSpec`, `q_value`.
-//!   * No `serde`/`scipy`; the "external" solver is a placeholder that reports
-//!     `optimal`, so the scipy-unavailable branches are inert.
+//! The first Rust port kept local zero-answer stubs so this runner could compile
+//! before the optimization modules landed. The modules now exist, so this file
+//! keeps its readable study fixtures but routes every solve through the real
+//! crate APIs.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
+use std::sync::Arc;
+
+use crate::des::general::des_lp_bridge::{
+    build_mdp_lp as real_build_mdp_lp, solve_mdp_as_lp as real_solve_mdp_as_lp, MdpAsLpOptions,
+};
+use crate::des::general::lp::{
+    solve_lp as real_solve_lp, solve_lp_external as real_solve_lp_external,
+    solve_lp_internal as real_solve_lp_internal, ExternalSolverOptions, InternalSimplexOptions,
+    LPProblem as RealLpProblem, LPSolution as RealLpSolution, LpSolverOptions, Sense,
+};
+use crate::des::general::lp_des::{
+    solve_lp_via_des as real_solve_lp_via_des, DESSimplexOptions, DESSimplexSolution, PivotRule,
+};
+use crate::des::general::value_iteration::{
+    value_iteration as real_value_iteration, MDPSpec as RealMdpSpec, Outcome as RealOutcome,
+    VIOptions as RealViOptions,
+};
+
 // =============================================================================
-// Stubbed LP layer — PORT NOTE: crate::des::general::lp / lp_des / des_lp_bridge.
+// Thin validation adapters over crate::des::general::lp / lp_des.
 // =============================================================================
 
 #[derive(Clone, Debug, Default)]
@@ -30,6 +41,8 @@ struct LpProblem {
     b_ub: Vec<f64>,
     a_eq: Vec<Vec<f64>>,
     b_eq: Vec<f64>,
+    lb: Option<Vec<Option<f64>>>,
+    ub: Option<Vec<Option<f64>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -48,48 +61,118 @@ struct LpResult {
     trace: LpTrace,
 }
 
-fn stub_lp(lp: &LpProblem, solver: &str) -> LpResult {
+fn to_real_lp_problem(lp: &LpProblem) -> RealLpProblem {
+    RealLpProblem {
+        sense: match lp.sense {
+            "min" => Sense::Min,
+            _ => Sense::Max,
+        },
+        c: lp.c.clone(),
+        a_ub: (!lp.a_ub.is_empty()).then(|| lp.a_ub.clone()),
+        b_ub: (!lp.b_ub.is_empty()).then(|| lp.b_ub.clone()),
+        a_eq: (!lp.a_eq.is_empty()).then(|| lp.a_eq.clone()),
+        b_eq: (!lp.b_eq.is_empty()).then(|| lp.b_eq.clone()),
+        lb: lp.lb.clone(),
+        ub: lp.ub.clone(),
+        var_names: None,
+        con_names: None,
+    }
+}
+
+fn from_real_lp_problem(lp: &RealLpProblem) -> LpProblem {
+    LpProblem {
+        sense: lp.sense.as_str(),
+        c: lp.c.clone(),
+        a_ub: lp.a_ub.clone().unwrap_or_default(),
+        b_ub: lp.b_ub.clone().unwrap_or_default(),
+        a_eq: lp.a_eq.clone().unwrap_or_default(),
+        b_eq: lp.b_eq.clone().unwrap_or_default(),
+        lb: lp.lb.clone(),
+        ub: lp.ub.clone(),
+    }
+}
+
+fn lp_result_from_solution(sol: RealLpSolution) -> LpResult {
     LpResult {
-        status: "optimal".to_string(),
-        x: vec![0.0; lp.c.len()],
-        objective: 0.0,
-        iters: 0,
-        solver: solver.to_string(),
-        message: String::new(),
+        status: sol.status.as_str().to_string(),
+        x: sol.x,
+        objective: sol.objective,
+        iters: sol.iters.unwrap_or(0),
+        solver: sol.solver,
+        message: sol.message.unwrap_or_default(),
         trace: LpTrace::default(),
     }
 }
 
+fn lp_result_from_des_solution(sol: DESSimplexSolution) -> LpResult {
+    let pivot_history = sol.trace.pivot_history.iter().map(|p| p.tick).collect();
+    LpResult {
+        status: sol.status.as_str().to_string(),
+        x: sol.x,
+        objective: sol.objective,
+        iters: sol.iters.unwrap_or(0),
+        solver: sol.solver,
+        message: sol.message.unwrap_or_default(),
+        trace: LpTrace { pivot_history },
+    }
+}
+
 fn solve_lp_internal(lp: &LpProblem, _max_iter: Option<usize>) -> LpResult {
-    stub_lp(lp, "internal")
+    let real = to_real_lp_problem(lp);
+    lp_result_from_solution(real_solve_lp_internal(
+        &real,
+        &InternalSimplexOptions {
+            max_iter: _max_iter,
+            tol: None,
+            basis_start: None,
+        },
+    ))
 }
 
 fn solve_lp_external(lp: &LpProblem, method: &str) -> LpResult {
-    stub_lp(lp, &format!("scipy:{}", method))
+    let real = to_real_lp_problem(lp);
+    lp_result_from_solution(real_solve_lp_external(
+        &real,
+        &ExternalSolverOptions {
+            method: Some(method.to_string()),
+            ..Default::default()
+        },
+    ))
 }
 
-fn solve_lp_via_des(
-    lp: &LpProblem,
-    _pivot_rule: Option<&str>,
-    _max_iter: Option<usize>,
-) -> LpResult {
-    stub_lp(lp, "des-simplex")
+fn solve_lp_via_des(lp: &LpProblem, pivot_rule: Option<&str>, max_iter: Option<usize>) -> LpResult {
+    let pivot_rule = match pivot_rule {
+        Some("bland") => Some(PivotRule::Bland),
+        Some("dantzig") => Some(PivotRule::Dantzig),
+        _ => None,
+    };
+    let real = to_real_lp_problem(lp);
+    lp_result_from_des_solution(real_solve_lp_via_des(
+        &real,
+        &DESSimplexOptions {
+            pivot_rule,
+            max_iter,
+            tol: None,
+        },
+    ))
 }
 
 fn solve_lp(lp: &LpProblem) -> LpResult {
-    let choice = std::env::var("LP_SOLVER").unwrap_or_else(|_| "internal".to_string());
-    stub_lp(lp, &choice)
+    let real = to_real_lp_problem(lp);
+    lp_result_from_solution(real_solve_lp(&real, &LpSolverOptions::default()))
 }
 
 fn scipy_unavailable(r: &LpResult) -> bool {
     r.status == "numerical-error"
-        && (r.message.contains("scipy")
+        && (r.solver.starts_with("scipy:")
+            || r.message.contains("scipy")
             || r.message.contains("numpy")
+            || r.message.contains("ModuleNotFoundError")
             || r.message.contains("No module named"))
 }
 
 // =============================================================================
-// Stubbed MDP layer — PORT NOTE: value_iteration / des_lp_bridge.
+// Thin validation adapters over value_iteration / des_lp_bridge.
 // =============================================================================
 
 #[derive(Clone, Copy, Debug)]
@@ -122,15 +205,32 @@ struct ViOptions {
 }
 
 fn value_iteration(spec: &MdpSpec, _opts: ViOptions) -> ViResult {
+    let real = to_real_mdp_spec(spec);
+    let result = real_value_iteration(
+        real,
+        RealViOptions {
+            gamma: _opts.gamma,
+            tol: _opts.tol,
+            max_iter: _opts.max_iter,
+            random_tie_break: false,
+            ..Default::default()
+        },
+    );
     ViResult {
-        v: vec![0.0; spec.num_states],
-        policy: vec![0; spec.num_states],
-        iterations: 0,
+        v: result.v,
+        policy: result.policy.into_iter().map(i64::from).collect(),
+        iterations: result.iterations,
     }
 }
 
-fn q_value(_spec: &MdpSpec, _v: &[f64], _s: usize, _a: i64, _gamma: f64) -> f64 {
-    0.0
+fn q_value(spec: &MdpSpec, v: &[f64], s: usize, a: i64, gamma: f64) -> f64 {
+    if a < 0 {
+        return f64::NEG_INFINITY;
+    }
+    (spec.outcomes)(s, a as usize)
+        .iter()
+        .map(|o| o.prob * (o.reward + gamma * v[o.next_state]))
+        .sum()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -147,17 +247,99 @@ struct MdpLpSolution {
 }
 
 fn build_mdp_lp(_spec: &MdpSpec, _gamma: f64) -> LpProblem {
-    LpProblem::default()
+    let real = to_real_mdp_spec(_spec);
+    from_real_lp_problem(&real_build_mdp_lp(&real, _gamma, None))
 }
 
 fn solve_mdp_as_lp(spec: &MdpSpec, _gamma: f64) -> MdpLpSolution {
-    MdpLpSolution {
-        v: vec![0.0; spec.num_states],
-        policy: vec![0; spec.num_states],
-        lp: LpSubInfo {
-            iters: 0,
-            solver: "stub".to_string(),
+    let real = to_real_mdp_spec(spec);
+    match real_solve_mdp_as_lp(&real, _gamma, &MdpAsLpOptions::default()) {
+        Ok(sol) => MdpLpSolution {
+            v: sol.v,
+            policy: sol.policy.into_iter().map(i64::from).collect(),
+            lp: LpSubInfo {
+                iters: sol.lp.iters.unwrap_or(0),
+                solver: sol.lp.solver,
+            },
         },
+        Err(err) => MdpLpSolution {
+            v: vec![f64::NAN; spec.num_states],
+            policy: vec![-1; spec.num_states],
+            lp: LpSubInfo {
+                iters: 0,
+                solver: format!("error: {}", err),
+            },
+        },
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MdpSnapshot {
+    num_states: usize,
+    num_actions: Vec<usize>,
+    outcomes: Vec<Vec<Vec<Outcome>>>,
+    terminal: Vec<bool>,
+    terminal_reward: Vec<f64>,
+}
+
+fn snapshot_mdp(spec: &MdpSpec) -> MdpSnapshot {
+    let mut num_actions = Vec::with_capacity(spec.num_states);
+    let mut outcomes = Vec::with_capacity(spec.num_states);
+    let mut terminal = Vec::with_capacity(spec.num_states);
+    let mut terminal_reward = Vec::with_capacity(spec.num_states);
+
+    for s in 0..spec.num_states {
+        let action_count = (spec.num_actions)(s);
+        num_actions.push(action_count);
+        terminal.push((spec.is_terminal)(s));
+        terminal_reward.push((spec.terminal_reward)(s));
+
+        let mut per_action = Vec::with_capacity(action_count);
+        for a in 0..action_count {
+            per_action.push((spec.outcomes)(s, a));
+        }
+        outcomes.push(per_action);
+    }
+
+    MdpSnapshot {
+        num_states: spec.num_states,
+        num_actions,
+        outcomes,
+        terminal,
+        terminal_reward,
+    }
+}
+
+fn to_real_mdp_spec(spec: &MdpSpec) -> RealMdpSpec {
+    let snapshot = snapshot_mdp(spec);
+    let num_states = snapshot.num_states;
+    let num_actions = Arc::new(snapshot.num_actions);
+    let outcomes = Arc::new(snapshot.outcomes);
+    let terminal = Arc::new(snapshot.terminal);
+    let terminal_reward = Arc::new(snapshot.terminal_reward);
+
+    let num_actions_for_cb = Arc::clone(&num_actions);
+    let outcomes_for_cb = Arc::clone(&outcomes);
+    let terminal_for_cb = Arc::clone(&terminal);
+    let terminal_reward_for_cb = Arc::clone(&terminal_reward);
+
+    RealMdpSpec {
+        num_states,
+        num_actions: Box::new(move |s| num_actions_for_cb[s]),
+        outcomes: Box::new(move |s, a| {
+            outcomes_for_cb[s][a]
+                .iter()
+                .map(|o| RealOutcome {
+                    prob: o.prob,
+                    reward: o.reward,
+                    next_state: o.next_state,
+                })
+                .collect()
+        }),
+        is_terminal: Some(Box::new(move |s| terminal_for_cb[s])),
+        terminal_reward: Some(Box::new(move |s| terminal_reward_for_cb[s])),
+        state_label: None,
+        action_label: None,
     }
 }
 
@@ -264,7 +446,7 @@ pub fn run() {
         );
         for method in ["highs", "highs-ds", "highs-ipm"] {
             let ext = solve_lp_external(&lp, method);
-            if ext.status == "numerical-error" && ext.message.contains("scipy") {
+            if scipy_unavailable(&ext) {
                 println!("#   scipy:{} skipped (scipy unavailable)", method);
                 continue;
             }
@@ -646,7 +828,7 @@ pub fn run() {
             };
             let internal = solve_lp_internal(&lp, Some(1000));
             let ext = solve_lp_external(&lp, "highs");
-            if ext.status == "numerical-error" && ext.message.contains("scipy") {
+            if scipy_unavailable(&ext) {
                 scipy_available = false;
                 n_skip += 1;
                 continue;

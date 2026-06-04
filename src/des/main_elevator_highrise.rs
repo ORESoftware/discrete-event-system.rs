@@ -26,7 +26,10 @@
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
-use crate::des::animation::html_player::{build_html_set, AnimationSetOptions, AnimationVariant};
+use crate::des::animation::html_player::{
+    build_html_set, build_html_set_external, AnimationSetOptions, AnimationVariant,
+    ExternalAnimationVariant,
+};
 use crate::des::animation::types::{
     js_num, to_fixed, Anchor, Animation, ChartSeries, ChartSpec, CircleShape, FontWeight, Frame,
     FrameParts, LineShape, RectShape, Shape, TextShape,
@@ -3546,21 +3549,45 @@ pub fn run() {
     }
 
     let _ = std::fs::create_dir_all("out");
+    let asset_dir = std::path::Path::new("out").join("elevator-highrise");
+    let _ = std::fs::create_dir_all(&asset_dir);
+
+    let mut external_variants: Vec<ExternalAnimationVariant> = Vec::new();
+    let mut external_payload_bytes = 0usize;
+    for variant in &variants {
+        let rel = format!("elevator-highrise/{}.json", variant.id);
+        let path = std::path::Path::new("out").join(&rel);
+        let payload = variant.animation.to_json().to_string();
+        external_payload_bytes += payload.len();
+        let _ = std::fs::write(&path, payload);
+        external_variants.push(ExternalAnimationVariant {
+            id: variant.id.clone(),
+            label: variant.label.clone(),
+            href: rel,
+            summary: variant.summary.clone(),
+            controls: variant.controls.clone(),
+        });
+    }
+
     let html_path = "out/elevator-highrise.html";
-    let html = build_html_set(
-        &variants,
-        &AnimationSetOptions {
-            title: Some("High-rise elevator dispatch policies".to_string()),
-            subtitle: Some(format!(
-                "{} floors, {} shafts, dt={}s, {} arrivals. Switch policy and decision authority.",
-                cfg.n_floors,
-                cfg.n_elevators,
-                js_num(cfg.step_size),
-                schedule.len()
-            )),
-            selector_label: None,
-        },
-    );
+    let html_opts = AnimationSetOptions {
+        title: Some("High-rise elevator dispatch policies".to_string()),
+        subtitle: Some(format!(
+            "{} floors, {} shafts, dt={}s, {} arrivals. Switch policy and decision authority.",
+            cfg.n_floors,
+            cfg.n_elevators,
+            js_num(cfg.step_size),
+            schedule.len()
+        )),
+        selector_label: None,
+    };
+    let inline_highrise = std::env::var("INLINE_ANIMATION_DATA").as_deref() == Ok("1")
+        || std::env::var("INLINE_HIGHRISE_ANIMATION").as_deref() == Ok("1");
+    let html = if inline_highrise {
+        build_html_set(&variants, &html_opts)
+    } else {
+        build_html_set_external(&external_variants, &html_opts)
+    };
     let _ = std::fs::write(html_path, html);
 
     let tunings_json = JsonValue::Object(
@@ -3587,6 +3614,11 @@ pub fn run() {
 
     println!();
     println!("# wrote {html_path}");
+    println!(
+        "# wrote {} lazy animation payloads under out/elevator-highrise/ ({:.1} MB total)",
+        external_variants.len(),
+        external_payload_bytes as f64 / (1024.0 * 1024.0)
+    );
     println!("# wrote {json_path}");
 }
 

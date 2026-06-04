@@ -5,20 +5,32 @@
 //! reproducibility, monotone best-history and stall-limit early stop.
 //! Driver → [`run`].
 //!
-//! PORT NOTES — wire to the already-ported real modules (present):
-//!   * `crate::des::general::simulated_annealing::{run_simulated_annealing,
-//!     build_tsp_sa_problem, build_knapsack_sa_problem, temperature_at,
-//!     CoolingSchedule, SASolverOptions, SAResult}`.
-//!   * `crate::des::general::genetic_tsp::{build_pentagon_tsp, build_random_tsp,
-//!     tour_length, held_karp_exact}`.
-//!   * `crate::des::general::milp_bnb::{solve_milp, build_knapsack_milp}`.
-//! `temperature_at` is implemented faithfully (the validator tests it directly);
-//! the SA / MILP kernels are stubbed with matching signatures.
+//! The initial Rust runner kept local SA / TSP / MILP stubs. The real modules
+//! are now ported, so the studies below exercise the production solvers.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
+use std::rc::Rc;
+
+use crate::des::general::genetic_tsp::{
+    build_pentagon_tsp as real_build_pentagon_tsp, build_random_tsp as real_build_random_tsp,
+    held_karp_exact as real_held_karp_exact, tour_length as real_tour_length,
+    TSPInstance as TspInstance, Tour,
+};
+use crate::des::general::milp_bnb::{
+    build_knapsack_milp as real_build_knapsack_milp, solve_milp as real_solve_milp, MILPProblem,
+    MILPSolveOptions,
+};
+use crate::des::general::simulated_annealing::{
+    build_knapsack_sa_problem as real_build_knapsack_sa_problem,
+    build_tsp_sa_problem as real_build_tsp_sa_problem,
+    run_simulated_annealing as real_run_simulated_annealing, temperature_at as real_temperature_at,
+    CoolingSchedule, KnapsackInstance, KnapsackSaProblem, SASolverOptions, TSPSAProblemOptions,
+    TspSaProblem,
+};
+
 // =============================================================================
-// Cooling schedule — ported faithfully (Study 4 tests it directly).
+// Cooling schedule adapters.
 // =============================================================================
 
 #[derive(Clone, Copy, Debug)]
@@ -38,29 +50,17 @@ enum Cooling {
 }
 
 fn temperature_at(s: &Cooling, k: usize) -> f64 {
-    match *s {
-        Cooling::Geometric { t0, alpha, tmin } => {
-            let t = t0 * alpha.powi(k as i32);
-            f64::max(tmin.unwrap_or(0.0), t)
-        }
-        Cooling::Linear { t0, rate } => f64::max(0.0, t0 - rate * k as f64),
-        Cooling::Logarithmic { t0 } => t0 / (1.0 + (1.0 + k as f64).ln()),
-    }
+    real_temperature_at(&to_real_cooling(*s), k)
 }
 
 // =============================================================================
-// Stubbed SA / TSP / MILP kernels (mirror real signatures).
+// Thin validation adapters over SA / TSP / MILP kernels.
 // =============================================================================
 
-#[derive(Clone, Debug, Default)]
-struct TspInstance {
-    n: usize,
+enum SaProblem {
+    Tsp(TspSaProblem),
+    Knapsack(KnapsackSaProblem),
 }
-
-/// Opaque SA problem (PORT NOTE: `simulated_annealing::{TspSaProblem,
-/// KnapsackSaProblem}` implementing the `SAProblem<S>` trait).
-#[derive(Clone, Debug, Default)]
-struct SaProblem;
 
 #[derive(Clone, Debug, Default)]
 struct SaResult {
@@ -81,35 +81,82 @@ struct SaOpts {
 }
 
 fn build_tsp_sa_problem(_inst: &TspInstance) -> SaProblem {
-    SaProblem
+    SaProblem::Tsp(real_build_tsp_sa_problem(
+        _inst.clone(),
+        TSPSAProblemOptions::default(),
+    ))
 }
 
 fn build_knapsack_sa_problem(_values: &[f64], _weights: &[f64], _capacity: f64) -> SaProblem {
-    SaProblem
+    SaProblem::Knapsack(real_build_knapsack_sa_problem(
+        KnapsackInstance {
+            values: _values.to_vec(),
+            weights: _weights.to_vec(),
+            capacity: _capacity,
+        },
+        1.0e6,
+    ))
 }
 
-fn run_simulated_annealing(_problem: SaProblem, opts: &SaOpts) -> SaResult {
-    // PORT NOTE: real Metropolis loop with seeded RNG. Stub returns a flat,
-    // zero trajectory sized to `max_iterations` so history indexing is sound.
-    let len = opts.max_iterations.max(1);
+fn to_real_cooling(cooling: Cooling) -> CoolingSchedule {
+    match cooling {
+        Cooling::Geometric { t0, alpha, tmin } => CoolingSchedule::Geometric {
+            t0,
+            alpha,
+            t_min: tmin,
+        },
+        Cooling::Linear { t0, rate } => CoolingSchedule::Linear {
+            t0,
+            rate,
+            t_min: None,
+        },
+        Cooling::Logarithmic { t0 } => CoolingSchedule::Logarithmic { t0, t_min: None },
+    }
+}
+
+fn to_real_sa_opts(opts: &SaOpts) -> SASolverOptions {
+    SASolverOptions {
+        max_iterations: opts.max_iterations,
+        cooling: to_real_cooling(opts.cooling),
+        seed: Some(opts.seed as u32),
+        stall_limit: opts.stall_limit,
+        verbose: None,
+        record_trace: Some(false),
+        trace_stride: None,
+    }
+}
+
+fn sa_result_from_real<S>(r: crate::des::general::simulated_annealing::SAResult<S>) -> SaResult {
     SaResult {
-        best_cost: 0.0,
-        iterations: opts.max_iterations,
-        accepted_count: 0,
-        improve_count: 0,
-        best_history: vec![0.0; len],
-        final_cost: 0.0,
+        best_cost: r.best_cost,
+        iterations: r.iterations,
+        accepted_count: r.accepted_count,
+        improve_count: r.improve_count,
+        best_history: r.best_history,
+        final_cost: r.final_cost,
+    }
+}
+
+fn run_simulated_annealing(problem: SaProblem, opts: &SaOpts) -> SaResult {
+    match problem {
+        SaProblem::Tsp(problem) => sa_result_from_real(real_run_simulated_annealing::<Tour>(
+            Rc::new(problem),
+            to_real_sa_opts(opts),
+        )),
+        SaProblem::Knapsack(problem) => sa_result_from_real(
+            real_run_simulated_annealing::<Vec<f64>>(Rc::new(problem), to_real_sa_opts(opts)),
+        ),
     }
 }
 
 fn build_pentagon_tsp(n: usize, _radius: f64) -> TspInstance {
-    TspInstance { n }
+    real_build_pentagon_tsp(n, _radius)
 }
 fn build_random_tsp(n: usize, _seed: u32) -> TspInstance {
-    TspInstance { n }
+    real_build_random_tsp(n, _seed, None)
 }
 fn tour_length(_inst: &TspInstance, _tour: &[usize]) -> f64 {
-    0.0
+    real_tour_length(_inst, _tour)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -117,22 +164,24 @@ struct HeldKarpResult {
     length: f64,
 }
 fn held_karp_exact(_inst: &TspInstance) -> HeldKarpResult {
-    HeldKarpResult { length: 0.0 }
+    HeldKarpResult {
+        length: real_held_karp_exact(_inst).length,
+    }
 }
 
-#[derive(Clone, Debug, Default)]
-struct MilpProblem {
-    c: Vec<f64>,
-}
+type MilpProblem = MILPProblem;
+
 #[derive(Clone, Debug, Default)]
 struct MilpResult {
     z: f64,
 }
 fn build_knapsack_milp(values: &[f64], _weights: &[f64], _capacity: f64) -> MilpProblem {
-    MilpProblem { c: values.to_vec() }
+    real_build_knapsack_milp(values.to_vec(), _weights.to_vec(), _capacity)
 }
 fn solve_milp(_milp: &MilpProblem) -> MilpResult {
-    MilpResult { z: 0.0 }
+    MilpResult {
+        z: real_solve_milp(_milp, MILPSolveOptions::default()).z,
+    }
 }
 
 // =============================================================================

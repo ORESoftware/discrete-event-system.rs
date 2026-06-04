@@ -8207,6 +8207,161 @@ mod tests {
     }
 
     #[test]
+    fn auto_lp_plan_stays_internal_without_external_opt_in_for_large_relaxations() {
+        let variable_count = 50;
+        let row_count = 50;
+        let p = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0; variable_count],
+            a: vec![vec![1.0; variable_count]; row_count],
+            b: vec![variable_count as f64; row_count],
+            integer_vars: vec![true; variable_count],
+            ub: Some(vec![1.0; variable_count]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+
+        let internal_plan =
+            build_ipmip_solver_technique_plan(&p, LpRelaxationAlgorithm::Auto, false);
+        let external_plan =
+            build_ipmip_solver_technique_plan(&p, LpRelaxationAlgorithm::Auto, true);
+
+        assert_eq!(
+            internal_plan.root_lp_algorithm,
+            ConcreteLpRelaxationAlgorithm::IncrementalPrimalDual
+        );
+        assert!(!internal_plan.external_solvers_allowed);
+        assert!(!internal_plan.uses_external_solvers);
+        assert!(!internal_plan.external_candidate);
+        assert!(
+            internal_plan
+                .rationale
+                .iter()
+                .any(|line| line.contains("stays in-house")),
+            "rationale={:?}",
+            internal_plan.rationale
+        );
+
+        assert_eq!(
+            external_plan.root_lp_algorithm,
+            ConcreteLpRelaxationAlgorithm::ExternalHighsIpm
+        );
+        assert!(external_plan.external_solvers_allowed);
+        assert!(external_plan.uses_external_solvers);
+        assert!(external_plan.external_candidate);
+    }
+
+    #[test]
+    fn branch_and_cut_reports_des_station_topology_and_token_lineage() {
+        let p = build_binary_knapsack_ip(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
+        let sol = solve_ipmip_with_des(
+            p,
+            IPMIPSolveOptions {
+                lp_algorithm: Some(LpRelaxationAlgorithm::Concrete(
+                    ConcreteLpRelaxationAlgorithm::InternalSimplex,
+                )),
+                max_cut_rounds: Some(0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sol.status, IPMIPStatus::Optimal);
+        assert_eq!(sol.solver_kind, "in-house-branch-and-cut");
+        assert_eq!(sol.execution_mode, "single-threaded");
+        assert_eq!(sol.composite_station_id, "ip-branch-and-cut");
+        assert!(sol.in_house_only);
+        assert!(!sol.uses_external_solvers);
+        assert!(sol.token_stats.created > 0);
+        assert!(sol.token_stats.stateful > 0);
+        assert!(sol.token_stats.state_transitions > 0);
+        assert!(
+            sol.token_stats.by_kind.get("ip-node").copied().unwrap_or(0) > 0,
+            "token_stats={:?}",
+            sol.token_stats
+        );
+        assert!(
+            sol.token_stats
+                .by_kind
+                .get("ip-relaxation")
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "token_stats={:?}",
+            sol.token_stats
+        );
+
+        let expected_stations = [
+            ("ip-branch-and-cut", None, "composite single-threaded"),
+            (
+                "ip-search-controller",
+                Some("ip-branch-and-cut"),
+                "frontier",
+            ),
+            (
+                "ip-lp-relaxation",
+                Some("ip-branch-and-cut"),
+                "stationary LP solver block",
+            ),
+            (
+                "ip-rounding-repair",
+                Some("ip-branch-and-cut"),
+                "movable-variable rounding",
+            ),
+            (
+                "ip-incumbent",
+                Some("ip-branch-and-cut"),
+                "best feasible integer solution",
+            ),
+            (
+                "ip-cut-generator",
+                Some("ip-branch-and-cut"),
+                "valid-inequality station",
+            ),
+            (
+                "ip-node-decision",
+                Some("ip-branch-and-cut"),
+                "prune, strengthen, or branch",
+            ),
+        ];
+        for (id, parent_id, role_fragment) in expected_stations {
+            let node = sol
+                .topology
+                .iter()
+                .find(|node| node.id == id)
+                .unwrap_or_else(|| panic!("missing topology node {id}: {:?}", sol.topology));
+            assert_eq!(node.parent_id.as_deref(), parent_id);
+            assert!(
+                node.role.contains(role_fragment),
+                "node={node:?} role_fragment={role_fragment}"
+            );
+        }
+
+        assert!(
+            sol.trace.iter().all(|event| event.solver == "internal"),
+            "trace={:?}",
+            sol.trace
+        );
+        assert!(sol.trace.iter().all(|event| event
+            .node_token_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("ip-node-"))));
+        assert!(sol.trace.iter().all(|event| event
+            .lineage_root
+            .as_deref()
+            .is_some_and(|id| id.starts_with("ip-node-"))));
+        assert!(sol
+            .trace
+            .iter()
+            .all(|event| event.state_mode == Some(TokenStateMode::Stateful)));
+        assert!(sol.trace.iter().all(|event| event
+            .token_generation
+            .is_some_and(|generation| generation >= 1)));
+    }
+
+    #[test]
     fn mip_start_seeds_incumbent_when_feasible() {
         let p = build_binary_knapsack_ip(vec![60.0, 100.0, 120.0], vec![10.0, 20.0, 30.0], 50.0);
         let sol = solve_ipmip_with_des(

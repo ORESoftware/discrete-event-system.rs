@@ -1,12 +1,12 @@
 //! Port of `src/des/animation/html-player.ts`.
 //!
-//! Renders an [`Animation`] into a single self-contained HTML string: the
-//! animation JSON is embedded in a `<script type="application/json">` blob and
-//! a vanilla-JS player (no CDN / build step) draws each frame as SVG with
-//! play / pause / reverse / step / scrub / speed controls and optional
-//! time-series charts. Because the whole frame list is collected first and
-//! rendered offline (never during the simulation loop), playback can run at any
-//! speed and in either time direction purely by walking the embedded index.
+//! Renders an [`Animation`] into a vanilla-JS HTML player (no CDN / build step).
+//! Small pages embed animation JSON directly in a `<script type="application/json">`
+//! blob; large multi-variant pages can use an external manifest so the browser
+//! loads only the selected variant's frames. Because each variant frame list is
+//! collected first and rendered offline (never during the simulation loop),
+//! playback can run at any speed and in either time direction purely by walking
+//! the active variant's embedded/loaded index.
 //!
 //! ## Notes
 //!
@@ -35,6 +35,17 @@ pub struct AnimationVariant {
     /// per the migration header — iteration order is not preserved, so the
     /// selector ordering in a multi-control page is unspecified (the single-
     /// variant `buildHTML` path is unaffected).
+    pub controls: Option<HashMap<String, String>>,
+}
+
+/// One selectable animation whose frame payload is stored in a separate file.
+#[derive(Clone, Debug, Default)]
+pub struct ExternalAnimationVariant {
+    pub id: String,
+    pub label: String,
+    /// Relative or absolute URL for an [`Animation::to_json`] payload.
+    pub href: String,
+    pub summary: Option<String>,
     pub controls: Option<HashMap<String, String>>,
 }
 
@@ -106,11 +117,63 @@ pub fn build_html_set(variants: &[AnimationVariant], opts: &AnimationSetOptions)
         .replace("__ANIMATION_JSON__", &json)
 }
 
+/// Build a multi-variant page that lazy-loads each variant's frame payload.
+///
+/// This keeps the initial HTML cold-load small for large catalogues while
+/// preserving the same controls and playback UI as [`build_html_set`].
+pub fn build_html_set_external(
+    variants: &[ExternalAnimationVariant],
+    opts: &AnimationSetOptions,
+) -> String {
+    if variants.is_empty() {
+        panic!("build_html_set_external requires at least one animation variant");
+    }
+    let title = escape_html(opts.title.as_deref().unwrap_or("Simulation"));
+    let subtitle = escape_html(opts.subtitle.as_deref().unwrap_or(""));
+
+    let variant_json: Vec<JsonValue> = variants.iter().map(external_variant_to_json).collect();
+    let payload = JsonValue::Object(vec![
+        ("variants".to_string(), JsonValue::Array(variant_json)),
+        (
+            "selectorLabel".to_string(),
+            JsonValue::String(
+                opts.selector_label
+                    .clone()
+                    .unwrap_or_else(|| "variant".to_string()),
+            ),
+        ),
+    ]);
+    let json = json_for_script(&payload);
+    TEMPLATE
+        .replace("__TITLE__", &title)
+        .replace("__SUBTITLE__", &subtitle)
+        .replace("__ANIMATION_JSON__", &json)
+}
+
 fn variant_to_json(v: &AnimationVariant) -> JsonValue {
     let mut o: Vec<(String, JsonValue)> = vec![
         ("id".to_string(), JsonValue::String(v.id.clone())),
         ("label".to_string(), JsonValue::String(v.label.clone())),
         ("animation".to_string(), v.animation.to_json()),
+    ];
+    if let Some(s) = &v.summary {
+        o.push(("summary".to_string(), JsonValue::String(s.clone())));
+    }
+    if let Some(controls) = &v.controls {
+        let entries: Vec<(String, JsonValue)> = controls
+            .iter()
+            .map(|(k, val)| (k.clone(), JsonValue::String(val.clone())))
+            .collect();
+        o.push(("controls".to_string(), JsonValue::Object(entries)));
+    }
+    JsonValue::Object(o)
+}
+
+fn external_variant_to_json(v: &ExternalAnimationVariant) -> JsonValue {
+    let mut o: Vec<(String, JsonValue)> = vec![
+        ("id".to_string(), JsonValue::String(v.id.clone())),
+        ("label".to_string(), JsonValue::String(v.label.clone())),
+        ("href".to_string(), JsonValue::String(v.href.clone())),
     ];
     if let Some(s) = &v.summary {
         o.push(("summary".to_string(), JsonValue::String(s.clone())));
@@ -335,7 +398,8 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const PAYLOAD = JSON.parse(document.getElementById('anim-data').textContent);
   const VARIANTS = Array.isArray(PAYLOAD.variants) ? PAYLOAD.variants : null;
-  let ANIM = VARIANTS ? VARIANTS[0].animation : PAYLOAD;
+  const ANIMATION_CACHE = new Map();
+  let ANIM = VARIANTS ? null : PAYLOAD;
   const stage = document.getElementById('stage');
   const caption = document.getElementById('caption');
   const scrub = document.getElementById('scrub');
@@ -349,21 +413,49 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
   const variantSelectors = document.getElementById('variant-selectors');
   const variantSummary = document.getElementById('variant-summary');
 
-  let N = ANIM.frames.length;
+  let N = frameCount();
   let i = 0;
   let playing = false;
   let lastTimestamp = null;
   let speed = 1;
   let dir = 1; // playback direction in time: +1 = forward, -1 = reverse
+  let activeVariantIndex = 0;
+  let loadSerial = 0;
+
+  function frameCount() {
+    return ANIM && Array.isArray(ANIM.frames) ? ANIM.frames.length : 0;
+  }
 
   function applyAnimationConfig() {
-    N = ANIM.frames.length;
+    N = frameCount();
     scrub.max = String(Math.max(0, N - 1));
-    stage.setAttribute('width', ANIM.width);
-    stage.setAttribute('height', ANIM.height);
-    stage.setAttribute('viewBox', '0 0 ' + ANIM.width + ' ' + ANIM.height);
+    const width = Number(ANIM && ANIM.width) || 1200;
+    const height = Number(ANIM && ANIM.height) || 760;
+    stage.setAttribute('width', width);
+    stage.setAttribute('height', height);
+    stage.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
     stage.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-    stage.style.background = ANIM.background || '#fff';
+    stage.style.background = (ANIM && ANIM.background) || '#fff';
+  }
+
+  function setTransportDisabled(disabled) {
+    playBtn.disabled = disabled;
+    reverseBtn.disabled = disabled;
+    stepBack.disabled = disabled;
+    stepFwd.disabled = disabled;
+    scrub.disabled = disabled;
+  }
+
+  function setLoading(message) {
+    setPlaying(false);
+    setTransportDisabled(true);
+    ANIM = null;
+    i = 0;
+    applyAnimationConfig();
+    clearStage();
+    caption.textContent = message || 'Loading animation...';
+    readout.textContent = 'loading';
+    scrub.value = '0';
   }
 
   // --- Rendering -----------------------------------------------------------
@@ -516,7 +608,7 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
   function render(idx) {
     if (N === 0) {
       clearStage();
-      caption.textContent = 'No frames';
+      caption.textContent = ANIM ? 'No frames' : (caption.textContent || 'Loading animation...');
       readout.textContent = 'frame 0 / 0';
       return;
     }
@@ -572,16 +664,63 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
     if (playing) lastTimestamp = null;
   }
 
+  function validateAnimationPayload(payload, label) {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error(label + ' did not return an animation object');
+    }
+    if (!Array.isArray(payload.frames)) {
+      throw new Error(label + ' is missing a frames array');
+    }
+    if (!Number.isFinite(Number(payload.width)) || !Number.isFinite(Number(payload.height))) {
+      throw new Error(label + ' is missing numeric width/height');
+    }
+    return payload;
+  }
+
+  async function loadVariantAnimation(idx) {
+    const variant = VARIANTS && VARIANTS[idx];
+    if (!variant) throw new Error('Unknown animation variant ' + idx);
+    if (variant.animation) {
+      return validateAnimationPayload(variant.animation, variant.label || variant.id || ('variant ' + (idx + 1)));
+    }
+    if (!variant.href) {
+      throw new Error('Variant ' + (variant.label || variant.id || idx) + ' has no animation payload or href');
+    }
+    if (ANIMATION_CACHE.has(variant.href)) return ANIMATION_CACHE.get(variant.href);
+    const response = await fetch(variant.href);
+    if (!response.ok) {
+      throw new Error('Failed to load ' + variant.href + ' (' + response.status + ')');
+    }
+    const payload = validateAnimationPayload(await response.json(), variant.href);
+    ANIMATION_CACHE.set(variant.href, payload);
+    return payload;
+  }
+
   // --- Wiring --------------------------------------------------------------
 
-  function selectVariant(idx) {
+  async function selectVariant(idx) {
     if (!VARIANTS) return;
-    setPlaying(false);
+    activeVariantIndex = idx;
+    const serial = ++loadSerial;
     const variant = VARIANTS[idx];
-    ANIM = variant.animation;
+    syncVariantControls(variant);
+    if (variantSummary) variantSummary.textContent = variant.summary || '';
+    setLoading('Loading ' + (variant.label || variant.id || 'animation') + '...');
+    let animation;
+    try {
+      animation = await loadVariantAnimation(idx);
+    } catch (err) {
+      if (serial !== loadSerial) return;
+      clearStage();
+      caption.textContent = 'Could not load animation variant.';
+      readout.textContent = err && err.message ? err.message : String(err);
+      return;
+    }
+    if (serial !== loadSerial || activeVariantIndex !== idx) return;
+    ANIM = animation;
     i = 0;
     applyAnimationConfig();
-    syncVariantControls(variant);
+    setTransportDisabled(false);
     if (variantSummary) variantSummary.textContent = variant.summary || '';
     render(i);
   }
@@ -689,6 +828,7 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
     variantControls.hidden = false;
     populateVariantControls();
     variantSummary.textContent = VARIANTS[0].summary || '';
+    selectVariant(0);
   }
 
   playBtn.addEventListener('click', function() { setPlaying(!playing); });
@@ -704,8 +844,11 @@ const TEMPLATE: &str = r####"<!DOCTYPE html>
     else if (e.key === 'r' || e.key === 'R') { setDirection(-dir); }
   });
 
-  applyAnimationConfig();
-  if (N > 0) render(0);
+  if (!VARIANTS) {
+    validateAnimationPayload(ANIM, 'embedded animation');
+    applyAnimationConfig();
+    if (N > 0) render(0);
+  }
 })();
 </script>
 </body>
@@ -775,8 +918,36 @@ mod tests {
     }
 
     #[test]
+    fn build_html_set_external_writes_lazy_manifest() {
+        let html = build_html_set_external(
+            &[ExternalAnimationVariant {
+                id: "a".to_string(),
+                label: "A".to_string(),
+                href: "elevator-highrise/a.json".to_string(),
+                summary: Some("summary".to_string()),
+                controls: Some(HashMap::from([("policy".to_string(), "P".to_string())])),
+            }],
+            &AnimationSetOptions {
+                title: Some("Lazy".to_string()),
+                subtitle: Some("loads on demand".to_string()),
+                selector_label: None,
+            },
+        );
+        assert!(html.contains("<title>Lazy</title>"));
+        assert!(html.contains("\"href\":\"elevator-highrise/a.json\""));
+        assert!(html.contains("fetch(variant.href)"));
+        assert!(!html.contains("\"animation\":{"));
+    }
+
+    #[test]
     #[should_panic]
     fn build_html_set_rejects_empty() {
         build_html_set(&[], &AnimationSetOptions::default());
+    }
+
+    #[test]
+    #[should_panic]
+    fn build_html_set_external_rejects_empty() {
+        build_html_set_external(&[], &AnimationSetOptions::default());
     }
 }

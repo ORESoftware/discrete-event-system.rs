@@ -4,26 +4,23 @@
 //! Held–Karp) and its constraint-handling policies (cut / penalize / repair).
 //! Top-level driver → [`run`].
 //!
-//! PORT NOTES — wire these to the already-ported real module
-//! `crate::des::general::genetic_tsp` (present, exposes identical symbols):
-//!   * `build_pentagon_tsp(n, radius) -> TSPInstance`
-//!   * `build_random_tsp(n, seed, precedence) -> TSPInstance`
-//!   * `run_genetic_tsp(TSPInstance, GASolverOptions) -> GASolverResult`
-//!   * `tour_length`, `check_precedence`, `is_permutation`,
-//!     `held_karp_exact -> HeldKarpResult{length}`, `one_tree_lower_bound -> f64`.
-//! The stubs below mirror those signatures so wiring = delete stub + `use`.
+//! The first Rust runner kept local zero-value stubs for the GA/TSP layer. The
+//! real genetic TSP module is now ported, so these studies exercise production
+//! GA, Held-Karp, and lower-bound code.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
-// =============================================================================
-// Stubbed `genetic_tsp` layer (mirrors the real public API).
-// =============================================================================
+use crate::des::general::genetic_tsp::{
+    build_pentagon_tsp as real_build_pentagon_tsp, build_random_tsp as real_build_random_tsp,
+    check_precedence as real_check_precedence, held_karp_exact as real_held_karp_exact,
+    is_permutation as real_is_permutation, one_tree_lower_bound as real_one_tree_lower_bound,
+    run_genetic_tsp as real_run_genetic_tsp, tour_length as real_tour_length, Feasibility,
+    GASolverOptions, InitMode, TSPInstance as TspInstance,
+};
 
-#[derive(Clone, Debug, Default)]
-struct TspInstance {
-    n: usize,
-    precedence: Vec<(usize, usize)>,
-}
+// =============================================================================
+// Thin validation adapters over `genetic_tsp`.
+// =============================================================================
 
 #[derive(Clone, Debug, Default)]
 struct GaOptions {
@@ -52,59 +49,71 @@ struct HeldKarpResult {
 }
 
 fn build_pentagon_tsp(n: usize, _radius: f64) -> TspInstance {
-    TspInstance {
-        n,
-        precedence: vec![],
-    }
+    real_build_pentagon_tsp(n, _radius)
 }
 
 fn build_random_tsp(n: usize, _seed: u32, precedence: Option<Vec<(usize, usize)>>) -> TspInstance {
-    TspInstance {
-        n,
-        precedence: precedence.unwrap_or_default(),
-    }
+    real_build_random_tsp(n, _seed, precedence)
 }
 
 fn run_genetic_tsp(instance: &TspInstance, options: &GaOptions) -> GaResult {
-    // PORT NOTE: real GA evolves a population with seeded RNG. Stub returns the
-    // identity tour and a flat best-history so structural checks stay sound.
+    let result = real_run_genetic_tsp(instance.clone(), to_real_ga_options(options));
     GaResult {
-        best_length: 0.0,
-        best_tour: (0..instance.n).collect(),
-        total_feasible_evaluated: 0,
-        total_infeasible_cut: 0,
-        per_generation_best: vec![0.0; options.num_generations.max(1)],
+        best_length: result.best_length,
+        best_tour: result.best_tour,
+        total_feasible_evaluated: result.total_feasible_evaluated,
+        total_infeasible_cut: result.total_infeasible_cut,
+        per_generation_best: result.per_generation_best,
+    }
+}
+
+fn to_real_ga_options(options: &GaOptions) -> GASolverOptions {
+    GASolverOptions {
+        population_size: Some(options.population_size),
+        num_generations: Some(options.num_generations),
+        tournament_size: None,
+        crossover_prob: None,
+        mutation_prob: None,
+        elitism: options.elitism,
+        seed: Some(options.seed as u32),
+        feasibility: options.feasibility.map(|f| match f {
+            "penalize" => Feasibility::Penalize,
+            "repair" => Feasibility::Repair,
+            _ => Feasibility::Cut,
+        }),
+        penalty_per_violation: options.penalty_per_violation,
+        retry_limit: options.retry_limit,
+        init: options.init.map(|i| match i {
+            "nearest-neighbor" => InitMode::NearestNeighbor,
+            _ => InitMode::Random,
+        }),
+        local_search: None,
+        local_search_prob: None,
+        local_search_passes: None,
+        on_generation: None,
     }
 }
 
 fn tour_length(_instance: &TspInstance, _tour: &[usize]) -> f64 {
-    0.0
+    real_tour_length(_instance, _tour)
 }
 
 fn check_precedence(_instance: &TspInstance, _tour: &[usize]) -> Option<(usize, usize)> {
-    None
+    real_check_precedence(_instance, _tour)
 }
 
 fn is_permutation(tour: &[usize], n: usize) -> bool {
-    if tour.len() != n {
-        return false;
-    }
-    let mut seen = vec![false; n];
-    for &v in tour {
-        if v >= n || seen[v] {
-            return false;
-        }
-        seen[v] = true;
-    }
-    true
+    real_is_permutation(tour, n)
 }
 
 fn held_karp_exact(_instance: &TspInstance) -> HeldKarpResult {
-    HeldKarpResult { length: 0.0 }
+    HeldKarpResult {
+        length: real_held_karp_exact(_instance).length,
+    }
 }
 
 fn one_tree_lower_bound(_instance: &TspInstance) -> f64 {
-    0.0
+    real_one_tree_lower_bound(_instance)
 }
 
 // =============================================================================
@@ -231,7 +240,7 @@ pub fn run() {
     println!("\nStudy 4 — Precedence constraints: all branches respected");
     {
         let mut inst = build_random_tsp(15, 42, None);
-        inst.precedence = vec![(0, 14), (1, 13), (2, 12), (3, 11)];
+        inst.precedence = Some(vec![(0, 14), (1, 13), (2, 12), (3, 11)]);
         let r = run_genetic_tsp(
             &inst,
             &GaOptions {
@@ -267,7 +276,7 @@ pub fn run() {
     println!("\nStudy 5 — Constraint policies converge differently");
     {
         let mut inst = build_random_tsp(16, 11, None);
-        inst.precedence = vec![(0, 15), (2, 13), (4, 11), (6, 9)];
+        inst.precedence = Some(vec![(0, 15), (2, 13), (4, 11), (6, 9)]);
         let cut = run_genetic_tsp(
             &inst,
             &GaOptions {

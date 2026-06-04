@@ -882,6 +882,25 @@ pub fn build_soccer_ipmip_solver_charts(solution: &IPMIPSolution) -> Vec<ChartSp
 mod tests {
     use super::*;
 
+    fn frame_contains_text(frame: &FrameParts, needle: &str) -> bool {
+        frame
+            .caption
+            .as_deref()
+            .is_some_and(|caption| caption.contains(needle))
+            || frame.shapes.iter().any(|shape| match shape {
+                Shape::Text(text) => text.text.contains(needle),
+                Shape::Rect(rect) => rect
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.contains(needle)),
+                Shape::Circle(circle) => circle
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.contains(needle)),
+                _ => false,
+            })
+    }
+
     #[test]
     fn event_path_for_cut_action() {
         let ev = IPMIPTraceEvent {
@@ -916,5 +935,37 @@ mod tests {
             fp.caption.as_deref(),
             Some("event=1/1 node=n0 action=branch status=optimal")
         );
+    }
+
+    #[test]
+    fn solver_frame_renders_visual_blocks_and_internal_backend() {
+        let solution = IPMIPSolution {
+            trace: vec![IPMIPTraceEvent {
+                node_id: "0".to_string(),
+                depth: 0.0,
+                action: "incumbent".to_string(),
+                lp_z: Some(4.0),
+                fractional: Vec::new(),
+                reason: Some("integer feasible".to_string()),
+            }],
+            status: "optimal".to_string(),
+            z: 4.0,
+            gap: 0.0,
+            best_bound: 4.0,
+            lp_algorithm: "internal-simplex".to_string(),
+            lp_solves: 2.0,
+            elapsed_ms: 12.0,
+            nodes_explored: 2.0,
+            ..Default::default()
+        };
+
+        let fp = build_soccer_ipmip_solver_frame(&solution, 0);
+
+        assert!(frame_contains_text(&fp, "7v7 IP/MIP solver entities"));
+        assert!(frame_contains_text(&fp, "station graph"));
+        assert!(frame_contains_text(&fp, "Search Controller"));
+        assert!(frame_contains_text(&fp, "LP Relaxation"));
+        assert!(frame_contains_text(&fp, "internal-simplex"));
+        assert!(frame_contains_text(&fp, "integer feasible"));
     }
 }

@@ -4,32 +4,42 @@
 //! architectural layer (greedy / fluid-LP / MDP-VI / MCTS) performs, via five
 //! Welch-t-tested studies. Top-level `main()` → [`run`].
 //!
-//! PORT NOTES (stubbed cross-module deps):
-//!   * `crate::des::general::dispatch::{DispatchProblem, evaluate_policy, welch_t,
-//!     policy_random, policy_round_robin, policy_shortest_queue, policy_sect,
-//!     policy_fluid_lp, policy_mdp_vi, policy_mcts, build_dispatch_fluid_lp}`.
-//!   * `crate::des::general::lp::{solve_lp_internal, solve_lp_external}` and
-//!     `crate::des::general::lp_des::solve_lp_via_des`.
-//!   * The MDP/MCTS RNG would route through `crate::des::shared::capabilities`.
+//! The initial Rust port carried local stubs for the dispatch, LP, and DES-LP
+//! layers. Those layers are now ported, so this runner keeps the original study
+//! shape and calls the production Rust implementations.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
+use crate::des::general::dispatch::{
+    build_dispatch_fluid_lp as real_build_dispatch_fluid_lp,
+    policy_fluid_lp as real_policy_fluid_lp, policy_mcts as real_policy_mcts,
+    policy_mdp_vi as real_policy_mdp_vi, policy_random as real_policy_random,
+    policy_round_robin as real_policy_round_robin, policy_sect as real_policy_sect,
+    policy_shortest_queue as real_policy_shortest_queue,
+    simulate_dispatch as real_simulate_dispatch, welch_t as real_welch_t, DispatchPolicy,
+    DispatchProblem, MctsPolicyOptions, MdpViPolicyOptions,
+};
+use crate::des::general::lp::{
+    solve_lp_external as real_solve_lp_external, solve_lp_internal as real_solve_lp_internal,
+    ExternalSolverOptions, InternalSimplexOptions, LPProblem as LpProblem,
+    LPSolution as RealLpSolution,
+};
+use crate::des::general::lp_des::{
+    solve_lp_via_des as real_solve_lp_via_des, DESSimplexOptions,
+    DESSimplexSolution as RealDesLpSolution,
+};
+
 // =============================================================================
-// Stubbed dispatch + LP layer.
+// Thin validation adapters over dispatch + LP.
 // =============================================================================
 
-#[derive(Clone, Debug, Default)]
-struct DispatchProblem {
-    m: usize,
-    k: usize,
-    arrival_rate: f64,
-    class_prob: Vec<f64>,
-    service_rate: Vec<Vec<f64>>,
+struct Policy(Box<dyn DispatchPolicy>);
+
+impl Policy {
+    fn new<P: DispatchPolicy + 'static>(policy: P) -> Self {
+        Policy(Box::new(policy))
+    }
 }
-
-/// Opaque dispatch policy handle (PORT NOTE: `dispatch::Policy`).
-#[derive(Clone, Debug, Default)]
-struct Policy;
 
 #[derive(Clone, Debug, Default)]
 struct EvalResult {
@@ -37,7 +47,6 @@ struct EvalResult {
     raw_waits: Vec<f64>,
 }
 
-#[derive(Clone, Debug, Default)]
 struct FluidLpResult {
     policy: Policy,
 }
@@ -61,69 +70,82 @@ struct MctsOpts {
     rollout_depth: usize,
 }
 
-fn policy_random(_seed: u64) -> Policy {
-    Policy
+fn policy_random(seed: u64) -> Policy {
+    Policy::new(real_policy_random(seed as u32))
 }
 fn policy_round_robin() -> Policy {
-    Policy
+    Policy::new(real_policy_round_robin())
 }
 fn policy_shortest_queue() -> Policy {
-    Policy
+    Policy::new(real_policy_shortest_queue())
 }
-fn policy_sect(_p: &DispatchProblem) -> Policy {
-    Policy
+fn policy_sect(p: &DispatchProblem) -> Policy {
+    Policy::new(real_policy_sect(p))
 }
-fn policy_fluid_lp(_p: &DispatchProblem) -> FluidLpResult {
-    FluidLpResult::default()
+fn policy_fluid_lp(p: &DispatchProblem) -> FluidLpResult {
+    FluidLpResult {
+        policy: Policy::new(real_policy_fluid_lp(p, 12345).policy),
+    }
 }
-fn policy_mdp_vi(_p: &DispatchProblem, _o: MdpViOpts) -> DispatchViResult {
-    DispatchViResult { v: vec![0.0; 4] }
+fn policy_mdp_vi(p: &DispatchProblem, o: MdpViOpts) -> DispatchViResult {
+    let result = real_policy_mdp_vi(
+        p,
+        MdpViPolicyOptions {
+            q_max: Some(o.q_max),
+            gamma: Some(o.gamma),
+            rollouts_per_sa: Some(o.rollouts_per_sa),
+            seed: Some(o.seed as u32),
+            ..Default::default()
+        },
+    );
+    DispatchViResult { v: result.v }
 }
-fn policy_mcts(_p: &DispatchProblem, _o: MctsOpts) -> Policy {
-    Policy
+fn policy_mcts(p: &DispatchProblem, o: MctsOpts) -> Policy {
+    Policy::new(real_policy_mcts(
+        p,
+        MctsPolicyOptions {
+            iterations: Some(o.iterations),
+            rollout_depth: Some(o.rollout_depth),
+            ..Default::default()
+        },
+    ))
 }
-fn build_dispatch_fluid_lp(_p: &DispatchProblem) -> LpProblem {
-    LpProblem::default()
+fn build_dispatch_fluid_lp(p: &DispatchProblem) -> LpProblem {
+    real_build_dispatch_fluid_lp(p)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn evaluate_policy<F: Fn() -> Policy>(
-    _problem: &DispatchProblem,
-    _factory: F,
+    problem: &DispatchProblem,
+    factory: F,
     _name: &str,
     num_reps: usize,
-    _num_arrivals: usize,
-    _seed_base: u64,
-    _warmup: usize,
+    num_arrivals: usize,
+    seed_base: u64,
+    warmup: usize,
 ) -> EvalResult {
-    // PORT NOTE: real impl simulates `num_reps` replications and returns the
-    // per-rep mean waits. Stub returns zeros.
+    let mut waits = Vec::with_capacity(num_reps);
+    for r in 0..num_reps {
+        let mut policy = factory();
+        let result = real_simulate_dispatch(
+            problem,
+            policy.0.as_mut(),
+            num_arrivals,
+            (seed_base + r as u64) as u32,
+            warmup,
+        );
+        waits.push(result.mean_sojourn);
+    }
+    let mean_wait = waits.iter().sum::<f64>() / waits.len() as f64;
     EvalResult {
-        mean_wait: 0.0,
-        raw_waits: vec![0.0; num_reps],
+        mean_wait,
+        raw_waits: waits,
     }
 }
 
 /// Welch t-statistic for two samples (matches `dispatch::welch_t`).
 fn welch_t(a: &[f64], b: &[f64]) -> f64 {
-    if a.len() < 2 || b.len() < 2 {
-        return 0.0;
-    }
-    let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
-    let var = |xs: &[f64]| {
-        let m = mean(xs);
-        xs.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / (xs.len() as f64 - 1.0)
-    };
-    let se_sq = var(a) / a.len() as f64 + var(b) / b.len() as f64;
-    if se_sq <= 0.0 {
-        return 0.0;
-    }
-    (mean(a) - mean(b)) / se_sq.sqrt()
-}
-
-#[derive(Clone, Debug, Default)]
-struct LpProblem {
-    c: Vec<f64>,
+    real_welch_t(a.to_vec(), b.to_vec())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,20 +154,36 @@ struct LpResult {
     objective: f64,
 }
 
-fn stub_lp() -> LpResult {
+fn lp_result_from_solution(sol: RealLpSolution) -> LpResult {
     LpResult {
-        status: "optimal".to_string(),
-        objective: 0.0,
+        status: sol.status.as_str().to_string(),
+        objective: sol.objective,
+    }
+}
+
+fn lp_result_from_des_solution(sol: RealDesLpSolution) -> LpResult {
+    LpResult {
+        status: sol.status.as_str().to_string(),
+        objective: sol.objective,
     }
 }
 fn solve_lp_internal(_lp: &LpProblem) -> LpResult {
-    stub_lp()
+    lp_result_from_solution(real_solve_lp_internal(
+        _lp,
+        &InternalSimplexOptions::default(),
+    ))
 }
-fn solve_lp_external(_lp: &LpProblem, _method: &str) -> LpResult {
-    stub_lp()
+fn solve_lp_external(lp: &LpProblem, method: &str) -> LpResult {
+    lp_result_from_solution(real_solve_lp_external(
+        lp,
+        &ExternalSolverOptions {
+            method: Some(method.to_string()),
+            ..Default::default()
+        },
+    ))
 }
-fn solve_lp_via_des(_lp: &LpProblem) -> LpResult {
-    stub_lp()
+fn solve_lp_via_des(lp: &LpProblem) -> LpResult {
+    lp_result_from_des_solution(real_solve_lp_via_des(lp, &DESSimplexOptions::default()))
 }
 
 // =============================================================================

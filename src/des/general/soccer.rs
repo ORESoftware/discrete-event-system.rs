@@ -35030,6 +35030,37 @@ mod tests {
     }
 
     #[test]
+    fn dribble_beat_event_uses_move_reward_and_rejects_invalid_contests() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 0;
+        let attacker = 11;
+        sim.players[defender].position = Vec2::new(40.0, 60.0);
+        sim.players[attacker].position = Vec2::new(41.0, 60.0);
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+
+        sim.record_dribble_beat_event(attacker, defender, DribbleMoveKind::Nutmeg);
+
+        let attacker_reward = sim
+            .reward_events
+            .iter()
+            .filter(|event| event.player_id == attacker)
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert_eq!(attacker_reward, NUTMEG_BEAT_REWARD_POINTS);
+        assert!(sim.events.iter().any(|event| event.kind == "nutmeg"));
+
+        let reward_count = sim.reward_events.len();
+        let event_count = sim.events.len();
+        sim.record_dribble_beat_event(attacker, 12, DribbleMoveKind::Nutmeg);
+        sim.ball.holder = Some(defender);
+        sim.record_dribble_beat_event(attacker, defender, DribbleMoveKind::Nutmeg);
+
+        assert_eq!(sim.reward_events.len(), reward_count);
+        assert_eq!(sim.events.len(), event_count);
+    }
+
+    #[test]
     fn tackle_foul_probability_rises_with_poor_timing_and_aggression() {
         let clean_defender = SkillProfile {
             defending: 9.6,

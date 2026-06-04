@@ -8,13 +8,15 @@
 //! PORT NOTES:
 //!   * Uses the real Rust belief, POMDP/Tiger, and FactMachine modules.
 //!   * Optional Python (scipy/numpy) reference via `std::process::Command` is
-//!     only attempted when `FACTMACHINE_PY` is explicitly set. JSON parsing is
-//!     not wired here, so the default path stays Rust-only and skips the
-//!     external reference.
+//!     only attempted when `FACTMACHINE_PY` is explicitly set. Successful JSON
+//!     output is parsed with serde; the default path stays Rust-only and skips
+//!     the external reference.
 
 #![allow(dead_code)]
 
 use std::process::Command;
+
+use serde::Deserialize;
 
 use crate::des::general::belief::{brier_score, BinaryOutcome, DiscreteBelief};
 use crate::des::general::pomdp::{pomdp_exact_finite_horizon, MDPVIOptions, QMDPSolver};
@@ -57,9 +59,14 @@ fn binary_outcome(outcome: i32) -> BinaryOutcome {
 // Optional Python reference (always None — see module PORT NOTES).
 // =============================================================================
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct PyJson {
+    #[serde(alias = "final_mean")]
     final_mean: f64,
+    #[serde(alias = "final_belief")]
     final_belief: Vec<f64>,
+    #[serde(alias = "mean_history")]
     mean_history: Vec<f64>,
     thetas: Vec<f64>,
     pwin: Vec<f64>,
@@ -71,15 +78,32 @@ fn run_python(env: &[(&str, String)]) -> Option<PyJson> {
         .join("external-references")
         .join("factmachine")
         .join("factmachine.py");
+    if !script.exists() {
+        return None;
+    }
     let mut cmd = Command::new(python);
     cmd.arg(&script);
     for (k, v) in env {
         cmd.env(k, v);
     }
     match cmd.output() {
-        Ok(out) if out.status.success() => None, // PORT NOTE: parse last stdout line via serde_json.
+        Ok(out) if out.status.success() => parse_python_stdout(&out.stdout),
         _ => None,
     }
+}
+
+fn parse_python_stdout(stdout: &[u8]) -> Option<PyJson> {
+    let text = String::from_utf8_lossy(stdout);
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(parsed) = serde_json::from_str::<PyJson>(trimmed) {
+            return Some(parsed);
+        }
+    }
+    serde_json::from_str::<PyJson>(&text).ok()
 }
 
 // =============================================================================

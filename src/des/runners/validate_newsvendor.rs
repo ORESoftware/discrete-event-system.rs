@@ -14,13 +14,15 @@
 //!   * `crate::des::general::value_iteration::{value_iteration, VIOptions, MDPSpec}`
 //!     (present).
 //!   * Optional Python reference via `std::process::Command` is only attempted
-//!     when `NEWSVENDOR_PY` is explicitly set. JSON parsing is not wired here,
-//!     so the default path stays Rust-only and prints the same SKIP branch.
+//!     when `NEWSVENDOR_PY` is explicitly set. Successful JSON output is parsed
+//!     with serde; the default path stays Rust-only and prints the SKIP branch.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
 use std::path::PathBuf;
 use std::process::Command;
+
+use serde::Deserialize;
 
 use crate::des::general::value_iteration::{value_iteration, VIOptions};
 use crate::des::main_inventory_mdp::{
@@ -63,17 +65,30 @@ fn policy_as_usize(policy: &[i32]) -> Vec<usize> {
         .collect()
 }
 
-// Optional Python reference (always None — see module PORT NOTES).
+// Optional Python reference.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct PyNewsvendor {
+    #[serde(alias = "q_star")]
     q_star: i64,
+    #[serde(alias = "expected_profit_at_qstar")]
     expected_profit_at_qstar: f64,
 }
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct PyInventory {
+    #[serde(alias = "v_at_zero")]
     v_at_zero: f64,
+    #[serde(alias = "policy_first_20")]
     policy_first_20: Vec<i64>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct PyJson {
     newsvendor: PyNewsvendor,
+    #[serde(alias = "inventory_mdp")]
     inventory_mdp: PyInventory,
 }
 
@@ -83,18 +98,32 @@ fn run_python(args: &[&str]) -> Option<PyJson> {
         .join("external-references")
         .join("newsvendor")
         .join("newsvendor.py");
+    if !script.exists() {
+        return None;
+    }
     let mut cmd = Command::new(python);
     cmd.arg(&script);
     for a in args {
         cmd.arg(a);
     }
     match cmd.output() {
-        Ok(out) if out.status.success() => {
-            // PORT NOTE: parse `out.stdout` with serde_json (absent in Cargo.toml).
-            None
-        }
+        Ok(out) if out.status.success() => parse_python_stdout(&out.stdout),
         _ => None,
     }
+}
+
+fn parse_python_stdout(stdout: &[u8]) -> Option<PyJson> {
+    let text = String::from_utf8_lossy(stdout);
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(parsed) = serde_json::from_str::<PyJson>(trimmed) {
+            return Some(parsed);
+        }
+    }
+    serde_json::from_str::<PyJson>(&text).ok()
 }
 
 // =============================================================================

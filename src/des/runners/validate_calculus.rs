@@ -1,14 +1,16 @@
 //! Port of `src/des/runners/validate-calculus.ts`.
 //!
 //! Validates the station-network calculus solvers in six studies: symbolic vs
-//! numerical derivative, quadrature agreement, ODE station-network ≡ pure-math
-//! RK4 ≡ scipy DOP853, 1-D heat (FTCS/BTCS), 1-D wave (leapfrog), and 2-D
-//! Poisson (Jacobi/Gauss-Seidel/SOR). The TS top-level driver becomes [`run`].
+//! numerical derivative, quadrature against a closed-form integral,
+//! ODE station-network ≡ pure-math RK4, 1-D heat (FTCS/BTCS), 1-D wave
+//! (leapfrog), and 2-D Poisson (Jacobi/Gauss-Seidel/SOR). The TS top-level
+//! driver becomes [`run`].
 //!
 //! ## PORT NOTE
-//!   * `execFileSync(python, [script], {env})` (scipy ground truth) →
-//!     [`std::process::Command`]; a failed/absent interpreter yields `None`
-//!     (TS `catch` → `null`), printing the same `SKIP` lines.
+//!   * `execFileSync(python, [script], {env})` (optional scipy sidecar) →
+//!     [`std::process::Command`]; the sidecar is only attempted when
+//!     `CALCULUS_PY` is set. Missing env stays Rust-only/skip, while enabled
+//!     references must run and emit valid JSON.
 //!   * `richardsonDerivative` is not present in the Rust `expr` module, so a
 //!     faithful local copy ([`richardson_derivative`]) is provided.
 //!   * `toFunction` lives in [`crate::des::general::equation_to_stations`]; the
@@ -34,7 +36,7 @@ use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::shared::transform::Transform;
 
 // -----------------------------------------------------------------------------
-// Local numerics + scipy bridge.
+// Local numerics + optional scipy bridge.
 // -----------------------------------------------------------------------------
 
 /// PORT NOTE: faithful copy of `expr.RichardsonDerivative` (five-point
@@ -54,10 +56,11 @@ fn root() -> PathBuf {
     }
 }
 
-/// `runPython(env)` — runs the scipy reference and parses the last stdout line.
-/// Returns `None` on any failure (mirrors the TS `try/catch → null`).
-fn run_python(extra_env: &[(&str, String)]) -> Option<JsonValue> {
-    let python = std::env::var("CALCULUS_PY").unwrap_or_else(|_| "python3".to_string());
+/// `runPython(env)` — runs the optional scipy sidecar and parses the last stdout line.
+fn run_python(extra_env: &[(&str, String)]) -> Result<Option<JsonValue>, String> {
+    let Some(python) = std::env::var("CALCULUS_PY").ok() else {
+        return Ok(None);
+    };
     let script = root()
         .join("external-references")
         .join("calculus")
@@ -67,13 +70,26 @@ fn run_python(extra_env: &[(&str, String)]) -> Option<JsonValue> {
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let out = cmd.output().ok()?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to run optional scipy sidecar: {e}"))?;
     if !out.status.success() {
-        return None;
+        return Err(format!(
+            "optional scipy sidecar exited with status {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let last = stdout.trim().lines().last()?.to_string();
-    parse_json(&last).ok()
+    let last = stdout
+        .trim()
+        .lines()
+        .last()
+        .ok_or_else(|| "optional scipy sidecar produced no JSON output".to_string())?
+        .to_string();
+    parse_json(&last)
+        .map(Some)
+        .map_err(|e| format!("failed to parse optional scipy sidecar JSON: {e}"))
 }
 
 // -----------------------------------------------------------------------------
@@ -205,16 +221,27 @@ pub fn run() -> i32 {
     let ref_ts = AdaptiveSimpsonRule::new(1e-15, 40)
         .transform(Integrand1D::new(integrand, a, b))
         .value;
+    let ref_closed = PI * PI - 3.0 - (-PI).exp();
+    c.check(
+        "adaptive Simpson matches closed-form integral",
+        (ref_ts - ref_closed).abs() < 1e-12,
+        Some(format!("|Δ|={}", to_exp((ref_ts - ref_closed).abs(), 2))),
+    );
     match run_python(&[("PROBLEM", "quad".to_string())]) {
-        Some(py) => {
+        Ok(Some(py)) => {
             let v = jget(&py, "value").unwrap_or(f64::NAN);
             c.check(
-                "scipy.integrate.quad agrees with adaptive Simpson",
+                "optional scipy.integrate.quad agrees with adaptive Simpson",
                 (v - ref_ts).abs() < 1e-10,
                 Some(format!("|Δ|={}", to_exp((v - ref_ts).abs(), 2))),
             );
         }
-        None => println!("  SKIP    scipy reference unavailable (set CALCULUS_PY)"),
+        Ok(None) => println!("  SKIP    optional scipy quad sidecar unavailable (set CALCULUS_PY)"),
+        Err(e) => c.check(
+            "optional scipy quad sidecar runs and emits JSON",
+            false,
+            Some(e),
+        ),
     }
     let trap = TrapezoidRule::new(64)
         .transform(Integrand1D::new(integrand, a, b))
@@ -242,9 +269,9 @@ pub fn run() -> i32 {
     );
 
     // -------------------------------------------------------------------------
-    // STUDY 3: ODE station network ≡ pure-math RK4 ≡ scipy DOP853
+    // STUDY 3: ODE station network ≡ pure-math RK4
     // -------------------------------------------------------------------------
-    println!("\n=== STUDY 3: ODE station network ≡ pure-math RK4 ≡ scipy DOP853 ===");
+    println!("\n=== STUDY 3: ODE station network ≡ pure-math RK4 ===");
     {
         let t1 = 4.0 * PI;
         let dt = 0.001;
@@ -277,15 +304,20 @@ pub fn run() -> i32 {
             Some(format!("|Δ| = {}", to_exp((station_y - 1.0).abs(), 2))),
         );
         match run_python(&[("PROBLEM", "ode".to_string()), ("T_END", js_num(t1))]) {
-            Some(sci) => {
+            Ok(Some(sci)) => {
                 let y_at = jget(&sci, "y_at_t1").unwrap_or(f64::NAN);
                 c.check(
-                    "scipy DOP853 vs cos(4π) = 1",
+                    "optional scipy DOP853 sidecar vs cos(4π) = 1",
                     (y_at - 1.0).abs() < 1e-12,
                     Some(format!("|Δ| = {}", to_exp((y_at - 1.0).abs(), 2))),
                 );
             }
-            None => println!("  SKIP    scipy DOP853 reference unavailable"),
+            Ok(None) => println!("  SKIP    optional scipy DOP853 sidecar unavailable"),
+            Err(e) => c.check(
+                "optional scipy DOP853 sidecar runs and emits JSON",
+                false,
+                Some(e),
+            ),
         }
     }
 
@@ -385,7 +417,7 @@ pub fn run() -> i32 {
             ("ALPHA", js_num(alpha)),
             ("T_END", js_num(t_end)),
         ]) {
-            Some(sci) => {
+            Ok(Some(sci)) => {
                 let final_values = sci
                     .get("final_values")
                     .and_then(|v| v.as_array())
@@ -400,12 +432,17 @@ pub fn run() -> i32 {
                     err_sci = err_sci.max((o1.final_values[i] - sv).abs());
                 }
                 c.check(
-                    "FTCS station-net ≡ scipy.LSODA on same FD spatial discretisation",
+                    "FTCS station-net ≡ optional scipy.LSODA sidecar on same FD spatial discretisation",
                     err_sci < 5e-3,
                     Some(format!("max|Δ|={}", to_exp(err_sci, 3))),
                 );
             }
-            None => println!("  SKIP    scipy LSODA reference unavailable"),
+            Ok(None) => println!("  SKIP    optional scipy LSODA sidecar unavailable"),
+            Err(e) => c.check(
+                "optional scipy LSODA sidecar runs and emits JSON",
+                false,
+                Some(e),
+            ),
         }
     }
 
@@ -531,21 +568,26 @@ pub fn run() -> i32 {
             ("N", js_num(n as f64)),
             ("TOL", js_num(tol)),
         ]) {
-            Some(sci) => {
+            Ok(Some(sci)) => {
                 let sci_iters = jget(&sci, "iterations").unwrap_or(f64::NAN);
                 c.check(
-                    "station Jacobi iteration count == scipy Jacobi iteration count",
+                    "station Jacobi iteration count == optional scipy sidecar iteration count",
                     r_j.iterations as f64 == sci_iters,
                     Some(format!("{} vs {}", r_j.iterations, js_num(sci_iters))),
                 );
                 let sci_err = jget(&sci, "max_err_vs_analytical").unwrap_or(f64::NAN);
                 c.check(
-                    "station Jacobi maxErr ≡ scipy Jacobi maxErr (bit-comparable Jacobi)",
+                    "station Jacobi maxErr ≡ optional scipy sidecar maxErr",
                     (err_j - sci_err).abs() < 1e-12,
                     Some(format!("|Δ|={}", to_exp((err_j - sci_err).abs(), 2))),
                 );
             }
-            None => println!("  SKIP    scipy Jacobi reference unavailable"),
+            Ok(None) => println!("  SKIP    optional scipy Jacobi sidecar unavailable"),
+            Err(e) => c.check(
+                "optional scipy Jacobi sidecar runs and emits JSON",
+                false,
+                Some(e),
+            ),
         }
     }
 

@@ -8,10 +8,9 @@
 //!   * `MDPSpec`/`Outcome`/`value_iteration` are reused from
 //!     `crate::des::general::value_iteration`; `mulberry32`/`with_seed` from
 //!     `crate::des::general::prng`.
-//!   * PORT NOTE: the TS imports `DemandDist`/`demandPoissonPMF`/`sampleDemand`
-//!     from the un-ported `main-newsvendor.ts`. Those small helpers are stubbed
-//!     locally here (faithful 1:1) until `main-newsvendor` is ported; wire to it
-//!     then.
+//!   * Newsvendor demand helpers are shared with
+//!     `crate::des::main_newsvendor` so the single-period and multi-period
+//!     inventory models use one PMF/sampling implementation.
 //!   * PORT NOTE: the optional HTML animation (FrameRecorder / newsvendor scene)
 //!     and the `out/*.json` artifact writes are omitted (no animation engine /
 //!     serde dependency assumed).
@@ -20,45 +19,7 @@
 
 use crate::des::general::prng::{mulberry32, with_seed};
 use crate::des::general::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
-use crate::des::shared::capabilities::{RandomSource, SeededRandom};
-
-// -----------------------------------------------------------------------------
-// PORT NOTE: local stub of the `main-newsvendor.ts` demand helpers.
-// -----------------------------------------------------------------------------
-
-/// A discrete demand distribution as a PMF over `0..pmf.len()`.
-#[derive(Clone, Debug)]
-pub struct DemandDist {
-    pub pmf: Vec<f64>,
-}
-
-/// Truncated Poisson PMF (tail lumped into `dMax`), via the stable recurrence
-/// `P(k) = P(k−1)·λ/k`.
-pub fn demand_poisson_pmf(lambda: f64, d_max: usize) -> DemandDist {
-    let mut pmf = vec![0.0; d_max + 1];
-    let mut p = (-lambda).exp();
-    pmf[0] = p;
-    for k in 1..=d_max {
-        p = p * lambda / k as f64;
-        pmf[k] = p;
-    }
-    let total: f64 = pmf.iter().sum();
-    pmf[d_max] += 1.0 - total;
-    DemandDist { pmf }
-}
-
-/// Inverse-CDF sample from a PMF.
-pub fn sample_demand(d: &DemandDist, rng: &mut SeededRandom) -> usize {
-    let u = rng.next_float();
-    let mut acc = 0.0;
-    for (k, &pk) in d.pmf.iter().enumerate() {
-        acc += pk;
-        if u <= acc {
-            return k;
-        }
-    }
-    d.pmf.len() - 1
-}
+pub use crate::des::main_newsvendor::{demand_poisson_pmf, sample_demand, DemandDist};
 
 // -----------------------------------------------------------------------------
 // Inventory MDP.

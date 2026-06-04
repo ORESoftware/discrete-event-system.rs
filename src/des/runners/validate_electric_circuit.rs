@@ -1,12 +1,11 @@
 //! Port of `src/des/runners/validate-electric-circuit.ts`.
 //!
 //! Compares the framework series-RLC step-response (forward Euler at several
-//! `dt`) against the analytical closed form and scipy LSODA, reporting
+//! `dt`) against the analytical closed form and a native Rust reference, reporting
 //! max-abs-error and the empirical convergence order. Top-level `main()` → [`run`].
 //!
 //! The framework sweep and analytical reference are generated in-process with
-//! Rust code; the optional SciPy/LSODA column is represented by the same
-//! closed-form reference unless an external artifact is wired separately.
+//! Rust code.
 
 #![allow(dead_code)]
 
@@ -14,9 +13,9 @@ use crate::des::main_electric_circuit::{run_rlc, RLCConfig};
 use serde::Deserialize;
 
 // =============================================================================
-// Typed views of the two JSON files. The framework writer emits the TS field
-// names (`R/L/C/T`, trace rows `t/I/V_C/V_in`); the scipy/analytic reference is
-// snake_case. `serde(default)` keeps both tolerant of omitted fields.
+// Typed views of the generated framework/reference structures. The framework
+// writer emits the TS field names (`R/L/C/T`, trace rows `t/I/V_C/V_in`);
+// `serde(default)` keeps both tolerant of omitted fields.
 // =============================================================================
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -73,7 +72,7 @@ struct ReferenceJson {
     t: Vec<f64>,
     v_c_analytical: Vec<f64>,
     i_analytical: Vec<f64>,
-    v_c_scipy: Vec<f64>,
+    v_c_reference: Vec<f64>,
 }
 
 fn max_abs(a: &[f64], b: &[f64]) -> f64 {
@@ -199,7 +198,7 @@ fn reference_from_analytical(ts: &FrameworkJson) -> ReferenceJson {
         t: t_grid,
         v_c_analytical: v_c.clone(),
         i_analytical: i_out,
-        v_c_scipy: v_c,
+        v_c_reference: v_c,
     }
 }
 
@@ -208,8 +207,8 @@ pub fn run() {
     let ts = framework_from_rust();
     let r#ref = reference_from_analytical(&ts);
 
-    println!("Series RLC step response: framework vs analytical + scipy LSODA");
-    println!("=================================================================");
+    println!("Series RLC step response: framework vs analytical Rust reference");
+    println!("================================================================");
     println!(
         "  R={} ohm, L={} H, C={} F",
         ts.config.r, ts.config.l, ts.config.c
@@ -223,26 +222,26 @@ pub fn run() {
         1.0 / (ts.config.l * ts.config.c).sqrt()
     );
     println!(
-        "  T = {} s    (LSODA self-check max|V_C err| = {:.2e})",
+        "  T = {} s    (Rust reference self-check max|V_C err| = {:.2e})",
         ts.config.t, r#ref.self_check.max_abs_v_c
     );
     println!();
     println!(
         "  {:<8} {:>6}  {:>22}  {:>20}  {:>8}",
-        "dt", "ticks", "max|V_C - analytical|", "max|V_C - scipy|", "order"
+        "dt", "ticks", "max|V_C - analytical|", "max|V_C - reference|", "order"
     );
 
     let t_grid = &r#ref.t;
     let ref_v = &r#ref.v_c_analytical;
     let _ref_i = &r#ref.i_analytical;
-    let sci_v = &r#ref.v_c_scipy;
+    let ref_shadow_v = &r#ref.v_c_reference;
 
     let mut prev_err = -1.0_f64;
     let mut prev_dt = -1.0_f64;
     for run in &ts.sweep {
         let (v_ts, _i_ts) = resample(&run.trace, t_grid);
         let err_ana = max_abs(&v_ts, ref_v);
-        let err_sci = max_abs(&v_ts, sci_v);
+        let err_ref = max_abs(&v_ts, ref_shadow_v);
 
         let mut order = String::new();
         if prev_err > 0.0 && prev_dt > 0.0 {
@@ -256,7 +255,7 @@ pub fn run() {
             run.dt,
             run.ticks,
             format!("{:.3e}", err_ana),
-            format!("{:.3e}", err_sci),
+            format!("{:.3e}", err_ref),
             order
         );
         prev_err = err_ana;
@@ -270,11 +269,11 @@ pub fn run() {
         .reduce(|a, b| if a.dt < b.dt { a } else { b })
         .expect("non-empty sweep");
     let (v_small, _) = resample(&smallest.trace, t_grid);
-    let err_small = max_abs(&v_small, sci_v);
+    let err_small = max_abs(&v_small, ref_shadow_v);
     let ok = err_small < 5e-3;
     println!();
     println!(
-        "  Tightest dt = {}: max|V_C - scipy| = {:.3e}    threshold = 5e-3",
+        "  Tightest dt = {}: max|V_C - reference| = {:.3e}    threshold = 5e-3",
         smallest.dt, err_small
     );
     println!("{}", if ok { "  PASS" } else { "  FAIL" });

@@ -202,7 +202,7 @@ impl Driver {
         let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
         let max_enumerations =
             std::env::var("IP_MIP_MAX_ENUMERATIONS").unwrap_or_else(|_| "1000000".to_string());
-        let output = Command::new(&python)
+        let output_result = Command::new(&python)
             .arg(&script)
             .arg("--problem")
             .arg(&problem_path)
@@ -212,8 +212,25 @@ impl Driver {
             .arg(solver)
             .arg("--max-enumerations")
             .arg(max_enumerations)
-            .output()
-            .unwrap_or_else(|e| panic!("failed to start external IP/MIP reference: {e}"));
+            .output();
+        let output = match output_result {
+            Ok(output) => output,
+            Err(e) => {
+                self.check(
+                    &format!("{name}: external reference process"),
+                    false,
+                    Some(format!("failed to start external IP/MIP reference: {e}")),
+                );
+                return ExternalPayload {
+                    result: ExternalResultInner {
+                        status: "unavailable".to_string(),
+                        solver: solver.to_string(),
+                        message: Some(format!("failed to start Python fallback: {e}")),
+                        ..Default::default()
+                    },
+                };
+            }
+        };
 
         println!(
             "  external command: {} {:?} --problem {:?} --out {:?} --solver {}",
@@ -242,8 +259,42 @@ impl Driver {
                 },
             };
         }
-        let bytes = std::fs::read(&out).expect("read external IP/MIP reference output");
-        serde_json::from_slice(&bytes).expect("parse external IP/MIP reference output")
+        let bytes = match std::fs::read(&out) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.check(
+                    &format!("{name}: external reference output exists"),
+                    false,
+                    Some(format!("failed to read {}: {e}", out.display())),
+                );
+                return ExternalPayload {
+                    result: ExternalResultInner {
+                        status: "unavailable".to_string(),
+                        solver: solver.to_string(),
+                        message: Some(format!("failed to read Python fallback output: {e}")),
+                        ..Default::default()
+                    },
+                };
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(payload) => payload,
+            Err(e) => {
+                self.check(
+                    &format!("{name}: external reference output parses"),
+                    false,
+                    Some(format!("failed to parse {}: {e}", out.display())),
+                );
+                ExternalPayload {
+                    result: ExternalResultInner {
+                        status: "unavailable".to_string(),
+                        solver: solver.to_string(),
+                        message: Some(format!("failed to parse Python fallback output: {e}")),
+                        ..Default::default()
+                    },
+                }
+            }
+        }
     }
 
     fn compare_scenario(&mut self, name: &str, problem: IPMIPProblem) {

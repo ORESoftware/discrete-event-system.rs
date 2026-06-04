@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use serde::Deserialize;
 
@@ -239,7 +239,7 @@ use crate::des::general::math_program::{
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
     export_math_program_cplex_lp, export_math_program_mps, map_math_program_export_solution,
     map_math_program_lp_row_certificates, map_math_program_lp_variable_certificates,
-    solve_math_program, solve_math_program_external_scipy, solve_math_program_solution_pool,
+    solve_math_program, solve_math_program_external, solve_math_program_solution_pool,
     ExternalMathProgramOptions, GlobalCardinalityCount, MathProgram,
     MathProgramAssumptionCoreOptions, MathProgramConflictItem, MathProgramConflictOptions,
     MathProgramCrossCheck, MathProgramExportRowKind, MathProgramExportVariableExpansion,
@@ -750,79 +750,6 @@ impl Driver {
         fallback.solver = format!("internal-simplex-no-highs-cli-{algorithm_label}");
         fallback.message = Some("highs executable not found; used internal simplex".to_string());
         fallback
-    }
-
-    fn run_python_json(&self, script: &str, args: &[&str], stdin_json: &str) -> serde_json::Value {
-        let path = self.root.join("scripts").join(script);
-        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-        let mut child = Command::new(&python)
-            .arg(&path)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to start {script}: {e}"));
-        {
-            use std::io::Write;
-            child
-                .stdin
-                .as_mut()
-                .expect("python stdin")
-                .write_all(stdin_json.as_bytes())
-                .expect("write python stdin");
-        }
-        let out = child
-            .wait_with_output()
-            .unwrap_or_else(|e| panic!("failed to wait for {script}: {e}"));
-        if !out.status.success() {
-            panic!(
-                "{script} failed with {:?}: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|e| panic!("parse {script} stdout as JSON: {e}"))
-    }
-
-    fn run_python_json_lenient(
-        &self,
-        script: &str,
-        args: &[&str],
-        stdin_json: &str,
-    ) -> serde_json::Value {
-        let path = self.root.join("scripts").join(script);
-        let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-        let mut child = Command::new(&python)
-            .arg(&path)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to start {script}: {e}"));
-        {
-            use std::io::Write;
-            child
-                .stdin
-                .as_mut()
-                .expect("python stdin")
-                .write_all(stdin_json.as_bytes())
-                .expect("write python stdin");
-        }
-        let out = child
-            .wait_with_output()
-            .unwrap_or_else(|e| panic!("failed to wait for {script}: {e}"));
-        match serde_json::from_slice(&out.stdout) {
-            Ok(value) => value,
-            Err(err) => panic!(
-                "parse {script} stdout as JSON after exit {:?}: {err}; stdout={} stderr={}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            ),
-        }
     }
 
     fn run_cp_sat_rust_json(&self, args: &[&str], stdin_json: &str) -> serde_json::Value {
@@ -11161,9 +11088,8 @@ impl Driver {
             .expect("improving axis");
         let unbounded_internal =
             solve_math_program(&unbounded_math_lp, &solve_opts).expect("unbounded LP internal");
-        let unbounded_external =
-            solve_math_program_external_scipy(&unbounded_math_lp, &external_opts)
-                .expect("unbounded LP external");
+        let unbounded_external = solve_math_program_external(&unbounded_math_lp, &external_opts)
+            .expect("unbounded LP external");
         self.check(
             "MathProgram LP facade unbounded-ray certificate",
             unbounded_internal.status == MathProgramStatus::Unbounded
@@ -11198,9 +11124,8 @@ impl Driver {
             .expect("infeasible upper row");
         let infeasible_internal =
             solve_math_program(&infeasible_math_lp, &solve_opts).expect("infeasible LP internal");
-        let infeasible_external =
-            solve_math_program_external_scipy(&infeasible_math_lp, &external_opts)
-                .expect("infeasible LP external");
+        let infeasible_external = solve_math_program_external(&infeasible_math_lp, &external_opts)
+            .expect("infeasible LP external");
         self.check(
             "MathProgram LP facade Farkas certificate",
             infeasible_internal.status == MathProgramStatus::Infeasible
@@ -16369,10 +16294,7 @@ impl Driver {
             branch_priorities: Some(vec![0, 10]),
             ..Default::default()
         };
-        match solve_math_program_external_scipy(
-            &branch_priority_mip,
-            &branch_priority_external_opts,
-        ) {
+        match solve_math_program_external(&branch_priority_mip, &branch_priority_external_opts) {
             Ok(solution)
                 if solution.status == MathProgramStatus::NumericalError
                     && solution
@@ -16413,7 +16335,7 @@ impl Driver {
             ),
         }
 
-        match solve_math_program_external_scipy(&limited_mip, &limited_opts) {
+        match solve_math_program_external(&limited_mip, &limited_opts) {
             Ok(solution)
                 if solution.status == MathProgramStatus::NumericalError
                     && solution
@@ -16484,7 +16406,7 @@ impl Driver {
             presolve: Some(ExternalLinearCliPresolve::Off),
             ..Default::default()
         };
-        match solve_math_program_external_scipy(&limited_mip, &objective_limited_opts) {
+        match solve_math_program_external(&limited_mip, &objective_limited_opts) {
             Ok(solution)
                 if solution.status == MathProgramStatus::NumericalError
                     && solution
@@ -16573,7 +16495,7 @@ impl Driver {
             solution_pool_size: Some(pool_size_target),
             ..Default::default()
         };
-        match solve_math_program_external_scipy(&pool_control_mip, &pool_control_opts) {
+        match solve_math_program_external(&pool_control_mip, &pool_control_opts) {
             Ok(solution)
                 if solution.status == MathProgramStatus::NumericalError
                     && solution

@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::des::general::soccer::{
     MatchConfig, MatchSummary, SoccerMatch, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions,
     SoccerQStateKey, SoccerQTargetEntry, SoccerSelfPlayEpisodeSummary,
-    SoccerSelfPlayTrainingArtifact, SoccerTeamQPolicies, Team,
+    SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary, SoccerTeamQPolicies, Team,
 };
 
 pub const SOCCER_LEARNING_FIXED_SCALE: i64 = 1_000_000;
@@ -115,6 +115,7 @@ pub struct SoccerLearningCompletedGame {
     pub seed: u64,
     pub summary: MatchSummary,
     pub episode_summary: SoccerSelfPlayEpisodeSummary,
+    pub tactical_summary: SoccerTacticalLearningSummary,
     pub policies: SoccerTeamQPolicies,
     pub score: SoccerLearningRunScore,
     pub delta: SoccerLearningPolicyDelta,
@@ -141,6 +142,7 @@ pub struct SoccerLearningQueueReport {
     pub elapsed_seconds: f64,
     pub total_home_goals: u32,
     pub total_away_goals: u32,
+    pub tactical_summary: SoccerTacticalLearningSummary,
     pub final_policy_entries: usize,
     pub final_target_entries: usize,
     pub episode_summaries: Vec<SoccerSelfPlayEpisodeSummary>,
@@ -433,6 +435,7 @@ pub fn run_soccer_learning_game(
         seed,
         summary: episode_summary.summary.clone(),
         episode_summary,
+        tactical_summary: artifact.tactical_summary,
         policies,
         score,
         delta,
@@ -464,6 +467,7 @@ where
     let mut failed_games = 0usize;
     let mut policies = initial_policies;
     let mut episode_summaries = Vec::new();
+    let mut tactical_summary = SoccerTacticalLearningSummary::default();
     let mut total_home_goals = 0u32;
     let mut total_away_goals = 0u32;
 
@@ -499,6 +503,7 @@ where
                 on_completed_game(&game, &policies)?;
                 total_home_goals = total_home_goals.saturating_add(game.summary.score_home);
                 total_away_goals = total_away_goals.saturating_add(game.summary.score_away);
+                tactical_summary.merge(&game.tactical_summary);
                 episode_summaries.push(game.episode_summary);
                 completed_games += 1;
             }
@@ -519,6 +524,7 @@ where
         elapsed_seconds: started.elapsed().as_secs_f64(),
         total_home_goals,
         total_away_goals,
+        tactical_summary,
         final_policy_entries,
         final_target_entries,
         episode_summaries,
@@ -533,6 +539,7 @@ pub fn soccer_self_play_artifact_from_queue_report(
 ) -> SoccerSelfPlayTrainingArtifact {
     SoccerSelfPlayTrainingArtifact {
         tactical_learning: config.tactical_learning.clone(),
+        tactical_summary: report.tactical_summary.clone(),
         config,
         options,
         episodes: report.episode_summaries.clone(),

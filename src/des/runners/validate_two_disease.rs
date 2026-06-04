@@ -1,9 +1,9 @@
 //! Port of `src/des/runners/validate-two-disease.ts`.
 //!
-//! Compares the framework two-disease ensemble mean against the scipy LSODA ODE
-//! and the Python Gillespie SSA ensemble: per-tick max-relative error, the
-//! time-integrated populations, and a Welch t-test on the final death count.
-//! Top-level `main()` → [`run`].
+//! Compares the framework two-disease ensemble mean against a Rust-generated
+//! reference payload that keeps the legacy LSODA/Gillespie schema: per-tick
+//! max-relative error, the time-integrated populations, and a Welch t-test on
+//! the final death count. Top-level `main()` → [`run`].
 //!
 //! The framework ensemble is generated in-process with the Rust two-disease
 //! model. External LSODA/Gillespie artifacts can still be wired later; until
@@ -21,8 +21,8 @@ use serde::Deserialize;
 
 // =============================================================================
 // Typed views of the two JSON files. The framework writer emits uppercase
-// compartment keys (`S/A/B/AB/R/D`) and camelCase params; the python reference
-// is snake_case. `serde(default)` keeps both tolerant of omitted fields.
+// compartment keys (`S/A/B/AB/R/D`) and camelCase params; the reference side is
+// snake_case. `serde(default)` keeps both tolerant of omitted fields.
 // =============================================================================
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -107,7 +107,7 @@ struct FrameworkJson {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
-struct PythonJson {
+struct ReferenceJson {
     ode: Compartments,
     ssa_mean: Compartments,
     ssa_final_d_mean: f64,
@@ -276,7 +276,7 @@ fn stddev(xs: &[f64]) -> f64 {
         .sqrt()
 }
 
-fn generated_inputs() -> (FrameworkJson, PythonJson) {
+fn generated_inputs() -> (FrameworkJson, ReferenceJson) {
     let params = model_params();
     let reps = env_usize("REPS", 8);
     let mut final_deaths = Vec::new();
@@ -307,7 +307,7 @@ fn generated_inputs() -> (FrameworkJson, PythonJson) {
             reps,
             final_deaths,
         },
-        PythonJson {
+        ReferenceJson {
             ode: compartments.clone(),
             ssa_mean: compartments,
             ssa_final_d_mean: final_d_mean,
@@ -319,13 +319,13 @@ fn generated_inputs() -> (FrameworkJson, PythonJson) {
 
 /// `validate-two-disease.ts` `main()`.
 pub fn run() {
-    let (ts, py) = generated_inputs();
+    let (ts, reference) = generated_inputs();
 
     let mean_ts = &ts.mean_trace;
-    let ode = &py.ode;
-    let ssa = &py.ssa_mean;
+    let ode = &reference.ode;
+    let ssa = &reference.ssa_mean;
 
-    println!("Two-disease framework vs Python (LSODA + Gillespie SSA)");
+    println!("Two-disease framework vs Rust reference shadow (LSODA + Gillespie schema)");
     println!("==========================================================================");
     println!(
         "  N={}  reps={}  simT={}  dt={}",
@@ -377,9 +377,9 @@ pub fn run() {
 
     // Final-state Welch test on D.
     let ts_final_d = &ts.final_deaths;
-    let py_ssa_mean_d = py.ssa_final_d_mean;
-    let py_ssa_std_d = py.ssa_final_d_std;
-    let py_ssa_reps = py.ssa_reps;
+    let reference_ssa_mean_d = reference.ssa_final_d_mean;
+    let reference_ssa_std_d = reference.ssa_final_d_std;
+    let reference_ssa_reps = reference.ssa_reps;
     let ts_mean_d = ts_final_d.iter().sum::<f64>() / ts_final_d.len() as f64;
     let ts_std_d = (ts_final_d
         .iter()
@@ -388,12 +388,12 @@ pub fn run() {
         / (1.0_f64).max(ts_final_d.len() as f64 - 1.0))
     .sqrt();
     let se_gap = (ts_std_d * ts_std_d / ts_final_d.len() as f64
-        + py_ssa_std_d * py_ssa_std_d / py_ssa_reps)
+        + reference_ssa_std_d * reference_ssa_std_d / reference_ssa_reps)
         .sqrt();
     let t_stat = if se_gap == 0.0 {
         0.0
     } else {
-        (ts_mean_d - py_ssa_mean_d) / se_gap
+        (ts_mean_d - reference_ssa_mean_d) / se_gap
     };
     let z = t_stat.abs();
     let p = 2.0 * (1.0 - 0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2)));
@@ -406,15 +406,15 @@ pub fn run() {
         ts_final_d.len()
     );
     println!(
-        "    Python SSA: mean={:.2}  std={:.2}  n={}",
-        py_ssa_mean_d, py_ssa_std_d, py_ssa_reps
+        "    reference SSA: mean={:.2}  std={:.2}  n={}",
+        reference_ssa_mean_d, reference_ssa_std_d, reference_ssa_reps
     );
     println!("    t = {:.3}    p ≈ {:.3}", t_stat, p);
 
     let ode_final_d = ode.d[ode.d.len() - 1];
     println!(
         "    LSODA mean-field final D = {:.2} (compare to SSA mean {:.2})",
-        ode_final_d, py_ssa_mean_d
+        ode_final_d, reference_ssa_mean_d
     );
 
     let tol_int_ode_mon = 0.05;

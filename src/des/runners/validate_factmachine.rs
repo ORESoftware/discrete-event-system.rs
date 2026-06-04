@@ -1,16 +1,16 @@
 //! Port of `src/des/runners/validate-factmachine.ts`.
 //!
-//! Validates the FactMachine POMDP: Bayesian belief filter vs scipy, majority
-//! win-probability, Brier calibration, policy ranking, late-flip misdirection,
-//! Tiger POMDP exact-VI vs QMDP, and binary-vs-scalar market contrast.
+//! Validates the FactMachine POMDP: Bayesian belief filter vs native Rust
+//! reference, majority win-probability, Brier calibration, policy ranking,
+//! late-flip misdirection, Tiger POMDP exact-VI vs QMDP, and binary-vs-scalar
+//! market contrast.
 //! Driver → [`run`].
 //!
 //! PORT NOTES:
 //!   * Uses the real Rust belief, POMDP/Tiger, and FactMachine modules.
-//!   * Optional Python (scipy/numpy) reference via `std::process::Command` is
-//!     only attempted when `FACTMACHINE_PY` is explicitly set. JSON parsing is
-//!     not wired here, so the default path stays Rust-only and skips the
-//!     external reference.
+//!   * Optional Python/scipy reference via `std::process::Command` is only
+//!     attempted when `FACTMACHINE_PY` is explicitly set. The default path uses
+//!     native Rust shadow references.
 
 #![allow(dead_code)]
 
@@ -23,6 +23,7 @@ use crate::des::main_factmachine::{
     default_params, run_fact_machine as run_fact_machine_model, FactMachineParams,
     FactMachineResult, MarketType, Policy, ResolutionMode,
 };
+use crate::des::observability::logger::{parse_json, JsonValue};
 
 fn run_fact_machine(params: &FactMachineParams) -> FactMachineResult {
     run_fact_machine_model(params.clone())
@@ -53,8 +54,153 @@ fn binary_outcome(outcome: i32) -> BinaryOutcome {
     }
 }
 
+struct BeliefReference {
+    final_mean: f64,
+    final_belief: Vec<f64>,
+    mean_history: Vec<f64>,
+}
+
+struct PWinReference {
+    thetas: Vec<f64>,
+    pwin: Vec<f64>,
+}
+
+fn mean_from_weights(states: &[f64], weights: &[f64]) -> f64 {
+    states
+        .iter()
+        .zip(weights.iter())
+        .map(|(theta, weight)| theta * weight)
+        .sum()
+}
+
+fn normalize_log_weights(log_weights: &[f64]) -> Vec<f64> {
+    if log_weights.is_empty() {
+        return Vec::new();
+    }
+    let max_log = log_weights
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !max_log.is_finite() {
+        return vec![1.0 / log_weights.len() as f64; log_weights.len()];
+    }
+    let mut weights = log_weights
+        .iter()
+        .map(|w| (w - max_log).exp())
+        .collect::<Vec<_>>();
+    let sum: f64 = weights.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return vec![1.0 / log_weights.len() as f64; log_weights.len()];
+    }
+    for weight in &mut weights {
+        *weight /= sum;
+    }
+    weights
+}
+
+fn vote_log_likelihood(theta: f64, informedness: f64, yes: i64, total: i64) -> f64 {
+    let q = (theta * informedness + 0.5 * (1.0 - informedness)).clamp(1e-300, 1.0 - 1e-15);
+    yes as f64 * q.ln() + (total - yes) as f64 * (1.0 - q).ln()
+}
+
+fn rust_log_space_belief_reference(
+    states: &[f64],
+    informedness: f64,
+    obs: &[(i64, i64)],
+) -> BeliefReference {
+    let mut log_weights = vec![0.0; states.len()];
+    let mut weights = normalize_log_weights(&log_weights);
+    let mut mean_history = vec![mean_from_weights(states, &weights)];
+    for &(yes, total) in obs {
+        for (i, theta) in states.iter().enumerate() {
+            log_weights[i] += vote_log_likelihood(*theta, informedness, yes, total);
+        }
+        weights = normalize_log_weights(&log_weights);
+        mean_history.push(mean_from_weights(states, &weights));
+    }
+    BeliefReference {
+        final_mean: mean_history.last().copied().unwrap_or(f64::NAN),
+        final_belief: weights,
+        mean_history,
+    }
+}
+
+fn rust_discrete_belief_reference(
+    states: &[f64],
+    informedness: f64,
+    obs: &[(i64, i64)],
+) -> BeliefReference {
+    let mut belief = DiscreteBelief::new(states.to_vec(), None);
+    let mut mean_history = vec![belief.mean()];
+    for &(yes, total) in obs {
+        belief.update(|theta, _| {
+            vote_log_likelihood(*theta, informedness, yes, total)
+                .exp()
+                .max(0.0)
+        });
+        mean_history.push(belief.mean());
+    }
+    BeliefReference {
+        final_mean: mean_history.last().copied().unwrap_or(f64::NAN),
+        final_belief: belief.weights,
+        mean_history,
+    }
+}
+
+fn binomial_majority_tail_recurrence(theta: f64, voters: i64) -> f64 {
+    let half = voters / 2;
+    let theta = theta.clamp(1e-300, 1.0 - 1e-15);
+    let mut p = 0.0;
+    let mut log_p = voters as f64 * (1.0 - theta).ln();
+    let mut log_coef = 0.0;
+    for k in 0..=voters {
+        if k > half {
+            p += (log_coef + log_p).exp();
+        }
+        if k < voters {
+            log_coef += ((voters - k) as f64).ln() - ((k + 1) as f64).ln();
+            log_p += theta.ln() - (1.0 - theta).ln();
+        }
+    }
+    p.clamp(0.0, 1.0)
+}
+
+fn binomial_majority_tail_dp(theta: f64, voters: usize) -> f64 {
+    let theta = theta.clamp(0.0, 1.0);
+    let mut pmf = vec![0.0; voters + 1];
+    pmf[0] = 1.0;
+    for i in 0..voters {
+        for yes in (0..=i).rev() {
+            let current = pmf[yes];
+            pmf[yes] = current * (1.0 - theta);
+            pmf[yes + 1] += current * theta;
+        }
+    }
+    pmf.iter().skip(voters / 2 + 1).sum::<f64>().clamp(0.0, 1.0)
+}
+
+fn rust_majority_reference(voters: usize) -> PWinReference {
+    let thetas = (1..=9).map(|i| i as f64 / 10.0).collect::<Vec<_>>();
+    let pwin = thetas
+        .iter()
+        .map(|theta| binomial_majority_tail_dp(*theta, voters))
+        .collect::<Vec<_>>();
+    PWinReference { thetas, pwin }
+}
+
+fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() {
+        return f64::INFINITY;
+    }
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f64::max)
+}
+
 // =============================================================================
-// Optional Python reference (always None — see module PORT NOTES).
+// Optional Python reference.
 // =============================================================================
 
 struct PyJson {
@@ -65,8 +211,72 @@ struct PyJson {
     pwin: Vec<f64>,
 }
 
-fn run_python(env: &[(&str, String)]) -> Option<PyJson> {
-    let python = std::env::var("FACTMACHINE_PY").ok()?;
+fn get_any<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a JsonValue> {
+    names.iter().find_map(|name| value.get(name))
+}
+
+fn number_field(value: &JsonValue, names: &[&str], label: &str) -> Result<f64, String> {
+    get_any(value, names)
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("missing numeric field {label}"))
+}
+
+fn number_array_field(value: &JsonValue, names: &[&str], label: &str) -> Result<Vec<f64>, String> {
+    get_any(value, names)
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("missing array field {label}"))?
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            v.as_f64()
+                .ok_or_else(|| format!("{label}[{i}] must be numeric"))
+        })
+        .collect()
+}
+
+fn parse_python_reference(problem: &str, text: &str) -> Result<PyJson, String> {
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| "Python reference produced no JSON output".to_string())?;
+    let root = parse_json(line.trim())?;
+    match problem {
+        "belief" => Ok(PyJson {
+            final_mean: number_field(&root, &["finalMean", "final_mean"], "finalMean")?,
+            final_belief: number_array_field(
+                &root,
+                &["finalBelief", "final_belief"],
+                "finalBelief",
+            )?,
+            mean_history: number_array_field(
+                &root,
+                &["meanHistory", "mean_history"],
+                "meanHistory",
+            )?,
+            thetas: Vec::new(),
+            pwin: Vec::new(),
+        }),
+        "pwin" => Ok(PyJson {
+            final_mean: 0.0,
+            final_belief: Vec::new(),
+            mean_history: Vec::new(),
+            thetas: number_array_field(&root, &["thetas"], "thetas")?,
+            pwin: number_array_field(&root, &["pwin", "pWin"], "pwin")?,
+        }),
+        other => Err(format!("unknown Python reference problem {other}")),
+    }
+}
+
+fn run_python(env: &[(&str, String)]) -> Result<Option<PyJson>, String> {
+    let Some(python) = std::env::var("FACTMACHINE_PY").ok() else {
+        return Ok(None);
+    };
+    let problem = env
+        .iter()
+        .find(|(k, _)| *k == "PROBLEM")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
     let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("external-references")
         .join("factmachine")
@@ -77,8 +287,16 @@ fn run_python(env: &[(&str, String)]) -> Option<PyJson> {
         cmd.env(k, v);
     }
     match cmd.output() {
-        Ok(out) if out.status.success() => None, // PORT NOTE: parse last stdout line via serde_json.
-        _ => None,
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_python_reference(problem, &stdout).map(Some)
+        }
+        Ok(out) => Err(format!(
+            "Python reference exited with status {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => Err(format!("failed to run Python reference: {e}")),
     }
 }
 
@@ -116,7 +334,7 @@ pub fn run() {
     let mut c = Checker::new();
 
     // STUDY 1.
-    println!("\n=== STUDY 1: Bayesian belief filter ≡ scipy reference ===");
+    println!("\n=== STUDY 1: Bayesian belief filter ≡ Rust log-space reference ===");
     {
         let k = 21usize;
         let informedness = 0.6;
@@ -131,6 +349,33 @@ pub fn run() {
             (16, 20),
             (10, 22),
         ];
+        let model_ref = rust_discrete_belief_reference(&states, informedness, &obs);
+        let shadow_ref = rust_log_space_belief_reference(&states, informedness, &obs);
+        let d_mean = (model_ref.final_mean - shadow_ref.final_mean).abs();
+        c.check(
+            &format!(
+                "final E[θ] matches Rust log-space reference  model={:.8}  ref={:.8}",
+                model_ref.final_mean, shadow_ref.final_mean
+            ),
+            d_mean < 1e-10,
+            &format!("|Δ|={:.2e}", d_mean),
+        );
+        let max_belief_diff = max_abs_diff(&model_ref.final_belief, &shadow_ref.final_belief);
+        c.check(
+            "per-bin |belief_model - belief_ref| <= 1e-10 across 21 bins",
+            max_belief_diff < 1e-10,
+            &format!("max|Δ|={:.2e}", max_belief_diff),
+        );
+        let max_mean_diff = max_abs_diff(&model_ref.mean_history, &shadow_ref.mean_history);
+        c.check(
+            &format!(
+                "per-tick mean trajectory matches Rust reference across {} steps",
+                obs.len() + 1
+            ),
+            max_mean_diff < 1e-10,
+            &format!("max|Δ|={:.2e}", max_mean_diff),
+        );
+
         let obs_str = obs
             .iter()
             .map(|(y, n)| format!("{}/{}", y, n))
@@ -143,96 +388,107 @@ pub fn run() {
             ("OBS", obs_str),
         ]);
         match py {
-            None => println!("  SKIP    scipy/numpy reference unavailable"),
-            Some(py) => {
-                let mut b = DiscreteBelief::new(states.clone(), None);
-                let mut ts_means: Vec<f64> = vec![b.mean()];
-                for &(y, n) in &obs {
-                    b.update(|theta, _| {
-                        let q = *theta * informedness + 0.5 * (1.0 - informedness);
-                        (y as f64 * f64::max(1e-300, q).ln()
-                            + (n - y) as f64 * f64::max(1e-300, 1.0 - q).ln())
-                        .exp()
-                    });
-                    ts_means.push(b.mean());
-                }
-                let d_mean = (ts_means[ts_means.len() - 1] - py.final_mean).abs();
+            Ok(None) => println!("  SKIP    optional Python/scipy belief sidecar unavailable"),
+            Err(e) => c.check(
+                "optional Python/scipy belief sidecar runs and emits JSON",
+                false,
+                &e,
+            ),
+            Ok(Some(py)) => {
+                let d_mean = (model_ref.final_mean - py.final_mean).abs();
                 c.check(
                     &format!(
-                        "final E[θ] match  TS={:.8}  PY={:.8}",
-                        ts_means[ts_means.len() - 1],
-                        py.final_mean
+                        "optional Python final E[θ] matches model  model={:.8}  py={:.8}",
+                        model_ref.final_mean, py.final_mean
                     ),
                     d_mean < 1e-10,
                     &format!("|Δ|={:.2e}", d_mean),
                 );
-                let mut max_belief_diff = 0.0_f64;
-                for i in 0..k {
-                    max_belief_diff =
-                        f64::max(max_belief_diff, (b.weights[i] - py.final_belief[i]).abs());
+                if py.final_belief.len() == k {
+                    let max_belief_diff = max_abs_diff(&model_ref.final_belief, &py.final_belief);
+                    c.check(
+                        "optional Python per-bin belief matches model across 21 bins",
+                        max_belief_diff < 1e-10,
+                        &format!("max|Δ|={:.2e}", max_belief_diff),
+                    );
+                } else {
+                    c.check(
+                        "optional Python final belief length matches theta grid",
+                        false,
+                        &format!("got={} expected={k}", py.final_belief.len()),
+                    );
                 }
-                c.check(
-                    "per-bin |b_TS − b_PY| ≤ 1e-12 across 21 bins",
-                    max_belief_diff < 1e-12,
-                    &format!("max|Δ|={:.2e}", max_belief_diff),
-                );
-                let mut max_mean_diff = 0.0_f64;
-                for t in 0..=obs.len() {
-                    max_mean_diff =
-                        f64::max(max_mean_diff, (ts_means[t] - py.mean_history[t]).abs());
+                if py.mean_history.len() == obs.len() + 1 {
+                    let max_mean_diff = max_abs_diff(&model_ref.mean_history, &py.mean_history);
+                    c.check(
+                        &format!(
+                            "optional Python mean trajectory matches model across {} steps",
+                            obs.len() + 1
+                        ),
+                        max_mean_diff < 1e-10,
+                        &format!("max|Δ|={:.2e}", max_mean_diff),
+                    );
+                } else {
+                    c.check(
+                        "optional Python mean-history length matches observations",
+                        false,
+                        &format!("got={} expected={}", py.mean_history.len(), obs.len() + 1),
+                    );
                 }
-                c.check(
-                    &format!(
-                        "per-tick mean trajectory matches across {} steps",
-                        obs.len() + 1
-                    ),
-                    max_mean_diff < 1e-10,
-                    &format!("max|Δ|={:.2e}", max_mean_diff),
-                );
             }
         }
     }
 
     // STUDY 2.
-    println!("\n=== STUDY 2: P(majority votes YES | θ) ≡ scipy.stats.binom.sf ===");
+    println!("\n=== STUDY 2: P(majority votes YES | theta) ≡ Rust DP reference ===");
     {
+        let voters = 51usize;
+        let rust_ref = rust_majority_reference(voters);
+        let recurrence = PWinReference {
+            thetas: rust_ref.thetas.clone(),
+            pwin: rust_ref
+                .thetas
+                .iter()
+                .map(|theta| binomial_majority_tail_recurrence(*theta, voters as i64))
+                .collect(),
+        };
+        let max_diff = max_abs_diff(&recurrence.pwin, &rust_ref.pwin);
+        c.check(
+            "pYesWins at 9 theta values matches Rust DP binomial tail to 1e-10",
+            max_diff < 1e-10,
+            &format!("max|Δ|={:.2e}", max_diff),
+        );
+
         let py = run_python(&[
             ("PROBLEM", "pwin".to_string()),
-            ("N_VOTERS", "51".to_string()),
+            ("N_VOTERS", voters.to_string()),
         ]);
         match py {
-            None => println!("  SKIP    scipy reference unavailable"),
-            Some(py) => {
-                let mut params = default_params();
-                params.resolution_mode = ResolutionMode::Majority;
-                params.n_voters = 51;
-                let nn = params.n_voters as i64;
-                let half = nn / 2;
-                let pwin_ts = |theta: f64| -> f64 {
-                    let mut p = 0.0;
-                    let mut log_p = nn as f64 * f64::max(1e-300, 1.0 - theta).ln();
-                    let mut lcoef = 0.0;
-                    for k in 0..=nn {
-                        if k > half {
-                            p += (lcoef + log_p).exp();
-                        }
-                        if k < nn {
-                            lcoef += ((nn - k) as f64).ln() - ((k + 1) as f64).ln();
-                            log_p +=
-                                f64::max(1e-300, theta).ln() - f64::max(1e-300, 1.0 - theta).ln();
-                        }
+            Ok(None) => println!("  SKIP    optional Python/scipy p-win sidecar unavailable"),
+            Err(e) => c.check(
+                "optional Python/scipy p-win sidecar runs and emits JSON",
+                false,
+                &e,
+            ),
+            Ok(Some(py)) => {
+                if py.thetas.len() == py.pwin.len() {
+                    let mut max_diff = 0.0_f64;
+                    for i in 0..py.thetas.len() {
+                        let model = binomial_majority_tail_recurrence(py.thetas[i], voters as i64);
+                        max_diff = f64::max(max_diff, (model - py.pwin[i]).abs());
                     }
-                    p.max(0.0).min(1.0)
-                };
-                let mut max_diff = 0.0_f64;
-                for i in 0..py.thetas.len() {
-                    max_diff = f64::max(max_diff, (pwin_ts(py.thetas[i]) - py.pwin[i]).abs());
+                    c.check(
+                        "optional Python pYesWins matches model to 1e-10",
+                        max_diff < 1e-10,
+                        &format!("max|Δ|={:.2e}", max_diff),
+                    );
+                } else {
+                    c.check(
+                        "optional Python p-win arrays have matching lengths",
+                        false,
+                        &format!("theta={} pwin={}", py.thetas.len(), py.pwin.len()),
+                    );
                 }
-                c.check(
-                    "pYesWins at 9 θ values matches scipy.stats.binom.sf to 1e-10",
-                    max_diff < 1e-10,
-                    &format!("max|Δ|={:.2e}", max_diff),
-                );
             }
         }
     }

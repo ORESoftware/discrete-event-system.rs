@@ -6,9 +6,9 @@
 //!
 //! PORT NOTES:
 //!   * The internal side is wired to the real Rust smart-traffic DES.
-//!   * The optional SUMO adapter remains dependency-gated. Problem/payload JSON
-//!     I/O is intentionally minimal here, so missing SUMO is reported cleanly
-//!     instead of making the in-repo validator fail.
+//!   * The optional SUMO adapter remains dependency-gated. The validator writes
+//!     a real normalized problem payload and calls the external-module registry;
+//!     missing scripts, SUMO, or netconvert are reported as clean skips.
 
 #![allow(dead_code)]
 
@@ -16,10 +16,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::des::general::network_flow::{
-    TrafficLane, TrafficNetwork, TrafficParams, TrafficSink, TrafficSource,
+    TrafficLane, TrafficNetwork, TrafficNodeKind, TrafficParams, TrafficSink, TrafficSource,
 };
 use crate::des::general::smart_traffic_flow::{
     run_smart_traffic_flow, SmartTrafficParams, SmartTrafficResult,
+};
+use crate::des::observability::logger::{parse_json, JsonValue};
+
+use super::external_modules::{register_built_in_external_modules, TRAFFIC_SUMO_REFERENCE_ID};
+use super::external_program::{
+    run_external_module, ExternalModuleParams, ExternalProgramResult, ParamValue,
 };
 
 // =============================================================================
@@ -182,7 +188,7 @@ fn build_demand(
 }
 
 // =============================================================================
-// External SUMO payload (stubbed).
+// External SUMO payload.
 // =============================================================================
 
 #[derive(Clone, Debug, Default)]
@@ -204,11 +210,428 @@ struct ExternalTrafficPayload {
     result: Option<ExternalTrafficResult>,
 }
 
-#[derive(Clone, Debug, Default)]
-struct ExtRun {
-    status: i32,
-    stdout: String,
-    stderr: String,
+fn opt_num(v: Option<f64>) -> JsonValue {
+    v.map(JsonValue::Number).unwrap_or(JsonValue::Null)
+}
+
+fn opt_usize(v: Option<usize>) -> JsonValue {
+    v.map(|n| JsonValue::Number(n as f64))
+        .unwrap_or(JsonValue::Null)
+}
+
+fn opt_string_array(v: Option<&Vec<String>>) -> JsonValue {
+    match v {
+        Some(items) => {
+            JsonValue::Array(items.iter().map(|s| JsonValue::String(s.clone())).collect())
+        }
+        None => JsonValue::Null,
+    }
+}
+
+fn node_kind_label(kind: TrafficNodeKind) -> &'static str {
+    match kind {
+        TrafficNodeKind::Source => "source",
+        TrafficNodeKind::Intersection => "intersection",
+        TrafficNodeKind::Sink => "sink",
+    }
+}
+
+fn network_json(network: &TrafficNetwork) -> JsonValue {
+    let nodes = network
+        .nodes
+        .iter()
+        .map(|node| {
+            JsonValue::Object(vec![
+                ("id".to_string(), JsonValue::String(node.id.clone())),
+                (
+                    "kind".to_string(),
+                    JsonValue::String(node_kind_label(node.kind).to_string()),
+                ),
+                ("x".to_string(), JsonValue::Number(node.x)),
+                ("y".to_string(), JsonValue::Number(node.y)),
+            ])
+        })
+        .collect();
+    let lanes = network
+        .lanes
+        .iter()
+        .map(|lane| {
+            JsonValue::Object(vec![
+                ("id".to_string(), JsonValue::String(lane.id.clone())),
+                ("from".to_string(), JsonValue::String(lane.from.clone())),
+                ("to".to_string(), JsonValue::String(lane.to.clone())),
+                ("lengthM".to_string(), JsonValue::Number(lane.length_m)),
+                (
+                    "speedLimitMps".to_string(),
+                    JsonValue::Number(lane.speed_limit_mps),
+                ),
+                ("capacity".to_string(), opt_usize(lane.capacity)),
+            ])
+        })
+        .collect();
+    let signals = network
+        .signals
+        .as_ref()
+        .map(|signals| {
+            JsonValue::Array(
+                signals
+                    .iter()
+                    .map(|signal| {
+                        JsonValue::Object(vec![
+                            (
+                                "nodeId".to_string(),
+                                JsonValue::String(signal.node_id.clone()),
+                            ),
+                            (
+                                "phases".to_string(),
+                                JsonValue::Array(
+                                    signal
+                                        .phases
+                                        .iter()
+                                        .map(|phase| {
+                                            JsonValue::Object(vec![
+                                                (
+                                                    "name".to_string(),
+                                                    JsonValue::String(phase.name.clone()),
+                                                ),
+                                                (
+                                                    "greenLanes".to_string(),
+                                                    JsonValue::Array(
+                                                        phase
+                                                            .green_lanes
+                                                            .iter()
+                                                            .map(|lane| {
+                                                                JsonValue::String(lane.clone())
+                                                            })
+                                                            .collect(),
+                                                    ),
+                                                ),
+                                                (
+                                                    "durationSec".to_string(),
+                                                    JsonValue::Number(phase.duration_sec),
+                                                ),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                            ("offsetSec".to_string(), opt_num(signal.offset_sec)),
+                        ])
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or(JsonValue::Null);
+    let sources = network
+        .sources
+        .iter()
+        .map(|source| {
+            JsonValue::Object(vec![
+                ("id".to_string(), JsonValue::String(source.id.clone())),
+                (
+                    "nodeId".to_string(),
+                    JsonValue::String(source.node_id.clone()),
+                ),
+                (
+                    "ratePerMin".to_string(),
+                    JsonValue::Number(source.rate_per_min),
+                ),
+                (
+                    "destinationSinkIds".to_string(),
+                    opt_string_array(source.destination_sink_ids.as_ref()),
+                ),
+            ])
+        })
+        .collect();
+    let sinks = network
+        .sinks
+        .iter()
+        .map(|sink| {
+            JsonValue::Object(vec![
+                ("id".to_string(), JsonValue::String(sink.id.clone())),
+                (
+                    "nodeId".to_string(),
+                    JsonValue::String(sink.node_id.clone()),
+                ),
+            ])
+        })
+        .collect();
+
+    JsonValue::Object(vec![
+        ("nodes".to_string(), JsonValue::Array(nodes)),
+        ("lanes".to_string(), JsonValue::Array(lanes)),
+        ("signals".to_string(), signals),
+        ("sources".to_string(), JsonValue::Array(sources)),
+        ("sinks".to_string(), JsonValue::Array(sinks)),
+    ])
+}
+
+fn demand_json(demand: &[TrafficDemandRow]) -> JsonValue {
+    JsonValue::Array(
+        demand
+            .iter()
+            .map(|row| {
+                JsonValue::Object(vec![
+                    ("id".to_string(), JsonValue::String(row.id.clone())),
+                    (
+                        "sourceId".to_string(),
+                        JsonValue::String(row.source_id.clone()),
+                    ),
+                    ("sinkId".to_string(), JsonValue::String(row.sink_id.clone())),
+                    (
+                        "route".to_string(),
+                        JsonValue::Array(
+                            row.route
+                                .iter()
+                                .map(|lane| JsonValue::String(lane.clone()))
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "vehicles".to_string(),
+                        JsonValue::Number(row.vehicles as f64),
+                    ),
+                    ("beginSec".to_string(), JsonValue::Number(row.begin_sec)),
+                    ("endSec".to_string(), JsonValue::Number(row.end_sec)),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn params_json(params: &SmartTrafficParams) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "builtin".to_string(),
+            params
+                .base
+                .builtin
+                .clone()
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "durationSec".to_string(),
+            JsonValue::Number(params.base.duration_sec),
+        ),
+        ("dtSec".to_string(), JsonValue::Number(params.base.dt_sec)),
+        ("seed".to_string(), JsonValue::Number(params.base.seed)),
+        (
+            "maxCars".to_string(),
+            JsonValue::Number(params.base.max_cars as f64),
+        ),
+        ("carLengthM".to_string(), opt_num(params.base.car_length_m)),
+        ("carWidthM".to_string(), opt_num(params.base.car_width_m)),
+        ("laneWidthM".to_string(), opt_num(params.base.lane_width_m)),
+        ("minGapM".to_string(), opt_num(params.base.min_gap_m)),
+        (
+            "maxAccelMps2".to_string(),
+            opt_num(params.base.max_accel_mps2),
+        ),
+        (
+            "maxDecelMps2".to_string(),
+            opt_num(params.base.max_decel_mps2),
+        ),
+        (
+            "maxJerkMps3".to_string(),
+            opt_num(params.base.max_jerk_mps3),
+        ),
+        (
+            "reactionTimeSec".to_string(),
+            opt_num(params.base.reaction_time_sec),
+        ),
+        (
+            "timeHeadwaySec".to_string(),
+            opt_num(params.base.time_headway_sec),
+        ),
+        (
+            "gridCellSizeM".to_string(),
+            opt_num(params.base.grid_cell_size_m),
+        ),
+        (
+            "gridLookAheadM".to_string(),
+            opt_num(params.base.grid_look_ahead_m),
+        ),
+        (
+            "spawnRateMultiplier".to_string(),
+            opt_num(params.base.spawn_rate_multiplier),
+        ),
+        (
+            "smartCarPoolSize".to_string(),
+            opt_num(params.smart_car_pool_size.map(|n| n as f64)),
+        ),
+        (
+            "actorShuffleSeed".to_string(),
+            opt_num(params.actor_shuffle_seed),
+        ),
+        (
+            "accidentRiskScale".to_string(),
+            opt_num(params.accident_risk_scale),
+        ),
+        (
+            "accidentProbability".to_string(),
+            opt_num(params.accident_probability),
+        ),
+        (
+            "accidentAccelBoostMps2".to_string(),
+            opt_num(params.accident_accel_boost_mps2),
+        ),
+        (
+            "accidentFaultDurationSec".to_string(),
+            opt_num(params.accident_fault_duration_sec),
+        ),
+        (
+            "distancePreferenceSpread".to_string(),
+            opt_num(params.distance_preference_spread),
+        ),
+        (
+            "startPreferenceSpread".to_string(),
+            opt_num(params.start_preference_spread),
+        ),
+        (
+            "accidentFlashSeconds".to_string(),
+            opt_num(params.accident_flash_seconds),
+        ),
+    ])
+}
+
+fn problem_json(
+    internal: &SmartTrafficResult,
+    demand: &[TrafficDemandRow],
+    demand_vehicles: i64,
+) -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "model".to_string(),
+            JsonValue::String("smart-traffic-sumo".to_string()),
+        ),
+        ("network".to_string(), network_json(&internal.network)),
+        ("demand".to_string(), demand_json(demand)),
+        ("params".to_string(), params_json(&internal.params)),
+        (
+            "internalBaseline".to_string(),
+            JsonValue::Object(vec![
+                (
+                    "entered".to_string(),
+                    JsonValue::Number(internal.entered as f64),
+                ),
+                (
+                    "exited".to_string(),
+                    JsonValue::Number(internal.exited as f64),
+                ),
+                (
+                    "demandVehicles".to_string(),
+                    JsonValue::Number(demand_vehicles as f64),
+                ),
+                (
+                    "meanTravelTimeSec".to_string(),
+                    JsonValue::Number(internal.mean_travel_time_sec),
+                ),
+                (
+                    "meanSpeedMps".to_string(),
+                    JsonValue::Number(internal.mean_speed_mps),
+                ),
+            ]),
+        ),
+    ])
+}
+
+fn run_external_module_safe(id: &str, params: &ExternalModuleParams) -> ExternalProgramResult {
+    match run_external_module(id, params) {
+        Ok(result) => result,
+        Err(error) => ExternalProgramResult {
+            command: String::new(),
+            args: Vec::new(),
+            status: None,
+            stdout: String::new(),
+            stderr: error,
+            module_id: Some(id.to_string()),
+        },
+    }
+}
+
+fn status_str(status: Option<i32>) -> String {
+    status
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn slice_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+fn optional_external_unavailable(ext: &ExternalProgramResult) -> Option<String> {
+    let stderr = ext.stderr.trim();
+    let stdout = ext.stdout.trim();
+    let message = if stderr.is_empty() { stdout } else { stderr };
+    let lower = message.to_ascii_lowercase();
+    let unavailable = lower.contains("unknown external module")
+        || lower.contains("not registered")
+        || lower.contains("external script not found")
+        || lower.contains("no such file")
+        || lower.contains("no module named")
+        || lower.contains("modulenotfounderror")
+        || lower.contains("not installed")
+        || lower.contains("sumo not found")
+        || lower.contains("netconvert not found")
+        || lower.contains("unavailable");
+
+    if unavailable {
+        Some(if message.is_empty() {
+            "optional external dependency unavailable".to_string()
+        } else {
+            slice_chars(message, 500)
+        })
+    } else {
+        None
+    }
+}
+
+fn number_any(value: &JsonValue, names: &[&str]) -> Option<f64> {
+    names
+        .iter()
+        .find_map(|name| value.get(name).and_then(|v| v.as_f64()))
+}
+
+fn parse_external_result(value: &JsonValue) -> ExternalTrafficResult {
+    ExternalTrafficResult {
+        generated_demand: number_any(value, &["generatedDemand", "generated_demand"])
+            .unwrap_or(f64::NAN),
+        departed: number_any(value, &["departed"]).unwrap_or(f64::NAN),
+        arrived: number_any(value, &["arrived"]).unwrap_or(f64::NAN),
+        active_at_end: number_any(value, &["activeAtEnd", "active_at_end"]).unwrap_or(0.0),
+        mean_travel_time_sec: number_any(value, &["meanTravelTimeSec", "mean_travel_time_sec"])
+            .unwrap_or(f64::NAN),
+        mean_speed_mps: number_any(value, &["meanSpeedMps", "mean_speed_mps"]).unwrap_or(0.0),
+        mean_waiting_time_sec: number_any(value, &["meanWaitingTimeSec", "mean_waiting_time_sec"])
+            .unwrap_or(0.0),
+        collision_count: number_any(value, &["collisionCount", "collision_count"])
+            .unwrap_or(f64::NAN),
+    }
+}
+
+fn load_external_payload(path: &PathBuf) -> Result<ExternalTrafficPayload, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let root = parse_json(&text)?;
+    let status = root
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ok")
+        .to_string();
+    let message = root
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let result = if status == "ok" {
+        root.get("result").map(parse_external_result)
+    } else {
+        None
+    };
+    Ok(ExternalTrafficPayload {
+        status,
+        message,
+        result,
+    })
 }
 
 // =============================================================================
@@ -396,69 +819,98 @@ pub fn run() {
             internal.entered
         )),
     );
-    // PORT NOTE: JSON.stringify(problem, null, 2) needs serde_json (absent).
-    std::fs::write(&problem_path, "{}\n").ok();
+    let problem = problem_json(&internal, &demand, demand_vehicles);
+    std::fs::write(&problem_path, format!("{}\n", problem.to_string_pretty(2))).ok();
     d.check(
         "writes normalized external traffic problem",
         problem_path.exists(),
         Some(problem_path.display().to_string()),
     );
 
-    // PORT NOTE: real call → run_external_module(TRAFFIC_SUMO_REFERENCE_ID, {...}).
-    let ext = ExtRun {
-        status: 0,
-        ..Default::default()
-    };
+    let registration = register_built_in_external_modules();
     d.check(
-        "external SUMO adapter process exits cleanly",
-        ext.status == 0,
-        Some(format!("status={}", ext.status)),
+        "built-in external module registry loads",
+        registration.is_ok(),
+        registration.err(),
     );
+    std::fs::write(&out_path, "{\"status\":\"pending\"}\n").ok();
+    let mut external_params = ExternalModuleParams::new();
+    external_params.insert(
+        "problem".to_string(),
+        ParamValue::Str(problem_path.display().to_string()),
+    );
+    external_params.insert(
+        "out".to_string(),
+        ParamValue::Str(out_path.display().to_string()),
+    );
+    external_params.insert(
+        "collisionAction".to_string(),
+        ParamValue::Str("warn".to_string()),
+    );
+    let ext = run_external_module_safe(TRAFFIC_SUMO_REFERENCE_ID, &external_params);
     if !ext.stdout.trim().is_empty() {
         println!("  external stdout: {}", ext.stdout.trim());
     }
     if !ext.stderr.trim().is_empty() {
         eprintln!("{}", ext.stderr.trim());
     }
-    std::fs::write(&out_path, "{}\n").ok();
-    d.check(
-        "external SUMO adapter writes JSON payload",
-        out_path.exists(),
-        Some(out_path.display().to_string()),
-    );
-    // PORT NOTE: JSON.parse(out_path). Needs serde_json (absent); synthesize the
-    // optional-dependency "unavailable" payload.
-    let payload = ExternalTrafficPayload {
-        status: "unavailable".to_string(),
-        message: Some("SUMO not found on PATH (set SUMO_BIN)".to_string()),
-        result: None,
-    };
-    d.check(
-        "external payload has known status",
-        ["ok", "unavailable", "error"].contains(&payload.status.as_str()),
-        Some(format!("status={}", payload.status)),
-    );
 
-    if payload.status == "unavailable" {
-        d.check(
-            "SUMO dependency is optional and reported cleanly",
-            true,
-            payload.message.clone(),
-        );
-    } else if payload.status == "ok" && payload.result.is_some() {
-        let result = payload.result.clone().unwrap();
-        d.compare_sumo(&internal, &result);
+    if ext.status != Some(0) {
+        if let Some(message) = optional_external_unavailable(&ext) {
+            d.check(
+                "SUMO dependency is optional and reported cleanly",
+                true,
+                Some(message),
+            );
+        } else {
+            d.check(
+                "external SUMO adapter process exits cleanly",
+                false,
+                Some(format!("status={}", status_str(ext.status))),
+            );
+        }
     } else {
         d.check(
-            "SUMO run completed without adapter error",
-            false,
-            Some(
-                payload
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "unknown external adapter error".to_string()),
-            ),
+            "external SUMO adapter process exits cleanly",
+            true,
+            Some(format!("status={}", status_str(ext.status))),
         );
+        d.check(
+            "external SUMO adapter writes JSON payload",
+            out_path.exists(),
+            Some(out_path.display().to_string()),
+        );
+        match load_external_payload(&out_path) {
+            Ok(payload) => {
+                d.check(
+                    "external payload has known status",
+                    ["ok", "unavailable", "error"].contains(&payload.status.as_str()),
+                    Some(format!("status={}", payload.status)),
+                );
+                if payload.status == "unavailable" {
+                    d.check(
+                        "SUMO dependency is optional and reported cleanly",
+                        true,
+                        payload.message.clone(),
+                    );
+                } else if payload.status == "ok" && payload.result.is_some() {
+                    let result = payload.result.clone().unwrap();
+                    d.compare_sumo(&internal, &result);
+                } else {
+                    d.check(
+                        "SUMO run completed without adapter error",
+                        false,
+                        Some(
+                            payload
+                                .message
+                                .clone()
+                                .unwrap_or_else(|| "unknown external adapter error".to_string()),
+                        ),
+                    );
+                }
+            }
+            Err(error) => d.check("external payload parses as JSON", false, Some(error)),
+        }
     }
 
     println!();

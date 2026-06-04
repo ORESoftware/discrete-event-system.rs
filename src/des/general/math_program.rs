@@ -5827,7 +5827,7 @@ fn solve_hierarchical_math_program_external(
     opts: &ExternalMathProgramOptions,
 ) -> Result<MathProgramSolution, MathProgramError> {
     solve_hierarchical_math_program_with(program, "external-hierarchical", |stage_program| {
-        solve_math_program_external_scipy_single_objective(stage_program, opts)
+        solve_math_program_external_single_objective(stage_program, opts)
     })
 }
 
@@ -6267,7 +6267,7 @@ pub fn cross_check_math_program_with_external(
     tol: f64,
 ) -> Result<MathProgramCrossCheck, MathProgramError> {
     let internal = solve_math_program(program, internal_opts)?;
-    let external = solve_math_program_external_scipy(program, external_opts)?;
+    let external = solve_math_program_external(program, external_opts)?;
     Ok(compare_math_program_solutions(
         program, internal, external, tol,
     ))
@@ -6340,7 +6340,7 @@ pub fn cross_check_math_program_conflict_with_external(
     conflict_opts: &MathProgramConflictOptions,
 ) -> Result<MathProgramConflictCrossCheck, MathProgramError> {
     let internal = refine_math_program_conflict(program, internal_opts, conflict_opts)?;
-    let external = solve_math_program_external_scipy(&internal.subsystem, external_opts)?;
+    let external = solve_math_program_external(&internal.subsystem, external_opts)?;
     let status_agree = internal.status == external.status;
     let within_tolerance = status_agree && internal.status == MathProgramStatus::Infeasible;
     Ok(MathProgramConflictCrossCheck {
@@ -6422,7 +6422,7 @@ pub fn cross_check_math_program_assumption_core_with_external(
 ) -> Result<MathProgramAssumptionCoreCrossCheck, MathProgramError> {
     let internal =
         find_math_program_assumption_unsat_core(program, assumptions, internal_opts, core_opts)?;
-    let external = solve_math_program_external_scipy(&internal.subsystem, external_opts)?;
+    let external = solve_math_program_external(&internal.subsystem, external_opts)?;
     let status_agree = internal.status == external.status;
     let within_tolerance = status_agree && internal.status == MathProgramStatus::Infeasible;
     Ok(MathProgramAssumptionCoreCrossCheck {
@@ -6491,7 +6491,7 @@ pub fn cross_check_math_program_feas_relaxation_with_external(
     tol: f64,
 ) -> Result<MathProgramFeasRelaxCrossCheck, MathProgramError> {
     let internal = solve_math_program_feas_relaxation(program, internal_opts, relax_opts)?;
-    let external = solve_math_program_external_scipy(&internal.relaxed_program, external_opts)?;
+    let external = solve_math_program_external(&internal.relaxed_program, external_opts)?;
     let status_agree = internal.status == external.status;
     let objective_abs_diff = (internal.violation_objective.is_finite()
         && external.objective.is_finite())
@@ -6536,7 +6536,7 @@ pub fn solve_math_program_external_solution_pool(
         program,
         pool_opts,
         "external-solution-pool",
-        |candidate| solve_math_program_external_scipy(candidate, external_opts),
+        |candidate| solve_math_program_external(candidate, external_opts),
     )
 }
 
@@ -8849,7 +8849,7 @@ fn add_solution_pool_no_good_cut(
 }
 
 /// Solve a model through the optional external-solver oracle.
-pub fn solve_math_program_external_scipy(
+pub fn solve_math_program_external(
     program: &MathProgram,
     opts: &ExternalMathProgramOptions,
 ) -> Result<MathProgramSolution, MathProgramError> {
@@ -8857,10 +8857,20 @@ pub fn solve_math_program_external_scipy(
     if !program.secondary_objectives.is_empty() {
         return solve_hierarchical_math_program_external(program, opts);
     }
-    solve_math_program_external_scipy_single_objective(program, opts)
+    solve_math_program_external_single_objective(program, opts)
 }
 
-fn solve_math_program_external_scipy_single_objective(
+#[deprecated(
+    note = "use solve_math_program_external; the default linear external path is the Rust CLI bridge"
+)]
+pub fn solve_math_program_external_scipy(
+    program: &MathProgram,
+    opts: &ExternalMathProgramOptions,
+) -> Result<MathProgramSolution, MathProgramError> {
+    solve_math_program_external(program, opts)
+}
+
+fn solve_math_program_external_single_objective(
     program: &MathProgram,
     opts: &ExternalMathProgramOptions,
 ) -> Result<MathProgramSolution, MathProgramError> {
@@ -21307,7 +21317,7 @@ mod tests {
             .unwrap();
 
         let solution =
-            solve_math_program_external_scipy(&p, &ExternalMathProgramOptions::default()).unwrap();
+            solve_math_program_external(&p, &ExternalMathProgramOptions::default()).unwrap();
 
         assert_eq!(solution.status, MathProgramStatus::Optimal);
         assert_eq!(solution.solver, "highs:cli");

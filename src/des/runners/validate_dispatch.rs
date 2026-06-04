@@ -442,8 +442,8 @@ fn study3(c: &mut Checker) {
     let lp = build_dispatch_fluid_lp(&problem);
     let s_internal = solve_lp_internal(&lp);
     let s_des = solve_lp_via_des(&lp);
-    let s_scipy_ds = solve_lp_external(&lp, "highs-ds");
-    let s_scipy_ipm = solve_lp_external(&lp, "highs-ipm");
+    let s_external_ds = solve_lp_external(&lp, "highs-ds");
+    let s_external_ipm = solve_lp_external(&lp, "highs-ipm");
     println!(
         "    internal simplex     status={} obj={:.8}",
         s_internal.status, s_internal.objective
@@ -453,14 +453,14 @@ fn study3(c: &mut Checker) {
         s_des.status, s_des.objective
     );
     println!(
-        "    scipy:highs-ds       status={}  obj={:.8}",
-        s_scipy_ds.status, s_scipy_ds.objective
+        "    external:highs-ds    status={}  obj={:.8}",
+        s_external_ds.status, s_external_ds.objective
     );
     println!(
-        "    scipy:highs-ipm      status={} obj={:.8}",
-        s_scipy_ipm.status, s_scipy_ipm.objective
+        "    external:highs-ipm   status={} obj={:.8}",
+        s_external_ipm.status, s_external_ipm.objective
     );
-    let objs: Vec<f64> = [&s_internal, &s_des, &s_scipy_ds, &s_scipy_ipm]
+    let objs: Vec<f64> = [&s_internal, &s_des, &s_external_ds, &s_external_ipm]
         .iter()
         .filter(|s| s.status == "optimal")
         .map(|s| s.objective)

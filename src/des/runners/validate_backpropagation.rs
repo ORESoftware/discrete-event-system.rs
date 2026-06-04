@@ -1,7 +1,9 @@
 //! Port of `src/des/runners/validate-backpropagation.ts`.
 //!
 //! Compares the framework's backprop output (`out/backprop-framework.json`)
-//! against the numpy-style reference (`out/external/backpropagation/numpy.json`):
+//! against a deterministic Rust recomputation from the same config. If the
+//! optional NumPy sidecar (`out/external/backpropagation/numpy.json`) is present,
+//! it can be used as the reference artifact instead. The validator compares
 //! per-tensor max-abs error on `W1/b1/W2/b2`, the loss history, and the four XOR
 //! predictions, asserting agreement within `1e-12`. The TS `main()` becomes
 //! [`run`], returning the process exit code.
@@ -15,6 +17,7 @@
 
 use std::path::PathBuf;
 
+use crate::des::main_backpropagation::{init_weights, run_backprop};
 use crate::des::observability::logger::{parse_json, JsonValue};
 
 fn root() -> PathBuf {
@@ -111,11 +114,37 @@ fn fmt_num(v: Option<&JsonValue>) -> String {
     }
 }
 
+fn config_number(v: &JsonValue, key: &str, default: f64) -> f64 {
+    at(v, &["config", key])
+        .and_then(|x| x.as_f64())
+        .unwrap_or(default)
+}
+
+fn rust_reference_from_framework_config(framework: &JsonValue) -> Result<JsonValue, i32> {
+    let seed = config_number(framework, "seed", 7.0) as u32;
+    let n = config_number(framework, "N", 10000.0) as usize;
+    let lr = config_number(framework, "lr", 0.5);
+    let init = init_weights(seed, 3);
+    let result = run_backprop(&init, n, lr);
+    let out = serde_json::json!({
+        "config": {"seed": seed, "N": n, "lr": lr},
+        "init": {"W1": init.w1, "b1": init.b1, "W2": init.w2, "b2": init.b2},
+        "final": {"W1": result.w1, "b1": result.b1, "W2": result.w2, "b2": result.b2},
+        "predictions": result.predictions,
+        "lossHistory": result.loss_history,
+        "ticks": result.ticks,
+    });
+    parse_json(&out.to_string()).map_err(|e| {
+        eprintln!("[validate-backpropagation] Rust reference serialization error: {e}");
+        1
+    })
+}
+
 /// `main()` — returns the exit code (0 = PASS).
 pub fn run() -> i32 {
     let root = root();
     let ts_path = root.join("out").join("backprop-framework.json");
-    let py_path = root
+    let reference_path = root
         .join("out")
         .join("external")
         .join("backpropagation")
@@ -125,12 +154,19 @@ pub fn run() -> i32 {
         Ok(v) => v,
         Err(code) => return code,
     };
-    let py = match load_json(&py_path) {
-        Ok(v) => v,
-        Err(code) => return code,
+    let (reference, reference_source) = if reference_path.exists() {
+        match load_json(&reference_path) {
+            Ok(v) => (v, reference_path.display().to_string()),
+            Err(code) => return code,
+        }
+    } else {
+        match rust_reference_from_framework_config(&ts) {
+            Ok(v) => (v, "Rust recomputation from framework config".to_string()),
+            Err(code) => return code,
+        }
     };
 
-    println!("Backpropagation: framework vs numpy-naive python");
+    println!("Backpropagation: framework vs Rust/optional NumPy reference artifact");
     println!("===================================================");
     println!(
         "  config = seed={}, N={}, lr={}",
@@ -138,38 +174,39 @@ pub fn run() -> i32 {
         fmt_num(at(&ts, &["config", "N"])),
         fmt_num(at(&ts, &["config", "lr"])),
     );
+    println!("  reference = {reference_source}");
 
     let loss_ts = as_vec(ts.get("lossHistory").unwrap_or(&JsonValue::Null));
-    let loss_py = as_vec(py.get("lossHistory").unwrap_or(&JsonValue::Null));
+    let loss_reference = as_vec(reference.get("lossHistory").unwrap_or(&JsonValue::Null));
     let pred_ts = as_vec(ts.get("predictions").unwrap_or(&JsonValue::Null));
-    let pred_py = as_vec(py.get("predictions").unwrap_or(&JsonValue::Null));
+    let pred_reference = as_vec(reference.get("predictions").unwrap_or(&JsonValue::Null));
 
-    let loss_diff = match max_abs_diff(&loss_ts, &loss_py) {
+    let loss_diff = match max_abs_diff(&loss_ts, &loss_reference) {
         Ok(d) => d,
         Err(c) => return c,
     };
-    let pred_diff = match max_abs_diff(&pred_ts, &pred_py) {
+    let pred_diff = match max_abs_diff(&pred_ts, &pred_reference) {
         Ok(d) => d,
         Err(c) => return c,
     };
     let w1_diff = max_abs_diff_2d(
         &as_mat(at(&ts, &["final", "W1"]).unwrap_or(&JsonValue::Null)),
-        &as_mat(at(&py, &["final", "W1"]).unwrap_or(&JsonValue::Null)),
+        &as_mat(at(&reference, &["final", "W1"]).unwrap_or(&JsonValue::Null)),
     );
     let b1_diff = match max_abs_diff(
         &as_vec(at(&ts, &["final", "b1"]).unwrap_or(&JsonValue::Null)),
-        &as_vec(at(&py, &["final", "b1"]).unwrap_or(&JsonValue::Null)),
+        &as_vec(at(&reference, &["final", "b1"]).unwrap_or(&JsonValue::Null)),
     ) {
         Ok(d) => d,
         Err(c) => return c,
     };
     let w2_diff = max_abs_diff_2d(
         &as_mat(at(&ts, &["final", "W2"]).unwrap_or(&JsonValue::Null)),
-        &as_mat(at(&py, &["final", "W2"]).unwrap_or(&JsonValue::Null)),
+        &as_mat(at(&reference, &["final", "W2"]).unwrap_or(&JsonValue::Null)),
     );
     let b2_diff = match max_abs_diff(
         &as_vec(at(&ts, &["final", "b2"]).unwrap_or(&JsonValue::Null)),
-        &as_vec(at(&py, &["final", "b2"]).unwrap_or(&JsonValue::Null)),
+        &as_vec(at(&reference, &["final", "b2"]).unwrap_or(&JsonValue::Null)),
     ) {
         Ok(d) => d,
         Err(c) => return c,

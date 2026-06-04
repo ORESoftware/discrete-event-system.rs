@@ -1,9 +1,11 @@
 //! Port of `src/des/runners/validate-convolution.ts`.
 //!
 //! Compares the framework's convolution output (`out/convolution-framework.json`)
-//! against `numpy.convolve` (`out/external/convolution/numpy.json`): reports
-//! max-abs error + RMSE and asserts agreement to within a ULP-scaled tolerance.
-//! The TS top-level `main()` becomes [`run`], returning the process exit code.
+//! against a direct Rust convolution reference. If
+//! `out/external/convolution/numpy.json` exists, it is used as an optional
+//! sidecar reference instead. The runner reports max-abs error + RMSE and
+//! asserts agreement to within a ULP-scaled tolerance. The TS top-level
+//! `main()` becomes [`run`], returning the process exit code.
 //!
 //! ## PORT NOTE
 //!   * `__dirname/../../..` repo root → `REPO_ROOT` env var or the current
@@ -50,6 +52,44 @@ fn arr_len(v: &JsonValue, key: &str) -> usize {
         .unwrap_or(0)
 }
 
+fn direct_convolve(signal: &[f64], kernel: &[f64]) -> Vec<f64> {
+    if signal.is_empty() || kernel.is_empty() {
+        return Vec::new();
+    }
+    let mut y = vec![0.0; signal.len() + kernel.len() - 1];
+    for n in 0..y.len() {
+        let mut acc = 0.0;
+        for k in 0..kernel.len() {
+            if n >= k {
+                let i = n - k;
+                if i < signal.len() {
+                    acc += kernel[k] * signal[i];
+                }
+            }
+        }
+        y[n] = acc;
+    }
+    y
+}
+
+fn write_rust_reference(root: &std::path::Path, y: &[f64]) {
+    let dir = root.join("out").join("external").join("convolution");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let json = JsonValue::Object(vec![
+        (
+            "solver".to_string(),
+            JsonValue::String("rust:direct-convolution".to_string()),
+        ),
+        (
+            "y".to_string(),
+            JsonValue::Array(y.iter().copied().map(JsonValue::Number).collect()),
+        ),
+    ]);
+    let _ = std::fs::write(dir.join("rust-direct.json"), json.to_string_pretty(2));
+}
+
 /// `main()` — returns the exit code (0 = PASS).
 pub fn run() -> i32 {
     let root = root();
@@ -64,19 +104,32 @@ pub fn run() -> i32 {
         Ok(v) => v,
         Err(code) => return code,
     };
-    let np = match load_json(&np_path) {
-        Ok(v) => v,
-        Err(code) => return code,
+    let y_ts = arr_f64(&ts, "y");
+    let signal = arr_f64(&ts, "signal");
+    let kernel = arr_f64(&ts, "kernel");
+    let (reference_name, y_ref) = if np_path.exists() {
+        match load_json(&np_path) {
+            Ok(np) => ("NumPy sidecar", arr_f64(&np, "y")),
+            Err(code) => return code,
+        }
+    } else {
+        if signal.is_empty() || kernel.is_empty() {
+            eprintln!(
+                "[validate-convolution] framework JSON must include non-empty signal and kernel arrays for Rust reference"
+            );
+            return 1;
+        }
+        let y = direct_convolve(&signal, &kernel);
+        write_rust_reference(&root, &y);
+        ("Rust direct convolution", y)
     };
 
-    let y_ts = arr_f64(&ts, "y");
-    let y_np = arr_f64(&np, "y");
-
-    if y_ts.len() != y_np.len() {
+    if y_ts.len() != y_ref.len() {
         eprintln!(
-            "length mismatch: framework={} numpy={}",
+            "length mismatch: framework={} reference({})={}",
             y_ts.len(),
-            y_np.len()
+            reference_name,
+            y_ref.len()
         );
         return 1;
     }
@@ -85,7 +138,7 @@ pub fn run() -> i32 {
     let mut sum_sq = 0.0_f64;
     let mut arg_max: i64 = -1;
     for i in 0..y_ts.len() {
-        let e = (y_ts[i] - y_np[i]).abs();
+        let e = (y_ts[i] - y_ref[i]).abs();
         sum_sq += e * e;
         if e > max_abs {
             max_abs = e;
@@ -94,8 +147,8 @@ pub fn run() -> i32 {
     }
     let rmse = (sum_sq / y_ts.len().max(1) as f64).sqrt();
 
-    println!("Convolution: framework vs numpy.convolve");
-    println!("==========================================");
+    println!("Convolution: framework vs {reference_name}");
+    println!("===========================================");
     println!("  signal length     = {}", arr_len(&ts, "signal"));
     println!("  kernel length     = {}", arr_len(&ts, "kernel"));
     println!("  output length     = {}", y_ts.len());

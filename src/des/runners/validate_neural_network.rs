@@ -8,8 +8,9 @@
 //! PORT NOTES:
 //!   * Uses the real Rust neural-network, neural Q-learning, corridor, policy
 //!     evaluation, and neural-ODE modules.
-//!   * The optional Python reference remains skipped when its JSON artifact is
-//!     unavailable; framework-side checks still exercise real Rust code.
+//!   * The optional Python reference is invoked through the external-module
+//!     registry and skipped cleanly when its script/dependencies are unavailable;
+//!     framework-side checks still exercise real Rust code.
 
 #![allow(dead_code)]
 
@@ -19,7 +20,7 @@ use crate::des::general::des_base::environment::{PureEnvironment, StepResult};
 use crate::des::general::neural_network::{
     run_neural_q_learning_des as run_neural_q_learning_des_model,
     run_xor_neural_net_des as run_xor_neural_net_des_model,
-    solve_neural_ode as solve_neural_ode_model, ActivationName, DenseLayerConfig,
+    solve_neural_ode as solve_neural_ode_model, xor_dataset, ActivationName, DenseLayerConfig,
     FeedForwardNetwork as RealFeedForwardNetwork, NeuralODEOptions, NeuralODESolverName,
     NeuralQLearningResult, NeuralQLearningRunParams, SupervisedNeuralNetDESResult,
     XorNeuralNetOptions,
@@ -28,6 +29,12 @@ use crate::des::general::ode::ODETrace;
 use crate::des::general::prng::mulberry32;
 use crate::des::general::rl_environments::{
     eval_policy as eval_policy_model, Corridor as CorridorModel, Environment, EvalPolicyOptions,
+};
+use crate::des::observability::logger::{parse_json, JsonValue};
+
+use super::external_modules::{register_built_in_external_modules, NEURAL_NETWORK_REFERENCE_ID};
+use super::external_program::{
+    run_external_module, ExternalModuleParams, ExternalProgramResult, ParamValue,
 };
 
 type Activation = ActivationName;
@@ -195,31 +202,6 @@ fn eval_policy<F: Fn(usize) -> usize>(env: &Corridor, policy: F, opts: &EvalOpts
 // Optional external reference.
 // =============================================================================
 
-#[derive(Clone, Debug, Default)]
-struct ExtResult {
-    command: String,
-    args: Vec<String>,
-    status: i32,
-    stdout: String,
-    stderr: String,
-}
-
-fn run_external_module(out_path: &PathBuf) -> ExtResult {
-    // PORT NOTE: real call → crate::des::runners::external_program::run_external_module(
-    //   NEURAL_NETWORK_REFERENCE_ID, {out: out_path}). Stubbed to status 0.
-    ExtResult {
-        command: std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string()),
-        args: vec![
-            "external-references/neural-network/nn_reference.py".to_string(),
-            "--out".to_string(),
-            out_path.display().to_string(),
-        ],
-        status: 0,
-        stdout: String::new(),
-        stderr: String::new(),
-    }
-}
-
 #[derive(Clone, Debug)]
 struct XorRef {
     predictions: Vec<f64>,
@@ -240,9 +222,134 @@ struct Reference {
     neural_ode_decay: OdeRef,
 }
 
-fn load_reference(_path: &PathBuf) -> Option<Reference> {
-    // PORT NOTE: JSON.parse(fs.readFileSync(OUT_PATH)). Needs serde_json (absent).
-    None
+fn run_external_reference(out_path: &PathBuf) -> ExternalProgramResult {
+    let mut params = ExternalModuleParams::new();
+    params.insert(
+        "out".to_string(),
+        ParamValue::Str(out_path.display().to_string()),
+    );
+    match run_external_module(NEURAL_NETWORK_REFERENCE_ID, &params) {
+        Ok(result) => result,
+        Err(error) => ExternalProgramResult {
+            command: String::new(),
+            args: Vec::new(),
+            status: None,
+            stdout: String::new(),
+            stderr: error,
+            module_id: Some(NEURAL_NETWORK_REFERENCE_ID.to_string()),
+        },
+    }
+}
+
+fn status_str(status: Option<i32>) -> String {
+    status
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn slice_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+fn optional_external_unavailable(ext: &ExternalProgramResult) -> Option<String> {
+    let stderr = ext.stderr.trim();
+    let stdout = ext.stdout.trim();
+    let message = if stderr.is_empty() { stdout } else { stderr };
+    let lower = message.to_ascii_lowercase();
+    let unavailable = lower.contains("unknown external module")
+        || lower.contains("not registered")
+        || lower.contains("external script not found")
+        || lower.contains("no such file")
+        || lower.contains("no module named")
+        || lower.contains("modulenotfounderror")
+        || lower.contains("not installed")
+        || lower.contains("unavailable");
+
+    if unavailable {
+        Some(if message.is_empty() {
+            "optional external dependency unavailable".to_string()
+        } else {
+            slice_chars(message, 500)
+        })
+    } else {
+        None
+    }
+}
+
+fn get_any<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a JsonValue> {
+    names.iter().find_map(|name| value.get(name))
+}
+
+fn number_array(value: &JsonValue, label: &str) -> Result<Vec<f64>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{label} must be an array"))?
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            v.as_f64()
+                .ok_or_else(|| format!("{label}[{i}] must be a number"))
+        })
+        .collect()
+}
+
+fn usize_array(value: &JsonValue, label: &str) -> Result<Vec<usize>, String> {
+    number_array(value, label)?
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if v.is_finite() && v >= 0.0 && v.fract() == 0.0 {
+                Ok(v as usize)
+            } else {
+                Err(format!("{label}[{i}] must be a non-negative integer"))
+            }
+        })
+        .collect()
+}
+
+fn load_reference(path: &PathBuf) -> Result<Reference, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let root = parse_json(&text)?;
+    if let Some(status) = root.get("status").and_then(|v| v.as_str()) {
+        if status != "ok" {
+            let message = root
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(status);
+            return Err(format!("external reference status={status}: {message}"));
+        }
+    }
+    let body = root.get("result").unwrap_or(&root);
+    let xor = get_any(body, &["xor"]).ok_or_else(|| "missing xor reference".to_string())?;
+    let corridor =
+        get_any(body, &["corridor"]).ok_or_else(|| "missing corridor reference".to_string())?;
+    let ode = get_any(body, &["neuralOdeDecay", "neural_ode_decay"])
+        .ok_or_else(|| "missing neural ODE reference".to_string())?;
+    let predictions = number_array(
+        get_any(xor, &["predictions"]).ok_or_else(|| "missing xor.predictions".to_string())?,
+        "xor.predictions",
+    )?;
+    let loss_history = number_array(
+        get_any(xor, &["lossHistory", "loss_history"])
+            .ok_or_else(|| "missing xor.lossHistory".to_string())?,
+        "xor.lossHistory",
+    )?;
+    let policy = usize_array(
+        get_any(corridor, &["policy"]).ok_or_else(|| "missing corridor.policy".to_string())?,
+        "corridor.policy",
+    )?;
+    let final_value = get_any(ode, &["finalValue", "final_value"])
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "missing neuralOdeDecay.finalValue".to_string())?;
+
+    Ok(Reference {
+        xor: XorRef {
+            predictions,
+            loss_history,
+        },
+        corridor: CorridorRef { policy },
+        neural_ode_decay: OdeRef { final_value },
+    })
 }
 
 // =============================================================================
@@ -257,7 +364,7 @@ struct CheckRow {
 
 fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() {
-        panic!("length mismatch: {} vs {}", a.len(), b.len());
+        return f64::INFINITY;
     }
     let mut m = 0.0_f64;
     for i in 0..a.len() {
@@ -296,10 +403,20 @@ pub fn run() {
         .join("neural-network")
         .join("reference.json");
 
-    let ext = run_external_module(&out_path);
-
-    println!("Neural-network: framework vs external Python reference");
+    println!("Neural-network: Rust framework checks with optional external reference");
     println!("======================================================");
+    let registration = register_built_in_external_modules();
+    check(
+        &mut checks,
+        "built-in external module registry loads",
+        registration.is_ok(),
+        registration.err(),
+    );
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&out_path, "{\"status\":\"pending\"}\n").ok();
+    let ext = run_external_reference(&out_path);
     println!(
         "  external command: {} {}",
         ext.command,
@@ -315,12 +432,44 @@ pub fn run() {
     if !ext.stderr.trim().is_empty() {
         eprintln!("{}", ext.stderr.trim());
     }
-    if ext.status != 0 {
-        eprintln!("external reference exited with status {}", ext.status);
-        std::process::exit(1);
-    }
-
-    let reference = load_reference(&out_path);
+    let reference = if ext.status == Some(0) {
+        match load_reference(&out_path) {
+            Ok(reference) => {
+                check(
+                    &mut checks,
+                    "external reference JSON parsed",
+                    true,
+                    Some(out_path.display().to_string()),
+                );
+                Some(reference)
+            }
+            Err(error) => {
+                check(
+                    &mut checks,
+                    "external reference JSON parsed",
+                    false,
+                    Some(error),
+                );
+                None
+            }
+        }
+    } else if let Some(message) = optional_external_unavailable(&ext) {
+        check(
+            &mut checks,
+            "optional external reference unavailable cleanly",
+            true,
+            Some(message),
+        );
+        None
+    } else {
+        check(
+            &mut checks,
+            "external reference process exits cleanly",
+            false,
+            Some(format!("status={}", status_str(ext.status))),
+        );
+        None
+    };
 
     println!();
     println!("-- XOR supervised network --");
@@ -331,6 +480,45 @@ pub fn run() {
         hidden_layers: vec![4],
     });
     let xor_pred: Vec<f64> = xor.predictions.iter().map(|v| v[0]).collect();
+    let xor_targets: Vec<f64> = xor_dataset()
+        .iter()
+        .map(|sample| sample.target[0])
+        .collect();
+    let xor_truth_error = max_abs_diff(&xor_pred, &xor_targets);
+    let xor_classifies = xor_pred
+        .iter()
+        .zip(xor_targets.iter())
+        .all(|(&pred, &target)| (pred >= 0.5) == (target >= 0.5));
+    let tail = if xor.loss_history.len() > 100 {
+        &xor.loss_history[xor.loss_history.len() - 100..]
+    } else {
+        &xor.loss_history[..]
+    };
+    let tail_loss = if tail.is_empty() {
+        f64::INFINITY
+    } else {
+        tail.iter().sum::<f64>() / tail.len() as f64
+    };
+    check(
+        &mut checks,
+        "XOR predictions classify the canonical truth table",
+        xor_classifies,
+        Some(format!(
+            "pred=[{}], max target error={:.3e}",
+            xor_pred
+                .iter()
+                .map(|v| format!("{v:.4}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            xor_truth_error
+        )),
+    );
+    check(
+        &mut checks,
+        "XOR trailing mean loss stays below 0.05",
+        tail_loss < 0.05,
+        Some(format!("tail mean loss={:.3e}", tail_loss)),
+    );
     match &reference {
         Some(reference) => {
             let pred_diff = max_abs_diff(&xor_pred, &reference.xor.predictions);

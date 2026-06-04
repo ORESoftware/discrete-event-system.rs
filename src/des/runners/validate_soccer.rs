@@ -278,11 +278,11 @@ pub fn run() {
             s_des.status, s_des.objective
         );
         println!(
-            "    scipy:highs-ds       status={} obj={:.8}",
+            "    external:highs-ds    status={} obj={:.8}",
             s_ds.status, s_ds.objective
         );
         println!(
-            "    scipy:highs-ipm      status={} obj={:.8}",
+            "    external:highs-ipm   status={} obj={:.8}",
             s_ipm.status, s_ipm.objective
         );
         let objs: Vec<f64> = [&s_int, &s_des, &s_ds, &s_ipm]

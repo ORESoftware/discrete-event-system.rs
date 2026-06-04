@@ -10,21 +10,212 @@
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
+use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::runners::fel_runner::run_fel_once;
 use crate::des::runners::gillespie_runner::run_gillespie_once;
 use crate::des::runners::ode_runner::run_ode_once;
 use crate::des::runners::per_individual_runner::run_per_individual_once;
 use crate::des::runners::stats::{mean, stddev, welch};
 use crate::des::runners::types::{
-    default_config, RunOpts, RunResult, ServiceDiscipline, COMPARTMENT_ORDER,
+    default_config, Kernel, Probabilities, RunOpts, RunResult, ServiceDiscipline, SimConfig,
+    Totals, COMPARTMENT_ORDER,
 };
 
-fn load_external(_tool_dir: &PathBuf) -> Vec<RunResult> {
-    // PORT NOTE: read every *.json, JSON.parse, keep only SEIR-shaped objects.
-    // External reference result decoding is adapter-specific → returns empty.
-    Vec::new()
+fn get_any<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a JsonValue> {
+    names.iter().find_map(|name| value.get(name))
+}
+
+fn number_field(value: &JsonValue, names: &[&str]) -> Option<f64> {
+    get_any(value, names).and_then(|v| v.as_f64())
+}
+
+fn string_field<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a str> {
+    get_any(value, names).and_then(|v| v.as_str())
+}
+
+fn number_pair(value: &JsonValue) -> Option<(f64, f64)> {
+    let items = value.as_array()?;
+    let a = items.first()?.as_f64()?;
+    let b = items.get(1)?.as_f64()?;
+    Some((a, b))
+}
+
+fn number_map(value: &JsonValue) -> Option<HashMap<String, f64>> {
+    let entries = value.as_object()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
+            .collect(),
+    )
+}
+
+fn nested_number_map(value: &JsonValue) -> Option<HashMap<String, HashMap<String, f64>>> {
+    let entries = value.as_object()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|(k, v)| number_map(v).map(|row| (k.clone(), row)))
+            .collect(),
+    )
+}
+
+fn parse_kernel(value: &JsonValue) -> Kernel {
+    match string_field(value, &["kernel"]).unwrap_or_default() {
+        "framework" => Kernel::Framework,
+        "fel" => Kernel::Fel,
+        "per-individual" | "perIndividual" => Kernel::PerIndividual,
+        "gillespie" => Kernel::Gillespie,
+        "ode" => Kernel::Ode,
+        _ => Kernel::Difference,
+    }
+}
+
+fn parse_probabilities(value: &JsonValue, defaults: Probabilities) -> Probabilities {
+    Probabilities {
+        asymptomatic_share: number_field(value, &["asymptomaticShare", "asymptomatic_share"])
+            .unwrap_or(defaults.asymptomatic_share),
+        hospitalization_given_symptom: number_field(
+            value,
+            &[
+                "hospitalizationGivenSymptom",
+                "hospitalization_given_symptom",
+            ],
+        )
+        .unwrap_or(defaults.hospitalization_given_symptom),
+        case_fatality_given_hospital: number_field(
+            value,
+            &["caseFatalityGivenHospital", "case_fatality_given_hospital"],
+        )
+        .unwrap_or(defaults.case_fatality_given_hospital),
+    }
+}
+
+fn parse_config(value: Option<&JsonValue>) -> SimConfig {
+    let mut cfg = default_config();
+    let Some(value) = value else {
+        return cfg;
+    };
+    cfg.step_size = number_field(value, &["stepSize", "step_size"]).unwrap_or(cfg.step_size);
+    cfg.horizon_days =
+        number_field(value, &["horizonDays", "horizon_days"]).unwrap_or(cfg.horizon_days);
+    cfg.phase1_days =
+        number_field(value, &["phase1Days", "phase1_days"]).unwrap_or(cfg.phase1_days);
+    cfg.source_cap = number_field(value, &["sourceCap", "source_cap"]).unwrap_or(cfg.source_cap);
+    if let Some(pair) =
+        get_any(value, &["arrivalsInterarrival", "arrivals_interarrival"]).and_then(number_pair)
+    {
+        cfg.arrivals_interarrival = pair;
+    }
+    if let Some(probabilities) = get_any(value, &["probabilities"]) {
+        cfg.probabilities = parse_probabilities(probabilities, cfg.probabilities);
+    }
+    if let Some(entries) = get_any(value, &["residence"]).and_then(|v| v.as_object()) {
+        let mut residence = HashMap::new();
+        for (key, raw) in entries {
+            if let Some(pair) = number_pair(raw) {
+                residence.insert(key.clone(), pair);
+            }
+        }
+        if !residence.is_empty() {
+            cfg.residence = residence;
+        }
+    }
+    cfg
+}
+
+fn parse_run_result(value: &JsonValue) -> Option<RunResult> {
+    let totals = get_any(value, &["totals"])?;
+    let split_probs = get_any(value, &["splitProbs", "split_probs"]).and_then(nested_number_map)?;
+    let time_avg_populations =
+        get_any(value, &["timeAvgPopulations", "time_avg_populations"]).and_then(number_map)?;
+    if split_probs.is_empty() || time_avg_populations.is_empty() {
+        return None;
+    }
+    let created = number_field(totals, &["created"])?;
+    let absorbed = number_field(totals, &["absorbed"])?;
+    let seed = number_field(value, &["seed"]).unwrap_or(0.0);
+    let elapsed_ms = number_field(value, &["elapsedMs", "elapsed_ms"]).unwrap_or(0.0);
+    Some(RunResult {
+        kernel: parse_kernel(value),
+        config: parse_config(get_any(value, &["config"])),
+        seed: seed.max(0.0).round() as u64,
+        totals: Totals { created, absorbed },
+        final_populations: get_any(value, &["finalPopulations", "final_populations"])
+            .and_then(number_map)
+            .unwrap_or_default(),
+        transition_counts: get_any(value, &["transitionCounts", "transition_counts"])
+            .and_then(nested_number_map)
+            .unwrap_or_default(),
+        split_probs,
+        time_avg_populations,
+        peak_populations: get_any(value, &["peakPopulations", "peak_populations"])
+            .and_then(number_map)
+            .unwrap_or_default(),
+        elapsed_ms: elapsed_ms.max(0.0).round() as u128,
+    })
+}
+
+fn append_run_results(value: &JsonValue, out: &mut Vec<RunResult>) {
+    if let Some(run) = parse_run_result(value) {
+        out.push(run);
+        return;
+    }
+    if let Some(items) = value.as_array() {
+        for item in items {
+            append_run_results(item, out);
+        }
+        return;
+    }
+    for key in ["runs", "results"] {
+        if let Some(items) = value.get(key).and_then(|v| v.as_array()) {
+            for item in items {
+                append_run_results(item, out);
+            }
+        }
+    }
+    if let Some(result) = value.get("result") {
+        append_run_results(result, out);
+    }
+}
+
+fn collect_json_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_json_files(&path, files);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+}
+
+fn load_external(tool_dir: &PathBuf) -> Vec<RunResult> {
+    let mut files = Vec::new();
+    collect_json_files(tool_dir, &mut files);
+    files.sort();
+
+    let mut runs = Vec::new();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match parse_json(&text) {
+            Ok(value) => append_run_results(&value, &mut runs),
+            Err(err) => eprintln!(
+                "[validate-with-externals] ignoring malformed JSON {}: {}",
+                path.display(),
+                err
+            ),
+        }
+    }
+    runs
 }
 
 fn collect_split(rs: &[RunResult], from: &str, to: &str) -> Vec<f64> {
@@ -159,7 +350,7 @@ pub fn run() {
     }
     if externals.is_empty() {
         println!(
-            "NOTE: no external JSONs found under {}",
+            "NOTE: no SEIR-shaped external JSON runs found under {}",
             external_dir.display()
         );
         println!("      run `bash external-references/run-all.sh` first to populate them.");

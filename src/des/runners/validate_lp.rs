@@ -1,8 +1,8 @@
 //! Port of `src/des/runners/validate-lp.ts`.
 //!
-//! Validates the in-process simplex against scipy.linprog and the MDP-as-LP
-//! transformation against generic value iteration, across nine studies. The
-//! top-level driver code becomes [`run`].
+//! Validates the in-process simplex against external HiGHS-compatible
+//! references and the MDP-as-LP transformation against generic value iteration,
+//! across nine studies. The top-level driver code becomes [`run`].
 //!
 //! PORT NOTES:
 //!   * Uses the real Rust LP, DES-simplex, MDP-as-LP, and value-iteration
@@ -58,18 +58,6 @@ struct LpResult {
     solver: String,
     message: String,
     trace: LpTrace,
-}
-
-fn stub_lp(lp: &LpProblem, solver: &str) -> LpResult {
-    LpResult {
-        status: "optimal".to_string(),
-        x: vec![0.0; lp.c.len()],
-        objective: 0.0,
-        iters: 0,
-        solver: solver.to_string(),
-        message: String::new(),
-        trace: LpTrace::default(),
-    }
 }
 
 fn real_sense(sense: &str) -> RealLpSense {
@@ -158,11 +146,13 @@ fn solve_lp(lp: &LpProblem) -> LpResult {
     lp_result_from_real(solve_lp_model(&real, &LpSolverOptions::default()))
 }
 
-fn scipy_unavailable(r: &LpResult) -> bool {
+fn external_reference_unavailable(r: &LpResult) -> bool {
     r.status == "numerical-error"
         && (r.message.contains("scipy")
             || r.message.contains("numpy")
-            || r.message.contains("No module named"))
+            || r.message.contains("No module named")
+            || r.message.contains("executable not found")
+            || r.message.contains("unavailable"))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -362,7 +352,7 @@ pub fn run() {
     let mut c = Checker::new();
 
     // -------------------------------------------------------------------------
-    // STUDY 1: Classic 2-variable LP — internal ≡ scipy across all methods.
+    // STUDY 1: Classic 2-variable LP — internal ≡ external methods.
     // -------------------------------------------------------------------------
     println!("=== STUDY 1: 2-variable LP across all solver methods ===");
     {
@@ -387,23 +377,23 @@ pub fn run() {
         );
         for method in ["highs", "highs-ds", "highs-ipm"] {
             let ext = solve_lp_external(&lp, method);
-            if ext.status == "numerical-error" && ext.message.contains("scipy") {
-                println!("#   scipy:{} skipped (scipy unavailable)", method);
+            if external_reference_unavailable(&ext) {
+                println!("#   external:{} skipped ({})", method, ext.message);
                 continue;
             }
             println!(
-                "#   scipy:{}:  x={:?}  obj={}  iters={}",
+                "#   external:{}:  x={:?}  obj={}  iters={}",
                 method, ext.x, ext.objective, ext.iters
             );
             c.check(
-                &format!("scipy:{} matches expected optimum", method),
+                &format!("external:{} matches expected optimum", method),
                 ext.status == "optimal"
                     && approx_eq(ext.objective, expected_obj, 1e-7)
                     && max_abs_diff(&ext.x, &expected_x) < 1e-9,
                 &format!("obj={:.6}", ext.objective),
             );
             c.check(
-                &format!("scipy:{} ≡ internal (|Δobj| ≤ 1e-9)", method),
+                &format!("external:{} ≡ internal (|Δobj| ≤ 1e-9)", method),
                 approx_eq(ext.objective, internal.objective, 1e-9),
                 "",
             );
@@ -440,7 +430,7 @@ pub fn run() {
         let ext = solve_lp_external(&lp, "highs");
         if ext.status == "optimal" {
             println!(
-                "#   scipy:highs    = {:.6}   x = {}",
+                "#   external:highs = {:.6}   x = {}",
                 ext.objective,
                 ext.x
                     .iter()
@@ -449,12 +439,12 @@ pub fn run() {
                     .join(", ")
             );
             c.check(
-                "internal cost ≡ scipy:highs cost (|Δ| ≤ 1e-7)",
+                "internal cost ≡ external:highs cost (|Δ| ≤ 1e-7)",
                 approx_eq(internal.objective, ext.objective, 1e-7),
                 &format!("Δ={:.3e}", (internal.objective - ext.objective).abs()),
             );
             c.check(
-                "internal x ≡ scipy:highs x  (max|Δ| ≤ 1e-6)",
+                "internal x ≡ external:highs x  (max|Δ| ≤ 1e-6)",
                 max_abs_diff(&internal.x, &ext.x) < 1e-6,
                 &format!("max|Δx|={:.3e}", max_abs_diff(&internal.x, &ext.x)),
             );
@@ -523,9 +513,9 @@ pub fn run() {
         let ext = solve_lp_external(&lp, "highs");
         println!("#   internal cost   = {:.6}", internal.objective);
         if ext.status == "optimal" {
-            println!("#   scipy:highs     = {:.6}", ext.objective);
+            println!("#   external:highs  = {:.6}", ext.objective);
             c.check(
-                "transportation cost: internal ≡ scipy:highs (|Δ| ≤ 1e-7)",
+                "transportation cost: internal ≡ external:highs (|Δ| ≤ 1e-7)",
                 approx_eq(internal.objective, ext.objective, 1e-7),
                 &format!(
                     "internal={:.6}  highs={:.6}",
@@ -735,15 +725,15 @@ pub fn run() {
     }
 
     // -------------------------------------------------------------------------
-    // STUDY 6: 200 random feasible LPs — internal ≡ scipy:highs.
+    // STUDY 6: 200 random feasible LPs — internal ≡ external:highs.
     // -------------------------------------------------------------------------
-    println!("\n=== STUDY 6: 200 random feasible LPs — internal ≡ scipy:highs ===");
+    println!("\n=== STUDY 6: 200 random feasible LPs — internal ≡ external:highs ===");
     {
         let n_prob = 200usize;
         let mut max_obj_diff = 0.0_f64;
         let mut n_match = 0usize;
         let mut n_skip = 0usize;
-        let mut scipy_available = true;
+        let mut external_available = true;
         for p in 0..n_prob {
             // Seeded LCG (`seed = (seed*1664525 + 1013904223) >>> 0; seed/0xFFFFFFFF`).
             let mut seed: u32 = (p as u32).wrapping_add(1);
@@ -769,8 +759,8 @@ pub fn run() {
             };
             let internal = solve_lp_internal(&lp, Some(1000));
             let ext = solve_lp_external(&lp, "highs");
-            if ext.status == "numerical-error" && ext.message.contains("scipy") {
-                scipy_available = false;
+            if external_reference_unavailable(&ext) {
+                external_available = false;
                 n_skip += 1;
                 continue;
             }
@@ -786,8 +776,8 @@ pub fn run() {
                 n_match += 1;
             }
         }
-        if !scipy_available {
-            println!("#   scipy unavailable; skipping random comparison");
+        if !external_available {
+            println!("#   external reference unavailable; skipping random comparison");
         } else {
             println!(
                 "#   {}/{} matched to 1e-7   max|Δobj| = {:.3e}",
@@ -821,12 +811,7 @@ pub fn run() {
             ..Default::default()
         };
         let expected = 8.0;
-        for choice in [
-            "internal",
-            "scipy:highs",
-            "scipy:highs-ds",
-            "scipy:highs-ipm",
-        ] {
+        for choice in ["internal", "highs", "highs-ds", "highs-ipm"] {
             std::env::set_var("LP_SOLVER", choice);
             let r = solve_lp(&lp);
             println!(
@@ -850,9 +835,9 @@ pub fn run() {
     }
 
     // -------------------------------------------------------------------------
-    // STUDY 8: DES-engine simplex ≡ scipy:highs ≡ in-process simplex.
+    // STUDY 8: DES-engine simplex ≡ external:highs ≡ in-process simplex.
     // -------------------------------------------------------------------------
-    println!("\n=== STUDY 8: DES-engine simplex ≡ scipy:highs (LP-as-DES validation) ===");
+    println!("\n=== STUDY 8: DES-engine simplex ≡ external:highs (LP-as-DES validation) ===");
     {
         struct Case {
             name: &'static str,
@@ -926,21 +911,21 @@ pub fn run() {
             let des_b = solve_lp_via_des(&case.lp, Some("bland"), None);
             let ext = solve_lp_external(&case.lp, "highs");
             let internal = solve_lp_internal(&case.lp, None);
-            let all: Vec<&LpResult> = if scipy_unavailable(&ext) {
+            let all: Vec<&LpResult> = if external_reference_unavailable(&ext) {
                 vec![&des_d, &des_b, &internal]
             } else {
                 vec![&des_d, &des_b, &internal, &ext]
             };
             let stats: Vec<String> = all.iter().map(|r| r.status.clone()).collect();
             let same_status = stats.iter().all(|s| *s == stats[0]);
-            let scope = if scipy_unavailable(&ext) {
+            let scope = if external_reference_unavailable(&ext) {
                 "available solvers"
             } else {
                 "all four solvers"
             };
-            if scipy_unavailable(&ext) {
+            if external_reference_unavailable(&ext) {
                 println!(
-                    "#   {:<32}  scipy:highs skipped ({})",
+                    "#   {:<32}  external:highs skipped ({})",
                     case.name, ext.message
                 );
             }
@@ -971,15 +956,15 @@ pub fn run() {
                         max_delta
                     ),
                 );
-                let reference_x = if scipy_unavailable(&ext) {
+                let reference_x = if external_reference_unavailable(&ext) {
                     &internal.x
                 } else {
                     &ext.x
                 };
-                let reference_name = if scipy_unavailable(&ext) {
+                let reference_name = if external_reference_unavailable(&ext) {
                     "internal simplex"
                 } else {
-                    "scipy:highs"
+                    "external:highs"
                 };
                 let x_max_delta = max_abs_diff(&des_d.x, reference_x);
                 c.check(
@@ -1003,14 +988,14 @@ pub fn run() {
     }
 
     // -------------------------------------------------------------------------
-    // STUDY 9: 50 random feasible LPs — DES simplex ≡ scipy:highs.
+    // STUDY 9: 50 random feasible LPs — DES simplex ≡ external:highs.
     // -------------------------------------------------------------------------
-    println!("\n=== STUDY 9: 50 random feasible LPs — DES simplex ≡ scipy:highs ===");
+    println!("\n=== STUDY 9: 50 random feasible LPs — DES simplex ≡ external:highs ===");
     {
         let n = 50usize;
         let mut n_match = 0usize;
         let mut n_skip = 0usize;
-        let mut scipy_available = true;
+        let mut external_available = true;
         let mut max_obj_diff = 0.0_f64;
         for p in 0..n {
             let mut seed: u32 = (p as u32).wrapping_add(50);
@@ -1036,8 +1021,8 @@ pub fn run() {
             };
             let des = solve_lp_via_des(&lp, None, Some(500));
             let ext = solve_lp_external(&lp, "highs");
-            if scipy_unavailable(&ext) {
-                scipy_available = false;
+            if external_reference_unavailable(&ext) {
+                external_available = false;
                 n_skip += 1;
                 continue;
             }
@@ -1054,15 +1039,15 @@ pub fn run() {
             }
         }
         let compared = n - n_skip;
-        if !scipy_available || compared == 0 {
-            println!("#   scipy unavailable; skipping random DES/scipy comparison");
+        if !external_available || compared == 0 {
+            println!("#   external reference unavailable; skipping random DES/external comparison");
         } else {
             println!(
                 "#   {}/{} matched to 1e-7   max|Δobj| = {:.3e}",
                 n_match, compared, max_obj_diff
             );
             c.check(
-                "all 50 random LPs: DES-simplex obj ≡ scipy:highs obj  (|Δ| ≤ 1e-7)",
+                "all 50 random LPs: DES-simplex obj ≡ external:highs obj  (|Δ| ≤ 1e-7)",
                 n_match == compared,
                 &format!("nMatch={}  N={}", n_match, compared),
             );

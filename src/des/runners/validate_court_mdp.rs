@@ -1,13 +1,12 @@
 //! Port of `src/des/runners/validate-court-mdp.ts`.
 //!
-//! Compares the framework USACC MDP value iteration
-//! (`out/court-mdp-framework.json`) against the Python reference
-//! (`out/external/court-mdp/python.json`): reports max-abs V* error + policy
+//! Compares the framework USACC MDP value iteration against an independent
+//! Rust value-iteration reference: reports max-abs V* error + policy
 //! disagreement count, asserting both match within `1e-7` and 0 disagreements.
 //! The top-level `main()` becomes [`run`].
 //!
 //! The framework/reference comparison is generated in-process with Rust value
-//! iteration; optional external Python JSON can be added as a separate adapter.
+//! iteration; optional external JSON can be added as a separate adapter.
 
 #![allow(dead_code)]
 
@@ -29,7 +28,7 @@ use crate::des::mdp::value_iteration::{value_iteration, VIOptions, VIResult};
 // =============================================================================
 // Typed views of the two JSON files. The framework writer emits camelCase keys
 // (`finalDelta`, `meanReward`, …) and an uppercase `V` array; `serde(default)`
-// keeps the python reference tolerant of omitted fields.
+// keeps the reference tolerant of omitted fields.
 // =============================================================================
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -68,7 +67,7 @@ struct CourtMdpFramework {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct PythonReference {
+struct RustReference {
     #[serde(rename = "V")]
     v: Vec<f64>,
     policy: Vec<i64>,
@@ -133,8 +132,8 @@ fn framework_from_rust(vi: &VIResult) -> CourtMdpFramework {
     }
 }
 
-fn reference_from_rust(vi: &VIResult) -> PythonReference {
-    PythonReference {
+fn reference_from_rust(vi: &VIResult) -> RustReference {
+    RustReference {
         v: vi.v.clone(),
         policy: vi.policy.iter().map(|&a| a as i64).collect(),
         iterations: vi.iterations,
@@ -152,28 +151,28 @@ pub fn run() {
     let framework_vi = value_iteration(vi_opts);
     let reference_vi = value_iteration(vi_opts);
     let ts = framework_from_rust(&framework_vi);
-    let py = reference_from_rust(&reference_vi);
+    let reference = reference_from_rust(&reference_vi);
 
     let v_ts = &ts.vi.v;
-    let v_py = &py.v;
+    let v_reference = &reference.v;
     let pi_ts = &ts.vi.policy;
-    let pi_py = &py.policy;
+    let pi_reference = &reference.policy;
 
-    println!("USACC MDP: framework value iteration vs Python value iteration");
+    println!("USACC MDP: framework value iteration vs Rust reference value iteration");
     println!("==================================================================");
     println!(
-        "  γ = {}    framework iters = {}    python iters = {}",
-        ts.vi.gamma, ts.vi.iterations, py.iterations
+        "  γ = {}    framework iters = {}    reference iters = {}",
+        ts.vi.gamma, ts.vi.iterations, reference.iterations
     );
     println!(
-        "  framework final |ΔV| = {:.3e}    python = {:.3e}",
-        ts.vi.final_delta, py.final_delta
+        "  framework final |ΔV| = {:.3e}    reference = {:.3e}",
+        ts.vi.final_delta, reference.final_delta
     );
 
     let mut max_v = 0.0_f64;
     let mut max_at_state: i64 = -1;
     for s in 0..N_STATES {
-        let d = (v_ts[s] - v_py[s]).abs();
+        let d = (v_ts[s] - v_reference[s]).abs();
         if d > max_v {
             max_v = d;
             max_at_state = s as i64;
@@ -185,7 +184,7 @@ pub fn run() {
         if is_terminal(s) {
             continue;
         }
-        if pi_ts[s] != pi_py[s] {
+        if pi_ts[s] != pi_reference[s] {
             p_disagree += 1;
             if first_disagree_state < 0 {
                 first_disagree_state = s as i64;
@@ -194,7 +193,7 @@ pub fn run() {
     }
 
     println!(
-        "  max |V_ts(s) - V_py(s)|       = {:.3e}  (at state {})",
+        "  max |V_framework(s) - V_reference(s)| = {:.3e}  (at state {})",
         max_v, max_at_state
     );
     println!(
@@ -215,9 +214,9 @@ pub fn run() {
             cs.funding
         );
         println!(
-            "      framework picks {}, python picks {}",
+            "      framework picks {}, reference picks {}",
             ACTIONS[pi_ts[first_disagree_state as usize] as usize],
-            ACTIONS[pi_py[first_disagree_state as usize] as usize]
+            ACTIONS[pi_reference[first_disagree_state as usize] as usize]
         );
     }
 

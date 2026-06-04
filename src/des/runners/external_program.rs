@@ -283,26 +283,6 @@ pub fn run_external_module(
     )
 }
 
-/// `runPythonReference(relativeScript, args)`.
-pub fn run_python_reference(
-    relative_script: &str,
-    args: &[String],
-) -> Result<ExternalProgramResult, String> {
-    let root = repo_root_from_runner();
-    let script = resolve_external_script(&root, relative_script)?;
-    let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-    let mut full: Vec<String> = vec![script.display().to_string()];
-    full.extend_from_slice(args);
-    run_external_program(
-        &python,
-        &full,
-        &RunExternalOpts {
-            cwd: Some(root),
-            ..Default::default()
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

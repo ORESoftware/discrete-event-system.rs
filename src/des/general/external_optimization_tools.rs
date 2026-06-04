@@ -362,7 +362,9 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Clarabel
             | ExternalOptimizationTool::Ecos
             | ExternalOptimizationTool::Clingo
-            | ExternalOptimizationTool::Cvc5 => ExternalOptimizationLanguage::Python,
+            | ExternalOptimizationTool::Cvc5
+            | ExternalOptimizationTool::Proxqp
+            | ExternalOptimizationTool::Bitwuzla => ExternalOptimizationLanguage::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationLanguage::Julia,
             ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
@@ -382,13 +384,11 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Baron
             | ExternalOptimizationTool::Copt
             | ExternalOptimizationTool::Qpoases
-            | ExternalOptimizationTool::Proxqp
             | ExternalOptimizationTool::Cosmo
             | ExternalOptimizationTool::Sdpa
             | ExternalOptimizationTool::Csdp
             | ExternalOptimizationTool::Z3
             | ExternalOptimizationTool::Yices
-            | ExternalOptimizationTool::Bitwuzla
             | ExternalOptimizationTool::Boolector
             | ExternalOptimizationTool::MathSat
             | ExternalOptimizationTool::OptiMathSat
@@ -799,8 +799,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::GurobiCli
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
-            | ExternalOptimizationTool::LindoCli
-            | ExternalOptimizationTool::OrToolsCpSat => &[],
+            | ExternalOptimizationTool::LindoCli => &[],
+            ExternalOptimizationTool::OrToolsCpSat => &["fzn-cp-sat"],
             ExternalOptimizationTool::GoodLp => &["ores-good-lp-adapter", "good-lp-adapter"],
             ExternalOptimizationTool::LpModeler => {
                 &["ores-lp-modeler-adapter", "lp-modeler-adapter"]
@@ -871,6 +871,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Scs => &["scs"],
             ExternalOptimizationTool::Clarabel => &["clarabel"],
             ExternalOptimizationTool::Ecos => &["ecos"],
+            ExternalOptimizationTool::Proxqp => &["proxsuite"],
+            ExternalOptimizationTool::Bitwuzla => &["bitwuzla"],
             _ => &[],
         }
     }
@@ -4315,7 +4317,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
                 .count(),
-            25
+            27
         );
         assert_eq!(
             specs
@@ -4329,7 +4331,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            47
+            45
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -4393,7 +4395,7 @@ mod tests {
                 && spec.language == ExternalOptimizationLanguage::Native
                 && spec.family == ExternalOptimizationFamily::CpSatRouting
                 && spec.exactness == ExternalOptimizationExactness::Exact
-                && spec.adapter_command_aliases.is_empty()
+                && spec.adapter_command_aliases.contains(&"fzn-cp-sat")
                 && spec
                     .artifact_env_names
                     .iter()
@@ -4500,6 +4502,20 @@ mod tests {
                 && spec.family == ExternalOptimizationFamily::SmtOmt
                 && spec.exactness == ExternalOptimizationExactness::Exact
                 && spec.tool.python_modules().contains(&"cvc5")
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Bitwuzla
+                && spec.language == ExternalOptimizationLanguage::Python
+                && spec.family == ExternalOptimizationFamily::SmtOmt
+                && spec.exactness == ExternalOptimizationExactness::Exact
+                && spec.tool.python_modules().contains(&"bitwuzla")
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Proxqp
+                && spec.language == ExternalOptimizationLanguage::Python
+                && spec.family == ExternalOptimizationFamily::ConvexOptimization
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.python_modules().contains(&"proxsuite")
         }));
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::OptiMathSat
@@ -4638,6 +4654,20 @@ mod tests {
         assert!(ExternalOptimizationTool::Cvc5
             .python_modules()
             .contains(&"cvc5"));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Bitwuzla)[0],
+            "ORES_BITWUZLA_PYTHON"
+        );
+        assert!(ExternalOptimizationTool::Bitwuzla
+            .python_modules()
+            .contains(&"bitwuzla"));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Proxqp)[0],
+            "ORES_PROXQP_PYTHON"
+        );
+        assert!(ExternalOptimizationTool::Proxqp
+            .python_modules()
+            .contains(&"proxsuite"));
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Conjure)[0],
             "ORES_CONJURE_DIR"

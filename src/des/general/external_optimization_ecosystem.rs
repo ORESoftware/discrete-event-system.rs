@@ -479,7 +479,9 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Clarabel
             | ExternalOptimizationTool::Ecos
             | ExternalOptimizationTool::Clingo
-            | ExternalOptimizationTool::Cvc5 => ExternalOptimizationEcosystem::Python,
+            | ExternalOptimizationTool::Cvc5
+            | ExternalOptimizationTool::Proxqp
+            | ExternalOptimizationTool::Bitwuzla => ExternalOptimizationEcosystem::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationEcosystem::Julia,
             ExternalOptimizationTool::Conjure
             | ExternalOptimizationTool::Picat
@@ -502,13 +504,11 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Baron
             | ExternalOptimizationTool::Copt
             | ExternalOptimizationTool::Qpoases
-            | ExternalOptimizationTool::Proxqp
             | ExternalOptimizationTool::Cosmo
             | ExternalOptimizationTool::Sdpa
             | ExternalOptimizationTool::Csdp
             | ExternalOptimizationTool::Z3
             | ExternalOptimizationTool::Yices
-            | ExternalOptimizationTool::Bitwuzla
             | ExternalOptimizationTool::Boolector
             | ExternalOptimizationTool::MathSat
             | ExternalOptimizationTool::OptiMathSat
@@ -603,14 +603,14 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Clarabel => "CLARABEL_PYTHON",
             ExternalOptimizationTool::Ecos => "ECOS_PYTHON",
             ExternalOptimizationTool::Qpoases => "QPOASES_DIR",
-            ExternalOptimizationTool::Proxqp => "PROXQP_DIR",
+            ExternalOptimizationTool::Proxqp => "PROXQP_PYTHON",
             ExternalOptimizationTool::Cosmo => "COSMO_DIR",
             ExternalOptimizationTool::Sdpa => "SDPA_DIR",
             ExternalOptimizationTool::Csdp => "CSDP_DIR",
             ExternalOptimizationTool::Z3 => "Z3_DIR",
             ExternalOptimizationTool::Cvc5 => "CVC5_PYTHON",
             ExternalOptimizationTool::Yices => "YICES_DIR",
-            ExternalOptimizationTool::Bitwuzla => "BITWUZLA_DIR",
+            ExternalOptimizationTool::Bitwuzla => "BITWUZLA_PYTHON",
             ExternalOptimizationTool::Boolector => "BOOLECTOR_DIR",
             ExternalOptimizationTool::MathSat => "MATHSAT_DIR",
             ExternalOptimizationTool::OptiMathSat => "OPTIMATHSAT_DIR",
@@ -949,6 +949,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Clarabel => &["clarabel"],
             ExternalOptimizationTool::Ecos => &["ecos"],
             ExternalOptimizationTool::Cvc5 => &["cvc5"],
+            ExternalOptimizationTool::Proxqp => &["proxsuite"],
             _ => &[],
         }
     }
@@ -2075,6 +2076,17 @@ mod tests {
         assert!(ExternalOptimizationTool::Cvc5
             .python_modules()
             .contains(&"cvc5"));
+        assert_eq!(
+            ExternalOptimizationTool::Bitwuzla.env_var(),
+            "BITWUZLA_PYTHON"
+        );
+        assert!(ExternalOptimizationTool::Bitwuzla
+            .python_modules()
+            .contains(&"bitwuzla"));
+        assert_eq!(ExternalOptimizationTool::Proxqp.env_var(), "PROXQP_PYTHON");
+        assert!(ExternalOptimizationTool::Proxqp
+            .python_modules()
+            .contains(&"proxsuite"));
         assert!(ExternalOptimizationTool::Osqp
             .python_modules()
             .contains(&"osqp"));

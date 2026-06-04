@@ -1109,8 +1109,8 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "Bitwuzla",
         env_key: "BITWUZLA",
         family: ExternalValidationFamily::SmtSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["bitwuzla"],
         capabilities: SMT_CAPS,
         input_formats: SMT_FORMATS,
@@ -2153,12 +2153,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "NLopt",
         env_key: "NLOPT",
         family: ExternalValidationFamily::NonlinearGlobalSolver,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["ores-nlopt-adapter", "nlopt-adapter"],
         capabilities: NONLINEAR_CAPS,
         input_formats: &["json", "nl"],
-        notes: "NLopt derivative-free and gradient nonlinear optimization adapter using local installations",
+        notes: "NLopt derivative-free and gradient nonlinear optimization adapter using the Python package or local adapters",
     },
     ExternalValidationToolSpec {
         id: "nlopt-cli",
@@ -10839,12 +10839,14 @@ fn external_validation_python_modules(
         "python-mip" => &["mip"],
         "clingo" => &["clingo"],
         "cvc5" => &["cvc5"],
+        "bitwuzla" => &["bitwuzla"],
         "gurobipy" => &["gurobipy"],
         "cplex-python" => &["cplex"],
         "xpress-python" => &["xpress"],
         "docplex" => &["docplex"],
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ortools"],
         "scipy-optimize" => &["scipy.optimize", "scipy"],
+        "nlopt" => &["nlopt"],
         "pysat" => &["pysat"],
         "casadi" => &["casadi"],
         "osqp" => &["osqp"],
@@ -11758,8 +11760,9 @@ mod tests {
         let nlopt = find_external_validation_tool("nlopt").unwrap();
         assert_eq!(
             external_validation_artifact_env_names(nlopt)[0],
-            "ORES_NLOPT_DIR"
+            "ORES_NLOPT_PYTHON"
         );
+        assert!(external_validation_python_modules(nlopt).contains(&"nlopt"));
         let highs_rust = find_external_validation_tool("highs_rust").unwrap();
         assert!(external_validation_command_dir_env_names(highs_rust)
             .contains(&"HIGHS_HOME".to_string()));

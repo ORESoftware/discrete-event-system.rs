@@ -5228,7 +5228,9 @@ impl Default for MathProgramSolveOptions {
 /// `cbc-cli`, `clp-cli`, `soplex-cli`, `qsopt-ex-cli`, `lp-solve-cli`, and
 /// `lindo-cli` use the Rust `external_linear_cli` adapter for LP/MIP models.
 /// Python remains the fallback bridge for SciPy, OR-Tools, nonlinear oracles,
-/// and external API bindings.
+/// and external API bindings. Default HiGHS and GLPK methods use Python
+/// bindings when available and fall back to local `highs`/`glpsol` for LP/MIP
+/// models if the corresponding Python stack is missing.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalMathProgramOptions {
     /// Solver method, such as `highs`, `highs-cli`, `clp-cli`,
@@ -9036,6 +9038,20 @@ fn solve_math_program_external_scipy_single_objective(
     };
 
     let raw = run_external_math_program(&python, &script, &method, &payload)?;
+    if should_fallback_highs_default_to_cli(program, &method, &raw, opts) {
+        if let Some(solution) =
+            solve_math_program_external_linear_cli(program, opts, "highs-cli:default")?
+        {
+            return Ok(solution);
+        }
+    }
+    if should_fallback_glpk_default_to_cli(&method, &raw, opts) {
+        if let Some(solution) =
+            solve_math_program_external_linear_cli(program, opts, "glpk-cli:default")?
+        {
+            return Ok(solution);
+        }
+    }
     let status = parse_external_status(&raw);
     let raw_x = raw
         .get("x")
@@ -9105,6 +9121,83 @@ fn solve_math_program_external_scipy_single_objective(
             .and_then(Value::as_str)
             .map(str::to_string),
     })
+}
+
+fn should_fallback_highs_default_to_cli(
+    program: &MathProgram,
+    method: &str,
+    raw: &Value,
+    opts: &ExternalMathProgramOptions,
+) -> bool {
+    if opts.script.is_some()
+        || !is_highs_default_method(method)
+        || !program_supports_linear_cli_fallback(program)
+    {
+        return false;
+    }
+    if parse_external_status(raw) != MathProgramStatus::NumericalError {
+        return false;
+    }
+    raw_message_mentions_missing_python_package(raw, &["scipy", "numpy"])
+}
+
+fn should_fallback_glpk_default_to_cli(
+    method: &str,
+    raw: &Value,
+    opts: &ExternalMathProgramOptions,
+) -> bool {
+    if opts.script.is_some() || !is_glpk_default_method(method) {
+        return false;
+    }
+    if parse_external_status(raw) != MathProgramStatus::NumericalError {
+        return false;
+    }
+    raw_message_mentions_missing_python_package(raw, &["swiglpk"])
+        || raw
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.to_ascii_lowercase().contains("glpk unavailable"))
+}
+
+fn raw_message_mentions_missing_python_package(raw: &Value, packages: &[&str]) -> bool {
+    raw.get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            packages.iter().any(|package| {
+                let package = package.to_ascii_lowercase();
+                message.contains(&format!("no module named '{package}'"))
+                    || message.contains(&format!("no module named \"{package}\""))
+                    || message.contains(&format!("no module named {package}"))
+            })
+        })
+}
+
+fn is_highs_default_method(method: &str) -> bool {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    let normalized = normalized
+        .strip_suffix(":default")
+        .unwrap_or(&normalized)
+        .to_string();
+    matches!(normalized.as_str(), "highs" | "highs-ds" | "highs-ipm")
+}
+
+fn is_glpk_default_method(method: &str) -> bool {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(normalized.as_str(), "glpk" | "glpk:default")
+}
+
+fn program_supports_linear_cli_fallback(program: &MathProgram) -> bool {
+    if program.has_discrete_features() {
+        !program.has_conic_constraints()
+            && !program.has_quadratic_constraints()
+            && !(program.has_quadratic_objective()
+                && quadratic_objective_has_native_nonlinear_terms(program))
+    } else {
+        !program.has_conic_constraints()
+            && !program.has_quadratic_constraints()
+            && !program.has_quadratic_objective()
+    }
 }
 
 fn solve_math_program_external_linear_cli(
@@ -20846,6 +20939,145 @@ mod tests {
             parse_external_math_program_linear_cli_method("ortools:CP-SAT"),
             None
         );
+    }
+
+    #[test]
+    fn highs_default_cli_fallback_only_handles_missing_scipy_stack_for_linear_models() {
+        let mut lp = MathProgram::new(ObjectiveSense::Max);
+        let x = lp.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
+        lp.add_constraint("limit", vec![(x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+        let missing_scipy = serde_json::json!({
+            "status": "numerical-error",
+            "message": "No module named 'scipy'",
+        });
+        assert!(should_fallback_highs_default_to_cli(
+            &lp,
+            "highs",
+            &missing_scipy,
+            &ExternalMathProgramOptions::default()
+        ));
+        assert!(should_fallback_highs_default_to_cli(
+            &lp,
+            "HiGHS-DS:default",
+            &missing_scipy,
+            &ExternalMathProgramOptions::default()
+        ));
+
+        let mut mip = MathProgram::new(ObjectiveSense::Max);
+        let y = mip.add_binary_var("y", 1.0).unwrap();
+        mip.add_constraint("pick", vec![(y, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+        let missing_numpy = serde_json::json!({
+            "status": "numerical-error",
+            "message": "scipy milp unavailable: No module named 'numpy'",
+        });
+        assert!(should_fallback_highs_default_to_cli(
+            &mip,
+            "highs-ipm",
+            &missing_numpy,
+            &ExternalMathProgramOptions::default()
+        ));
+
+        let custom_script = ExternalMathProgramOptions {
+            script: Some("custom_highs_bridge.py".to_string()),
+            ..Default::default()
+        };
+        assert!(!should_fallback_highs_default_to_cli(
+            &lp,
+            "highs",
+            &missing_scipy,
+            &custom_script
+        ));
+        assert!(!should_fallback_highs_default_to_cli(
+            &lp,
+            "highs-cli:default",
+            &missing_scipy,
+            &ExternalMathProgramOptions::default()
+        ));
+
+        let solver_error = serde_json::json!({
+            "status": "numerical-error",
+            "message": "HiGHS failed while reading model",
+        });
+        assert!(!should_fallback_highs_default_to_cli(
+            &lp,
+            "highs",
+            &solver_error,
+            &ExternalMathProgramOptions::default()
+        ));
+        let infeasible = serde_json::json!({
+            "status": "infeasible",
+            "message": "No module named 'scipy'",
+        });
+        assert!(!should_fallback_highs_default_to_cli(
+            &lp,
+            "highs",
+            &infeasible,
+            &ExternalMathProgramOptions::default()
+        ));
+
+        let mut qp = MathProgram::new(ObjectiveSense::Min);
+        let q = qp.add_continuous_var("q", 0.0, Some(0.0), None).unwrap();
+        qp.add_quadratic_objective_term(q, q, 1.0).unwrap();
+        assert!(!should_fallback_highs_default_to_cli(
+            &qp,
+            "highs",
+            &missing_scipy,
+            &ExternalMathProgramOptions::default()
+        ));
+    }
+
+    #[test]
+    fn glpk_default_cli_fallback_only_handles_missing_python_binding() {
+        let missing = serde_json::json!({
+            "status": "numerical-error",
+            "message": "GLPK unavailable: No module named 'swiglpk'",
+        });
+        assert!(should_fallback_glpk_default_to_cli(
+            "glpk:default",
+            &missing,
+            &ExternalMathProgramOptions::default()
+        ));
+        assert!(should_fallback_glpk_default_to_cli(
+            " GLPK ",
+            &missing,
+            &ExternalMathProgramOptions::default()
+        ));
+
+        let custom_script = ExternalMathProgramOptions {
+            script: Some("custom_glpk_bridge.py".to_string()),
+            ..Default::default()
+        };
+        assert!(!should_fallback_glpk_default_to_cli(
+            "glpk:default",
+            &missing,
+            &custom_script
+        ));
+        assert!(!should_fallback_glpk_default_to_cli(
+            "glpk-cli:default",
+            &missing,
+            &ExternalMathProgramOptions::default()
+        ));
+
+        let solver_error = serde_json::json!({
+            "status": "numerical-error",
+            "message": "GLPK failed while reading model",
+        });
+        assert!(!should_fallback_glpk_default_to_cli(
+            "glpk:default",
+            &solver_error,
+            &ExternalMathProgramOptions::default()
+        ));
+        let infeasible = serde_json::json!({
+            "status": "infeasible",
+            "message": "No module named 'swiglpk'",
+        });
+        assert!(!should_fallback_glpk_default_to_cli(
+            "glpk:default",
+            &infeasible,
+            &ExternalMathProgramOptions::default()
+        ));
     }
 
     #[test]

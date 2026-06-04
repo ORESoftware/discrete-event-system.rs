@@ -89,6 +89,9 @@ const MAX_BALL_CURL_YPS2: f64 = 7.6;
 const POSSESSION_CHASE_MIN_BALL_RELOCATION_YARDS: f64 = 0.90;
 const POSSESSION_CHASE_MIN_ACTIVE_DEFENDERS: usize = 2;
 const POSSESSION_CHASE_MIN_CREDIT: f64 = 0.035;
+const TEAMWORK_PROGRESS_NEAR_BALL_PLAYERS: usize = 5;
+const TEAMWORK_PROGRESS_MIN_RELOCATION_YARDS: f64 = 0.08;
+const TEAMWORK_PROGRESS_MIN_CREDIT: f64 = 0.024;
 const GOAL_REWARD_POINTS: f64 = 100.0;
 const SHOT_ON_TARGET_REWARD_POINTS: f64 = 50.0;
 const DEFENSIVE_CLEAR_AND_HOLD_FIRST_SECONDS: f64 = 5.0;
@@ -110,6 +113,8 @@ const COMMIT_DRIBBLE_BEAT_MULTIPLIER: f64 = 1.50;
 const DRIBBLE_HOLD_UP_CONTEST_RADIUS_YARDS: f64 = 2.6;
 const GOAL_CHAIN_REWARD_PATTERN: [f64; 5] = [30.0, 30.0, 20.0, 15.0, 5.0];
 const SHOT_ON_TARGET_REWARD_PATTERN: [f64; 5] = [15.0, 15.0, 10.0, 7.5, 2.5];
+const PASS_CHAIN_HISTORY_LIMIT: usize = 8;
+const PASS_CHAIN_MAX_CONTINUATION_SECONDS: f64 = 12.0;
 const MATCH_RESULT_WIN_PLAYER_REWARD: f64 = 8.0;
 const MATCH_RESULT_LOSS_PLAYER_PENALTY: f64 = 5.0;
 const MATCH_RESULT_MARGIN_REWARD_PER_GOAL: f64 = 1.25;
@@ -6965,6 +6970,14 @@ pub struct MatchStats {
     pub possession_chase_advantage_home: f64,
     #[serde(default)]
     pub possession_chase_advantage_away: f64,
+    #[serde(default)]
+    pub teamwork_upfield_progress_home: f64,
+    #[serde(default)]
+    pub teamwork_upfield_progress_away: f64,
+    #[serde(default)]
+    pub teamwork_near_ball_progress_home: f64,
+    #[serde(default)]
+    pub teamwork_near_ball_progress_away: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -6981,6 +6994,17 @@ struct PendingPass {
     receiver_openness: f64,
     passer_skill: f64,
     offside: Option<PendingOffside>,
+}
+
+#[derive(Clone, Debug)]
+struct CompletedPassChainEntry {
+    team: Team,
+    from: usize,
+    to: usize,
+    direction: PassDirectionBucket,
+    tick: u64,
+    clock_seconds: f64,
+    continuation_rewarded: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -10347,6 +10371,33 @@ fn completed_pass_reward(team: Team, origin: Vec2, target: Vec2, field_length: f
     }
 }
 
+fn pass_chain_link_reward(direction: PassDirectionBucket, depth: usize) -> f64 {
+    let base = match direction {
+        PassDirectionBucket::Forward => 2.40,
+        PassDirectionBucket::Lateral => 1.25,
+        PassDirectionBucket::Backward => 0.45,
+    };
+    let depth_multiplier = match depth {
+        0 => 1.0,
+        1 => 0.62,
+        _ => 0.0,
+    };
+    base * depth_multiplier
+}
+
+fn is_positive_pass_chain_continuation_action(action: &str) -> bool {
+    let action = normalize_soccer_action_label(action);
+    matches!(
+        action,
+        "shoot"
+            | "first-time-shot"
+            | "first-time-header"
+            | "pass"
+            | "aerial-pass"
+            | "first-time-pass"
+    ) || is_dribble_action_label(action)
+}
+
 fn ball_distance_from_own_goal(team: Team, position: Vec2, field_length: f64) -> f64 {
     (position.y - team.other().goal_y(field_length)).abs()
 }
@@ -10509,6 +10560,16 @@ struct DefensiveRelaxationSignal {
     defender_penalties: Vec<PlayerRewardLoad>,
 }
 
+#[derive(Clone, Debug)]
+struct TeamworkProgressSignal {
+    possession_team: Team,
+    ball_progress: f64,
+    team_centroid_progress: f64,
+    near_ball_centroid_progress: f64,
+    attacking_credit: f64,
+    support_players: Vec<usize>,
+}
+
 fn snapshot_player<'a>(
     snapshot: &'a WorldSnapshot,
     player_id: usize,
@@ -10517,6 +10578,110 @@ fn snapshot_player<'a>(
         .players
         .iter()
         .find(|player| player.id == player_id)
+}
+
+fn snapshot_player_position(snapshot: &WorldSnapshot, player: &PlayerSnapshot) -> Vec2 {
+    snapshot
+        .player_position(player.id)
+        .unwrap_or(player.position)
+}
+
+fn unique_team_player_ids(
+    ids: impl IntoIterator<Item = usize>,
+    snapshot: &WorldSnapshot,
+    team: Team,
+) -> Vec<usize> {
+    let mut unique = Vec::new();
+    for id in ids {
+        if unique.contains(&id) {
+            continue;
+        }
+        if snapshot
+            .players
+            .iter()
+            .any(|player| player.id == id && player.team == team)
+        {
+            unique.push(id);
+        }
+    }
+    unique
+}
+
+fn team_field_player_ids(snapshot: &WorldSnapshot, team: Team) -> Vec<usize> {
+    snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team && player.role != PlayerRole::Goalkeeper)
+        .map(|player| player.id)
+        .collect()
+}
+
+fn nearest_team_field_players_to_ball(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    count: usize,
+) -> Vec<usize> {
+    let mut players = snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team && player.role != PlayerRole::Goalkeeper)
+        .map(|player| {
+            (
+                player.id,
+                snapshot_player_position(snapshot, player).distance(snapshot.ball.position),
+            )
+        })
+        .collect::<Vec<_>>();
+    players.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    players
+        .into_iter()
+        .take(count)
+        .map(|(player_id, _)| player_id)
+        .collect()
+}
+
+fn team_centroid_for_player_ids(snapshot: &WorldSnapshot, player_ids: &[usize]) -> Option<Vec2> {
+    let mut total = Vec2::zero();
+    let mut count = 0.0;
+    for player_id in player_ids {
+        let Some(player) = snapshot_player(snapshot, *player_id) else {
+            continue;
+        };
+        total += snapshot_player_position(snapshot, player);
+        count += 1.0;
+    }
+    (count > 0.0).then_some(total / count)
+}
+
+fn centroid_upfield_progress(
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+    team: Team,
+    player_ids: &[usize],
+) -> f64 {
+    let Some(before_centroid) = team_centroid_for_player_ids(before, player_ids) else {
+        return 0.0;
+    };
+    let Some(after_centroid) = team_centroid_for_player_ids(after, player_ids) else {
+        return 0.0;
+    };
+    (after_centroid.y - before_centroid.y) * team.attack_dir()
+}
+
+fn player_upfield_progress(
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+    team: Team,
+    player_id: usize,
+) -> f64 {
+    let Some(before_player) = snapshot_player(before, player_id) else {
+        return 0.0;
+    };
+    let before_position = snapshot_player_position(before, before_player);
+    let after_position = snapshot_player(after, player_id)
+        .map(|player| snapshot_player_position(after, player))
+        .unwrap_or(before_position);
+    (after_position.y - before_position.y) * team.attack_dir()
 }
 
 fn player_motion_distance(before: &WorldSnapshot, after: &WorldSnapshot, player_id: usize) -> f64 {
@@ -10583,6 +10748,99 @@ fn team_average_defensive_depth(snapshot: &WorldSnapshot, team: Team) -> f64 {
     } else {
         snapshot.field_length
     }
+}
+
+fn teamwork_progress_signal(
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+    possession_team: Team,
+) -> Option<TeamworkProgressSignal> {
+    if before.controlled_possession_team() != Some(possession_team)
+        || after.possession_team() != Some(possession_team)
+    {
+        return None;
+    }
+
+    let ball_relocation = before.ball.position.distance(after.ball.position);
+    if ball_relocation < TEAMWORK_PROGRESS_MIN_RELOCATION_YARDS {
+        return None;
+    }
+
+    let ball_progress =
+        (after.ball.position.y - before.ball.position.y) * possession_team.attack_dir();
+    let all_field_players = team_field_player_ids(before, possession_team);
+    let near_ball_players = nearest_team_field_players_to_ball(
+        before,
+        possession_team,
+        TEAMWORK_PROGRESS_NEAR_BALL_PLAYERS,
+    );
+    if all_field_players.is_empty() || near_ball_players.is_empty() {
+        return None;
+    }
+
+    let team_centroid_progress =
+        centroid_upfield_progress(before, after, possession_team, &all_field_players);
+    let near_ball_centroid_progress =
+        centroid_upfield_progress(before, after, possession_team, &near_ball_players);
+    let advancing_threshold = (before.dt_seconds.max(0.0) * 0.18).clamp(0.015, 0.12);
+    let advancing_supporters = near_ball_players
+        .iter()
+        .filter(|player_id| {
+            player_upfield_progress(before, after, possession_team, **player_id)
+                >= advancing_threshold
+        })
+        .count();
+    if advancing_supporters < 3 && near_ball_centroid_progress < advancing_threshold * 0.75 {
+        return None;
+    }
+
+    if ball_progress <= 0.05
+        && near_ball_centroid_progress <= advancing_threshold * 0.5
+        && team_centroid_progress <= advancing_threshold * 0.35
+    {
+        return None;
+    }
+
+    let retained_control = after.controlled_possession_team() == Some(possession_team);
+    let support_ratio =
+        (advancing_supporters as f64 / TEAMWORK_PROGRESS_NEAR_BALL_PLAYERS as f64).clamp(0.0, 1.0);
+    let coordinated_multiplier = if ball_progress > 0.10 && near_ball_centroid_progress > 0.02 {
+        1.0 + support_ratio * 0.36
+    } else {
+        1.0
+    };
+    let possession_credit = if retained_control { 0.018 } else { 0.006 };
+    let forward_drive = ball_progress.max(0.0).clamp(0.0, 14.0) * 0.055
+        + near_ball_centroid_progress.max(0.0).clamp(0.0, 6.0) * 0.22
+        + team_centroid_progress.max(0.0).clamp(0.0, 4.0) * 0.16;
+    let backward_cost = (-ball_progress).max(0.0).clamp(0.0, 10.0) * 0.055
+        + (-near_ball_centroid_progress).max(0.0).clamp(0.0, 5.0) * 0.14
+        + (-team_centroid_progress).max(0.0).clamp(0.0, 4.0) * 0.08;
+    let attacking_credit = (possession_credit + forward_drive * coordinated_multiplier
+        - backward_cost)
+        .clamp(0.0, 0.62);
+    if attacking_credit < TEAMWORK_PROGRESS_MIN_CREDIT {
+        return None;
+    }
+
+    let mut support_players = Vec::new();
+    if let Some(holder) = before.ball.holder {
+        support_players.push(holder);
+    }
+    support_players.extend(near_ball_players);
+    if let Some(holder) = after.ball.holder {
+        support_players.push(holder);
+    }
+    let support_players = unique_team_player_ids(support_players, before, possession_team);
+
+    Some(TeamworkProgressSignal {
+        possession_team,
+        ball_progress,
+        team_centroid_progress,
+        near_ball_centroid_progress,
+        attacking_credit,
+        support_players,
+    })
 }
 
 fn possession_chase_signal(
@@ -10948,7 +11206,7 @@ fn dense_soccer_transition_reward(
                     before.field_length,
                 );
         if after_possession == Some(player.team) {
-            reward += 0.18;
+            reward += 0.09;
         } else if after_possession == Some(player.team.other()) {
             reward -= intentional_long_ball_loss_penalty(
                 action,
@@ -13764,6 +14022,7 @@ pub struct SoccerMatch {
     coach_set_play_hints: HashMap<Team, SoccerSetPlayVectorHint>,
     reward_events: Vec<SoccerRewardEvent>,
     possession_chain: VecDeque<usize>,
+    completed_pass_chain: VecDeque<CompletedPassChainEntry>,
     recent_learning_history: VecDeque<SoccerLearningTransition>,
     deferred_reward_transitions: Vec<SoccerLearningTransition>,
     defensive_delay_clocks: HashMap<usize, f64>,
@@ -13864,6 +14123,7 @@ impl SoccerMatch {
             coach_set_play_hints: HashMap::new(),
             reward_events: Vec::new(),
             possession_chain,
+            completed_pass_chain: VecDeque::new(),
             recent_learning_history: VecDeque::new(),
             deferred_reward_transitions: Vec::new(),
             defensive_delay_clocks: HashMap::new(),
@@ -14081,6 +14341,7 @@ impl SoccerMatch {
         self.ball.holder = kickoff;
         self.ball.last_touch_team = Some(team);
         self.possession_chain.clear();
+        self.completed_pass_chain.clear();
         if let Some(holder_id) = kickoff {
             self.mark_ball_received(holder_id);
             self.record_possession_touch(holder_id);
@@ -15005,6 +15266,11 @@ impl SoccerMatch {
             &next_snapshot,
             self.config.learning_enabled || self.config.learning_logging_enabled,
         );
+        self.update_pass_chain_continuation_rewards(
+            &snapshot,
+            &next_snapshot,
+            self.config.learning_enabled || self.config.learning_logging_enabled,
+        );
         if self.config.learning_enabled || self.config.learning_logging_enabled {
             let next_snapshot = WorldSnapshot::from_match(self);
             self.update_defensive_reward_trackers(&snapshot, &next_snapshot);
@@ -15147,6 +15413,14 @@ impl SoccerMatch {
         if player_id >= self.players.len() {
             return;
         }
+        let team = self.players[player_id].team;
+        if self
+            .completed_pass_chain
+            .back()
+            .is_some_and(|entry| entry.team != team)
+        {
+            self.completed_pass_chain.clear();
+        }
         if self
             .possession_chain
             .back()
@@ -15170,6 +15444,77 @@ impl SoccerMatch {
         self.record_reward_event(pass.from, amount);
         self.record_possession_touch(pass.from);
         self.record_possession_touch(receiver);
+        self.record_completed_pass_chain_entry(pass, receiver);
+    }
+
+    fn recent_completed_pass_chain_into(
+        &self,
+        team: Team,
+        receiver: usize,
+        max_depth: usize,
+    ) -> Vec<CompletedPassChainEntry> {
+        let mut chain = Vec::new();
+        let mut current_receiver = receiver;
+        while chain.len() < max_depth {
+            let Some(entry) = self
+                .completed_pass_chain
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.team == team
+                        && entry.to == current_receiver
+                        && self.clock_seconds - entry.clock_seconds
+                            <= PASS_CHAIN_MAX_CONTINUATION_SECONDS
+                        && !chain.iter().any(|existing: &CompletedPassChainEntry| {
+                            existing.tick == entry.tick
+                                && existing.from == entry.from
+                                && existing.to == entry.to
+                        })
+                })
+                .cloned()
+            else {
+                break;
+            };
+            current_receiver = entry.from;
+            chain.push(entry);
+        }
+        chain
+    }
+
+    fn mark_pass_chain_continuation_rewarded(&mut self, entry: &CompletedPassChainEntry) {
+        if let Some(stored) = self.completed_pass_chain.iter_mut().rev().find(|stored| {
+            stored.team == entry.team
+                && stored.from == entry.from
+                && stored.to == entry.to
+                && stored.tick == entry.tick
+        }) {
+            stored.continuation_rewarded = true;
+        }
+    }
+
+    fn record_completed_pass_chain_entry(&mut self, pass: &PendingPass, receiver: usize) {
+        let direction = pass_direction_bucket(pass.team, pass.origin, pass.intended_target);
+        if direction == PassDirectionBucket::Forward {
+            let previous_chain = self.recent_completed_pass_chain_into(pass.team, pass.from, 1);
+            if let Some(previous) = previous_chain.first() {
+                let amount = pass_chain_link_reward(previous.direction, 1);
+                self.record_reward_event(previous.from, amount);
+            }
+        }
+
+        self.completed_pass_chain
+            .push_back(CompletedPassChainEntry {
+                team: pass.team,
+                from: pass.from,
+                to: receiver,
+                direction,
+                tick: self.tick,
+                clock_seconds: self.clock_seconds,
+                continuation_rewarded: false,
+            });
+        while self.completed_pass_chain.len() > PASS_CHAIN_HISTORY_LIMIT {
+            self.completed_pass_chain.pop_front();
+        }
     }
 
     fn record_interception_reward(
@@ -15582,6 +15927,41 @@ impl SoccerMatch {
         }
     }
 
+    fn record_teamwork_progress_stats(&mut self, signal: &TeamworkProgressSignal) {
+        let combined_progress = signal.ball_progress.max(0.0)
+            + signal.team_centroid_progress.max(0.0)
+            + signal.near_ball_centroid_progress.max(0.0);
+        match signal.possession_team {
+            Team::Home => {
+                self.stats.teamwork_upfield_progress_home += combined_progress;
+                self.stats.teamwork_near_ball_progress_home +=
+                    signal.near_ball_centroid_progress.max(0.0);
+            }
+            Team::Away => {
+                self.stats.teamwork_upfield_progress_away += combined_progress;
+                self.stats.teamwork_near_ball_progress_away +=
+                    signal.near_ball_centroid_progress.max(0.0);
+            }
+        }
+    }
+
+    fn apply_teamwork_progress_signal(
+        &mut self,
+        tick: u64,
+        signal: TeamworkProgressSignal,
+        record_rewards: bool,
+    ) {
+        self.record_teamwork_progress_stats(&signal);
+        if record_rewards {
+            self.record_involved_team_reward_at(
+                tick,
+                signal.possession_team,
+                signal.attacking_credit,
+                &signal.support_players,
+            );
+        }
+    }
+
     fn apply_possession_chase_signal(
         &mut self,
         tick: u64,
@@ -15647,9 +16027,61 @@ impl SoccerMatch {
         if let Some(signal) = possession_chase_signal(before, after, possession_team) {
             self.apply_possession_chase_signal(before.tick, signal, record_rewards);
         }
+        if let Some(signal) = teamwork_progress_signal(before, after, possession_team) {
+            self.apply_teamwork_progress_signal(before.tick, signal, record_rewards);
+        }
         if let Some(signal) = defensive_relaxation_signal(before, after, possession_team) {
             self.apply_defensive_relaxation_signal(before.tick, signal, record_rewards);
         }
+    }
+
+    fn update_pass_chain_continuation_rewards(
+        &mut self,
+        before: &WorldSnapshot,
+        after: &WorldSnapshot,
+        record_rewards: bool,
+    ) {
+        if !record_rewards {
+            return;
+        }
+        let Some(holder_id) = before.ball.holder else {
+            return;
+        };
+        let Some(holder) = before.players.iter().find(|player| player.id == holder_id) else {
+            return;
+        };
+        let team = holder.team;
+        if before.controlled_possession_team() != Some(team)
+            || after.possession_team() != Some(team)
+        {
+            return;
+        }
+        let Some(decision) = self
+            .players
+            .get(holder_id)
+            .and_then(|player| player.last_decision.as_ref())
+        else {
+            return;
+        };
+        if decision.mdp_state.tick != before.tick
+            || !is_positive_pass_chain_continuation_action(&decision.action)
+        {
+            return;
+        }
+
+        let chain = self.recent_completed_pass_chain_into(team, holder_id, 2);
+        let Some(latest) = chain.first() else {
+            return;
+        };
+        if latest.continuation_rewarded {
+            return;
+        }
+
+        for (depth, entry) in chain.iter().enumerate() {
+            let amount = pass_chain_link_reward(entry.direction, depth);
+            self.record_reward_event_at(before.tick, entry.from, amount);
+        }
+        self.mark_pass_chain_continuation_rewarded(latest);
     }
 
     fn facing_for_player_action(&self, player_id: usize, action: &SoccerAction) -> FacingBucket {
@@ -17875,6 +18307,7 @@ impl SoccerMatch {
         self.ball.holder = kickoff;
         self.ball.last_touch_team = Some(kickoff_team);
         self.possession_chain.clear();
+        self.completed_pass_chain.clear();
         if let Some(holder_id) = kickoff {
             self.mark_ball_received(holder_id);
             self.record_possession_touch(holder_id);
@@ -17941,6 +18374,7 @@ impl SoccerMatch {
         self.ball.holder = kickoff;
         self.ball.last_touch_team = Some(kickoff_team);
         self.possession_chain.clear();
+        self.completed_pass_chain.clear();
         if let Some(holder_id) = kickoff {
             self.mark_ball_received(holder_id);
             self.record_possession_touch(holder_id);
@@ -25396,6 +25830,29 @@ mod tests {
         }
     }
 
+    fn test_pending_pass(
+        team: Team,
+        from: usize,
+        target: usize,
+        origin: Vec2,
+        intended_target: Vec2,
+    ) -> PendingPass {
+        PendingPass {
+            team,
+            from,
+            target: Some(target),
+            flight: PassFlight::Floor,
+            is_cross: false,
+            launch_tick: 0,
+            origin,
+            intended_target,
+            distance_yards: origin.distance(intended_target),
+            receiver_openness: 1.0,
+            passer_skill: 1.0,
+            offside: None,
+        }
+    }
+
     fn assert_kickoff_shape(sim: &SoccerMatch, kickoff_team: Team) {
         let center = Vec2::new(
             sim.config.field_width_yards * 0.5,
@@ -25713,6 +26170,128 @@ mod tests {
                 field_length
             ),
             0.7
+        );
+    }
+
+    #[test]
+    fn completed_forward_pass_rewards_current_and_previous_passer() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 1.0,
+            duration_seconds: 3.0,
+            seed: 151,
+            ..Default::default()
+        });
+        let a = 5;
+        let b = 6;
+        let c = 7;
+        let pass_ab = test_pending_pass(
+            Team::Home,
+            a,
+            b,
+            Vec2::new(34.0, 38.0),
+            Vec2::new(42.0, 38.8),
+        );
+        sim.record_completed_pass_reward(&pass_ab, b);
+        sim.tick += 1;
+        sim.clock_seconds += 1.0;
+        let event_start = sim.reward_events.len();
+
+        let pass_bc = test_pending_pass(
+            Team::Home,
+            b,
+            c,
+            Vec2::new(42.0, 38.8),
+            Vec2::new(43.0, 52.0),
+        );
+        sim.record_completed_pass_reward(&pass_bc, c);
+
+        let reward_for = |player_id| {
+            sim.reward_events[event_start..]
+                .iter()
+                .filter(|event| event.player_id == player_id)
+                .map(|event| event.amount)
+                .sum::<f64>()
+        };
+        assert!(reward_for(b) >= 8.0);
+        assert!(
+            reward_for(a) > 0.0,
+            "previous passer into B should receive chain credit"
+        );
+    }
+
+    #[test]
+    fn continuation_after_completed_pass_rewards_past_two_passers() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 1.0,
+            duration_seconds: 4.0,
+            seed: 152,
+            ..Default::default()
+        });
+        let a = 5;
+        let b = 6;
+        let c = 7;
+        let d = 8;
+        let pass_ab = test_pending_pass(
+            Team::Home,
+            a,
+            b,
+            Vec2::new(34.0, 36.0),
+            Vec2::new(42.0, 36.4),
+        );
+        sim.record_completed_pass_reward(&pass_ab, b);
+        sim.tick += 1;
+        sim.clock_seconds += 1.0;
+        let pass_bc = test_pending_pass(
+            Team::Home,
+            b,
+            c,
+            Vec2::new(42.0, 36.4),
+            Vec2::new(43.0, 49.0),
+        );
+        sim.record_completed_pass_reward(&pass_bc, c);
+        sim.tick += 1;
+        sim.clock_seconds += 1.0;
+        let pass_cd = test_pending_pass(
+            Team::Home,
+            c,
+            d,
+            Vec2::new(43.0, 49.0),
+            Vec2::new(51.0, 49.5),
+        );
+        sim.record_completed_pass_reward(&pass_cd, d);
+        sim.tick += 1;
+        sim.clock_seconds += 1.0;
+        sim.ball.holder = Some(d);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.position = Vec2::new(51.0, 49.5);
+        sim.players[d].position = sim.ball.position;
+        let before = WorldSnapshot::from_match(&sim);
+        sim.players[d].last_decision = Some(test_decision_trace(&before, d, "dribble"));
+        let mut after = before.clone();
+        after.ball.position.y += 1.2;
+        let event_start = sim.reward_events.len();
+
+        sim.update_pass_chain_continuation_rewards(&before, &after, true);
+
+        let reward_for = |player_id| {
+            sim.reward_events[event_start..]
+                .iter()
+                .filter(|event| event.player_id == player_id)
+                .map(|event| event.amount)
+                .sum::<f64>()
+        };
+        assert!(
+            reward_for(c) > 0.0,
+            "passer C into D should receive continuation credit"
+        );
+        assert!(
+            reward_for(b) > 0.0,
+            "passer B into C should receive continuation credit"
+        );
+        assert_eq!(
+            reward_for(a),
+            0.0,
+            "A is outside the two-passer continuation window"
         );
     }
 
@@ -30266,6 +30845,96 @@ mod tests {
             defender_penalty < 0.0,
             "defender penalty: {defender_penalty}"
         );
+    }
+
+    #[test]
+    fn teamwork_progress_signal_rewards_near_ball_unit_marching_upfield() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 1.0,
+            duration_seconds: 2.0,
+            seed: 1571,
+            ..Default::default()
+        });
+        let holder = 5;
+        let support = [6, 7, 8, 9];
+        let far_teammate = 10;
+        sim.tick = 75;
+        sim.ball.holder = Some(holder);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.position = Vec2::new(40.0, 42.0);
+        park_players_except(&mut sim, &[holder, 6, 7, 8, 9, far_teammate]);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[6].position = Vec2::new(34.0, 41.0);
+        sim.players[7].position = Vec2::new(46.0, 41.5);
+        sim.players[8].position = Vec2::new(38.0, 38.0);
+        sim.players[9].position = Vec2::new(42.0, 39.0);
+        sim.players[far_teammate].position = Vec2::new(12.0, 16.0);
+        sim.possession_chain.clear();
+        sim.possession_chain.push_back(holder);
+        let setup = WorldSnapshot::from_match(&sim);
+        sim.players[holder].last_decision = Some(test_decision_trace(&setup, holder, "dribble"));
+        for teammate in support {
+            sim.players[teammate].last_decision =
+                Some(test_decision_trace(&setup, teammate, "space"));
+        }
+        let before = WorldSnapshot::from_match(&sim);
+
+        sim.ball.position = Vec2::new(40.5, 46.0);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[6].position.y += 1.5;
+        sim.players[7].position.y += 1.4;
+        sim.players[8].position.y += 1.2;
+        sim.players[9].position.y += 1.1;
+        let after = WorldSnapshot::from_match(&sim);
+        let event_start = sim.reward_events.len();
+
+        sim.update_possession_chase_trackers(&before, &after, true);
+
+        assert!(sim.stats.teamwork_upfield_progress_home > 0.0);
+        assert!(sim.stats.teamwork_near_ball_progress_home > 0.0);
+        let reward_for = |player_id| {
+            sim.reward_events[event_start..]
+                .iter()
+                .filter(|event| event.player_id == player_id)
+                .map(|event| event.amount)
+                .sum::<f64>()
+        };
+        assert!(reward_for(holder) > 0.0);
+        assert!(reward_for(6) > 0.0);
+        assert_eq!(reward_for(far_teammate), 0.0);
+    }
+
+    #[test]
+    fn teamwork_progress_signal_does_not_reward_in_place_possession() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 1.0,
+            duration_seconds: 2.0,
+            seed: 1572,
+            ..Default::default()
+        });
+        let holder = 5;
+        sim.tick = 76;
+        sim.ball.holder = Some(holder);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.position = Vec2::new(40.0, 42.0);
+        park_players_except(&mut sim, &[holder, 6, 7, 8, 9]);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[6].position = Vec2::new(34.0, 41.0);
+        sim.players[7].position = Vec2::new(46.0, 41.5);
+        sim.players[8].position = Vec2::new(38.0, 38.0);
+        sim.players[9].position = Vec2::new(42.0, 39.0);
+        let before = WorldSnapshot::from_match(&sim);
+
+        sim.ball.position = Vec2::new(40.25, 42.0);
+        sim.players[holder].position = sim.ball.position;
+        let after = WorldSnapshot::from_match(&sim);
+        let event_start = sim.reward_events.len();
+
+        sim.update_possession_chase_trackers(&before, &after, true);
+
+        assert_eq!(sim.reward_events.len(), event_start);
+        assert_eq!(sim.stats.teamwork_upfield_progress_home, 0.0);
+        assert_eq!(sim.stats.teamwork_near_ball_progress_home, 0.0);
     }
 
     #[test]

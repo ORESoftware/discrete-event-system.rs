@@ -1345,6 +1345,7 @@ mod tests {
     use super::{
         build_problem_from_request, solve_planner, solve_planner_summary, PlannerResponse,
     };
+    use crate::des::animation::types::Shape;
     use crate::des::general::ip_mip_des::validate_ipmip_problem;
     use crate::des::general::soccer_rotation::build_soccer_ipmip;
     use crate::des::soccer_planner::{default_planner_request, PlannerPlayer, PlannerRequest};
@@ -1416,6 +1417,27 @@ mod tests {
         assert_eq!(resp.bench.len(), 18);
     }
 
+    fn solver_animation_contains_text(resp: &PlannerResponse, needle: &str) -> bool {
+        resp.solver_animation.frames.iter().any(|frame| {
+            frame
+                .caption
+                .as_deref()
+                .is_some_and(|caption| caption.contains(needle))
+                || frame.shapes.iter().any(|shape| match shape {
+                    Shape::Text(text) => text.text.contains(needle),
+                    Shape::Rect(rect) => rect
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label.contains(needle)),
+                    Shape::Circle(circle) => circle
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label.contains(needle)),
+                    _ => false,
+                })
+        })
+    }
+
     #[test]
     fn default_planner_request_solves() {
         let req = default_planner_request();
@@ -1459,6 +1481,34 @@ mod tests {
             .solver_notes
             .iter()
             .any(|note| note.contains("Branch-and-bound completed")));
+    }
+
+    #[test]
+    fn forced_branch_and_cut_solver_tab_renders_internal_backend() {
+        let resp = solve_planner(&tiny_branch_and_cut_request());
+
+        assert!(
+            resp.ok,
+            "branch-and-cut planner solve failed: {:?}",
+            resp.error
+        );
+        assert!(!resp.used_fallback, "fallback={:?}", resp.fallback_reason);
+        assert_eq!(
+            resp.solver_animation.title.as_deref(),
+            Some("IP/MIP branch-and-cut")
+        );
+        assert_eq!(
+            resp.solver_animation.subtitle.as_deref(),
+            Some("IP/MIP branch-and-cut")
+        );
+        assert!(
+            solver_animation_contains_text(&resp, "internal-simplex"),
+            "solver tab should show the internal LP backend"
+        );
+        assert!(
+            solver_animation_contains_text(&resp, "LP Relaxation"),
+            "solver tab should show the LP-relaxation station label"
+        );
     }
 
     #[test]

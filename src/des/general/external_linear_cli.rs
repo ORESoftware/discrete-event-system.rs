@@ -2,15 +2,16 @@
 //!
 //! This module exposes a Rust-facing interface for solver executables that are
 //! installed locally (for example through Homebrew) without vendoring any
-//! external binaries into the repository. HiGHS, GLPK, CBC, and CLP plain solves
-//! run through native Rust CLI paths; the broader solver-specific command lines
-//! and parsers still live in `scripts/linear_cli_reference.py` as a
-//! compatibility bridge.
+//! external binaries into the repository. Plain LP/MIP solves for the common
+//! open-source CLIs run through native Rust paths where practical; the broader
+//! solver-specific command lines and parsers still live in
+//! `scripts/linear_cli_reference.py` as a compatibility bridge.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -1286,11 +1287,17 @@ pub fn solve_lp_with_external_cli(
     if should_use_native_glpk_cli(opts) {
         return solve_lp_with_native_glpk_cli(problem, opts);
     }
+    if should_use_native_scip_cli(ExternalLinearCliKind::Lp, opts) {
+        return solve_lp_with_native_scip_cli(problem, opts);
+    }
     if should_use_native_cbc_cli(opts) {
         return solve_lp_with_native_cbc_cli(problem, opts);
     }
     if should_use_native_clp_cli(opts) {
         return solve_lp_with_native_clp_cli(problem, opts);
+    }
+    if should_use_native_soplex_cli(opts) {
+        return solve_lp_with_native_soplex_cli(problem, opts);
     }
     solve_linear_cli_json(
         ExternalLinearCliKind::Lp,
@@ -1309,6 +1316,9 @@ pub fn solve_ipmip_with_external_cli(
     }
     if should_use_native_glpk_cli(opts) {
         return solve_ipmip_with_native_glpk_cli(problem, opts);
+    }
+    if should_use_native_scip_cli(ExternalLinearCliKind::Mip, opts) {
+        return solve_ipmip_with_native_scip_cli(problem, opts);
     }
     if should_use_native_cbc_cli(opts) {
         return solve_ipmip_with_native_cbc_cli(problem, opts);
@@ -1732,12 +1742,26 @@ pub fn solve_linear_cli_json(
         }
     };
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        if let Err(err) = stdin.write_all(stdin_json.as_bytes()) {
+    match child.stdin.as_mut() {
+        Some(stdin) => {
+            if let Err(err) = stdin.write_all(stdin_json.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return external_cli_failure(
+                    ExternalLinearCliStatus::NumericalError,
+                    bridge_solver,
+                    format!("failed to write local CLI bridge stdin: {err}"),
+                    elapsed_ms(t0),
+                );
+            }
+        }
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
             return external_cli_failure(
                 ExternalLinearCliStatus::NumericalError,
                 bridge_solver,
-                format!("failed to write local CLI bridge stdin: {err}"),
+                "local CLI bridge stdin pipe was unavailable".to_string(),
                 elapsed_ms(t0),
             );
         }
@@ -1959,9 +1983,386 @@ fn solve_ipmip_with_native_glpk_cli(
     )
 }
 
+fn should_use_native_scip_cli(
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Scip
+        || opts.script_path.is_some()
+        || opts.lp_algorithm.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.integer_feasibility_tolerance.is_some()
+        || opts.branch_rule.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.node_selection.is_some()
+        || opts.mip_start.is_some()
+        || matches!(opts.presolve, Some(ExternalLinearCliPresolve::Auto))
+        || matches!(opts.cuts, Some(ExternalLinearCliMipSwitch::Auto))
+        || !matches!(
+            opts.heuristics,
+            None | Some(ExternalLinearCliMipSwitch::Off)
+        )
+    {
+        return false;
+    }
+
+    if kind == ExternalLinearCliKind::Lp {
+        return opts.max_nodes.is_none()
+            && opts.node_limit.is_none()
+            && opts.solution_limit.is_none()
+            && opts.relative_gap.is_none()
+            && opts.absolute_gap.is_none()
+            && opts.objective_limit.is_none()
+            && opts.cuts.is_none()
+            && opts.heuristics.is_none();
+    }
+
+    true
+}
+
+fn solve_lp_with_native_scip_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    solve_native_scip_cli_model(
+        ExternalLinearCliKind::Lp,
+        &model_text,
+        problem.c.len(),
+        problem.sense,
+        problem.a_ub.as_deref().unwrap_or(&[]),
+        problem.a_eq.as_deref().unwrap_or(&[]),
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_scip_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
+    };
+    solve_native_scip_cli_model(
+        ExternalLinearCliKind::Mip,
+        &model_text,
+        problem.c.len(),
+        problem.sense,
+        &[],
+        &[],
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_native_scip_cli_model(
+    kind: ExternalLinearCliKind,
+    model_text: &str,
+    variable_count: usize,
+    sense: Sense,
+    le_rows: &[Vec<f64>],
+    eq_rows: &[Vec<f64>],
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "scip:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Scip, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "scip executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_scip_temp_path("model", extension);
+    let solution_path = native_scip_temp_path("solution", "sol");
+    let cleanup_paths = vec![model_path.clone(), solution_path.clone()];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_scip_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write SCIP model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    add_native_scip_option_commands(&mut command, kind, opts);
+    if kind == ExternalLinearCliKind::Lp {
+        command
+            .arg("-c")
+            .arg("set presolving maxrounds 0")
+            .arg("-c")
+            .arg("set separating maxrounds 0")
+            .arg("-c")
+            .arg("set heuristics trivial freq -1");
+    }
+    command
+        .arg("-c")
+        .arg(format!("read {}", model_path.display()))
+        .arg("-c")
+        .arg(format!(
+            "set limits time {:.17}",
+            normalized_time_limit(opts.time_limit_secs)
+        ))
+        .arg("-c")
+        .arg("optimize")
+        .arg("-c")
+        .arg(format!("write solution {}", solution_path.display()));
+    if kind == ExternalLinearCliKind::Lp {
+        command.arg("-c").arg("display dualsolution");
+    }
+    if kind == ExternalLinearCliKind::Mip {
+        command.arg("-c").arg("display statistics");
+    }
+    command
+        .arg("-c")
+        .arg("quit")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_scip_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start SCIP executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_scip_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_scip_solver_version(&command_path));
+
+    let parsed =
+        match parse_native_scip_solution_file(&solution_path, variable_count, &stdout, &stderr) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                let status = classify_native_linear_status("", &stdout, &stderr);
+                cleanup_native_scip_temp_files(&cleanup_paths);
+                let mut failure = external_cli_failure(
+                    if matches!(
+                        status,
+                        ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+                    ) {
+                        status
+                    } else {
+                        ExternalLinearCliStatus::Unavailable
+                    },
+                    bridge_solver,
+                    message,
+                    elapsed,
+                );
+                failure.solver_version = solver_version;
+                return failure;
+            }
+        };
+    cleanup_native_scip_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let objective = dot_f64(objective_coefficients, &parsed.x);
+    let quality = parse_scip_mip_quality(kind, objective, &stdout, &stderr);
+    let certificate = (kind == ExternalLinearCliKind::Lp).then(|| {
+        parse_scip_lp_certificate_fields(&stdout, sense, objective_coefficients, le_rows, eq_rows)
+    });
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x,
+        objective: Some(objective),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: quality.best_bound,
+        solution_limit: (kind == ExternalLinearCliKind::Mip)
+            .then(|| opts.solution_limit.map(|limit| limit.max(1)))
+            .flatten(),
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: quality.mip_gap,
+        absolute_gap: quality.absolute_gap,
+        objective_limit: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_objective_limit(opts.objective_limit))
+            .flatten(),
+        primal_feasibility_tolerance: normalized_tolerance(opts.primal_feasibility_tolerance),
+        dual_feasibility_tolerance: normalized_tolerance(opts.dual_feasibility_tolerance),
+        integer_feasibility_tolerance: None,
+        nodes_explored: quality.nodes_explored,
+        threads: opts.threads.filter(|threads| *threads > 0),
+        random_seed: opts.random_seed,
+        presolve: opts.presolve.map(|presolve| presolve.as_str().to_string()),
+        cuts: (kind == ExternalLinearCliKind::Mip)
+            .then(|| opts.cuts.map(|cuts| cuts.as_str().to_string()))
+            .flatten(),
+        heuristics: (kind == ExternalLinearCliKind::Mip)
+            .then(|| {
+                opts.heuristics
+                    .map(|heuristics| heuristics.as_str().to_string())
+            })
+            .flatten(),
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: certificate
+            .as_ref()
+            .and_then(|fields| fields.dual_ub.clone()),
+        dual_eq: certificate
+            .as_ref()
+            .and_then(|fields| fields.dual_eq.clone()),
+        reduced_costs: certificate.and_then(|fields| fields.reduced_costs),
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
+fn add_native_scip_option_commands(
+    command: &mut Command,
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) {
+    if let Some(presolve) = opts.presolve {
+        match presolve {
+            ExternalLinearCliPresolve::On => {
+                command.arg("-c").arg("set presolving maxrounds -1");
+            }
+            ExternalLinearCliPresolve::Off => {
+                command.arg("-c").arg("set presolving maxrounds 0");
+            }
+            ExternalLinearCliPresolve::Auto => {}
+        }
+    }
+    if let Some(random_seed) = opts.random_seed {
+        command
+            .arg("-c")
+            .arg(format!("set randomization randomseedshift {random_seed}"));
+    }
+    if let Some(threads) = opts.threads.filter(|threads| *threads > 0) {
+        command
+            .arg("-c")
+            .arg(format!("set parallel maxnthreads {threads}"));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.primal_feasibility_tolerance) {
+        command
+            .arg("-c")
+            .arg(format!("set numerics feastol {tolerance:.17}"));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.dual_feasibility_tolerance) {
+        command
+            .arg("-c")
+            .arg(format!("set numerics dualfeastol {tolerance:.17}"));
+    }
+    if kind != ExternalLinearCliKind::Mip {
+        return;
+    }
+    if let Some(cuts) = opts.cuts {
+        match cuts {
+            ExternalLinearCliMipSwitch::On => {
+                command
+                    .arg("-c")
+                    .arg("set separating maxrounds -1")
+                    .arg("-c")
+                    .arg("set separating maxroundsroot -1");
+            }
+            ExternalLinearCliMipSwitch::Off => {
+                command
+                    .arg("-c")
+                    .arg("set separating maxrounds 0")
+                    .arg("-c")
+                    .arg("set separating maxroundsroot 0");
+            }
+            ExternalLinearCliMipSwitch::Auto => {}
+        }
+    }
+    if opts.heuristics == Some(ExternalLinearCliMipSwitch::Off) {
+        command.arg("-c").arg("set heuristics emphasis off");
+    }
+    if let Some(max_nodes) = opts
+        .max_nodes
+        .or_else(|| opts.node_limit.map(|limit| limit as u64))
+        .filter(|limit| *limit > 0)
+    {
+        command
+            .arg("-c")
+            .arg(format!("set limits nodes {max_nodes}"));
+    }
+    if let Some(solution_limit) = opts.solution_limit.filter(|limit| *limit > 0) {
+        command
+            .arg("-c")
+            .arg(format!("set limits solutions {solution_limit}"));
+    }
+    if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+        command
+            .arg("-c")
+            .arg(format!("set limits gap {relative_gap:.17}"));
+    }
+    if let Some(absolute_gap) = normalized_absolute_gap(opts.absolute_gap) {
+        command
+            .arg("-c")
+            .arg(format!("set limits absgap {absolute_gap:.17}"));
+    }
+    if let Some(objective_limit) = normalized_objective_limit(opts.objective_limit) {
+        command
+            .arg("-c")
+            .arg(format!("set limits primal {objective_limit:.17}"));
+    }
+}
+
 fn should_use_native_cbc_cli(opts: &ExternalLinearCliOptions) -> bool {
     opts.solver == ExternalLinearCliSolver::Cbc
-        && opts.python.is_none()
         && opts.script_path.is_none()
         && opts.lp_algorithm.is_none()
         && opts.max_nodes.is_none()
@@ -1993,7 +2394,11 @@ fn solve_native_plain_cli_json_direct(
 ) -> Option<ExternalLinearCliSolution> {
     let use_highs = should_use_native_highs_cli(kind, opts);
     let use_glpk = should_use_native_glpk_cli(opts);
-    if !use_highs && !use_glpk {
+    let use_scip = should_use_native_scip_cli(kind, opts);
+    let use_cbc = should_use_native_cbc_cli(opts);
+    let use_clp = kind == ExternalLinearCliKind::Lp && should_use_native_clp_cli(opts);
+    let use_soplex = kind == ExternalLinearCliKind::Lp && should_use_native_soplex_cli(opts);
+    if !use_highs && !use_glpk && !use_scip && !use_cbc && !use_clp && !use_soplex {
         return None;
     }
 
@@ -2033,6 +2438,40 @@ fn solve_native_plain_cli_json_direct(
             &model.c,
             opts,
         ),
+        ExternalLinearCliSolver::Scip => solve_native_scip_cli_model(
+            kind,
+            &model_text,
+            model.c.len(),
+            model.sense,
+            &model.le_rows,
+            &model.eq_rows,
+            &model.c,
+            opts,
+        ),
+        ExternalLinearCliSolver::Cbc => solve_native_cbc_cli_model(
+            kind,
+            model.sense,
+            &model_text,
+            model.c.len(),
+            model.le_rows.len(),
+            model.eq_rows.len(),
+            &model.c,
+            opts,
+        ),
+        ExternalLinearCliSolver::Clp if kind == ExternalLinearCliKind::Lp => {
+            solve_native_clp_cli_model(
+                model.sense,
+                &model_text,
+                model.c.len(),
+                model.le_rows.len(),
+                model.eq_rows.len(),
+                &model.c,
+                opts,
+            )
+        }
+        ExternalLinearCliSolver::Soplex if kind == ExternalLinearCliKind::Lp => {
+            solve_native_soplex_cli_model(&model_text, model.c.len(), &model.c, opts)
+        }
         _ => return None,
     };
     Some(solution)
@@ -2523,7 +2962,6 @@ fn solve_ipmip_with_native_cbc_cli(
 
 fn should_use_native_clp_cli(opts: &ExternalLinearCliOptions) -> bool {
     opts.solver == ExternalLinearCliSolver::Clp
-        && opts.python.is_none()
         && opts.script_path.is_none()
         && opts.lp_algorithm.is_none()
         && opts.max_nodes.is_none()
@@ -2566,6 +3004,42 @@ fn solve_lp_with_native_clp_cli(
         &problem.c,
         opts,
     )
+}
+
+fn should_use_native_soplex_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.solver == ExternalLinearCliSolver::Soplex
+        && opts.script_path.is_none()
+        && opts.lp_algorithm.is_none()
+        && opts.max_nodes.is_none()
+        && opts.node_limit.is_none()
+        && opts.solution_limit.is_none()
+        && opts.solution_pool_size.is_none()
+        && opts.relative_gap.is_none()
+        && opts.absolute_gap.is_none()
+        && opts.objective_limit.is_none()
+        && opts.primal_feasibility_tolerance.is_none()
+        && opts.dual_feasibility_tolerance.is_none()
+        && opts.integer_feasibility_tolerance.is_none()
+        && opts.threads.is_none()
+        && opts.random_seed.is_none()
+        && opts.presolve.is_none()
+        && opts.cuts.is_none()
+        && opts.heuristics.is_none()
+        && opts.branch_rule.is_none()
+        && opts.branch_priorities.is_none()
+        && opts.node_selection.is_none()
+        && opts.mip_start.is_none()
+}
+
+fn solve_lp_with_native_soplex_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    solve_native_soplex_cli_model(&model_text, problem.c.len(), &problem.c, opts)
 }
 
 fn solve_native_cbc_cli_model(
@@ -2722,26 +3196,28 @@ fn solve_native_cbc_cli_model(
         return failure;
     }
 
+    let objective = dot_f64(objective_coefficients, &parsed.x);
+    let quality = parse_cbc_mip_quality(kind, status, objective, &stdout, &stderr);
     ExternalLinearCliSolution {
         status,
         solver: bridge_solver,
         solver_version,
         x: parsed.x.clone(),
-        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective: Some(objective),
         objective_values: None,
         lp_algorithm: None,
-        best_bound: None,
+        best_bound: quality.best_bound,
         solution_limit: None,
         solution_pool_size: None,
         solutions: None,
         exhausted: None,
-        mip_gap: None,
-        absolute_gap: None,
+        mip_gap: quality.mip_gap,
+        absolute_gap: quality.absolute_gap,
         objective_limit: None,
         primal_feasibility_tolerance: None,
         dual_feasibility_tolerance: None,
         integer_feasibility_tolerance: None,
-        nodes_explored: None,
+        nodes_explored: quality.nodes_explored,
         threads: None,
         random_seed: None,
         presolve: None,
@@ -2973,6 +3449,167 @@ fn solve_native_clp_cli_model(
     }
 }
 
+fn solve_native_soplex_cli_model(
+    model_text: &str,
+    variable_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "soplex:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Soplex, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "soplex executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_soplex_temp_path("model", extension);
+    let solution_path = native_soplex_temp_path("solution", "sol");
+    let cleanup_paths = vec![model_path.clone(), solution_path.clone()];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_soplex_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write SoPlex model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let output = match Command::new(&command_path)
+        .arg("-v3")
+        .arg(format!(
+            "-t{:.17}",
+            normalized_time_limit(opts.time_limit_secs)
+        ))
+        .arg(format!("-x={}", solution_path.display()))
+        .arg(&model_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_soplex_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start SoPlex executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_soplex_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_soplex_solver_version(&command_path));
+
+    let parsed =
+        match parse_native_soplex_solution_file(&solution_path, variable_count, &stdout, &stderr) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                let status = classify_native_linear_status("", &stdout, &stderr);
+                cleanup_native_soplex_temp_files(&cleanup_paths);
+                let mut failure = external_cli_failure(
+                    if matches!(
+                        status,
+                        ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+                    ) {
+                        status
+                    } else {
+                        ExternalLinearCliStatus::Unavailable
+                    },
+                    bridge_solver,
+                    message,
+                    elapsed,
+                );
+                failure.solver_version = solver_version;
+                return failure;
+            }
+        };
+    cleanup_native_soplex_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: parse_soplex_lp_iterations(&stdout, &stderr),
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
 fn solve_native_glpk_cli_model(
     kind: ExternalLinearCliKind,
     sense: Sense,
@@ -3134,26 +3771,28 @@ fn solve_native_glpk_cli_model(
         return failure;
     }
 
+    let objective = dot_f64(objective_coefficients, &parsed.x);
+    let quality = parse_glpk_mip_quality(kind, status, objective, &stdout, &stderr);
     ExternalLinearCliSolution {
         status,
         solver: bridge_solver,
         solver_version,
         x: parsed.x.clone(),
-        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective: Some(objective),
         objective_values: None,
         lp_algorithm: None,
-        best_bound: None,
+        best_bound: quality.best_bound,
         solution_limit: None,
         solution_pool_size: None,
         solutions: None,
         exhausted: None,
-        mip_gap: None,
-        absolute_gap: None,
+        mip_gap: quality.mip_gap,
+        absolute_gap: quality.absolute_gap,
         objective_limit: None,
         primal_feasibility_tolerance: None,
         dual_feasibility_tolerance: None,
         integer_feasibility_tolerance: None,
-        nodes_explored: None,
+        nodes_explored: quality.nodes_explored,
         threads: None,
         random_seed: None,
         presolve: None,
@@ -3451,6 +4090,12 @@ struct ParsedNativeGlpkSolution {
 }
 
 #[derive(Default)]
+struct ParsedNativeScipSolution {
+    status: String,
+    x: Vec<f64>,
+}
+
+#[derive(Default)]
 struct ParsedNativeCbcSolution {
     status: String,
     x: Vec<f64>,
@@ -3462,6 +4107,12 @@ struct ParsedNativeCbcSolution {
 }
 
 #[derive(Default)]
+struct ParsedNativeSoplexSolution {
+    status: String,
+    x: Vec<f64>,
+}
+
+#[derive(Default)]
 struct HighsMipQuality {
     best_bound: Option<f64>,
     mip_gap: Option<f64>,
@@ -3470,12 +4121,18 @@ struct HighsMipQuality {
 }
 
 fn native_highs_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("highs", stem, extension)
+}
+
+fn native_solver_temp_path(solver: &str, stem: &str, extension: &str) -> PathBuf {
+    static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
+    let sequence = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "ores-native-highs-{stem}-{}-{nanos}.{extension}",
+        "ores-native-{solver}-{stem}-{}-{nanos}-{sequence}.{extension}",
         std::process::id()
     ))
 }
@@ -3487,14 +4144,7 @@ fn cleanup_native_highs_temp_files(paths: &[PathBuf]) {
 }
 
 fn native_glpk_temp_path(stem: &str, extension: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "ores-native-glpk-{stem}-{}-{nanos}.{extension}",
-        std::process::id()
-    ))
+    native_solver_temp_path("glpk", stem, extension)
 }
 
 fn cleanup_native_glpk_temp_files(paths: &[PathBuf]) {
@@ -3503,15 +4153,18 @@ fn cleanup_native_glpk_temp_files(paths: &[PathBuf]) {
     }
 }
 
+fn native_scip_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("scip", stem, extension)
+}
+
+fn cleanup_native_scip_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn native_cbc_temp_path(stem: &str, extension: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "ores-native-cbc-{stem}-{}-{nanos}.{extension}",
-        std::process::id()
-    ))
+    native_solver_temp_path("cbc", stem, extension)
 }
 
 fn cleanup_native_cbc_temp_files(paths: &[PathBuf]) {
@@ -3521,17 +4174,20 @@ fn cleanup_native_cbc_temp_files(paths: &[PathBuf]) {
 }
 
 fn native_clp_temp_path(stem: &str, extension: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "ores-native-clp-{stem}-{}-{nanos}.{extension}",
-        std::process::id()
-    ))
+    native_solver_temp_path("clp", stem, extension)
 }
 
 fn cleanup_native_clp_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn native_soplex_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("soplex", stem, extension)
+}
+
+fn cleanup_native_soplex_temp_files(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
     }
@@ -3863,6 +4519,129 @@ fn parse_native_glpk_solution_text(
     })
 }
 
+fn parse_native_scip_solution_file(
+    path: &Path,
+    variable_count: usize,
+    stdout: &str,
+    stderr: &str,
+) -> Result<ParsedNativeScipSolution, String> {
+    if !path.exists() {
+        return Err(native_solver_message("", stdout, stderr));
+    }
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read SCIP solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    Ok(parse_native_scip_solution_text(&text, variable_count))
+}
+
+fn parse_native_scip_solution_text(text: &str, variable_count: usize) -> ParsedNativeScipSolution {
+    let mut parsed = ParsedNativeScipSolution {
+        status: "unknown".to_string(),
+        x: vec![0.0; variable_count],
+    };
+    for line in text.lines() {
+        let stripped = line.trim();
+        if let Some((_, status)) = stripped.split_once("solution status:") {
+            parsed.status = status.trim().to_ascii_lowercase();
+            continue;
+        }
+        if let Some((index, value)) = parse_named_variable_value_line(stripped, variable_count) {
+            parsed.x[index] = value;
+        }
+    }
+    parsed
+}
+
+struct ScipLpCertificateFields {
+    dual_ub: Option<Vec<f64>>,
+    dual_eq: Option<Vec<f64>>,
+    reduced_costs: Option<Vec<f64>>,
+}
+
+fn parse_scip_lp_certificate_fields(
+    stdout: &str,
+    _sense: Sense,
+    objective_coefficients: &[f64],
+    le_rows: &[Vec<f64>],
+    eq_rows: &[Vec<f64>],
+) -> ScipLpCertificateFields {
+    let mut dual_ub = vec![0.0; le_rows.len()];
+    let mut dual_eq = vec![0.0; eq_rows.len()];
+    let mut saw_dual = false;
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        let Some(value) = parts.next().and_then(parse_f64_token) else {
+            continue;
+        };
+        if let Some(index) = numbered_name_suffix(name, "c") {
+            if index < dual_ub.len() {
+                dual_ub[index] = clean_certificate_value(value);
+                saw_dual = true;
+            }
+        } else if let Some(index) = numbered_name_suffix(name, "e") {
+            if index < dual_eq.len() {
+                dual_eq[index] = clean_certificate_value(value);
+                saw_dual = true;
+            }
+        }
+    }
+
+    let reduced_costs = saw_dual.then(|| {
+        reduced_costs_from_row_duals(objective_coefficients, le_rows, &dual_ub, eq_rows, &dual_eq)
+    });
+    ScipLpCertificateFields {
+        dual_ub: saw_dual.then_some(dual_ub),
+        dual_eq: saw_dual.then_some(dual_eq),
+        reduced_costs,
+    }
+}
+
+fn reduced_costs_from_row_duals(
+    objective_coefficients: &[f64],
+    le_rows: &[Vec<f64>],
+    dual_ub: &[f64],
+    eq_rows: &[Vec<f64>],
+    dual_eq: &[f64],
+) -> Vec<f64> {
+    objective_coefficients
+        .iter()
+        .enumerate()
+        .map(|(col, coeff)| {
+            let le_part = le_rows
+                .iter()
+                .zip(dual_ub)
+                .filter_map(|(row, dual)| row.get(col).map(|value| value * dual))
+                .sum::<f64>();
+            let eq_part = eq_rows
+                .iter()
+                .zip(dual_eq)
+                .filter_map(|(row, dual)| row.get(col).map(|value| value * dual))
+                .sum::<f64>();
+            clean_certificate_value(coeff - le_part - eq_part)
+        })
+        .collect()
+}
+
+fn clean_certificate_value(value: f64) -> f64 {
+    if value.abs() <= 1e-8 {
+        0.0
+    } else {
+        value
+    }
+}
+
+fn numbered_name_suffix(name: &str, prefix: &str) -> Option<usize> {
+    name.strip_prefix(prefix)
+        .filter(|suffix| !suffix.is_empty())
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+}
+
 fn parse_native_cbc_solution_file(
     path: &Path,
     variable_count: usize,
@@ -4002,6 +4781,102 @@ fn parse_native_cbc_basis_text(
     }
 
     (all_some_string(&var_basis), all_some_string(&row_basis))
+}
+
+fn parse_native_soplex_solution_file(
+    path: &Path,
+    variable_count: usize,
+    stdout: &str,
+    stderr: &str,
+) -> Result<ParsedNativeSoplexSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read SoPlex solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    Ok(parse_native_soplex_solution_text(
+        &text,
+        variable_count,
+        stdout,
+        stderr,
+    ))
+}
+
+fn parse_native_soplex_solution_text(
+    text: &str,
+    variable_count: usize,
+    stdout: &str,
+    stderr: &str,
+) -> ParsedNativeSoplexSolution {
+    let mut x = vec![0.0; variable_count];
+    let lower = format!("{stdout}\n{stderr}\n{text}").to_ascii_lowercase();
+    let status = if lower.contains("infeasible") {
+        "infeasible"
+    } else if lower.contains("unbounded") {
+        "unbounded"
+    } else if lower.contains("problem is solved [optimal]") || lower.contains("primal solution") {
+        "optimal"
+    } else {
+        "unknown"
+    }
+    .to_string();
+
+    for line in text.lines() {
+        if let Some((idx, value)) = parse_named_variable_value_line(line, variable_count) {
+            x[idx] = value;
+        }
+    }
+    ParsedNativeSoplexSolution { status, x }
+}
+
+fn parse_named_variable_value_line(line: &str, variable_count: usize) -> Option<(usize, f64)> {
+    let bytes = line.as_bytes();
+    for start in 0..bytes.len() {
+        if !matches!(bytes[start], b'x' | b'X') {
+            continue;
+        }
+        if start > 0 && is_ascii_word_byte(bytes[start - 1]) {
+            continue;
+        }
+        let mut end = start + 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == start + 1 {
+            continue;
+        }
+        if end < bytes.len() && is_ascii_word_byte(bytes[end]) {
+            continue;
+        }
+        let idx = line[start + 1..end].parse::<usize>().ok()?;
+        if idx >= variable_count {
+            continue;
+        }
+        for token in
+            line[end..].split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '='))
+        {
+            if let Some(value) = parse_f64_token(token) {
+                return Some((idx, value));
+            }
+        }
+        let mut before_value = None;
+        for token in line[..start]
+            .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '='))
+        {
+            if let Some(value) = parse_f64_token(token) {
+                before_value = Some(value);
+            }
+        }
+        if let Some(value) = before_value {
+            return Some((idx, value));
+        }
+    }
+    None
+}
+
+fn is_ascii_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn highs_variable_index(name: &str) -> Option<usize> {
@@ -4183,6 +5058,37 @@ fn probe_glpk_solver_version(command_path: &Path) -> Option<String> {
     parse_glpk_solver_version(&text)
 }
 
+fn parse_scip_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some((_, rest)) = line.split_once("SCIP version ") {
+            let version = rest
+                .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')' || ch == '[')
+                .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                .unwrap_or("")
+                .trim();
+            if !version.is_empty() {
+                return Some(format!("SCIP {version}"));
+            }
+        }
+    }
+    None
+}
+
+fn probe_scip_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_scip_solver_version(&text)
+}
+
 fn parse_cbc_solver_version(text: &str) -> Option<String> {
     for line in text.lines() {
         if let Some((_, rest)) = line.split_once("Version:") {
@@ -4216,15 +5122,20 @@ fn probe_cbc_solver_version(command_path: &Path) -> Option<String> {
 
 fn parse_clp_solver_version(text: &str) -> Option<String> {
     for line in text.lines() {
-        if let Some((_, rest)) = line.split_once("Version:") {
-            let version = rest
-                .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
-                .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
-                .unwrap_or("")
-                .trim();
-            if !version.is_empty() {
-                return Some(format!("CLP {version}"));
-            }
+        let rest = if let Some((_, rest)) = line.split_once("Version:") {
+            rest
+        } else if let Some((_, rest)) = line.split_once("Coin LP version ") {
+            rest
+        } else {
+            continue;
+        };
+        let version = rest
+            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+            .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+            .unwrap_or("")
+            .trim();
+        if !version.is_empty() {
+            return Some(format!("CLP {version}"));
         }
     }
     None
@@ -4243,6 +5154,37 @@ fn probe_clp_solver_version(command_path: &Path) -> Option<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     parse_clp_solver_version(&text)
+}
+
+fn parse_soplex_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some((_, rest)) = line.split_once("SoPlex version ") {
+            let version = rest
+                .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')' || ch == '[')
+                .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                .unwrap_or("")
+                .trim();
+            if !version.is_empty() {
+                return Some(format!("SoPlex {version}"));
+            }
+        }
+    }
+    None
+}
+
+fn probe_soplex_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("-v0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_soplex_solver_version(&text)
 }
 
 fn parse_highs_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
@@ -4299,6 +5241,21 @@ fn parse_cbc_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
     None
 }
 
+fn parse_soplex_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("iterations") {
+            if let Some(value) = first_float_after_colon(stripped) {
+                if value >= 0.0 && value.is_finite() {
+                    return Some(value.round() as u64);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn parse_highs_mip_quality(
     kind: ExternalLinearCliKind,
     objective: f64,
@@ -4341,6 +5298,150 @@ fn parse_highs_mip_quality(
     quality
 }
 
+fn parse_glpk_mip_quality(
+    kind: ExternalLinearCliKind,
+    status: ExternalLinearCliStatus,
+    objective: f64,
+    stdout: &str,
+    stderr: &str,
+) -> HighsMipQuality {
+    if kind != ExternalLinearCliKind::Mip {
+        return HighsMipQuality::default();
+    }
+    let mut quality = HighsMipQuality::default();
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.contains("integer optimal solution found by mip preprocessor") {
+            quality.nodes_explored = Some(0);
+        }
+        if lowered.contains("mip =") {
+            if let Some(gap) = percent_gap_from_line(stripped) {
+                quality.mip_gap = Some(gap);
+            }
+        }
+    }
+    fill_optimal_mip_quality(status, objective, &mut quality);
+    quality
+}
+
+fn parse_cbc_mip_quality(
+    kind: ExternalLinearCliKind,
+    status: ExternalLinearCliStatus,
+    objective: f64,
+    stdout: &str,
+    stderr: &str,
+) -> HighsMipQuality {
+    if kind != ExternalLinearCliKind::Mip {
+        return HighsMipQuality::default();
+    }
+    let mut quality = HighsMipQuality::default();
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("enumerated nodes") {
+            quality.nodes_explored = first_float_after_colon(stripped)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.round() as u64);
+        } else if lowered.starts_with("gap") {
+            quality.mip_gap = first_float_after_colon(stripped).map(|gap| {
+                if stripped.contains('%') {
+                    gap / 100.0
+                } else {
+                    gap
+                }
+            });
+        } else if lowered.starts_with("lower bound")
+            || lowered.starts_with("best possible")
+            || lowered.starts_with("best bound")
+        {
+            quality.best_bound =
+                first_float_after_colon(stripped).or_else(|| first_float(stripped));
+        }
+    }
+    fill_optimal_mip_quality(status, objective, &mut quality);
+    quality
+}
+
+fn parse_scip_mip_quality(
+    kind: ExternalLinearCliKind,
+    objective: f64,
+    stdout: &str,
+    stderr: &str,
+) -> HighsMipQuality {
+    if kind != ExternalLinearCliKind::Mip {
+        return HighsMipQuality::default();
+    }
+    let mut quality = HighsMipQuality::default();
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("solving nodes") {
+            quality.nodes_explored = first_float_after_colon(stripped)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.round() as u64);
+        } else if lowered.starts_with("dual bound") {
+            quality.best_bound = first_float_after_colon(stripped);
+        } else if lowered.starts_with("gap") {
+            quality.mip_gap = first_float_after_colon(stripped).map(|gap| {
+                if stripped.contains('%') {
+                    gap / 100.0
+                } else {
+                    gap
+                }
+            });
+        }
+    }
+    if let Some(best_bound) = quality.best_bound.filter(|value| value.is_finite()) {
+        quality.absolute_gap = Some((best_bound - objective).abs().max(0.0));
+        if quality.mip_gap.is_none() {
+            quality.mip_gap = Some((best_bound - objective).abs() / objective.abs().max(1.0));
+        }
+    }
+    quality.mip_gap = quality
+        .mip_gap
+        .filter(|value| value.is_finite())
+        .map(|value| value.max(0.0));
+    quality
+}
+
+fn fill_optimal_mip_quality(
+    status: ExternalLinearCliStatus,
+    objective: f64,
+    quality: &mut HighsMipQuality,
+) {
+    if status != ExternalLinearCliStatus::Optimal || !objective.is_finite() {
+        return;
+    }
+    if quality.best_bound.is_none() {
+        quality.best_bound = Some(objective);
+    }
+    if quality.mip_gap.is_none() {
+        quality.mip_gap = Some(0.0);
+    }
+    if quality.absolute_gap.is_none() {
+        quality.absolute_gap = Some(0.0);
+    }
+}
+
+fn percent_gap_from_line(line: &str) -> Option<f64> {
+    let mut saw_percent = false;
+    for token in line.split_whitespace().rev() {
+        let token = token.trim_matches(|ch: char| matches!(ch, ',' | '(' | ')' | '[' | ']'));
+        if token.contains('%') {
+            saw_percent = true;
+            if let Some(value) = parse_f64_token(token) {
+                return Some((value / 100.0).max(0.0));
+            }
+        } else if saw_percent {
+            if let Some(value) = parse_f64_token(token) {
+                return Some((value / 100.0).max(0.0));
+            }
+        }
+    }
+    None
+}
+
 fn first_float_after_colon(line: &str) -> Option<f64> {
     let text = line.split_once(':').map_or(line, |(_, rest)| rest);
     first_float(text)
@@ -4353,7 +5454,11 @@ fn first_float(text: &str) -> Option<f64> {
 }
 
 fn parse_f64_token(token: &str) -> Option<f64> {
-    token.trim().trim_end_matches('%').parse::<f64>().ok()
+    token
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '%' | ',' | '(' | ')' | '[' | ']' | '*'))
+        .parse::<f64>()
+        .ok()
 }
 
 fn dot_f64(left: &[f64], right: &[f64]) -> f64 {
@@ -4376,7 +5481,11 @@ fn native_solver_message(status: &str, stdout: &str, stderr: &str) -> String {
     if !stderr.is_empty() {
         return stderr.to_string();
     }
-    stdout.trim().to_string()
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        return stdout.to_string();
+    }
+    "solver produced no diagnostic output".to_string()
 }
 
 fn external_cli_failure(
@@ -4505,7 +5614,7 @@ fn cplex_lp_string(
     }
     out.push_str("Bounds\n");
     for i in 0..n {
-        if binary_set.contains(&i) {
+        if binary_set.contains(&i) && lp_variable_is_referenced(i, c, le_rows, eq_rows) {
             continue;
         }
         let lb = lbs.get(i).copied().flatten();
@@ -4552,6 +5661,19 @@ fn cplex_lp_string(
     }
     out.push_str("End\n");
     out
+}
+
+fn lp_variable_is_referenced(
+    index: usize,
+    c: &[f64],
+    le_rows: &[Vec<f64>],
+    eq_rows: &[Vec<f64>],
+) -> bool {
+    c.get(index).is_some_and(|coef| coef.abs() > 1.0e-12)
+        || le_rows
+            .iter()
+            .chain(eq_rows)
+            .any(|row| row.get(index).is_some_and(|coef| coef.abs() > 1.0e-12))
 }
 
 fn lp_term_expr(coefs: &[f64], names: &[String]) -> String {
@@ -5326,6 +6448,26 @@ mod tests {
     }
 
     #[test]
+    fn ipmip_cplex_export_declares_unused_binary_columns() {
+        let p = IPMIPProblem {
+            sense: Sense::Min,
+            c: vec![0.0, 0.0, 0.0],
+            a: vec![vec![1.0, 1.0, 0.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true, true],
+            ub: Some(vec![1.0, 1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let text = ipmip_problem_to_cplex_lp_string(&p);
+        assert!(text.contains("Bounds\n 0 <= x2 <= 1\n"));
+        assert!(text.contains("Binary\n x0 x1 x2\n"));
+    }
+
+    #[test]
     fn ipmip_exports_lazy_constraints_as_cli_rows() {
         let p = IPMIPProblem {
             sense: Sense::Max,
@@ -5652,11 +6794,166 @@ ENDATA
     }
 
     #[test]
+    fn native_cbc_mip_quality_parser_reads_optimal_nodes() {
+        let stdout = "\
+Result - Optimal solution found
+
+Objective value:                1.00000000
+Enumerated nodes:               7
+Total iterations:               11
+";
+        let quality = super::parse_cbc_mip_quality(
+            ExternalLinearCliKind::Mip,
+            ExternalLinearCliStatus::Optimal,
+            1.0,
+            stdout,
+            "",
+        );
+        assert_eq!(quality.nodes_explored, Some(7));
+        assert_eq!(quality.best_bound, Some(1.0));
+        assert_eq!(quality.mip_gap, Some(0.0));
+        assert_eq!(quality.absolute_gap, Some(0.0));
+    }
+
+    #[test]
+    fn native_glpk_mip_quality_parser_reads_preprocessor_optimal() {
+        let stdout = "\
+GLPK Integer Optimizer 5.0
+Objective value =   1.000000000e+00
+INTEGER OPTIMAL SOLUTION FOUND BY MIP PREPROCESSOR
+";
+        let quality = super::parse_glpk_mip_quality(
+            ExternalLinearCliKind::Mip,
+            ExternalLinearCliStatus::Optimal,
+            1.0,
+            stdout,
+            "",
+        );
+        assert_eq!(quality.nodes_explored, Some(0));
+        assert_eq!(quality.best_bound, Some(1.0));
+        assert_eq!(quality.mip_gap, Some(0.0));
+        assert_eq!(quality.absolute_gap, Some(0.0));
+    }
+
+    #[test]
     fn native_clp_version_parser_uses_clp_label() {
-        let text = "Coin LP version 1.17.11\nVersion: 1.17.11\n";
+        let text = "Coin LP version 1.17.11, build Mar 11 2026\n";
         assert_eq!(
             super::parse_clp_solver_version(text),
             Some("CLP 1.17.11".to_string())
+        );
+    }
+
+    #[test]
+    fn native_soplex_solution_parser_reads_named_values_and_status() {
+        let solution_text = "\
+Primal solution
+x0 = 1.5
+2.25 x1
+";
+        let stdout = "SoPlex version 8.0.2\nProblem is solved [optimal]\nIterations : 7\n";
+        let parsed = super::parse_native_soplex_solution_text(solution_text, 2, stdout, "");
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![1.5, 2.25]);
+        assert_eq!(
+            super::parse_soplex_solver_version(stdout),
+            Some("SoPlex 8.0.2".to_string())
+        );
+        assert_eq!(super::parse_soplex_lp_iterations(stdout, ""), Some(7));
+    }
+
+    #[test]
+    fn native_scip_solution_parser_reads_named_values_and_quality() {
+        let solution_text = "\
+solution status: optimal solution found
+objective value: 4
+x0 1.5
+x1 2.25
+";
+        let stdout = "\
+SCIP version 10.0.2 [precision: 8 byte]
+Solving Nodes      : 3
+Dual Bound         : 4
+Gap                : 0.00 %
+";
+        let parsed = super::parse_native_scip_solution_text(solution_text, 2);
+        let quality = super::parse_scip_mip_quality(ExternalLinearCliKind::Mip, 4.0, stdout, "");
+        assert_eq!(parsed.status, "optimal solution found");
+        assert_eq!(parsed.x, vec![1.5, 2.25]);
+        assert_eq!(
+            super::parse_scip_solver_version(stdout),
+            Some("SCIP 10.0.2".to_string())
+        );
+        assert_eq!(quality.nodes_explored, Some(3));
+        assert_eq!(quality.best_bound, Some(4.0));
+        assert_eq!(quality.mip_gap, Some(0.0));
+        assert_eq!(quality.absolute_gap, Some(0.0));
+    }
+
+    #[test]
+    fn native_scip_dual_parser_builds_lp_certificates() {
+        let stdout = "\
+objective value:                                   34
+x0                                                  6 \t(obj:3)
+x1                                                  4 \t(obj:4)
+
+
+c0                                   2.33333333333333
+c2                                  0.666666666666667
+";
+        let fields = super::parse_scip_lp_certificate_fields(
+            stdout,
+            Sense::Max,
+            &[3.0, 4.0],
+            &[vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]],
+            &[],
+        );
+        let dual_ub = fields.dual_ub.unwrap();
+        assert!((dual_ub[0] - 7.0 / 3.0).abs() <= 1e-8);
+        assert_eq!(dual_ub[1], 0.0);
+        assert!((dual_ub[2] - 2.0 / 3.0).abs() <= 1e-8);
+        assert_eq!(fields.dual_eq, Some(Vec::new()));
+        assert_eq!(fields.reduced_costs, Some(vec![0.0, 0.0]));
+    }
+
+    #[test]
+    fn native_scip_dual_parser_reads_equality_rows_and_starred_values() {
+        let stdout = "\
+objective value:                                    2
+x0                                                  2 \t(obj:1)
+
+
+e0                                                  1*
+";
+        let fields =
+            super::parse_scip_lp_certificate_fields(stdout, Sense::Max, &[1.0], &[], &[vec![1.0]]);
+        assert_eq!(fields.dual_ub, Some(Vec::new()));
+        assert_eq!(fields.dual_eq, Some(vec![1.0]));
+        assert_eq!(fields.reduced_costs, Some(vec![0.0]));
+    }
+
+    #[test]
+    fn native_numeric_parser_tolerates_solver_punctuation() {
+        assert_eq!(super::parse_f64_token("0.00%"), Some(0.0));
+        assert_eq!(super::parse_f64_token("(7.5%),"), Some(7.5));
+        assert_eq!(super::parse_f64_token("[3.25]"), Some(3.25));
+        assert_eq!(super::parse_f64_token("2*"), Some(2.0));
+        assert_eq!(super::percent_gap_from_line("Gap: (7.5%),"), Some(0.075));
+    }
+
+    #[test]
+    fn native_solver_message_falls_back_when_diagnostics_are_empty() {
+        assert_eq!(
+            super::native_solver_message("", "  \n", "\t"),
+            "solver produced no diagnostic output"
+        );
+        assert_eq!(
+            super::native_solver_message("", "stdout detail", " stderr detail "),
+            "stderr detail"
+        );
+        assert_eq!(
+            super::native_solver_message("optimal", "stdout detail", "stderr detail"),
+            "optimal"
         );
     }
 
@@ -5813,6 +7110,142 @@ ENDATA
             solution.message
         );
         assert_eq!(solution.solver, "glpk:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_scip_json_plain_mip_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Scip) else {
+            eprintln!("SKIP direct SCIP JSON MIP solve: scip command not installed");
+            return;
+        };
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Scip,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-scip-json-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "scip:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_scip_json_unused_binary_mip_reports_infeasible() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Scip) else {
+            eprintln!("SKIP direct SCIP unused-binary MIP solve: scip command not installed");
+            return;
+        };
+        let problem = IPMIPProblem {
+            sense: Sense::Min,
+            c: vec![0.0, 0.0, 0.0],
+            a: vec![
+                vec![-1.0, 0.0, 0.0],
+                vec![0.0, -1.0, 0.0],
+                vec![1.0, 1.0, 0.0],
+            ],
+            b: vec![-1.0, -1.0, 1.0],
+            integer_vars: vec![true, true, true],
+            ub: Some(vec![1.0, 1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            ipmip_problem_to_cli_json(&problem),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Scip,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-scip-unused-binary".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Infeasible,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "scip:cli");
+    }
+
+    #[test]
+    fn native_cbc_json_plain_mip_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Cbc) else {
+            eprintln!("SKIP direct CBC JSON MIP solve: cbc command not installed");
+            return;
+        };
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-cbc-json-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "cbc:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_clp_json_plain_lp_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Clp) else {
+            eprintln!("SKIP direct CLP JSON LP solve: clp command not installed");
+            return;
+        };
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Clp,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-clp-json-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "clp:cli");
         assert_eq!(solution.x, vec![1.0]);
         assert!(solution
             .objective

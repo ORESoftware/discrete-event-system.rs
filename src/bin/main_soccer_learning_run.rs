@@ -17,45 +17,57 @@ use des_engine::des::general::soccer::{
 };
 use serde::Serialize;
 
-fn env_usize(name: &str, default: usize) -> usize {
+fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
-fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(default)
+fn env_usize(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    value.parse::<usize>().map_err(|_| {
+        invalid_data(format!("{name} must be an unsigned integer, got {value:?}")).into()
+    })
 }
 
-fn env_f64(name: &str, default: f64) -> f64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(default)
+fn env_u32(name: &str, default: u32) -> Result<u32, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    value
+        .parse::<u32>()
+        .map_err(|_| invalid_data(format!("{name} must be a u32, got {value:?}")).into())
 }
 
-fn env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "y" | "on"
-            )
-        })
-        .unwrap_or(default)
+fn env_f64(name: &str, default: f64) -> Result<f64, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    value
+        .parse::<f64>()
+        .map_err(|_| invalid_data(format!("{name} must be a finite number, got {value:?}")).into())
 }
 
-fn env_f64_alias(primary: &str, alias: &str, default: f64) -> f64 {
-    std::env::var(primary)
-        .or_else(|_| std::env::var(alias))
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(default)
+fn env_bool(name: &str, default: bool) -> Result<bool, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" => Ok(false),
+        _ => Err(invalid_data(format!("{name} must be a boolean, got {value:?}")).into()),
+    }
+}
+
+fn env_f64_alias(primary: &str, alias: &str, default: f64) -> Result<f64, Box<dyn Error>> {
+    if env_value(primary).is_some() {
+        env_f64(primary, default)
+    } else {
+        env_f64(alias, default)
+    }
 }
 
 fn q_entry_order(a: &SoccerQEntry, b: &SoccerQEntry) -> std::cmp::Ordering {
@@ -103,46 +115,46 @@ fn compact_training_artifact_for_export(
     export
 }
 
-fn env_tactical_learning_weights() -> SoccerTacticalLearningWeights {
+fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<dyn Error>> {
     let default = SoccerTacticalLearningWeights::default();
-    SoccerTacticalLearningWeights {
+    Ok(SoccerTacticalLearningWeights {
         attack_spacing_delta_weight: env_f64(
             "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
             default.attack_spacing_delta_weight,
-        ),
+        )?,
         attack_spacing_score_weight: env_f64(
             "SOCCER_ATTACK_SPACING_SCORE_WEIGHT",
             default.attack_spacing_score_weight,
-        ),
+        )?,
         attack_width_delta_weight: env_f64(
             "SOCCER_ATTACK_WIDTH_DELTA_WEIGHT",
             default.attack_width_delta_weight,
-        ),
+        )?,
         attack_width_score_weight: env_f64(
             "SOCCER_ATTACK_WIDTH_SCORE_WEIGHT",
             default.attack_width_score_weight,
-        ),
+        )?,
         attack_flank_lane_weight: env_f64(
             "SOCCER_ATTACK_FLANK_LANE_WEIGHT",
             default.attack_flank_lane_weight,
-        ),
+        )?,
         defense_spacing_delta_weight: env_f64(
             "SOCCER_DEFENSE_SPACING_DELTA_WEIGHT",
             default.defense_spacing_delta_weight,
-        ),
+        )?,
         defense_spacing_score_weight: env_f64(
             "SOCCER_DEFENSE_SPACING_SCORE_WEIGHT",
             default.defense_spacing_score_weight,
-        ),
+        )?,
         defense_contract_delta_weight: env_f64(
             "SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT",
             default.defense_contract_delta_weight,
-        ),
+        )?,
         defense_compactness_score_weight: env_f64(
             "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
             default.defense_compactness_score_weight,
-        ),
-    }
+        )?,
+    })
 }
 
 fn artifact_minutes_label(minutes: f64) -> String {
@@ -174,6 +186,94 @@ fn default_artifact_path(
             artifact_minutes_label(minutes)
         )
     }
+}
+
+fn default_artifact_path_in_run_dir(
+    run_dir: &Path,
+    games: usize,
+    minutes: f64,
+    shard_index: usize,
+    shard_count: usize,
+) -> PathBuf {
+    let minutes = artifact_minutes_label(minutes);
+    let file_name = if shard_count > 1 {
+        format!(
+            "final-policy-shard-{}-of-{}-{}x{}.json",
+            shard_index, shard_count, games, minutes
+        )
+    } else {
+        "final-policy.json".to_string()
+    };
+    run_dir.join(file_name)
+}
+
+fn validate_run_settings(
+    games: usize,
+    halves: usize,
+    half_minutes: f64,
+    minutes: f64,
+    period_break_recovery_seconds: f64,
+    dt_seconds: f64,
+    learning_interval_ticks: usize,
+    parallel_games: usize,
+    shard_seed_stride: u32,
+    options: &SoccerQPolicyOptions,
+) -> Result<(), Box<dyn Error>> {
+    if games == 0 {
+        return Err(invalid_data("SOCCER_GAMES must be at least 1").into());
+    }
+    if !(1..=8).contains(&halves) {
+        return Err(invalid_data("SOCCER_HALVES must be between 1 and 8").into());
+    }
+    if !half_minutes.is_finite() || half_minutes <= 0.0 || half_minutes > 120.0 {
+        return Err(invalid_data("SOCCER_HALF_MINUTES must be finite and in (0, 120]").into());
+    }
+    if !minutes.is_finite() || minutes <= 0.0 || minutes > 24.0 * 60.0 {
+        return Err(invalid_data("SOCCER_MINUTES must be finite and in (0, 1440]").into());
+    }
+    if env_value("SOCCER_MINUTES").is_some() {
+        let expected = half_minutes * halves as f64;
+        if (minutes - expected).abs() > 1e-6 {
+            return Err(invalid_data(format!(
+                "SOCCER_MINUTES ({minutes}) must equal SOCCER_HALF_MINUTES * SOCCER_HALVES ({expected})"
+            ))
+            .into());
+        }
+    }
+    if !period_break_recovery_seconds.is_finite()
+        || !(0.0..=60.0 * 60.0).contains(&period_break_recovery_seconds)
+    {
+        return Err(invalid_data(
+            "SOCCER_PERIOD_BREAK_RECOVERY_SECONDS must be finite and in [0, 3600]",
+        )
+        .into());
+    }
+    if !dt_seconds.is_finite() || !(0.01..=5.0).contains(&dt_seconds) {
+        return Err(invalid_data("SOCCER_DT_SECONDS must be finite and in [0.01, 5.0]").into());
+    }
+    if learning_interval_ticks == 0 {
+        return Err(invalid_data("SOCCER_LEARNING_INTERVAL_TICKS must be at least 1").into());
+    }
+    if !(1..=100).contains(&parallel_games) {
+        return Err(invalid_data("SOCCER_PARALLEL_GAMES must be between 1 and 100").into());
+    }
+    if shard_seed_stride == 0 {
+        return Err(invalid_data("SOCCER_SHARD_SEED_STRIDE must be at least 1").into());
+    }
+    validate_soccer_q_policy_options_for_runner(options)?;
+    Ok(())
+}
+
+fn validate_soccer_q_policy_options_for_runner(
+    options: &SoccerQPolicyOptions,
+) -> Result<(), Box<dyn Error>> {
+    if !options.alpha.is_finite() || !(0.0..=1.0).contains(&options.alpha) {
+        return Err(invalid_data("SOCCER_ALPHA must be finite and in [0, 1]").into());
+    }
+    if !options.gamma.is_finite() || !(0.0..=1.0).contains(&options.gamma) {
+        return Err(invalid_data("SOCCER_GAMMA must be finite and in [0, 1]").into());
+    }
+    Ok(())
 }
 
 fn write_episode_log(log: &mut Option<std::fs::File>, episode: &SoccerSelfPlayEpisodeSummary) {

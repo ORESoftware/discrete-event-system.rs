@@ -8104,6 +8104,14 @@ mod tests {
 
     use super::*;
 
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
     #[test]
     fn solves_binary_knapsack() {
         // values [60,100,120], weights [10,20,30], capacity 50 -> take items 1,2 = 220.
@@ -8134,6 +8142,11 @@ mod tests {
         assert!(
             result.is_err(),
             "external LP backend should be rejected unless allow_external_solvers is true"
+        );
+        let message = panic_message(result.as_ref().err().expect("panic payload").as_ref());
+        assert!(
+            message.contains("allowExternalSolvers is false"),
+            "unexpected panic: {message}"
         );
     }
 

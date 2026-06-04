@@ -3,7 +3,9 @@
 //! The canonical table contract lives in `remote/libs/pg-defs/schema/schema.sql`.
 //! This module is a small Rust adapter over that contract for queue runners.
 
-use postgres::{Client, NoTls};
+use native_tls::TlsConnector;
+use postgres::Client;
+use postgres_native_tls::MakeTlsConnector;
 use serde_json::{json, Value};
 
 use crate::des::general::soccer::{
@@ -28,7 +30,10 @@ pub struct SoccerLearningPgStore {
 
 impl SoccerLearningPgStore {
     pub fn connect(database_url: &str) -> Result<Self, String> {
-        let client = Client::connect(database_url, NoTls)
+        let tls = TlsConnector::builder()
+            .build()
+            .map_err(|err| format!("build soccer learning postgres tls connector: {err}"))?;
+        let client = Client::connect(database_url, MakeTlsConnector::new(tls))
             .map_err(|err| format!("connect soccer learning postgres: {err}"))?;
         Ok(Self { client })
     }

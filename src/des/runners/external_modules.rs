@@ -13,8 +13,8 @@
 //!   * the TS bottom-of-file `registerBuiltInExternalModules()` side-effect (run
 //!     on import) becomes an explicit call from
 //!     [`register_built_in_external_modules`]; callers (the CLI) invoke it at
-//!     startup. Registration that fails (e.g. a missing source script) returns
-//!     an `Err` instead of throwing at import time.
+//!     startup. Missing optional source scripts are left unregistered so
+//!     validators can skip only the affected external engine.
 
 #![allow(dead_code)]
 
@@ -262,16 +262,25 @@ fn build_traffic_sumo(
 
 /// `registerBuiltInExternalModules()` — idempotent via [`OnceLock`].
 ///
-/// Returns the first registration error encountered (e.g. a missing source
-/// script under `external-references/`), mirroring the TS `throw`. The result
-/// is memoised so repeated calls are cheap and stable.
+/// Missing optional source scripts under `external-references/` are skipped;
+/// malformed module definitions still return an error. The result is memoised
+/// so repeated calls are cheap and stable.
 pub fn register_built_in_external_modules() -> Result<(), String> {
     static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
     RESULT.get_or_init(do_register).clone()
 }
 
+fn register_available_external_module(module: ExternalProgramModule) -> Result<(), String> {
+    match register_external_module(module) {
+        Ok(()) => Ok(()),
+        Err(e) if e.contains("external script not found:") => Ok(()),
+        Err(e) if e.contains("already registered") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn do_register() -> Result<(), String> {
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: NEURAL_NETWORK_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Reference,
         description: "Dependency-free Python reference for neural XOR, corridor value iteration, and neural ODE decay.".to_string(),
@@ -293,7 +302,7 @@ fn do_register() -> Result<(), String> {
         build_args: build_neural_network,
     })?;
 
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: COMPUTER_NETWORK_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
         description: "Dependency-free Python reference simulator for computer-network topology, queueing, drops, and bottleneck metrics.".to_string(),
@@ -305,7 +314,7 @@ fn do_register() -> Result<(), String> {
         build_args: build_computer_network,
     })?;
 
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: COMPUTER_NETWORK_FEL_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
         description: "Dependency-free Python FEL-style packet-network reference; consumes the same computer-network JSON model spec as the internal registry.".to_string(),
@@ -317,7 +326,7 @@ fn do_register() -> Result<(), String> {
         build_args: build_computer_network_fel,
     })?;
 
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: IP_MIP_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Solver,
         description: "Source-only external IP/MIP reference: Python brute force for bounded integer models, optional scipy.optimize.milp when installed.".to_string(),
@@ -329,7 +338,7 @@ fn do_register() -> Result<(), String> {
         build_args: build_ip_mip,
     })?;
 
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: TRAFFIC_SIMPY_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
         description: "Optional SimPy process-oriented traffic FEL reference for shared source/sink scheduled trips.".to_string(),
@@ -341,7 +350,7 @@ fn do_register() -> Result<(), String> {
         build_args: build_traffic_simpy,
     })?;
 
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: TRAFFIC_CIW_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
         description: "Optional Ciw queueing-network traffic FEL reference for shared source/sink scheduled trips.".to_string(),
@@ -353,7 +362,7 @@ fn do_register() -> Result<(), String> {
         build_args: build_traffic_ciw,
     })?;
 
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: TRAFFIC_FEL_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
         description: "Dependency-free Python Future Event List traffic reference for model-spec traffic flows and shared source/sink scheduled trips.".to_string(),
@@ -365,7 +374,7 @@ fn do_register() -> Result<(), String> {
         build_args: build_traffic_fel,
     })?;
 
-    register_external_module(ExternalProgramModule {
+    register_available_external_module(ExternalProgramModule {
         id: TRAFFIC_SUMO_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
         description: "Optional SUMO black-box traffic simulator cross-check; calls SUMO/netconvert from PATH or SUMO_BIN without vendoring binaries.".to_string(),

@@ -7,7 +7,10 @@
 //!
 //! ## PORT NOTE
 //!   * `import './external-modules'` (registration side-effect) →
-//!     an explicit [`register_built_in_external_modules`] call in [`run`].
+//!     an explicit [`register_built_in_external_modules`] call in [`run`]. If
+//!     optional external scripts are absent from the checkout, the affected
+//!     comparisons are reported as `SKIP` rows instead of aborting unrelated
+//!     Rust validation.
 //!   * `JSON.stringify(problem, null, 2)` → [`problem_to_json`] (there is no
 //!     `Serialize` derive on [`ComputerNetworkProblem`]; this helper mirrors the
 //!     camelCase shape the Python reference consumes).
@@ -20,9 +23,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::des::general::computer_network::{
-    build_default_computer_network_problem, run_computer_network_simulation,
-    ComputerNetworkProblem, ComputerNetworkResult, NetworkFlowSpec, NetworkLinkSpec,
-    NetworkNodeKind, NetworkNodeSpec, NetworkProtocol, NetworkRoutingMetric,
+    build_bottleneck_computer_network_problem, build_default_computer_network_problem,
+    run_computer_network_simulation, ComputerNetworkProblem, ComputerNetworkResult,
+    NetworkRoutingMetric,
 };
 use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::runners::external_modules::{
@@ -39,6 +42,7 @@ use crate::des::runners::external_program::{
 struct CheckRow {
     name: String,
     passed: bool,
+    skipped: bool,
     detail: Option<String>,
 }
 
@@ -57,6 +61,21 @@ impl Checks {
         self.rows.push(CheckRow {
             name: name.to_string(),
             passed,
+            skipped: false,
+            detail,
+        });
+    }
+
+    fn skip(&mut self, name: &str, detail: Option<String>) {
+        let suffix = detail
+            .as_ref()
+            .map(|d| format!("  - {d}"))
+            .unwrap_or_default();
+        println!("  SKIP  {name}{suffix}");
+        self.rows.push(CheckRow {
+            name: name.to_string(),
+            passed: true,
+            skipped: true,
             detail,
         });
     }
@@ -266,138 +285,6 @@ pub fn problem_to_json(p: &ComputerNetworkProblem) -> JsonValue {
 }
 
 // -----------------------------------------------------------------------------
-// PORT NOTE — `buildBottleneckComputerNetworkProblem`.
-//
-// `build_default_computer_network_problem` exists in the Rust engine, but the
-// bottleneck builder is **not yet ported** there. This is a faithful local copy
-// of `computer-network.ts::buildBottleneckComputerNetworkProblem`; move it to
-// `crate::des::general::computer_network` when that module gains it.
-// -----------------------------------------------------------------------------
-
-fn node(id: &str, kind: NetworkNodeKind, fwd: f64, queue: usize) -> NetworkNodeSpec {
-    NetworkNodeSpec {
-        id: id.to_string(),
-        kind,
-        forwarding_rate_pps: Some(fwd),
-        queue_limit_packets: Some(queue),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn link(
-    id: &str,
-    from: &str,
-    to: &str,
-    bw: f64,
-    lat: f64,
-    cost: f64,
-    queue: usize,
-) -> NetworkLinkSpec {
-    NetworkLinkSpec {
-        id: id.to_string(),
-        from: from.to_string(),
-        to: to.to_string(),
-        bandwidth_mbps: bw,
-        latency_ms: lat,
-        cost_per_mb: Some(cost),
-        queue_limit_packets: Some(queue),
-        bidirectional: Some(true),
-    }
-}
-
-fn flow(
-    id: &str,
-    source: &str,
-    destination: &str,
-    protocol: NetworkProtocol,
-    rate_pps: f64,
-    packet_size_bytes: f64,
-    max_packets: u64,
-) -> NetworkFlowSpec {
-    NetworkFlowSpec {
-        id: id.to_string(),
-        source: source.to_string(),
-        destination: destination.to_string(),
-        protocol: Some(protocol),
-        rate_pps,
-        packet_size_bytes,
-        start_ms: None,
-        end_ms: None,
-        max_packets: Some(max_packets),
-        ttl_hops: None,
-    }
-}
-
-fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
-    ComputerNetworkProblem {
-        nodes: vec![
-            node("web-client", NetworkNodeKind::Host, 6000.0, 512),
-            node("telemetry-client", NetworkNodeKind::Host, 6000.0, 512),
-            node("edge", NetworkNodeKind::Switch, 12000.0, 1024),
-            node("wan-router", NetworkNodeKind::Router, 9000.0, 1024),
-            node("api-server", NetworkNodeKind::Host, 9000.0, 1024),
-        ],
-        links: vec![
-            link("web-edge", "web-client", "edge", 100.0, 1.0, 0.001, 256),
-            link(
-                "telemetry-edge",
-                "telemetry-client",
-                "edge",
-                100.0,
-                1.0,
-                0.001,
-                256,
-            ),
-            link("edge-wan", "edge", "wan-router", 5.0, 25.0, 0.010, 96),
-            link(
-                "wan-api",
-                "wan-router",
-                "api-server",
-                100.0,
-                4.0,
-                0.002,
-                256,
-            ),
-        ],
-        flows: vec![
-            flow(
-                "http-api",
-                "web-client",
-                "api-server",
-                NetworkProtocol::Http,
-                900.0,
-                1100.0,
-                1800,
-            ),
-            flow(
-                "udp-telemetry",
-                "telemetry-client",
-                "api-server",
-                NetworkProtocol::Udp,
-                700.0,
-                900.0,
-                1400,
-            ),
-            flow(
-                "tcp-bulk",
-                "web-client",
-                "api-server",
-                NetworkProtocol::Tcp,
-                350.0,
-                1400.0,
-                700,
-            ),
-        ],
-        duration_ms: 2000.0,
-        dt_ms: 1.0,
-        routing_metric: Some(NetworkRoutingMetric::Latency),
-        drain_after_sources_ms: Some(4000.0),
-        max_packets_in_system: Some(10000),
-        sample_every_ms: Some(100.0),
-    }
-}
-
-// -----------------------------------------------------------------------------
 // External invocation + JSON field helpers.
 // -----------------------------------------------------------------------------
 
@@ -461,6 +348,13 @@ fn run_external(name: &str, problem: &ComputerNetworkProblem) -> Result<JsonValu
     Ok(parsed.get("result").cloned().unwrap_or(JsonValue::Null))
 }
 
+fn external_reference_unavailable(error: &str) -> bool {
+    error.contains("unknown external module")
+        || error.contains("external script not found")
+        || error.contains("failed to run python")
+        || error.contains("No such file or directory")
+}
+
 fn str_field(v: &JsonValue, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(str::to_string)
 }
@@ -473,7 +367,17 @@ fn compare_scenario(
     println!();
     println!("-- {name} --");
     let internal: ComputerNetworkResult = run_computer_network_simulation(problem);
-    let external = run_external(name, problem)?;
+    let external = match run_external(name, problem) {
+        Ok(external) => external,
+        Err(e) if external_reference_unavailable(&e) => {
+            checks.skip(
+                &format!("{name}: external Python reference unavailable"),
+                Some(e),
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     checks.same_count(
         &format!("{name}: generated packets"),
@@ -686,8 +590,12 @@ fn index_by_id(arr: Option<&JsonValue>) -> HashMap<String, JsonValue> {
 /// `main()` — returns the exit code (0 = all checks pass).
 pub fn run() -> i32 {
     if let Err(e) = register_built_in_external_modules() {
-        eprintln!("failed to register external modules: {e}");
-        return 1;
+        if external_reference_unavailable(&e) {
+            eprintln!("external modules partially unavailable: {e}");
+        } else {
+            eprintln!("failed to register external modules: {e}");
+            return 1;
+        }
     }
 
     println!("Computer-network DES: framework vs external Python reference");
@@ -714,9 +622,10 @@ pub fn run() -> i32 {
     println!();
     println!("========================================");
     let passed = checks.rows.iter().filter(|c| c.passed).count();
+    let skipped = checks.rows.iter().filter(|c| c.skipped).count();
     println!(
-        "validate-computer-network: {passed}/{} checks passed.",
-        checks.rows.len()
+        "validate-computer-network: {passed}/{} checks passed, {skipped} skipped.",
+        checks.rows.len(),
     );
     if passed < checks.rows.len() {
         println!("FAILED:");

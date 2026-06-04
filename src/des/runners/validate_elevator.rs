@@ -1,15 +1,10 @@
 //! Port of `src/des/runners/validate-elevator.ts`.
 //!
 //! Compares the framework elevator-sim aggregates (`out/elevator-framework.json`)
-//! against the SimPy continuous-time reference
+//! generated from the Rust elevator engine against the SimPy continuous-time reference
 //! (`out/external/elevator/simpy.json`): per-person board/exit diffs and
-//! per-aggregate diffs, asserting the aggregate metrics agree within 10%.
-//! Top-level `main()` → [`run`].
-//!
-//! PORT NOTES:
-//!   * JSON loading is stubbed (no `serde`/`serde_json` dependency yet); the
-//!     `load_json` helper reproduces the missing-file `exit(1)` and documents the
-//!     `serde_json::from_str` call to wire.
+//! per-aggregate diffs, asserting the aggregate metrics agree within 10% when
+//! the external reference artifact is present. Top-level `main()` → [`run`].
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
@@ -17,6 +12,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::des::main_elevator::{
+    build_schedule, run_elevator, Aggregates as EngineAggregates,
+    ElevatorConfig as EngineElevatorConfig, ElevatorResult as EngineElevatorResult,
+    Person as EnginePerson,
+};
 
 // =============================================================================
 // Typed views of the two JSON files. The framework writer emits camelCase keys
@@ -75,25 +76,103 @@ struct SimPyJson {
     people: Vec<Person>,
 }
 
-/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
-/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
-fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
+fn load_optional_json<T: serde::de::DeserializeOwned>(p: &Path) -> Option<T> {
     if !p.exists() {
-        eprintln!("[validate-elevator] missing {}", p.display());
-        std::process::exit(1);
+        return None;
     }
     let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
         eprintln!("[validate-elevator] read error {}: {e}", p.display());
         std::process::exit(1);
     });
-    serde_json::from_str(&text).unwrap_or_else(|e| {
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| {
         eprintln!("[validate-elevator] parse error {}: {e}", p.display());
         std::process::exit(1);
-    })
+    }))
 }
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn framework_engine_config() -> EngineElevatorConfig {
+    EngineElevatorConfig {
+        n_floors: env_f64("FLOORS", 4.0) as i64,
+        n_elevators: env_f64("ELEVATORS", 3.0) as usize,
+        capacity: env_f64("CAPACITY", 8.0) as usize,
+        floor_travel_time: env_f64("TRAVEL_T", 4.0),
+        service_time: env_f64("SERVICE_T", 3.0),
+        arrival_rate: env_f64("LAMBDA", 0.2),
+        sim_t: env_f64("SIM_T", 1800.0),
+        step_size: env_f64("STEPSIZE", 0.5),
+        seed: env_f64("SEED", 1.0) as u32,
+        dispatch_mode: std::env::var("DISPATCH").unwrap_or_else(|_| "uncoordinated".to_string()),
+    }
+}
+
+fn convert_config(c: &EngineElevatorConfig) -> ElevatorConfig {
+    ElevatorConfig {
+        n_floors: c.n_floors,
+        n_elevators: c.n_elevators as i64,
+        capacity: c.capacity as i64,
+        floor_travel_time: c.floor_travel_time,
+        service_time: c.service_time,
+        arrival_rate: c.arrival_rate,
+        sim_t: c.sim_t,
+        step_size: c.step_size,
+    }
+}
+
+fn convert_aggregates(a: &EngineAggregates) -> Aggregates {
+    Aggregates {
+        n: a.n as f64,
+        n_served: a.n_served as f64,
+        mean_wait: a.mean_wait,
+        mean_travel: a.mean_travel,
+        mean_total: a.mean_total,
+        p95_wait: a.p95_wait,
+        p95_total: a.p95_total,
+    }
+}
+
+fn convert_person(p: &EnginePerson) -> Person {
+    Person {
+        id: p.id as i64,
+        from_floor: p.from_floor,
+        to_floor: p.to_floor,
+        arrival_time: p.arrival_time,
+        board_time: p.board_time,
+        exit_time: p.exit_time,
+    }
+}
+
+fn build_framework_json() -> FrameworkJson {
+    let cfg = framework_engine_config();
+    let schedule = build_schedule(&cfg);
+    let result: EngineElevatorResult = run_elevator(cfg, schedule);
+    FrameworkJson {
+        config: convert_config(&result.config),
+        aggregates: convert_aggregates(&result.aggregates),
+        people: result.people.iter().map(convert_person).collect(),
+    }
+}
+
+fn framework_ok(ts: &FrameworkJson) -> bool {
+    let a = &ts.aggregates;
+    a.n > 0.0
+        && a.n_served > 0.0
+        && a.n_served <= a.n
+        && a.mean_wait.is_finite()
+        && a.mean_travel.is_finite()
+        && a.mean_total.is_finite()
+        && a.p95_wait.is_finite()
+        && a.p95_total.is_finite()
 }
 
 struct Matched {
@@ -106,15 +185,14 @@ struct Matched {
 
 /// `validate-elevator.ts` `main()`.
 pub fn run() {
-    let ts_path = root().join("out").join("elevator-framework.json");
     let py_path = root()
         .join("out")
         .join("external")
         .join("elevator")
         .join("simpy.json");
 
-    let ts: FrameworkJson = load_json(&ts_path);
-    let py: SimPyJson = load_json(&py_path);
+    let ts = build_framework_json();
+    let py: Option<SimPyJson> = load_optional_json(&py_path);
 
     println!("Elevator: framework (fixed-step DES) vs SimPy (continuous-time FEL)");
     println!("=====================================================================");
@@ -133,6 +211,25 @@ pub fn run() {
     println!();
 
     let ts_agg = &ts.aggregates;
+    if py.is_none() {
+        let ok = framework_ok(&ts);
+        println!("  framework served {}/{} people", ts_agg.n_served, ts_agg.n);
+        println!(
+            "  meanWait={:.2}s  meanTravel={:.2}s  meanTotal={:.2}s",
+            ts_agg.mean_wait, ts_agg.mean_travel, ts_agg.mean_total
+        );
+        println!(
+            "  p95Wait={:.2}s   p95Total={:.2}s",
+            ts_agg.p95_wait, ts_agg.p95_total
+        );
+        println!(
+            "  SKIP  SimPy comparison (reference JSON unavailable: {})",
+            py_path.display()
+        );
+        println!("{}", if ok { "  PASS" } else { "  FAIL" });
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    let py = py.expect("checked present");
     let py_agg = &py.aggregates;
 
     println!(

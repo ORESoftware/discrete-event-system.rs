@@ -26,6 +26,17 @@ control.
   like policy entries and weighted by that team’s match outcome.
 - `des_soccer_learning_merge_events`: records which strategy produced a new
   policy version from prior deltas or elite parents.
+- `des_soccer_learning_set_play_runs`: typed metrics for restart-learning runs,
+  including primary restart, spot, duration, goals, and windowed goal rates.
+- `des_soccer_learning_set_play_restart_mix`: one row per restart type trained
+  in a run, preserving indirect/direct ordering without packing it into JSONB.
+- `des_soccer_learning_set_play_episode_metrics`: one row per repeated restart
+  episode with restart, routine, scoring, policy-entry, and neural-step facts.
+- `des_soccer_learning_neural_run_metrics`: one row per learning run with
+  bounded neural gradient stats, replay stats, parameter count, and losses.
+
+JSONB on the main run and policy-version rows remains a compatibility snapshot,
+not the primary analytical surface for restart or neural learning metrics.
 
 ## Merge Method
 

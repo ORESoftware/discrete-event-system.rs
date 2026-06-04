@@ -1,18 +1,10 @@
 //! Port of `src/des/runners/validate-court-mdp.ts`.
 //!
 //! Compares the framework USACC MDP value iteration
-//! (`out/court-mdp-framework.json`) against the Python reference
+//! generated from the Rust model against the Python reference
 //! (`out/external/court-mdp/python.json`): reports max-abs V* error + policy
 //! disagreement count, asserting both match within `1e-7` and 0 disagreements.
 //! The top-level `main()` becomes [`run`].
-//!
-//! PORT NOTES (cross-module deps to wire later):
-//!   * JSON loading is stubbed — the crate has no `serde`/`serde_json` dependency
-//!     yet. The `load_*` helpers faithfully reproduce the missing-file `exit(1)`
-//!     and, on the happy path, document the `serde_json::from_str` call to wire.
-//!   * The MDP label tables (`STAGES`/`EVIDENCE`/…), `is_terminal`, and `decode`
-//!     are local stubs; reuse `crate::des::mdp::usacc_mdp::*` once
-//!     `runners/mod.rs` declares this module (cannot create `mod.rs` here).
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
@@ -20,6 +12,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::des::main_court_mdp::{
+    run_court_sim, AlwaysEscalatePolicy, CourtAggregates, CourtMDPConfig, CourtMDPResult,
+    NaiveThresholdPolicy, OptimalPolicy, Policy, RejectAllPolicy,
+};
 // The MDP label tables, `decode`, and `is_terminal` are the real model. The
 // original port stubbed them locally with the wrong arity (N_STATES = 1875 and
 // invented action/stage labels); they now come straight from `usacc_mdp`, which
@@ -27,6 +23,7 @@ use serde::Deserialize;
 use crate::des::mdp::usacc_mdp::{
     decode, is_terminal, ACTIONS, CORROBORATION, EVIDENCE, MANIPULATION, N_STATES, STAGES,
 };
+use crate::des::mdp::value_iteration::{value_iteration, VIOptions};
 
 // =============================================================================
 // Typed views of the two JSON files. The framework writer emits camelCase keys
@@ -78,21 +75,18 @@ struct PythonReference {
     final_delta: f64,
 }
 
-/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
-/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
-fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
+fn load_optional_json<T: serde::de::DeserializeOwned>(p: &Path) -> Option<T> {
     if !p.exists() {
-        eprintln!("[validate-court-mdp] missing {}", p.display());
-        std::process::exit(1);
+        return None;
     }
     let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
         eprintln!("[validate-court-mdp] read error {}: {e}", p.display());
         std::process::exit(1);
     });
-    serde_json::from_str(&text).unwrap_or_else(|e| {
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| {
         eprintln!("[validate-court-mdp] parse error {}: {e}", p.display());
         std::process::exit(1);
-    })
+    }))
 }
 
 fn root() -> PathBuf {
@@ -100,25 +94,124 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn convert_aggregates(a: &CourtAggregates) -> Aggregates {
+    Aggregates {
+        mean_reward: a.mean_reward,
+        fraction_accepted: a.fraction_accepted,
+        fraction_closed: a.fraction_closed,
+        fraction_exhausted: a.fraction_exhausted,
+    }
+}
+
+fn convert_result(r: CourtMDPResult) -> ResultRow {
+    ResultRow {
+        policy: r.policy,
+        aggregates: convert_aggregates(&r.aggregates),
+    }
+}
+
+fn build_framework_json() -> CourtMdpFramework {
+    let vi = value_iteration(VIOptions {
+        gamma: 0.95,
+        tol: 1e-10,
+        max_iter: 5000,
+    });
+    let optimal = OptimalPolicy {
+        action: vi.policy.clone(),
+    };
+    let policies: Vec<Box<dyn Policy>> = vec![
+        Box::new(RejectAllPolicy),
+        Box::new(AlwaysEscalatePolicy),
+        Box::new(NaiveThresholdPolicy),
+        Box::new(optimal),
+    ];
+    let cfg = CourtMDPConfig {
+        total_cases: env_usize("CASES", 5000),
+        arrivals_per_tick: env_usize("ARRIVALS_PER_TICK", 5),
+        max_ticks: env_usize("MAX_TICKS", 10000),
+        seed: std::env::var("SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(42u32),
+    };
+    let results = policies
+        .iter()
+        .map(|p| convert_result(run_court_sim(cfg, p.as_ref())))
+        .collect();
+    let policy = vi.policy.iter().map(|&a| a as i64).collect();
+    CourtMdpFramework {
+        vi: ViBlock {
+            v: vi.v,
+            policy,
+            gamma: vi.gamma,
+            iterations: vi.iterations,
+            final_delta: vi.final_delta,
+        },
+        results,
+    }
+}
+
+fn framework_ok(ts: &CourtMdpFramework) -> bool {
+    ts.vi.v.len() == N_STATES
+        && ts.vi.policy.len() == N_STATES
+        && ts.vi.v.iter().all(|v| v.is_finite())
+        && ts.vi.final_delta < 1e-7
+        && !ts.results.is_empty()
+}
+
 /// `validate-court-mdp.ts` `main()`.
 pub fn run() {
-    let ts_path = root().join("out").join("court-mdp-framework.json");
     let py_path = root()
         .join("out")
         .join("external")
         .join("court-mdp")
         .join("python.json");
 
-    let ts: CourtMdpFramework = load_json(&ts_path);
-    let py: PythonReference = load_json(&py_path);
+    let ts = build_framework_json();
+    let py: Option<PythonReference> = load_optional_json(&py_path);
 
+    println!("USACC MDP: framework value iteration vs Python value iteration");
+    println!("==================================================================");
+    if py.is_none() {
+        let ok = framework_ok(&ts);
+        println!(
+            "  γ = {}    framework iters = {}",
+            ts.vi.gamma, ts.vi.iterations
+        );
+        println!("  framework final |ΔV| = {:.3e}", ts.vi.final_delta);
+        println!();
+        println!("  Policy comparison (framework simulation, last run):");
+        for r in &ts.results {
+            let a = &r.aggregates;
+            println!(
+                "    {:<18}  meanReward={:>8}    accepted={:>5}%    closed={:>5}%    exhausted={:>5}%",
+                r.policy,
+                format!("{:.2}", a.mean_reward),
+                format!("{:.1}", a.fraction_accepted * 100.0),
+                format!("{:.1}", a.fraction_closed * 100.0),
+                format!("{:.1}", a.fraction_exhausted * 100.0)
+            );
+        }
+        println!(
+            "  SKIP  Python value-iteration comparison (reference JSON unavailable: {})",
+            py_path.display()
+        );
+        println!("{}", if ok { "  PASS" } else { "  FAIL" });
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    let py = py.expect("checked present");
     let v_ts = &ts.vi.v;
     let v_py = &py.v;
     let pi_ts = &ts.vi.policy;
     let pi_py = &py.policy;
 
-    println!("USACC MDP: framework value iteration vs Python value iteration");
-    println!("==================================================================");
     println!(
         "  γ = {}    framework iters = {}    python iters = {}",
         ts.vi.gamma, ts.vi.iterations, py.iterations

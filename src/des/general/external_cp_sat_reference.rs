@@ -3,7 +3,7 @@
 //! The native Rust fallback accepts the crate's compact CP-SAT JSON model and
 //! enumerates small finite-domain validation models without a Python dependency.
 //! `scripts/cp_sat_reference.py` remains available for OR-Tools CP-SAT and
-//! legacy Python fallback checks. Broader CP ecosystems such as Choco, JaCoP,
+//! explicit legacy Python enumeration checks. Broader CP ecosystems such as Choco, JaCoP,
 //! CPMpy, Conjure, clingo, SAT4J, and Open-WBO use the
 //! `optimization_ecosystem_reference.py` smoke-model contract instead; this
 //! module exposes both paths without pretending they share one model format.
@@ -108,9 +108,7 @@ impl ExternalCpSatReferenceSolver {
             ExternalCpSatReferenceSolver::Auto => "Auto",
             ExternalCpSatReferenceSolver::OrToolsCpSat => "Google OR-Tools CP-SAT",
             ExternalCpSatReferenceSolver::RustEnumeration => "Rust exact CP enumeration",
-            ExternalCpSatReferenceSolver::PythonEnumeration => {
-                "Dependency-free exact CP enumeration"
-            }
+            ExternalCpSatReferenceSolver::PythonEnumeration => "Legacy Python exact CP enumeration",
             ExternalCpSatReferenceSolver::ChocoSolver => "Choco Solver",
             ExternalCpSatReferenceSolver::JaCoP => "JaCoP",
             ExternalCpSatReferenceSolver::IbmCpOptimizer => "IBM ILOG CP Optimizer",
@@ -133,9 +131,9 @@ impl ExternalCpSatReferenceSolver {
         match self {
             ExternalCpSatReferenceSolver::Auto => ExternalCpSatReferenceFamily::Auto,
             ExternalCpSatReferenceSolver::OrToolsCpSat => ExternalCpSatReferenceFamily::CpSatScript,
-            ExternalCpSatReferenceSolver::RustEnumeration
-            | ExternalCpSatReferenceSolver::PythonEnumeration => {
-                ExternalCpSatReferenceFamily::Fallback
+            ExternalCpSatReferenceSolver::RustEnumeration => ExternalCpSatReferenceFamily::Fallback,
+            ExternalCpSatReferenceSolver::PythonEnumeration => {
+                ExternalCpSatReferenceFamily::PythonBridge
             }
             ExternalCpSatReferenceSolver::ChocoSolver
             | ExternalCpSatReferenceSolver::JaCoP
@@ -162,7 +160,7 @@ impl ExternalCpSatReferenceSolver {
             ExternalCpSatReferenceSolver::Auto => Some("auto"),
             ExternalCpSatReferenceSolver::OrToolsCpSat => Some("ortools-cp-sat"),
             ExternalCpSatReferenceSolver::RustEnumeration => Some("rust-enumeration"),
-            ExternalCpSatReferenceSolver::PythonEnumeration => Some("fallback"),
+            ExternalCpSatReferenceSolver::PythonEnumeration => Some("python-enumeration"),
             _ => None,
         }
     }
@@ -216,7 +214,7 @@ impl ExternalCpSatReferenceSolver {
                 "Native Rust exact enumeration for small finite-domain CP-SAT JSON models."
             }
             ExternalCpSatReferenceSolver::PythonEnumeration => {
-                "Legacy exact enumeration bridge through scripts/cp_sat_reference.py."
+                "Explicit legacy Python exact enumeration bridge through scripts/cp_sat_reference.py."
             }
             _ => {
                 "Ecosystem smoke bridge through scripts/optimization_ecosystem_reference.py; uses the ecosystem CP-assignment contract rather than the CP-SAT JSON model."
@@ -243,6 +241,7 @@ pub enum ExternalCpSatReferenceFamily {
     CpSatScript,
     EcosystemReference,
     Fallback,
+    PythonBridge,
 }
 
 impl ExternalCpSatReferenceFamily {
@@ -252,6 +251,7 @@ impl ExternalCpSatReferenceFamily {
             ExternalCpSatReferenceFamily::CpSatScript => "cp-sat-script",
             ExternalCpSatReferenceFamily::EcosystemReference => "ecosystem-reference",
             ExternalCpSatReferenceFamily::Fallback => "fallback",
+            ExternalCpSatReferenceFamily::PythonBridge => "python-bridge",
         }
     }
 }
@@ -2389,14 +2389,30 @@ mod tests {
             .iter()
             .filter(|spec| spec.supports_ecosystem_cp_assignment)
             .count();
+        let rust_fallback = specs
+            .iter()
+            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::Fallback)
+            .count();
+        let python_bridge = specs
+            .iter()
+            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::PythonBridge)
+            .count();
 
         assert_eq!(specs.len(), 19);
         assert_eq!(direct, 4);
         assert_eq!(ecosystem, 15);
+        assert_eq!(rust_fallback, 1);
+        assert_eq!(python_bridge, 1);
         assert!(specs.iter().any(|spec| {
             spec.solver == ExternalCpSatReferenceSolver::RustEnumeration
                 && spec.family == ExternalCpSatReferenceFamily::Fallback
                 && spec.supports_cp_sat_json
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.solver == ExternalCpSatReferenceSolver::PythonEnumeration
+                && spec.family == ExternalCpSatReferenceFamily::PythonBridge
+                && spec.supports_cp_sat_json
+                && spec.display_name.contains("Python")
         }));
         assert!(specs.iter().any(|spec| {
             spec.solver == ExternalCpSatReferenceSolver::ChocoSolver
@@ -2404,6 +2420,10 @@ mod tests {
         }));
         assert!(ExternalCpSatReferenceSolver::RustEnumeration.supports_cp_sat_json());
         assert!(ExternalCpSatReferenceSolver::PythonEnumeration.supports_cp_sat_json());
+        assert_eq!(
+            ExternalCpSatReferenceSolver::PythonEnumeration.direct_cp_sat_json_solver_arg(),
+            Some("python-enumeration")
+        );
         assert!(!ExternalCpSatReferenceSolver::ChocoSolver.supports_cp_sat_json());
     }
 

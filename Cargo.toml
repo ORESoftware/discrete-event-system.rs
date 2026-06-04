@@ -8,6 +8,10 @@ repository = "https://github.com/ores/discrete-event-system.rs"
 keywords = ["simulation", "discrete-event", "control-systems", "mdp", "solver"]
 categories = ["simulation", "science", "mathematics"]
 
+[lib]
+name = "des_engine"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
 # `cargo doc` / docs.rs builds the library only; the 90+ demo bins under
 # src/bin/ are runnable simulations, not part of the SDK API surface.
 [package.metadata.docs.rs]

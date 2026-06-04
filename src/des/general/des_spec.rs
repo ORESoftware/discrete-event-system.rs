@@ -21,6 +21,7 @@
 //!     an optional stricter validator layered on top of `ParamSchema`.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// The required value of `DESModelSpec::schema` (the TS `$schema` literal).
 pub const DES_MODEL_SPEC_SCHEMA: &str = "des/model-spec/v1";
@@ -80,6 +81,12 @@ impl JsonObject {
 }
 
 impl JsonValue {
+    /// Public compact JSON serialization. `Undefined` and non-finite numbers
+    /// serialize to `null`, matching JavaScript `JSON.stringify` behavior.
+    pub fn to_json_string(&self) -> String {
+        self.to_json()
+    }
+
     /// `JSON.stringify(self)` equivalent. `Undefined`/non-finite numbers
     /// serialise to `null`, matching JS.
     fn to_json(&self) -> String {
@@ -107,6 +114,12 @@ impl JsonValue {
                 format!("{{{}}}", inner.join(","))
             }
         }
+    }
+}
+
+impl fmt::Display for JsonValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_json())
     }
 }
 

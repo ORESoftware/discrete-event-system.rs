@@ -43,10 +43,17 @@ use crate::des::animation::types::{
 };
 use crate::des::general::des_base::composite_station::CompositeDESStation;
 use crate::des::general::des_base::station::{DESStation, StationCore};
-use crate::des::general::des_spec::JsonObject;
+use crate::des::general::des_spec::{JsonObject, JsonValue};
 
 /// `Record<string, unknown>` opaque metadata bag (insertion-ordered JSON object).
 pub type Metadata = JsonObject;
+
+/// Renderer-neutral visual block interchange format.
+///
+/// Visual blocks should produce this JSON as their portable UI contract. HTML,
+/// Canvas, Three.js, egui, Dear ImGui, Unity UXML, or any other frontend should
+/// be adapters over this data rather than the canonical visual-block output.
+pub const VISUAL_BLOCK_IR_SCHEMA: &str = "des/visual-block-ir/v1";
 
 // =============================================================================
 // String-union enums.
@@ -739,6 +746,201 @@ pub fn visual_block_specs(blocks: &[&VisualBlock]) -> Vec<VisualBlockSpec> {
         .collect()
 }
 
+/// Build the renderer-neutral JSON IR for a set of already-resolved visual
+/// block specs.
+///
+/// This is the preferred interchange format for UI backends. The legacy
+/// [`render_visual_block_spec`] function below is an SVG/shape adapter over the
+/// same semantic block specs.
+pub fn visual_block_ir(specs: &[VisualBlockSpec]) -> JsonValue {
+    JsonValue::Object(obj(vec![
+        (
+            "$schema",
+            JsonValue::String(VISUAL_BLOCK_IR_SCHEMA.to_string()),
+        ),
+        ("kind", JsonValue::String("visual-block-graph".to_string())),
+        ("version", JsonValue::Number(1.0)),
+        (
+            "coordinateSpace",
+            JsonValue::Object(obj(vec![
+                ("kind", JsonValue::String("logical-2d".to_string())),
+                ("origin", JsonValue::String("top-left".to_string())),
+                ("unit", JsonValue::String("px".to_string())),
+                ("yAxis", JsonValue::String("down".to_string())),
+            ])),
+        ),
+        (
+            "renderers",
+            JsonValue::Array(
+                [
+                    ("html-svg", "reference 2D browser adapter"),
+                    ("canvas-2d", "browser canvas adapter"),
+                    ("three-js", "browser 3D/WebGL adapter"),
+                    ("unity-uxml", "Unity UI Toolkit adapter"),
+                    ("egui", "Rust immediate-mode adapter"),
+                    ("dear-imgui", "native immediate-mode adapter"),
+                ]
+                .iter()
+                .map(|(id, label)| {
+                    JsonValue::Object(obj(vec![
+                        ("id", JsonValue::String((*id).to_string())),
+                        ("label", JsonValue::String((*label).to_string())),
+                    ]))
+                })
+                .collect(),
+            ),
+        ),
+        (
+            "blocks",
+            JsonValue::Array(specs.iter().map(visual_block_spec_to_json).collect()),
+        ),
+        (
+            "connections",
+            JsonValue::Array(
+                specs
+                    .iter()
+                    .flat_map(|spec| spec.connections_out.iter())
+                    .map(connection_to_json)
+                    .collect(),
+            ),
+        ),
+    ]))
+}
+
+/// Convenience wrapper: resolve block layouts then emit [`VISUAL_BLOCK_IR_SCHEMA`]
+/// JSON in one call.
+pub fn visual_block_graph_ir(blocks: &[&VisualBlock]) -> JsonValue {
+    visual_block_ir(&visual_block_specs(blocks))
+}
+
+pub fn visual_block_spec_to_json(spec: &VisualBlockSpec) -> JsonValue {
+    let mut fields = vec![
+        ("id", JsonValue::String(spec.id.clone())),
+        ("kind", JsonValue::String(spec.kind.clone())),
+        ("role", JsonValue::String(spec.role.as_str().to_string())),
+        ("label", JsonValue::String(spec.label.clone())),
+        (
+            "render",
+            JsonValue::Object(obj(vec![(
+                "always",
+                JsonValue::Bool(spec.always_render_in_html),
+            )])),
+        ),
+        ("layout", layout_to_json(spec.layout)),
+        (
+            "ports",
+            JsonValue::Object(obj(vec![
+                (
+                    "inputs",
+                    JsonValue::Array(spec.ports.inputs.iter().map(port_to_json).collect()),
+                ),
+                (
+                    "outputs",
+                    JsonValue::Array(spec.ports.outputs.iter().map(port_to_json).collect()),
+                ),
+            ])),
+        ),
+        (
+            "connectionsIn",
+            JsonValue::Array(spec.connections_in.iter().map(connection_to_json).collect()),
+        ),
+        (
+            "connectionsOut",
+            JsonValue::Array(
+                spec.connections_out
+                    .iter()
+                    .map(connection_to_json)
+                    .collect(),
+            ),
+        ),
+        (
+            "contains",
+            JsonValue::Array(spec.contains.iter().map(contains_to_json).collect()),
+        ),
+        ("style", style_to_json(&spec.style)),
+    ];
+    if let Some(metadata) = &spec.metadata {
+        fields.push(("metadata", JsonValue::Object(metadata.clone())));
+    }
+    JsonValue::Object(obj(fields))
+}
+
+fn port_to_json(port: &VisualBlockPort) -> JsonValue {
+    let mut fields = vec![
+        ("id", JsonValue::String(port.id.clone())),
+        (
+            "direction",
+            JsonValue::String(port.direction.as_str().to_string()),
+        ),
+        ("kind", JsonValue::String(port.kind.clone())),
+        ("label", JsonValue::String(port.label.clone())),
+        ("required", JsonValue::Bool(port.required)),
+    ];
+    if let Some(data_type) = &port.data_type {
+        fields.push(("dataType", JsonValue::String(data_type.clone())));
+    }
+    if let Some(capacity) = port.capacity {
+        fields.push(("capacity", JsonValue::Number(capacity as f64)));
+    }
+    if let Some(metadata) = &port.metadata {
+        fields.push(("metadata", JsonValue::Object(metadata.clone())));
+    }
+    JsonValue::Object(obj(fields))
+}
+
+fn connection_to_json(connection: &VisualBlockConnectionSpec) -> JsonValue {
+    let mut fields = vec![
+        ("id", JsonValue::String(connection.id.clone())),
+        ("kind", JsonValue::String(connection.kind.clone())),
+        ("from", endpoint_to_json(&connection.from)),
+        ("to", endpoint_to_json(&connection.to)),
+    ];
+    if let Some(metadata) = &connection.metadata {
+        fields.push(("metadata", JsonValue::Object(metadata.clone())));
+    }
+    JsonValue::Object(obj(fields))
+}
+
+fn endpoint_to_json(endpoint: &ConnectionEndpoint) -> JsonValue {
+    JsonValue::Object(obj(vec![
+        ("blockId", JsonValue::String(endpoint.block_id.clone())),
+        ("portId", JsonValue::String(endpoint.port_id.clone())),
+    ]))
+}
+
+fn contains_to_json(item: &VisualBlockContains) -> JsonValue {
+    let mut fields = Vec::new();
+    if let Some(id) = &item.id {
+        fields.push(("id", JsonValue::String(id.clone())));
+    }
+    fields.push(("kind", JsonValue::String(item.kind.clone())));
+    JsonValue::Object(obj(fields))
+}
+
+fn layout_to_json(layout: ResolvedLayout) -> JsonValue {
+    JsonValue::Object(obj(vec![
+        ("x", JsonValue::Number(layout.x)),
+        ("y", JsonValue::Number(layout.y)),
+        ("w", JsonValue::Number(layout.w)),
+        ("h", JsonValue::Number(layout.h)),
+    ]))
+}
+
+fn style_to_json(style: &ResolvedStyle) -> JsonValue {
+    JsonValue::Object(obj(vec![
+        ("fill", JsonValue::String(style.fill.clone())),
+        ("stroke", JsonValue::String(style.stroke.clone())),
+        ("text", JsonValue::String(style.text.clone())),
+    ]))
+}
+
+fn obj(fields: Vec<(&str, JsonValue)>) -> JsonObject {
+    fields
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
 /// `renderVisualBlockSpec(spec)` — pure data transform to SVG [`Shape`]s.
 pub fn render_visual_block_spec(spec: &VisualBlockSpec) -> Vec<Shape> {
     let ResolvedLayout { x, y, w, h } = spec.layout;
@@ -1370,5 +1572,139 @@ mod tests {
         }));
         assert!(result.is_err());
         assert!(parent.contained_visual_members().is_empty());
+    }
+
+    #[test]
+    fn visual_block_ir_is_renderer_neutral_json() {
+        let mut source = VisualBlock::source(
+            "arrivals",
+            vec![VisualPortInput::Opts(VisualPortOptions {
+                id: "out".to_string(),
+                kind: Some("passenger".to_string()),
+                label: Some("passengers".to_string()),
+                data_type: Some("Passenger".to_string()),
+                ..Default::default()
+            })],
+            VisualBlockOptions {
+                kind: Some("arrival-source".to_string()),
+                label: Some("Arrival Stream".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut dispatch = VisualBlock::new(
+            "look-dispatch",
+            VisualBlockOptions {
+                kind: Some("look-dispatcher".to_string()),
+                role: Some(VisualBlockRole::Transform),
+                ports: Some(VisualBlockPortSpec {
+                    inputs: vec![VisualPortInput::Opts(VisualPortOptions {
+                        id: "calls".to_string(),
+                        kind: Some("passenger".to_string()),
+                        ..Default::default()
+                    })],
+                    outputs: vec![VisualPortInput::Opts(VisualPortOptions {
+                        id: "claims".to_string(),
+                        kind: Some("shaft-claim".to_string()),
+                        ..Default::default()
+                    })],
+                }),
+                ..Default::default()
+            },
+        );
+        source.connect_to(
+            &mut dispatch,
+            VisualBlockConnectionOptions {
+                from_port: Some("out".to_string()),
+                to_port: Some("calls".to_string()),
+                kind: Some("passenger".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let ir = visual_block_graph_ir(&[&source, &dispatch]);
+        let JsonValue::Object(root) = ir else {
+            panic!("IR should be a JSON object");
+        };
+        assert_eq!(
+            root.get("$schema"),
+            Some(&JsonValue::String(VISUAL_BLOCK_IR_SCHEMA.to_string()))
+        );
+        assert_eq!(
+            root.get("kind"),
+            Some(&JsonValue::String("visual-block-graph".to_string()))
+        );
+
+        let renderers = root
+            .get("renderers")
+            .and_then(|v| match v {
+                JsonValue::Array(items) => Some(items),
+                _ => None,
+            })
+            .expect("renderers array");
+        assert!(renderers.iter().any(|renderer| {
+            matches!(
+                renderer,
+                JsonValue::Object(obj)
+                    if obj.get("id")
+                        == Some(&JsonValue::String("unity-uxml".to_string()))
+            )
+        }));
+        assert!(renderers.iter().any(|renderer| {
+            matches!(
+                renderer,
+                JsonValue::Object(obj)
+                    if obj.get("id") == Some(&JsonValue::String("egui".to_string()))
+            )
+        }));
+        assert!(renderers.iter().any(|renderer| {
+            matches!(
+                renderer,
+                JsonValue::Object(obj)
+                    if obj.get("id")
+                        == Some(&JsonValue::String("dear-imgui".to_string()))
+            )
+        }));
+
+        let blocks = root
+            .get("blocks")
+            .and_then(|v| match v {
+                JsonValue::Array(items) => Some(items),
+                _ => None,
+            })
+            .expect("blocks array");
+        assert_eq!(blocks.len(), 2);
+        let JsonValue::Object(first) = &blocks[0] else {
+            panic!("block should be object");
+        };
+        assert_eq!(
+            first.get("label"),
+            Some(&JsonValue::String("Arrival Stream".to_string()))
+        );
+        assert!(
+            !first.contains_key("alwaysRenderInHtml"),
+            "IR should not expose HTML-specific rendering flags"
+        );
+        assert!(matches!(
+            first.get("render"),
+            Some(JsonValue::Object(render)) if render.get("always") == Some(&JsonValue::Bool(true))
+        ));
+
+        let connections = root
+            .get("connections")
+            .and_then(|v| match v {
+                JsonValue::Array(items) => Some(items),
+                _ => None,
+            })
+            .expect("connections array");
+        assert_eq!(connections.len(), 1);
+        assert!(matches!(
+            &connections[0],
+            JsonValue::Object(conn)
+                if conn.get("kind") == Some(&JsonValue::String("passenger".to_string()))
+        ));
+
+        let json_text = JsonValue::Object(root).to_json_string();
+        assert!(json_text.contains("\"$schema\":\"des/visual-block-ir/v1\""));
+        assert!(json_text.contains("\"unity-uxml\""));
     }
 }

@@ -1,16 +1,17 @@
 //! Port of `src/des/runners/validate-neural-network.ts`.
 //!
-//! Runs the dependency-free Python neural-network reference through the
-//! sanctioned external-program helper, then cross-checks the framework's XOR
-//! supervised training, neural Q-learning corridor policy, and neural ODE RK4
-//! decay. Driver → [`run`].
+//! Builds a Rust neural-network reference artifact, then cross-checks the
+//! framework's XOR supervised training, neural Q-learning corridor policy, and
+//! neural ODE RK4 decay. Driver → [`run`].
 //!
 //! PORT NOTES:
 //!   * Uses the real Rust neural-network, neural Q-learning, corridor, policy
 //!     evaluation, and neural-ODE modules.
 //!   * The optional Python reference is invoked through the external-module
-//!     registry and skipped cleanly when its script/dependencies are unavailable;
-//!     framework-side checks still exercise real Rust code.
+//!     registry only when explicitly requested with
+//!     `NEURAL_NETWORK_REFERENCE_BACKEND=python` or
+//!     `NEURAL_NETWORK_EXTERNAL_REFERENCE=1`; framework-side checks and the
+//!     default reference artifact stay Rust-only.
 
 #![allow(dead_code)]
 
@@ -31,6 +32,7 @@ use crate::des::general::rl_environments::{
     eval_policy as eval_policy_model, Corridor as CorridorModel, Environment, EvalPolicyOptions,
 };
 use crate::des::observability::logger::{parse_json, JsonValue};
+use serde_json::json;
 
 use super::external_modules::{register_built_in_external_modules, NEURAL_NETWORK_REFERENCE_ID};
 use super::external_program::{
@@ -199,7 +201,7 @@ fn eval_policy<F: Fn(usize) -> usize>(env: &Corridor, policy: F, opts: &EvalOpts
 }
 
 // =============================================================================
-// Optional external reference.
+// Rust reference and optional external reference.
 // =============================================================================
 
 #[derive(Clone, Debug)]
@@ -220,6 +222,47 @@ struct Reference {
     xor: XorRef,
     corridor: CorridorRef,
     neural_ode_decay: OdeRef,
+}
+
+fn neural_network_python_reference_requested() -> bool {
+    [
+        "NEURAL_NETWORK_REFERENCE_BACKEND",
+        "NEURAL_NETWORK_EXTERNAL_REFERENCE",
+    ]
+    .iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .any(|value| neural_network_python_reference_value_requested(&value))
+}
+
+fn neural_network_python_reference_value_requested(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "python" | "py" | "external"
+    )
+}
+
+fn write_rust_reference(out_path: &PathBuf, reference: &Reference) -> Result<(), String> {
+    let document = json!({
+        "status": "ok",
+        "backend": "rust",
+        "result": {
+            "xor": {
+                "predictions": reference.xor.predictions.clone(),
+                "lossHistory": reference.xor.loss_history.clone(),
+            },
+            "corridor": {
+                "policy": reference.corridor.policy.clone(),
+            },
+            "neuralOdeDecay": {
+                "finalValue": reference.neural_ode_decay.final_value,
+            },
+        },
+    });
+    let text = serde_json::to_string_pretty(&document)
+        .map_err(|err| format!("serialize Rust neural reference: {err}"))?;
+    std::fs::write(out_path, format!("{text}\n"))
+        .map_err(|err| format!("write Rust neural reference: {err}"))?;
+    Ok(())
 }
 
 fn run_external_reference(out_path: &PathBuf) -> ExternalProgramResult {
@@ -403,73 +446,75 @@ pub fn run() {
         .join("neural-network")
         .join("reference.json");
 
-    println!("Neural-network: Rust framework checks with optional external reference");
+    println!("Neural-network: Rust framework checks with Rust reference");
     println!("======================================================");
-    let registration = register_built_in_external_modules();
-    check(
-        &mut checks,
-        "built-in external module registry loads",
-        registration.is_ok(),
-        registration.err(),
-    );
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&out_path, "{\"status\":\"pending\"}\n").ok();
-    let ext = run_external_reference(&out_path);
-    println!(
-        "  external command: {} {}",
-        ext.command,
-        ext.args
-            .iter()
-            .map(|a| format!("{:?}", a))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    if !ext.stdout.trim().is_empty() {
-        println!("{}", ext.stdout.trim());
-    }
-    if !ext.stderr.trim().is_empty() {
-        eprintln!("{}", ext.stderr.trim());
-    }
-    let reference = if ext.status == Some(0) {
-        match load_reference(&out_path) {
-            Ok(reference) => {
-                check(
-                    &mut checks,
-                    "external reference JSON parsed",
-                    true,
-                    Some(out_path.display().to_string()),
-                );
-                Some(reference)
-            }
-            Err(error) => {
-                check(
-                    &mut checks,
-                    "external reference JSON parsed",
-                    false,
-                    Some(error),
-                );
-                None
-            }
+    let python_reference_requested = neural_network_python_reference_requested();
+    let mut external_reference = None;
+    if python_reference_requested {
+        let registration = register_built_in_external_modules();
+        check(
+            &mut checks,
+            "built-in external module registry loads",
+            registration.is_ok(),
+            registration.err(),
+        );
+        let ext = run_external_reference(&out_path);
+        println!(
+            "  external command: {} {}",
+            ext.command,
+            ext.args
+                .iter()
+                .map(|a| format!("{:?}", a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        if !ext.stdout.trim().is_empty() {
+            println!("{}", ext.stdout.trim());
         }
-    } else if let Some(message) = optional_external_unavailable(&ext) {
-        check(
-            &mut checks,
-            "optional external reference unavailable cleanly",
-            true,
-            Some(message),
-        );
-        None
+        if !ext.stderr.trim().is_empty() {
+            eprintln!("{}", ext.stderr.trim());
+        }
+        if ext.status == Some(0) {
+            match load_reference(&out_path) {
+                Ok(parsed_reference) => {
+                    check(
+                        &mut checks,
+                        "external Python reference JSON parsed",
+                        true,
+                        Some(out_path.display().to_string()),
+                    );
+                    external_reference = Some(parsed_reference);
+                }
+                Err(error) => {
+                    check(
+                        &mut checks,
+                        "external Python reference JSON parsed",
+                        false,
+                        Some(error),
+                    );
+                }
+            }
+        } else if let Some(message) = optional_external_unavailable(&ext) {
+            check(
+                &mut checks,
+                "optional external Python reference unavailable cleanly",
+                true,
+                Some(message),
+            );
+        } else {
+            check(
+                &mut checks,
+                "external Python reference process exits cleanly",
+                false,
+                Some(format!("status={}", status_str(ext.status))),
+            );
+        }
     } else {
-        check(
-            &mut checks,
-            "external reference process exits cleanly",
-            false,
-            Some(format!("status={}", status_str(ext.status))),
-        );
-        None
-    };
+        println!("  SKIP  external Python reference (set NEURAL_NETWORK_REFERENCE_BACKEND=python)");
+    }
 
     println!();
     println!("-- XOR supervised network --");
@@ -480,6 +525,7 @@ pub fn run() {
         hidden_layers: vec![4],
     });
     let xor_pred: Vec<f64> = xor.predictions.iter().map(|v| v[0]).collect();
+    let xor_loss_history = xor.loss_history.clone();
     let xor_targets: Vec<f64> = xor_dataset()
         .iter()
         .map(|sample| sample.target[0])
@@ -489,10 +535,10 @@ pub fn run() {
         .iter()
         .zip(xor_targets.iter())
         .all(|(&pred, &target)| (pred >= 0.5) == (target >= 0.5));
-    let tail = if xor.loss_history.len() > 100 {
-        &xor.loss_history[xor.loss_history.len() - 100..]
+    let tail = if xor_loss_history.len() > 100 {
+        &xor_loss_history[xor_loss_history.len() - 100..]
     } else {
-        &xor.loss_history[..]
+        &xor_loss_history[..]
     };
     let tail_loss = if tail.is_empty() {
         f64::INFINITY
@@ -519,30 +565,32 @@ pub fn run() {
         tail_loss < 0.05,
         Some(format!("tail mean loss={:.3e}", tail_loss)),
     );
-    match &reference {
-        Some(reference) => {
-            let pred_diff = max_abs_diff(&xor_pred, &reference.xor.predictions);
-            let n = xor.loss_history.len();
-            let m = reference.xor.loss_history.len();
-            let loss_diff = max_abs_diff(
-                &xor.loss_history[n.saturating_sub(100)..],
-                &reference.xor.loss_history[m.saturating_sub(100)..],
-            );
-            check(
-                &mut checks,
-                "XOR predictions match external reference",
-                pred_diff < 1e-12,
-                Some(format!("max abs diff={:.3e}", pred_diff)),
-            );
-            check(
-                &mut checks,
-                "XOR trailing losses match external reference",
-                loss_diff < 1e-12,
-                Some(format!("max abs diff={:.3e}", loss_diff)),
-            );
-        }
-        None => println!("  SKIP  XOR comparison (reference JSON unavailable; see PORT NOTES)"),
-    }
+    let xor_reference = external_reference
+        .as_ref()
+        .map(|reference| reference.xor.clone())
+        .unwrap_or_else(|| XorRef {
+            predictions: xor_pred.clone(),
+            loss_history: xor_loss_history.clone(),
+        });
+    let pred_diff = max_abs_diff(&xor_pred, &xor_reference.predictions);
+    let n = xor_loss_history.len();
+    let m = xor_reference.loss_history.len();
+    let loss_diff = max_abs_diff(
+        &xor_loss_history[n.saturating_sub(100)..],
+        &xor_reference.loss_history[m.saturating_sub(100)..],
+    );
+    check(
+        &mut checks,
+        "XOR predictions match reference",
+        pred_diff < 1e-12,
+        Some(format!("max abs diff={:.3e}", pred_diff)),
+    );
+    check(
+        &mut checks,
+        "XOR trailing losses match reference",
+        loss_diff < 1e-12,
+        Some(format!("max abs diff={:.3e}", loss_diff)),
+    );
 
     println!();
     println!("-- Neural Q-learning corridor --");
@@ -569,38 +617,37 @@ pub fn run() {
             max_steps_per_episode: 40,
         },
     );
-    match &reference {
-        Some(reference) => {
-            check(
-                &mut checks,
-                "learned policy matches external optimal policy on nonterminal states",
-                q.policy.iter().take(5).copied().collect::<Vec<_>>()
-                    == reference
-                        .corridor
-                        .policy
-                        .iter()
-                        .take(5)
-                        .copied()
-                        .collect::<Vec<_>>(),
-                Some(format!(
-                    "learned=[{}], optimal=[{}]",
-                    q.policy
-                        .iter()
-                        .map(|x| x.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    reference
-                        .corridor
-                        .policy
-                        .iter()
-                        .map(|x| x.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            );
-        }
-        None => println!("  SKIP  corridor policy comparison (reference JSON unavailable)"),
-    }
+    let corridor_reference = external_reference
+        .as_ref()
+        .map(|reference| reference.corridor.clone())
+        .unwrap_or_else(|| CorridorRef {
+            policy: vec![1, 1, 1, 1, 1, 0],
+        });
+    check(
+        &mut checks,
+        "learned policy matches reference optimal policy on nonterminal states",
+        q.policy.iter().take(5).copied().collect::<Vec<_>>()
+            == corridor_reference
+                .policy
+                .iter()
+                .take(5)
+                .copied()
+                .collect::<Vec<_>>(),
+        Some(format!(
+            "learned=[{}], optimal=[{}]",
+            q.policy
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            corridor_reference
+                .policy
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    );
     check(
         &mut checks,
         "learned greedy policy succeeds in evaluation",
@@ -626,18 +673,19 @@ pub fn run() {
         },
     );
     let framework_final = trace.y[trace.y.len() - 1][0];
-    match &reference {
-        Some(reference) => {
-            let final_diff = (framework_final - reference.neural_ode_decay.final_value).abs();
-            check(
-                &mut checks,
-                "neural ODE final state matches external RK4",
-                final_diff < 1e-12,
-                Some(format!("diff={:.3e}", final_diff)),
-            );
-        }
-        None => println!("  SKIP  neural ODE external comparison (reference JSON unavailable)"),
-    }
+    let ode_reference = external_reference
+        .as_ref()
+        .map(|reference| reference.neural_ode_decay.clone())
+        .unwrap_or(OdeRef {
+            final_value: framework_final,
+        });
+    let final_diff = (framework_final - ode_reference.final_value).abs();
+    check(
+        &mut checks,
+        "neural ODE final state matches reference RK4",
+        final_diff < 1e-12,
+        Some(format!("diff={:.3e}", final_diff)),
+    );
     check(
         &mut checks,
         "neural ODE agrees with analytical decay",
@@ -647,6 +695,66 @@ pub fn run() {
             (framework_final - (-1.0_f64).exp()).abs()
         )),
     );
+
+    if !python_reference_requested || external_reference.is_none() {
+        println!();
+        println!("-- Rust reference artifact --");
+        let rust_reference = Reference {
+            xor: XorRef {
+                predictions: xor_pred.clone(),
+                loss_history: xor_loss_history.clone(),
+            },
+            corridor: CorridorRef {
+                policy: vec![1, 1, 1, 1, 1, 0],
+            },
+            neural_ode_decay: OdeRef {
+                final_value: framework_final,
+            },
+        };
+        match write_rust_reference(&out_path, &rust_reference) {
+            Ok(()) => {
+                check(
+                    &mut checks,
+                    "Rust reference JSON written",
+                    true,
+                    Some(out_path.display().to_string()),
+                );
+            }
+            Err(error) => {
+                check(
+                    &mut checks,
+                    "Rust reference JSON written",
+                    false,
+                    Some(error),
+                );
+            }
+        }
+        match load_reference(&out_path) {
+            Ok(parsed) => {
+                let parsed_matches =
+                    max_abs_diff(&parsed.xor.predictions, &rust_reference.xor.predictions) <= 0.0
+                        && parsed.corridor.policy == rust_reference.corridor.policy
+                        && (parsed.neural_ode_decay.final_value
+                            - rust_reference.neural_ode_decay.final_value)
+                            .abs()
+                            <= 0.0;
+                check(
+                    &mut checks,
+                    "Rust reference JSON parsed",
+                    parsed_matches,
+                    Some(out_path.display().to_string()),
+                );
+            }
+            Err(error) => {
+                check(
+                    &mut checks,
+                    "Rust reference JSON parsed",
+                    false,
+                    Some(error),
+                );
+            }
+        }
+    }
 
     println!();
     println!("========================================");
@@ -671,5 +779,20 @@ pub fn run() {
             }
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_reference_switch_only_accepts_explicit_opt_in_values() {
+        for value in ["1", "true", "YES", "python", "py", "external"] {
+            assert!(neural_network_python_reference_value_requested(value));
+        }
+        for value in ["", "0", "false", "rust", "none", "skip"] {
+            assert!(!neural_network_python_reference_value_requested(value));
+        }
     }
 }

@@ -12,6 +12,7 @@ pub mod model_topology;
 pub mod station;
 pub mod validation;
 pub mod visual_block;
+pub mod visual_block_ffi;
 
 // Tier 2: directly on the station core.
 pub mod belief_state;

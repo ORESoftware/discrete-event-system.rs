@@ -6,14 +6,12 @@
 //! wrappers a stable JSON-in/JSON-out contract while keeping jars, native
 //! libraries, and generated executables out of version control.
 
-use super::classical_optimization_models::{
-    run_job_shop_exact, JobOperation, JobShopDispatchParams, JobShopJob,
-};
 use super::external_linear_cli::{
     probe_external_linear_cli_solver, ExternalLinearCliKind, ExternalLinearCliOptions,
     ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -2438,8 +2436,9 @@ fn native_solve_ecosystem_cp_job_shop(
         return NativeExternalOptimizationEcosystemResult::status("invalid", "missing jobs");
     }
 
-    let mut jobs = Vec::with_capacity(raw_jobs.len());
-    let mut operation_order = Vec::<(String, usize)>::new();
+    let mut operations = Vec::<NativeCpJobShopOperation>::new();
+    let mut per_machine = BTreeMap::<String, Vec<usize>>::new();
+    let mut job_operation_ids = Vec::<Vec<usize>>::new();
     for (job_index, raw_job) in raw_jobs.iter().enumerate() {
         let Some(raw_operations) = raw_job.get("operations").and_then(Value::as_array) else {
             return NativeExternalOptimizationEcosystemResult::status(
@@ -2453,12 +2452,7 @@ fn native_solve_ecosystem_cp_job_shop(
                 "each job needs operations",
             );
         }
-        let job_id = raw_job
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("J{}", job_index + 1));
-        let mut operations = Vec::with_capacity(raw_operations.len());
+        let mut ids = Vec::with_capacity(raw_operations.len());
         for (op_index, raw_op) in raw_operations.iter().enumerate() {
             let machine = raw_op
                 .get("machine")
@@ -2478,65 +2472,207 @@ fn native_solve_ecosystem_cp_job_shop(
                     "operation duration must be non-negative",
                 );
             }
-            operations.push(JobOperation { machine, duration });
-            operation_order.push((job_id.clone(), op_index));
+            let op_id = operations.len();
+            operations.push(NativeCpJobShopOperation {
+                job: job_index,
+                op: op_index,
+                machine: machine.clone(),
+                duration,
+            });
+            per_machine.entry(machine).or_default().push(op_id);
+            ids.push(op_id);
         }
-        let due = raw_job
-            .get("due")
-            .map(|value| native_value_as_f64(Some(value), 0.0));
-        jobs.push(JobShopJob {
-            id: job_id,
-            due,
-            operations,
-        });
+        job_operation_ids.push(ids);
     }
 
-    let total_ops = operation_order.len();
+    let total_ops = operations.len();
     let max_operations = native_value_as_f64(payload.get("max_operations"), 10.0)
         .round()
         .max(0.0) as usize;
-    if total_ops > max_operations.min(20) {
+    if total_ops > max_operations {
         return NativeExternalOptimizationEcosystemResult::status(
             "unsupported",
             "job-shop reference model is too large",
         );
     }
 
-    let result = run_job_shop_exact(JobShopDispatchParams {
-        jobs: Some(jobs),
-        rule: None,
-    });
-    let mut starts = Vec::with_capacity(operation_order.len());
-    for (job_id, op_index) in operation_order {
-        let Some(operation) = result
-            .schedule
-            .iter()
-            .find(|operation| operation.job_id == job_id && operation.op_index == op_index)
-        else {
-            return NativeExternalOptimizationEcosystemResult::status(
-                "invalid",
-                "Rust job-shop schedule missing operation",
-            );
-        };
-        starts.push(operation.start);
+    let machine_orders = per_machine
+        .values()
+        .map(|ids| native_permutations(ids))
+        .collect::<Vec<_>>();
+    let order_count = machine_orders
+        .iter()
+        .map(Vec::len)
+        .try_fold(1usize, |acc, len| acc.checked_mul(len));
+    if order_count.is_none_or(|count| count > 1_048_576) {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "unsupported",
+            "job-shop machine-order search space is too large",
+        );
     }
 
-    let schedule = result
-        .schedule
+    let mut best_starts = None::<Vec<f64>>;
+    let mut best_makespan = None::<f64>;
+    native_enumerate_machine_orders(&machine_orders, |order_choice| {
+        let Some(starts) = native_cp_job_shop_starts_for_machine_order(
+            &operations,
+            &job_operation_ids,
+            order_choice,
+        ) else {
+            return;
+        };
+        let makespan = operations
+            .iter()
+            .enumerate()
+            .map(|(idx, operation)| starts[idx] + operation.duration)
+            .fold(0.0_f64, f64::max);
+        if native_better(makespan, best_makespan, "min")
+            || (best_makespan.is_some_and(|best| (makespan - best).abs() <= 1e-12)
+                && best_starts
+                    .as_ref()
+                    .is_some_and(|best| native_lexicographic_less_f64(&starts, best)))
+        {
+            best_makespan = Some(makespan);
+            best_starts = Some(starts);
+        }
+    });
+
+    let (Some(makespan), Some(starts)) = (best_makespan, best_starts.clone()) else {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "infeasible",
+            "no acyclic machine/job ordering",
+        );
+    };
+
+    let schedule = operations
         .iter()
-        .map(|operation| {
+        .enumerate()
+        .map(|(idx, operation)| {
+            let start = starts[idx];
             json!({
-                "job": operation.job_id,
-                "op": operation.op_index,
+                "job": operation.job,
+                "op": operation.op,
                 "machine": operation.machine,
-                "start": operation.start,
-                "finish": operation.finish
+                "start": start,
+                "finish": start + operation.duration
             })
         })
         .collect::<Vec<_>>();
-    NativeExternalOptimizationEcosystemResult::optimal(result.makespan, starts)
+    NativeExternalOptimizationEcosystemResult::optimal(makespan, starts)
         .with_extra("schedule", Value::Array(schedule))
-        .with_extra("total_flow_time", Value::from(result.total_flow_time))
+}
+
+#[derive(Clone, Debug)]
+struct NativeCpJobShopOperation {
+    job: usize,
+    op: usize,
+    machine: String,
+    duration: f64,
+}
+
+fn native_permutations(values: &[usize]) -> Vec<Vec<usize>> {
+    fn go(values: &mut Vec<usize>, index: usize, out: &mut Vec<Vec<usize>>) {
+        if index == values.len() {
+            out.push(values.clone());
+            return;
+        }
+        for swap_index in index..values.len() {
+            values.swap(index, swap_index);
+            go(values, index + 1, out);
+            values.swap(index, swap_index);
+        }
+    }
+
+    let mut values = values.to_vec();
+    let mut out = Vec::new();
+    go(&mut values, 0, &mut out);
+    out
+}
+
+fn native_enumerate_machine_orders<F>(machine_orders: &[Vec<Vec<usize>>], mut visit: F)
+where
+    F: FnMut(&[Vec<usize>]),
+{
+    fn go<F>(
+        machine_orders: &[Vec<Vec<usize>>],
+        index: usize,
+        current: &mut Vec<Vec<usize>>,
+        visit: &mut F,
+    ) where
+        F: FnMut(&[Vec<usize>]),
+    {
+        if index == machine_orders.len() {
+            visit(current);
+            return;
+        }
+        for order in &machine_orders[index] {
+            current.push(order.clone());
+            go(machine_orders, index + 1, current, visit);
+            current.pop();
+        }
+    }
+
+    let mut current = Vec::with_capacity(machine_orders.len());
+    go(machine_orders, 0, &mut current, &mut visit);
+}
+
+fn native_cp_job_shop_starts_for_machine_order(
+    operations: &[NativeCpJobShopOperation],
+    job_operation_ids: &[Vec<usize>],
+    machine_order: &[Vec<usize>],
+) -> Option<Vec<f64>> {
+    let mut successors = vec![Vec::<(usize, f64)>::new(); operations.len()];
+    let mut indegree = vec![0usize; operations.len()];
+    let mut add_arc = |before: usize, after: usize| {
+        successors[before].push((after, operations[before].duration));
+        indegree[after] = indegree[after].saturating_add(1);
+    };
+    for ids in job_operation_ids {
+        for pair in ids.windows(2) {
+            add_arc(pair[0], pair[1]);
+        }
+    }
+    for order in machine_order {
+        for pair in order.windows(2) {
+            add_arc(pair[0], pair[1]);
+        }
+    }
+
+    let mut starts = vec![0.0_f64; operations.len()];
+    let mut ready = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, count)| (*count == 0).then_some(idx))
+        .collect::<Vec<_>>();
+    let mut topological_count = 0usize;
+    while !ready.is_empty() {
+        let (ready_index, current) = ready
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, op_id)| **op_id)
+            .map(|(idx, op_id)| (idx, *op_id))?;
+        ready.remove(ready_index);
+        topological_count += 1;
+        for (next, lag) in &successors[current] {
+            starts[*next] = starts[*next].max(starts[current] + *lag);
+            indegree[*next] = indegree[*next].saturating_sub(1);
+            if indegree[*next] == 0 {
+                ready.push(*next);
+            }
+        }
+    }
+
+    (topological_count == operations.len()).then_some(starts)
+}
+
+fn native_lexicographic_less_f64(left: &[f64], right: &[f64]) -> bool {
+    for (left, right) in left.iter().zip(right.iter()) {
+        if (left - right).abs() <= 1e-12 {
+            continue;
+        }
+        return left < right;
+    }
+    left.len() < right.len()
 }
 
 fn native_solve_ecosystem_cp_assignment(

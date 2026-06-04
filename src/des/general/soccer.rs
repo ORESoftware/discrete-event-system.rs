@@ -14594,6 +14594,7 @@ struct SoccerNeuralTrainingResult {
     samples: usize,
     loss: f64,
     parameter_count: usize,
+    snapshot: SoccerNeuralNetworkSnapshot,
 }
 
 enum SoccerNeuralLearningWorkerCommand {
@@ -14694,7 +14695,14 @@ impl SoccerNeuralLearner {
 
     fn record_worker_result(&mut self, result: SoccerNeuralLearningWorkerResult) {
         match result {
-            SoccerNeuralLearningWorkerResult::Trained(result) => self.stats.record_result(result),
+            SoccerNeuralLearningWorkerResult::Trained(result) => {
+                let snapshot = result.snapshot.clone();
+                let snapshot_is_valid = result.loss.is_finite();
+                self.stats.record_result(result);
+                if snapshot_is_valid {
+                    self.last_network_snapshot = Some(snapshot);
+                }
+            }
             SoccerNeuralLearningWorkerResult::Snapshot(snapshot) => {
                 self.last_network_snapshot = Some(snapshot);
             }
@@ -14882,15 +14890,20 @@ impl SoccerNeuralLearner {
             SoccerNeuralLearningBackend::Inline => {
                 if let Some(network) = &mut self.inline_network {
                     for batch in samples.chunks(batch_size).take(max_batches) {
-                        let pairs = batch
-                            .iter()
-                            .map(|sample| (sample.input.clone(), vec![sample.target]))
-                            .collect::<Vec<_>>();
-                        let loss = network.train_batch(&pairs, learning_rate);
+                        let loss = network.train_batch_slices(
+                            batch.iter().map(|sample| {
+                                (
+                                    sample.input.as_slice(),
+                                    std::slice::from_ref(&sample.target),
+                                )
+                            }),
+                            learning_rate,
+                        );
                         self.stats.record_result(SoccerNeuralTrainingResult {
                             samples: batch.len(),
                             loss,
                             parameter_count: network.num_parameters(),
+                            snapshot: soccer_neural_network_snapshot(network),
                         });
                     }
                     self.last_network_snapshot = Some(soccer_neural_network_snapshot(network));
@@ -14953,16 +14966,22 @@ fn spawn_soccer_neural_learning_worker(
                     if batch.is_empty() {
                         continue;
                     }
-                    let pairs = batch
-                        .iter()
-                        .map(|sample| (sample.input.clone(), vec![sample.target]))
-                        .collect::<Vec<_>>();
-                    let loss = network.train_batch(&pairs, learning_rate);
+                    let loss = network.train_batch_slices(
+                        batch.iter().map(|sample| {
+                            (
+                                sample.input.as_slice(),
+                                std::slice::from_ref(&sample.target),
+                            )
+                        }),
+                        learning_rate,
+                    );
+                    let snapshot = soccer_neural_network_snapshot(&network);
                     let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Trained(
                         SoccerNeuralTrainingResult {
                             samples: batch.len(),
                             loss,
                             parameter_count: network.num_parameters(),
+                            snapshot,
                         },
                     ));
                 }
@@ -32338,6 +32357,7 @@ mod tests {
         assert!(learning.neural_learning_samples > 0);
         assert!(learning.neural_learning_parameter_count > 0);
         assert!(learning.neural_learning_last_loss.is_some());
+        assert!(sim.team_policy_artifact().learning.neural_network.is_some());
 
         sim.drain_neural_learning(Duration::from_millis(50));
         let artifact = sim.team_policy_artifact();

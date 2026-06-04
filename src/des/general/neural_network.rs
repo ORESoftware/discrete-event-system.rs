@@ -215,11 +215,26 @@ impl FeedForwardNetwork {
         samples: &[(NumericVector, NumericVector)],
         learning_rate: f64,
     ) -> f64 {
+        self.train_batch_slices(
+            samples
+                .iter()
+                .map(|(input, target)| (input.as_slice(), target.as_slice())),
+            learning_rate,
+        )
+    }
+
+    /// Mean loss over a borrowed batch without cloning input/target vectors.
+    pub fn train_batch_slices<'a, I>(&mut self, samples: I, learning_rate: f64) -> f64
+    where
+        I: IntoIterator<Item = (&'a [f64], &'a [f64])>,
+    {
         let mut total = 0.0;
+        let mut count = 0usize;
         for (input, target) in samples {
             total += self.train_sample(input, target, learning_rate).loss;
+            count += 1;
         }
-        total / (samples.len().max(1) as f64)
+        total / (count.max(1) as f64)
     }
 
     /// Total number of weights + biases. (TS `parameterCount`.)
@@ -1166,6 +1181,35 @@ mod tests {
         assert_eq!(net.output_dim, 2);
         assert_eq!(net.predict(&[3.0, 4.0]), vec![11.5, -3.0]);
         assert_eq!(net.num_parameters(), 6);
+    }
+
+    #[test]
+    fn borrowed_batch_training_matches_owned_batch_training() {
+        let mut owned_network = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1]],
+            biases: vec![0.05],
+            activation: ActivationName::Linear,
+        }]);
+        let mut borrowed_network = owned_network.clone();
+        let samples = vec![
+            (vec![1.0, 2.0], vec![0.4]),
+            (vec![-1.0, 0.5], vec![-0.3]),
+            (vec![0.25, -0.75], vec![0.15]),
+        ];
+
+        let owned_loss = owned_network.train_batch(&samples, 0.02);
+        let borrowed_loss = borrowed_network.train_batch_slices(
+            samples
+                .iter()
+                .map(|(input, target)| (input.as_slice(), target.as_slice())),
+            0.02,
+        );
+
+        assert!((owned_loss - borrowed_loss).abs() <= f64::EPSILON);
+        assert_eq!(
+            owned_network.predict(&[0.5, -0.25]),
+            borrowed_network.predict(&[0.5, -0.25])
+        );
     }
 
     #[test]

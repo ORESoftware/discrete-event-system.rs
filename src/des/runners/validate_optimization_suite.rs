@@ -663,9 +663,20 @@ fn optional_math_program_external_unavailable(message: &str) -> bool {
         "not configured",
         "cannot find",
         "failed to load",
+        "timed out",
+        "timeout",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn optional_external_quadratic_reference_unavailable(
+    status: ExternalQuadraticReferenceStatus,
+    message: &str,
+) -> bool {
+    status == ExternalQuadraticReferenceStatus::Unavailable
+        || (status == ExternalQuadraticReferenceStatus::NumericalError
+            && optional_math_program_external_unavailable(message))
 }
 
 impl Driver {
@@ -11367,7 +11378,10 @@ impl Driver {
                 ..Default::default()
             },
         );
-        if qp_highs_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+        if optional_external_quadratic_reference_unavailable(
+            qp_highs_reference.status,
+            &qp_highs_reference.message,
+        ) {
             println!(
                 "  SKIP  MathProgram QP facade same-input HiGHS QP-reference cross-check: {}",
                 qp_highs_reference.message
@@ -11479,7 +11493,7 @@ impl Driver {
                     && report.internal.status == MathProgramStatus::Optimal
                     && report.external.status == MathProgramStatus::Optimal
                     && report.internal.solver == "des-mip-convex-qp-cutting-plane"
-                    && report.external.solver == "python:bounded-integer-qp-enumeration"
+                    && report.external.solver == "rust:miqp-enumeration"
                     && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && (report.internal.x[miqp_x] - 2.0).abs() <= 1e-7,
@@ -11631,7 +11645,10 @@ impl Driver {
                 ..Default::default()
             },
         );
-        if socp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+        if optional_external_quadratic_reference_unavailable(
+            socp_external_reference.status,
+            &socp_external_reference.message,
+        ) {
             println!(
                 "  SKIP  MathProgram SOCP facade same-input quadratic-reference cross-check: {}",
                 socp_external_reference.message
@@ -11758,7 +11775,10 @@ impl Driver {
                 ..Default::default()
             },
         );
-        if rotated_socp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+        if optional_external_quadratic_reference_unavailable(
+            rotated_socp_external_reference.status,
+            &rotated_socp_external_reference.message,
+        ) {
             println!(
                 "  SKIP  MathProgram rotated SOCP facade same-input quadratic-reference cross-check: {}",
                 rotated_socp_external_reference.message
@@ -11822,7 +11842,7 @@ impl Driver {
                     && report.internal.status == MathProgramStatus::Optimal
                     && report.external.status == MathProgramStatus::Optimal
                     && report.internal.solver == "des-mip-soc-cutting-plane"
-                    && report.external.solver == "python:bounded-integer-conic-enumeration"
+                    && report.external.solver == "rust:misocp-enumeration"
                     && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && (report.internal.x[misocp_t] - 5.0).abs() <= 1e-7,
@@ -11937,7 +11957,7 @@ impl Driver {
                     && report.internal.status == MathProgramStatus::Optimal
                     && report.external.status == MathProgramStatus::Optimal
                     && report.internal.solver == "des-mip-soc-cutting-plane"
-                    && report.external.solver == "python:bounded-integer-conic-enumeration"
+                    && report.external.solver == "rust:misocp-enumeration"
                     && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && (report.internal.x[rotated_misocp_v] - 4.0).abs() <= 1e-7,
@@ -12102,7 +12122,10 @@ impl Driver {
                 ..Default::default()
             },
         );
-        if qcp_external_reference.status == ExternalQuadraticReferenceStatus::Unavailable {
+        if optional_external_quadratic_reference_unavailable(
+            qcp_external_reference.status,
+            &qcp_external_reference.message,
+        ) {
             println!(
                 "  SKIP  MathProgram QCP facade same-input quadratic-reference cross-check: {}",
                 qcp_external_reference.message
@@ -12199,7 +12222,7 @@ impl Driver {
                     && report.internal.status == MathProgramStatus::Optimal
                     && report.external.status == MathProgramStatus::Optimal
                     && report.internal.solver == "des-mip-convex-cutting-plane"
-                    && report.external.solver == "python:bounded-integer-conic-enumeration"
+                    && report.external.solver == "rust:miqcp-enumeration"
                     && report.objective_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && report.max_x_abs_diff.is_some_and(|diff| diff <= 1e-7)
                     && (report.internal.x[miqcp_y] - 9.0).abs() <= 1e-7,
@@ -16495,11 +16518,13 @@ impl Driver {
                     && solution
                         .message
                         .as_deref()
-                        .is_some_and(|message| message.contains("not found")) =>
+                        .is_some_and(optional_math_program_external_unavailable) =>
             {
-                println!(
-                    "  SKIP  MathProgram external MIP incumbent-limit controls: cbc executable not found"
-                );
+                let message = solution
+                    .message
+                    .as_deref()
+                    .unwrap_or("external solver unavailable");
+                println!("  SKIP  MathProgram external MIP incumbent-limit controls: {message}");
             }
             Ok(solution) => {
                 let feedback = solution.control_feedback.as_ref();

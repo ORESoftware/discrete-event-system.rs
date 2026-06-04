@@ -241,6 +241,7 @@ const CUE_OUTPUT_FORMATS: &[&str] = &["cue", "json", "yaml"];
 const YAML_OUTPUT_FORMATS: &[&str] = &["yaml", "yml", "json"];
 const GRAPHQL_OUTPUT_FORMATS: &[&str] = &["graphql", "gql", "json"];
 const DBT_OUTPUT_FORMATS: &[&str] = &["sql", "yml", "yaml", "json"];
+const SQL_OUTPUT_FORMATS: &[&str] = &["sql", "json"];
 const PARQUET_OUTPUT_FORMATS: &[&str] = &["parquet", "arrow", "json", "csv"];
 
 pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
@@ -3302,6 +3303,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "dbt test adapter for relational output contracts and data models",
     },
     ExternalValidationToolSpec {
+        id: "sqlfluff",
+        display_name: "SQLFluff",
+        env_key: "SQLFLUFF",
+        family: ExternalValidationFamily::OutputDataValidator,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::None,
+        command_aliases: &["sqlfluff", "sql-lint", "sql-validator"],
+        capabilities: OUTPUT_VALIDATOR_CAPS,
+        input_formats: SQL_OUTPUT_FORMATS,
+        notes: "SQL linting and structural query validation adapter for relational model outputs",
+    },
+    ExternalValidationToolSpec {
         id: "whylogs",
         display_name: "whylogs",
         env_key: "WHYLOGS",
@@ -5535,6 +5548,163 @@ fn output_validation_graphql_reference(payload: &Value, validator: &str) -> Valu
     )
 }
 
+fn output_validation_sql_without_comments(text: &str) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(text.len());
+    let mut errors = Vec::new();
+    let mut chars = text.chars().peekable();
+    let mut quote = None::<char>;
+    let mut line = 1usize;
+    let mut block_comment_line = None::<usize>;
+    while let Some(ch) = chars.next() {
+        if ch == '\n' {
+            line += 1;
+        }
+        if block_comment_line.is_some() {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                block_comment_line = None;
+            } else if ch == '\n' {
+                out.push('\n');
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            out.push(ch);
+            if ch == active_quote {
+                if active_quote == '\'' && chars.peek() == Some(&'\'') {
+                    out.push(chars.next().unwrap_or('\''));
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                out.push(ch);
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                for comment_ch in chars.by_ref() {
+                    if comment_ch == '\n' {
+                        line += 1;
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                block_comment_line = Some(line);
+            }
+            _ => out.push(ch),
+        }
+    }
+    if let Some(active_quote) = quote {
+        errors.push(format!("sql has an unterminated {active_quote} quoted string"));
+    }
+    if let Some(start_line) = block_comment_line {
+        errors.push(format!("line {start_line} starts an unterminated SQL block comment"));
+    }
+    (out, errors)
+}
+
+fn output_validation_sql_reference(payload: &Value, validator: &str) -> Value {
+    let Some(text) = output_validation_payload_text(
+        payload,
+        &[
+            "sql",
+            "query",
+            "statement",
+            "model_sql",
+            "modelSql",
+            "model",
+            "text",
+            "content",
+        ],
+    ) else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "payload needs sql, query, statement, modelSql, model, text, or content",
+            Vec::new(),
+        );
+    };
+    let (without_comments, mut errors) = output_validation_sql_without_comments(text);
+    errors.extend(output_validation_balanced_delimiters(&without_comments));
+    let tokens = without_comments
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let has_sql_verb = tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "select"
+                | "with"
+                | "insert"
+                | "update"
+                | "delete"
+                | "merge"
+                | "create"
+                | "alter"
+                | "drop"
+                | "truncate"
+                | "explain"
+                | "analyze"
+        )
+    });
+    if !has_sql_verb {
+        errors.push("sql: expected a recognizable SQL statement keyword".to_string());
+    }
+    if tokens
+        .windows(2)
+        .any(|pair| pair[0] == "from" && matches!(pair[1].as_str(), "where" | "group" | "order" | "limit" | "having"))
+    {
+        errors.push("sql: FROM clause appears to be missing a relation".to_string());
+    }
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
+    )
+}
+
+fn output_validation_text_looks_sql(text: &str) -> bool {
+    let trimmed = text.trim_start().to_ascii_lowercase();
+    [
+        "select ", "with ", "insert ", "update ", "delete ", "merge ", "create ", "alter ",
+        "drop ", "truncate ", "explain ", "analyze ",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix))
+        || trimmed.contains("\nselect ")
+        || trimmed.contains("\nwith ")
+}
+
+fn output_validation_has_sql_payload(payload: &Value) -> bool {
+    [
+        "sql",
+        "query",
+        "statement",
+        "model_sql",
+        "modelSql",
+        "model",
+    ]
+    .iter()
+    .any(|key| payload.get(*key).and_then(Value::as_str).is_some())
+        || output_validation_payload_text(payload, &["text", "content"])
+            .is_some_and(output_validation_text_looks_sql)
+}
+
 pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &str) -> Value {
     let tool = tool.trim().to_ascii_lowercase().replace('_', "-");
     let kind = payload
@@ -5599,6 +5769,12 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         "table" | "table-schema" | "tabular" | "csv-validator" | "csvlint" => {
             output_validation_table_reference(payload, "builtin:table-schema-subset")
         }
+        "dbt" if kind == "sql-validation" || kind == "dbt-validation" || output_validation_has_sql_payload(payload) => {
+            output_validation_sql_reference(payload, "builtin:sql-structural-for-dbt")
+        }
+        "sqlfluff" | "sql-lint" | "sql-validator" => {
+            output_validation_sql_reference(payload, &format!("builtin:sql-structural-for-{tool}"))
+        }
         "frictionless"
         | "pandera"
         | "dbt"
@@ -5637,6 +5813,9 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         }
         _ if kind == "table-validation" => {
             output_validation_table_reference(payload, "builtin:table-schema-subset")
+        }
+        _ if kind == "sql-validation" || kind == "dbt-validation" => {
+            output_validation_sql_reference(payload, "builtin:sql-structural")
         }
         _ if kind == "protobuf-validation" => output_validation_protobuf_reference(payload),
         _ if kind == "avro-validation" => output_validation_avro_reference(payload),
@@ -11668,6 +11847,49 @@ mod tests {
         assert_eq!(
             invalid["validator"].as_str(),
             Some("builtin:table-schema-subset-for-great-expectations")
+        );
+    }
+
+    #[test]
+    fn sql_validator_aliases_use_rust_structural_fallbacks() {
+        let dbt = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "dbt-validation",
+                "text": "with matches as (select id, score from soccer_matches)\nselect id, score from matches where score >= 0\n",
+            }),
+            "dbt",
+        );
+        assert_eq!(dbt["status"].as_str(), Some("ok"));
+        assert_eq!(dbt["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            dbt["validator"].as_str(),
+            Some("builtin:sql-structural-for-dbt")
+        );
+
+        let sqlfluff = run_output_validation_json_with_rust_reference(
+            &json!({
+                "sql": "select id, score from where score > 0",
+            }),
+            "sqlfluff",
+        );
+        assert_eq!(sqlfluff["status"].as_str(), Some("ok"));
+        assert_eq!(sqlfluff["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            sqlfluff["validator"].as_str(),
+            Some("builtin:sql-structural-for-sqlfluff")
+        );
+
+        let sql_lint = run_output_validation_json_with_rust_reference(
+            &json!({
+                "query": "select * from games where status = 'complete'",
+            }),
+            "sql_lint",
+        );
+        assert_eq!(sql_lint["status"].as_str(), Some("ok"));
+        assert_eq!(sql_lint["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            sql_lint["validator"].as_str(),
+            Some("builtin:sql-structural-for-sql-lint")
         );
     }
 

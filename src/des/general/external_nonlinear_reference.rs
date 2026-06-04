@@ -10,8 +10,9 @@
 use std::f64::consts::PI;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -675,10 +676,46 @@ fn reference_script() -> PathBuf {
     root.join("scripts").join("nonlinear_reference.py")
 }
 
+fn nonlinear_reference_timeout_ms() -> u64 {
+    std::env::var("NONLINEAR_REFERENCE_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_nonlinear_reference_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll nonlinear_reference.py: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for nonlinear_reference.py: {err}"))
+}
+
 fn run_reference_process(
     payload: Value,
     opts: &ExternalNonlinearReferenceOptions,
-) -> (Instant, Result<std::process::Output, String>) {
+) -> (Instant, Result<(Output, bool, u64), String>) {
     let started = Instant::now();
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
@@ -717,14 +754,10 @@ fn run_reference_process(
             );
         }
     }
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(err) => {
-            return (
-                started,
-                Err(format!("failed to wait for nonlinear_reference.py: {err}")),
-            )
-        }
+    let timeout_ms = nonlinear_reference_timeout_ms();
+    let output = match wait_for_nonlinear_reference_output(child, timeout_ms) {
+        Ok((output, timed_out)) => (output, timed_out, timeout_ms),
+        Err(err) => return (started, Err(err)),
     };
     (started, Ok(output))
 }
@@ -734,11 +767,21 @@ fn run_nonlinear_reference_json(
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalNonlinearReferenceSolution {
     let (started, output) = run_reference_process(payload, opts);
-    let output = match output {
+    let (output, timed_out, timeout_ms) = match output {
         Ok(output) => output,
         Err(message) => return unavailable(message, started.elapsed().as_secs_f64() * 1000.0),
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("nonlinear_reference.py timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; nonlinear_reference.py timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     match serde_json::from_slice::<NonlinearReferencePayload>(&output.stdout) {
         Ok(parsed) => ExternalNonlinearReferenceSolution {
             status: status_from_str(&parsed.status),
@@ -755,7 +798,7 @@ fn run_nonlinear_reference_json(
                 if output.status.success() {
                     "ok".to_string()
                 } else {
-                    String::from_utf8_lossy(&output.stderr).trim().to_string()
+                    stderr.clone()
                 }
             }),
             elapsed_ms,
@@ -763,7 +806,7 @@ fn run_nonlinear_reference_json(
         Err(err) => numerical_error(
             format!(
                 "failed to parse nonlinear_reference.py output: {err}; stderr={}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr
             ),
             elapsed_ms,
         ),
@@ -775,13 +818,23 @@ fn run_pareto_portfolio_reference_json(
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalParetoPortfolioReferenceSolution {
     let (started, output) = run_reference_process(payload, opts);
-    let output = match output {
+    let (output, timed_out, timeout_ms) = match output {
         Ok(output) => output,
         Err(message) => {
             return pareto_unavailable(message, started.elapsed().as_secs_f64() * 1000.0)
         }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("nonlinear_reference.py timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; nonlinear_reference.py timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     match serde_json::from_slice::<ParetoPortfolioReferencePayload>(&output.stdout) {
         Ok(parsed) => ExternalParetoPortfolioReferenceSolution {
             status: status_from_str(&parsed.status),
@@ -804,7 +857,7 @@ fn run_pareto_portfolio_reference_json(
                 if output.status.success() {
                     "ok".to_string()
                 } else {
-                    String::from_utf8_lossy(&output.stderr).trim().to_string()
+                    stderr.clone()
                 }
             }),
             elapsed_ms,
@@ -812,7 +865,7 @@ fn run_pareto_portfolio_reference_json(
         Err(err) => pareto_numerical_error(
             format!(
                 "failed to parse nonlinear_reference.py Pareto output: {err}; stderr={}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr
             ),
             elapsed_ms,
         ),
@@ -904,6 +957,7 @@ pub fn solve_global_benchmark_with_external_reference(
 
 #[cfg(test)]
 mod tests {
+    use super::wait_for_nonlinear_reference_output;
     use crate::des::general::external_nonlinear_reference::{
         solve_exponential_fit_with_external_reference,
         solve_global_benchmark_with_external_reference,
@@ -912,6 +966,7 @@ mod tests {
         ExternalNonlinearReferenceSolver, ExternalNonlinearReferenceStatus,
     };
     use crate::des::general::nonlinear_optimization_models::CurveFitPoint;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn auto_prefers_rust_reference_without_python() {
@@ -1010,5 +1065,21 @@ mod tests {
         let pareto = solve_pareto_portfolio_with_external_reference(&[], 32, 11, &opts);
         assert_eq!(pareto.status, ExternalNonlinearReferenceStatus::Optimal);
         assert!(pareto.solver.starts_with("rust:"));
+    }
+
+    #[test]
+    fn nonlinear_python_bridge_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_nonlinear_reference_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 }

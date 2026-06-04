@@ -5,7 +5,7 @@
 //! evolutionary spawning, and a queue runner that keeps worker slots full.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -405,15 +405,30 @@ pub fn evolve_soccer_team_policies(
 
 pub fn run_soccer_learning_game(
     episode: usize,
-    mut config: MatchConfig,
+    config: MatchConfig,
     starting_policies: SoccerTeamQPolicies,
+    neural_drain_timeout: Duration,
+) -> Result<SoccerLearningCompletedGame, String> {
+    run_soccer_learning_game_from_snapshot(
+        episode,
+        config,
+        Arc::new(starting_policies),
+        neural_drain_timeout,
+    )
+}
+
+fn run_soccer_learning_game_from_snapshot(
+    episode: usize,
+    mut config: MatchConfig,
+    starting_policies: Arc<SoccerTeamQPolicies>,
     neural_drain_timeout: Duration,
 ) -> Result<SoccerLearningCompletedGame, String> {
     let started = Instant::now();
     config.seed = config.seed.wrapping_add(episode as u32);
     let seed = config.seed as u64;
     let total_ticks = config.total_ticks();
-    let mut sim = SoccerMatch::default_11v11(config).with_team_policies(starting_policies.clone());
+    let mut sim =
+        SoccerMatch::default_11v11(config).with_team_policies((*starting_policies).clone());
 
     for _ in 0..total_ticks {
         sim.run_time_step();
@@ -427,7 +442,7 @@ pub fn run_soccer_learning_game(
     let artifact = sim.team_policy_artifact();
     let summary = artifact.summary.clone();
     let score = soccer_learning_run_score(&summary);
-    let delta = soccer_policy_delta_entries(&starting_policies, &policies, &score);
+    let delta = soccer_policy_delta_entries(starting_policies.as_ref(), &policies, &score);
     let episode_summary = SoccerSelfPlayEpisodeSummary {
         episode,
         seed,
@@ -460,6 +475,13 @@ pub fn run_soccer_learning_queue(
     run_soccer_learning_queue_with_observer(config, initial_policies, |_, _| Ok(()))
 }
 
+struct SoccerLearningQueueTask {
+    episode: usize,
+    match_config: MatchConfig,
+    starting_policies: Arc<SoccerTeamQPolicies>,
+    neural_drain_timeout: Duration,
+}
+
 pub fn run_soccer_learning_queue_with_observer<F>(
     config: SoccerLearningQueueRunnerConfig,
     initial_policies: SoccerTeamQPolicies,
@@ -470,7 +492,34 @@ where
 {
     let started = Instant::now();
     let parallel_games = config.parallel_games.clamp(1, 100);
-    let (tx, rx) = mpsc::channel();
+    let (task_tx, task_rx) = mpsc::sync_channel::<SoccerLearningQueueTask>(parallel_games);
+    let task_rx = Arc::new(Mutex::new(task_rx));
+    let (result_tx, result_rx) = mpsc::channel();
+    let mut workers = Vec::with_capacity(parallel_games);
+    for _ in 0..parallel_games {
+        let task_rx = Arc::clone(&task_rx);
+        let result_tx = result_tx.clone();
+        workers.push(thread::spawn(move || loop {
+            let task = {
+                let receiver = task_rx
+                    .lock()
+                    .expect("soccer learning queue task receiver poisoned");
+                receiver.recv()
+            };
+            let Ok(task) = task else {
+                break;
+            };
+            let result = run_soccer_learning_game_from_snapshot(
+                task.episode,
+                task.match_config,
+                task.starting_policies,
+                task.neural_drain_timeout,
+            );
+            let _ = result_tx.send((task.episode, result));
+        }));
+    }
+    drop(result_tx);
+
     let mut active = 0usize;
     let mut next_episode = 0usize;
     let mut completed_games = 0usize;
@@ -481,43 +530,66 @@ where
     let mut total_home_goals = 0u32;
     let mut total_away_goals = 0u32;
     let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
+    let mut first_error = None::<String>;
 
-    while completed_games + failed_games < config.games {
+    while completed_games + failed_games < config.games && first_error.is_none() {
         while active < parallel_games && next_episode < config.games {
-            let tx = tx.clone();
             let episode = next_episode;
-            let starting_policies = policies.clone();
+            let starting_policies = Arc::new(policies.clone());
             let mut match_config = config.match_config.clone();
             match_config.seed = config.base_seed;
             let neural_drain_timeout = config.neural_drain_timeout;
-            thread::spawn(move || {
-                let result = run_soccer_learning_game(
-                    episode,
-                    match_config,
-                    starting_policies,
-                    neural_drain_timeout,
-                );
-                let _ = tx.send((episode, result));
-            });
+            if let Err(err) = task_tx.send(SoccerLearningQueueTask {
+                episode,
+                match_config,
+                starting_policies: Arc::clone(&starting_policies),
+                neural_drain_timeout,
+            }) {
+                first_error = Some(format!("soccer learning queue task send failed: {err}"));
+                break;
+            }
             active += 1;
             next_episode += 1;
         }
 
-        let (_, game_result) = rx
-            .recv()
-            .map_err(|err| format!("soccer learning queue worker channel closed: {err}"))?;
+        if first_error.is_some() {
+            break;
+        }
+
+        let game_result = match result_rx.recv() {
+            Ok((_, game_result)) => game_result,
+            Err(err) => {
+                first_error = Some(format!(
+                    "soccer learning queue worker channel closed: {err}"
+                ));
+                break;
+            }
+        };
         active = active.saturating_sub(1);
 
         match game_result {
             Ok(game) => {
-                let merged = merge_soccer_policy_deltas(&policies, &[game.delta.clone()], 1.0)?;
+                let merged = match merge_soccer_policy_deltas(
+                    &policies,
+                    std::slice::from_ref(&game.delta),
+                    1.0,
+                ) {
+                    Ok(merged) => merged,
+                    Err(err) => {
+                        first_error = Some(err);
+                        break;
+                    }
+                };
                 policies = merged;
                 policies.prune(
                     config.prune_action_entries_per_team,
                     config.prune_target_entries_per_team,
                     config.min_policy_visits,
                 );
-                on_completed_game(&game, &policies)?;
+                if let Err(err) = on_completed_game(&game, &policies) {
+                    first_error = Some(err);
+                    break;
+                }
                 if let Some(snapshot) = game.neural_network.clone() {
                     latest_neural_network = Some(snapshot);
                 }
@@ -531,6 +603,16 @@ where
                 failed_games += 1;
             }
         }
+    }
+
+    drop(task_tx);
+    for worker in workers {
+        if worker.join().is_err() && first_error.is_none() {
+            first_error = Some("soccer learning queue worker thread panicked".to_string());
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
     episode_summaries.sort_by_key(|summary| summary.episode);
@@ -1038,6 +1120,14 @@ mod tests {
         assert_eq!(report.completed_games, 2);
         assert_eq!(report.failed_games, 0);
         assert_eq!(report.episode_summaries.len(), 2);
+        assert_eq!(
+            report
+                .episode_summaries
+                .iter()
+                .map(|summary| summary.seed)
+                .collect::<Vec<_>>(),
+            vec![1888, 1889]
+        );
         assert!(report.tactical_summary.total_transitions > 0);
         assert!(report.tactical_summary.shape_transitions > 0);
     }

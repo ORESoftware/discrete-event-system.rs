@@ -161,6 +161,48 @@ fn valid_module_id(id: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
+fn external_module_timeout_env_name(id: &str) -> String {
+    let mut name = String::from("EXTERNAL_MODULE_");
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            name.push(ch.to_ascii_uppercase());
+        } else {
+            name.push('_');
+        }
+    }
+    name.push_str("_TIMEOUT_MS");
+    name
+}
+
+fn parse_external_timeout_ms(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+fn resolve_external_module_timeout_ms_with_lookup<F>(
+    module: &ExternalProgramModule,
+    mut lookup: F,
+) -> Option<u64>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if module.timeout_ms.is_some() {
+        return module.timeout_ms;
+    }
+
+    let module_env_name = external_module_timeout_env_name(&module.id);
+    if let Some(timeout_ms) =
+        lookup(&module_env_name).and_then(|value| parse_external_timeout_ms(&value))
+    {
+        return Some(timeout_ms);
+    }
+
+    lookup("EXTERNAL_MODULE_TIMEOUT_MS").and_then(|value| parse_external_timeout_ms(&value))
+}
+
+fn resolve_external_module_timeout_ms(module: &ExternalProgramModule) -> Option<u64> {
+    resolve_external_module_timeout_ms_with_lookup(module, |name| std::env::var(name).ok())
+}
+
 /// `registerExternalModule(module)`.
 pub fn register_external_module(module: ExternalProgramModule) -> Result<(), String> {
     {
@@ -309,7 +351,7 @@ pub fn run_external_module(
         &args,
         &RunExternalOpts {
             cwd: Some(root),
-            timeout_ms: module.timeout_ms,
+            timeout_ms: resolve_external_module_timeout_ms(&module),
             max_buffer_bytes: module.max_buffer_bytes,
             module_id: Some(id.to_string()),
         },
@@ -320,6 +362,31 @@ pub fn run_external_module(
 mod tests {
     use super::*;
 
+    fn empty_build_args(
+        _: &ExternalModuleParams,
+        _: &ExternalModuleContext,
+    ) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn timeout_test_module(id: &str, timeout_ms: Option<u64>) -> ExternalProgramModule {
+        ExternalProgramModule {
+            id: id.to_string(),
+            kind: ExternalModuleKind::Reference,
+            description: "timeout test module".to_string(),
+            source_path: "external-references/timeout-test.py".to_string(),
+            interpreter: ExternalInterpreterSpec {
+                env_var: "TIMEOUT_TEST_INTERPRETER".to_string(),
+                default_command: "python3".to_string(),
+                label: "Python".to_string(),
+            },
+            default_params: ExternalModuleParams::new(),
+            timeout_ms,
+            max_buffer_bytes: None,
+            build_args: empty_build_args,
+        }
+    }
+
     #[test]
     fn module_id_validation() {
         assert!(valid_module_id("neural-network-reference"));
@@ -327,6 +394,60 @@ mod tests {
         assert!(!valid_module_id("-bad"));
         assert!(!valid_module_id("Bad"));
         assert!(!valid_module_id("has space"));
+    }
+
+    #[test]
+    fn external_module_timeout_env_name_sanitizes_module_id() {
+        assert_eq!(
+            external_module_timeout_env_name("traffic-simpy-reference"),
+            "EXTERNAL_MODULE_TRAFFIC_SIMPY_REFERENCE_TIMEOUT_MS"
+        );
+        assert_eq!(
+            external_module_timeout_env_name("solver.foo_v2"),
+            "EXTERNAL_MODULE_SOLVER_FOO_V2_TIMEOUT_MS"
+        );
+    }
+
+    #[test]
+    fn external_module_timeout_resolution_uses_metadata_then_envs() {
+        let module = timeout_test_module("neural-network-reference", Some(55));
+        assert_eq!(
+            resolve_external_module_timeout_ms_with_lookup(&module, |_| Some("99".to_string())),
+            Some(55)
+        );
+
+        let module = timeout_test_module("neural-network-reference", None);
+        assert_eq!(
+            resolve_external_module_timeout_ms_with_lookup(&module, |name| match name {
+                "EXTERNAL_MODULE_NEURAL_NETWORK_REFERENCE_TIMEOUT_MS" => Some("77".to_string()),
+                "EXTERNAL_MODULE_TIMEOUT_MS" => Some("99".to_string()),
+                _ => None,
+            }),
+            Some(77)
+        );
+
+        assert_eq!(
+            resolve_external_module_timeout_ms_with_lookup(&module, |name| match name {
+                "EXTERNAL_MODULE_TIMEOUT_MS" => Some("99".to_string()),
+                _ => None,
+            }),
+            Some(99)
+        );
+
+        assert_eq!(
+            resolve_external_module_timeout_ms_with_lookup(&module, |name| match name {
+                "EXTERNAL_MODULE_NEURAL_NETWORK_REFERENCE_TIMEOUT_MS" =>
+                    Some("not-a-number".to_string()),
+                "EXTERNAL_MODULE_TIMEOUT_MS" => Some("99".to_string()),
+                _ => None,
+            }),
+            Some(99)
+        );
+
+        assert_eq!(
+            resolve_external_module_timeout_ms_with_lookup(&module, |_| None),
+            None
+        );
     }
 
     #[test]

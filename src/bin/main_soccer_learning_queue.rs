@@ -8,6 +8,8 @@ use std::error::Error;
 use std::fs;
 use std::io::{BufWriter, Error as IoError, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
@@ -26,6 +28,7 @@ use serde::Serialize;
 
 const DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE: usize = 2;
 const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 200;
 
 #[derive(Clone, Debug)]
@@ -35,6 +38,19 @@ struct PendingPostgresCompletedRun {
     output_policy_version_id: Option<String>,
     generation: i32,
     policy_version_written: bool,
+}
+
+struct PostgresCompletedRunBatch {
+    experiment_id: String,
+    runner_id: String,
+    pending_runs: Vec<PendingPostgresCompletedRun>,
+}
+
+struct AsyncPostgresCompletedRunWriter {
+    sender: Option<mpsc::SyncSender<PostgresCompletedRunBatch>>,
+    receiver: mpsc::Receiver<Result<usize, String>>,
+    handle: Option<thread::JoinHandle<()>>,
+    pending_batches: usize,
 }
 
 fn env_value(name: &str) -> Option<String> {
@@ -316,6 +332,143 @@ fn flush_postgres_completed_runs(
     Ok(flushed)
 }
 
+impl AsyncPostgresCompletedRunWriter {
+    fn start(queue_batches: usize) -> Self {
+        let (sender, receiver) =
+            mpsc::sync_channel::<PostgresCompletedRunBatch>(queue_batches.max(1));
+        let (result_sender, result_receiver) = mpsc::channel::<Result<usize, String>>();
+        let handle = thread::spawn(move || {
+            let mut store = match SoccerLearningPgStore::connect_from_env() {
+                Ok(Some(store)) => store,
+                Ok(None) => {
+                    while receiver.recv().is_ok() {
+                        let _ = result_sender.send(Err(
+                            "postgres completed-run writer could not find a database URL"
+                                .to_string(),
+                        ));
+                    }
+                    return;
+                }
+                Err(error) => {
+                    while receiver.recv().is_ok() {
+                        let _ = result_sender.send(Err(format!(
+                            "postgres completed-run writer connect failed: {error}"
+                        )));
+                    }
+                    return;
+                }
+            };
+
+            while let Ok(mut batch) = receiver.recv() {
+                let result = flush_postgres_completed_runs(
+                    &mut store,
+                    &batch.experiment_id,
+                    &batch.runner_id,
+                    &mut batch.pending_runs,
+                );
+                let _ = result_sender.send(result);
+            }
+        });
+
+        AsyncPostgresCompletedRunWriter {
+            sender: Some(sender),
+            receiver: result_receiver,
+            handle: Some(handle),
+            pending_batches: 0,
+        }
+    }
+
+    fn drain_finished(&mut self) -> Result<usize, String> {
+        let mut persisted = 0usize;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(result) => {
+                    self.pending_batches = self.pending_batches.saturating_sub(1);
+                    persisted = persisted.saturating_add(result?);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if self.pending_batches > 0 {
+                        return Err(
+                            "postgres completed-run writer stopped before all batches finished"
+                                .to_string(),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(persisted)
+    }
+
+    fn enqueue(
+        &mut self,
+        experiment_id: &str,
+        runner_id: &str,
+        pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+    ) -> Result<usize, String> {
+        let persisted = self.drain_finished()?;
+        if pending_runs.is_empty() {
+            return Ok(persisted);
+        }
+        let Some(sender) = &self.sender else {
+            return Err("postgres completed-run writer is closed".to_string());
+        };
+        let batch = PostgresCompletedRunBatch {
+            experiment_id: experiment_id.to_string(),
+            runner_id: runner_id.to_string(),
+            pending_runs: std::mem::take(pending_runs),
+        };
+        sender
+            .send(batch)
+            .map_err(|err| format!("queue postgres completed-run batch: {err}"))?;
+        self.pending_batches = self.pending_batches.saturating_add(1);
+        Ok(persisted)
+    }
+
+    fn finish(mut self) -> Result<usize, String> {
+        let mut persisted = self.drain_finished()?;
+        let mut first_error = None::<String>;
+        self.sender.take();
+
+        while self.pending_batches > 0 {
+            match self.receiver.recv() {
+                Ok(result) => {
+                    self.pending_batches = self.pending_batches.saturating_sub(1);
+                    match result {
+                        Ok(count) => persisted = persisted.saturating_add(count),
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(format!(
+                            "postgres completed-run writer channel closed early: {error}"
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+
+        if let Some(handle) = self.handle.take() {
+            if handle.join().is_err() && first_error.is_none() {
+                first_error = Some("postgres completed-run writer thread panicked".to_string());
+            }
+        }
+
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(persisted)
+        }
+    }
+}
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -455,8 +608,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         "SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES",
         default_postgres_completed_run_batch_games(parallel_games),
     )?;
+    let pg_completed_run_async_queue_batches = env_usize_alias(
+        "SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE",
+        "SOCCER_POSTGRES_ASYNC_BATCH_QUEUE",
+        DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE,
+    )?;
     let pg_policy_version_interval_games = pg_policy_version_interval_games.max(1);
     let pg_completed_run_batch_games = pg_completed_run_batch_games.max(1);
+    let pg_completed_run_async_queue_batches = pg_completed_run_async_queue_batches.max(1);
     let options = SoccerQPolicyOptions {
         alpha: env_f64("SOCCER_ALPHA", 0.20)?,
         gamma: env_f64("SOCCER_GAMMA", 0.96)?,
@@ -548,9 +707,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         pg_experiment_id = Some(experiment_id);
     }
+    let mut pg_completed_writer = if pg_store.is_some() {
+        Some(AsyncPostgresCompletedRunWriter::start(
+            pg_completed_run_async_queue_batches,
+        ))
+    } else {
+        None
+    };
 
     println!(
-        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_drain_timeout_ms={} pg_policy_version_interval_games={} pg_completed_run_batch_games={}",
+        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_drain_timeout_ms={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={}",
         run_id,
         games,
         parallel_games,
@@ -563,6 +729,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         neural_drain_timeout_ms,
         pg_policy_version_interval_games,
         pg_completed_run_batch_games,
+        pg_completed_writer.is_some(),
+        pg_completed_run_async_queue_batches,
     );
     if let Some(path) = &resume_artifact {
         println!("resume_artifact={path}");
@@ -627,22 +795,36 @@ fn run() -> Result<(), Box<dyn Error>> {
                 policy_version_written: should_write_policy_version,
             });
             if pg_completed_buffer.len() >= pg_completed_run_batch_games {
-                pg_persisted_games += flush_postgres_completed_runs(
-                    store,
-                    experiment_id,
-                    &run_id,
-                    &mut pg_completed_buffer,
-                )?;
+                pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
+                    writer.enqueue(experiment_id, &run_id, &mut pg_completed_buffer)?
+                } else {
+                    flush_postgres_completed_runs(
+                        store,
+                        experiment_id,
+                        &run_id,
+                        &mut pg_completed_buffer,
+                    )?
+                };
             }
             Ok(())
         },
     )
     .map_err(invalid_data)?;
 
-    if let (Some(store), Some(experiment_id)) = (pg_store.as_mut(), pg_experiment_id.as_deref()) {
-        pg_persisted_games +=
+    if let Some(experiment_id) = pg_experiment_id.as_deref() {
+        pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
+            writer
+                .enqueue(experiment_id, &run_id, &mut pg_completed_buffer)
+                .map_err(invalid_data)?
+        } else if let Some(store) = pg_store.as_mut() {
             flush_postgres_completed_runs(store, experiment_id, &run_id, &mut pg_completed_buffer)
-                .map_err(invalid_data)?;
+                .map_err(invalid_data)?
+        } else {
+            0
+        };
+    }
+    if let Some(writer) = pg_completed_writer {
+        pg_persisted_games += writer.finish().map_err(invalid_data)?;
     }
 
     let artifact = soccer_self_play_artifact_from_queue_report(config, options, &report);
@@ -698,5 +880,10 @@ mod tests {
     #[test]
     fn default_queue_neural_drain_timeout_keeps_worker_wait_bounded() {
         assert_eq!(DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS, 200);
+    }
+
+    #[test]
+    fn default_queue_postgres_async_writer_stays_bounded() {
+        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE, 2);
     }
 }

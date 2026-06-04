@@ -14,8 +14,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExternalValidationFamily {
@@ -7486,6 +7487,42 @@ pub fn external_simulation_validation_reference_script() -> PathBuf {
         .join("simulation_validation_reference.py")
 }
 
+fn external_validation_reference_timeout_ms() -> u64 {
+    env::var("EXTERNAL_VALIDATION_REFERENCE_TIMEOUT_MS")
+        .or_else(|_| env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_external_validation_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll external validation process: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for external validation process: {err}"))
+}
+
 const EVENT_SIMULATION_ENGINES: &[&str] = &[
     "simpy",
     "salabim",
@@ -9219,7 +9256,8 @@ pub fn run_simulation_validation_json_with_python_reference(
         }
     }
 
-    let output = match child.wait_with_output() {
+    let timeout_ms = external_validation_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_external_validation_output(child, timeout_ms) {
         Ok(output) => output,
         Err(e) => {
             return ExternalSimulationValidationReferenceRun {
@@ -9239,7 +9277,16 @@ pub fn run_simulation_validation_json_with_python_reference(
 
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("external validation process timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; external validation process timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     let raw = match serde_json::from_str::<Value>(stdout.trim()) {
         Ok(raw) => raw,
         Err(e) => {
@@ -9559,7 +9606,8 @@ pub fn run_external_validation_text_cli(
             };
         }
     }
-    let output = match child.wait_with_output() {
+    let timeout_ms = external_validation_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_external_validation_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => {
             return ExternalValidationRun {
@@ -9573,7 +9621,16 @@ pub fn run_external_validation_text_cli(
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if stderr.trim().is_empty() {
+            format!("external validation process timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; external validation process timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).to_string()
+    };
     let verdict = infer_external_validation_text_verdict(
         opts.input_format,
         &stdout,
@@ -10681,7 +10738,8 @@ fn run_json_adapter(
             };
         }
     }
-    let output = match child.wait_with_output() {
+    let timeout_ms = external_validation_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_external_validation_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => {
             return ExternalValidationRun {
@@ -10694,13 +10752,23 @@ fn run_json_adapter(
         }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("external validation process timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; external validation process timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     if !output.status.success() {
         return ExternalValidationRun {
             tool_id: tool.id.to_string(),
             status: ExternalValidationRunStatus::Failed,
             output: None,
             elapsed_ms,
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            message: stderr,
         };
     }
     match serde_json::from_slice::<Value>(&output.stdout) {
@@ -11088,6 +11156,7 @@ fn resolve_command_path(command: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::wait_for_external_validation_output;
     use crate::des::general::external_validation_tools::{
         dimacs_cnf_to_string, dimacs_wcnf_to_string, external_benchmark_manifest_to_json,
         external_simulation_validation_engine_manifest, external_simulation_validation_tool_specs,
@@ -11122,6 +11191,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn validation_python_probe_command_honors_python_bin_precedence() {
@@ -12431,6 +12501,22 @@ mod tests {
             process_run.metrics.get("mass_balance_error").copied(),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn external_validation_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_external_validation_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 
     #[test]

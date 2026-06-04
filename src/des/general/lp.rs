@@ -34,7 +34,9 @@
 //! NOTE on JSON: the legacy Python bridge keeps the small hand-rolled JSON
 //! encoder/parser in this file for compatibility with the original TS port.
 
-use std::time::Instant;
+use std::process::Output;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::des::general::external_linear_cli::{
     solve_lp_with_external_cli, ExternalLinearCliLpAlgorithm, ExternalLinearCliOptions,
@@ -677,6 +679,42 @@ pub struct InternalSimplexOptions {
 
 fn ms_since(t0: Instant) -> f64 {
     t0.elapsed().as_secs_f64() * 1000.0
+}
+
+fn lp_external_timeout_ms() -> u64 {
+    std::env::var("LP_EXTERNAL_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_lp_external_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll external solver: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("external solver wait failed: {err}"))
 }
 
 /// The vanilla two-phase simplex algorithm (module-private; public entry is
@@ -3962,11 +4000,12 @@ impl ExternalSolver {
             // `stdin` dropped here, closing the pipe so the child sees EOF.
         }
 
-        let out = match child.wait_with_output() {
+        let timeout_ms = lp_external_timeout_ms();
+        let (out, timed_out) = match wait_for_lp_external_output(child, timeout_ms) {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[lp.external] {requested_solver} wait failed: {e}");
-                return numerical_error(format!("external solver wait failed: {e}"), t0);
+                return numerical_error(e, t0);
             }
         };
 
@@ -3976,11 +4015,20 @@ impl ExternalSolver {
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "null".to_string());
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let stderr = if stderr.is_empty() {
-                "(no stderr)".to_string()
+            let stderr = if timed_out {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.trim().is_empty() {
+                    format!("external solver timed out after {timeout_ms}ms")
+                } else {
+                    format!("{stderr}; external solver timed out after {timeout_ms}ms")
+                }
             } else {
-                stderr.to_string()
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.is_empty() {
+                    "(no stderr)".to_string()
+                } else {
+                    stderr.to_string()
+                }
             };
             eprintln!("[lp.external] {requested_solver} process exited with code {code}: {stderr}");
             return numerical_error(format!("external solver exited with {code}: {stderr}"), t0);
@@ -4710,6 +4758,7 @@ fn encode_request(p: &LPProblem, method: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     const TOL: f64 = 1e-6;
 
@@ -4735,6 +4784,21 @@ mod tests {
         assert_eq!(external_solver_label("glpk"), "glpk:cli");
         assert_eq!(external_solver_label("cbc"), "cbc:cli");
         assert_eq!(external_solver_label("gurobi"), "gurobi:cli");
+    }
+
+    #[test]
+    fn lp_external_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) = wait_for_lp_external_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 
     #[test]

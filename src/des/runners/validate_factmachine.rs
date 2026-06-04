@@ -14,7 +14,9 @@
 
 #![allow(dead_code)]
 
-use std::process::Command;
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::des::general::belief::{brier_score, BinaryOutcome, DiscreteBelief};
 use crate::des::general::pomdp::{pomdp_exact_finite_horizon, MDPVIOptions, QMDPSolver};
@@ -268,6 +270,44 @@ fn parse_python_reference(problem: &str, text: &str) -> Result<PyJson, String> {
     }
 }
 
+fn factmachine_python_timeout_ms() -> u64 {
+    std::env::var("FACTMACHINE_PY_TIMEOUT_MS")
+        .ok()
+        .or_else(|| std::env::var("PYTHON_REFERENCE_TIMEOUT_MS").ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_factmachine_python_output(
+    mut child: Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let timeout = Duration::from_millis(timeout_ms);
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map(|output| (output, false))
+                    .map_err(|err| format!("failed to wait for Python reference: {err}"));
+            }
+            Ok(None) => {}
+            Err(err) => return Err(format!("failed to poll Python reference: {err}")),
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            return child
+                .wait_with_output()
+                .map(|output| (output, true))
+                .map_err(|err| format!("failed to collect timed-out Python reference: {err}"));
+        }
+
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 fn run_python(env: &[(&str, String)]) -> Result<Option<PyJson>, String> {
     let Some(python) = std::env::var("FACTMACHINE_PY").ok() else {
         return Ok(None);
@@ -286,16 +326,35 @@ fn run_python(env: &[(&str, String)]) -> Result<Option<PyJson>, String> {
     for (k, v) in env {
         cmd.env(k, v);
     }
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
+    let timeout_ms = factmachine_python_timeout_ms();
+    let child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to start Python reference: {e}"))?;
+    match wait_for_factmachine_python_output(child, timeout_ms) {
+        Ok((out, timed_out)) if out.status.success() && !timed_out => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             parse_python_reference(problem, &stdout).map(Some)
         }
-        Ok(out) => Err(format!(
-            "Python reference exited with status {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
+        Ok((mut out, timed_out)) => {
+            if timed_out {
+                let timeout_message = format!("Python reference timed out after {timeout_ms}ms");
+                if out.stderr.is_empty() {
+                    out.stderr = timeout_message.into_bytes();
+                } else {
+                    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    stderr.push_str("; ");
+                    stderr.push_str(&timeout_message);
+                    out.stderr = stderr.into_bytes();
+                }
+            }
+            Err(format!(
+                "Python reference exited with status {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
         Err(e) => Err(format!("failed to run Python reference: {e}")),
     }
 }
@@ -906,5 +965,28 @@ pub fn run() {
     println!("\n=== Summary: {} passed, {} failed ===", c.pass, c.fail);
     if c.fail > 0 {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn factmachine_python_sidecar_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_factmachine_python_output(child, 10).expect("timeout output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(timed_out);
+        assert!(!output.status.success());
+        assert!(stderr.is_empty());
     }
 }

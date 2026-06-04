@@ -8,8 +8,9 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -307,6 +308,42 @@ fn reference_script() -> PathBuf {
     root.join("scripts").join("min_cost_flow_reference.py")
 }
 
+fn min_cost_flow_reference_timeout_ms() -> u64 {
+    std::env::var("MIN_COST_FLOW_REFERENCE_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_min_cost_flow_reference_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll min_cost_flow_reference.py: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for min_cost_flow_reference.py: {err}"))
+}
+
 fn run_min_cost_flow_reference_json(
     payload: Value,
     opts: &ExternalMinCostFlowReferenceOptions,
@@ -340,16 +377,22 @@ fn run_min_cost_flow_reference_json(
             );
         }
     }
-    let output = match child.wait_with_output() {
+    let timeout_ms = min_cost_flow_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_min_cost_flow_reference_output(child, timeout_ms) {
         Ok(output) => output,
-        Err(err) => {
-            return numerical_error(
-                format!("failed to wait for min_cost_flow_reference.py: {err}"),
-                started.elapsed().as_secs_f64() * 1000.0,
-            )
-        }
+        Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("min_cost_flow_reference.py timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; min_cost_flow_reference.py timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     match serde_json::from_slice::<MinCostFlowReferencePayload>(&output.stdout) {
         Ok(parsed) => ExternalMinCostFlowReferenceSolution {
             status: status_from_str(&parsed.status),
@@ -378,7 +421,7 @@ fn run_min_cost_flow_reference_json(
                 if output.status.success() {
                     "ok".to_string()
                 } else {
-                    String::from_utf8_lossy(&output.stderr).trim().to_string()
+                    stderr.clone()
                 }
             }),
             elapsed_ms,
@@ -386,7 +429,7 @@ fn run_min_cost_flow_reference_json(
         Err(err) => numerical_error(
             format!(
                 "failed to parse min_cost_flow_reference.py output: {err}; stderr={}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr
             ),
             elapsed_ms,
         ),
@@ -527,5 +570,21 @@ mod tests {
         assert_eq!(solution.solver, "rust:ssp-min-cost-flow");
         assert_eq!(solution.objective, Some(21.0));
         assert_eq!(solution.node_balance, vec![5.0, 7.0, -6.0, -6.0]);
+    }
+
+    #[test]
+    fn min_cost_flow_python_bridge_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_min_cost_flow_reference_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 }

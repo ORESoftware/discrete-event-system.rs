@@ -2476,6 +2476,10 @@ impl SoccerQPolicy {
     }
 
     pub fn update(&mut self, transition: &SoccerLearningTransition) {
+        self.update_with_reward(transition, transition.reward);
+    }
+
+    fn update_with_reward(&mut self, transition: &SoccerLearningTransition, reward: f64) {
         let state = SoccerQStateKey::from_transition(transition);
         let next_state = SoccerQStateKey::from_next_transition(transition);
         let action = normalize_soccer_action_label(&transition.action).to_string();
@@ -2491,7 +2495,7 @@ impl SoccerQPolicy {
         };
         let alpha = self.options.alpha.clamp(0.0, 1.0);
         let gamma = self.options.gamma.clamp(0.0, 0.999);
-        let target = transition.reward + gamma * max_next;
+        let target = reward + gamma * max_next;
         let updated = old + alpha * (target - old);
         self.insert_q_value(key.clone(), updated);
         *self.visits.entry(key).or_insert(0) += 1;
@@ -3401,7 +3405,7 @@ impl SoccerTeamQPolicies {
     }
 
     pub fn train_adversarial(&mut self, transitions: &[SoccerLearningTransition]) {
-        let mut tick_rewards: BTreeMap<u64, (f64, u32, f64, u32)> = BTreeMap::new();
+        let mut tick_rewards: HashMap<u64, (f64, u32, f64, u32)> = HashMap::new();
         for transition in transitions {
             let entry = tick_rewards.entry(transition.tick).or_default();
             match transition.team {
@@ -3437,10 +3441,8 @@ impl SoccerTeamQPolicies {
                 Team::Home => away_avg,
                 Team::Away => home_avg,
             };
-            let mut adversarial_transition = transition.clone();
-            adversarial_transition.reward = transition.reward - opponent_avg;
             self.policy_mut(transition.team)
-                .update(&adversarial_transition);
+                .update_with_reward(transition, transition.reward - opponent_avg);
         }
     }
 
@@ -16322,7 +16324,7 @@ impl SoccerMatch {
         }
         let target_scale = self.config.neural_learning.sanitized_target_scale();
         let target_clip = self.config.neural_learning.sanitized_target_clip();
-        let mut tick_rewards: BTreeMap<u64, (f64, u32, f64, u32)> = BTreeMap::new();
+        let mut tick_rewards: HashMap<u64, (f64, u32, f64, u32)> = HashMap::new();
         if self.team_policies.is_some() {
             for transition in transitions {
                 let entry = tick_rewards.entry(transition.tick).or_default();

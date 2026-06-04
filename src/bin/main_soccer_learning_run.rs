@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Error as IoError, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,7 +28,10 @@ use serde::Serialize;
 const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 200;
 const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
+const DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE: usize = 2;
+const DEFAULT_SOCCER_MAX_AUTO_PARALLEL_GAMES: usize = 10;
 const DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS: bool = false;
+const DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT: bool = true;
 const DEFAULT_SOCCER_PRINT_COMPLETED_GAMES: bool = false;
 
 fn env_value(name: &str) -> Option<String> {
@@ -116,6 +120,13 @@ fn default_postgres_policy_version_interval_games(parallel_games: usize) -> usiz
 
 fn default_postgres_completed_run_batch_games(parallel_games: usize) -> usize {
     parallel_games.max(DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES)
+}
+
+fn default_soccer_parallel_games() -> usize {
+    thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+        .clamp(1, DEFAULT_SOCCER_MAX_AUTO_PARALLEL_GAMES)
 }
 
 fn env_neural_learning_backend(
@@ -437,8 +448,8 @@ fn validate_tactical_learning_weights(
     Ok(())
 }
 
-fn write_episode_log(
-    file: &mut std::fs::File,
+fn write_episode_log<W: Write>(
+    file: &mut W,
     episode: &SoccerSelfPlayEpisodeSummary,
 ) -> Result<(), Box<dyn Error>> {
     serde_json::to_writer(&mut *file, episode)?;
@@ -479,6 +490,112 @@ struct CompletedGame {
     elapsed_seconds: f64,
 }
 
+struct SoccerLearningWorkerTask {
+    episode: usize,
+    config: MatchConfig,
+    starting_policies: Arc<SoccerTeamQPolicies>,
+    adversarial_moment_windows: Arc<Vec<SoccerMomentWindow>>,
+    print_progress: bool,
+    neural_drain_timeout: Duration,
+}
+
+struct SoccerLearningWorkerPool {
+    sender: Option<mpsc::SyncSender<SoccerLearningWorkerTask>>,
+    receiver: mpsc::Receiver<(usize, Result<CompletedGame, String>)>,
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+impl SoccerLearningWorkerPool {
+    fn start(worker_count: usize) -> Self {
+        let worker_count = worker_count.clamp(1, 100);
+        let (task_sender, task_receiver) =
+            mpsc::sync_channel::<SoccerLearningWorkerTask>(worker_count);
+        let task_receiver = Arc::new(Mutex::new(task_receiver));
+        let (result_sender, result_receiver) =
+            mpsc::channel::<(usize, Result<CompletedGame, String>)>();
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let task_receiver = Arc::clone(&task_receiver);
+            let result_sender = result_sender.clone();
+            handles.push(thread::spawn(move || loop {
+                let task = {
+                    let receiver = task_receiver
+                        .lock()
+                        .expect("soccer learning run task receiver poisoned");
+                    receiver.recv()
+                };
+                let Ok(task) = task else {
+                    break;
+                };
+                let episode = task.episode;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_game(
+                        task.episode,
+                        task.config,
+                        task.starting_policies,
+                        task.adversarial_moment_windows,
+                        task.print_progress,
+                        task.neural_drain_timeout,
+                    )
+                }))
+                .unwrap_or_else(|_| Err("soccer learning worker thread panicked".to_string()));
+                let _ = result_sender.send((episode, result));
+            }));
+        }
+        drop(result_sender);
+
+        Self {
+            sender: Some(task_sender),
+            receiver: result_receiver,
+            handles,
+        }
+    }
+
+    fn submit(&self, task: SoccerLearningWorkerTask) -> Result<(), Box<dyn Error>> {
+        let Some(sender) = &self.sender else {
+            return Err(io_error("soccer learning worker pool is closed").into());
+        };
+        sender
+            .send(task)
+            .map_err(|err| io_error(format!("soccer learning worker task send failed: {err}")))?;
+        Ok(())
+    }
+
+    fn recv_completed_game(&self) -> Result<CompletedGame, Box<dyn Error>> {
+        let (_, result) = self.receiver.recv().map_err(|err| {
+            invalid_data(format!(
+                "soccer learning worker result channel closed: {err}"
+            ))
+        })?;
+        result.map_err(|err| invalid_data(err).into())
+    }
+
+    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
+        self.sender.take();
+        let mut panicked = false;
+        for handle in self.handles.drain(..) {
+            if handle.join().is_err() {
+                panicked = true;
+            }
+        }
+        if panicked {
+            Err(io_error("soccer learning worker thread panicked").into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for SoccerLearningWorkerPool {
+    fn drop(&mut self) {
+        self.sender.take();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PendingPostgresCompletedRun {
     completed_episode: usize,
@@ -487,6 +604,165 @@ struct PendingPostgresCompletedRun {
     output_policy_version_id: Option<String>,
     generation: i32,
     policy_version_written: bool,
+}
+
+struct PostgresCompletedRunBatch {
+    experiment_id: String,
+    runner_id: String,
+    pending_runs: Vec<PendingPostgresCompletedRun>,
+    shard_index: usize,
+    shard_count: usize,
+}
+
+struct AsyncPostgresCompletedRunWriter {
+    sender: Option<mpsc::SyncSender<PostgresCompletedRunBatch>>,
+    receiver: mpsc::Receiver<Result<usize, String>>,
+    handle: Option<thread::JoinHandle<()>>,
+    pending_batches: usize,
+}
+
+impl AsyncPostgresCompletedRunWriter {
+    fn start(queue_batches: usize) -> Self {
+        let (sender, receiver) =
+            mpsc::sync_channel::<PostgresCompletedRunBatch>(queue_batches.max(1));
+        let (result_sender, result_receiver) = mpsc::channel::<Result<usize, String>>();
+        let handle = thread::spawn(move || {
+            let mut store = match SoccerLearningPgStore::connect_from_env() {
+                Ok(Some(store)) => store,
+                Ok(None) => {
+                    while receiver.recv().is_ok() {
+                        let _ = result_sender.send(Err(
+                            "postgres completed-run writer could not find a database URL"
+                                .to_string(),
+                        ));
+                    }
+                    return;
+                }
+                Err(error) => {
+                    while receiver.recv().is_ok() {
+                        let _ = result_sender.send(Err(format!(
+                            "postgres completed-run writer connect failed: {error}"
+                        )));
+                    }
+                    return;
+                }
+            };
+
+            while let Ok(mut batch) = receiver.recv() {
+                let result = flush_postgres_completed_runs(
+                    &mut store,
+                    &batch.experiment_id,
+                    &batch.runner_id,
+                    &mut batch.pending_runs,
+                    batch.shard_index,
+                    batch.shard_count,
+                )
+                .map_err(|err| err.to_string());
+                let _ = result_sender.send(result);
+            }
+        });
+
+        AsyncPostgresCompletedRunWriter {
+            sender: Some(sender),
+            receiver: result_receiver,
+            handle: Some(handle),
+            pending_batches: 0,
+        }
+    }
+
+    fn drain_finished(&mut self) -> Result<usize, String> {
+        let mut persisted = 0usize;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(result) => {
+                    self.pending_batches = self.pending_batches.saturating_sub(1);
+                    persisted = persisted.saturating_add(result?);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if self.pending_batches > 0 {
+                        return Err(
+                            "postgres completed-run writer stopped before all batches finished"
+                                .to_string(),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(persisted)
+    }
+
+    fn enqueue(
+        &mut self,
+        experiment_id: &str,
+        runner_id: &str,
+        pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+        shard_index: usize,
+        shard_count: usize,
+    ) -> Result<usize, String> {
+        let persisted = self.drain_finished()?;
+        if pending_runs.is_empty() {
+            return Ok(persisted);
+        }
+        let Some(sender) = &self.sender else {
+            return Err("postgres completed-run writer is closed".to_string());
+        };
+        let batch = PostgresCompletedRunBatch {
+            experiment_id: experiment_id.to_string(),
+            runner_id: runner_id.to_string(),
+            pending_runs: std::mem::take(pending_runs),
+            shard_index,
+            shard_count,
+        };
+        sender
+            .send(batch)
+            .map_err(|err| format!("queue postgres completed-run batch: {err}"))?;
+        self.pending_batches = self.pending_batches.saturating_add(1);
+        Ok(persisted)
+    }
+
+    fn finish(mut self) -> Result<usize, String> {
+        let mut persisted = self.drain_finished()?;
+        let mut first_error = None::<String>;
+        self.sender.take();
+
+        while self.pending_batches > 0 {
+            match self.receiver.recv() {
+                Ok(result) => {
+                    self.pending_batches = self.pending_batches.saturating_sub(1);
+                    match result {
+                        Ok(count) => persisted = persisted.saturating_add(count),
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(format!(
+                            "postgres completed-run writer channel closed early: {error}"
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+
+        if let Some(handle) = self.handle.take() {
+            if handle.join().is_err() && first_error.is_none() {
+                first_error = Some("postgres completed-run writer thread panicked".to_string());
+            }
+        }
+
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(persisted)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -548,6 +824,7 @@ struct RunManifest {
     postgres_last_policy_version_id: Option<String>,
     postgres_persisted_games: usize,
     postgres_completed_run_batch_games: usize,
+    write_final_policy_artifact: bool,
     write_game_artifacts: bool,
     game_artifact_mode: String,
     game_artifacts: Vec<GameManifestEntry>,
@@ -668,8 +945,8 @@ fn load_initial_policies(
 fn run_game(
     episode: usize,
     config: MatchConfig,
-    starting_policies: SoccerTeamQPolicies,
-    adversarial_moment_windows: Vec<SoccerMomentWindow>,
+    starting_policies: Arc<SoccerTeamQPolicies>,
+    adversarial_moment_windows: Arc<Vec<SoccerMomentWindow>>,
     print_progress: bool,
     neural_drain_timeout: Duration,
 ) -> Result<CompletedGame, String> {
@@ -677,9 +954,10 @@ fn run_game(
     let total_ticks = config.total_ticks();
     let episode_seed = config.seed as u64;
     let progress_interval = (total_ticks / 9).max(1);
-    let mut sim = SoccerMatch::default_11v11(config).with_team_policies(starting_policies);
-    for window in adversarial_moment_windows {
-        sim.remember_adversarial_moment_window(window);
+    let mut sim =
+        SoccerMatch::default_11v11(config).with_team_policies((*starting_policies).clone());
+    for window in adversarial_moment_windows.iter() {
+        sim.remember_adversarial_moment_window(window.clone());
     }
 
     for tick_idx in 0..total_ticks {
@@ -984,6 +1262,7 @@ fn run_manifest(
     postgres_last_policy_version_id: Option<String>,
     postgres_persisted_games: usize,
     postgres_completed_run_batch_games: usize,
+    write_final_policy_artifact: bool,
     write_game_artifacts: bool,
     game_artifact_mode: &str,
     game_artifacts: Vec<GameManifestEntry>,
@@ -1020,6 +1299,7 @@ fn run_manifest(
         postgres_last_policy_version_id,
         postgres_persisted_games,
         postgres_completed_run_batch_games,
+        write_final_policy_artifact,
         write_game_artifacts,
         game_artifact_mode: game_artifact_mode.to_string(),
         game_artifacts,
@@ -1039,7 +1319,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2)?;
     let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4)?;
-    let parallel_games = env_usize("SOCCER_PARALLEL_GAMES", 1)?;
+    let parallel_games = env_usize("SOCCER_PARALLEL_GAMES", default_soccer_parallel_games())?;
     let checkpoint_interval_games = env_usize("SOCCER_CHECKPOINT_INTERVAL_GAMES", 10)?;
     let artifact_max_entries_per_policy =
         env_usize("SOCCER_ARTIFACT_MAX_ENTRIES_PER_POLICY", 10_000)?;
@@ -1058,6 +1338,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS,
     )?;
     let write_final_artifacts = env_bool("SOCCER_WRITE_FINAL_ARTIFACTS", true)?;
+    let write_final_policy_artifact = env_bool(
+        "SOCCER_WRITE_FINAL_POLICY_ARTIFACT",
+        DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT,
+    )?;
     let write_checkpoint_artifacts =
         env_bool("SOCCER_WRITE_CHECKPOINT_ARTIFACTS", write_final_artifacts)?;
     let print_progress = env_bool("SOCCER_PRINT_PROGRESS", false)?;
@@ -1076,6 +1360,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     let pg_completed_run_batch_games = env_usize(
         "SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES",
         default_postgres_completed_run_batch_games(parallel_games),
+    )?
+    .max(1);
+    let pg_completed_run_async_queue_batches = env_usize(
+        "SOCCER_POSTGRES_ASYNC_BATCH_QUEUE",
+        DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE,
     )?
     .max(1);
     let neural_drain_timeout_ms = env_usize(
@@ -1182,11 +1471,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     if let Some(parent) = episode_log_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut episode_log = OpenOptions::new()
+    let episode_log_file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(&episode_log_path)?;
+    let mut episode_log = BufWriter::new(episode_log_file);
     let manifest_path = run_dir.join("manifest.json");
     let resume_artifact =
         env_value("SOCCER_RESUME_ARTIFACT").or_else(|| env_value("SOCCER_RESUME_ARTIFACT_PATH"));
@@ -1233,6 +1523,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     } else {
         println!("postgres_enabled=false");
     }
+    let mut pg_completed_writer = if pg_store.is_some() {
+        Some(AsyncPostgresCompletedRunWriter::start(
+            pg_completed_run_async_queue_batches,
+        ))
+    } else {
+        None
+    };
     let mut moment_replay_records = 0usize;
     let mut moment_replay_transitions = 0usize;
     let mut adversarial_moment_windows = Vec::new();
@@ -1260,7 +1557,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
+        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
         run_id,
         games,
         parallel_games,
@@ -1281,6 +1578,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         episode_log_flush_interval_games,
         pg_policy_version_interval_games,
         pg_completed_run_batch_games,
+        pg_completed_writer.is_some(),
+        pg_completed_run_async_queue_batches,
         neural_drain_timeout_ms,
         game_artifact_mode,
         checkpoint_interval_games,
@@ -1298,6 +1597,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("manifest={}", manifest_path.display());
     println!("episode_log={}", episode_log_path.display());
     println!("write_final_artifacts={write_final_artifacts}");
+    println!("write_final_policy_artifact={write_final_policy_artifact}");
     println!("write_checkpoint_artifacts={write_checkpoint_artifacts}");
     if checkpoint_interval_games == 0 || !write_checkpoint_artifacts {
         println!("checkpoint_artifact=disabled");
@@ -1370,11 +1670,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut last_checkpoint_episode = 0usize;
     let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
     let mut pg_completed_buffer = Vec::new();
+    let worker_pool = SoccerLearningWorkerPool::start(parallel_games);
 
     while next_episode < games {
         let batch_size = parallel_games.min(games - next_episode);
         let batch_start_episode = next_episode;
-        let batch_start_policies = policies.clone();
+        let batch_start_policies = Arc::new(policies.clone());
+        let batch_adversarial_moment_windows = Arc::new(adversarial_moment_windows.clone());
         println!(
             "starting_batch episodes={}..{} parallel_games={}",
             batch_start_episode + 1,
@@ -1382,34 +1684,23 @@ fn run() -> Result<(), Box<dyn Error>> {
             batch_size
         );
 
-        let mut handles = Vec::new();
         for offset in 0..batch_size {
             let episode = batch_start_episode + offset;
             let mut episode_config = config.clone();
             episode_config.seed = effective_seed.wrapping_add(episode as u32);
-            let starting_policies = batch_start_policies.clone();
-            let adversarial_moment_windows = adversarial_moment_windows.clone();
-            let print_progress = print_progress;
-            let neural_drain_timeout = neural_drain_timeout;
-            handles.push(thread::spawn(move || {
-                run_game(
-                    episode,
-                    episode_config,
-                    starting_policies,
-                    adversarial_moment_windows,
-                    print_progress,
-                    neural_drain_timeout,
-                )
-            }));
+            worker_pool.submit(SoccerLearningWorkerTask {
+                episode,
+                config: episode_config,
+                starting_policies: Arc::clone(&batch_start_policies),
+                adversarial_moment_windows: Arc::clone(&batch_adversarial_moment_windows),
+                print_progress,
+                neural_drain_timeout,
+            })?;
         }
 
-        let mut completed_games = Vec::new();
-        for handle in handles {
-            let game = handle
-                .join()
-                .map_err(|_| io_error("soccer learning worker thread panicked"))?
-                .map_err(invalid_data)?;
-            completed_games.push(game);
+        let mut completed_games = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            completed_games.push(worker_pool.recv_completed_game()?);
         }
         completed_games.sort_by_key(|game| game.episode_summary.episode);
 
@@ -1420,9 +1711,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                 latest_neural_network = Some(snapshot);
             }
             let completed_learning_game =
-                soccer_learning_completed_game_from_completed(&game, &batch_start_policies);
+                soccer_learning_completed_game_from_completed(&game, batch_start_policies.as_ref());
             if merge_deltas {
-                merge_team_policy_delta(&mut policies, &batch_start_policies, &game.policies);
+                merge_team_policy_delta(
+                    &mut policies,
+                    batch_start_policies.as_ref(),
+                    &game.policies,
+                );
             } else {
                 policies = game.policies.clone();
             }
@@ -1550,22 +1845,35 @@ fn run() -> Result<(), Box<dyn Error>> {
             && (next_episode >= games
                 || next_episode.saturating_sub(last_checkpoint_episode)
                     >= checkpoint_interval_games);
-        if let (Some(store), Some(experiment_id)) = (pg_store.as_mut(), pg_experiment_id.as_deref())
-        {
+        if let Some(experiment_id) = pg_experiment_id.as_deref() {
             let should_flush_completed_runs = !pg_completed_buffer.is_empty()
                 && (next_episode >= games
                     || should_checkpoint
                     || pg_completed_buffer.len() >= pg_completed_run_batch_games);
             if should_flush_completed_runs {
                 let runner_id = soccer_learning_pg_runner_id(&run_id, shard_index, shard_count);
-                pg_persisted_games += flush_postgres_completed_runs(
-                    store,
-                    experiment_id,
-                    &runner_id,
-                    &mut pg_completed_buffer,
-                    shard_index,
-                    shard_count,
-                )?;
+                pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
+                    writer
+                        .enqueue(
+                            experiment_id,
+                            &runner_id,
+                            &mut pg_completed_buffer,
+                            shard_index,
+                            shard_count,
+                        )
+                        .map_err(invalid_data)?
+                } else if let Some(store) = pg_store.as_mut() {
+                    flush_postgres_completed_runs(
+                        store,
+                        experiment_id,
+                        &runner_id,
+                        &mut pg_completed_buffer,
+                        shard_index,
+                        shard_count,
+                    )?
+                } else {
+                    0
+                };
             }
         }
         if should_checkpoint {
@@ -1623,6 +1931,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 pg_last_policy_version_id.clone(),
                 pg_persisted_games,
                 pg_completed_run_batch_games,
+                write_final_policy_artifact,
                 write_game_artifacts,
                 &game_artifact_mode,
                 manifest_games.clone(),
@@ -1638,7 +1947,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             let _ = std::io::stdout().flush();
         }
     }
+    worker_pool.shutdown()?;
     episode_log.flush()?;
+    if let Some(writer) = pg_completed_writer {
+        pg_persisted_games += writer.finish().map_err(invalid_data)?;
+    }
 
     let artifact = self_play_artifact_from_policies(
         config.clone(),
@@ -1648,9 +1961,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         &policies,
     );
     if write_final_artifacts {
-        let final_export =
-            compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
-        write_json(&final_artifact_path, &final_export)?;
+        if write_final_policy_artifact {
+            let final_export =
+                compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
+            write_json(&final_artifact_path, &final_export)?;
+        } else {
+            println!("final_policy_artifact=disabled");
+        }
         let learned_params =
             SoccerSelfPlayLearnedParams::from_training_artifact_with_neural_network(
                 &artifact,
@@ -1694,6 +2011,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             pg_last_policy_version_id.clone(),
             pg_persisted_games,
             pg_completed_run_batch_games,
+            write_final_policy_artifact,
             write_game_artifacts,
             &game_artifact_mode,
             manifest_games,
@@ -1803,8 +2121,20 @@ mod tests {
     }
 
     #[test]
+    fn default_postgres_async_writer_stays_bounded() {
+        assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE, 2);
+    }
+
+    #[test]
+    fn default_parallel_games_uses_bounded_local_parallelism() {
+        let default_parallel_games = default_soccer_parallel_games();
+        assert!((1..=DEFAULT_SOCCER_MAX_AUTO_PARALLEL_GAMES).contains(&default_parallel_games));
+    }
+
+    #[test]
     fn default_batch_runner_outputs_keep_per_game_io_off_hot_path() {
         assert!(!DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS);
+        assert!(DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT);
         assert!(!DEFAULT_SOCCER_PRINT_COMPLETED_GAMES);
     }
 }

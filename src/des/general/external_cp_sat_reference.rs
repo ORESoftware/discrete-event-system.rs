@@ -11,8 +11,9 @@
 use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -832,6 +833,42 @@ fn python_command() -> PathBuf {
     env::var_os("PYTHON_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("python3"))
+}
+
+fn cp_sat_reference_timeout_ms() -> u64 {
+    env::var("CP_SAT_REFERENCE_TIMEOUT_MS")
+        .or_else(|_| env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_cp_sat_reference_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll cp_sat_reference.py: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for cp_sat_reference.py: {err}"))
 }
 
 fn script_working_dir(script: &Path) -> Option<PathBuf> {
@@ -2201,7 +2238,8 @@ pub fn solve_cp_sat_json_with_external_reference(
         }
     }
 
-    let output = match child.wait_with_output() {
+    let timeout_ms = cp_sat_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_cp_sat_reference_output(child, timeout_ms) {
         Ok(output) => output,
         Err(e) => {
             return ExternalCpSatReferenceRun {
@@ -2220,7 +2258,16 @@ pub fn solve_cp_sat_json_with_external_reference(
 
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("cp_sat_reference.py timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; cp_sat_reference.py timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     let raw = match serde_json::from_str::<Value>(stdout.trim()) {
         Ok(raw) => raw,
         Err(e) => {
@@ -2655,5 +2702,21 @@ mod tests {
         assert_eq!(run.objective, Some(9.0));
         assert_eq!(run.assignment, vec![1, 0, 2]);
         assert_eq!(run.backend, "builtin:constraint-programming");
+    }
+
+    #[test]
+    fn cp_sat_python_bridge_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_cp_sat_reference_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 }

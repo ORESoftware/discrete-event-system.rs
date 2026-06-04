@@ -6,6 +6,9 @@
 //! wrappers a stable JSON-in/JSON-out contract while keeping jars, native
 //! libraries, and generated executables out of version control.
 
+use super::classical_optimization_models::{
+    run_job_shop_exact, JobOperation, JobShopDispatchParams, JobShopJob,
+};
 use super::external_linear_cli::{
     probe_external_linear_cli_solver, ExternalLinearCliKind, ExternalLinearCliOptions,
     ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
@@ -16,8 +19,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExternalOptimizationTool {
@@ -1507,8 +1511,1307 @@ pub fn run_external_optimization_ecosystem_reference(
     input: &Value,
     tool: ExternalOptimizationTool,
 ) -> ExternalOptimizationAdapterRun {
+    if let Some(run) = run_native_external_optimization_ecosystem_reference(input, tool) {
+        return run;
+    }
     let options = external_optimization_ecosystem_reference_options(tool);
     run_external_optimization_adapter(input, &options)
+}
+
+#[derive(Clone, Debug)]
+struct NativeExternalOptimizationEcosystemResult {
+    status: &'static str,
+    objective: Option<f64>,
+    x: Option<Vec<f64>>,
+    message: String,
+    extra: Vec<(String, Value)>,
+}
+
+impl NativeExternalOptimizationEcosystemResult {
+    fn optimal(objective: f64, x: Vec<f64>) -> Self {
+        Self {
+            status: "optimal",
+            objective: Some(objective),
+            x: Some(x),
+            message: String::new(),
+            extra: Vec::new(),
+        }
+    }
+
+    fn status(status: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            objective: None,
+            x: None,
+            message: message.into(),
+            extra: Vec::new(),
+        }
+    }
+
+    fn with_extra(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.extra.push((key.into(), value));
+        self
+    }
+}
+
+fn run_native_external_optimization_ecosystem_reference(
+    input: &Value,
+    tool: ExternalOptimizationTool,
+) -> Option<ExternalOptimizationAdapterRun> {
+    let started = Instant::now();
+    input.as_object()?;
+    let kind = input
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let family = native_external_optimization_ecosystem_family(tool, &kind)?;
+    let result = match family {
+        "constraint-programming" | "smt-omt" => {
+            if native_ecosystem_kind_is_cp_job_shop(&kind) {
+                native_solve_ecosystem_cp_job_shop(input)
+            } else {
+                native_solve_ecosystem_cp_assignment(input)
+            }
+        }
+        "planning-metaheuristic" | "ai-planning" => {
+            native_solve_ecosystem_planning_assignment(input)
+        }
+        "evolutionary-multiobjective" => native_solve_ecosystem_multiobjective(input),
+        "nonlinear-optimization" => native_solve_ecosystem_nonlinear(input),
+        "linear-mip" | "convex-optimization" | "native-solver-binding" | "hybrid-optimization" => {
+            if native_ecosystem_kind_is_planning(&kind) {
+                native_solve_ecosystem_planning_assignment(input)
+            } else if native_ecosystem_kind_is_nonlinear(&kind) {
+                native_solve_ecosystem_nonlinear(input)
+            } else {
+                native_solve_ecosystem_discrete_linear(input)
+            }
+        }
+        _ => return None,
+    };
+    let mut output = serde_json::Map::new();
+    output.insert(
+        "kind".to_string(),
+        Value::String("optimization-ecosystem-reference-result".to_string()),
+    );
+    output.insert("tool".to_string(), Value::String(tool.as_str().to_string()));
+    output.insert("family".to_string(), Value::String(family.to_string()));
+    output.insert(
+        "status".to_string(),
+        Value::String(result.status.to_string()),
+    );
+    output.insert(
+        "objective".to_string(),
+        result.objective.map_or(Value::Null, Value::from),
+    );
+    output.insert(
+        "x".to_string(),
+        result
+            .x
+            .map(|x| Value::Array(x.into_iter().map(Value::from).collect()))
+            .unwrap_or(Value::Null),
+    );
+    output.insert("message".to_string(), Value::String(result.message));
+    output.insert(
+        "backend".to_string(),
+        Value::String(format!("builtin-rust:{family}")),
+    );
+    for (key, value) in result.extra {
+        output.insert(key, value);
+    }
+    Some(ExternalOptimizationAdapterRun {
+        tool,
+        status: ExternalOptimizationAdapterStatus::Ok,
+        output: Some(Value::Object(output)),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        message: String::new(),
+    })
+}
+
+fn native_ecosystem_kind_is_planning(kind: &str) -> bool {
+    matches!(
+        kind,
+        "planning-assignment" | "ecosystem-planning-assignment"
+    )
+}
+
+fn native_ecosystem_kind_is_nonlinear(kind: &str) -> bool {
+    matches!(kind, "nonlinear-program" | "ecosystem-nonlinear")
+}
+
+fn native_ecosystem_kind_is_cp_job_shop(kind: &str) -> bool {
+    matches!(kind, "cp-job-shop" | "ecosystem-cp-job-shop")
+}
+
+fn native_external_optimization_ecosystem_family(
+    tool: ExternalOptimizationTool,
+    payload_kind: &str,
+) -> Option<&'static str> {
+    match tool {
+        ExternalOptimizationTool::ChocoSolver
+        | ExternalOptimizationTool::Jacop
+        | ExternalOptimizationTool::IbmCpOptimizer
+        | ExternalOptimizationTool::OrToolsJava
+        | ExternalOptimizationTool::OrToolsPython
+        | ExternalOptimizationTool::OrToolsCpSat
+        | ExternalOptimizationTool::Cpmpy
+        | ExternalOptimizationTool::PyCsp3
+        | ExternalOptimizationTool::Conjure
+        | ExternalOptimizationTool::SavileRow
+        | ExternalOptimizationTool::Picat
+        | ExternalOptimizationTool::Clingo
+        | ExternalOptimizationTool::Clingcon
+        | ExternalOptimizationTool::Sat4j
+        | ExternalOptimizationTool::PySat
+        | ExternalOptimizationTool::OpenWbo => Some("constraint-programming"),
+        ExternalOptimizationTool::JMetal
+        | ExternalOptimizationTool::MoeaFramework
+        | ExternalOptimizationTool::Ecj => Some("evolutionary-multiobjective"),
+        ExternalOptimizationTool::OptaPlanner | ExternalOptimizationTool::Timefold => {
+            Some("planning-metaheuristic")
+        }
+        ExternalOptimizationTool::FastDownward
+        | ExternalOptimizationTool::LpgTd
+        | ExternalOptimizationTool::Optic
+        | ExternalOptimizationTool::Enhsp => Some("ai-planning"),
+        ExternalOptimizationTool::Z3
+        | ExternalOptimizationTool::Cvc5
+        | ExternalOptimizationTool::Yices
+        | ExternalOptimizationTool::Bitwuzla
+        | ExternalOptimizationTool::Boolector
+        | ExternalOptimizationTool::MathSat
+        | ExternalOptimizationTool::OptiMathSat
+        | ExternalOptimizationTool::OpenSmt
+        | ExternalOptimizationTool::SmtInterpol
+        | ExternalOptimizationTool::Princess => Some("smt-omt"),
+        ExternalOptimizationTool::Cvxpy
+        | ExternalOptimizationTool::Cvxopt
+        | ExternalOptimizationTool::Mosek
+        | ExternalOptimizationTool::Copt
+        | ExternalOptimizationTool::Osqp
+        | ExternalOptimizationTool::Scs
+        | ExternalOptimizationTool::Clarabel
+        | ExternalOptimizationTool::Ecos
+        | ExternalOptimizationTool::Qpoases
+        | ExternalOptimizationTool::Proxqp
+        | ExternalOptimizationTool::Cosmo
+        | ExternalOptimizationTool::Sdpa
+        | ExternalOptimizationTool::Csdp => Some("convex-optimization"),
+        ExternalOptimizationTool::PyScipOpt
+        | ExternalOptimizationTool::GurobiPy
+        | ExternalOptimizationTool::CplexPython
+        | ExternalOptimizationTool::XpressPython => Some("native-solver-binding"),
+        ExternalOptimizationTool::Hexaly => Some("hybrid-optimization"),
+        ExternalOptimizationTool::Argmin
+        | ExternalOptimizationTool::Nlopt
+        | ExternalOptimizationTool::ScipyOptimize
+        | ExternalOptimizationTool::Minotaur
+        | ExternalOptimizationTool::Ipopt
+        | ExternalOptimizationTool::IpoptRust
+        | ExternalOptimizationTool::Bonmin
+        | ExternalOptimizationTool::Couenne
+        | ExternalOptimizationTool::Knitro
+        | ExternalOptimizationTool::Baron
+        | ExternalOptimizationTool::Casadi => Some("nonlinear-optimization"),
+        ExternalOptimizationTool::OjAlgo
+        | ExternalOptimizationTool::Pyomo
+        | ExternalOptimizationTool::Pulp
+        | ExternalOptimizationTool::PythonMip
+        | ExternalOptimizationTool::OrToolsGlop
+        | ExternalOptimizationTool::OrToolsPdlp
+        | ExternalOptimizationTool::Docplex
+        | ExternalOptimizationTool::Jump
+        | ExternalOptimizationTool::Ampl
+        | ExternalOptimizationTool::Gams
+        | ExternalOptimizationTool::Symphony
+        | ExternalOptimizationTool::HighsCli
+        | ExternalOptimizationTool::GlpkCli
+        | ExternalOptimizationTool::ScipCli
+        | ExternalOptimizationTool::CbcCli
+        | ExternalOptimizationTool::ClpCli
+        | ExternalOptimizationTool::SoplexCli
+        | ExternalOptimizationTool::LpSolveCli
+        | ExternalOptimizationTool::GurobiCli
+        | ExternalOptimizationTool::CplexCli
+        | ExternalOptimizationTool::XpressCli
+        | ExternalOptimizationTool::LindoCli
+        | ExternalOptimizationTool::GoodLp
+        | ExternalOptimizationTool::LpModeler
+        | ExternalOptimizationTool::RustLinprog
+        | ExternalOptimizationTool::HighsRust
+        | ExternalOptimizationTool::ScipRust
+        | ExternalOptimizationTool::CbcRust => {
+            if native_ecosystem_kind_is_nonlinear(payload_kind) {
+                Some("nonlinear-optimization")
+            } else {
+                Some("linear-mip")
+            }
+        }
+        _ if matches!(
+            payload_kind,
+            "ecosystem-linear-binary"
+                | "linear-binary"
+                | "ecosystem-planning-assignment"
+                | "planning-assignment"
+        ) =>
+        {
+            Some("linear-mip")
+        }
+        _ if native_ecosystem_kind_is_nonlinear(payload_kind) => Some("nonlinear-optimization"),
+        _ => None,
+    }
+}
+
+fn native_value_as_f64(value: Option<&Value>, default: f64) -> f64 {
+    match value {
+        Some(Value::Bool(value)) => {
+            if *value {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Some(Value::Number(value)) => value.as_f64().unwrap_or(default),
+        _ => default,
+    }
+}
+
+fn native_value_array_as_f64(value: Option<&Value>) -> Option<Vec<f64>> {
+    value?.as_array().map(|items| {
+        items
+            .iter()
+            .map(|item| native_value_as_f64(Some(item), 0.0))
+            .collect()
+    })
+}
+
+fn native_better(candidate: f64, incumbent: Option<f64>, sense: &str) -> bool {
+    match incumbent {
+        None => true,
+        Some(incumbent) if sense == "max" => candidate > incumbent + 1e-12,
+        Some(incumbent) => candidate < incumbent - 1e-12,
+    }
+}
+
+fn native_row_feasible(lhs: f64, sense: &str, rhs: f64) -> bool {
+    match sense.trim() {
+        "<=" | "le" | "less-equal" => lhs <= rhs + 1e-9,
+        ">=" | "ge" | "greater-equal" => lhs + 1e-9 >= rhs,
+        "=" | "==" | "eq" | "equal" => (lhs - rhs).abs() <= 1e-9,
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NativeNonlinearBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+}
+
+#[derive(Clone, Debug)]
+enum NativeNonlinearExpr {
+    Constant(f64),
+    Variable(String),
+    Unary {
+        sign: f64,
+        expr: Box<NativeNonlinearExpr>,
+    },
+    Binary {
+        op: NativeNonlinearBinaryOp,
+        left: Box<NativeNonlinearExpr>,
+        right: Box<NativeNonlinearExpr>,
+    },
+}
+
+struct NativeNonlinearExprParser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> NativeNonlinearExprParser<'a> {
+    fn parse(input: &'a str) -> Result<NativeNonlinearExpr, String> {
+        let mut parser = Self { input, pos: 0 };
+        let expr = parser.parse_sum()?;
+        parser.skip_ws();
+        if parser.pos != parser.input.len() {
+            return Err(format!(
+                "unexpected nonlinear expression token at byte {}",
+                parser.pos
+            ));
+        }
+        Ok(expr)
+    }
+
+    fn parse_sum(&mut self) -> Result<NativeNonlinearExpr, String> {
+        let mut expr = self.parse_product()?;
+        loop {
+            self.skip_ws();
+            let op = if self.consume_byte(b'+') {
+                NativeNonlinearBinaryOp::Add
+            } else if self.consume_byte(b'-') {
+                NativeNonlinearBinaryOp::Sub
+            } else {
+                break;
+            };
+            let right = self.parse_product()?;
+            expr = NativeNonlinearExpr::Binary {
+                op,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_product(&mut self) -> Result<NativeNonlinearExpr, String> {
+        let mut expr = self.parse_power()?;
+        loop {
+            self.skip_ws();
+            if self.input[self.pos..].starts_with("**") {
+                break;
+            }
+            let op = if self.consume_byte(b'*') {
+                NativeNonlinearBinaryOp::Mul
+            } else if self.consume_byte(b'/') {
+                NativeNonlinearBinaryOp::Div
+            } else {
+                break;
+            };
+            let right = self.parse_power()?;
+            expr = NativeNonlinearExpr::Binary {
+                op,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_power(&mut self) -> Result<NativeNonlinearExpr, String> {
+        let mut expr = self.parse_unary()?;
+        self.skip_ws();
+        if self.consume_str("**") || self.consume_byte(b'^') {
+            let right = self.parse_power()?;
+            expr = NativeNonlinearExpr::Binary {
+                op: NativeNonlinearBinaryOp::Pow,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_unary(&mut self) -> Result<NativeNonlinearExpr, String> {
+        self.skip_ws();
+        if self.consume_byte(b'+') {
+            return Ok(NativeNonlinearExpr::Unary {
+                sign: 1.0,
+                expr: Box::new(self.parse_unary()?),
+            });
+        }
+        if self.consume_byte(b'-') {
+            return Ok(NativeNonlinearExpr::Unary {
+                sign: -1.0,
+                expr: Box::new(self.parse_unary()?),
+            });
+        }
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> Result<NativeNonlinearExpr, String> {
+        self.skip_ws();
+        if self.consume_byte(b'(') {
+            let expr = self.parse_sum()?;
+            self.skip_ws();
+            if !self.consume_byte(b')') {
+                return Err(format!(
+                    "missing ')' in nonlinear expression at byte {}",
+                    self.pos
+                ));
+            }
+            return Ok(expr);
+        }
+        match self.peek_byte() {
+            Some(byte) if byte.is_ascii_digit() || byte == b'.' => self.parse_number(),
+            Some(byte) if byte.is_ascii_alphabetic() || byte == b'_' => self.parse_identifier(),
+            _ => Err(format!(
+                "expected nonlinear expression term at byte {}",
+                self.pos
+            )),
+        }
+    }
+
+    fn parse_number(&mut self) -> Result<NativeNonlinearExpr, String> {
+        let start = self.pos;
+        let mut has_digit = false;
+        while self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
+            has_digit = true;
+            self.pos += 1;
+        }
+        if self.consume_byte(b'.') {
+            while self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
+                has_digit = true;
+                self.pos += 1;
+            }
+        }
+        if !has_digit {
+            return Err(format!("invalid number at byte {start}"));
+        }
+        if self
+            .peek_byte()
+            .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+        {
+            self.pos += 1;
+            if self
+                .peek_byte()
+                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+            {
+                self.pos += 1;
+            }
+            let exponent_start = self.pos;
+            while self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
+                self.pos += 1;
+            }
+            if exponent_start == self.pos {
+                return Err(format!("invalid exponent at byte {exponent_start}"));
+            }
+        }
+        let raw = &self.input[start..self.pos];
+        let value = raw
+            .parse::<f64>()
+            .map_err(|err| format!("parse nonlinear number {raw:?}: {err}"))?;
+        if !value.is_finite() {
+            return Err(format!("non-finite nonlinear number {raw:?}"));
+        }
+        Ok(NativeNonlinearExpr::Constant(value))
+    }
+
+    fn parse_identifier(&mut self) -> Result<NativeNonlinearExpr, String> {
+        let start = self.pos;
+        self.pos += 1;
+        while self
+            .peek_byte()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            self.pos += 1;
+        }
+        Ok(NativeNonlinearExpr::Variable(
+            self.input[start..self.pos].to_string(),
+        ))
+    }
+
+    fn skip_ws(&mut self) {
+        while self
+            .peek_byte()
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn peek_byte(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.pos).copied()
+    }
+
+    fn consume_byte(&mut self, expected: u8) -> bool {
+        if self.peek_byte() == Some(expected) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_str(&mut self, expected: &str) -> bool {
+        if self.input[self.pos..].starts_with(expected) {
+            self.pos += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn native_nonlinear_expression_source(value: Option<&Value>, default: &str) -> String {
+    match value {
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => value.to_string(),
+        None => default.to_string(),
+    }
+}
+
+fn native_eval_nonlinear_expr(
+    expr: &NativeNonlinearExpr,
+    names: &[String],
+    values: &[f64],
+) -> Result<f64, String> {
+    let value = match expr {
+        NativeNonlinearExpr::Constant(value) => *value,
+        NativeNonlinearExpr::Variable(name) => names
+            .iter()
+            .position(|candidate| candidate == name)
+            .and_then(|index| values.get(index))
+            .copied()
+            .ok_or_else(|| format!("unknown nonlinear variable {name:?}"))?,
+        NativeNonlinearExpr::Unary { sign, expr } => {
+            *sign * native_eval_nonlinear_expr(expr, names, values)?
+        }
+        NativeNonlinearExpr::Binary { op, left, right } => {
+            let left = native_eval_nonlinear_expr(left, names, values)?;
+            let right = native_eval_nonlinear_expr(right, names, values)?;
+            match op {
+                NativeNonlinearBinaryOp::Add => left + right,
+                NativeNonlinearBinaryOp::Sub => left - right,
+                NativeNonlinearBinaryOp::Mul => left * right,
+                NativeNonlinearBinaryOp::Div => left / right,
+                NativeNonlinearBinaryOp::Pow => left.powf(right),
+            }
+        }
+    };
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err("non-finite nonlinear expression value".to_string())
+    }
+}
+
+fn native_nonlinear_constraint_violation(lhs: f64, sense: &str, rhs: f64) -> Result<f64, String> {
+    match sense.trim() {
+        "<=" | "le" | "less-equal" => Ok((lhs - rhs).max(0.0)),
+        ">=" | "ge" | "greater-equal" => Ok((rhs - lhs).max(0.0)),
+        "=" | "==" | "eq" | "equal" => Ok((lhs - rhs).abs()),
+        _ => Err(format!("unsupported nonlinear sense {sense:?}")),
+    }
+}
+
+fn native_sorted_unique_finite_values(values: &mut Vec<f64>) -> Result<(), String> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err("nonlinear domain values must be finite".to_string());
+    }
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mut unique = Vec::with_capacity(values.len());
+    for value in values.drain(..) {
+        if unique
+            .last()
+            .is_none_or(|previous: &f64| (value - *previous).abs() > 1e-12)
+        {
+            unique.push(value);
+        }
+    }
+    *values = unique;
+    Ok(())
+}
+
+fn enumerate_float_domains<F>(domains: &[Vec<f64>], mut visit: F)
+where
+    F: FnMut(&[f64]),
+{
+    fn go<F>(domains: &[Vec<f64>], index: usize, assignment: &mut Vec<f64>, visit: &mut F)
+    where
+        F: FnMut(&[f64]),
+    {
+        if index == domains.len() {
+            visit(assignment);
+            return;
+        }
+        for value in &domains[index] {
+            assignment.push(*value);
+            go(domains, index + 1, assignment, visit);
+            assignment.pop();
+        }
+    }
+    let mut assignment = Vec::with_capacity(domains.len());
+    go(domains, 0, &mut assignment, &mut visit);
+}
+
+fn native_integer_domains(payload: &Value, width: usize) -> Result<Vec<Vec<i64>>, String> {
+    let domains = payload.get("domains").and_then(Value::as_array);
+    let mut out = Vec::with_capacity(width);
+    for index in 0..width {
+        let raw = domains.and_then(|domains| domains.get(index));
+        let (lb, ub) = raw
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                Some((
+                    native_value_as_f64(items.first(), 0.0).round() as i64,
+                    native_value_as_f64(items.get(1), 1.0).round() as i64,
+                ))
+            })
+            .unwrap_or((0, 1));
+        if ub < lb {
+            return Err("empty domain".to_string());
+        }
+        if ub - lb > 20 {
+            return Err("domain too large for reference enumeration".to_string());
+        }
+        out.push((lb..=ub).collect());
+    }
+    Ok(out)
+}
+
+fn enumerate_integer_domains<F>(domains: &[Vec<i64>], mut visit: F)
+where
+    F: FnMut(&[i64]),
+{
+    fn go<F>(domains: &[Vec<i64>], index: usize, assignment: &mut Vec<i64>, visit: &mut F)
+    where
+        F: FnMut(&[i64]),
+    {
+        if index == domains.len() {
+            visit(assignment);
+            return;
+        }
+        for value in &domains[index] {
+            assignment.push(*value);
+            go(domains, index + 1, assignment, visit);
+            assignment.pop();
+        }
+    }
+    let mut assignment = Vec::with_capacity(domains.len());
+    go(domains, 0, &mut assignment, &mut visit);
+}
+
+fn native_solve_ecosystem_discrete_linear(
+    payload: &Value,
+) -> NativeExternalOptimizationEcosystemResult {
+    let Some(objective) = native_value_array_as_f64(payload.get("objective")) else {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "invalid",
+            "missing objective vector",
+        );
+    };
+    if objective.is_empty() {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "invalid",
+            "missing objective vector",
+        );
+    }
+    let sense = payload
+        .get("sense")
+        .and_then(Value::as_str)
+        .unwrap_or("min")
+        .to_ascii_lowercase();
+    let domains = match native_integer_domains(payload, objective.len()) {
+        Ok(domains) => domains,
+        Err(message) if message == "empty domain" => {
+            return NativeExternalOptimizationEcosystemResult::status("infeasible", message)
+        }
+        Err(message) => {
+            return NativeExternalOptimizationEcosystemResult::status("unsupported", message)
+        }
+    };
+    let constraints = payload
+        .get("constraints")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut best_x = None::<Vec<f64>>;
+    let mut best_objective = None::<f64>;
+    let mut invalid_message = None::<String>;
+    enumerate_integer_domains(&domains, |assignment| {
+        if invalid_message.is_some() {
+            return;
+        }
+        for row in &constraints {
+            let Some(coefs) = native_value_array_as_f64(row.get("coefs")) else {
+                invalid_message = Some("constraint coefficient length mismatch".to_string());
+                return;
+            };
+            if coefs.len() != objective.len() {
+                invalid_message = Some("constraint coefficient length mismatch".to_string());
+                return;
+            }
+            let lhs = coefs
+                .iter()
+                .zip(assignment.iter())
+                .map(|(coef, value)| coef * *value as f64)
+                .sum::<f64>();
+            let row_sense = row.get("sense").and_then(Value::as_str).unwrap_or("<=");
+            let rhs = native_value_as_f64(row.get("rhs"), 0.0);
+            if !native_row_feasible(lhs, row_sense, rhs) {
+                return;
+            }
+        }
+        let value = objective
+            .iter()
+            .zip(assignment.iter())
+            .map(|(coef, value)| coef * *value as f64)
+            .sum::<f64>();
+        if native_better(value, best_objective, &sense) {
+            best_objective = Some(value);
+            best_x = Some(assignment.iter().map(|value| *value as f64).collect());
+        }
+    });
+    if let Some(message) = invalid_message {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", message);
+    }
+    match (best_objective, best_x) {
+        (Some(objective), Some(x)) => {
+            NativeExternalOptimizationEcosystemResult::optimal(objective, x)
+        }
+        _ => NativeExternalOptimizationEcosystemResult::status(
+            "infeasible",
+            "no feasible assignment",
+        ),
+    }
+}
+
+fn native_solve_ecosystem_nonlinear(payload: &Value) -> NativeExternalOptimizationEcosystemResult {
+    let Some(variables) = payload.get("variables").and_then(Value::as_array) else {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing variables");
+    };
+    if variables.is_empty() {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing variables");
+    }
+    if variables.len() > 10 {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "unsupported",
+            "nonlinear reference enumeration supports at most 10 variables",
+        );
+    }
+
+    let mut names = Vec::with_capacity(variables.len());
+    let mut domains = Vec::with_capacity(variables.len());
+    let mut point_count = 1usize;
+    for (index, variable) in variables.iter().enumerate() {
+        let name = variable
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("x{index}"));
+        let lb = native_value_as_f64(variable.get("lb"), -5.0);
+        let ub = native_value_as_f64(variable.get("ub"), 5.0);
+        if !lb.is_finite() || !ub.is_finite() {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "invalid",
+                "nonlinear bounds must be finite",
+            );
+        }
+        if ub < lb {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "infeasible",
+                "empty nonlinear domain",
+            );
+        }
+        let midpoint = 0.5 * (lb + ub);
+        let start = native_value_as_f64(variable.get("start"), midpoint);
+        let mut domain = vec![lb, ub, midpoint, start];
+        if let Err(message) = native_sorted_unique_finite_values(&mut domain) {
+            return NativeExternalOptimizationEcosystemResult::status("invalid", message);
+        }
+        point_count = point_count.saturating_mul(domain.len().max(1));
+        if point_count > 1_048_576 {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "unsupported",
+                "nonlinear reference grid too large",
+            );
+        }
+        names.push(name);
+        domains.push(domain);
+    }
+
+    let objective_source = native_nonlinear_expression_source(payload.get("objective"), "0");
+    let objective_expr = match NativeNonlinearExprParser::parse(&objective_source) {
+        Ok(expr) => expr,
+        Err(message) => {
+            return NativeExternalOptimizationEcosystemResult::status("invalid", message)
+        }
+    };
+    let sense = payload
+        .get("sense")
+        .and_then(Value::as_str)
+        .unwrap_or("min")
+        .to_ascii_lowercase();
+    let constraints: &[Value] = match payload.get("constraints") {
+        Some(value) => match value.as_array() {
+            Some(rows) => rows.as_slice(),
+            None => {
+                return NativeExternalOptimizationEcosystemResult::status(
+                    "invalid",
+                    "constraints must be a list",
+                )
+            }
+        },
+        None => &[],
+    };
+    let mut parsed_constraints = Vec::<(NativeNonlinearExpr, String, f64)>::new();
+    for row in constraints {
+        let expr_source = native_nonlinear_expression_source(row.get("expr"), "0");
+        let expr = match NativeNonlinearExprParser::parse(&expr_source) {
+            Ok(expr) => expr,
+            Err(message) => {
+                return NativeExternalOptimizationEcosystemResult::status("invalid", message)
+            }
+        };
+        let row_sense = row
+            .get("sense")
+            .and_then(Value::as_str)
+            .unwrap_or("<=")
+            .to_string();
+        if !matches!(
+            row_sense.trim(),
+            "<=" | "le"
+                | "less-equal"
+                | ">="
+                | "ge"
+                | "greater-equal"
+                | "="
+                | "=="
+                | "eq"
+                | "equal"
+        ) {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "invalid",
+                format!("unsupported nonlinear sense {row_sense:?}"),
+            );
+        }
+        parsed_constraints.push((expr, row_sense, native_value_as_f64(row.get("rhs"), 0.0)));
+    }
+
+    let mut best_x = None::<Vec<f64>>;
+    let mut best_objective = None::<f64>;
+    let mut best_violation = f64::INFINITY;
+    let mut invalid_message = None::<String>;
+    enumerate_float_domains(&domains, |point| {
+        if invalid_message.is_some() {
+            return;
+        }
+        let mut violation = 0.0f64;
+        for (expr, row_sense, rhs) in &parsed_constraints {
+            let lhs = match native_eval_nonlinear_expr(expr, &names, point) {
+                Ok(value) => value,
+                Err(message) => {
+                    invalid_message = Some(message);
+                    return;
+                }
+            };
+            let row_violation = match native_nonlinear_constraint_violation(lhs, row_sense, *rhs) {
+                Ok(value) => value,
+                Err(message) => {
+                    invalid_message = Some(message);
+                    return;
+                }
+            };
+            violation = violation.max(row_violation);
+        }
+        let objective = match native_eval_nonlinear_expr(&objective_expr, &names, point) {
+            Ok(value) => value,
+            Err(message) => {
+                invalid_message = Some(message);
+                return;
+            }
+        };
+        if violation <= 1e-7 && native_better(objective, best_objective, &sense) {
+            best_objective = Some(objective);
+            best_x = Some(point.to_vec());
+        }
+        best_violation = best_violation.min(violation);
+    });
+    if let Some(message) = invalid_message {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", message);
+    }
+    match (best_objective, best_x) {
+        (Some(objective), Some(x)) => {
+            NativeExternalOptimizationEcosystemResult::optimal(objective, x)
+                .with_extra("grid_points", Value::from(point_count as u64))
+        }
+        _ => NativeExternalOptimizationEcosystemResult::status(
+            "infeasible",
+            format!("best constraint violation {best_violation:.3e}"),
+        ),
+    }
+}
+
+fn native_solve_ecosystem_cp_job_shop(
+    payload: &Value,
+) -> NativeExternalOptimizationEcosystemResult {
+    let Some(raw_jobs) = payload.get("jobs").and_then(Value::as_array) else {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing jobs");
+    };
+    if raw_jobs.is_empty() {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing jobs");
+    }
+
+    let mut jobs = Vec::with_capacity(raw_jobs.len());
+    let mut operation_order = Vec::<(String, usize)>::new();
+    for (job_index, raw_job) in raw_jobs.iter().enumerate() {
+        let Some(raw_operations) = raw_job.get("operations").and_then(Value::as_array) else {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "invalid",
+                "each job needs operations",
+            );
+        };
+        if raw_operations.is_empty() {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "invalid",
+                "each job needs operations",
+            );
+        }
+        let job_id = raw_job
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("J{}", job_index + 1));
+        let mut operations = Vec::with_capacity(raw_operations.len());
+        for (op_index, raw_op) in raw_operations.iter().enumerate() {
+            let machine = raw_op
+                .get("machine")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if machine.is_empty() {
+                return NativeExternalOptimizationEcosystemResult::status(
+                    "invalid",
+                    "operation machine is required",
+                );
+            }
+            let duration = native_value_as_f64(raw_op.get("duration"), 0.0);
+            if !duration.is_finite() || duration < 0.0 {
+                return NativeExternalOptimizationEcosystemResult::status(
+                    "invalid",
+                    "operation duration must be non-negative",
+                );
+            }
+            operations.push(JobOperation { machine, duration });
+            operation_order.push((job_id.clone(), op_index));
+        }
+        let due = raw_job
+            .get("due")
+            .map(|value| native_value_as_f64(Some(value), 0.0));
+        jobs.push(JobShopJob {
+            id: job_id,
+            due,
+            operations,
+        });
+    }
+
+    let total_ops = operation_order.len();
+    let max_operations = native_value_as_f64(payload.get("max_operations"), 10.0)
+        .round()
+        .max(0.0) as usize;
+    if total_ops > max_operations.min(20) {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "unsupported",
+            "job-shop reference model is too large",
+        );
+    }
+
+    let result = run_job_shop_exact(JobShopDispatchParams {
+        jobs: Some(jobs),
+        rule: None,
+    });
+    let mut starts = Vec::with_capacity(operation_order.len());
+    for (job_id, op_index) in operation_order {
+        let Some(operation) = result
+            .schedule
+            .iter()
+            .find(|operation| operation.job_id == job_id && operation.op_index == op_index)
+        else {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "invalid",
+                "Rust job-shop schedule missing operation",
+            );
+        };
+        starts.push(operation.start);
+    }
+
+    let schedule = result
+        .schedule
+        .iter()
+        .map(|operation| {
+            json!({
+                "job": operation.job_id,
+                "op": operation.op_index,
+                "machine": operation.machine,
+                "start": operation.start,
+                "finish": operation.finish
+            })
+        })
+        .collect::<Vec<_>>();
+    NativeExternalOptimizationEcosystemResult::optimal(result.makespan, starts)
+        .with_extra("schedule", Value::Array(schedule))
+        .with_extra("total_flow_time", Value::from(result.total_flow_time))
+}
+
+fn native_solve_ecosystem_cp_assignment(
+    payload: &Value,
+) -> NativeExternalOptimizationEcosystemResult {
+    let Some(cost_rows) = payload.get("costs").and_then(Value::as_array) else {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing cost matrix");
+    };
+    if cost_rows.is_empty() {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing cost matrix");
+    }
+    let rows = cost_rows
+        .iter()
+        .map(|row| native_value_array_as_f64(Some(row)).unwrap_or_default())
+        .collect::<Vec<_>>();
+    if rows.iter().any(Vec::is_empty) || rows.iter().any(|row| row.len() != rows[0].len()) {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "ragged cost matrix");
+    }
+    let domains = if payload.get("domains").and_then(Value::as_array).is_some() {
+        match native_integer_domains(payload, rows.len()) {
+            Ok(domains) => domains,
+            Err(message) if message == "empty domain" => {
+                return NativeExternalOptimizationEcosystemResult::status("infeasible", message)
+            }
+            Err(message) => {
+                return NativeExternalOptimizationEcosystemResult::status("unsupported", message)
+            }
+        }
+    } else {
+        let columns = rows[0].len() as i64;
+        (0..rows.len())
+            .map(|_| (0..columns).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    let all_different = payload
+        .get("all_different")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let forbidden = payload
+        .get("forbidden")
+        .and_then(Value::as_array)
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter_map(|pair| {
+                    let items = pair.as_array()?;
+                    Some((
+                        native_value_as_f64(items.first(), 0.0).round() as usize,
+                        native_value_as_f64(items.get(1), 0.0).round() as i64,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut best_x = None::<Vec<f64>>;
+    let mut best_objective = None::<f64>;
+    enumerate_integer_domains(&domains, |assignment| {
+        if all_different {
+            let mut sorted = assignment.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            if sorted.len() != assignment.len() {
+                return;
+            }
+        }
+        if assignment
+            .iter()
+            .enumerate()
+            .any(|(row, value)| forbidden.iter().any(|pair| *pair == (row, *value)))
+        {
+            return;
+        }
+        if assignment
+            .iter()
+            .enumerate()
+            .any(|(row, value)| *value < 0 || *value as usize >= rows[row].len())
+        {
+            return;
+        }
+        let value = assignment
+            .iter()
+            .enumerate()
+            .map(|(row, column)| rows[row][*column as usize])
+            .sum::<f64>();
+        if native_better(value, best_objective, "min") {
+            best_objective = Some(value);
+            best_x = Some(assignment.iter().map(|value| *value as f64).collect());
+        }
+    });
+    match (best_objective, best_x) {
+        (Some(objective), Some(x)) => {
+            NativeExternalOptimizationEcosystemResult::optimal(objective, x)
+        }
+        _ => NativeExternalOptimizationEcosystemResult::status(
+            "infeasible",
+            "no feasible assignment",
+        ),
+    }
+}
+
+fn native_solve_ecosystem_planning_assignment(
+    payload: &Value,
+) -> NativeExternalOptimizationEcosystemResult {
+    let Some(durations) = native_value_array_as_f64(payload.get("task_durations")) else {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "invalid",
+            "missing task_durations",
+        );
+    };
+    if durations.is_empty() {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "invalid",
+            "missing task_durations",
+        );
+    }
+    let machines = native_value_as_f64(payload.get("machines"), 0.0).round() as i64;
+    if machines <= 0 {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "invalid",
+            "machines must be positive",
+        );
+    }
+    let capacities = match payload.get("capacities").and_then(Value::as_array) {
+        Some(items) => {
+            if items.len() != machines as usize {
+                return NativeExternalOptimizationEcosystemResult::status(
+                    "invalid",
+                    "capacity length mismatch",
+                );
+            }
+            items
+                .iter()
+                .map(|item| native_value_as_f64(Some(item), f64::INFINITY))
+                .collect::<Vec<_>>()
+        }
+        None => vec![f64::INFINITY; machines as usize],
+    };
+    if durations.len() > 20 {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "unsupported",
+            "planning assignment too large for reference enumeration",
+        );
+    }
+    let domains = (0..durations.len())
+        .map(|_| (0..machines).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut best_x = None::<Vec<f64>>;
+    let mut best_objective = None::<f64>;
+    let mut best_loads = None::<Vec<f64>>;
+    enumerate_integer_domains(&domains, |assignment| {
+        let mut loads = vec![0.0; machines as usize];
+        for (task, machine) in assignment.iter().enumerate() {
+            loads[*machine as usize] += durations[task];
+        }
+        if loads
+            .iter()
+            .zip(capacities.iter())
+            .any(|(load, capacity)| load > &(capacity + 1e-9))
+        {
+            return;
+        }
+        let value = loads.iter().copied().fold(0.0, f64::max);
+        if native_better(value, best_objective, "min") {
+            best_objective = Some(value);
+            best_x = Some(assignment.iter().map(|value| *value as f64).collect());
+            best_loads = Some(loads);
+        }
+    });
+    match (best_objective, best_x, best_loads) {
+        (Some(objective), Some(x), Some(loads)) => {
+            NativeExternalOptimizationEcosystemResult::optimal(objective, x).with_extra(
+                "loads",
+                Value::Array(loads.into_iter().map(Value::from).collect()),
+            )
+        }
+        _ => NativeExternalOptimizationEcosystemResult::status("infeasible", "no feasible plan"),
+    }
+}
+
+fn native_dominates(a: &[f64], b: &[f64], senses: &[String]) -> bool {
+    let mut at_least_one = false;
+    for ((a, b), sense) in a.iter().zip(b.iter()).zip(senses.iter()) {
+        if sense == "max" {
+            if a < &(b - 1e-12) {
+                return false;
+            }
+            at_least_one = at_least_one || a > &(b + 1e-12);
+        } else {
+            if a > &(b + 1e-12) {
+                return false;
+            }
+            at_least_one = at_least_one || a < &(b - 1e-12);
+        }
+    }
+    at_least_one
+}
+
+fn native_solve_ecosystem_multiobjective(
+    payload: &Value,
+) -> NativeExternalOptimizationEcosystemResult {
+    let Some(candidates) = payload.get("candidates").and_then(Value::as_array) else {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing candidates");
+    };
+    if candidates.is_empty() {
+        return NativeExternalOptimizationEcosystemResult::status("invalid", "missing candidates");
+    }
+    let senses = payload
+        .get("senses")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str().unwrap_or("min").to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["min".to_string(), "min".to_string()]);
+    let weights = native_value_array_as_f64(payload.get("weights")).unwrap_or_else(|| {
+        std::iter::repeat(1.0)
+            .take(senses.len())
+            .collect::<Vec<_>>()
+    });
+    let mut parsed = Vec::<(Vec<f64>, Vec<f64>)>::new();
+    for candidate in candidates {
+        let x = native_value_array_as_f64(candidate.get("x")).unwrap_or_default();
+        let objectives = native_value_array_as_f64(candidate.get("objectives")).unwrap_or_default();
+        if objectives.len() != senses.len() {
+            return NativeExternalOptimizationEcosystemResult::status(
+                "invalid",
+                "objective dimension mismatch",
+            );
+        }
+        parsed.push((x, objectives));
+    }
+    let front = parsed
+        .iter()
+        .filter(|(_, objectives)| {
+            !parsed
+                .iter()
+                .any(|(_, other)| native_dominates(other, objectives, &senses))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if front.is_empty() {
+        return NativeExternalOptimizationEcosystemResult::status(
+            "infeasible",
+            "empty Pareto front",
+        );
+    }
+    let scalar_score = |objectives: &[f64]| {
+        objectives
+            .iter()
+            .zip(weights.iter())
+            .zip(senses.iter())
+            .map(|((value, weight), sense)| {
+                if sense == "max" {
+                    weight * -*value
+                } else {
+                    weight * *value
+                }
+            })
+            .sum::<f64>()
+    };
+    let (best_x, best_objectives) = front
+        .iter()
+        .min_by(|(_, left), (_, right)| {
+            scalar_score(left)
+                .partial_cmp(&scalar_score(right))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .cloned()
+        .unwrap_or_default();
+    let pareto_front = front
+        .into_iter()
+        .map(|(x, objectives)| json!({ "x": x, "objectives": objectives }))
+        .collect::<Vec<_>>();
+    NativeExternalOptimizationEcosystemResult::optimal(scalar_score(&best_objectives), best_x)
+        .with_extra("pareto_front", Value::Array(pareto_front))
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2089,7 +3392,9 @@ pub fn run_external_optimization_adapter(
             };
         }
     }
-    let output = match child.wait_with_output() {
+    let timeout_ms = external_optimization_adapter_timeout_ms();
+    let (output, timed_out) = match wait_for_external_optimization_adapter_output(child, timeout_ms)
+    {
         Ok(output) => output,
         Err(err) => {
             return ExternalOptimizationAdapterRun {
@@ -2102,13 +3407,23 @@ pub fn run_external_optimization_adapter(
         }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("external optimization adapter timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; external optimization adapter timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     if !output.status.success() {
         return ExternalOptimizationAdapterRun {
             tool: opts.tool,
             status: ExternalOptimizationAdapterStatus::Failed,
             output: None,
             elapsed_ms,
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            message: stderr,
         };
     }
     match serde_json::from_slice::<Value>(&output.stdout) {
@@ -2127,6 +3442,46 @@ pub fn run_external_optimization_adapter(
             message: err.to_string(),
         },
     }
+}
+
+fn external_optimization_adapter_timeout_ms() -> u64 {
+    env::var("EXTERNAL_OPTIMIZATION_ADAPTER_TIMEOUT_MS")
+        .or_else(|_| env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_external_optimization_adapter_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "failed to poll external optimization adapter: {err}"
+                ))
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for external optimization adapter: {err}"))
 }
 
 pub fn external_optimization_normalized_result_from_value(
@@ -2386,6 +3741,19 @@ fn probe_python_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptim
             ),
         };
     }
+    if !external_optimization_python_import_probes_enabled() {
+        return ExternalOptimizationProbe {
+            tool: opts.tool,
+            status: ExternalOptimizationProbeStatus::NotConfigured,
+            command: default_python_probe_command(),
+            message: format!(
+                "{} needs a local adapter command or explicit Python env; set {} or {}, or set EXTERNAL_OPTIMIZATION_PYTHON_IMPORT_PROBES=1 to probe importable Python packages",
+                opts.tool.display_name(),
+                adapter_env_names(opts.tool)[0],
+                artifact_env_names(opts.tool)[0]
+            ),
+        };
+    }
     let Some(python) = default_python_probe_command() else {
         return ExternalOptimizationProbe {
             tool: opts.tool,
@@ -2528,11 +3896,48 @@ fn probe_external_optimization_linear_cli_tool(
 }
 
 fn python_can_import(python: &Path, module: &str) -> bool {
-    Command::new(python)
+    let Ok(child) = Command::new(python)
         .arg("-c")
         .arg(python_import_probe_code(module))
-        .output()
-        .is_ok_and(|output| output.status.success())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    wait_for_external_optimization_adapter_output(
+        child,
+        external_optimization_python_import_probe_timeout_ms(),
+    )
+    .is_ok_and(|(output, timed_out)| !timed_out && output.status.success())
+}
+
+fn external_optimization_python_import_probes_enabled() -> bool {
+    [
+        "ORES_EXTERNAL_OPTIMIZATION_PYTHON_IMPORT_PROBES",
+        "EXTERNAL_OPTIMIZATION_PYTHON_IMPORT_PROBES",
+        "EXTERNAL_OPTIMIZATION_PROBE_PYTHON_IMPORTS",
+    ]
+    .iter()
+    .find_map(|name| env::var(name).ok())
+    .is_some_and(|value| external_optimization_python_import_probe_value_enabled(&value))
+}
+
+fn external_optimization_python_import_probe_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "1" | "true" | "yes" | "y" | "on" | "python" | "python-imports" | "imports"
+    )
+}
+
+fn external_optimization_python_import_probe_timeout_ms() -> u64 {
+    env::var("EXTERNAL_OPTIMIZATION_PYTHON_IMPORT_TIMEOUT_MS")
+        .or_else(|_| env::var("EXTERNAL_OPTIMIZATION_ADAPTER_TIMEOUT_MS"))
+        .or_else(|_| env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(2_000)
 }
 
 fn python_import_probe_code(module: &str) -> String {
@@ -2727,11 +4132,13 @@ fn numeric_vector_from_value(value: &Value) -> Option<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{python_import_probe_code, python_probe_command_from_env};
+    use super::{
+        external_optimization_python_import_probe_value_enabled, python_import_probe_code,
+        python_probe_command_from_env, wait_for_external_optimization_adapter_output,
+    };
     use crate::des::general::external_optimization_tools::{
         adapter_env_names, artifact_env_names, external_optimization_command_dir_env_names,
         external_optimization_comparison_report_to_json,
-        external_optimization_ecosystem_reference_invocation,
         external_optimization_ecosystem_reference_options,
         external_optimization_normalized_result_from_value, external_optimization_tool_specs,
         external_optimization_tools, find_command_in_install_dir,
@@ -2742,9 +4149,10 @@ mod tests {
         ExternalOptimizationNormalizedResult, ExternalOptimizationProbeStatus,
         ExternalOptimizationTool,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::ffi::OsString;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
@@ -2983,6 +4391,47 @@ mod tests {
             ExternalOptimizationTool::QsoptExCli.linear_cli_solver(),
             Some(ExternalLinearCliSolver::QsoptEx)
         );
+    }
+
+    #[test]
+    fn external_optimization_adapter_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_external_optimization_adapter_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn python_import_probes_are_explicit_opt_in() {
+        for value in [
+            "1",
+            "true",
+            "YES",
+            "on",
+            "python",
+            "python_imports",
+            "imports",
+        ] {
+            assert!(
+                external_optimization_python_import_probe_value_enabled(value),
+                "{value:?} should opt into Python import probes"
+            );
+        }
+
+        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+            assert!(
+                !external_optimization_python_import_probe_value_enabled(value),
+                "{value:?} should keep Python import probes disabled"
+            );
+        }
     }
 
     #[test]
@@ -3438,6 +4887,38 @@ mod tests {
         assert_eq!(choco_normalized.objective, Some(9.0));
         assert_eq!(choco_normalized.solution, Some(vec![1.0, 0.0, 2.0]));
 
+        let cp_job_shop_payload = json!({
+            "kind": "ecosystem-cp-job-shop",
+            "jobs": [
+                {"operations": [{"machine": "M1", "duration": 3}, {"machine": "M2", "duration": 2}]},
+                {"operations": [{"machine": "M2", "duration": 2}, {"machine": "M1", "duration": 4}]},
+                {"operations": [{"machine": "M1", "duration": 2}, {"machine": "M2", "duration": 3}]}
+            ]
+        });
+        let choco_job_shop = run_external_optimization_ecosystem_reference(
+            &cp_job_shop_payload,
+            ExternalOptimizationTool::ChocoSolver,
+        );
+        assert_eq!(choco_job_shop.status, ExternalOptimizationAdapterStatus::Ok);
+        assert_eq!(
+            choco_job_shop
+                .output
+                .as_ref()
+                .and_then(|output| output.get("backend"))
+                .and_then(Value::as_str),
+            Some("builtin-rust:constraint-programming")
+        );
+        let choco_job_shop_normalized = choco_job_shop.output.as_ref().map_or_else(
+            ExternalOptimizationNormalizedResult::default,
+            external_optimization_normalized_result_from_value,
+        );
+        assert_eq!(choco_job_shop_normalized.status.as_deref(), Some("optimal"));
+        assert_eq!(choco_job_shop_normalized.objective, Some(9.0));
+        assert_eq!(
+            choco_job_shop_normalized.solution,
+            Some(vec![0.0, 3.0, 0.0, 5.0, 3.0, 5.0])
+        );
+
         let multiobjective_payload = json!({
             "kind": "ecosystem-multiobjective",
             "senses": ["min", "min"],
@@ -3448,29 +4929,28 @@ mod tests {
                 {"x": [2], "objectives": [1, 4]}
             ]
         });
-        let report = run_external_optimization_comparison(
-            &multiobjective_payload,
-            &[
-                external_optimization_ecosystem_reference_invocation(
-                    "jmetal-reference",
-                    ExternalOptimizationTool::JMetal,
-                ),
-                external_optimization_ecosystem_reference_invocation(
-                    "moea-reference",
-                    ExternalOptimizationTool::MoeaFramework,
-                ),
-                external_optimization_ecosystem_reference_invocation(
-                    "ecj-reference",
-                    ExternalOptimizationTool::Ecj,
-                ),
-            ],
-            1e-9,
-            1e-9,
-        );
-        assert!(report.agreement);
-        assert_eq!(report.reference_status.as_deref(), Some("optimal"));
-        assert_eq!(report.reference_objective, Some(2.0));
-        assert_eq!(report.reference_solution, Some(vec![1.0]));
+        for tool in [
+            ExternalOptimizationTool::JMetal,
+            ExternalOptimizationTool::MoeaFramework,
+            ExternalOptimizationTool::Ecj,
+        ] {
+            let run = run_external_optimization_ecosystem_reference(&multiobjective_payload, tool);
+            assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+            assert_eq!(
+                run.output
+                    .as_ref()
+                    .and_then(|output| output.get("backend"))
+                    .and_then(Value::as_str),
+                Some("builtin-rust:evolutionary-multiobjective")
+            );
+            let normalized = run.output.as_ref().map_or_else(
+                ExternalOptimizationNormalizedResult::default,
+                external_optimization_normalized_result_from_value,
+            );
+            assert_eq!(normalized.status.as_deref(), Some("optimal"));
+            assert_eq!(normalized.objective, Some(2.0));
+            assert_eq!(normalized.solution, Some(vec![1.0]));
+        }
     }
 
     #[test]
@@ -3482,26 +4962,132 @@ mod tests {
             "constraints": [{"coefs": [1, 1], "sense": "<=", "rhs": 1}],
             "domains": [[0, 1], [0, 1]]
         });
-        let report = run_external_optimization_comparison(
-            &linear_payload,
-            &[
-                external_optimization_ecosystem_reference_invocation(
-                    "ortools-glop-reference",
-                    ExternalOptimizationTool::OrToolsGlop,
-                ),
-                external_optimization_ecosystem_reference_invocation(
-                    "ortools-pdlp-reference",
-                    ExternalOptimizationTool::OrToolsPdlp,
-                ),
-            ],
-            1e-9,
-            1e-9,
-        );
+        for tool in [
+            ExternalOptimizationTool::OrToolsGlop,
+            ExternalOptimizationTool::OrToolsPdlp,
+        ] {
+            let run = run_external_optimization_ecosystem_reference(&linear_payload, tool);
+            assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+            assert_eq!(
+                run.output
+                    .as_ref()
+                    .and_then(|output| output.get("backend"))
+                    .and_then(Value::as_str),
+                Some("builtin-rust:linear-mip")
+            );
+            let normalized = run.output.as_ref().map_or_else(
+                ExternalOptimizationNormalizedResult::default,
+                external_optimization_normalized_result_from_value,
+            );
+            assert_eq!(normalized.status.as_deref(), Some("optimal"));
+            assert_eq!(normalized.objective, Some(3.0));
+            assert_eq!(normalized.solution, Some(vec![1.0, 0.0]));
+        }
+    }
 
-        assert!(report.agreement);
-        assert_eq!(report.reference_status.as_deref(), Some("optimal"));
-        assert_eq!(report.reference_objective, Some(3.0));
-        assert_eq!(report.reference_solution, Some(vec![1.0, 0.0]));
+    #[test]
+    fn ecosystem_reference_helper_runs_planning_engines_in_rust() {
+        let planning_payload = json!({
+            "kind": "ecosystem-planning-assignment",
+            "task_durations": [3, 4, 5],
+            "machines": 2,
+            "capacities": [8, 8]
+        });
+        for (tool, backend) in [
+            (
+                ExternalOptimizationTool::OptaPlanner,
+                "builtin-rust:planning-metaheuristic",
+            ),
+            (
+                ExternalOptimizationTool::Timefold,
+                "builtin-rust:planning-metaheuristic",
+            ),
+            (
+                ExternalOptimizationTool::FastDownward,
+                "builtin-rust:ai-planning",
+            ),
+        ] {
+            let run = run_external_optimization_ecosystem_reference(&planning_payload, tool);
+            assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+            assert_eq!(
+                run.output
+                    .as_ref()
+                    .and_then(|output| output.get("backend"))
+                    .and_then(Value::as_str),
+                Some(backend)
+            );
+            assert_eq!(
+                run.output
+                    .as_ref()
+                    .and_then(|output| output.get("loads"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(2)
+            );
+            let normalized = run.output.as_ref().map_or_else(
+                ExternalOptimizationNormalizedResult::default,
+                external_optimization_normalized_result_from_value,
+            );
+            assert_eq!(normalized.status.as_deref(), Some("optimal"));
+            assert_eq!(normalized.objective, Some(7.0));
+            assert_eq!(normalized.solution, Some(vec![0.0, 0.0, 1.0]));
+        }
+    }
+
+    #[test]
+    fn ecosystem_reference_helper_runs_nonlinear_engines_in_rust() {
+        let nonlinear_payload = json!({
+            "kind": "ecosystem-nonlinear",
+            "variables": [
+                {"name": "x", "lb": 0.0, "ub": 2.0, "start": 1.0},
+                {"name": "y", "lb": 0.0, "ub": 4.0, "start": 2.0}
+            ],
+            "objective": "(x - 1)**2 + (y - 2)**2",
+            "constraints": [{"expr": "x + y", "sense": ">=", "rhs": 1.0}]
+        });
+        for (tool, backend) in [
+            (
+                ExternalOptimizationTool::Argmin,
+                "builtin-rust:nonlinear-optimization",
+            ),
+            (
+                ExternalOptimizationTool::Nlopt,
+                "builtin-rust:nonlinear-optimization",
+            ),
+            (
+                ExternalOptimizationTool::ScipyOptimize,
+                "builtin-rust:nonlinear-optimization",
+            ),
+            (
+                ExternalOptimizationTool::IpoptRust,
+                "builtin-rust:nonlinear-optimization",
+            ),
+            (
+                ExternalOptimizationTool::Cvxpy,
+                "builtin-rust:convex-optimization",
+            ),
+            (
+                ExternalOptimizationTool::Hexaly,
+                "builtin-rust:hybrid-optimization",
+            ),
+        ] {
+            let run = run_external_optimization_ecosystem_reference(&nonlinear_payload, tool);
+            assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+            assert_eq!(
+                run.output
+                    .as_ref()
+                    .and_then(|output| output.get("backend"))
+                    .and_then(Value::as_str),
+                Some(backend)
+            );
+            let normalized = run.output.as_ref().map_or_else(
+                ExternalOptimizationNormalizedResult::default,
+                external_optimization_normalized_result_from_value,
+            );
+            assert_eq!(normalized.status.as_deref(), Some("optimal"));
+            assert_eq!(normalized.objective, Some(0.0));
+            assert_eq!(normalized.solution, Some(vec![1.0, 2.0]));
+        }
     }
 
     #[test]

@@ -25,6 +25,7 @@ use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
 };
 use serde::Serialize;
+use uuid::Uuid;
 
 const DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
@@ -37,12 +38,27 @@ struct PendingPostgresCompletedRun {
     base_policy_version_id: Option<String>,
     output_policy_version_id: Option<String>,
     generation: i32,
-    policy_version_written: bool,
+}
+
+#[derive(Debug)]
+struct PendingPostgresPolicyVersion {
+    id: String,
+    parent_policy_version_id: Option<String>,
+    generation: i32,
+    version_label: String,
+    source_kind: &'static str,
+    status: &'static str,
+    config: MatchConfig,
+    home_options: SoccerQPolicyOptions,
+    away_options: SoccerQPolicyOptions,
+    policies: SoccerTeamQPolicies,
+    fitness: f64,
 }
 
 struct PostgresCompletedRunBatch {
     experiment_id: String,
     runner_id: String,
+    pending_policy_versions: Vec<PendingPostgresPolicyVersion>,
     pending_runs: Vec<PendingPostgresCompletedRun>,
 }
 
@@ -296,9 +312,31 @@ fn flush_postgres_completed_runs(
     store: &mut SoccerLearningPgStore,
     experiment_id: &str,
     runner_id: &str,
+    pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
     pending_runs: &mut Vec<PendingPostgresCompletedRun>,
 ) -> Result<usize, String> {
+    if pending_policy_versions.is_empty() && pending_runs.is_empty() {
+        return Ok(0);
+    }
+    let policy_versions_written = pending_policy_versions.len();
+    for policy_version in pending_policy_versions.iter() {
+        store.insert_policy_version_with_id(
+            &policy_version.id,
+            experiment_id,
+            policy_version.parent_policy_version_id.as_deref(),
+            policy_version.generation,
+            &policy_version.version_label,
+            policy_version.source_kind,
+            policy_version.status,
+            &policy_version.config,
+            policy_version.home_options.clone(),
+            policy_version.away_options.clone(),
+            &policy_version.policies,
+            policy_version.fitness,
+        )?;
+    }
     if pending_runs.is_empty() {
+        pending_policy_versions.clear();
         return Ok(0);
     }
 
@@ -319,10 +357,6 @@ fn flush_postgres_completed_runs(
         run_ids.first(),
         run_ids.last(),
     ) {
-        let policy_versions_written = pending_runs
-            .iter()
-            .filter(|pending| pending.policy_version_written)
-            .count();
         println!(
             "postgres_persisted_batch episodes={}..{} first_run_id={} last_run_id={} first_policy_version={} last_policy_version={} first_generation={} last_generation={} policy_versions_written={} batch_size={}",
             first.completed_game.episode + 1,
@@ -341,6 +375,7 @@ fn flush_postgres_completed_runs(
         );
     }
     let flushed = pending_runs.len();
+    pending_policy_versions.clear();
     pending_runs.clear();
     Ok(flushed)
 }
@@ -377,6 +412,7 @@ impl AsyncPostgresCompletedRunWriter {
                     &mut store,
                     &batch.experiment_id,
                     &batch.runner_id,
+                    &mut batch.pending_policy_versions,
                     &mut batch.pending_runs,
                 );
                 let _ = result_sender.send(result);
@@ -418,10 +454,11 @@ impl AsyncPostgresCompletedRunWriter {
         &mut self,
         experiment_id: &str,
         runner_id: &str,
+        pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
         pending_runs: &mut Vec<PendingPostgresCompletedRun>,
     ) -> Result<usize, String> {
         let persisted = self.drain_finished()?;
-        if pending_runs.is_empty() {
+        if pending_policy_versions.is_empty() && pending_runs.is_empty() {
             return Ok(persisted);
         }
         let Some(sender) = &self.sender else {
@@ -430,6 +467,7 @@ impl AsyncPostgresCompletedRunWriter {
         let batch = PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            pending_policy_versions: std::mem::take(pending_policy_versions),
             pending_runs: std::mem::take(pending_runs),
         };
         sender
@@ -691,6 +729,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_last_policy_version_id = None::<String>;
     let mut pg_generation = 0i32;
     let mut pg_completed_games_seen = 0usize;
+    let mut pg_policy_version_buffer = Vec::<PendingPostgresPolicyVersion>::new();
     let mut pg_completed_buffer = Vec::<PendingPostgresCompletedRun>::new();
     let mut pg_persisted_games = 0usize;
 
@@ -766,9 +805,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         },
         initial_policies,
         |game, merged_policies| {
-            let Some(store) = pg_store.as_mut() else {
-                return Ok(());
-            };
             let Some(experiment_id) = pg_experiment_id.as_deref() else {
                 return Ok(());
             };
@@ -780,19 +816,20 @@ fn run() -> Result<(), Box<dyn Error>> {
             let output_policy_version_id = if should_write_policy_version {
                 let next_generation = pg_generation.saturating_add(1);
                 let version_label = format!("{}-episode-{:06}", run_id, game.episode + 1);
-                let output_policy_version_id = store.insert_policy_version(
-                    experiment_id,
-                    pg_batch_base_policy_version_id.as_deref(),
-                    next_generation,
-                    &version_label,
-                    "merge",
-                    "active",
-                    &config,
-                    options.clone(),
-                    options.clone(),
-                    merged_policies,
-                    game.score.match_fitness,
-                )?;
+                let output_policy_version_id = Uuid::new_v4().to_string();
+                pg_policy_version_buffer.push(PendingPostgresPolicyVersion {
+                    id: output_policy_version_id.clone(),
+                    parent_policy_version_id: pg_batch_base_policy_version_id.clone(),
+                    generation: next_generation,
+                    version_label,
+                    source_kind: "merge",
+                    status: "active",
+                    config: config.clone(),
+                    home_options: options.clone(),
+                    away_options: options.clone(),
+                    policies: merged_policies.clone(),
+                    fitness: game.score.match_fitness,
+                });
                 pg_base_policy_version_id = Some(output_policy_version_id.clone());
                 pg_last_policy_version_id = Some(output_policy_version_id.clone());
                 pg_generation = next_generation;
@@ -805,18 +842,25 @@ fn run() -> Result<(), Box<dyn Error>> {
                 base_policy_version_id: pg_batch_base_policy_version_id,
                 output_policy_version_id,
                 generation: pg_generation,
-                policy_version_written: should_write_policy_version,
             });
             if pg_completed_buffer.len() >= pg_completed_run_batch_games {
                 pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
-                    writer.enqueue(experiment_id, &run_id, &mut pg_completed_buffer)?
-                } else {
+                    writer.enqueue(
+                        experiment_id,
+                        &run_id,
+                        &mut pg_policy_version_buffer,
+                        &mut pg_completed_buffer,
+                    )?
+                } else if let Some(store) = pg_store.as_mut() {
                     flush_postgres_completed_runs(
                         store,
                         experiment_id,
                         &run_id,
+                        &mut pg_policy_version_buffer,
                         &mut pg_completed_buffer,
                     )?
+                } else {
+                    0
                 };
             }
             Ok(())
@@ -827,11 +871,22 @@ fn run() -> Result<(), Box<dyn Error>> {
     if let Some(experiment_id) = pg_experiment_id.as_deref() {
         pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
             writer
-                .enqueue(experiment_id, &run_id, &mut pg_completed_buffer)
+                .enqueue(
+                    experiment_id,
+                    &run_id,
+                    &mut pg_policy_version_buffer,
+                    &mut pg_completed_buffer,
+                )
                 .map_err(invalid_data)?
         } else if let Some(store) = pg_store.as_mut() {
-            flush_postgres_completed_runs(store, experiment_id, &run_id, &mut pg_completed_buffer)
-                .map_err(invalid_data)?
+            flush_postgres_completed_runs(
+                store,
+                experiment_id,
+                &run_id,
+                &mut pg_policy_version_buffer,
+                &mut pg_completed_buffer,
+            )
+            .map_err(invalid_data)?
         } else {
             0
         };

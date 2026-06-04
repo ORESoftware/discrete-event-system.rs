@@ -151,6 +151,39 @@ impl SoccerLearningPgStore {
         policies: &SoccerTeamQPolicies,
         fitness: f64,
     ) -> Result<String, String> {
+        let policy_version_id = Uuid::new_v4().to_string();
+        self.insert_policy_version_with_id(
+            &policy_version_id,
+            experiment_id,
+            parent_policy_version_id,
+            generation,
+            version_label,
+            source_kind,
+            status,
+            config,
+            home_options,
+            away_options,
+            policies,
+            fitness,
+        )?;
+        Ok(policy_version_id)
+    }
+
+    pub fn insert_policy_version_with_id(
+        &mut self,
+        policy_version_id: &str,
+        experiment_id: &str,
+        parent_policy_version_id: Option<&str>,
+        generation: i32,
+        version_label: &str,
+        source_kind: &str,
+        status: &str,
+        config: &MatchConfig,
+        home_options: SoccerQPolicyOptions,
+        away_options: SoccerQPolicyOptions,
+        policies: &SoccerTeamQPolicies,
+        fitness: f64,
+    ) -> Result<(), String> {
         let config_json =
             serde_json::to_value(config).map_err(|err| format!("serialize match config: {err}"))?;
         let options_json = json!({
@@ -185,46 +218,48 @@ impl SoccerLearningPgStore {
             .map_err(|err| format!("archive old soccer policy versions: {err}"))?;
         }
 
-        let row = tx
-            .query_one(
+        let inserted = tx
+            .execute(
                 r#"
-                insert into des_soccer_learning_policy_versions
-                  (
-                    experiment_id,
-                    parent_policy_version_id,
-                    generation,
-                    version_label,
-                    source_kind,
-                    status,
-                    options,
-                    config,
-                    lineage,
-                    metrics,
-                    entry_count,
-                    target_entry_count,
-                    visit_count,
-                    fitness_micros
-                  )
-                values
-                  (
-                    $1::text::uuid,
-                    $2::text::uuid,
-                    $3,
-                    $4,
-                    $5,
-                    $6,
-                    $7,
-                    $8,
-                    $9,
-                    $10,
-                    $11,
-                    $12,
-                    $13,
-                    $14
-                  )
-                returning id::text
-                "#,
+            insert into des_soccer_learning_policy_versions
+              (
+                id,
+                experiment_id,
+                parent_policy_version_id,
+                generation,
+                version_label,
+                source_kind,
+                status,
+                options,
+                config,
+                lineage,
+                metrics,
+                entry_count,
+                target_entry_count,
+                visit_count,
+                fitness_micros
+              )
+            values
+              (
+                $1::text::uuid,
+                $2::text::uuid,
+                $3::text::uuid,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14,
+                $15
+              )
+            "#,
                 &[
+                    &policy_version_id,
                     &experiment_id,
                     &parent_policy_version_id,
                     &generation,
@@ -242,7 +277,11 @@ impl SoccerLearningPgStore {
                 ],
             )
             .map_err(|err| format!("insert soccer policy version: {err}"))?;
-        let policy_version_id: String = row.get(0);
+        if inserted != 1 {
+            return Err(format!(
+                "insert soccer policy version inserted {inserted} rows for policy version {policy_version_id}"
+            ));
+        }
 
         insert_policy_entries_for_team(
             &mut tx,
@@ -261,7 +300,7 @@ impl SoccerLearningPgStore {
 
         tx.commit()
             .map_err(|err| format!("commit soccer policy version: {err}"))?;
-        Ok(policy_version_id)
+        Ok(())
     }
 
     pub fn insert_completed_run(

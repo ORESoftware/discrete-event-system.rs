@@ -4310,13 +4310,24 @@ fn output_validation_table_rows(
         .or_else(|| payload.get("data"))
         .or_else(|| payload.get("instance"));
     let Some(source) = source else {
-        return Err(
-            "table-validation payload needs rows, data, instance, csv, or text".to_string(),
-        );
+        let Some(text) = payload
+            .get("csv")
+            .or_else(|| payload.get("text"))
+            .and_then(Value::as_str)
+        else {
+            return Err(
+                "table-validation payload needs rows, data, instance, csv, or text".to_string(),
+            );
+        };
+        return output_validation_csv_rows(text);
     };
+    if let Some(text) = source.as_str() {
+        return output_validation_csv_rows(text);
+    }
     let Some(rows) = source.as_array() else {
         return Err(
-            "table-validation payload needs rows, data, or instance as an array".to_string(),
+            "table-validation payload needs rows, data, or instance as an array or CSV text"
+                .to_string(),
         );
     };
     let mut out = Vec::with_capacity(rows.len());
@@ -4327,6 +4338,75 @@ fn output_validation_table_rows(
         out.push(row_obj.clone());
     }
     Ok(out)
+}
+
+fn output_validation_csv_record(line: &str) -> Result<Vec<String>, String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+            }
+            ',' if !in_quotes => {
+                fields.push(field.trim().to_string());
+                field.clear();
+            }
+            _ => field.push(ch),
+        }
+    }
+    if in_quotes {
+        return Err("csv row has an unterminated quoted field".to_string());
+    }
+    fields.push(field.trim().to_string());
+    Ok(fields)
+}
+
+fn output_validation_csv_rows(text: &str) -> Result<Vec<serde_json::Map<String, Value>>, String> {
+    let mut records = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(output_validation_csv_record);
+    let Some(headers) = records.next() else {
+        return Err("csv table payload needs a header row".to_string());
+    };
+    let headers = headers?;
+    if headers.is_empty() || headers.iter().any(|header| header.is_empty()) {
+        return Err("csv table header names must be non-empty".to_string());
+    }
+    let mut rows = Vec::new();
+    for (idx, record) in records.enumerate() {
+        let fields = record?;
+        if fields.len() > headers.len() {
+            return Err(format!(
+                "csv row {} has {} fields for {} headers",
+                idx + 1,
+                fields.len(),
+                headers.len()
+            ));
+        }
+        let mut row = serde_json::Map::new();
+        for (col_idx, header) in headers.iter().enumerate() {
+            row.insert(
+                header.clone(),
+                Value::String(fields.get(col_idx).cloned().unwrap_or_default()),
+            );
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn output_validation_has_table_payload(payload: &Value) -> bool {
+    ["rows", "data", "instance", "csv", "text"]
+        .iter()
+        .any(|key| payload.get(*key).is_some())
 }
 
 fn output_validation_missing_cell(value: Option<&Value>) -> bool {
@@ -5265,13 +5345,193 @@ fn output_validation_pydantic_reference(payload: &Value, validator: &str) -> Val
     )
 }
 
-fn output_validation_package_unavailable(tool: &str) -> Value {
+fn output_validation_payload_text<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .filter_map(|key| payload.get(*key).and_then(Value::as_str))
+        .find(|text| !text.trim().is_empty())
+}
+
+fn output_validation_balanced_delimiters(text: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut stack = Vec::<(char, usize)>::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    for (line_idx, line) in text.lines().enumerate() {
+        for ch in line.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && quote == Some('"') {
+                escaped = true;
+                continue;
+            }
+            if matches!(ch, '"' | '\'') {
+                if quote == Some(ch) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(ch);
+                }
+                continue;
+            }
+            if quote.is_some() {
+                continue;
+            }
+            match ch {
+                '{' | '[' | '(' => stack.push((ch, line_idx + 1)),
+                '}' | ']' | ')' => {
+                    let Some((open, open_line)) = stack.pop() else {
+                        errors.push(format!("line {} has unmatched {ch}", line_idx + 1));
+                        continue;
+                    };
+                    let expected = match open {
+                        '{' => '}',
+                        '[' => ']',
+                        '(' => ')',
+                        _ => unreachable!(),
+                    };
+                    if ch != expected {
+                        errors.push(format!(
+                            "line {} closes {ch} but line {open_line} opened {open}",
+                            line_idx + 1
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (open, line) in stack {
+        errors.push(format!("line {line} has unclosed {open}"));
+    }
+    errors
+}
+
+fn output_validation_yaml_reference(payload: &Value, validator: &str) -> Value {
+    let Some(text) =
+        output_validation_payload_text(payload, &["yaml", "document", "text", "content"])
+    else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "payload needs yaml, document, text, or content",
+            Vec::new(),
+        );
+    };
+    let mut errors = output_validation_balanced_delimiters(text);
+    for (line_idx, line) in text.lines().enumerate() {
+        if line
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .any(|ch| ch == '\t')
+        {
+            errors.push(format!("line {} uses a tab for indentation", line_idx + 1));
+        }
+        if line.ends_with(' ') || line.ends_with('\t') {
+            errors.push(format!("line {} has trailing whitespace", line_idx + 1));
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if matches!(trimmed, "---" | "...") {
+            continue;
+        }
+        if trimmed.starts_with(':') {
+            errors.push(format!("line {} has an empty mapping key", line_idx + 1));
+        }
+        if trimmed.starts_with("-:") {
+            errors.push(format!(
+                "line {} has an empty sequence mapping key",
+                line_idx + 1
+            ));
+        }
+    }
     output_validation_result(
-        "unavailable",
-        "unknown",
-        &format!("rust:{tool}"),
-        format!("{tool} adapter package is not installed"),
-        Vec::new(),
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
+    )
+}
+
+fn output_validation_graphql_reference(payload: &Value, validator: &str) -> Value {
+    let Some(text) = output_validation_payload_text(
+        payload,
+        &["schema", "graphql", "sdl", "document", "text", "content"],
+    ) else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "payload needs schema, graphql, sdl, document, text, or content",
+            Vec::new(),
+        );
+    };
+    let without_comments = text
+        .lines()
+        .map(|line| line.split_once('#').map(|(head, _)| head).unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut errors = output_validation_balanced_delimiters(&without_comments);
+    let trimmed = without_comments.trim();
+    if trimmed.is_empty() {
+        errors.push("GraphQL schema is empty".to_string());
+    }
+    let has_definition = [
+        "type ",
+        "interface ",
+        "enum ",
+        "union ",
+        "input ",
+        "scalar ",
+        "directive ",
+        "schema ",
+        "extend type ",
+        "extend interface ",
+    ]
+    .iter()
+    .any(|keyword| trimmed.contains(keyword));
+    if !has_definition {
+        errors.push(
+            "GraphQL schema has no type, schema, scalar, directive, or extension definition"
+                .to_string(),
+        );
+    }
+    for keyword in ["type ", "interface ", "enum ", "input ", "schema "] {
+        let mut rest = trimmed;
+        while let Some(idx) = rest.find(keyword) {
+            rest = &rest[idx + keyword.len()..];
+            let before_next_definition = ["type ", "interface ", "enum ", "input ", "schema "]
+                .iter()
+                .filter_map(|next| rest.find(next))
+                .min()
+                .map(|next_idx| &rest[..next_idx])
+                .unwrap_or(rest);
+            if !before_next_definition.contains('{') {
+                errors.push(format!(
+                    "GraphQL {keyword:?} definition is missing a field block"
+                ));
+                break;
+            }
+        }
+    }
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
     )
 }
 
@@ -5294,13 +5554,22 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         ),
         "openapi"
         | "openapi-validator"
+        | "openapi-generator-cli"
+        | "swagger-cli"
         | "spectral"
         | "openapi-spec-validator"
+        | "redocly"
         | "redocly-cli"
+        | "asyncapi"
         | "asyncapi-cli" => {
             let validator = if matches!(
                 tool.as_str(),
-                "spectral" | "openapi-spec-validator" | "redocly-cli" | "asyncapi-cli"
+                "spectral"
+                    | "openapi-spec-validator"
+                    | "redocly"
+                    | "redocly-cli"
+                    | "asyncapi"
+                    | "asyncapi-cli"
             ) {
                 format!("builtin:openapi-structural-for-{tool}")
             } else {
@@ -5327,7 +5596,7 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
             };
             output_validation_pydantic_reference(payload, &validator)
         }
-        "table" | "table-schema" | "tabular" | "csv-validator" => {
+        "table" | "table-schema" | "tabular" | "csv-validator" | "csvlint" => {
             output_validation_table_reference(payload, "builtin:table-schema-subset")
         }
         "frictionless"
@@ -5343,7 +5612,7 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         | "deequ"
         | "tensorflow-data-validation"
         | "openrefine"
-            if kind == "table-validation" =>
+            if kind == "table-validation" || output_validation_has_table_payload(payload) =>
         {
             output_validation_table_reference(
                 payload,
@@ -5371,7 +5640,16 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         }
         _ if kind == "protobuf-validation" => output_validation_protobuf_reference(payload),
         _ if kind == "avro-validation" => output_validation_avro_reference(payload),
-        "yamllint" | "graphql-schema" => output_validation_package_unavailable(&tool),
+        "yamllint" => output_validation_yaml_reference(payload, "builtin:yaml-structural"),
+        "graphql-schema" | "graphql-schema-linter" | "graphql-inspector" => {
+            output_validation_graphql_reference(payload, "builtin:graphql-schema-structural")
+        }
+        _ if kind == "yaml-validation" || kind == "yamllint-validation" => {
+            output_validation_yaml_reference(payload, "builtin:yaml-structural")
+        }
+        _ if kind == "graphql-validation" || kind == "graphql-schema-validation" => {
+            output_validation_graphql_reference(payload, "builtin:graphql-schema-structural")
+        }
         _ => output_validation_result(
             "unavailable",
             "unknown",
@@ -5408,6 +5686,23 @@ fn model_validation_payload_text<'a>(payload: &'a Value, keys: &[&str]) -> &'a s
 
 fn model_validation_normalized_tool(tool: &str) -> String {
     tool.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn model_validation_payload_has_wcnf(payload: &Value) -> bool {
+    payload.get("wcnf").is_some()
+        || payload
+            .get("dimacs")
+            .and_then(Value::as_str)
+            .is_some_and(|text| {
+                text.lines().any(|line| {
+                    let line = line.trim().to_ascii_lowercase();
+                    line.starts_with("p wcnf ")
+                })
+            })
+}
+
+fn model_validation_payload_has_opb(payload: &Value) -> bool {
+    payload.get("opb").is_some() || payload.get("pb").is_some()
 }
 
 fn model_validation_infer_smtlib(text: &str) -> Value {
@@ -6072,10 +6367,40 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "kissat",
         "cadical",
         "cryptominisat",
+        "cryptominisat5",
         "minisat",
         "glucose",
+        "glucose-syrup",
         "maplesat",
+        "maple-sat",
+        "maple-lcm",
         "varisat",
+        "sat4j",
+        "sat4j-sat",
+        "pysat",
+        "pysat-adapter",
+        "python-sat",
+        "python-sat-adapter",
+    ];
+    let maxsat_tools = [
+        "open-wbo",
+        "open-wbo-static",
+        "maxhs",
+        "sat4j",
+        "sat4j-sat",
+        "pysat",
+        "pysat-adapter",
+        "python-sat",
+        "python-sat-adapter",
+    ];
+    let pseudo_boolean_tools = [
+        "roundingsat",
+        "sat4j",
+        "sat4j-sat",
+        "pysat",
+        "pysat-adapter",
+        "python-sat",
+        "python-sat-adapter",
     ];
     if kind == "minizinc-validation" || minizinc_tools.contains(&tool.as_str()) {
         return model_validation_minizinc_reference(payload);
@@ -6107,12 +6432,15 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
     if kind == "wcnf-validation"
         || kind == "dimacs-wcnf-validation"
         || kind == "maxsat-validation"
-        || ((tool == "open-wbo" || tool == "maxhs")
-            && (payload.get("wcnf").is_some() || payload.get("dimacs").is_some()))
+        || (maxsat_tools.contains(&tool.as_str()) && model_validation_payload_has_wcnf(payload))
     {
         return model_validation_wcnf_reference(payload);
     }
-    if kind == "opb-validation" || kind == "pseudo-boolean-validation" || tool == "roundingsat" {
+    if kind == "opb-validation"
+        || kind == "pseudo-boolean-validation"
+        || (pseudo_boolean_tools.contains(&tool.as_str())
+            && model_validation_payload_has_opb(payload))
+    {
         return model_validation_opb_reference(payload);
     }
     if kind == "dimacs-validation"
@@ -6273,6 +6601,21 @@ fn proof_validation_veripb_has_derivation(proof: &str) -> bool {
     })
 }
 
+fn proof_validation_is_veripb_tool(tool: &str) -> bool {
+    matches!(tool, "veripb" | "veripb-checker")
+}
+
+fn proof_validation_is_lrat_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "lrat" | "lrat-check" | "lrat-checker" | "cake-lpr" | "cake-lpr-check"
+    )
+}
+
+fn proof_validation_is_frat_tool(tool: &str) -> bool {
+    matches!(tool, "frat" | "frat-rs" | "frat-trim")
+}
+
 pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str) -> Value {
     let tool = model_validation_normalized_tool(tool);
     let kind = payload
@@ -6280,8 +6623,7 @@ pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str
         .and_then(Value::as_str)
         .map(model_validation_normalized_tool)
         .unwrap_or_default();
-    if tool == "veripb"
-        || tool == "veripb-checker"
+    if proof_validation_is_veripb_tool(&tool)
         || matches!(
             kind.as_str(),
             "pseudo-boolean-proof-validation" | "opb-proof-validation" | "veripb-validation"
@@ -6379,9 +6721,9 @@ pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str
                 vec![("cnf_status", json!("sat")), ("witness", json!(model))],
             );
         }
-        let has_empty_clause = if matches!(tool.as_str(), "lrat" | "lrat-check" | "lrat-checker") {
+        let has_empty_clause = if proof_validation_is_lrat_tool(&tool) {
             proof_validation_lrat_has_empty_clause(proof)
-        } else if matches!(tool.as_str(), "frat" | "frat-rs" | "frat-trim") {
+        } else if proof_validation_is_frat_tool(&tool) {
             proof_validation_frat_has_empty_clause(proof)
         } else {
             proof_validation_drat_has_empty_clause(proof)
@@ -11174,7 +11516,10 @@ mod tests {
         prism_validation_model_to_string, prism_validation_properties_to_string,
         python_probe_command_from_env, run_external_validation_artifact_cli,
         run_external_validation_consensus, run_external_validation_file_cli,
-        run_external_validation_text_cli, run_simulation_validation_json_with_external_reference,
+        run_external_validation_text_cli, run_model_validation_json_with_rust_reference,
+        run_output_validation_json_with_rust_reference,
+        run_proof_validation_json_with_rust_reference,
+        run_simulation_validation_json_with_external_reference,
         run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
         smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
         DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
@@ -11230,6 +11575,293 @@ mod tests {
                 tool.id
             );
         }
+    }
+
+    #[test]
+    fn output_validation_yamllint_and_graphql_schema_have_rust_fallbacks() {
+        let yaml = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "yaml-validation",
+                "yaml": "---\nname: soccer-learning\nsteps:\n  - simulate\n  - validate\n",
+            }),
+            "yamllint",
+        );
+        assert_eq!(yaml["status"].as_str(), Some("ok"));
+        assert_eq!(yaml["verdict"].as_str(), Some("valid"));
+        assert_eq!(yaml["validator"].as_str(), Some("builtin:yaml-structural"));
+
+        let bad_yaml = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "yaml-validation",
+                "yaml": "---\n: missing-key\n",
+            }),
+            "yamllint",
+        );
+        assert_eq!(bad_yaml["status"].as_str(), Some("ok"));
+        assert_eq!(bad_yaml["verdict"].as_str(), Some("invalid"));
+
+        let graphql = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "graphql-schema-validation",
+                "schema": "type Query { score: Int }\n",
+            }),
+            "graphql-schema",
+        );
+        assert_eq!(graphql["status"].as_str(), Some("ok"));
+        assert_eq!(graphql["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            graphql["validator"].as_str(),
+            Some("builtin:graphql-schema-structural")
+        );
+
+        let bad_graphql = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "graphql-schema-validation",
+                "schema": "type Query { score: Int \n",
+            }),
+            "graphql-schema",
+        );
+        assert_eq!(bad_graphql["status"].as_str(), Some("ok"));
+        assert_eq!(bad_graphql["verdict"].as_str(), Some("invalid"));
+    }
+
+    #[test]
+    fn table_package_tools_use_rust_csv_fallback_when_payload_is_table_shaped() {
+        let valid = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "columns": {
+                        "episode": {"type": "integer", "required": true},
+                        "score": {"type": "number", "minimum": 0.0},
+                        "team": {"type": "string", "enum": ["home", "away"]}
+                    },
+                    "minRows": 2,
+                    "additionalColumns": false
+                },
+                "csv": "episode,score,team\n1,2.5,home\n2,1.0,away\n",
+            }),
+            "frictionless",
+        );
+        assert_eq!(valid["status"].as_str(), Some("ok"));
+        assert_eq!(valid["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            valid["validator"].as_str(),
+            Some("builtin:table-schema-subset-for-frictionless")
+        );
+
+        let invalid = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "columns": {
+                        "episode": {"type": "integer", "required": true},
+                        "score": {"type": "number", "minimum": 0.0}
+                    }
+                },
+                "text": "episode,score\n1,-3.0\n2,4.0\n",
+            }),
+            "great-expectations",
+        );
+        assert_eq!(invalid["status"].as_str(), Some("ok"));
+        assert_eq!(invalid["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            invalid["validator"].as_str(),
+            Some("builtin:table-schema-subset-for-great-expectations")
+        );
+    }
+
+    #[test]
+    fn output_validator_command_aliases_use_rust_structural_fallbacks() {
+        let openapi_payload = json!({
+            "spec": {
+                "openapi": "3.0.0",
+                "info": {"title": "Soccer API", "version": "1.0.0"},
+                "paths": {
+                    "/score": {
+                        "get": {
+                            "responses": {"200": {"description": "ok"}}
+                        }
+                    }
+                }
+            }
+        });
+        for alias in ["swagger-cli", "openapi-generator-cli"] {
+            let run = run_output_validation_json_with_rust_reference(&openapi_payload, alias);
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some("builtin:openapi-structural"),
+                "{alias}"
+            );
+        }
+        for alias in ["redocly", "asyncapi"] {
+            let run = run_output_validation_json_with_rust_reference(&openapi_payload, alias);
+            let expected_validator = format!("builtin:openapi-structural-for-{alias}");
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator.as_str()),
+                "{alias}"
+            );
+        }
+
+        for alias in ["graphql-schema-linter", "graphql-inspector"] {
+            let run = run_output_validation_json_with_rust_reference(
+                &json!({"schema": "type Query { score: Int }\n"}),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some("builtin:graphql-schema-structural"),
+                "{alias}"
+            );
+        }
+
+        let csv = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "columns": {"episode": {"type": "integer", "required": true}},
+                    "minRows": 1
+                },
+                "csv": "episode\n1\n",
+            }),
+            "csvlint",
+        );
+        assert_eq!(csv["status"].as_str(), Some("ok"));
+        assert_eq!(csv["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            csv["validator"].as_str(),
+            Some("builtin:table-schema-subset")
+        );
+    }
+
+    #[test]
+    fn python_sat_tool_aliases_use_rust_model_validation_fallbacks() {
+        let cnf = run_model_validation_json_with_rust_reference(
+            &json!({
+                "dimacs": "p cnf 2 2\n1 2 0\n-1 0\n",
+            }),
+            "pysat",
+        );
+        assert_eq!(cnf["status"].as_str(), Some("ok"));
+        assert_eq!(cnf["verdict"].as_str(), Some("sat"));
+        assert_eq!(cnf["validator"].as_str(), Some("builtin:dimacs-small-cnf"));
+
+        for alias in ["cryptominisat5", "glucose-syrup", "maple-sat", "maple_lcm"] {
+            let alias_run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "dimacs": "p cnf 1 1\n1 0\n",
+                }),
+                alias,
+            );
+            assert_eq!(alias_run["status"].as_str(), Some("ok"), "{alias}");
+            assert_eq!(alias_run["verdict"].as_str(), Some("sat"), "{alias}");
+            assert_eq!(
+                alias_run["validator"].as_str(),
+                Some("builtin:dimacs-small-cnf"),
+                "{alias}"
+            );
+        }
+
+        let wcnf = run_model_validation_json_with_rust_reference(
+            &json!({
+                "wcnf": "p wcnf 2 2 10\n10 1 0\n2 -1 2 0\n",
+            }),
+            "python-sat-adapter",
+        );
+        assert_eq!(wcnf["status"].as_str(), Some("ok"));
+        assert_eq!(wcnf["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            wcnf["validator"].as_str(),
+            Some("builtin:wcnf-small-maxsat")
+        );
+
+        let open_wbo_alias = run_model_validation_json_with_rust_reference(
+            &json!({
+                "dimacs": "p wcnf 1 1 10\n2 1 0\n",
+            }),
+            "open-wbo_static",
+        );
+        assert_eq!(open_wbo_alias["status"].as_str(), Some("ok"));
+        assert_eq!(open_wbo_alias["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            open_wbo_alias["validator"].as_str(),
+            Some("builtin:wcnf-small-maxsat")
+        );
+
+        let opb = run_model_validation_json_with_rust_reference(
+            &json!({
+                "opb": "1 x1 1 x2 >= 1;\n",
+            }),
+            "sat4j-sat",
+        );
+        assert_eq!(opb["status"].as_str(), Some("ok"));
+        assert_eq!(opb["verdict"].as_str(), Some("sat"));
+        assert_eq!(opb["validator"].as_str(), Some("builtin:opb-small-pb"));
+
+        let pysat_opb = run_model_validation_json_with_rust_reference(
+            &json!({
+                "opb": "1 x1 >= 1;\n",
+            }),
+            "pysat-adapter",
+        );
+        assert_eq!(pysat_opb["status"].as_str(), Some("ok"));
+        assert_eq!(pysat_opb["verdict"].as_str(), Some("sat"));
+        assert_eq!(
+            pysat_opb["validator"].as_str(),
+            Some("builtin:opb-small-pb")
+        );
+    }
+
+    #[test]
+    fn proof_checker_command_aliases_use_rust_structural_fallbacks() {
+        let unsat_cnf = "p cnf 1 2\n1 0\n-1 0\n";
+
+        let lrat = run_proof_validation_json_with_rust_reference(
+            &json!({
+                "cnf": unsat_cnf,
+                "proof": "1 0 0\n",
+            }),
+            "cake_lpr",
+        );
+        assert_eq!(lrat["status"].as_str(), Some("ok"));
+        assert_eq!(lrat["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            lrat["validator"].as_str(),
+            Some("builtin:small-cnf-proof-for-cake-lpr")
+        );
+
+        let frat = run_proof_validation_json_with_rust_reference(
+            &json!({
+                "cnf": unsat_cnf,
+                "proof": "a 0\n",
+            }),
+            "frat-trim",
+        );
+        assert_eq!(frat["status"].as_str(), Some("ok"));
+        assert_eq!(frat["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            frat["validator"].as_str(),
+            Some("builtin:small-cnf-proof-for-frat-trim")
+        );
+
+        let veripb = run_proof_validation_json_with_rust_reference(
+            &json!({
+                "kind": "opb-proof-validation",
+                "opb": "1 x1 >= 1;\n1 x1 <= 0;\n",
+                "proof": "1 >= 1 ;\n",
+            }),
+            "veripb-checker",
+        );
+        assert_eq!(veripb["status"].as_str(), Some("ok"));
+        assert_eq!(veripb["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            veripb["validator"].as_str(),
+            Some("builtin:small-opb-proof-for-veripb-checker")
+        );
     }
 
     #[test]

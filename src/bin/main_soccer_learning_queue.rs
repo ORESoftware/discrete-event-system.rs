@@ -6,12 +6,12 @@
 
 use std::error::Error;
 use std::fs;
-use std::io::{BufWriter, Error as IoError, ErrorKind};
+use std::io::{BufWriter, Error as IoError, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
-    MatchConfig, SoccerQPolicyOptions, SoccerSelfPlayTrainingArtifact,
+    MatchConfig, SoccerQPolicyOptions, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
     SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
@@ -130,11 +130,15 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>
         fs::create_dir_all(parent)?;
     }
     let mut tmp_name = path.as_os_str().to_os_string();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
     let tmp_path = PathBuf::from(tmp_name);
     let result = (|| -> Result<(), Box<dyn Error>> {
         let file = fs::File::create(&tmp_path)?;
-        serde_json::to_writer(BufWriter::new(file), value)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, value)?;
+        writer.flush()?;
+        let file = writer.into_inner()?;
+        file.sync_all()?;
         Ok(())
     })();
     if let Err(err) = result {
@@ -142,6 +146,9 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>
         return Err(err);
     }
     fs::rename(&tmp_path, path)?;
+    if let Some(parent) = path.parent() {
+        let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
+    }
     Ok(())
 }
 
@@ -259,9 +266,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         &options,
     )?;
     let tactical_learning = env_tactical_learning_weights()?;
+    let half_duration_seconds = half_minutes * 60.0;
+    let halftime_fatigue_recovery = if half_duration_seconds > 0.0 {
+        (period_break_recovery_seconds / half_duration_seconds).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let config = MatchConfig {
         dt_seconds,
         duration_seconds: minutes * 60.0,
+        halves: halves as u8,
+        half_duration_seconds,
+        halftime_fatigue_recovery,
         period_count: halves,
         period_break_recovery_seconds,
         learning_enabled: true,
@@ -272,13 +288,19 @@ fn run() -> Result<(), Box<dyn Error>> {
         seed,
         ..MatchConfig::default()
     };
-    let resume_artifact = std::env::var("SOCCER_RESUME_ARTIFACT")
-        .or_else(|_| std::env::var("SOCCER_RESUME_ARTIFACT_PATH"))
-        .ok();
-    let run_id = std::env::var("SOCCER_RUN_ID").unwrap_or_else(|_| default_run_id());
-    let artifact_path = PathBuf::from(
-        std::env::var("SOCCER_ARTIFACT_PATH").unwrap_or_else(|_| format!("out/{run_id}.json")),
+    let resume_artifact =
+        env_value("SOCCER_RESUME_ARTIFACT").or_else(|| env_value("SOCCER_RESUME_ARTIFACT_PATH"));
+    let run_id = env_value("SOCCER_RUN_ID").unwrap_or_else(default_run_id);
+    let run_dir = PathBuf::from(
+        env_value("SOCCER_RUN_DIR")
+            .unwrap_or_else(|| format!("out/soccer-learning-queue-runs/{run_id}")),
     );
+    let artifact_path = env_value("SOCCER_ARTIFACT_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| run_dir.join("final-policy.json"));
+    let learned_params_path = env_value("SOCCER_LEARNED_PARAMS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| run_dir.join("learned-params.json"));
     let mut pg_store = SoccerLearningPgStore::connect_from_env().map_err(invalid_data)?;
     let mut pg_experiment_id = None::<String>;
     let mut pg_base_policy_version_id = None::<String>;
@@ -286,10 +308,10 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let mut initial_policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
     if let Some(store) = pg_store.as_mut() {
-        let experiment_slug = std::env::var("SOCCER_EXPERIMENT_SLUG")
-            .unwrap_or_else(|_| "soccer-self-play".to_string());
-        let experiment_name = std::env::var("SOCCER_EXPERIMENT_NAME")
-            .unwrap_or_else(|_| "Soccer self-play".to_string());
+        let experiment_slug =
+            env_value("SOCCER_EXPERIMENT_SLUG").unwrap_or_else(|| "soccer-self-play".to_string());
+        let experiment_name =
+            env_value("SOCCER_EXPERIMENT_NAME").unwrap_or_else(|| "Soccer self-play".to_string());
         let experiment_id = store
             .ensure_experiment(&experiment_slug, &experiment_name, &config)
             .map_err(invalid_data)?;
@@ -384,6 +406,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let artifact = soccer_self_play_artifact_from_queue_report(config, options, &report);
     write_json(&artifact_path, &artifact)?;
+    let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+    write_json(&learned_params_path, &learned_params)?;
 
     println!(
         "soccer_learning_queue_done completed={} failed={} elapsed={:.2}s home_goals={} away_goals={} policy_entries={} target_entries={}",
@@ -395,7 +419,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         report.final_policy_entries,
         report.final_target_entries
     );
+    println!("run_dir={}", run_dir.display());
     println!("artifact={}", artifact_path.display());
+    println!("learned_params={}", learned_params_path.display());
     Ok(())
 }
 

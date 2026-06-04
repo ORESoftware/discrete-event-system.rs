@@ -1,17 +1,17 @@
 //! A **Future Event List** elevator simulation — additive, next-event style.
 //!
-//! This is a brand-new FEL model of a single-car elevator serving a building;
+//! This is a brand-new FEL model of a three-shaft elevator bank serving a building;
 //! it does **not** touch the existing time-stepped elevator (`crate::des::
 //! main_elevator` / `main_elevator_highrise`). Events drive everything:
 //!
 //! * **passenger arrival** at a floor (Poisson stream) with a random destination,
-//! * **car step** (the car finishes traversing one floor),
+//! * **car step** (one shaft's car finishes traversing one floor),
 //! * **doors close** (after a dwell during which passengers board/alight).
 //!
-//! The car runs a **LOOK** (collective-control) policy: keep moving in the
-//! current direction while there are calls/destinations ahead, reverse when
-//! there are none, and idle when the building is empty (the FEL simply skips
-//! forward to the next arrival — no idle ticking).
+//! Each shaft runs a **LOOK** (collective-control) policy: keep moving in the
+//! current direction while claimed calls/destinations lie ahead, reverse when
+//! there are none, and idle when the bank is empty (the FEL simply skips forward
+//! to the next arrival — no idle ticking).
 //!
 //! Alongside the simulator this module ships canonical **MDP** and **POMDP**
 //! formulations of the elevator-dispatch *decision* problem ([`elevator_mdp_spec`],
@@ -71,6 +71,28 @@ struct Passenger {
     arrived: f64,
 }
 
+/// Per-shaft mutable car state.
+#[derive(Clone)]
+struct CarState {
+    floor: usize,
+    dir: Dir,
+    doors_open: bool,
+    active: bool,
+    onboard: Vec<usize>,
+}
+
+impl CarState {
+    fn new() -> Self {
+        CarState {
+            floor: 0,
+            dir: Dir::Idle,
+            doors_open: false,
+            active: false,
+            onboard: Vec::new(),
+        }
+    }
+}
+
 /// Mutable FEL elevator world.
 struct ElevWorld {
     rng: Rng,
@@ -79,11 +101,7 @@ struct ElevWorld {
     travel: f64,
     dwell: f64,
     arrival_rate: f64,
-    car_floor: usize,
-    dir: Dir,
-    doors_open: bool,
-    active: bool,
-    car: Vec<usize>,
+    cars: Vec<CarState>,
     waiting: Vec<VecDeque<Passenger>>,
     served: u64,
     boarded: u64,
@@ -93,7 +111,15 @@ struct ElevWorld {
 }
 
 impl ElevWorld {
-    fn new(seed: u64, floors: usize, capacity: usize, travel: f64, dwell: f64, rate: f64) -> Self {
+    fn new(
+        seed: u64,
+        floors: usize,
+        shafts: usize,
+        capacity: usize,
+        travel: f64,
+        dwell: f64,
+        rate: f64,
+    ) -> Self {
         ElevWorld {
             rng: Rng::new(seed),
             floors,
@@ -101,11 +127,7 @@ impl ElevWorld {
             travel,
             dwell,
             arrival_rate: rate,
-            car_floor: 0,
-            dir: Dir::Idle,
-            doors_open: false,
-            active: false,
-            car: Vec::new(),
+            cars: (0..shafts).map(|_| CarState::new()).collect(),
             waiting: (0..floors).map(|_| VecDeque::new()).collect(),
             served: 0,
             boarded: 0,
@@ -117,23 +139,99 @@ impl ElevWorld {
     fn waiting_counts(&self) -> Vec<usize> {
         self.waiting.iter().map(|q| q.len()).collect()
     }
-    /// Floors with a pending reason to visit (waiting passengers or in-car drop-offs).
-    fn targets(&self) -> Vec<usize> {
+
+    fn total_in_cars(&self) -> usize {
+        self.cars.iter().map(|car| car.onboard.len()).sum()
+    }
+
+    fn active_cars(&self) -> usize {
+        self.cars
+            .iter()
+            .filter(|car| car.active || car.doors_open)
+            .count()
+    }
+
+    fn fleet_label(&self) -> String {
+        let active = self.active_cars();
+        if active == 0 {
+            "idle".to_string()
+        } else {
+            format!("{active} active")
+        }
+    }
+
+    fn car_frames(&self) -> Vec<Value> {
+        self.cars
+            .iter()
+            .enumerate()
+            .map(|(i, car)| {
+                json!({
+                    "id": i,
+                    "floor": car.floor,
+                    "dir": car.dir.label(),
+                    "doors": car.doors_open,
+                    "active": car.active,
+                    "inCar": car.onboard.len(),
+                })
+            })
+            .collect()
+    }
+
+    fn look_distance(&self, car: &CarState, floor: usize) -> f64 {
+        if car.floor == floor {
+            return 0.0;
+        }
+        let top = self.floors.saturating_sub(1);
+        match car.dir {
+            Dir::Idle => car.floor.abs_diff(floor) as f64,
+            Dir::Up if floor >= car.floor => (floor - car.floor) as f64,
+            Dir::Up => (top - car.floor + top - floor) as f64,
+            Dir::Down if floor <= car.floor => (car.floor - floor) as f64,
+            Dir::Down => (car.floor + floor) as f64,
+        }
+    }
+
+    fn hall_owner(&self, floor: usize) -> Option<usize> {
+        if self.waiting[floor].is_empty() {
+            return None;
+        }
+        self.cars
+            .iter()
+            .enumerate()
+            .filter(|(_, car)| car.onboard.len() < self.capacity)
+            .min_by(|(a_id, a), (b_id, b)| {
+                let score_a = self.look_distance(a, floor)
+                    + a.onboard.len() as f64 * 0.35
+                    + if a.active { 0.15 } else { 0.0 };
+                let score_b = self.look_distance(b, floor)
+                    + b.onboard.len() as f64 * 0.35
+                    + if b.active { 0.15 } else { 0.0 };
+                score_a.total_cmp(&score_b).then_with(|| a_id.cmp(b_id))
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// Floors with a pending reason for this shaft to visit: its in-car
+    /// drop-offs plus hall calls assigned to it by the shared dispatcher.
+    fn targets_for(&self, car_id: usize) -> Vec<usize> {
+        let car = &self.cars[car_id];
         (0..self.floors)
-            .filter(|&f| !self.waiting[f].is_empty() || self.car.contains(&f))
+            .filter(|&f| car.onboard.contains(&f) || self.hall_owner(f) == Some(car_id))
             .collect()
     }
 }
 
 fn record(eng: &mut Engine<ElevWorld>, kind: &str) {
     let w = &eng.world;
+    let first = &w.cars[0];
     let frame = json!({
         "t": eng.now(),
-        "car": w.car_floor,
-        "dir": w.dir.label(),
-        "doors": w.doors_open,
+        "car": first.floor,
+        "dir": w.fleet_label(),
+        "doors": w.cars.iter().any(|car| car.doors_open),
+        "cars": w.car_frames(),
         "wait": w.waiting_counts(),
-        "inCar": w.car.len(),
+        "inCar": w.total_in_cars(),
         "served": w.served,
         "events": eng.events_processed(),
         "kind": kind,
@@ -157,83 +255,97 @@ fn passenger_arrival(eng: &mut Engine<ElevWorld>) {
     eng.world.arrivals += 1;
     record(eng, "arrival");
 
-    if !eng.world.active {
-        eng.world.active = true;
-        decide_step(eng);
-    }
+    wake_idle_cars(eng);
 }
 
 /// The car has finished traversing one floor in its current direction.
-fn car_step(eng: &mut Engine<ElevWorld>) {
+fn car_step(eng: &mut Engine<ElevWorld>, car_id: usize) {
+    if car_id >= eng.world.cars.len() {
+        return;
+    }
     let floors = eng.world.floors;
-    let f = eng.world.car_floor as i64;
-    let nf = match eng.world.dir {
+    let f = eng.world.cars[car_id].floor as i64;
+    let nf = match eng.world.cars[car_id].dir {
         Dir::Up => f + 1,
         Dir::Down => f - 1,
         Dir::Idle => f,
     }
     .clamp(0, floors as i64 - 1) as usize;
-    eng.world.car_floor = nf;
-    record(eng, "move");
-    on_arrive(eng);
+    eng.world.cars[car_id].floor = nf;
+    record(eng, &format!("move:{car_id}"));
+    on_arrive(eng, car_id);
 }
 
 /// Decide, on arriving at `car_floor`, whether to stop (open doors) or roll on.
-fn on_arrive(eng: &mut Engine<ElevWorld>) {
-    let f = eng.world.car_floor;
-    let need_alight = eng.world.car.contains(&f);
-    let need_board = !eng.world.waiting[f].is_empty() && eng.world.car.len() < eng.world.capacity;
+fn on_arrive(eng: &mut Engine<ElevWorld>, car_id: usize) {
+    let f = eng.world.cars[car_id].floor;
+    let need_alight = eng.world.cars[car_id].onboard.contains(&f);
+    let need_board = !eng.world.waiting[f].is_empty()
+        && eng.world.cars[car_id].onboard.len() < eng.world.capacity
+        && eng.world.hall_owner(f) == Some(car_id);
     if need_alight || need_board {
-        eng.world.doors_open = true;
-        record(eng, "doors_open");
+        eng.world.cars[car_id].doors_open = true;
+        record(eng, &format!("doors_open:{car_id}"));
         let dwell = eng.world.dwell;
-        eng.schedule_after(dwell, doors_close);
+        eng.schedule_after(dwell, move |eng| doors_close(eng, car_id));
     } else {
-        decide_step(eng);
+        decide_step(eng, car_id);
     }
 }
 
 /// Doors close: passengers alight (reached destination) and board (FIFO, up to
 /// capacity); then re-decide the next move.
-fn doors_close(eng: &mut Engine<ElevWorld>) {
-    let f = eng.world.car_floor;
+fn doors_close(eng: &mut Engine<ElevWorld>, car_id: usize) {
+    if car_id >= eng.world.cars.len() {
+        return;
+    }
+    let f = eng.world.cars[car_id].floor;
     let now = eng.now();
-    let before = eng.world.car.len();
-    eng.world.car.retain(|&d| d != f);
-    eng.world.served += (before - eng.world.car.len()) as u64;
-    while !eng.world.waiting[f].is_empty() && eng.world.car.len() < eng.world.capacity {
+    let before = eng.world.cars[car_id].onboard.len();
+    eng.world.cars[car_id].onboard.retain(|&d| d != f);
+    eng.world.served += (before - eng.world.cars[car_id].onboard.len()) as u64;
+    while !eng.world.waiting[f].is_empty()
+        && eng.world.cars[car_id].onboard.len() < eng.world.capacity
+    {
         let p = eng.world.waiting[f].pop_front().expect("nonempty");
         eng.world.total_wait += now - p.arrived;
         eng.world.boarded += 1;
-        eng.world.car.push(p.dest);
+        eng.world.cars[car_id].onboard.push(p.dest);
     }
-    eng.world.doors_open = false;
-    record(eng, "doors_close");
-    decide_step(eng);
+    eng.world.cars[car_id].doors_open = false;
+    record(eng, &format!("doors_close:{car_id}"));
+    decide_step(eng, car_id);
+    wake_idle_cars(eng);
 }
 
 /// LOOK dispatch: continue in the current direction while targets lie ahead,
 /// else reverse, else idle (and stop scheduling — the FEL skips to the next
 /// arrival).
-fn decide_step(eng: &mut Engine<ElevWorld>) {
-    let targets = eng.world.targets();
-    if targets.is_empty() {
-        eng.world.dir = Dir::Idle;
-        eng.world.active = false;
-        record(eng, "idle");
+fn decide_step(eng: &mut Engine<ElevWorld>, car_id: usize) {
+    if car_id >= eng.world.cars.len() {
         return;
     }
-    let f = eng.world.car_floor;
-    // A new arrival (or drop-off) at the current floor that we can service now.
-    let serviceable_here = eng.world.car.contains(&f)
-        || (!eng.world.waiting[f].is_empty() && eng.world.car.len() < eng.world.capacity);
+    let targets = eng.world.targets_for(car_id);
+    if targets.is_empty() {
+        eng.world.cars[car_id].dir = Dir::Idle;
+        eng.world.cars[car_id].active = false;
+        record(eng, &format!("idle:{car_id}"));
+        return;
+    }
+    let f = eng.world.cars[car_id].floor;
+    // A new claimed arrival (or drop-off) at the current floor that this shaft
+    // can service now.
+    let serviceable_here = eng.world.cars[car_id].onboard.contains(&f)
+        || (!eng.world.waiting[f].is_empty()
+            && eng.world.cars[car_id].onboard.len() < eng.world.capacity
+            && eng.world.hall_owner(f) == Some(car_id));
     if targets.contains(&f) && serviceable_here {
-        on_arrive(eng);
+        on_arrive(eng, car_id);
         return;
     }
     let up_ahead = targets.iter().any(|&t| t > f);
     let down_ahead = targets.iter().any(|&t| t < f);
-    let dir = match eng.world.dir {
+    let dir = match eng.world.cars[car_id].dir {
         Dir::Up if up_ahead => Dir::Up,
         Dir::Up if down_ahead => Dir::Down,
         Dir::Down if down_ahead => Dir::Down,
@@ -251,20 +363,30 @@ fn decide_step(eng: &mut Engine<ElevWorld>) {
     if dir == Dir::Idle {
         // Only target is the current floor but it is not serviceable (e.g. car
         // full); idle to avoid spinning.
-        eng.world.dir = Dir::Idle;
-        eng.world.active = false;
-        record(eng, "idle");
+        eng.world.cars[car_id].dir = Dir::Idle;
+        eng.world.cars[car_id].active = false;
+        record(eng, &format!("idle:{car_id}"));
         return;
     }
-    eng.world.dir = dir;
-    eng.world.active = true;
+    eng.world.cars[car_id].dir = dir;
+    eng.world.cars[car_id].active = true;
     let travel = eng.world.travel;
-    eng.schedule_after(travel, car_step);
+    eng.schedule_after(travel, move |eng| car_step(eng, car_id));
+}
+
+fn wake_idle_cars(eng: &mut Engine<ElevWorld>) {
+    let shafts = eng.world.cars.len();
+    for car_id in 0..shafts {
+        if !eng.world.cars[car_id].active && !eng.world.cars[car_id].doors_open {
+            decide_step(eng, car_id);
+        }
+    }
 }
 
 /// Configuration for a FEL elevator run.
 pub struct ElevatorConfig {
     pub floors: usize,
+    pub shafts: usize,
     pub capacity: usize,
     pub travel: f64,
     pub dwell: f64,
@@ -277,6 +399,7 @@ impl Default for ElevatorConfig {
     fn default() -> Self {
         ElevatorConfig {
             floors: 6,
+            shafts: 3,
             capacity: 8,
             travel: 1.5,
             dwell: 2.5,
@@ -290,18 +413,26 @@ impl Default for ElevatorConfig {
 /// Run the FEL elevator and return `{ meta, frames }` ready for the animation
 /// renderer.
 pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
+    let floors = cfg.floors.max(2);
+    let shafts = cfg.shafts.max(1);
+    let capacity = cfg.capacity.max(1);
+    let travel = cfg.travel.max(0.0);
+    let dwell = cfg.dwell.max(0.0);
+    let arrival_rate = cfg.arrival_rate.max(f64::MIN_POSITIVE);
+    let horizon = cfg.horizon.max(0.0);
     let mut eng = Engine::new(ElevWorld::new(
         cfg.seed,
-        cfg.floors,
-        cfg.capacity,
-        cfg.travel,
-        cfg.dwell,
-        cfg.arrival_rate,
+        floors,
+        shafts,
+        capacity,
+        travel,
+        dwell,
+        arrival_rate,
     ));
     record(&mut eng, "start");
-    let first = eng.world.rng.exp(cfg.arrival_rate);
+    let first = eng.world.rng.exp(arrival_rate);
     eng.schedule_after(first, passenger_arrival);
-    eng.run_until(cfg.horizon);
+    eng.run_until(horizon);
 
     let events = eng.events_processed();
     let w = &eng.world;
@@ -311,9 +442,16 @@ pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
         0.0
     };
     // Final hold frame.
+    let first = &w.cars[0];
     let final_frame = json!({
-        "t": cfg.horizon, "car": w.car_floor, "dir": w.dir.label(), "doors": false,
-        "wait": w.waiting_counts(), "inCar": w.car.len(), "served": w.served,
+        "t": horizon,
+        "car": first.floor,
+        "dir": w.fleet_label(),
+        "doors": w.cars.iter().any(|car| car.doors_open),
+        "cars": w.car_frames(),
+        "wait": w.waiting_counts(),
+        "inCar": w.total_in_cars(),
+        "served": w.served,
         "events": events, "kind": "end",
     });
     let mut frames = eng.world.frames;
@@ -321,12 +459,13 @@ pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
 
     json!({
         "meta": {
-            "floors": cfg.floors,
-            "capacity": cfg.capacity,
-            "travel": cfg.travel,
-            "dwell": cfg.dwell,
-            "arrivalRate": cfg.arrival_rate,
-            "horizon": cfg.horizon,
+            "floors": floors,
+            "shafts": shafts,
+            "capacity": capacity,
+            "travel": travel,
+            "dwell": dwell,
+            "arrivalRate": arrival_rate,
+            "horizon": horizon,
             "events": events,
             "arrivals": eng.world.arrivals,
             "served": eng.world.served,
@@ -455,7 +594,7 @@ pub fn elevator_pomdp_spec() -> Value {
 }
 
 /// Render a FEL-elevator `{ meta, frames }` data object to a self-contained
-/// animated HTML page (vertical shaft, boarding/alighting, live charts).
+/// animated HTML page (vertical shafts, boarding/alighting, live charts).
 pub fn render_elevator_html(data: &Value) -> String {
     let data_str = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
     HTML_TEMPLATE.replace("__DES_DATA__", &data_str)
@@ -496,7 +635,7 @@ button.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
 <body>
 <main>
 <h1>FEL elevator &mdash; next-event simulation</h1>
-<p class="sub">A single car serving a building under a <b>LOOK</b> (collective-control) policy, simulated on the engine's <b>future-event-list</b> scheduler: the clock jumps from one event to the next (passenger arrival, car-step across a floor, doors close) and skips all idle time. Watch passengers queue on each landing (left dots), board/alight when the doors open, and ride to their floor.</p>
+<p class="sub">Three elevator shafts serving one building under a shared <b>LOOK</b> (collective-control) policy, simulated on the engine's <b>future-event-list</b> scheduler: the clock jumps from one event to the next (passenger arrival, car-step across a floor, doors close) and skips all idle time. Watch passengers queue on each landing (left dots), then get claimed by the shaft that can naturally reach them.</p>
 <div class="chips" id="chips"></div>
 
 <div class="stage">
@@ -504,9 +643,9 @@ button.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
     <div class="stats">
       <span>clock <b class="clock" id="clock">0.0s</b></span>
       <span>events <b id="events">0</b></span>
-      <span>dir <b id="dir">idle</b></span>
+      <span>fleet <b id="dir">idle</b></span>
     </div>
-    <svg id="bld" viewBox="0 0 320 420"></svg>
+    <svg id="bld" viewBox="0 0 360 420"></svg>
   </div>
   <div class="panel">
     <div class="stats">
@@ -537,7 +676,8 @@ const M = DATA.meta, F = M.floors, T = M.horizon, FR = DATA.frames;
 
 (function(){
   const c=document.getElementById('chips');
-  const it=[['floors',F],['capacity',M.capacity],['arrival &lambda;',M.arrivalRate+' /s'],
+  const shafts = M.shafts || 1;
+  const it=[['floors',F],['shafts',shafts],['capacity/shaft',M.capacity],['arrival &lambda;',M.arrivalRate+' /s'],
     ['travel',M.travel+' s/floor'],['dwell',M.dwell+' s'],['horizon',T+' s'],
     ['FEL events',M.events.toLocaleString()],['arrivals',M.arrivals],['served',M.served],
     ['mean wait',M.meanWait.toFixed(1)+' s']];
@@ -551,11 +691,15 @@ function frameAt(t){
 }
 
 // ---- building renderer ----
-const BW=320, BH=420, MTOP=18, MBOT=22, SHX=150, SHW=92;
+const BW=360, BH=420, MTOP=18, MBOT=22, SHX=148, SHW=42, SHG=8;
 const lane = (BH-MTOP-MBOT)/F;
 function floorY(f){ return MTOP + (F-1-f)*lane; }  // floor 0 at the bottom
+function carsOf(fr){
+  return fr.cars || [{id:0,floor:fr.car,dir:fr.dir,doors:fr.doors,active:fr.dir!=='idle',inCar:fr.inCar}];
+}
 function drawBuilding(fr){
   let s='';
+  const cars=carsOf(fr);
   // floor lanes + landings
   for(let f=0;f<F;f++){
     const y=floorY(f);
@@ -569,24 +713,25 @@ function drawBuilding(fr){
     }
     if(w>6){ s+='<text x="'+(SHX-14-6*11)+'" y="'+(y+lane/2+4)+'" fill="#f59e0b" font-size="10" text-anchor="end">+'+(w-6)+'</text>'; }
   }
-  // shaft
-  s+='<rect x="'+SHX+'" y="'+MTOP+'" width="'+SHW+'" height="'+(BH-MTOP-MBOT)+'" fill="#0c1120" stroke="#283142"/>';
-  // car
-  const cy=floorY(fr.car);
-  const ch=lane-8;
-  const open=fr.doors;
-  const carColor = open? '#15803d' : '#1f6feb';
-  s+='<rect x="'+(SHX+8)+'" y="'+(cy+4)+'" width="'+(SHW-16)+'" height="'+ch+'" rx="6" fill="'+carColor+'" stroke="#3b4757" stroke-width="1.5"/>';
-  if(open){
-    // open doors: a gap in the middle
-    const midx=SHX+SHW/2;
-    s+='<rect x="'+(SHX+8)+'" y="'+(cy+4)+'" width="14" height="'+ch+'" fill="#0c1120" opacity="0.0"/>';
-    s+='<line x1="'+midx+'" y1="'+(cy+4)+'" x2="'+midx+'" y2="'+(cy+4+ch)+'" stroke="#0c1120" stroke-width="6"/>';
+  for(let i=0;i<cars.length;i++){
+    const sx=SHX+i*(SHW+SHG);
+    s+='<rect x="'+sx+'" y="'+MTOP+'" width="'+SHW+'" height="'+(BH-MTOP-MBOT)+'" fill="#0c1120" stroke="#283142"/>';
+    s+='<text x="'+(sx+SHW/2)+'" y="'+(BH-5)+'" fill="#6b7689" font-size="10" text-anchor="middle">S'+(i+1)+'</text>';
   }
-  s+='<text x="'+(SHX+SHW/2)+'" y="'+(cy+4+ch/2+5)+'" fill="#fff" font-size="14" font-weight="700" text-anchor="middle">'+fr.inCar+'</text>';
-  // direction arrow
-  const arrow = fr.dir==='up'? '\u25b2' : (fr.dir==='down'? '\u25bc' : '\u25cf');
-  s+='<text x="'+(SHX+SHW+14)+'" y="'+(cy+4+ch/2+5)+'" fill="#9ecbff" font-size="13">'+arrow+'</text>';
+  for(let i=0;i<cars.length;i++){
+    const car=cars[i], sx=SHX+i*(SHW+SHG), cy=floorY(car.floor);
+    const ch=Math.max(18,lane-8);
+    const open=car.doors;
+    const carColor = open? '#15803d' : (car.active? '#1f6feb' : '#334155');
+    s+='<rect x="'+(sx+5)+'" y="'+(cy+4)+'" width="'+(SHW-10)+'" height="'+ch+'" rx="5" fill="'+carColor+'" stroke="#3b4757" stroke-width="1.5"/>';
+    if(open){
+      const midx=sx+SHW/2;
+      s+='<line x1="'+midx+'" y1="'+(cy+5)+'" x2="'+midx+'" y2="'+(cy+3+ch)+'" stroke="#0c1120" stroke-width="5"/>';
+    }
+    s+='<text x="'+(sx+SHW/2)+'" y="'+(cy+4+ch/2+5)+'" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">'+car.inCar+'</text>';
+    const arrow = car.dir==='up'? '\u25b2' : (car.dir==='down'? '\u25bc' : '\u25cf');
+    s+='<text x="'+(sx+SHW/2)+'" y="'+(cy+3)+'" fill="#9ecbff" font-size="10" text-anchor="middle">'+arrow+'</text>';
+  }
   document.getElementById('bld').innerHTML=s;
 }
 
@@ -632,7 +777,8 @@ function render(){
   drawBuilding(fr); drawChart(tPlay);
   document.getElementById('clock').textContent=tPlay.toFixed(1)+'s';
   document.getElementById('events').textContent=fr.events.toLocaleString();
-  document.getElementById('dir').textContent=fr.dir;
+  const active=carsOf(fr).filter(function(c){return c.active || c.doors;}).length;
+  document.getElementById('dir').textContent=active===0?'idle':active+' active';
   document.getElementById('incar').textContent=fr.inCar;
   document.getElementById('waiting').textContent=fr.wait.reduce(function(a,b){return a+b;},0);
   document.getElementById('served').textContent=fr.served;
@@ -681,12 +827,19 @@ mod tests {
         });
         let served = data["meta"]["served"].as_u64().unwrap();
         let frames = data["frames"].as_array().unwrap();
+        let floors = data["meta"]["floors"].as_u64().unwrap() as usize;
+        let shafts = data["meta"]["shafts"].as_u64().unwrap() as usize;
+        assert_eq!(shafts, 3, "default FEL elevator should use three shafts");
         assert!(served > 0, "expected some passengers served");
         assert!(frames.len() > 10, "expected a frame stream");
-        // The car must never be outside the building.
+        // No car may ever be outside the building.
         for f in frames {
-            let car = f["car"].as_u64().unwrap() as usize;
-            assert!(car < 6, "car floor out of range: {car}");
+            let cars = f["cars"].as_array().expect("frame includes shaft states");
+            assert_eq!(cars.len(), shafts, "frame should carry every shaft");
+            for car in cars {
+                let floor = car["floor"].as_u64().unwrap() as usize;
+                assert!(floor < floors, "car floor out of range: {floor}");
+            }
         }
     }
 

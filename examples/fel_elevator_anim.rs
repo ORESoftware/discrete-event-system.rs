@@ -3,7 +3,7 @@
 //! ```sh
 //! cargo run --example fel_elevator_anim
 //! # writes:
-//! #   out/elevator-fel/animation.html    (the next-event elevator sim, animated)
+//! #   out/elevator-fel/animation.html    (the next-event elevator-bank sim, animated)
 //! #   out/elevator-fel/mdp-player.html    (elevator-dispatch MDP, value-iterated)
 //! #   out/elevator-fel/pomdp-player.html  (elevator-dispatch POMDP, belief-tracked)
 //! #   out/elevator-fel/mdp.json, pomdp.json  (the canonical specs)
@@ -37,8 +37,8 @@ fn main() {
 
     println!("FEL elevator simulation");
     println!(
-        "  floors={}  capacity={}  horizon={}s  λ={}/s",
-        meta["floors"], meta["capacity"], meta["horizon"], meta["arrivalRate"]
+        "  floors={}  shafts={}  capacity/shaft={}  horizon={}s  λ={}/s",
+        meta["floors"], meta["shafts"], meta["capacity"], meta["horizon"], meta["arrivalRate"]
     );
     println!(
         "  events={}  arrivals={}  served={}  mean wait={:.1}s",

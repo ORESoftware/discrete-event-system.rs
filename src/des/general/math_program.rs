@@ -21,6 +21,12 @@ use crate::des::general::external_linear_cli::{
     ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
     ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
+use crate::des::general::external_quadratic_reference::{
+    solve_miqcp_with_external_reference, solve_miqp_with_external_reference,
+    solve_misocp_with_external_reference, ExternalQuadraticReferenceOptions,
+    ExternalQuadraticReferenceSolution, ExternalQuadraticReferenceSolver,
+    ExternalQuadraticReferenceStatus,
+};
 use crate::des::general::ip_mip_des::{
     solve_ipmip_with_des, BranchOrCutConstraint, ConstraintKind, IPMIPProblem, IPMIPSolveOptions,
     IPMIPStatus, IPMIPTraceEvent, TraceAction,
@@ -35,6 +41,12 @@ use crate::des::general::lp::{
     Sense as LpSense,
 };
 use crate::des::general::lp_des::{solve_lp_via_des, DESSimplexOptions};
+use crate::des::general::qp::{
+    MixedIntegerQuadraticProgram, MixedIntegerQuadraticallyConstrainedProgram,
+    MixedIntegerSecondOrderConeProgram, QuadraticConstraint as QpQuadraticConstraint,
+    QuadraticProgram, QuadraticallyConstrainedProgram, SecondOrderCone as QpSecondOrderCone,
+    SecondOrderConeProgram,
+};
 use serde_json::{json, Value};
 
 /// Objective direction.
@@ -8879,17 +8891,24 @@ fn solve_math_program_external_single_objective(
 ) -> Result<MathProgramSolution, MathProgramError> {
     program.validate()?;
     let method = opts.method.clone().unwrap_or_else(|| {
-        if !program.has_discrete_features()
-            && (program.has_quadratic_objective()
-                || program.has_conic_constraints()
-                || program.has_quadratic_constraints())
+        if program.has_quadratic_objective()
+            || program.has_conic_constraints()
+            || program.has_quadratic_constraints()
         {
+            if program.has_discrete_features() {
+                return "rust".to_string();
+            }
             "SLSQP".to_string()
         } else {
             "highs-cli".to_string()
         }
     });
     if let Some(solution) = solve_math_program_external_linear_cli(program, opts, &method)? {
+        return Ok(solution);
+    }
+    if let Some(solution) =
+        solve_math_program_external_quadratic_rust_reference(program, opts, &method)?
+    {
         return Ok(solution);
     }
     let python = opts
@@ -9505,6 +9524,293 @@ fn math_program_external_cli_failure(method: &str, message: String) -> MathProgr
         infeasibility_certificate: None,
         solver: method.to_string(),
         message: Some(message),
+    }
+}
+
+fn solve_math_program_external_quadratic_rust_reference(
+    program: &MathProgram,
+    opts: &ExternalMathProgramOptions,
+    method: &str,
+) -> Result<Option<MathProgramSolution>, MathProgramError> {
+    if opts.python.is_some()
+        || opts.script.is_some()
+        || !external_math_program_method_prefers_rust_quadratic_reference(method)
+        || !program.has_discrete_features()
+    {
+        return Ok(None);
+    }
+    let has_nonlinear = program.has_quadratic_objective()
+        || program.has_conic_constraints()
+        || program.has_quadratic_constraints();
+    if !has_nonlinear {
+        return Ok(None);
+    }
+    let force_rust = external_math_program_method_is_rust_quadratic_reference(method);
+    let unsupported = |message: String| {
+        if force_rust {
+            Some(math_program_external_cli_failure(method, message))
+        } else {
+            None
+        }
+    };
+    let _validated = encode_external_math_program_options(opts)?;
+    if !can_encode_direct_mixed_integer_nonlinear(program) {
+        return Ok(unsupported(
+            "Rust mixed-integer nonlinear reference requires direct continuous/integer/binary variables without lowered discrete constraints"
+                .to_string(),
+        ));
+    }
+
+    let reference_opts = ExternalQuadraticReferenceOptions {
+        solver: ExternalQuadraticReferenceSolver::RustInternal,
+        max_enumerations: opts.node_limit,
+    };
+
+    if program.has_conic_constraints() {
+        if program.has_quadratic_constraints() || program.has_quadratic_objective() {
+            return Ok(unsupported(
+                "Rust mixed-integer SOCP reference currently accepts linear objectives with SOC constraints only"
+                    .to_string(),
+            ));
+        }
+        let problem = MixedIntegerSecondOrderConeProgram {
+            socp: math_program_to_second_order_cone_reference(program)?,
+            integer_vars: math_program_integer_var_mask(program),
+        };
+        let solution = solve_misocp_with_external_reference(&problem, &reference_opts);
+        return Ok(Some(
+            math_program_solution_from_external_quadratic_reference(program, solution),
+        ));
+    }
+
+    if program.has_quadratic_constraints() {
+        let problem = MixedIntegerQuadraticallyConstrainedProgram {
+            qcp: math_program_to_quadratically_constrained_reference(program)?,
+            integer_vars: math_program_integer_var_mask(program),
+        };
+        let solution = solve_miqcp_with_external_reference(&problem, &reference_opts);
+        return Ok(Some(
+            math_program_solution_from_external_quadratic_reference(program, solution),
+        ));
+    }
+
+    if program.has_quadratic_objective() && quadratic_objective_has_native_nonlinear_terms(program)
+    {
+        let problem = MixedIntegerQuadraticProgram {
+            qp: math_program_to_quadratic_reference(program)?,
+            integer_vars: math_program_integer_var_mask(program),
+        };
+        let solution = solve_miqp_with_external_reference(&problem, &reference_opts);
+        return Ok(Some(
+            math_program_solution_from_external_quadratic_reference(program, solution),
+        ));
+    }
+
+    Ok(None)
+}
+
+fn external_math_program_method_prefers_rust_quadratic_reference(method: &str) -> bool {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "rust"
+            | "rust-internal"
+            | "rust:internal"
+            | "auto"
+            | "fallback"
+            | "slsqp"
+            | "scipy"
+            | "scipy:slsqp"
+            | "bounded-integer-qp-enumeration"
+            | "bounded-integer-conic-enumeration"
+    )
+}
+
+fn external_math_program_method_is_rust_quadratic_reference(method: &str) -> bool {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "rust" | "rust-internal" | "rust:internal" | "auto" | "fallback"
+    )
+}
+
+fn math_program_solution_from_external_quadratic_reference(
+    program: &MathProgram,
+    reference: ExternalQuadraticReferenceSolution,
+) -> MathProgramSolution {
+    let status = match reference.status {
+        ExternalQuadraticReferenceStatus::Optimal => MathProgramStatus::Optimal,
+        ExternalQuadraticReferenceStatus::Infeasible => MathProgramStatus::Infeasible,
+        ExternalQuadraticReferenceStatus::Unbounded => MathProgramStatus::Unbounded,
+        ExternalQuadraticReferenceStatus::NumericalError
+        | ExternalQuadraticReferenceStatus::Unavailable => MathProgramStatus::NumericalError,
+    };
+    let objective = if reference.x.len() == program.variables.len() {
+        objective_value(program, &reference.x)
+    } else {
+        reference.objective.unwrap_or(f64::NAN)
+    };
+    MathProgramSolution {
+        status,
+        x: reference.x,
+        objective,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: reference
+            .enumerated
+            .and_then(|value| usize::try_from(value).ok()),
+        first_branch_variable: None,
+        solver_version: None,
+        iterations: reference
+            .iterations
+            .and_then(|value| usize::try_from(value).ok()),
+        control_feedback: None,
+        dual_ub: reference.dual_ub,
+        dual_eq: reference.dual_eq,
+        reduced_costs: reference.reduced_gradient,
+        var_basis: None,
+        row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        solver: reference.solver,
+        message: Some(reference.message),
+    }
+}
+
+fn math_program_to_quadratic_reference(
+    program: &MathProgram,
+) -> Result<QuadraticProgram, MathProgramError> {
+    let lp = program.to_linear_relaxation_lp_problem()?;
+    let minimize_sign = objective_minimize_sign(program.sense);
+    Ok(QuadraticProgram {
+        q: scale_matrix(&quadratic_hessian(program), minimize_sign),
+        c: scale_vec(&lp.c, minimize_sign),
+        a_ub: lp.a_ub,
+        b_ub: lp.b_ub,
+        a_eq: lp.a_eq,
+        b_eq: lp.b_eq,
+        lb: lp.lb,
+        ub: lp.ub,
+        var_names: lp.var_names,
+    })
+}
+
+fn math_program_to_second_order_cone_reference(
+    program: &MathProgram,
+) -> Result<SecondOrderConeProgram, MathProgramError> {
+    let lp = program.to_linear_relaxation_lp_problem()?;
+    let minimize_sign = objective_minimize_sign(program.sense);
+    let n = program.variables.len();
+    Ok(SecondOrderConeProgram {
+        c: scale_vec(&lp.c, minimize_sign),
+        a_ub: lp.a_ub,
+        b_ub: lp.b_ub,
+        a_eq: lp.a_eq,
+        b_eq: lp.b_eq,
+        lb: lp.lb,
+        ub: lp.ub,
+        cones: program
+            .second_order_cones
+            .iter()
+            .map(|cone| QpSecondOrderCone {
+                a: cone
+                    .terms
+                    .iter()
+                    .map(|term| dense_row(n, &term.coeffs))
+                    .collect(),
+                b: cone.terms.iter().map(|term| term.constant).collect(),
+                c: dense_row(n, &cone.rhs_coeffs),
+                d: cone.rhs_constant,
+                name: Some(cone.name.clone()),
+            })
+            .collect(),
+        var_names: lp.var_names,
+    })
+}
+
+fn math_program_to_quadratically_constrained_reference(
+    program: &MathProgram,
+) -> Result<QuadraticallyConstrainedProgram, MathProgramError> {
+    let qp = math_program_to_quadratic_reference(program)?;
+    let n = program.variables.len();
+    let mut constraints = Vec::new();
+    for row in &program.quadratic_constraints {
+        match row.sense {
+            RowSense::Le => constraints.push(math_program_quadratic_constraint_reference(
+                n, row, 1.0, None,
+            )),
+            RowSense::Ge => constraints.push(math_program_quadratic_constraint_reference(
+                n,
+                row,
+                -1.0,
+                Some("__ge".to_string()),
+            )),
+            RowSense::Eq => {
+                constraints.push(math_program_quadratic_constraint_reference(
+                    n, row, 1.0, None,
+                ));
+                constraints.push(math_program_quadratic_constraint_reference(
+                    n,
+                    row,
+                    -1.0,
+                    Some("__eq_lower".to_string()),
+                ));
+            }
+        }
+    }
+    Ok(QuadraticallyConstrainedProgram {
+        q: qp.q,
+        c: qp.c,
+        a_ub: qp.a_ub,
+        b_ub: qp.b_ub,
+        a_eq: qp.a_eq,
+        b_eq: qp.b_eq,
+        lb: qp.lb,
+        ub: qp.ub,
+        quadratic_constraints: constraints,
+        var_names: qp.var_names,
+    })
+}
+
+fn math_program_quadratic_constraint_reference(
+    n: usize,
+    row: &QuadraticConstraint,
+    scale: f64,
+    name_suffix: Option<String>,
+) -> QpQuadraticConstraint {
+    let mut q = vec![vec![0.0; n]; n];
+    for term in &row.quadratic_terms {
+        let coeff = scale * term.coeff;
+        if term.var_i == term.var_j {
+            q[term.var_i][term.var_i] += coeff;
+        } else {
+            q[term.var_i][term.var_j] += 0.5 * coeff;
+            q[term.var_j][term.var_i] += 0.5 * coeff;
+        }
+    }
+    QpQuadraticConstraint {
+        q,
+        c: scale_row(&dense_row(n, &row.linear_terms), scale),
+        rhs: scale * row.rhs,
+        name: Some(match name_suffix {
+            Some(suffix) => format!("{}{}", row.name, suffix),
+            None => row.name.clone(),
+        }),
+    }
+}
+
+fn math_program_integer_var_mask(program: &MathProgram) -> Vec<bool> {
+    program
+        .variables
+        .iter()
+        .map(|var| matches!(var.var_type, VariableType::Integer | VariableType::Binary))
+        .collect()
+}
+
+fn objective_minimize_sign(sense: ObjectiveSense) -> f64 {
+    match sense {
+        ObjectiveSense::Min => 1.0,
+        ObjectiveSense::Max => -1.0,
     }
 }
 

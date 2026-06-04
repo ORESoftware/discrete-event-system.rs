@@ -25,10 +25,10 @@ use des_engine::des::soccer_learning_pg::{
 };
 use serde::Serialize;
 
-const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 200;
+const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 0;
 const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
-const DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE: usize = 2;
+const DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE: usize = 4;
 const DEFAULT_SOCCER_MAX_AUTO_PARALLEL_GAMES: usize = 10;
 const DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS: bool = false;
 const DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT: bool = true;
@@ -2117,12 +2117,12 @@ mod tests {
 
     #[test]
     fn default_neural_drain_timeout_keeps_worker_boundary_wait_bounded() {
-        assert_eq!(DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS, 200);
+        assert_eq!(DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS, 0);
     }
 
     #[test]
     fn default_postgres_async_writer_stays_bounded() {
-        assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE, 2);
+        assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE, 4);
     }
 
     #[test]

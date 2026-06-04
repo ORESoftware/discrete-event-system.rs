@@ -28,8 +28,8 @@ use serde::Serialize;
 
 const DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
-const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE: usize = 2;
-const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 200;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE: usize = 4;
+const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 0;
 
 #[derive(Clone, Debug)]
 struct PendingPostgresCompletedRun {
@@ -879,11 +879,11 @@ mod tests {
 
     #[test]
     fn default_queue_neural_drain_timeout_keeps_worker_wait_bounded() {
-        assert_eq!(DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS, 200);
+        assert_eq!(DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS, 0);
     }
 
     #[test]
     fn default_queue_postgres_async_writer_stays_bounded() {
-        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE, 2);
+        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE, 4);
     }
 }

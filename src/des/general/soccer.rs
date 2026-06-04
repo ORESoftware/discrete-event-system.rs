@@ -106,7 +106,9 @@ const DEFENSIVE_CLEAR_AND_HOLD_SECOND_REWARD_POINTS: f64 = 20.0;
 const DEFENSIVE_DISPOSSESSION_REWARD_POINTS: f64 = 10.0;
 const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 4.0;
 const BEATEN_BY_DRIBBLE_PENALTY_POINTS: f64 = 3.0;
-const SIDE_STEP_BEAT_REWARD_POINTS: f64 = 6.0;
+const DRIBBLE_BEAT_REWARD_POINTS: f64 = 6.0;
+const NUTMEG_BEAT_REWARD_POINTS: f64 = 7.0;
+const SIDE_STEP_BEAT_REWARD_POINTS: f64 = DRIBBLE_BEAT_REWARD_POINTS;
 const DRIBBLE_LEFT_CUT_CHANCE: f64 = 0.45;
 const DRIBBLE_RIGHT_CUT_CHANCE: f64 = 0.45;
 const DRIBBLE_CUT_LATERAL_YARDS: f64 = 1.0;
@@ -5033,6 +5035,13 @@ impl DribbleMoveKind {
 
     fn event_kind(self) -> &'static str {
         self.label()
+    }
+
+    fn beat_reward_points(self) -> f64 {
+        match self {
+            DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => DRIBBLE_BEAT_REWARD_POINTS,
+            DribbleMoveKind::Nutmeg => NUTMEG_BEAT_REWARD_POINTS,
+        }
     }
 }
 

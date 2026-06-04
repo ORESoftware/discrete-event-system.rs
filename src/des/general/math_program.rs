@@ -10004,6 +10004,10 @@ fn infer_missing_external_lp_basis(
     program: &MathProgram,
     solution: &mut MathProgramSolution,
 ) -> Result<(), MathProgramError> {
+    if external_basis_is_uninformative_pdlp_status(solution) {
+        solution.var_basis = None;
+        solution.row_basis = None;
+    }
     if solution.status != MathProgramStatus::Optimal
         || (solution.var_basis.is_some() && solution.row_basis.is_some())
         || program.has_discrete_features()
@@ -10039,6 +10043,19 @@ fn infer_missing_external_lp_basis(
         solution.row_basis = row_basis;
     }
     Ok(())
+}
+
+fn external_basis_is_uninformative_pdlp_status(solution: &MathProgramSolution) -> bool {
+    let solver = solution.solver.to_ascii_lowercase();
+    if !solver.contains("pdlp") {
+        return false;
+    }
+    let all_free = |values: &Option<Vec<String>>| {
+        values.as_ref().is_some_and(|values| {
+            !values.is_empty() && values.iter().all(|status| status == "free")
+        })
+    };
+    all_free(&solution.var_basis) || all_free(&solution.row_basis)
 }
 
 fn infer_lp_basis_from_complementarity(
@@ -18092,8 +18109,8 @@ mod tests {
 
         let mut solution = MathProgramSolution {
             status: MathProgramStatus::Optimal,
-            x: vec![6.0, 4.0],
-            objective: 34.0,
+            x: vec![5.999999973406001, 3.999999971881202],
+            objective: 33.99999980774281,
             best_bound: None,
             mip_gap: None,
             nodes_explored: None,
@@ -18101,11 +18118,15 @@ mod tests {
             solver_version: None,
             iterations: None,
             control_feedback: None,
-            dual_ub: Some(vec![7.0 / 3.0, 0.0, 2.0 / 3.0]),
+            dual_ub: Some(vec![2.333333337179504, 0.0, 0.6666666702143926]),
             dual_eq: Some(Vec::new()),
             reduced_costs: Some(vec![0.0, 0.0]),
-            var_basis: None,
-            row_basis: None,
+            var_basis: Some(vec!["free".to_string(), "free".to_string()]),
+            row_basis: Some(vec![
+                "free".to_string(),
+                "free".to_string(),
+                "free".to_string(),
+            ]),
             unbounded_ray: None,
             infeasibility_certificate: None,
             solver: "ortools:pdlp".to_string(),

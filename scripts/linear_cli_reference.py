@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from fractions import Fraction
 import json
 import math
 import os
@@ -1224,17 +1225,31 @@ def parse_qsopt_ex_solution(path: str, n: int, stdout: str, stderr: str) -> tupl
     x = [0.0] * n
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
-    lower = f"{stdout}\n{stderr}\n{text}".lower()
-    if "infeasible" in lower:
+    solution_lower = text.lower()
+    combined_lower = f"{stdout}\n{stderr}\n{text}".lower()
+    if "status optimal" in solution_lower or "problem solved exactly" in combined_lower:
+        status = "optimal"
+    elif "status infeasible" in solution_lower or "infeasible" in combined_lower:
         status = "infeasible"
-    elif "unbounded" in lower:
+    elif "status unbounded" in solution_lower or "unbounded" in combined_lower:
         status = "unbounded"
-    elif "optimal" in lower or "objective" in lower or "primal solution" in lower:
+    elif "optimal" in solution_lower or "objective" in solution_lower or "primal solution" in solution_lower:
         status = "optimal"
     else:
         status = "unknown"
 
+    in_vars = False
     for line in text.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper == "VARS:":
+            in_vars = True
+            continue
+        if upper.startswith(("REDUCED COST", "PI", "SLACK")):
+            in_vars = False
+            continue
+        if not in_vars:
+            continue
         parsed = _parse_named_value_line(line, n)
         if parsed is not None:
             idx, value = parsed
@@ -1252,13 +1267,16 @@ def _parse_named_value_line(line: str, n: int) -> Optional[tuple[int, float]]:
     after = line[match.end() :]
     for token in re.split(r"[\s,;:=]+", after):
         token = token.strip()
-        if _is_number(token):
-            return idx, float(token)
+        value = _parse_number_token(token)
+        if value is not None:
+            return idx, value
     before = line[: match.start()]
     numeric_before = [
-        float(token)
+        value
         for token in re.split(r"[\s,;:=]+", before)
-        if token.strip() and _is_number(token.strip())
+        if token.strip()
+        for value in [_parse_number_token(token.strip())]
+        if value is not None
     ]
     if numeric_before:
         return idx, numeric_before[-1]
@@ -1280,11 +1298,21 @@ def _split_xpress_solution_line(line: str) -> list[str]:
 
 
 def _is_number(text: str) -> bool:
+    return _parse_number_token(text) is not None
+
+
+def _parse_number_token(text: str) -> Optional[float]:
+    stripped = text.strip()
+    if not stripped:
+        return None
     try:
-        float(text)
-        return True
+        value = float(stripped)
     except ValueError:
-        return False
+        try:
+            value = float(Fraction(stripped))
+        except (ValueError, ZeroDivisionError):
+            return None
+    return value if math.isfinite(value) else None
 
 
 def stripped_starts(text: str, prefixes: Sequence[str]) -> bool:

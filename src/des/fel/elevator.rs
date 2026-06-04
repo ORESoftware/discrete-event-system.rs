@@ -933,6 +933,7 @@ pub fn run_fel_elevator_with_policy(
         } => (*updates, loss_history.last().copied()),
         _ => (0, None),
     };
+    let policy_state = elevator_dispatch_policy_state_json(&w.dispatch_policy);
     let decisions: Vec<Value> = w
         .decisions
         .iter()
@@ -1005,8 +1006,84 @@ pub fn run_fel_elevator_with_policy(
         },
         "decisions": decisions,
         "pomdpBeliefs": pomdp_beliefs,
+        "policyState": policy_state,
         "frames": frames,
     })
+}
+
+/// Serializable final state for a FEL elevator dispatch policy.
+///
+/// This is the stable handoff payload for Postgres persistence and non-HTML
+/// renderers: MDP policies keep their table, neural policies keep weights, and
+/// POMDP policies keep their belief-control settings.
+pub fn elevator_dispatch_policy_state_json(policy: &ElevatorDispatchPolicy) -> Value {
+    match policy {
+        ElevatorDispatchPolicy::Look => json!({
+            "$schema": "des/fel-elevator-policy-state/v1",
+            "kind": "look",
+        }),
+        ElevatorDispatchPolicy::MdpTable {
+            floors,
+            shafts,
+            policy,
+        } => json!({
+            "$schema": "des/fel-elevator-policy-state/v1",
+            "kind": "mdp-table",
+            "floors": floors,
+            "shafts": shafts,
+            "table": policy,
+        }),
+        ElevatorDispatchPolicy::NeuralScorer { network } => json!({
+            "$schema": "des/fel-elevator-policy-state/v1",
+            "kind": "neural-scorer",
+            "network": elevator_neural_network_snapshot_json(network),
+        }),
+        ElevatorDispatchPolicy::PomdpBelief { dispatch_margin } => json!({
+            "$schema": "des/fel-elevator-policy-state/v1",
+            "kind": "pomdp-belief",
+            "dispatchMargin": dispatch_margin,
+        }),
+        ElevatorDispatchPolicy::NeuralTdScorer {
+            network,
+            learning_rate,
+            gamma,
+            updates,
+            loss_history,
+        } => json!({
+            "$schema": "des/fel-elevator-policy-state/v1",
+            "kind": "neural-td",
+            "learningRate": learning_rate,
+            "gamma": gamma,
+            "updates": updates,
+            "lossHistory": loss_history,
+            "network": elevator_neural_network_snapshot_json(network),
+        }),
+    }
+}
+
+pub fn elevator_neural_network_snapshot_json(network: &FeedForwardNetwork) -> Value {
+    json!({
+        "inputDim": network.input_dim,
+        "outputDim": network.output_dim,
+        "parameterCount": network.num_parameters(),
+        "l2Norm": network.l2_norm(),
+        "layers": network.layers.iter().map(|layer| {
+            json!({
+                "activation": elevator_activation_label(layer.activation),
+                "weights": &layer.weights,
+                "biases": &layer.biases,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn elevator_activation_label(activation: ActivationName) -> &'static str {
+    match activation {
+        ActivationName::Linear => "linear",
+        ActivationName::Sigmoid => "sigmoid",
+        ActivationName::Tanh => "tanh",
+        ActivationName::Relu => "relu",
+    }
 }
 
 fn finite_at_least(value: f64, min: f64, fallback: f64) -> f64 {

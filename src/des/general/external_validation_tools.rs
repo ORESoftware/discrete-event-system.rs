@@ -5602,10 +5602,14 @@ fn output_validation_sql_without_comments(text: &str) -> (String, Vec<String>) {
         }
     }
     if let Some(active_quote) = quote {
-        errors.push(format!("sql has an unterminated {active_quote} quoted string"));
+        errors.push(format!(
+            "sql has an unterminated {active_quote} quoted string"
+        ));
     }
     if let Some(start_line) = block_comment_line {
-        errors.push(format!("line {start_line} starts an unterminated SQL block comment"));
+        errors.push(format!(
+            "line {start_line} starts an unterminated SQL block comment"
+        ));
     }
     (out, errors)
 }
@@ -5659,10 +5663,13 @@ fn output_validation_sql_reference(payload: &Value, validator: &str) -> Value {
     if !has_sql_verb {
         errors.push("sql: expected a recognizable SQL statement keyword".to_string());
     }
-    if tokens
-        .windows(2)
-        .any(|pair| pair[0] == "from" && matches!(pair[1].as_str(), "where" | "group" | "order" | "limit" | "having"))
-    {
+    if tokens.windows(2).any(|pair| {
+        pair[0] == "from"
+            && matches!(
+                pair[1].as_str(),
+                "where" | "group" | "order" | "limit" | "having"
+            )
+    }) {
         errors.push("sql: FROM clause appears to be missing a relation".to_string());
     }
     output_validation_result(
@@ -5681,8 +5688,18 @@ fn output_validation_sql_reference(payload: &Value, validator: &str) -> Value {
 fn output_validation_text_looks_sql(text: &str) -> bool {
     let trimmed = text.trim_start().to_ascii_lowercase();
     [
-        "select ", "with ", "insert ", "update ", "delete ", "merge ", "create ", "alter ",
-        "drop ", "truncate ", "explain ", "analyze ",
+        "select ",
+        "with ",
+        "insert ",
+        "update ",
+        "delete ",
+        "merge ",
+        "create ",
+        "alter ",
+        "drop ",
+        "truncate ",
+        "explain ",
+        "analyze ",
     ]
     .iter()
     .any(|prefix| trimmed.starts_with(prefix))
@@ -5769,7 +5786,11 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         "table" | "table-schema" | "tabular" | "csv-validator" | "csvlint" => {
             output_validation_table_reference(payload, "builtin:table-schema-subset")
         }
-        "dbt" if kind == "sql-validation" || kind == "dbt-validation" || output_validation_has_sql_payload(payload) => {
+        "dbt"
+            if kind == "sql-validation"
+                || kind == "dbt-validation"
+                || output_validation_has_sql_payload(payload) =>
+        {
             output_validation_sql_reference(payload, "builtin:sql-structural-for-dbt")
         }
         "sqlfluff" | "sql-lint" | "sql-validator" => {

@@ -2,6 +2,10 @@
 
 - Stay on the `main` branch for now. Do not create feature branches unless the
   user explicitly asks for one.
+- When publishing `.bin` files on the filesystem, place them under a temp
+  artifact folder such as `$HOME/.codex/tmp`. Before writing a `.bin` file, move
+  any previous `.bin` file with the same name in that same folder to Trash
+  rather than overwriting it in place.
 - Rust-first rule: implement production library behavior, solver features,
   validation logic, and reusable tooling in Rust whenever practical. Use Python
   only for external/reference bridges, small compatibility smoke scripts, or

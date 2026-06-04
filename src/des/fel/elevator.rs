@@ -22,6 +22,11 @@ use std::collections::VecDeque;
 
 use serde_json::{json, Value};
 
+use crate::des::general::des_base::neural_network::{NeuralNetworkLike, TrainableNeuralNetwork};
+use crate::des::general::neural_network::{ActivationName, FeedForwardNetwork, RandomNetworkSpec};
+use crate::des::general::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
+use crate::des::shared::capabilities::SeededRandom;
+
 use super::engine::Engine;
 
 // --- tiny self-contained SplitMix64 RNG (deterministic, sim-local) ---------
@@ -62,6 +67,270 @@ impl Dir {
             Dir::Up => "up",
             Dir::Down => "down",
             Dir::Idle => "idle",
+        }
+    }
+}
+
+const DISPATCH_FEATURE_DIM: usize = 10;
+
+/// Belief over hidden demand at a floor: `empty`, `waiting`, `crowded`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElevatorFloorDemandBelief {
+    pub empty: f64,
+    pub waiting: f64,
+    pub crowded: f64,
+}
+
+impl ElevatorFloorDemandBelief {
+    pub fn empty() -> Self {
+        ElevatorFloorDemandBelief {
+            empty: 1.0,
+            waiting: 0.0,
+            crowded: 0.0,
+        }
+    }
+
+    fn weights(self) -> [f64; 3] {
+        [self.empty, self.waiting, self.crowded]
+    }
+
+    fn from_weights(w: [f64; 3]) -> Self {
+        ElevatorFloorDemandBelief {
+            empty: w[0],
+            waiting: w[1],
+            crowded: w[2],
+        }
+    }
+}
+
+/// Public car snapshot used by FEL dispatch policies and learning traces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElevatorCarDispatchState {
+    pub floor: usize,
+    /// -1 = down, 0 = idle, +1 = up.
+    pub dir: i8,
+    pub doors_open: bool,
+    pub active: bool,
+    pub moving: bool,
+    pub onboard: usize,
+    pub capacity: usize,
+}
+
+/// Observation at the decision boundary where a hall call is claimed by a shaft.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElevatorDispatchObservation {
+    pub time: f64,
+    pub call_floor: usize,
+    pub waiting_at_floor: usize,
+    pub floors: usize,
+    pub demand_belief: ElevatorFloorDemandBelief,
+    pub cars: Vec<ElevatorCarDispatchState>,
+}
+
+impl ElevatorDispatchObservation {
+    pub fn shafts(&self) -> usize {
+        self.cars.len()
+    }
+}
+
+/// A recorded FEL decision and the policy that made it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElevatorDispatchDecision {
+    pub time: f64,
+    pub call_floor: usize,
+    pub action_car: usize,
+    pub policy: String,
+}
+
+/// POMDP belief-update trace emitted by FEL runs that use partial-observation
+/// demand estimates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElevatorPomdpBeliefTrace {
+    pub time: f64,
+    pub floor: usize,
+    pub action: String,
+    pub observation: String,
+    pub belief: ElevatorFloorDemandBelief,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchChoice {
+    Defer,
+    Hold,
+    Claim(usize),
+}
+
+/// Pluggable hall-call claiming policy for the FEL elevator.
+///
+/// The default [`ElevatorDispatchPolicy::Look`] preserves the current shared
+/// LOOK/nearest-reachable heuristic. MDP and neural variants let a learned or
+/// planned policy choose which shaft owns each newly visible call.
+#[derive(Clone, Debug)]
+pub enum ElevatorDispatchPolicy {
+    Look,
+    /// Tabular policy over `(call_floor, car_0_floor, ..., car_n_floor)`.
+    MdpTable {
+        floors: usize,
+        shafts: usize,
+        policy: Vec<usize>,
+    },
+    /// Score each candidate shaft with a neural network over the fixed feature
+    /// vector returned by [`elevator_dispatch_features`].
+    NeuralScorer {
+        network: FeedForwardNetwork,
+    },
+    /// POMDP/QMDP floor-demand policy. A noisy hall-call belief chooses between
+    /// holding for more evidence and dispatching the closest useful shaft.
+    PomdpBelief {
+        dispatch_margin: f64,
+    },
+    /// Online neural TD scorer updated at each dispatch decision.
+    NeuralTdScorer {
+        network: FeedForwardNetwork,
+        learning_rate: f64,
+        gamma: f64,
+        updates: usize,
+        loss_history: Vec<f64>,
+    },
+}
+
+impl Default for ElevatorDispatchPolicy {
+    fn default() -> Self {
+        ElevatorDispatchPolicy::Look
+    }
+}
+
+impl ElevatorDispatchPolicy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ElevatorDispatchPolicy::Look => "look",
+            ElevatorDispatchPolicy::MdpTable { .. } => "mdp-table",
+            ElevatorDispatchPolicy::NeuralScorer { .. } => "neural-scorer",
+            ElevatorDispatchPolicy::PomdpBelief { .. } => "pomdp-belief",
+            ElevatorDispatchPolicy::NeuralTdScorer { .. } => "neural-td",
+        }
+    }
+
+    fn choose(&mut self, obs: &ElevatorDispatchObservation) -> DispatchChoice {
+        if obs.cars.is_empty() {
+            return DispatchChoice::Defer;
+        }
+        match self {
+            ElevatorDispatchPolicy::Look => DispatchChoice::Defer,
+            ElevatorDispatchPolicy::MdpTable {
+                floors,
+                shafts,
+                policy,
+            } => {
+                if *floors != obs.floors || *shafts != obs.cars.len() {
+                    return DispatchChoice::Defer;
+                }
+                let s = elevator_dispatch_state_index(obs);
+                policy
+                    .get(s)
+                    .copied()
+                    .map(|a| DispatchChoice::Claim(a.min(obs.cars.len() - 1)))
+                    .unwrap_or(DispatchChoice::Defer)
+            }
+            ElevatorDispatchPolicy::NeuralScorer { network } => {
+                if network.input_dim() != DISPATCH_FEATURE_DIM || network.output_dim() != 1 {
+                    return DispatchChoice::Defer;
+                }
+                let mut best = None;
+                let mut best_score = f64::NEG_INFINITY;
+                for car_id in 0..obs.cars.len() {
+                    let features = elevator_dispatch_features(obs, car_id);
+                    let score = network.predict(&features)[0];
+                    if score > best_score {
+                        best_score = score;
+                        best = Some(car_id);
+                    }
+                }
+                best.map(DispatchChoice::Claim)
+                    .unwrap_or(DispatchChoice::Defer)
+            }
+            ElevatorDispatchPolicy::NeuralTdScorer {
+                network,
+                learning_rate,
+                gamma,
+                updates,
+                loss_history,
+            } => {
+                if network.input_dim() != DISPATCH_FEATURE_DIM || network.output_dim() != 1 {
+                    return DispatchChoice::Defer;
+                }
+                let targets = neural_td_dispatch_targets(network, obs, *gamma);
+                let mut loss = 0.0;
+                for (features, target) in targets {
+                    loss += network
+                        .train_sample(&features, &[target], *learning_rate)
+                        .loss;
+                    *updates += 1;
+                }
+                loss_history.push(loss / obs.cars.len().max(1) as f64);
+                best_neural_dispatch_car(network, obs)
+                    .map(DispatchChoice::Claim)
+                    .unwrap_or(DispatchChoice::Defer)
+            }
+            ElevatorDispatchPolicy::PomdpBelief { dispatch_margin } => {
+                let values = elevator_floor_pomdp_belief_action_values(obs.demand_belief);
+                if values.dispatch + *dispatch_margin < values.hold {
+                    DispatchChoice::Hold
+                } else {
+                    best_dispatch_car(obs)
+                        .map(DispatchChoice::Claim)
+                        .unwrap_or(DispatchChoice::Defer)
+                }
+            }
+        }
+    }
+}
+
+/// Options for neural imitation of the abstract MDP dispatch policy.
+#[derive(Clone, Debug)]
+pub struct ElevatorNeuralDispatchTrainingOptions {
+    pub epochs: usize,
+    pub learning_rate: f64,
+    pub hidden_layers: Vec<usize>,
+    pub seed: u32,
+}
+
+impl Default for ElevatorNeuralDispatchTrainingOptions {
+    fn default() -> Self {
+        ElevatorNeuralDispatchTrainingOptions {
+            epochs: 40,
+            learning_rate: 0.08,
+            hidden_layers: vec![12],
+            seed: 7,
+        }
+    }
+}
+
+/// Result of training a neural scorer to imitate the dispatch MDP table.
+#[derive(Clone, Debug)]
+pub struct ElevatorNeuralDispatchTrainingResult {
+    pub policy: ElevatorDispatchPolicy,
+    pub loss_history: Vec<f64>,
+    pub samples: usize,
+    pub mdp_states: usize,
+}
+
+/// Options for online neural TD dispatch learning inside the FEL run.
+#[derive(Clone, Debug)]
+pub struct ElevatorNeuralTdDispatchOptions {
+    pub learning_rate: f64,
+    pub gamma: f64,
+    pub hidden_layers: Vec<usize>,
+    pub seed: u32,
+}
+
+impl Default for ElevatorNeuralTdDispatchOptions {
+    fn default() -> Self {
+        ElevatorNeuralTdDispatchOptions {
+            learning_rate: 0.05,
+            gamma: 0.85,
+            hidden_layers: vec![12],
+            seed: 17,
         }
     }
 }
@@ -107,8 +376,15 @@ struct ElevWorld {
     travel: f64,
     dwell: f64,
     arrival_rate: f64,
+    dispatch_policy: ElevatorDispatchPolicy,
     cars: Vec<CarState>,
     waiting: Vec<VecDeque<Passenger>>,
+    hall_claims: Vec<Option<usize>>,
+    held_floors: Vec<bool>,
+    held_recheck_scheduled: Vec<bool>,
+    demand_beliefs: Vec<ElevatorFloorDemandBelief>,
+    decisions: Vec<ElevatorDispatchDecision>,
+    pomdp_beliefs: Vec<ElevatorPomdpBeliefTrace>,
     served: u64,
     boarded: u64,
     arrivals: u64,
@@ -125,6 +401,7 @@ impl ElevWorld {
         travel: f64,
         dwell: f64,
         rate: f64,
+        dispatch_policy: ElevatorDispatchPolicy,
     ) -> Self {
         ElevWorld {
             rng: Rng::new(seed),
@@ -133,10 +410,17 @@ impl ElevWorld {
             travel,
             dwell,
             arrival_rate: rate,
+            dispatch_policy,
             cars: (0..shafts)
                 .map(|i| CarState::new(home_floor(i, shafts, floors)))
                 .collect(),
             waiting: (0..floors).map(|_| VecDeque::new()).collect(),
+            hall_claims: vec![None; floors],
+            held_floors: vec![false; floors],
+            held_recheck_scheduled: vec![false; floors],
+            demand_beliefs: vec![ElevatorFloorDemandBelief::empty(); floors],
+            decisions: Vec::new(),
+            pomdp_beliefs: Vec::new(),
             served: 0,
             boarded: 0,
             arrivals: 0,
@@ -201,7 +485,7 @@ impl ElevWorld {
         }
     }
 
-    fn hall_owner(&self, floor: usize) -> Option<usize> {
+    fn heuristic_hall_owner(&self, floor: usize) -> Option<usize> {
         if self.waiting[floor].is_empty() {
             return None;
         }
@@ -223,6 +507,105 @@ impl ElevWorld {
             .map(|(id, _)| id)
     }
 
+    fn hall_owner(&self, floor: usize) -> Option<usize> {
+        if self.waiting[floor].is_empty() {
+            return None;
+        }
+        if self.held_floors.get(floor).copied().unwrap_or(false) {
+            return None;
+        }
+        if let Some(car_id) = self.hall_claims.get(floor).and_then(|claim| *claim) {
+            if self
+                .cars
+                .get(car_id)
+                .map(|car| car.onboard.len() < self.capacity)
+                .unwrap_or(false)
+            {
+                return Some(car_id);
+            }
+        }
+        self.heuristic_hall_owner(floor)
+    }
+
+    fn dispatch_observation(&self, time: f64, floor: usize) -> ElevatorDispatchObservation {
+        ElevatorDispatchObservation {
+            time,
+            call_floor: floor,
+            waiting_at_floor: self.waiting[floor].len(),
+            floors: self.floors,
+            demand_belief: self
+                .demand_beliefs
+                .get(floor)
+                .copied()
+                .unwrap_or_else(ElevatorFloorDemandBelief::empty),
+            cars: self
+                .cars
+                .iter()
+                .map(|car| ElevatorCarDispatchState {
+                    floor: car.floor,
+                    dir: dir_code(car.dir),
+                    doors_open: car.doors_open,
+                    active: car.active,
+                    moving: car.moving,
+                    onboard: car.onboard.len(),
+                    capacity: self.capacity,
+                })
+                .collect(),
+        }
+    }
+
+    fn claim_floor(&mut self, time: f64, floor: usize) -> Option<usize> {
+        if floor >= self.floors || self.waiting[floor].is_empty() {
+            return None;
+        }
+        let obs = self.dispatch_observation(time, floor);
+        let choice = self.dispatch_policy.choose(&obs);
+        let chosen = match choice {
+            DispatchChoice::Claim(car_id) => self
+                .cars
+                .get(car_id)
+                .map(|car| car.onboard.len() < self.capacity)
+                .unwrap_or(false)
+                .then_some(car_id)
+                .or_else(|| self.heuristic_hall_owner(floor)),
+            DispatchChoice::Hold => {
+                self.hall_claims[floor] = None;
+                self.held_floors[floor] = true;
+                return None;
+            }
+            DispatchChoice::Defer => self.heuristic_hall_owner(floor),
+        };
+        if let Some(car_id) = chosen {
+            self.hall_claims[floor] = Some(car_id);
+            self.held_floors[floor] = false;
+            self.decisions.push(ElevatorDispatchDecision {
+                time,
+                call_floor: floor,
+                action_car: car_id,
+                policy: self.dispatch_policy.label().to_string(),
+            });
+        }
+        chosen
+    }
+
+    fn observe_floor_demand(&mut self, time: f64, floor: usize, action: PomdpDemandAction) {
+        if floor >= self.floors {
+            return;
+        }
+        let state = true_demand_state(self.waiting[floor].len());
+        let observation = sample_demand_observation(&mut self.rng, state);
+        let prior = self.demand_beliefs[floor];
+        let posterior = update_floor_demand_belief(prior, action, observation);
+        self.demand_beliefs[floor] = posterior;
+        self.pomdp_beliefs.push(ElevatorPomdpBeliefTrace {
+            time,
+            floor,
+            action: action.label().to_string(),
+            observation: observation.label().to_string(),
+            belief: posterior,
+        });
+    }
+
     /// Floors with a pending reason for this shaft to visit: its in-car
     /// drop-offs plus hall calls assigned to it by the shared dispatcher.
     fn targets_for(&self, car_id: usize) -> Vec<usize> {
@@ -239,6 +622,14 @@ fn home_floor(car_id: usize, shafts: usize, floors: usize) -> usize {
     } else {
         let top = floors.saturating_sub(1);
         ((car_id * top) + (shafts - 1) / 2) / (shafts - 1)
+    }
+}
+
+fn dir_code(dir: Dir) -> i8 {
+    match dir {
+        Dir::Down => -1,
+        Dir::Idle => 0,
+        Dir::Up => 1,
     }
 }
 
@@ -274,6 +665,10 @@ fn passenger_arrival(eng: &mut Engine<ElevWorld>) {
     }
     eng.world.waiting[origin].push_back(Passenger { dest, arrived: now });
     eng.world.arrivals += 1;
+    eng.world
+        .observe_floor_demand(now, origin, PomdpDemandAction::Hold);
+    eng.world.claim_floor(now, origin);
+    schedule_held_recheck(eng, origin);
     record(eng, "arrival");
 
     wake_idle_cars(eng);
@@ -343,11 +738,50 @@ fn doors_close(eng: &mut Engine<ElevWorld>, car_id: usize) {
         eng.world.boarded += 1;
         eng.world.cars[car_id].onboard.push(p.dest);
     }
+    eng.world
+        .observe_floor_demand(now, f, PomdpDemandAction::Dispatch);
+    if eng.world.waiting[f].is_empty() {
+        eng.world.hall_claims[f] = None;
+        eng.world.held_floors[f] = false;
+    } else {
+        eng.world.claim_floor(now, f);
+        schedule_held_recheck(eng, f);
+    }
     eng.world.cars[car_id].doors_open = false;
     eng.world.cars[car_id].boarding_claim = None;
     record(eng, &format!("doors_close:{car_id}"));
     decide_step(eng, car_id);
     wake_idle_cars(eng);
+}
+
+fn dispatch_recheck(eng: &mut Engine<ElevWorld>, floor: usize) {
+    if floor >= eng.world.floors {
+        return;
+    }
+    eng.world.held_recheck_scheduled[floor] = false;
+    if eng.world.waiting[floor].is_empty() {
+        eng.world.held_floors[floor] = false;
+        eng.world.hall_claims[floor] = None;
+        return;
+    }
+    let now = eng.now();
+    eng.world
+        .observe_floor_demand(now, floor, PomdpDemandAction::Hold);
+    eng.world.claim_floor(now, floor);
+    schedule_held_recheck(eng, floor);
+    wake_idle_cars(eng);
+}
+
+fn schedule_held_recheck(eng: &mut Engine<ElevWorld>, floor: usize) {
+    if floor >= eng.world.floors
+        || !eng.world.held_floors[floor]
+        || eng.world.held_recheck_scheduled[floor]
+    {
+        return;
+    }
+    eng.world.held_recheck_scheduled[floor] = true;
+    let delay = eng.world.dwell.max(eng.world.travel).max(0.1);
+    eng.schedule_after(delay, move |eng| dispatch_recheck(eng, floor));
 }
 
 /// LOOK dispatch: continue in the current direction while targets lie ahead,
@@ -422,6 +856,7 @@ fn wake_idle_cars(eng: &mut Engine<ElevWorld>) {
 }
 
 /// Configuration for a FEL elevator run.
+#[derive(Clone, Debug)]
 pub struct ElevatorConfig {
     pub floors: usize,
     pub shafts: usize,
@@ -431,6 +866,7 @@ pub struct ElevatorConfig {
     pub arrival_rate: f64,
     pub horizon: f64,
     pub seed: u64,
+    pub dispatch_policy: ElevatorDispatchPolicy,
 }
 
 impl Default for ElevatorConfig {
@@ -444,6 +880,7 @@ impl Default for ElevatorConfig {
             arrival_rate: 0.55,
             horizon: 120.0,
             seed: 0xE1E4_A705_u64,
+            dispatch_policy: ElevatorDispatchPolicy::Look,
         }
     }
 }
@@ -451,6 +888,14 @@ impl Default for ElevatorConfig {
 /// Run the FEL elevator and return `{ meta, frames }` ready for the animation
 /// renderer.
 pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
+    run_fel_elevator_with_policy(cfg, cfg.dispatch_policy.clone())
+}
+
+/// Run the FEL elevator with an explicit hall-call dispatch policy.
+pub fn run_fel_elevator_with_policy(
+    cfg: &ElevatorConfig,
+    dispatch_policy: ElevatorDispatchPolicy,
+) -> Value {
     let floors = cfg.floors.max(2);
     let shafts = cfg.shafts.max(1);
     let capacity = cfg.capacity.max(1);
@@ -470,6 +915,7 @@ pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
         travel,
         dwell,
         arrival_rate,
+        dispatch_policy,
     ));
     record(&mut eng, "start");
     let first = eng.world.rng.exp(arrival_rate);
@@ -478,6 +924,44 @@ pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
 
     let events = eng.events_processed();
     let w = &eng.world;
+    let policy_label = w.dispatch_policy.label().to_string();
+    let (online_updates, online_loss_last) = match &w.dispatch_policy {
+        ElevatorDispatchPolicy::NeuralTdScorer {
+            updates,
+            loss_history,
+            ..
+        } => (*updates, loss_history.last().copied()),
+        _ => (0, None),
+    };
+    let decisions: Vec<Value> = w
+        .decisions
+        .iter()
+        .map(|d| {
+            json!({
+                "t": d.time,
+                "floor": d.call_floor,
+                "car": d.action_car,
+                "policy": d.policy,
+            })
+        })
+        .collect();
+    let pomdp_beliefs: Vec<Value> = w
+        .pomdp_beliefs
+        .iter()
+        .map(|b| {
+            json!({
+                "t": b.time,
+                "floor": b.floor,
+                "action": b.action,
+                "observation": b.observation,
+                "belief": {
+                    "empty": b.belief.empty,
+                    "waiting": b.belief.waiting,
+                    "crowded": b.belief.crowded,
+                }
+            })
+        })
+        .collect();
     let mean_wait = if w.boarded > 0 {
         w.total_wait / w.boarded as f64
     } else {
@@ -513,7 +997,14 @@ pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
             "boarded": eng.world.boarded,
             "served": eng.world.served,
             "meanWait": mean_wait,
+            "dispatchPolicy": policy_label,
+            "dispatchDecisions": decisions.len(),
+            "pomdpBeliefUpdates": pomdp_beliefs.len(),
+            "onlineLearningUpdates": online_updates,
+            "onlineLearningLossLast": online_loss_last,
         },
+        "decisions": decisions,
+        "pomdpBeliefs": pomdp_beliefs,
         "frames": frames,
     })
 }
@@ -524,6 +1015,538 @@ fn finite_at_least(value: f64, min: f64, fallback: f64) -> f64 {
     } else {
         fallback.max(min)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PomdpDemandAction {
+    Hold,
+    Dispatch,
+}
+
+impl PomdpDemandAction {
+    fn index(self) -> usize {
+        match self {
+            PomdpDemandAction::Hold => 0,
+            PomdpDemandAction::Dispatch => 1,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PomdpDemandAction::Hold => "hold",
+            PomdpDemandAction::Dispatch => "dispatch",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PomdpDemandObservation {
+    Quiet,
+    Call,
+}
+
+impl PomdpDemandObservation {
+    fn index(self) -> usize {
+        match self {
+            PomdpDemandObservation::Quiet => 0,
+            PomdpDemandObservation::Call => 1,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PomdpDemandObservation::Quiet => "quiet",
+            PomdpDemandObservation::Call => "call",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElevatorFloorPomdpActionValues {
+    pub hold: f64,
+    pub dispatch: f64,
+}
+
+const FLOOR_POMDP_TRANSITION: [[[f64; 3]; 2]; 3] = [
+    [[0.7, 0.3, 0.0], [1.0, 0.0, 0.0]],
+    [[0.0, 0.6, 0.4], [1.0, 0.0, 0.0]],
+    [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+];
+
+const FLOOR_POMDP_OBSERVATION: [[f64; 2]; 3] = [[0.85, 0.15], [0.30, 0.70], [0.10, 0.90]];
+
+const FLOOR_POMDP_REWARD: [[f64; 2]; 3] = [[0.0, -3.0], [-1.0, 8.0], [-3.0, 15.0]];
+
+fn true_demand_state(waiting: usize) -> usize {
+    match waiting {
+        0 => 0,
+        1 => 1,
+        _ => 2,
+    }
+}
+
+fn sample_demand_observation(rng: &mut Rng, state: usize) -> PomdpDemandObservation {
+    let p_quiet = FLOOR_POMDP_OBSERVATION[state.min(2)][0];
+    if rng.unit() < p_quiet {
+        PomdpDemandObservation::Quiet
+    } else {
+        PomdpDemandObservation::Call
+    }
+}
+
+fn update_floor_demand_belief(
+    prior: ElevatorFloorDemandBelief,
+    action: PomdpDemandAction,
+    observation: PomdpDemandObservation,
+) -> ElevatorFloorDemandBelief {
+    let a = action.index();
+    let o = observation.index();
+    let prior = prior.weights();
+    let mut predicted = [0.0; 3];
+    for s in 0..3 {
+        for sp in 0..3 {
+            predicted[sp] += prior[s] * FLOOR_POMDP_TRANSITION[s][a][sp];
+        }
+    }
+
+    let mut total = 0.0;
+    for sp in 0..3 {
+        predicted[sp] *= FLOOR_POMDP_OBSERVATION[sp][o];
+        total += predicted[sp];
+    }
+    if !total.is_finite() || total <= 0.0 {
+        return ElevatorFloorDemandBelief {
+            empty: 1.0 / 3.0,
+            waiting: 1.0 / 3.0,
+            crowded: 1.0 / 3.0,
+        };
+    }
+    for x in &mut predicted {
+        *x /= total;
+    }
+    ElevatorFloorDemandBelief::from_weights(predicted)
+}
+
+fn floor_pomdp_q_values() -> [[f64; 2]; 3] {
+    let gamma = 0.95;
+    let mut v = [0.0; 3];
+    let mut q = [[0.0; 2]; 3];
+    for _ in 0..256 {
+        let mut next = [0.0; 3];
+        for s in 0..3 {
+            for a in 0..2 {
+                q[s][a] = FLOOR_POMDP_REWARD[s][a]
+                    + gamma
+                        * FLOOR_POMDP_TRANSITION[s][a]
+                            .iter()
+                            .zip(v.iter())
+                            .map(|(p, value)| p * value)
+                            .sum::<f64>();
+            }
+            next[s] = q[s][0].max(q[s][1]);
+        }
+        let delta = (0..3).map(|s| (next[s] - v[s]).abs()).fold(0.0, f64::max);
+        v = next;
+        if delta < 1e-10 {
+            break;
+        }
+    }
+    q
+}
+
+pub fn elevator_floor_pomdp_belief_action_values(
+    belief: ElevatorFloorDemandBelief,
+) -> ElevatorFloorPomdpActionValues {
+    let q = floor_pomdp_q_values();
+    let weights = belief.weights();
+    ElevatorFloorPomdpActionValues {
+        hold: (0..3).map(|s| weights[s] * q[s][0]).sum(),
+        dispatch: (0..3).map(|s| weights[s] * q[s][1]).sum(),
+    }
+}
+
+fn look_distance_from_dispatch_obs(
+    floors: usize,
+    car: &ElevatorCarDispatchState,
+    floor: usize,
+) -> f64 {
+    if car.floor == floor {
+        return 0.0;
+    }
+    let top = floors.saturating_sub(1);
+    match car.dir {
+        1 if floor >= car.floor => (floor - car.floor) as f64,
+        1 => (top - car.floor + top - floor) as f64,
+        -1 if floor <= car.floor => (car.floor - floor) as f64,
+        -1 => (car.floor + floor) as f64,
+        _ => car.floor.abs_diff(floor) as f64,
+    }
+}
+
+fn best_dispatch_car(obs: &ElevatorDispatchObservation) -> Option<usize> {
+    obs.cars
+        .iter()
+        .enumerate()
+        .filter(|(_, car)| car.onboard < car.capacity)
+        .min_by(|(a_id, a), (b_id, b)| {
+            let score_a = look_distance_from_dispatch_obs(obs.floors, a, obs.call_floor)
+                + a.onboard as f64 * 0.35
+                + if a.active { 0.15 } else { 0.0 }
+                + (*a_id as f64 * 0.01);
+            let score_b = look_distance_from_dispatch_obs(obs.floors, b, obs.call_floor)
+                + b.onboard as f64 * 0.35
+                + if b.active { 0.15 } else { 0.0 }
+                + (*b_id as f64 * 0.01);
+            score_a.total_cmp(&score_b).then_with(|| a_id.cmp(b_id))
+        })
+        .map(|(id, _)| id)
+}
+
+fn best_neural_dispatch_car(
+    network: &FeedForwardNetwork,
+    obs: &ElevatorDispatchObservation,
+) -> Option<usize> {
+    let mut best = None;
+    let mut best_score = f64::NEG_INFINITY;
+    for car_id in 0..obs.cars.len() {
+        if obs.cars[car_id].onboard >= obs.cars[car_id].capacity {
+            continue;
+        }
+        let score = network.predict(&elevator_dispatch_features(obs, car_id))[0];
+        if score > best_score {
+            best_score = score;
+            best = Some(car_id);
+        }
+    }
+    best
+}
+
+fn neural_td_dispatch_targets(
+    network: &FeedForwardNetwork,
+    obs: &ElevatorDispatchObservation,
+    gamma: f64,
+) -> Vec<(Vec<f64>, f64)> {
+    (0..obs.cars.len())
+        .map(|action| {
+            let features = elevator_dispatch_features(obs, action);
+            let car = &obs.cars[action];
+            let distance = look_distance_from_dispatch_obs(obs.floors, car, obs.call_floor);
+            let load_penalty = car.onboard as f64 / car.capacity.max(1) as f64;
+            let immediate = -distance - 0.35 * load_penalty;
+            let mut next_obs = obs.clone();
+            if let Some(next_car) = next_obs.cars.get_mut(action) {
+                next_car.floor = obs.call_floor;
+                next_car.dir = 0;
+                next_car.active = false;
+                next_car.moving = false;
+                next_car.doors_open = false;
+            }
+            let bootstrap = (0..next_obs.cars.len())
+                .map(|next_action| {
+                    network.predict(&elevator_dispatch_features(&next_obs, next_action))[0]
+                })
+                .fold(f64::NEG_INFINITY, f64::max)
+                .max(0.0);
+            (features, immediate + gamma * bootstrap)
+        })
+        .collect()
+}
+
+/// Feature vector used by neural dispatch scoring. The network scores one
+/// candidate shaft at a time.
+pub fn elevator_dispatch_features(obs: &ElevatorDispatchObservation, car_id: usize) -> Vec<f64> {
+    let car = &obs.cars[car_id];
+    let top = obs.floors.saturating_sub(1).max(1) as f64;
+    let capacity = car.capacity.max(1) as f64;
+    let floor = car.floor.min(obs.floors.saturating_sub(1));
+    let call = obs.call_floor.min(obs.floors.saturating_sub(1));
+    let signed_delta = call as f64 - floor as f64;
+    let dir = car.dir as f64;
+    let moving_toward = if dir == 0.0 {
+        0.0
+    } else if signed_delta == 0.0 || signed_delta.signum() == dir.signum() {
+        1.0
+    } else {
+        -1.0
+    };
+    vec![
+        1.0,
+        call as f64 / top,
+        floor as f64 / top,
+        signed_delta.abs() / top,
+        signed_delta / top,
+        dir,
+        moving_toward,
+        car.onboard as f64 / capacity,
+        if car.active { 1.0 } else { 0.0 },
+        if car.doors_open { 1.0 } else { 0.0 },
+    ]
+}
+
+pub fn elevator_dispatch_feature_dim() -> usize {
+    DISPATCH_FEATURE_DIM
+}
+
+fn dispatch_state_count(floors: usize, shafts: usize) -> usize {
+    let floors = floors.max(2);
+    floors * pow_usize(floors, shafts.max(1))
+}
+
+fn pow_usize(base: usize, exp: usize) -> usize {
+    (0..exp).fold(1usize, |acc, _| acc.saturating_mul(base))
+}
+
+fn encode_dispatch_state(floors: usize, call_floor: usize, car_floors: &[usize]) -> usize {
+    let mut idx = call_floor.min(floors - 1);
+    let mut stride = floors;
+    for &floor in car_floors {
+        idx += stride * floor.min(floors - 1);
+        stride *= floors;
+    }
+    idx
+}
+
+fn decode_dispatch_state(floors: usize, shafts: usize, state: usize) -> (usize, Vec<usize>) {
+    let call_floor = state % floors;
+    let mut rest = state / floors;
+    let mut car_floors = Vec::with_capacity(shafts);
+    for _ in 0..shafts {
+        car_floors.push(rest % floors);
+        rest /= floors;
+    }
+    (call_floor, car_floors)
+}
+
+fn elevator_dispatch_state_index(obs: &ElevatorDispatchObservation) -> usize {
+    let car_floors: Vec<usize> = obs.cars.iter().map(|car| car.floor).collect();
+    encode_dispatch_state(obs.floors, obs.call_floor, &car_floors)
+}
+
+fn dispatch_observation_from_state(
+    floors: usize,
+    shafts: usize,
+    state: usize,
+) -> ElevatorDispatchObservation {
+    let (call_floor, car_floors) = decode_dispatch_state(floors, shafts, state);
+    ElevatorDispatchObservation {
+        time: 0.0,
+        call_floor,
+        waiting_at_floor: 1,
+        floors,
+        demand_belief: ElevatorFloorDemandBelief {
+            empty: 0.05,
+            waiting: 0.80,
+            crowded: 0.15,
+        },
+        cars: car_floors
+            .into_iter()
+            .map(|floor| ElevatorCarDispatchState {
+                floor,
+                dir: 0,
+                doors_open: false,
+                active: false,
+                moving: false,
+                onboard: 0,
+                capacity: 1,
+            })
+            .collect(),
+    }
+}
+
+/// Abstract shaft-assignment MDP aligned with the FEL dispatch boundary.
+///
+/// State is `(call_floor, car_0_floor, ..., car_n_floor)`. Action is the shaft
+/// assigned to the current call. Serving a call moves that car to the call floor
+/// and then samples the next call uniformly. The reward is negative travel
+/// distance, which gives a compact value-iteration baseline for dispatch.
+pub fn elevator_dispatch_mdp_model(floors: usize, shafts: usize) -> MDPSpec {
+    let floors = floors.max(2);
+    let shafts = shafts.max(1);
+    let num_states = dispatch_state_count(floors, shafts);
+    MDPSpec {
+        num_states,
+        num_actions: Box::new(move |_s| shafts),
+        outcomes: Box::new(move |s, a| {
+            let (call_floor, mut car_floors) = decode_dispatch_state(floors, shafts, s);
+            let action = a.min(shafts - 1);
+            let distance = car_floors[action].abs_diff(call_floor) as f64;
+            car_floors[action] = call_floor;
+            let reward = -distance;
+            let p = 1.0 / floors as f64;
+            (0..floors)
+                .map(|next_call| Outcome {
+                    prob: p,
+                    reward,
+                    next_state: encode_dispatch_state(floors, next_call, &car_floors),
+                })
+                .collect()
+        }),
+        is_terminal: None,
+        terminal_reward: None,
+        state_label: Some(Box::new(move |s| {
+            let (call, cars) = decode_dispatch_state(floors, shafts, s);
+            format!("call@{call};cars={cars:?}")
+        })),
+        action_label: Some(Box::new(|a| format!("shaft-{a}"))),
+    }
+}
+
+/// Solve the abstract dispatch MDP into a table policy usable by the FEL run.
+pub fn solve_elevator_dispatch_mdp_policy(cfg: &ElevatorConfig) -> ElevatorDispatchPolicy {
+    let floors = cfg.floors.max(2);
+    let shafts = cfg.shafts.max(1);
+    let state_count = dispatch_state_count(floors, shafts);
+    let result = value_iteration(
+        elevator_dispatch_mdp_model(floors, shafts),
+        VIOptions {
+            gamma: 0.85,
+            tol: 1e-8,
+            max_iter: 1500,
+            random_tie_break: false,
+            ..Default::default()
+        },
+    );
+    let mut policy = vec![0usize; state_count];
+    for (i, &a) in result.policy.iter().enumerate().take(state_count) {
+        policy[i] = if a < 0 {
+            0
+        } else {
+            (a as usize).min(shafts - 1)
+        };
+    }
+    ElevatorDispatchPolicy::MdpTable {
+        floors,
+        shafts,
+        policy,
+    }
+}
+
+/// Construct a POMDP/QMDP demand-belief policy for the FEL dispatcher.
+pub fn elevator_pomdp_belief_dispatch_policy(dispatch_margin: f64) -> ElevatorDispatchPolicy {
+    ElevatorDispatchPolicy::PomdpBelief { dispatch_margin }
+}
+
+/// Construct an online neural TD dispatch policy that learns during the FEL run.
+pub fn elevator_neural_td_dispatch_policy(
+    opts: &ElevatorNeuralTdDispatchOptions,
+) -> ElevatorDispatchPolicy {
+    let mut rng = SeededRandom::new(opts.seed);
+    let network = FeedForwardNetwork::random(
+        &RandomNetworkSpec {
+            input_dim: DISPATCH_FEATURE_DIM,
+            hidden_layers: opts.hidden_layers.clone(),
+            output_dim: 1,
+            hidden_activation: ActivationName::Tanh,
+            output_activation: ActivationName::Linear,
+            weight_scale: Some(0.01),
+        },
+        &mut rng,
+    );
+    ElevatorDispatchPolicy::NeuralTdScorer {
+        network,
+        learning_rate: opts.learning_rate,
+        gamma: opts.gamma,
+        updates: 0,
+        loss_history: Vec::new(),
+    }
+}
+
+/// Train a neural dispatch scorer to imitate the abstract MDP policy table.
+///
+/// This is intentionally an imitation bootstrap, not the final RL loop: it gives
+/// the FEL a working neural policy surface immediately, and the same decision
+/// trace can later be used for online TD or policy-gradient updates.
+pub fn train_elevator_neural_dispatch_policy(
+    cfg: &ElevatorConfig,
+    opts: &ElevatorNeuralDispatchTrainingOptions,
+) -> ElevatorNeuralDispatchTrainingResult {
+    let floors = cfg.floors.max(2);
+    let shafts = cfg.shafts.max(1);
+    let state_count = dispatch_state_count(floors, shafts);
+    let mdp_policy = solve_elevator_dispatch_mdp_policy(cfg);
+    let policy_table = match &mdp_policy {
+        ElevatorDispatchPolicy::MdpTable { policy, .. } => policy.clone(),
+        _ => unreachable!("solver always returns a table policy"),
+    };
+
+    let mut rng = SeededRandom::new(opts.seed);
+    let mut network = FeedForwardNetwork::random(
+        &RandomNetworkSpec {
+            input_dim: DISPATCH_FEATURE_DIM,
+            hidden_layers: opts.hidden_layers.clone(),
+            output_dim: 1,
+            hidden_activation: ActivationName::Tanh,
+            output_activation: ActivationName::Sigmoid,
+            weight_scale: None,
+        },
+        &mut rng,
+    );
+
+    let samples = state_count * shafts;
+    let mut loss_history = Vec::with_capacity(opts.epochs);
+    for _ in 0..opts.epochs {
+        let mut loss = 0.0;
+        for state in 0..state_count {
+            let obs = dispatch_observation_from_state(floors, shafts, state);
+            let target_action = policy_table[state].min(shafts - 1);
+            for action in 0..shafts {
+                let x = elevator_dispatch_features(&obs, action);
+                let y = if action == target_action { 1.0 } else { 0.0 };
+                loss += network.train_sample(&x, &[y], opts.learning_rate).loss;
+            }
+        }
+        loss_history.push(loss / samples.max(1) as f64);
+    }
+
+    ElevatorNeuralDispatchTrainingResult {
+        policy: ElevatorDispatchPolicy::NeuralScorer { network },
+        loss_history,
+        samples,
+        mdp_states: state_count,
+    }
+}
+
+/// Run the FEL elevator under baseline LOOK, abstract-MDP dispatch, and neural
+/// imitation dispatch, while also returning the canonical MDP/POMDP specs.
+pub fn run_fel_elevator_learning_suite(
+    cfg: &ElevatorConfig,
+    neural_opts: &ElevatorNeuralDispatchTrainingOptions,
+) -> Value {
+    let baseline = run_fel_elevator_with_policy(cfg, ElevatorDispatchPolicy::Look);
+    let mdp_policy = solve_elevator_dispatch_mdp_policy(cfg);
+    let mdp = run_fel_elevator_with_policy(cfg, mdp_policy);
+    let pomdp = run_fel_elevator_with_policy(cfg, elevator_pomdp_belief_dispatch_policy(0.0));
+    let neural_td = run_fel_elevator_with_policy(
+        cfg,
+        elevator_neural_td_dispatch_policy(&ElevatorNeuralTdDispatchOptions::default()),
+    );
+    let neural = train_elevator_neural_dispatch_policy(cfg, neural_opts);
+    let neural_loss_history = neural.loss_history.clone();
+    let neural_samples = neural.samples;
+    let neural_mdp_states = neural.mdp_states;
+    let neural_run = run_fel_elevator_with_policy(cfg, neural.policy);
+
+    json!({
+        "$schema": "des/fel-elevator-learning/v1",
+        "runs": {
+            "look": baseline,
+            "mdpDispatch": mdp,
+            "pomdpDispatch": pomdp,
+            "neuralTdDispatch": neural_td,
+            "neuralDispatch": neural_run,
+        },
+        "training": {
+            "neuralImitation": {
+                "lossHistory": neural_loss_history,
+                "samples": neural_samples,
+                "mdpStates": neural_mdp_states,
+            }
+        },
+        "planningSpecs": {
+            "mdp": elevator_mdp_spec(),
+            "pomdp": elevator_pomdp_spec(),
+        }
+    })
 }
 
 // ===========================================================================
@@ -793,7 +1816,9 @@ function normalizeFrame(fr){
   const it=[['floors',F],['shafts',shaftCount],['capacity/shaft',M.capacity],['arrival &lambda;',M.arrivalRate+' /s'],
     ['travel',M.travel+' s/floor'],['dwell',M.dwell+' s'],['horizon',M.horizon+' s'],
     ['FEL events',Number(M.events || 0).toLocaleString()],['arrivals',M.arrivals],['served',M.served],
-    ['mean wait',Number(M.meanWait || 0).toFixed(1)+' s']];
+    ['mean wait',Number(M.meanWait || 0).toFixed(1)+' s'],['dispatch',M.dispatchPolicy || 'look'],
+    ['claims',M.dispatchDecisions || 0],['belief updates',M.pomdpBeliefUpdates || 0],
+    ['online updates',M.onlineLearningUpdates || 0]];
   c.innerHTML=it.map(function(p){return '<span class="chip">'+p[0]+' <b>'+p[1]+'</b></span>';}).join('');
 })();
 
@@ -1000,6 +2025,7 @@ mod tests {
             arrival_rate: f64::NEG_INFINITY,
             horizon: 8.0,
             seed: 7,
+            dispatch_policy: ElevatorDispatchPolicy::Look,
         });
         assert_eq!(data["meta"]["floors"], 2);
         assert_eq!(data["meta"]["shafts"], 1);
@@ -1035,5 +2061,196 @@ mod tests {
             .expect("elevator POMDP solves");
         assert_eq!(art.kind, "pomdp");
         assert!(!art.frames.is_empty(), "POMDP produced belief frames");
+    }
+
+    #[test]
+    fn elevator_dispatch_mdp_policy_drives_fel_claims() {
+        let cfg = ElevatorConfig {
+            floors: 4,
+            shafts: 2,
+            horizon: 45.0,
+            seed: 19,
+            ..Default::default()
+        };
+        let policy = solve_elevator_dispatch_mdp_policy(&cfg);
+        let data = run_fel_elevator_with_policy(&cfg, policy);
+        assert_eq!(data["meta"]["dispatchPolicy"], "mdp-table");
+        assert!(
+            data["meta"]["dispatchDecisions"].as_u64().unwrap() > 0,
+            "MDP policy should claim calls"
+        );
+        assert!(
+            data["meta"]["served"].as_u64().unwrap() > 0,
+            "MDP-driven FEL should still serve passengers"
+        );
+        for decision in data["decisions"].as_array().unwrap() {
+            assert!(decision["car"].as_u64().unwrap() < cfg.shafts as u64);
+            assert!(decision["floor"].as_u64().unwrap() < cfg.floors as u64);
+        }
+    }
+
+    #[test]
+    fn elevator_neural_policy_trains_and_drives_fel_claims() {
+        let cfg = ElevatorConfig {
+            floors: 3,
+            shafts: 2,
+            horizon: 45.0,
+            seed: 23,
+            ..Default::default()
+        };
+        let trained = train_elevator_neural_dispatch_policy(
+            &cfg,
+            &ElevatorNeuralDispatchTrainingOptions {
+                epochs: 6,
+                learning_rate: 0.12,
+                hidden_layers: vec![6],
+                seed: 11,
+            },
+        );
+        assert_eq!(trained.mdp_states, 27);
+        assert_eq!(trained.samples, 54);
+        assert_eq!(trained.loss_history.len(), 6);
+        assert!(trained.loss_history.iter().all(|loss| loss.is_finite()));
+
+        let data = run_fel_elevator_with_policy(&cfg, trained.policy);
+        assert_eq!(data["meta"]["dispatchPolicy"], "neural-scorer");
+        assert!(
+            data["meta"]["dispatchDecisions"].as_u64().unwrap() > 0,
+            "neural policy should claim calls"
+        );
+        assert!(
+            data["meta"]["served"].as_u64().unwrap() > 0,
+            "neural-driven FEL should still serve passengers"
+        );
+    }
+
+    #[test]
+    fn elevator_pomdp_policy_updates_beliefs_and_drives_fel_claims() {
+        let cfg = ElevatorConfig {
+            floors: 4,
+            shafts: 2,
+            horizon: 45.0,
+            seed: 31,
+            ..Default::default()
+        };
+        let data = run_fel_elevator_with_policy(&cfg, elevator_pomdp_belief_dispatch_policy(0.0));
+        assert_eq!(data["meta"]["dispatchPolicy"], "pomdp-belief");
+        assert!(
+            data["meta"]["pomdpBeliefUpdates"].as_u64().unwrap() > 0,
+            "POMDP policy should update noisy floor-demand beliefs"
+        );
+        assert!(
+            data["meta"]["dispatchDecisions"].as_u64().unwrap() > 0,
+            "POMDP policy should claim calls after belief updates"
+        );
+        assert!(
+            data["meta"]["served"].as_u64().unwrap() > 0,
+            "POMDP-driven FEL should still serve passengers"
+        );
+        let belief = &data["pomdpBeliefs"].as_array().unwrap()[0]["belief"];
+        let total = belief["empty"].as_f64().unwrap()
+            + belief["waiting"].as_f64().unwrap()
+            + belief["crowded"].as_f64().unwrap();
+        assert!((total - 1.0).abs() < 1e-9, "belief should normalize");
+    }
+
+    #[test]
+    fn elevator_neural_td_policy_learns_during_fel_run() {
+        let cfg = ElevatorConfig {
+            floors: 4,
+            shafts: 2,
+            horizon: 45.0,
+            seed: 37,
+            ..Default::default()
+        };
+        let data = run_fel_elevator_with_policy(
+            &cfg,
+            elevator_neural_td_dispatch_policy(&ElevatorNeuralTdDispatchOptions {
+                learning_rate: 0.04,
+                gamma: 0.80,
+                hidden_layers: vec![6],
+                seed: 19,
+            }),
+        );
+        assert_eq!(data["meta"]["dispatchPolicy"], "neural-td");
+        assert!(
+            data["meta"]["onlineLearningUpdates"].as_u64().unwrap() > 0,
+            "online neural TD policy should update during dispatch"
+        );
+        assert!(
+            data["meta"]["onlineLearningLossLast"]
+                .as_f64()
+                .unwrap()
+                .is_finite(),
+            "online neural TD loss should be finite"
+        );
+        assert!(
+            data["meta"]["served"].as_u64().unwrap() > 0,
+            "online neural TD FEL should still serve passengers"
+        );
+    }
+
+    #[test]
+    fn elevator_learning_suite_returns_runs_training_and_specs() {
+        let cfg = ElevatorConfig {
+            floors: 3,
+            shafts: 2,
+            horizon: 30.0,
+            seed: 29,
+            ..Default::default()
+        };
+        let suite = run_fel_elevator_learning_suite(
+            &cfg,
+            &ElevatorNeuralDispatchTrainingOptions {
+                epochs: 3,
+                learning_rate: 0.12,
+                hidden_layers: vec![5],
+                seed: 13,
+            },
+        );
+        assert_eq!(suite["$schema"], "des/fel-elevator-learning/v1");
+        assert_eq!(
+            suite["runs"]["look"]["meta"]["dispatchPolicy"], "look",
+            "suite should include baseline LOOK run"
+        );
+        assert_eq!(
+            suite["runs"]["mdpDispatch"]["meta"]["dispatchPolicy"], "mdp-table",
+            "suite should include MDP-driven run"
+        );
+        assert_eq!(
+            suite["runs"]["pomdpDispatch"]["meta"]["dispatchPolicy"], "pomdp-belief",
+            "suite should include POMDP-driven run"
+        );
+        assert!(
+            suite["runs"]["pomdpDispatch"]["meta"]["pomdpBeliefUpdates"]
+                .as_u64()
+                .unwrap()
+                > 0,
+            "suite POMDP run should carry belief updates"
+        );
+        assert_eq!(
+            suite["runs"]["neuralTdDispatch"]["meta"]["dispatchPolicy"], "neural-td",
+            "suite should include online neural TD run"
+        );
+        assert!(
+            suite["runs"]["neuralTdDispatch"]["meta"]["onlineLearningUpdates"]
+                .as_u64()
+                .unwrap()
+                > 0,
+            "suite neural TD run should learn online"
+        );
+        assert_eq!(
+            suite["runs"]["neuralDispatch"]["meta"]["dispatchPolicy"], "neural-scorer",
+            "suite should include neural-driven run"
+        );
+        assert_eq!(suite["training"]["neuralImitation"]["samples"], 54);
+        assert_eq!(
+            suite["planningSpecs"]["mdp"]["$schema"], "des/mdp/v1",
+            "suite should expose canonical MDP spec"
+        );
+        assert_eq!(
+            suite["planningSpecs"]["pomdp"]["$schema"], "des/pomdp/v1",
+            "suite should expose canonical POMDP spec"
+        );
     }
 }

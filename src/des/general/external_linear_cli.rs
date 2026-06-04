@@ -7,6 +7,7 @@
 //! solver-specific command lines and parsers still live in
 //! `scripts/linear_cli_reference.py` as a compatibility bridge.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1327,13 +1328,13 @@ pub fn solve_lp_with_external_cli(
     if should_use_native_highs_cli(ExternalLinearCliKind::Lp, opts) {
         return solve_lp_with_native_highs_cli(problem, opts);
     }
-    if should_use_native_glpk_cli(opts) {
+    if should_use_native_glpk_cli(ExternalLinearCliKind::Lp, opts) {
         return solve_lp_with_native_glpk_cli(problem, opts);
     }
     if should_use_native_scip_cli(ExternalLinearCliKind::Lp, opts) {
         return solve_lp_with_native_scip_cli(problem, opts);
     }
-    if should_use_native_cbc_cli(opts) {
+    if should_use_native_cbc_cli(ExternalLinearCliKind::Lp, opts) {
         return solve_lp_with_native_cbc_cli(problem, opts);
     }
     if should_use_native_clp_cli(opts) {
@@ -1360,13 +1361,13 @@ pub fn solve_ipmip_with_external_cli(
     if should_use_native_highs_cli(ExternalLinearCliKind::Mip, opts) {
         return solve_ipmip_with_native_highs_cli(problem, opts);
     }
-    if should_use_native_glpk_cli(opts) {
+    if should_use_native_glpk_cli(ExternalLinearCliKind::Mip, opts) {
         return solve_ipmip_with_native_glpk_cli(problem, opts);
     }
     if should_use_native_scip_cli(ExternalLinearCliKind::Mip, opts) {
         return solve_ipmip_with_native_scip_cli(problem, opts);
     }
-    if should_use_native_cbc_cli(opts) {
+    if should_use_native_cbc_cli(ExternalLinearCliKind::Mip, opts) {
         return solve_ipmip_with_native_cbc_cli(problem, opts);
     }
     if should_use_native_lp_solve_cli(ExternalLinearCliKind::Mip, opts) {
@@ -2201,7 +2202,7 @@ fn should_use_native_highs_cli(
         || opts.branch_rule.is_some()
         || opts.branch_priorities.is_some()
         || opts.node_selection.is_some()
-        || opts.mip_start.is_some()
+        || (kind == ExternalLinearCliKind::Lp && opts.mip_start.is_some())
     {
         return false;
     }
@@ -2251,29 +2252,49 @@ fn solve_ipmip_with_native_highs_cli(
     )
 }
 
-fn should_use_native_glpk_cli(opts: &ExternalLinearCliOptions) -> bool {
-    opts.solver == ExternalLinearCliSolver::Glpk
-        && opts.script_path.is_none()
-        && opts.lp_algorithm.is_none()
-        && opts.max_nodes.is_none()
-        && opts.node_limit.is_none()
-        && opts.solution_limit.is_none()
-        && opts.solution_pool_size.is_none()
-        && opts.relative_gap.is_none()
-        && opts.absolute_gap.is_none()
-        && opts.objective_limit.is_none()
-        && opts.primal_feasibility_tolerance.is_none()
-        && opts.dual_feasibility_tolerance.is_none()
-        && opts.integer_feasibility_tolerance.is_none()
-        && opts.threads.is_none()
-        && opts.random_seed.is_none()
-        && opts.presolve.is_none()
-        && opts.cuts.is_none()
-        && opts.heuristics.is_none()
-        && opts.branch_rule.is_none()
-        && opts.branch_priorities.is_none()
-        && opts.node_selection.is_none()
-        && opts.mip_start.is_none()
+fn should_use_native_glpk_cli(
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Glpk
+        || opts.script_path.is_some()
+        || opts.solution_limit.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.absolute_gap.is_some()
+        || opts.objective_limit.is_some()
+        || opts.primal_feasibility_tolerance.is_some()
+        || opts.dual_feasibility_tolerance.is_some()
+        || opts.integer_feasibility_tolerance.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.mip_start.is_some()
+        || opts.random_seed.is_some_and(|seed| seed > i32::MAX as u64)
+        || matches!(opts.presolve, Some(ExternalLinearCliPresolve::Auto))
+    {
+        return false;
+    }
+
+    match kind {
+        ExternalLinearCliKind::Lp => {
+            opts.max_nodes.is_none()
+                && opts.node_limit.is_none()
+                && opts.relative_gap.is_none()
+                && opts.threads.is_none()
+                && opts.cuts.is_none()
+                && opts.heuristics.is_none()
+                && opts.branch_rule.is_none()
+                && opts.node_selection.is_none()
+        }
+        ExternalLinearCliKind::Mip => {
+            opts.lp_algorithm.is_none()
+                && opts.max_nodes.is_none()
+                && opts.node_limit.is_none()
+                && opts.heuristics.is_none()
+                && !matches!(
+                    opts.cuts,
+                    Some(ExternalLinearCliMipSwitch::Auto | ExternalLinearCliMipSwitch::Off)
+                )
+        }
+    }
 }
 
 fn solve_lp_with_native_glpk_cli(
@@ -2327,12 +2348,11 @@ fn should_use_native_scip_cli(
     if opts.solver != ExternalLinearCliSolver::Scip
         || opts.script_path.is_some()
         || opts.lp_algorithm.is_some()
-        || opts.solution_pool_size.is_some()
         || opts.integer_feasibility_tolerance.is_some()
         || opts.branch_rule.is_some()
-        || opts.branch_priorities.is_some()
+        || (kind == ExternalLinearCliKind::Lp && opts.branch_priorities.is_some())
         || opts.node_selection.is_some()
-        || opts.mip_start.is_some()
+        || (kind == ExternalLinearCliKind::Lp && opts.mip_start.is_some())
         || matches!(opts.presolve, Some(ExternalLinearCliPresolve::Auto))
         || matches!(opts.cuts, Some(ExternalLinearCliMipSwitch::Auto))
         || !matches!(
@@ -2347,6 +2367,7 @@ fn should_use_native_scip_cli(
         return opts.max_nodes.is_none()
             && opts.node_limit.is_none()
             && opts.solution_limit.is_none()
+            && opts.solution_pool_size.is_none()
             && opts.relative_gap.is_none()
             && opts.absolute_gap.is_none()
             && opts.objective_limit.is_none()
@@ -2380,6 +2401,7 @@ fn solve_lp_with_native_scip_cli(
         eq_rhs,
         problem.lb.as_deref(),
         problem.ub.as_deref(),
+        None,
         &problem.c,
         opts,
     )
@@ -2389,6 +2411,12 @@ fn solve_ipmip_with_native_scip_cli(
     problem: &IPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if opts.solution_pool_size.is_some() {
+        return solve_native_mip_solution_pool_cli_model(
+            ipmip_problem_to_plain_linear_model(problem),
+            opts,
+        );
+    }
     let model_text = match opts.model_format {
         ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
         ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
@@ -2404,6 +2432,7 @@ fn solve_ipmip_with_native_scip_cli(
         &[],
         None,
         None,
+        Some(&problem.integer_vars),
         &problem.c,
         opts,
     )
@@ -2420,6 +2449,7 @@ fn solve_native_scip_cli_model(
     eq_rhs: &[f64],
     lower_bounds: Option<&[Option<f64>]>,
     upper_bounds: Option<&[Option<f64>]>,
+    integer_vars: Option<&[bool]>,
     objective_coefficients: &[f64],
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
@@ -2442,7 +2472,32 @@ fn solve_native_scip_cli_model(
     };
     let model_path = native_scip_temp_path("model", extension);
     let solution_path = native_scip_temp_path("solution", "sol");
-    let cleanup_paths = vec![model_path.clone(), solution_path.clone()];
+    let start_path = (kind == ExternalLinearCliKind::Mip && opts.mip_start.is_some())
+        .then(|| native_scip_temp_path("start", "sol"));
+    let mut cleanup_paths = vec![model_path.clone(), solution_path.clone()];
+    if let Some(start_path) = &start_path {
+        cleanup_paths.push(start_path.clone());
+    }
+    let active_branch_priorities = if kind == ExternalLinearCliKind::Mip {
+        match active_branch_priorities(
+            opts.branch_priorities.as_deref(),
+            integer_vars,
+            variable_count,
+        ) {
+            Ok(priorities) => priorities,
+            Err(message) => {
+                cleanup_native_scip_temp_files(&cleanup_paths);
+                return external_cli_failure(
+                    ExternalLinearCliStatus::NumericalError,
+                    bridge_solver,
+                    message,
+                    elapsed_ms(t0),
+                );
+            }
+        }
+    } else {
+        Vec::new()
+    };
 
     if let Err(err) = fs::write(&model_path, model_text) {
         cleanup_native_scip_temp_files(&cleanup_paths);
@@ -2457,6 +2512,71 @@ fn solve_native_scip_cli_model(
         );
     }
 
+    let mip_start_objective = if kind == ExternalLinearCliKind::Mip {
+        match opts.mip_start.as_deref() {
+            Some(mip_start) => {
+                if mip_start.len() != variable_count {
+                    cleanup_native_scip_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        format!(
+                            "mip_start length {} does not match variable count {}",
+                            mip_start.len(),
+                            variable_count
+                        ),
+                        elapsed_ms(t0),
+                    );
+                }
+                if mip_start.iter().any(|value| !value.is_finite()) {
+                    cleanup_native_scip_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "mip_start values must be finite".to_string(),
+                        elapsed_ms(t0),
+                    );
+                }
+                let objective = dot_f64(objective_coefficients, mip_start);
+                if !objective.is_finite() {
+                    cleanup_native_scip_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "mip_start objective must be finite".to_string(),
+                        elapsed_ms(t0),
+                    );
+                }
+                let Some(start_path) = &start_path else {
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "internal SCIP MIP-start path was unavailable".to_string(),
+                        elapsed_ms(t0),
+                    );
+                };
+                if let Err(err) =
+                    fs::write(start_path, native_scip_mip_start_text(mip_start, objective))
+                {
+                    cleanup_native_scip_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        format!(
+                            "failed to write SCIP MIP-start file '{}': {err}",
+                            start_path.display()
+                        ),
+                        elapsed_ms(t0),
+                    );
+                }
+                Some(objective)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let mut command = Command::new(&command_path);
     add_native_scip_option_commands(&mut command, kind, opts);
     if kind == ExternalLinearCliKind::Lp {
@@ -2470,7 +2590,22 @@ fn solve_native_scip_cli_model(
     }
     command
         .arg("-c")
-        .arg(format!("read {}", model_path.display()))
+        .arg(format!("read {}", model_path.display()));
+    for (idx, priority) in &active_branch_priorities {
+        command
+            .arg("-c")
+            .arg("set branching priority")
+            .arg("-c")
+            .arg(format!("x{idx}"))
+            .arg("-c")
+            .arg(priority.to_string());
+    }
+    if let Some(start_path) = &start_path {
+        command
+            .arg("-c")
+            .arg(format!("read {}", start_path.display()));
+    }
+    command
         .arg("-c")
         .arg(format!(
             "set limits time {:.17}",
@@ -2562,6 +2697,15 @@ fn solve_native_scip_cli_model(
 
     let objective = dot_f64(objective_coefficients, &parsed.x);
     let quality = parse_scip_mip_quality(kind, objective, &stdout, &stderr);
+    let (mip_start_accepted, mip_start_objective) = parse_scip_mip_start_feedback(
+        kind,
+        opts.mip_start.as_deref(),
+        mip_start_objective,
+        &stdout,
+        &stderr,
+    );
+    let (branch_priorities_accepted, branch_priority_count) =
+        parse_scip_branch_priority_feedback(kind, active_branch_priorities.len(), &stdout, &stderr);
     let certificate = (kind == ExternalLinearCliKind::Lp).then(|| {
         parse_scip_lp_certificate_fields(
             &stdout,
@@ -2613,11 +2757,11 @@ fn solve_native_scip_cli_model(
             })
             .flatten(),
         branch_rule: None,
-        branch_priorities_accepted: None,
-        branch_priority_count: None,
+        branch_priorities_accepted,
+        branch_priority_count,
         node_selection: None,
-        mip_start_accepted: None,
-        mip_start_objective: None,
+        mip_start_accepted,
+        mip_start_objective,
         dual_ub: certificate
             .as_ref()
             .and_then(|fields| fields.dual_ub.clone()),
@@ -2729,29 +2873,39 @@ fn add_native_scip_option_commands(
     }
 }
 
-fn should_use_native_cbc_cli(opts: &ExternalLinearCliOptions) -> bool {
-    opts.solver == ExternalLinearCliSolver::Cbc
-        && opts.script_path.is_none()
-        && opts.lp_algorithm.is_none()
-        && opts.max_nodes.is_none()
-        && opts.node_limit.is_none()
-        && opts.solution_limit.is_none()
-        && opts.solution_pool_size.is_none()
-        && opts.relative_gap.is_none()
-        && opts.absolute_gap.is_none()
-        && opts.objective_limit.is_none()
-        && opts.primal_feasibility_tolerance.is_none()
-        && opts.dual_feasibility_tolerance.is_none()
-        && opts.integer_feasibility_tolerance.is_none()
-        && opts.threads.is_none()
-        && opts.random_seed.is_none()
-        && opts.presolve.is_none()
-        && opts.cuts.is_none()
-        && opts.heuristics.is_none()
-        && opts.branch_rule.is_none()
-        && opts.branch_priorities.is_none()
-        && opts.node_selection.is_none()
-        && opts.mip_start.is_none()
+fn should_use_native_cbc_cli(kind: ExternalLinearCliKind, opts: &ExternalLinearCliOptions) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Cbc
+        || opts.script_path.is_some()
+        || opts.lp_algorithm.is_some()
+        || opts.objective_limit.is_some()
+        || opts.branch_rule.is_some()
+        || opts.random_seed.is_some_and(|seed| seed > i32::MAX as u64)
+        || matches!(opts.presolve, Some(ExternalLinearCliPresolve::Auto))
+        || matches!(opts.cuts, Some(ExternalLinearCliMipSwitch::Auto))
+        || matches!(opts.heuristics, Some(ExternalLinearCliMipSwitch::Auto))
+    {
+        return false;
+    }
+
+    if kind == ExternalLinearCliKind::Lp {
+        return opts.max_nodes.is_none()
+            && opts.node_limit.is_none()
+            && opts.solution_limit.is_none()
+            && opts.solution_pool_size.is_none()
+            && opts.relative_gap.is_none()
+            && opts.absolute_gap.is_none()
+            && opts.integer_feasibility_tolerance.is_none()
+            && opts.threads.is_none()
+            && opts.random_seed.is_none()
+            && opts.presolve.is_none()
+            && opts.cuts.is_none()
+            && opts.heuristics.is_none()
+            && opts.branch_priorities.is_none()
+            && opts.node_selection.is_none()
+            && opts.mip_start.is_none();
+    }
+
+    true
 }
 
 fn solve_native_plain_cli_json_direct(
@@ -2761,9 +2915,9 @@ fn solve_native_plain_cli_json_direct(
     t0: Instant,
 ) -> Option<ExternalLinearCliSolution> {
     let use_highs = should_use_native_highs_cli(kind, opts);
-    let use_glpk = should_use_native_glpk_cli(opts);
+    let use_glpk = should_use_native_glpk_cli(kind, opts);
     let use_scip = should_use_native_scip_cli(kind, opts);
-    let use_cbc = should_use_native_cbc_cli(opts);
+    let use_cbc = should_use_native_cbc_cli(kind, opts);
     let use_clp = kind == ExternalLinearCliKind::Lp && should_use_native_clp_cli(opts);
     let use_soplex = kind == ExternalLinearCliKind::Lp && should_use_native_soplex_cli(opts);
     let use_lp_solve = should_use_native_lp_solve_cli(kind, opts);
@@ -2785,6 +2939,16 @@ fn solve_native_plain_cli_json_direct(
             ));
         }
     };
+
+    if kind == ExternalLinearCliKind::Mip
+        && opts.solution_pool_size.is_some()
+        && matches!(
+            opts.solver,
+            ExternalLinearCliSolver::Scip | ExternalLinearCliSolver::Cbc
+        )
+    {
+        return Some(solve_native_mip_solution_pool_cli_model(model, opts));
+    }
 
     let include_objsense = opts.solver != ExternalLinearCliSolver::Glpk;
     let model_text = plain_linear_model_to_string(&model, opts.model_format, include_objsense);
@@ -2819,6 +2983,7 @@ fn solve_native_plain_cli_json_direct(
             &model.eq_rhs,
             Some(&model.lbs),
             Some(&model.ubs),
+            Some(&model.integer_vars),
             &model.c,
             opts,
         ),
@@ -2829,6 +2994,7 @@ fn solve_native_plain_cli_json_direct(
             model.c.len(),
             model.le_rows.len(),
             model.eq_rows.len(),
+            Some(&model.integer_vars),
             &model.c,
             opts,
         ),
@@ -3018,6 +3184,385 @@ fn plain_linear_model_to_lpsolve_lp_string(model: &PlainLinearCliModel) -> Strin
         &model.ubs,
         &model.integer_vars,
     )
+}
+
+fn ipmip_problem_to_plain_linear_model(problem: &IPMIPProblem) -> PlainLinearCliModel {
+    let n = problem.c.len();
+    let (le_rows, le_rhs) = ipmip_le_rows_with_lazy(problem);
+    PlainLinearCliModel {
+        sense: problem.sense,
+        c: problem.c.clone(),
+        le_rows,
+        le_rhs,
+        eq_rows: Vec::new(),
+        eq_rhs: Vec::new(),
+        lbs: vec![Some(0.0); n],
+        ubs: problem
+            .ub
+            .as_ref()
+            .map(|upper| upper.iter().copied().map(Some).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![None; n]),
+        integer_vars: problem.integer_vars.clone(),
+    }
+}
+
+fn solve_native_mip_solution_pool_cli_model(
+    mut working: PlainLinearCliModel,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = format!("{}:cli", opts.solver.as_str());
+    let solution_pool_size = opts.solution_pool_size.unwrap_or(1).max(1);
+    let original_n = working.c.len();
+    let original_c = working.c.clone();
+    let integer_indices = solution_pool_integer_indices(&working.integer_vars);
+    if let Some(message) =
+        validate_solution_pool_bounds(&working.lbs, &working.ubs, &integer_indices)
+    {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            message,
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut solutions = Vec::new();
+    let mut seen = HashSet::new();
+    let mut exhausted = false;
+    let mut message = String::new();
+    let mut overall_status = ExternalLinearCliStatus::Optimal;
+    let mut last_result = None;
+
+    for pool_idx in 0..solution_pool_size {
+        let mut stage_opts = opts.clone();
+        stage_opts.solution_pool_size = None;
+        if pool_idx > 0 {
+            stage_opts.mip_start = None;
+        }
+        if let Some(branch_priorities) = opts.branch_priorities.as_deref() {
+            let mut working_priorities = branch_priorities
+                .iter()
+                .copied()
+                .take(working.c.len())
+                .collect::<Vec<_>>();
+            working_priorities.resize(working.c.len(), 0);
+            stage_opts.branch_priorities = Some(working_priorities);
+        }
+
+        let result = solve_native_mip_solution_pool_stage(&working, &stage_opts);
+        if matches!(
+            result.status,
+            ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+        ) {
+            exhausted = result.status == ExternalLinearCliStatus::Infeasible;
+            message = if exhausted {
+                "pool exhausted by no-good cuts".to_string()
+            } else {
+                result.message.clone()
+            };
+            last_result = Some(result);
+            break;
+        }
+        if !matches!(
+            result.status,
+            ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+        ) {
+            overall_status = if solutions.is_empty() {
+                result.status
+            } else {
+                ExternalLinearCliStatus::Feasible
+            };
+            message = result.message.clone();
+            last_result = Some(result);
+            break;
+        }
+        if result.status == ExternalLinearCliStatus::Feasible {
+            overall_status = ExternalLinearCliStatus::Feasible;
+        }
+        if result.x.len() < original_n {
+            return external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                format!(
+                    "solution pool stage returned {} values for {original_n} original variables",
+                    result.x.len()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+
+        let x = result.x[..original_n].to_vec();
+        let key = solution_pool_assignment_key(&x, &integer_indices);
+        if !seen.insert(key) {
+            overall_status = ExternalLinearCliStatus::Feasible;
+            message = "pool search stopped after duplicate integer assignment".to_string();
+            last_result = Some(result);
+            break;
+        }
+
+        let objective = dot_f64(&original_c, &x);
+        solutions.push(ExternalLinearCliPoolMember {
+            x: x.clone(),
+            objective,
+        });
+        if let Some(cut_error) = add_solution_pool_no_good_cut(&mut working, &integer_indices, &x) {
+            exhausted = true;
+            message = cut_error;
+            last_result = Some(result);
+            break;
+        }
+        last_result = Some(result);
+    }
+
+    if solutions.len() as u64 == solution_pool_size && !exhausted {
+        message = "pool reached solution_pool_size".to_string();
+    }
+
+    let last_result = last_result.unwrap_or_else(|| {
+        external_cli_failure(
+            overall_status,
+            bridge_solver.clone(),
+            message.clone(),
+            elapsed_ms(t0),
+        )
+    });
+    if solutions.is_empty() {
+        let mut failure = external_cli_failure(
+            if exhausted {
+                ExternalLinearCliStatus::Infeasible
+            } else {
+                overall_status
+            },
+            bridge_solver,
+            message,
+            elapsed_ms(t0),
+        );
+        failure.solver_version = last_result.solver_version;
+        failure.solutions = Some(Vec::new());
+        failure.solution_pool_size = Some(solution_pool_size);
+        failure.exhausted = Some(exhausted);
+        return failure;
+    }
+
+    let first = solutions[0].clone();
+    ExternalLinearCliSolution {
+        status: overall_status,
+        solver: bridge_solver,
+        solver_version: last_result.solver_version,
+        x: first.x,
+        objective: Some(first.objective),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: Some(solution_pool_size),
+        solutions: Some(solutions),
+        exhausted: Some(exhausted),
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: last_result.primal_feasibility_tolerance,
+        dual_feasibility_tolerance: last_result.dual_feasibility_tolerance,
+        integer_feasibility_tolerance: last_result.integer_feasibility_tolerance,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: last_result.branch_priorities_accepted,
+        branch_priority_count: last_result.branch_priority_count,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
+        elapsed_ms: elapsed_ms(t0),
+        message,
+    }
+}
+
+fn solve_native_mip_solution_pool_stage(
+    model: &PlainLinearCliModel,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = plain_linear_model_to_string(model, opts.model_format, true);
+    match opts.solver {
+        ExternalLinearCliSolver::Scip => solve_native_scip_cli_model(
+            ExternalLinearCliKind::Mip,
+            &model_text,
+            model.c.len(),
+            model.sense,
+            &model.le_rows,
+            &model.le_rhs,
+            &model.eq_rows,
+            &model.eq_rhs,
+            Some(&model.lbs),
+            Some(&model.ubs),
+            Some(&model.integer_vars),
+            &model.c,
+            opts,
+        ),
+        ExternalLinearCliSolver::Cbc => solve_native_cbc_cli_model(
+            ExternalLinearCliKind::Mip,
+            model.sense,
+            &model_text,
+            model.c.len(),
+            model.le_rows.len(),
+            model.eq_rows.len(),
+            Some(&model.integer_vars),
+            &model.c,
+            opts,
+        ),
+        solver => external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            format!("{}:cli", solver.as_str()),
+            "native solution pool is only implemented for scip and cbc".to_string(),
+            0.0,
+        ),
+    }
+}
+
+fn solution_pool_integer_indices(integer_vars: &[bool]) -> Vec<usize> {
+    integer_vars
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, is_integer)| is_integer.then_some(idx))
+        .collect()
+}
+
+fn validate_solution_pool_bounds(
+    lbs: &[Option<f64>],
+    ubs: &[Option<f64>],
+    integer_indices: &[usize],
+) -> Option<String> {
+    if integer_indices.is_empty() {
+        return Some("solution pool requires at least one integer variable".to_string());
+    }
+    for &idx in integer_indices {
+        let lb = lbs.get(idx).copied().flatten().unwrap_or(0.0);
+        let Some(ub) = ubs.get(idx).copied().flatten() else {
+            return Some(format!(
+                "solution pool requires finite upper bound for integer variable x{idx}"
+            ));
+        };
+        if !lb.is_finite() {
+            return Some(format!(
+                "solution pool requires finite lower bound for integer variable x{idx}"
+            ));
+        }
+        if !ub.is_finite() {
+            return Some(format!(
+                "solution pool requires finite upper bound for integer variable x{idx}"
+            ));
+        }
+        if (lb - lb.round()).abs() > 1.0e-9 || (ub - ub.round()).abs() > 1.0e-9 {
+            return Some(format!(
+                "solution pool requires integral bounds for integer variable x{idx}"
+            ));
+        }
+    }
+    None
+}
+
+fn solution_pool_assignment_key(x: &[f64], integer_indices: &[usize]) -> Vec<i64> {
+    integer_indices
+        .iter()
+        .map(|&idx| x[idx].round() as i64)
+        .collect()
+}
+
+fn add_solution_pool_no_good_cut(
+    working: &mut PlainLinearCliModel,
+    integer_indices: &[usize],
+    assignment: &[f64],
+) -> Option<String> {
+    let n = working.c.len();
+    if working.lbs.len() != n || working.ubs.len() != n || working.integer_vars.len() != n {
+        return Some("solution pool no-good cut saw inconsistent working model dimensions".into());
+    }
+    if working
+        .le_rows
+        .iter()
+        .chain(&working.eq_rows)
+        .any(|row| row.len() != n)
+    {
+        return Some("solution pool no-good cut saw inconsistent working row dimensions".into());
+    }
+
+    let mut deviation_vars = Vec::new();
+    for &idx in integer_indices {
+        if idx >= assignment.len() {
+            return Some(format!(
+                "solution pool assignment is missing integer variable x{idx}"
+            ));
+        }
+        let value = assignment[idx].round();
+        let lb = working.lbs[idx].unwrap_or(0.0);
+        let Some(ub) = working.ubs[idx] else {
+            return Some(format!(
+                "solution pool requires finite upper bound for integer variable x{idx}"
+            ));
+        };
+        if value < lb - 1.0e-9 || value > ub + 1.0e-9 {
+            return Some(format!(
+                "solution pool assignment for x{idx} is outside its bounds"
+            ));
+        }
+
+        if value > lb + 1.0e-9 {
+            let deviation = append_solution_pool_deviation_var(working);
+            let mut row = vec![0.0; working.c.len()];
+            row[idx] = 1.0;
+            row[deviation] = ub - value + 1.0;
+            working.le_rows.push(row);
+            working.le_rhs.push(ub);
+            deviation_vars.push(deviation);
+        }
+
+        if value < ub - 1.0e-9 {
+            let deviation = append_solution_pool_deviation_var(working);
+            let mut row = vec![0.0; working.c.len()];
+            row[idx] = -1.0;
+            row[deviation] = value + 1.0 - lb;
+            working.le_rows.push(row);
+            working.le_rhs.push(-lb);
+            deviation_vars.push(deviation);
+        }
+    }
+
+    if deviation_vars.is_empty() {
+        return Some(
+            "solution pool could not create a no-good cut for a singleton integer domain"
+                .to_string(),
+        );
+    }
+
+    let mut row = vec![0.0; working.c.len()];
+    for deviation in deviation_vars {
+        row[deviation] = -1.0;
+    }
+    working.le_rows.push(row);
+    working.le_rhs.push(-1.0);
+    None
+}
+
+fn append_solution_pool_deviation_var(working: &mut PlainLinearCliModel) -> usize {
+    let deviation = working.c.len();
+    working.c.push(0.0);
+    working.lbs.push(Some(0.0));
+    working.ubs.push(Some(1.0));
+    working.integer_vars.push(true);
+    for row in working.le_rows.iter_mut().chain(&mut working.eq_rows) {
+        row.push(0.0);
+    }
+    deviation
 }
 
 fn parse_cli_sense(value: Option<&Value>) -> Result<Sense, String> {
@@ -3339,6 +3884,7 @@ fn solve_lp_with_native_cbc_cli(
         problem.c.len(),
         le_count,
         eq_count,
+        None,
         &problem.c,
         opts,
     )
@@ -3348,6 +3894,12 @@ fn solve_ipmip_with_native_cbc_cli(
     problem: &IPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if opts.solution_pool_size.is_some() {
+        return solve_native_mip_solution_pool_cli_model(
+            ipmip_problem_to_plain_linear_model(problem),
+            opts,
+        );
+    }
     let model_text = match opts.model_format {
         ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
         ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
@@ -3359,6 +3911,7 @@ fn solve_ipmip_with_native_cbc_cli(
         problem.c.len(),
         ipmip_total_le_row_count(problem),
         0,
+        Some(&problem.integer_vars),
         &problem.c,
         opts,
     )
@@ -3707,6 +4260,7 @@ fn solve_native_cbc_cli_model(
     variable_count: usize,
     le_count: usize,
     eq_count: usize,
+    integer_vars: Option<&[bool]>,
     objective_coefficients: &[f64],
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
@@ -3730,11 +4284,40 @@ fn solve_native_cbc_cli_model(
     let model_path = native_cbc_temp_path("model", extension);
     let solution_path = native_cbc_temp_path("solution", "sol");
     let basis_path = native_cbc_temp_path("basis", "bas");
-    let cleanup_paths = vec![
+    let start_path = (kind == ExternalLinearCliKind::Mip && opts.mip_start.is_some())
+        .then(|| native_cbc_temp_path("start", "sol"));
+    let active_branch_priorities = if kind == ExternalLinearCliKind::Mip {
+        match active_branch_priorities(
+            opts.branch_priorities.as_deref(),
+            integer_vars,
+            variable_count,
+        ) {
+            Ok(priorities) => priorities,
+            Err(message) => {
+                return external_cli_failure(
+                    ExternalLinearCliStatus::NumericalError,
+                    bridge_solver,
+                    message,
+                    elapsed_ms(t0),
+                );
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let priority_path =
+        (!active_branch_priorities.is_empty()).then(|| native_cbc_temp_path("priority", "csv"));
+    let mut cleanup_paths = vec![
         model_path.clone(),
         solution_path.clone(),
         basis_path.clone(),
     ];
+    if let Some(start_path) = &start_path {
+        cleanup_paths.push(start_path.clone());
+    }
+    if let Some(priority_path) = &priority_path {
+        cleanup_paths.push(priority_path.clone());
+    }
 
     if let Err(err) = fs::write(&model_path, model_text) {
         cleanup_native_cbc_temp_files(&cleanup_paths);
@@ -3748,6 +4331,86 @@ fn solve_native_cbc_cli_model(
             elapsed_ms(t0),
         );
     }
+    if let Some(priority_path) = &priority_path {
+        if let Err(err) = fs::write(
+            priority_path,
+            native_cbc_branch_priorities_text(&active_branch_priorities),
+        ) {
+            cleanup_native_cbc_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                format!(
+                    "failed to write CBC branch-priority file '{}': {err}",
+                    priority_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    }
+
+    let mip_start_objective = if kind == ExternalLinearCliKind::Mip {
+        match opts.mip_start.as_deref() {
+            Some(mip_start) => {
+                if mip_start.len() != variable_count {
+                    cleanup_native_cbc_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        format!(
+                            "mip_start length {} does not match variable count {}",
+                            mip_start.len(),
+                            variable_count
+                        ),
+                        elapsed_ms(t0),
+                    );
+                }
+                if mip_start.iter().any(|value| !value.is_finite()) {
+                    cleanup_native_cbc_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "mip_start values must be finite".to_string(),
+                        elapsed_ms(t0),
+                    );
+                }
+                let objective = dot_f64(objective_coefficients, mip_start);
+                if !objective.is_finite() {
+                    cleanup_native_cbc_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "mip_start objective must be finite".to_string(),
+                        elapsed_ms(t0),
+                    );
+                }
+                let Some(start_path) = &start_path else {
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "internal CBC MIP-start path was unavailable".to_string(),
+                        elapsed_ms(t0),
+                    );
+                };
+                if let Err(err) = fs::write(start_path, native_cbc_mip_start_text(mip_start)) {
+                    cleanup_native_cbc_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        format!(
+                            "failed to write CBC MIP-start file '{}': {err}",
+                            start_path.display()
+                        ),
+                        elapsed_ms(t0),
+                    );
+                }
+                Some(objective)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
 
     let mut command = Command::new(&command_path);
     command
@@ -3760,8 +4423,79 @@ fn solve_native_cbc_cli_model(
             Sense::Min => "-min",
         });
     }
+    if let Some(seed) = normalized_cbc_random_seed(opts.random_seed) {
+        command
+            .arg("-randomS")
+            .arg(seed.to_string())
+            .arg("-randomC")
+            .arg(seed.to_string());
+    }
+    if let Some(threads) = opts.threads.filter(|threads| *threads > 0) {
+        command.arg("-threads").arg(threads.to_string());
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.primal_feasibility_tolerance) {
+        command.arg("-primalT").arg(format!("{tolerance:.17}"));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.dual_feasibility_tolerance) {
+        command.arg("-dualT").arg(format!("{tolerance:.17}"));
+    }
+    match opts.presolve {
+        Some(ExternalLinearCliPresolve::Off) => {
+            command.arg("-presolve").arg("off");
+            if kind == ExternalLinearCliKind::Mip {
+                command.arg("-preprocess").arg("off");
+            }
+        }
+        Some(ExternalLinearCliPresolve::On) => {
+            command.arg("-presolve").arg("on");
+        }
+        Some(ExternalLinearCliPresolve::Auto) | None => {}
+    }
     if kind == ExternalLinearCliKind::Lp {
         command.arg("-printingOptions").arg("all");
+    }
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(cuts) = opts.cuts {
+            command.arg("-cuts").arg(cuts.as_str());
+        }
+        if let Some(heuristics) = opts.heuristics {
+            command.arg("-heuristicsOnOff").arg(heuristics.as_str());
+        }
+        if let Some(priority_path) = &priority_path {
+            command.arg("-priorityIn").arg(priority_path);
+        }
+        if let Some(start_path) = &start_path {
+            command.arg("-mipstart").arg(start_path);
+        }
+        if let Some(node_limit) = opts
+            .max_nodes
+            .or_else(|| opts.node_limit.map(|limit| limit as u64))
+        {
+            command.arg("-maxNodes").arg(node_limit.to_string());
+        }
+        if let Some(solution_limit) = opts.solution_limit.map(|limit| limit.max(1)) {
+            command.arg("-maxSolutions").arg(solution_limit.to_string());
+        }
+        match opts.node_selection {
+            Some(ExternalLinearCliNodeSelection::Dfs) => {
+                command.arg("-nodeStrategy").arg("depth");
+            }
+            Some(ExternalLinearCliNodeSelection::BestBound) => {
+                command.arg("-nodeStrategy").arg("fewest");
+            }
+            None => {}
+        }
+        if let Some(tolerance) = normalized_tolerance(opts.integer_feasibility_tolerance) {
+            command.arg("-integerT").arg(format!("{tolerance:.17}"));
+        }
+        if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+            command.arg("-ratioGap").arg(format!("{relative_gap:.17}"));
+        }
+        if let Some(absolute_gap) = normalized_absolute_gap(opts.absolute_gap) {
+            command
+                .arg("-allowableGap")
+                .arg(format!("{absolute_gap:.17}"));
+        }
     }
     command.arg("-solve").arg("-solution").arg(&solution_path);
     if kind == ExternalLinearCliKind::Lp {
@@ -3856,6 +4590,15 @@ fn solve_native_cbc_cli_model(
 
     let objective = dot_f64(objective_coefficients, &parsed.x);
     let quality = parse_cbc_mip_quality(kind, status, objective, &stdout, &stderr);
+    let (mip_start_accepted, mip_start_objective) = parse_cbc_mip_start_feedback(
+        kind,
+        opts.mip_start.as_deref(),
+        mip_start_objective,
+        &stdout,
+        &stderr,
+    );
+    let (branch_priorities_accepted, branch_priority_count) =
+        parse_cbc_branch_priority_feedback(kind, active_branch_priorities.len(), &stdout, &stderr);
     ExternalLinearCliSolution {
         status,
         solver: bridge_solver,
@@ -3865,28 +4608,44 @@ fn solve_native_cbc_cli_model(
         objective_values: None,
         lp_algorithm: None,
         best_bound: quality.best_bound,
-        solution_limit: None,
+        solution_limit: (kind == ExternalLinearCliKind::Mip)
+            .then(|| opts.solution_limit.map(|limit| limit.max(1)))
+            .flatten(),
         solution_pool_size: None,
         solutions: None,
         exhausted: None,
         mip_gap: quality.mip_gap,
         absolute_gap: quality.absolute_gap,
         objective_limit: None,
-        primal_feasibility_tolerance: None,
-        dual_feasibility_tolerance: None,
-        integer_feasibility_tolerance: None,
+        primal_feasibility_tolerance: normalized_tolerance(opts.primal_feasibility_tolerance),
+        dual_feasibility_tolerance: normalized_tolerance(opts.dual_feasibility_tolerance),
+        integer_feasibility_tolerance: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_tolerance(opts.integer_feasibility_tolerance))
+            .flatten(),
         nodes_explored: quality.nodes_explored,
-        threads: None,
-        random_seed: None,
-        presolve: None,
-        cuts: None,
-        heuristics: None,
+        threads: opts.threads.filter(|threads| *threads > 0),
+        random_seed: normalized_cbc_random_seed(opts.random_seed),
+        presolve: opts.presolve.map(|presolve| presolve.as_str().to_string()),
+        cuts: (kind == ExternalLinearCliKind::Mip)
+            .then(|| opts.cuts.map(|cuts| cuts.as_str().to_string()))
+            .flatten(),
+        heuristics: (kind == ExternalLinearCliKind::Mip)
+            .then(|| {
+                opts.heuristics
+                    .map(|heuristics| heuristics.as_str().to_string())
+            })
+            .flatten(),
         branch_rule: None,
-        branch_priorities_accepted: None,
-        branch_priority_count: None,
-        node_selection: None,
-        mip_start_accepted: None,
-        mip_start_objective: None,
+        branch_priorities_accepted,
+        branch_priority_count,
+        node_selection: (kind == ExternalLinearCliKind::Mip)
+            .then(|| {
+                opts.node_selection
+                    .map(|node_selection| node_selection.as_str().to_string())
+            })
+            .flatten(),
+        mip_start_accepted,
+        mip_start_objective,
         dual_ub: (kind == ExternalLinearCliKind::Lp)
             .then_some(parsed.dual_ub)
             .flatten(),
@@ -4362,10 +5121,64 @@ fn solve_native_glpk_cli_model(
                 .arg(&report_path)
                 .arg("--write")
                 .arg(&solution_path);
+            match opts.presolve {
+                Some(ExternalLinearCliPresolve::Off) => {
+                    command.arg("--nopresol");
+                }
+                Some(ExternalLinearCliPresolve::On) => {
+                    command.arg("--presol");
+                }
+                Some(ExternalLinearCliPresolve::Auto) | None => {}
+            }
+            match opts.lp_algorithm {
+                Some(ExternalLinearCliLpAlgorithm::Simplex) => {
+                    command.arg("--simplex");
+                }
+                Some(ExternalLinearCliLpAlgorithm::Ipm) => {
+                    command.arg("--interior");
+                }
+                None => {}
+            }
         }
         ExternalLinearCliKind::Mip => {
             command.arg("-o").arg(&solution_path);
+            match opts.presolve {
+                Some(ExternalLinearCliPresolve::Off) => {
+                    command.arg("--nointopt");
+                }
+                Some(ExternalLinearCliPresolve::On) => {
+                    command.arg("--intopt");
+                }
+                Some(ExternalLinearCliPresolve::Auto) | None => {}
+            }
+            match opts.branch_rule {
+                Some(ExternalLinearCliBranchRule::FirstFractional) => {
+                    command.arg("--first");
+                }
+                Some(ExternalLinearCliBranchRule::MostFractional) => {
+                    command.arg("--mostf");
+                }
+                None => {}
+            }
+            match opts.node_selection {
+                Some(ExternalLinearCliNodeSelection::Dfs) => {
+                    command.arg("--dfs");
+                }
+                Some(ExternalLinearCliNodeSelection::BestBound) => {
+                    command.arg("--bestb");
+                }
+                None => {}
+            }
+            if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+                command.arg("--mipgap").arg(format!("{relative_gap:.17}"));
+            }
+            if opts.cuts == Some(ExternalLinearCliMipSwitch::On) {
+                command.arg("--cuts");
+            }
         }
+    }
+    if let Some(seed) = normalized_glpk_random_seed(opts.random_seed) {
+        command.arg("--seed").arg(seed.to_string());
     }
 
     let output = match command.output() {
@@ -4457,7 +5270,12 @@ fn solve_native_glpk_cli_model(
         x: parsed.x.clone(),
         objective: Some(objective),
         objective_values: None,
-        lp_algorithm: None,
+        lp_algorithm: (kind == ExternalLinearCliKind::Lp)
+            .then(|| {
+                opts.lp_algorithm
+                    .map(|algorithm| algorithm.as_str().to_string())
+            })
+            .flatten(),
         best_bound: quality.best_bound,
         solution_limit: None,
         solution_pool_size: None,
@@ -4471,14 +5289,26 @@ fn solve_native_glpk_cli_model(
         integer_feasibility_tolerance: None,
         nodes_explored: quality.nodes_explored,
         threads: None,
-        random_seed: None,
-        presolve: None,
-        cuts: None,
+        random_seed: normalized_glpk_random_seed(opts.random_seed),
+        presolve: opts.presolve.map(|presolve| presolve.as_str().to_string()),
+        cuts: (kind == ExternalLinearCliKind::Mip
+            && opts.cuts == Some(ExternalLinearCliMipSwitch::On))
+        .then_some("on".to_string()),
         heuristics: None,
-        branch_rule: None,
+        branch_rule: (kind == ExternalLinearCliKind::Mip)
+            .then(|| {
+                opts.branch_rule
+                    .map(|branch_rule| branch_rule.as_str().to_string())
+            })
+            .flatten(),
         branch_priorities_accepted: None,
         branch_priority_count: None,
-        node_selection: None,
+        node_selection: (kind == ExternalLinearCliKind::Mip)
+            .then(|| {
+                opts.node_selection
+                    .map(|node_selection| node_selection.as_str().to_string())
+            })
+            .flatten(),
         mip_start_accepted: None,
         mip_start_objective: None,
         dual_ub: (kind == ExternalLinearCliKind::Lp)
@@ -4534,7 +5364,12 @@ fn solve_native_highs_cli_model(
     let solution_path = native_highs_temp_path("solution", "sol");
     let options_path = native_highs_temp_path("options", "options");
     let log_path = native_highs_temp_path("log", "log");
+    let start_path = (kind == ExternalLinearCliKind::Mip && opts.mip_start.is_some())
+        .then(|| native_highs_temp_path("start", "sol"));
     let mut cleanup_paths = vec![model_path.clone(), solution_path.clone(), log_path.clone()];
+    if let Some(start_path) = &start_path {
+        cleanup_paths.push(start_path.clone());
+    }
 
     if let Err(err) = fs::write(&model_path, model_text) {
         cleanup_native_highs_temp_files(&cleanup_paths);
@@ -4566,6 +5401,72 @@ fn solve_native_highs_cli_model(
         cleanup_paths.push(options_path.clone());
     }
 
+    let mip_start_objective = if kind == ExternalLinearCliKind::Mip {
+        match opts.mip_start.as_deref() {
+            Some(mip_start) => {
+                if mip_start.len() != variable_count {
+                    cleanup_native_highs_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        format!(
+                            "mip_start length {} does not match variable count {}",
+                            mip_start.len(),
+                            variable_count
+                        ),
+                        elapsed_ms(t0),
+                    );
+                }
+                if mip_start.iter().any(|value| !value.is_finite()) {
+                    cleanup_native_highs_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "mip_start values must be finite".to_string(),
+                        elapsed_ms(t0),
+                    );
+                }
+                let objective = dot_f64(objective_coefficients, mip_start);
+                if !objective.is_finite() {
+                    cleanup_native_highs_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "mip_start objective must be finite".to_string(),
+                        elapsed_ms(t0),
+                    );
+                }
+                let Some(start_path) = &start_path else {
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        "internal HiGHS MIP-start path was unavailable".to_string(),
+                        elapsed_ms(t0),
+                    );
+                };
+                if let Err(err) = fs::write(
+                    start_path,
+                    native_highs_mip_start_text(mip_start, objective),
+                ) {
+                    cleanup_native_highs_temp_files(&cleanup_paths);
+                    return external_cli_failure(
+                        ExternalLinearCliStatus::NumericalError,
+                        bridge_solver,
+                        format!(
+                            "failed to write HiGHS MIP-start file '{}': {err}",
+                            start_path.display()
+                        ),
+                        elapsed_ms(t0),
+                    );
+                }
+                Some(objective)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let mut command = Command::new(&command_path);
     command
         .arg("--model_file")
@@ -4578,6 +5479,9 @@ fn solve_native_highs_cli_model(
         .stderr(Stdio::piped());
     if options_path.exists() {
         command.arg("--options_file").arg(&options_path);
+    }
+    if let Some(start_path) = &start_path {
+        command.arg("--read_solution_file").arg(start_path);
     }
     if kind == ExternalLinearCliKind::Lp {
         if let Some(lp_algorithm) = opts.lp_algorithm {
@@ -4681,6 +5585,13 @@ fn solve_native_highs_cli_model(
 
     let objective = dot_f64(objective_coefficients, &parsed.x);
     let quality = parse_highs_mip_quality(kind, objective, &stdout, &stderr);
+    let (mip_start_accepted, mip_start_objective) = parse_highs_mip_start_feedback(
+        kind,
+        opts.mip_start.as_deref(),
+        mip_start_objective,
+        &stdout,
+        &stderr,
+    );
     ExternalLinearCliSolution {
         status,
         solver: bridge_solver,
@@ -4719,8 +5630,8 @@ fn solve_native_highs_cli_model(
         branch_priorities_accepted: None,
         branch_priority_count: None,
         node_selection: None,
-        mip_start_accepted: None,
-        mip_start_objective: None,
+        mip_start_accepted,
+        mip_start_objective,
         dual_ub: (kind == ExternalLinearCliKind::Lp)
             .then_some(parsed.dual_ub)
             .flatten(),
@@ -4841,6 +5752,26 @@ fn cleanup_native_highs_temp_files(paths: &[PathBuf]) {
     }
 }
 
+fn native_highs_mip_start_text(start: &[f64], objective: f64) -> String {
+    let mut text = String::new();
+    text.push_str("Model status\n");
+    text.push_str("Unknown\n\n");
+    text.push_str("# Primal solution values\n");
+    text.push_str("Feasible\n");
+    text.push_str(&format!("Objective {objective:.17}\n"));
+    text.push_str(&format!("# Columns {}\n", start.len()));
+    for (idx, value) in start.iter().enumerate() {
+        text.push_str(&format!("x{idx} {value:.17}\n"));
+    }
+    text.push_str("# Rows 0\n\n");
+    text.push_str("# Dual solution values\n");
+    text.push_str("None\n\n");
+    text.push_str("# Basis\n");
+    text.push_str("HiGHS_basis_file v2\n");
+    text.push_str("None\n");
+    text
+}
+
 fn native_glpk_temp_path(stem: &str, extension: &str) -> PathBuf {
     native_solver_temp_path("glpk", stem, extension)
 }
@@ -4855,6 +5786,16 @@ fn native_scip_temp_path(stem: &str, extension: &str) -> PathBuf {
     native_solver_temp_path("scip", stem, extension)
 }
 
+fn native_scip_mip_start_text(start: &[f64], objective: f64) -> String {
+    let mut text = String::new();
+    text.push_str("solution status: feasible\n");
+    text.push_str(&format!("objective value: {objective:.17}\n"));
+    for (idx, value) in start.iter().enumerate() {
+        text.push_str(&format!("x{idx} {value:.17}\n"));
+    }
+    text
+}
+
 fn cleanup_native_scip_temp_files(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
@@ -4863,6 +5804,28 @@ fn cleanup_native_scip_temp_files(paths: &[PathBuf]) {
 
 fn native_cbc_temp_path(stem: &str, extension: &str) -> PathBuf {
     native_solver_temp_path("cbc", stem, extension)
+}
+
+fn native_cbc_mip_start_text(start: &[f64]) -> String {
+    let mut text = String::new();
+    for (idx, value) in start.iter().enumerate() {
+        text.push_str(&format!("{idx} x{idx} {value:.17}\n"));
+    }
+    text
+}
+
+fn native_cbc_branch_priorities_text(active_priorities: &[(usize, i32)]) -> String {
+    let highest = active_priorities
+        .iter()
+        .map(|(_, priority)| *priority)
+        .max()
+        .unwrap_or(0);
+    let mut text = "name,priority\n".to_string();
+    for (idx, priority) in active_priorities {
+        let cbc_priority = highest - *priority + 1;
+        text.push_str(&format!("x{idx},{cbc_priority}\n"));
+    }
+    text
 }
 
 fn cleanup_native_cbc_temp_files(paths: &[PathBuf]) {
@@ -4915,8 +5878,16 @@ fn glpk_time_limit_arg(time_limit_secs: Option<f64>) -> String {
         .to_string()
 }
 
+fn normalized_glpk_random_seed(random_seed: Option<u64>) -> Option<u64> {
+    random_seed.filter(|seed| *seed <= i32::MAX as u64)
+}
+
 fn cbc_time_limit_arg(time_limit_secs: Option<f64>) -> String {
     format!("{:.17}", normalized_time_limit(time_limit_secs))
+}
+
+fn normalized_cbc_random_seed(random_seed: Option<u64>) -> Option<u64> {
+    random_seed.filter(|seed| *seed <= i32::MAX as u64)
 }
 
 fn native_highs_options_text(
@@ -6425,6 +7396,38 @@ fn parse_highs_mip_quality(
     quality
 }
 
+fn parse_highs_mip_start_feedback(
+    kind: ExternalLinearCliKind,
+    mip_start: Option<&[f64]>,
+    start_objective: Option<f64>,
+    stdout: &str,
+    stderr: &str,
+) -> (Option<bool>, Option<f64>) {
+    if kind != ExternalLinearCliKind::Mip || mip_start.is_none() {
+        return (None, None);
+    }
+    let text = format!("{stdout}\n{stderr}");
+    let lowered = text.to_ascii_lowercase();
+    let infeasibilities = mip_start_infeasibility_values(&text);
+    let accepted = lowered.contains("assessing feasibility of mip")
+        && infeasibilities.len() >= 3
+        && infeasibilities
+            .iter()
+            .take(3)
+            .all(|value| value.abs() <= 1.0e-9);
+    (
+        Some(accepted),
+        start_objective.filter(|value| value.is_finite()),
+    )
+}
+
+fn mip_start_infeasibility_values(text: &str) -> Vec<f64> {
+    text.lines()
+        .filter(|line| line.to_ascii_lowercase().contains("infeasibilities"))
+        .filter_map(first_float)
+        .collect()
+}
+
 fn parse_glpk_mip_quality(
     kind: ExternalLinearCliKind,
     status: ExternalLinearCliStatus,
@@ -6542,6 +7545,45 @@ fn parse_cbc_mip_quality(
     quality
 }
 
+fn parse_cbc_mip_start_feedback(
+    kind: ExternalLinearCliKind,
+    mip_start: Option<&[f64]>,
+    start_objective: Option<f64>,
+    stdout: &str,
+    stderr: &str,
+) -> (Option<bool>, Option<f64>) {
+    if kind != ExternalLinearCliKind::Mip || mip_start.is_none() {
+        return (None, None);
+    }
+    let lowered = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    let rejected = lowered.contains("mipstart solution is not valid")
+        || lowered.contains("mipstart values could not be used")
+        || lowered.contains("mipstart file not valid");
+    let accepted = !rejected
+        && (lowered.contains("mipstart values read")
+            || lowered.contains("mipstart provided solution")
+            || lowered.contains("integer solution"));
+    (
+        Some(accepted),
+        start_objective.filter(|value| value.is_finite()),
+    )
+}
+
+fn parse_cbc_branch_priority_feedback(
+    kind: ExternalLinearCliKind,
+    active_count: usize,
+    stdout: &str,
+    stderr: &str,
+) -> (Option<bool>, Option<u64>) {
+    if kind != ExternalLinearCliKind::Mip || active_count == 0 {
+        return (None, None);
+    }
+    let accepted = format!("{stdout}\n{stderr}")
+        .to_ascii_lowercase()
+        .contains("priorityin");
+    (Some(accepted), accepted.then_some(active_count as u64))
+}
+
 fn parse_scip_mip_quality(
     kind: ExternalLinearCliKind,
     objective: f64,
@@ -6582,6 +7624,40 @@ fn parse_scip_mip_quality(
         .filter(|value| value.is_finite())
         .map(|value| value.max(0.0));
     quality
+}
+
+fn parse_scip_mip_start_feedback(
+    kind: ExternalLinearCliKind,
+    mip_start: Option<&[f64]>,
+    start_objective: Option<f64>,
+    stdout: &str,
+    stderr: &str,
+) -> (Option<bool>, Option<f64>) {
+    if kind != ExternalLinearCliKind::Mip || mip_start.is_none() {
+        return (None, None);
+    }
+    let lowered = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    let accepted =
+        lowered.contains("accepted as candidate") || lowered.contains("solution candidate storage");
+    (
+        Some(accepted),
+        start_objective.filter(|value| value.is_finite()),
+    )
+}
+
+fn parse_scip_branch_priority_feedback(
+    kind: ExternalLinearCliKind,
+    active_count: usize,
+    stdout: &str,
+    stderr: &str,
+) -> (Option<bool>, Option<u64>) {
+    if kind != ExternalLinearCliKind::Mip || active_count == 0 {
+        return (None, None);
+    }
+    let accepted = format!("{stdout}\n{stderr}")
+        .to_ascii_lowercase()
+        .contains("branching priority of variable");
+    (Some(accepted), accepted.then_some(active_count as u64))
 }
 
 fn fill_optimal_mip_quality(
@@ -7348,6 +8424,40 @@ fn normalized_branch_priorities_json(
         .map_err(|err| format!("failed to serialize branch_priorities: {err}"))
 }
 
+fn active_branch_priorities(
+    branch_priorities: Option<&[i32]>,
+    integer_vars: Option<&[bool]>,
+    variable_count: usize,
+) -> Result<Vec<(usize, i32)>, String> {
+    let Some(branch_priorities) = branch_priorities else {
+        return Ok(Vec::new());
+    };
+    if branch_priorities.len() != variable_count {
+        return Err(format!(
+            "branch_priorities length {} does not match variable count {}",
+            branch_priorities.len(),
+            variable_count
+        ));
+    }
+    Ok(branch_priorities
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, priority)| {
+            if *priority == 0 {
+                return None;
+            }
+            if integer_vars
+                .and_then(|vars| vars.get(idx))
+                .copied()
+                .is_some_and(|is_integer| !is_integer)
+            {
+                return None;
+            }
+            Some((idx, *priority))
+        })
+        .collect())
+}
+
 fn normalized_mip_start_json(mip_start: Option<&[f64]>) -> Result<Option<String>, String> {
     let Some(mip_start) = mip_start else {
         return Ok(None);
@@ -7563,8 +8673,10 @@ mod tests {
         normalized_relative_gap, normalized_threads, pwl_ipmip_problem_to_cli_json,
         quadratic_objective_ipmip_problem_to_cli_json, semi_ipmip_problem_to_cli_json,
         solve_ipmip_with_external_cli, solve_lp_with_external_cli, solver_command_env_var,
-        sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json, ExternalLinearCliKind,
-        ExternalLinearCliLicenseClass, ExternalLinearCliModelFormat, ExternalLinearCliOptions,
+        sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json,
+        ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliLicenseClass,
+        ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat,
+        ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
         ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
     };
     use crate::des::general::ip_mip_des::{
@@ -7997,6 +9109,43 @@ e0 1
     }
 
     #[test]
+    fn native_highs_mip_quality_parser_reads_report_bounds_gap_and_nodes() {
+        let stdout = "\
+Solving report
+  Status            Optimal
+  Primal bound      41
+  Dual bound        40
+  Gap               2.5% (tolerance: 0.01%)
+  Nodes             12
+";
+        let quality = super::parse_highs_mip_quality(ExternalLinearCliKind::Mip, 41.0, stdout, "");
+        assert_eq!(quality.best_bound, Some(40.0));
+        assert_eq!(quality.nodes_explored, Some(12));
+        assert!((quality.mip_gap.unwrap() - 0.025).abs() <= 1.0e-12);
+        assert_eq!(quality.absolute_gap, Some(1.0));
+    }
+
+    #[test]
+    fn native_highs_mip_start_feedback_parser_reads_infeasibility_report() {
+        let stdout = "\
+Assessing feasibility of MIP using primal feasibility and integrality tolerance of       1e-06
+Solution has               num          max          sum
+Col     infeasibilities      0            0            0
+Integer infeasibilities      0            0            0
+Row     infeasibilities      0            0            0
+";
+        let (accepted, objective) = super::parse_highs_mip_start_feedback(
+            ExternalLinearCliKind::Mip,
+            Some(&[1.0, 0.0]),
+            Some(3.0),
+            stdout,
+            "",
+        );
+        assert_eq!(accepted, Some(true));
+        assert_eq!(objective, Some(3.0));
+    }
+
+    #[test]
     fn native_glpk_solution_parser_reads_plain_lp_sections() {
         let text = "\
 c Status:     OPTIMAL
@@ -8093,6 +9242,32 @@ Total iterations:               11
         assert_eq!(quality.best_bound, Some(1.0));
         assert_eq!(quality.mip_gap, Some(0.0));
         assert_eq!(quality.absolute_gap, Some(0.0));
+    }
+
+    #[test]
+    fn native_cbc_mip_start_feedback_parser_reads_values_read_message() {
+        let stdout = "\
+opening mipstart file start.sol.
+MIPStart values read for 2 variables.
+";
+        let (accepted, objective) = super::parse_cbc_mip_start_feedback(
+            ExternalLinearCliKind::Mip,
+            Some(&[1.0, 0.0]),
+            Some(3.0),
+            stdout,
+            "",
+        );
+        assert_eq!(accepted, Some(true));
+        assert_eq!(objective, Some(3.0));
+    }
+
+    #[test]
+    fn native_cbc_branch_priority_feedback_parser_reads_priorityin_command() {
+        let stdout = "command line - cbc model.lp -priorityIn priorities.csv -solve\n";
+        let (accepted, count) =
+            super::parse_cbc_branch_priority_feedback(ExternalLinearCliKind::Mip, 2, stdout, "");
+        assert_eq!(accepted, Some(true));
+        assert_eq!(count, Some(2));
     }
 
     #[test]
@@ -8202,6 +9377,41 @@ Gap                : 0.00 %
         assert_eq!(quality.best_bound, Some(4.0));
         assert_eq!(quality.mip_gap, Some(0.0));
         assert_eq!(quality.absolute_gap, Some(0.0));
+    }
+
+    #[test]
+    fn native_scip_mip_start_feedback_parser_reads_candidate_storage() {
+        let stdout = "\
+primal solution from solution file <start.sol> was accepted as candidate
+1/1 feasible solution given by solution candidate storage, new primal bound 0.000000e+00
+";
+        let (accepted, objective) = super::parse_scip_mip_start_feedback(
+            ExternalLinearCliKind::Mip,
+            Some(&[0.0, 1.0]),
+            Some(5.0),
+            stdout,
+            "",
+        );
+        assert_eq!(accepted, Some(true));
+        assert_eq!(objective, Some(5.0));
+    }
+
+    #[test]
+    fn native_scip_branch_priority_feedback_parser_reads_priority_message() {
+        let stdout = "branching priority of variable <x1> set to 10\n";
+        let (accepted, count) =
+            super::parse_scip_branch_priority_feedback(ExternalLinearCliKind::Mip, 1, stdout, "");
+        assert_eq!(accepted, Some(true));
+        assert_eq!(count, Some(1));
+    }
+
+    #[test]
+    fn active_branch_priorities_filters_zeros_and_continuous_vars() {
+        let priorities =
+            super::active_branch_priorities(Some(&[5, 0, 3]), Some(&[true, true, false]), 3)
+                .unwrap();
+        assert_eq!(priorities, vec![(0, 5)]);
+        assert!(super::active_branch_priorities(Some(&[1, 2]), Some(&[true]), 1).is_err());
     }
 
     #[test]
@@ -8514,6 +9724,79 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
     }
 
     #[test]
+    fn native_highs_plain_mip_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP direct HiGHS MIP solve: highs command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-highs-mip-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+        assert!(solution
+            .best_bound
+            .is_some_and(|best_bound| (best_bound - 1.0).abs() <= 1.0e-8));
+        assert!(solution
+            .mip_gap
+            .is_some_and(|mip_gap| mip_gap.abs() <= 1.0e-8));
+        assert!(solution
+            .absolute_gap
+            .is_some_and(|absolute_gap| absolute_gap.abs() <= 1.0e-8));
+        assert!(solution.nodes_explored.is_some());
+    }
+
+    #[test]
+    fn native_highs_mip_start_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP direct HiGHS MIP-start solve: highs command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-highs-mip-start".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                mip_start: Some(vec![0.0]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.mip_start_accepted, Some(true));
+        assert_eq!(solution.mip_start_objective, Some(0.0));
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
     fn native_glpk_plain_lp_succeeds_without_python_bridge() {
         let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
             eprintln!("SKIP direct GLPK LP solve: glpsol command not installed");
@@ -8541,6 +9824,40 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(solution
             .objective
             .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_glpk_lp_algorithm_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
+            eprintln!("SKIP direct GLPK LP algorithm solve: glpsol command not installed");
+            return;
+        };
+        let solution = solve_lp_with_external_cli(
+            &super::external_linear_cli_smoke_lp(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-glpk-lp-algorithm".to_string()),
+                time_limit_secs: Some(2.0),
+                lp_algorithm: Some(ExternalLinearCliLpAlgorithm::Ipm),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "glpk:cli");
+        assert_eq!(solution.lp_algorithm.as_deref(), Some("ipm"));
+        assert!(solution
+            .x
+            .first()
+            .is_some_and(|value| (value - 1.0).abs() <= 1.0e-6));
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-6));
     }
 
     #[test]
@@ -8572,6 +9889,44 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(solution
             .objective
             .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_highs_json_plain_mip_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP direct HiGHS JSON MIP solve: highs command not installed");
+            return;
+        };
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-highs-json-mip-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+        assert!(solution
+            .best_bound
+            .is_some_and(|best_bound| (best_bound - 1.0).abs() <= 1.0e-8));
+        assert!(solution
+            .mip_gap
+            .is_some_and(|mip_gap| mip_gap.abs() <= 1.0e-8));
     }
 
     #[test]
@@ -8607,6 +9962,182 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
     }
 
     #[test]
+    fn native_glpk_mip_controls_succeed_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
+            eprintln!("SKIP direct GLPK MIP-control solve: glpsol command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-glpk-mip-controls".to_string()),
+                time_limit_secs: Some(2.0),
+                relative_gap: Some(0.25),
+                threads: Some(1),
+                random_seed: Some(7),
+                presolve: Some(ExternalLinearCliPresolve::Off),
+                branch_rule: Some(ExternalLinearCliBranchRule::FirstFractional),
+                node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "glpk:cli");
+        assert_eq!(solution.random_seed, Some(7));
+        assert_eq!(solution.presolve.as_deref(), Some("off"));
+        assert_eq!(solution.branch_rule.as_deref(), Some("first-fractional"));
+        assert_eq!(solution.node_selection.as_deref(), Some("dfs"));
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_glpk_mip_cuts_succeed_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Glpk) else {
+            eprintln!("SKIP direct GLPK MIP-cut solve: glpsol command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-glpk-mip-cuts".to_string()),
+                time_limit_secs: Some(2.0),
+                cuts: Some(ExternalLinearCliMipSwitch::On),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "glpk:cli");
+        assert_eq!(solution.cuts.as_deref(), Some("on"));
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn solution_pool_no_good_cut_handles_general_integer_domains() {
+        let mut model = super::PlainLinearCliModel {
+            sense: Sense::Max,
+            c: vec![1.0],
+            le_rows: Vec::new(),
+            le_rhs: Vec::new(),
+            eq_rows: vec![vec![1.0]],
+            eq_rhs: vec![1.0],
+            lbs: vec![Some(0.0)],
+            ubs: vec![Some(2.0)],
+            integer_vars: vec![true],
+        };
+        let integer_indices = super::solution_pool_integer_indices(&model.integer_vars);
+        assert_eq!(
+            super::validate_solution_pool_bounds(&model.lbs, &model.ubs, &integer_indices),
+            None
+        );
+        assert_eq!(
+            super::add_solution_pool_no_good_cut(&mut model, &integer_indices, &[1.0]),
+            None
+        );
+        assert_eq!(model.c, vec![1.0, 0.0, 0.0]);
+        assert_eq!(model.lbs, vec![Some(0.0), Some(0.0), Some(0.0)]);
+        assert_eq!(model.ubs, vec![Some(2.0), Some(1.0), Some(1.0)]);
+        assert_eq!(model.integer_vars, vec![true, true, true]);
+        assert_eq!(model.eq_rows, vec![vec![1.0, 0.0, 0.0]]);
+        assert_eq!(
+            model.le_rows,
+            vec![
+                vec![1.0, 2.0, 0.0],
+                vec![-1.0, 0.0, 2.0],
+                vec![0.0, -1.0, -1.0]
+            ]
+        );
+        assert_eq!(model.le_rhs, vec![2.0, -0.0, -1.0]);
+    }
+
+    fn native_solution_pool_smoke_problem() -> IPMIPProblem {
+        IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        }
+    }
+
+    fn assert_native_solution_pool(
+        solution: &crate::des::general::external_linear_cli::ExternalLinearCliSolution,
+        solver: &str,
+    ) {
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, format!("{solver}:cli"));
+        assert_eq!(solution.solution_pool_size, Some(3));
+        assert_eq!(solution.exhausted, Some(false));
+        assert_eq!(solution.message, "pool reached solution_pool_size");
+        assert_eq!(solution.x, vec![1.0, 0.0]);
+        assert_eq!(solution.objective, Some(3.0));
+        let solutions = solution.solutions.as_deref().unwrap_or(&[]);
+        assert_eq!(solutions.len(), 3);
+        let expected = [
+            (vec![1.0, 0.0], 3.0),
+            (vec![0.0, 1.0], 2.0),
+            (vec![0.0, 0.0], 0.0),
+        ];
+        for (member, (expected_x, expected_objective)) in solutions.iter().zip(expected) {
+            assert_eq!(member.x, expected_x);
+            assert!((member.objective - expected_objective).abs() <= 1.0e-8);
+        }
+    }
+
+    #[test]
+    fn native_scip_solution_pool_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Scip) else {
+            eprintln!("SKIP direct SCIP solution-pool solve: scip command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &native_solution_pool_smoke_problem(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Scip,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-scip-solution-pool".to_string()),
+                time_limit_secs: Some(5.0),
+                solution_pool_size: Some(3),
+                branch_priorities: Some(vec![3, 2]),
+                ..Default::default()
+            },
+        );
+        assert_native_solution_pool(&solution, "scip");
+        assert_eq!(solution.branch_priorities_accepted, Some(true));
+        assert_eq!(solution.branch_priority_count, Some(2));
+    }
+
+    #[test]
     fn native_scip_json_plain_mip_succeeds_without_python_bridge() {
         let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Scip) else {
             eprintln!("SKIP direct SCIP JSON MIP solve: scip command not installed");
@@ -8631,6 +10162,72 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
             solution.message
         );
         assert_eq!(solution.solver, "scip:cli");
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_scip_mip_start_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Scip) else {
+            eprintln!("SKIP direct SCIP MIP-start solve: scip command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Scip,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-scip-mip-start".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                mip_start: Some(vec![0.0]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "scip:cli");
+        assert_eq!(solution.mip_start_accepted, Some(true));
+        assert_eq!(solution.mip_start_objective, Some(0.0));
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_scip_branch_priorities_succeed_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Scip) else {
+            eprintln!("SKIP direct SCIP branch-priority solve: scip command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Scip,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-scip-branch-priority".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "scip:cli");
+        assert_eq!(solution.branch_priorities_accepted, Some(true));
+        assert_eq!(solution.branch_priority_count, Some(1));
         assert_eq!(solution.x, vec![1.0]);
         assert!(solution
             .objective
@@ -8709,6 +10306,178 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(solution
             .objective
             .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_cbc_solution_pool_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Cbc) else {
+            eprintln!("SKIP direct CBC solution-pool solve: cbc command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &native_solution_pool_smoke_problem(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-cbc-solution-pool".to_string()),
+                time_limit_secs: Some(5.0),
+                solution_pool_size: Some(3),
+                branch_priorities: Some(vec![3, 2]),
+                ..Default::default()
+            },
+        );
+        assert_native_solution_pool(&solution, "cbc");
+        assert_eq!(solution.branch_priorities_accepted, Some(true));
+        assert_eq!(solution.branch_priority_count, Some(2));
+    }
+
+    #[test]
+    fn native_cbc_mip_start_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Cbc) else {
+            eprintln!("SKIP direct CBC MIP-start solve: cbc command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-cbc-mip-start".to_string()),
+                time_limit_secs: Some(2.0),
+                mip_start: Some(vec![0.0]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "cbc:cli");
+        assert_eq!(solution.mip_start_accepted, Some(true));
+        assert_eq!(solution.mip_start_objective, Some(0.0));
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_cbc_branch_priorities_succeed_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Cbc) else {
+            eprintln!("SKIP direct CBC branch-priority solve: cbc command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-cbc-branch-priority".to_string()),
+                time_limit_secs: Some(2.0),
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "cbc:cli");
+        assert_eq!(solution.branch_priorities_accepted, Some(true));
+        assert_eq!(solution.branch_priority_count, Some(1));
+        assert_eq!(solution.x, vec![1.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_cbc_mip_controls_succeed_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Cbc) else {
+            eprintln!("SKIP direct CBC MIP-control solve: cbc command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-cbc-mip-controls".to_string()),
+                time_limit_secs: Some(2.0),
+                relative_gap: Some(0.25),
+                threads: Some(1),
+                random_seed: Some(7),
+                presolve: Some(ExternalLinearCliPresolve::Off),
+                primal_feasibility_tolerance: Some(1e-7),
+                dual_feasibility_tolerance: Some(2e-7),
+                integer_feasibility_tolerance: Some(1e-6),
+                cuts: Some(ExternalLinearCliMipSwitch::Off),
+                heuristics: Some(ExternalLinearCliMipSwitch::Off),
+                node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "cbc:cli");
+        assert_eq!(solution.threads, Some(1));
+        assert_eq!(solution.random_seed, Some(7));
+        assert_eq!(solution.presolve.as_deref(), Some("off"));
+        assert_eq!(solution.cuts.as_deref(), Some("off"));
+        assert_eq!(solution.heuristics.as_deref(), Some("off"));
+        assert_eq!(solution.node_selection.as_deref(), Some("dfs"));
+        assert!(solution
+            .primal_feasibility_tolerance
+            .is_some_and(|tol| (tol - 1e-7).abs() <= 1e-12));
+        assert!(solution
+            .dual_feasibility_tolerance
+            .is_some_and(|tol| (tol - 2e-7).abs() <= 1e-12));
+        assert!(solution
+            .integer_feasibility_tolerance
+            .is_some_and(|tol| (tol - 1e-6).abs() <= 1e-12));
+        assert_eq!(solution.x, vec![1.0]);
+    }
+
+    #[test]
+    fn native_cbc_lp_tolerances_succeed_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Cbc) else {
+            eprintln!("SKIP direct CBC LP-tolerance solve: cbc command not installed");
+            return;
+        };
+        let solution = solve_lp_with_external_cli(
+            &super::external_linear_cli_smoke_lp(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-cbc-lp-tolerances".to_string()),
+                time_limit_secs: Some(2.0),
+                primal_feasibility_tolerance: Some(1e-7),
+                dual_feasibility_tolerance: Some(2e-7),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "cbc:cli");
+        assert!(solution
+            .primal_feasibility_tolerance
+            .is_some_and(|tol| (tol - 1e-7).abs() <= 1e-12));
+        assert!(solution
+            .dual_feasibility_tolerance
+            .is_some_and(|tol| (tol - 2e-7).abs() <= 1e-12));
+        assert_eq!(solution.x, vec![1.0]);
     }
 
     #[test]

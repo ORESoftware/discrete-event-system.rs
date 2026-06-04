@@ -526,7 +526,9 @@ pub fn solve_max_flow_with_external_reference(
 ) -> ExternalMaxFlowReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalMaxFlowReferenceSolver::RustEdmondsKarp | ExternalMaxFlowReferenceSolver::Fallback
+        ExternalMaxFlowReferenceSolver::Auto
+            | ExternalMaxFlowReferenceSolver::RustEdmondsKarp
+            | ExternalMaxFlowReferenceSolver::Fallback
     ) {
         return solve_max_flow_with_rust_reference(problem);
     }
@@ -623,5 +625,19 @@ mod tests {
         assert_eq!(solution.solver, "rust:edmonds-karp-max-flow");
         assert!((solution.max_flow.unwrap() - 5.0).abs() <= 1e-9);
         assert!((solution.min_cut.capacity - 5.0).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_textbook_max_flow_problem();
+
+        let solution = solve_max_flow_with_external_reference(
+            &problem,
+            &ExternalMaxFlowReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:edmonds-karp-max-flow");
+        assert!((solution.max_flow.unwrap() - 23.0).abs() <= 1e-9);
     }
 }

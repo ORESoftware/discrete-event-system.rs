@@ -382,7 +382,9 @@ pub fn solve_assignment_with_external_reference(
 ) -> ExternalAssignmentReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalAssignmentReferenceSolver::RustDp | ExternalAssignmentReferenceSolver::Fallback
+        ExternalAssignmentReferenceSolver::Auto
+            | ExternalAssignmentReferenceSolver::RustDp
+            | ExternalAssignmentReferenceSolver::Fallback
     ) {
         return solve_assignment_with_rust_reference(cost);
     }
@@ -438,5 +440,20 @@ mod tests {
         assert_eq!(solution.solver, "rust:assignment-dp");
         assert_eq!(solution.assignment, vec![0, 1]);
         assert_eq!(solution.objective, Some(2.0));
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let cost = vec![vec![3.0, 1.0], vec![2.0, 4.0]];
+
+        let solution = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalAssignmentReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:assignment-dp");
+        assert_eq!(solution.assignment, vec![1, 0]);
+        assert_eq!(solution.objective, Some(3.0));
     }
 }

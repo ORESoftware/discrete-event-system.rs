@@ -580,7 +580,8 @@ pub fn solve_knapsack_with_external_reference(
 ) -> ExternalKnapsackReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalKnapsackReferenceSolver::RustBranchAndBound
+        ExternalKnapsackReferenceSolver::Auto
+            | ExternalKnapsackReferenceSolver::RustBranchAndBound
             | ExternalKnapsackReferenceSolver::Fallback
     ) {
         return solve_knapsack_with_rust_reference(problem);
@@ -661,5 +662,20 @@ mod tests {
         assert_eq!(solution.selected_item_ids, vec!["B"]);
         assert_eq!(solution.total_weight, Some(4.0));
         assert_eq!(solution.total_value, Some(10.0));
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_knapsack_problem();
+
+        let solution = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalKnapsackReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:branch-and-bound-knapsack");
+        assert_eq!(solution.selected_item_ids, vec!["B", "C", "D"]);
+        assert_eq!(solution.objective, Some(51.0));
     }
 }

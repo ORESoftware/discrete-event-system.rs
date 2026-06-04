@@ -44,6 +44,10 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use crate::des::general::des_base::composite_station::CompositeDESStation;
@@ -716,6 +720,11 @@ pub struct IPMIPSolveOptions {
     pub max_cuts_per_node: Option<usize>,
     pub heuristic_passes: Option<usize>,
     pub verbose: Option<bool>,
+    /// Cooperative cancellation flag checked between solver DES ticks.
+    pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Monotonic signal. Each increment asks the solver to stop after the next
+    /// newly accepted incumbent after the signal is observed.
+    pub take_next_incumbent_signal: Option<Arc<AtomicU64>>,
 }
 
 /// Branching rule (TS `'most-fractional' | 'first-fractional'`).
@@ -753,6 +762,8 @@ struct FilledIPMIPSolveOptions {
     max_cuts_per_node: usize,
     heuristic_passes: usize,
     verbose: bool,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    take_next_incumbent_signal: Option<Arc<AtomicU64>>,
 }
 
 /// Overall solve status (TS `IPMIPSolution['status']`).
@@ -767,6 +778,8 @@ pub enum IPMIPStatus {
     GapLimit,
     SolutionLimit,
     ObjectiveLimit,
+    Cancelled,
+    TakeNextIncumbent,
 }
 
 impl IPMIPStatus {
@@ -782,6 +795,8 @@ impl IPMIPStatus {
             IPMIPStatus::GapLimit => "gap-limit",
             IPMIPStatus::SolutionLimit => "solution-limit",
             IPMIPStatus::ObjectiveLimit => "objective-limit",
+            IPMIPStatus::Cancelled => "cancelled",
+            IPMIPStatus::TakeNextIncumbent => "take-next",
         }
     }
 }
@@ -2133,6 +2148,8 @@ enum IPMIPStopCondition {
     GapLimit,
     SolutionLimit,
     ObjectiveLimit,
+    Cancelled,
+    TakeNextIncumbent,
 }
 
 /// Composite single-threaded in-house branch-and-cut solver.
@@ -2365,6 +2382,8 @@ fn fill_ipmip_options(opts: &IPMIPSolveOptions) -> FilledIPMIPSolveOptions {
         max_cuts_per_node: opts.max_cuts_per_node.unwrap_or(2),
         heuristic_passes: opts.heuristic_passes.unwrap_or(60),
         verbose: opts.verbose.unwrap_or(false),
+        cancel_flag: opts.cancel_flag.clone(),
+        take_next_incumbent_signal: opts.take_next_incumbent_signal.clone(),
     }
 }
 
@@ -2425,6 +2444,13 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     let mip_gap_abs = filled.mip_gap_abs;
     let solution_limit = filled.solution_limit;
     let objective_limit = filled.objective_limit;
+    let cancel_flag = filled.cancel_flag.clone();
+    let take_next_incumbent_signal = filled.take_next_incumbent_signal.clone();
+    let mut seen_take_next_signal = take_next_incumbent_signal
+        .as_ref()
+        .map(|signal| signal.load(Ordering::Relaxed))
+        .unwrap_or(0);
+    let mut take_next_target_updates: Option<usize> = None;
     let stop_clock = t0;
     let stop_condition: Rc<RefCell<Option<IPMIPStopCondition>>> = Rc::new(RefCell::new(None));
     let stop_condition_for_loop = stop_condition.clone();
@@ -2435,6 +2461,28 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
             shuffle: false,
             max_ticks: Some(filled.max_ticks),
             stop_when: Some(Box::new(move |_tick, _ents| {
+                if cancel_flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    *stop_condition_for_loop.borrow_mut() = Some(IPMIPStopCondition::Cancelled);
+                    return true;
+                }
+                if let Some(signal) = take_next_incumbent_signal.as_ref() {
+                    let current_signal = signal.load(Ordering::Relaxed);
+                    if current_signal > seen_take_next_signal {
+                        seen_take_next_signal = current_signal;
+                        let current_updates = solver_for_stop.borrow().incumbent.borrow().updates;
+                        take_next_target_updates = Some(current_updates.saturating_add(1));
+                    }
+                    if let Some(target_updates) = take_next_target_updates {
+                        if solver_for_stop.borrow().incumbent.borrow().updates >= target_updates {
+                            *stop_condition_for_loop.borrow_mut() =
+                                Some(IPMIPStopCondition::TakeNextIncumbent);
+                            return true;
+                        }
+                    }
+                }
                 if time_limit.is_finite()
                     && stop_clock.elapsed().as_secs_f64() * 1000.0 >= time_limit
                 {
@@ -2488,6 +2536,14 @@ pub fn solve_ipmip_with_des(p: IPMIPProblem, opts: IPMIPSolveOptions) -> IPMIPSo
     let saw_unbounded = solver_ref.decision.borrow().saw_unbounded;
     let status = if summary.reason == Some(RunReason::MaxTicks) {
         IPMIPStatus::TickLimit
+    } else if summary.reason == Some(RunReason::StopWhen)
+        && stop_condition == Some(IPMIPStopCondition::Cancelled)
+    {
+        IPMIPStatus::Cancelled
+    } else if summary.reason == Some(RunReason::StopWhen)
+        && stop_condition == Some(IPMIPStopCondition::TakeNextIncumbent)
+    {
+        IPMIPStatus::TakeNextIncumbent
     } else if summary.reason == Some(RunReason::StopWhen)
         && stop_condition == Some(IPMIPStopCondition::ObjectiveLimit)
     {

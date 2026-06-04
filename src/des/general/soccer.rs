@@ -10385,17 +10385,47 @@ fn pass_chain_link_reward(direction: PassDirectionBucket, depth: usize) -> f64 {
     base * depth_multiplier
 }
 
-fn is_positive_pass_chain_continuation_action(action: &str) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassChainContinuationKind {
+    Shot,
+    Pass,
+    Dribble,
+}
+
+fn pass_chain_continuation_kind(action: &str) -> Option<PassChainContinuationKind> {
     let action = normalize_soccer_action_label(action);
-    matches!(
+    if matches!(
         action,
         "shoot"
             | "first-time-shot"
             | "first-time-header"
-            | "pass"
-            | "aerial-pass"
-            | "first-time-pass"
-    ) || is_dribble_action_label(action)
+    ) {
+        return Some(PassChainContinuationKind::Shot);
+    }
+    if matches!(action, "pass" | "aerial-pass" | "first-time-pass") {
+        return Some(PassChainContinuationKind::Pass);
+    }
+    is_dribble_action_label(action).then_some(PassChainContinuationKind::Dribble)
+}
+
+fn team_has_constructive_upfield_possession(snapshot: &WorldSnapshot, team: Team) -> bool {
+    snapshot.controlled_possession_team() == Some(team)
+        || snapshot
+            .pending_pass
+            .as_ref()
+            .is_some_and(|pass| pass.team == team)
+}
+
+fn pass_chain_continuation_retained_possession(
+    kind: PassChainContinuationKind,
+    team: Team,
+    after: &WorldSnapshot,
+) -> bool {
+    match kind {
+        PassChainContinuationKind::Dribble => after.controlled_possession_team() == Some(team),
+        PassChainContinuationKind::Pass => team_has_constructive_upfield_possession(after, team),
+        PassChainContinuationKind::Shot => after.possession_team() == Some(team),
+    }
 }
 
 fn ball_distance_from_own_goal(team: Team, position: Vec2, field_length: f64) -> f64 {
@@ -10756,7 +10786,7 @@ fn teamwork_progress_signal(
     possession_team: Team,
 ) -> Option<TeamworkProgressSignal> {
     if before.controlled_possession_team() != Some(possession_team)
-        || after.possession_team() != Some(possession_team)
+        || !team_has_constructive_upfield_possession(after, possession_team)
     {
         return None;
     }
@@ -15435,6 +15465,16 @@ impl SoccerMatch {
     }
 
     fn record_completed_pass_reward(&mut self, pass: &PendingPass, receiver: usize) {
+        let Some(passer) = self.players.get(pass.from) else {
+            return;
+        };
+        let Some(receiver_player) = self.players.get(receiver) else {
+            return;
+        };
+        if pass.from == receiver || passer.team != pass.team || receiver_player.team != pass.team {
+            return;
+        }
+
         let amount = completed_pass_reward(
             pass.team,
             pass.origin,
@@ -15461,10 +15501,10 @@ impl SoccerMatch {
                 .iter()
                 .rev()
                 .find(|entry| {
+                    let age_seconds = self.clock_seconds - entry.clock_seconds;
                     entry.team == team
                         && entry.to == current_receiver
-                        && self.clock_seconds - entry.clock_seconds
-                            <= PASS_CHAIN_MAX_CONTINUATION_SECONDS
+                        && (0.0..=PASS_CHAIN_MAX_CONTINUATION_SECONDS).contains(&age_seconds)
                         && !chain.iter().any(|existing: &CompletedPassChainEntry| {
                             existing.tick == entry.tick
                                 && existing.from == entry.from
@@ -16064,8 +16104,13 @@ impl SoccerMatch {
             return;
         };
         if decision.mdp_state.tick != before.tick
-            || !is_positive_pass_chain_continuation_action(&decision.action)
         {
+            return;
+        }
+        let Some(kind) = pass_chain_continuation_kind(&decision.action) else {
+            return;
+        };
+        if !pass_chain_continuation_retained_possession(kind, team, after) {
             return;
         }
 

@@ -33,6 +33,10 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64},
+    Arc,
+};
 
 use crate::des::general::hungarian::{hungarian, AssignmentDirection};
 use crate::des::general::ip_mip_des::{
@@ -2507,6 +2511,8 @@ pub struct SoccerIPMIPPolicyOptions {
     pub node_selection: Option<NodeSelection>,
     pub branch_rule: Option<BranchRule>,
     pub heuristic_passes: Option<usize>,
+    pub cancel_flag: Option<Arc<AtomicBool>>,
+    pub take_next_incumbent_signal: Option<Arc<AtomicU64>>,
     /// Keep demos animatable even when the MIP has no incumbent yet. Default true.
     pub fallback_to_mdp: Option<bool>,
 }
@@ -2558,6 +2564,8 @@ pub fn policy_ipmip_feasible(
         node_selection: Some(opts.node_selection.unwrap_or(NodeSelection::BestBound)),
         branch_rule: Some(opts.branch_rule.unwrap_or(BranchRule::MostFractional)),
         heuristic_passes: Some(opts.heuristic_passes.unwrap_or(120)),
+        cancel_flag: opts.cancel_flag.clone(),
+        take_next_incumbent_signal: opts.take_next_incumbent_signal.clone(),
         ..Default::default()
     };
     let mip = solve_ipmip_with_des(model.ip.clone(), solver_options.clone());
@@ -2571,6 +2579,9 @@ pub fn policy_ipmip_feasible(
             used_fallback: false,
             fallback_reason: None,
         };
+    }
+    if mip.status == crate::des::general::ip_mip_des::IPMIPStatus::Cancelled {
+        panic!("planner solve cancelled by user before a feasible incumbent was available");
     }
     if opts.fallback_to_mdp == Some(false) {
         panic!(

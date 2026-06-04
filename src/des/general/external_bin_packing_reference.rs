@@ -581,7 +581,9 @@ pub fn solve_bin_packing_with_external_reference(
 ) -> ExternalBinPackingReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalBinPackingReferenceSolver::RustExact | ExternalBinPackingReferenceSolver::Fallback
+        ExternalBinPackingReferenceSolver::Auto
+            | ExternalBinPackingReferenceSolver::RustExact
+            | ExternalBinPackingReferenceSolver::Fallback
     ) {
         return solve_bin_packing_with_rust_reference(problem);
     }
@@ -643,5 +645,20 @@ mod tests {
         assert_eq!(solution.objective, Some(2));
         assert_eq!(solution.lower_bound_bins, Some(2));
         assert_eq!(solution.total_weight, Some(20.0));
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_bin_packing_problem();
+
+        let solution = solve_bin_packing_with_external_reference(
+            &problem,
+            &ExternalBinPackingReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalBinPackingReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:exact-bin-packing");
+        assert_eq!(solution.objective, Some(3));
+        assert_eq!(solution.total_weight, Some(30.0));
     }
 }

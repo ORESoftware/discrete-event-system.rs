@@ -1113,23 +1113,36 @@ fn flush_postgres_completed_runs(
     let run_row_ids = store
         .insert_completed_runs(experiment_id, runner_id, &inserts)
         .map_err(invalid_data)?;
-    for (pending, run_row_id) in pending_runs.iter().zip(run_row_ids.iter()) {
+    let persisted = run_row_ids.len();
+    if let (Some(first), Some(last), Some(first_run_id), Some(last_run_id)) = (
+        pending_runs.first(),
+        pending_runs.last(),
+        run_row_ids.first(),
+        run_row_ids.last(),
+    ) {
+        let policy_versions_written = pending_runs
+            .iter()
+            .filter(|pending| pending.policy_version_written)
+            .count();
         println!(
-            "postgres_persisted_game episode={} shard={}/{} run_id={} policy_version={} generation={} policy_version_written={} batch_size={}",
-            pending.completed_episode,
+            "postgres_persisted_batch episodes={}..{} shard={}/{} first_run_id={} last_run_id={} first_policy_version={} last_policy_version={} first_generation={} last_generation={} policy_versions_written={} batch_size={}",
+            first.completed_episode,
+            last.completed_episode,
             shard_index,
             shard_count,
-            run_row_id,
-            pending
+            first_run_id,
+            last_run_id,
+            first
                 .output_policy_version_id
                 .as_deref()
                 .unwrap_or("none"),
-            pending.generation,
-            pending.policy_version_written,
-            run_row_ids.len()
+            last.output_policy_version_id.as_deref().unwrap_or("none"),
+            first.generation,
+            last.generation,
+            policy_versions_written,
+            persisted
         );
     }
-    let persisted = run_row_ids.len();
     pending_runs.clear();
     Ok(persisted)
 }

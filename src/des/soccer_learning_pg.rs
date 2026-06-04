@@ -8,6 +8,7 @@ use postgres::types::ToSql;
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::des::general::soccer::{
     MatchConfig, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey,
@@ -34,6 +35,7 @@ pub struct SoccerLearningPgCompletedRunInsert<'a> {
 
 const SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE: usize = 256;
 const SOCCER_RUN_DELTA_INSERT_BATCH_SIZE: usize = 256;
+const SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE: usize = 512;
 
 pub struct SoccerLearningPgStore {
     client: Client,
@@ -302,15 +304,15 @@ impl SoccerLearningPgStore {
             .transaction()
             .map_err(|err| format!("begin soccer run batch transaction: {err}"))?;
         let mut run_ids = Vec::with_capacity(runs.len());
-        for run in runs {
-            run_ids.push(insert_completed_run_in_transaction(
+        for chunk in runs.chunks(SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE) {
+            let chunk_run_ids = insert_completed_run_headers_in_transaction(
                 &mut tx,
                 experiment_id,
                 runner_id,
-                run.base_policy_version_id,
-                run.output_policy_version_id,
-                run.game,
-            )?);
+                chunk,
+            )?;
+            insert_completed_run_delta_rows_in_transaction(&mut tx, &chunk_run_ids, chunk)?;
+            run_ids.extend(chunk_run_ids);
         }
         tx.commit()
             .map_err(|err| format!("commit soccer learning run batch: {err}"))?;
@@ -852,6 +854,148 @@ fn insert_completed_run_in_transaction(
 }
 
 #[derive(Clone, Debug)]
+struct SoccerCompletedRunHeaderInsert<'a> {
+    run_id: String,
+    base_policy_version_id: Option<&'a str>,
+    output_policy_version_id: Option<&'a str>,
+    seed: i64,
+    episode_index: i32,
+    score_home: i32,
+    score_away: i32,
+    home_goal_diff: i32,
+    away_goal_diff: i32,
+    home_outcome: &'static str,
+    away_outcome: &'static str,
+    home_merge_weight_micros: i64,
+    away_merge_weight_micros: i64,
+    fitness_micros: i64,
+    duration_ticks: i64,
+    simulated_seconds_micros: i64,
+    elapsed_millis: i64,
+    transitions: i32,
+    summary_json: Value,
+    stats_json: Value,
+}
+
+fn completed_run_header_insert<'a>(
+    run: &SoccerLearningPgCompletedRunInsert<'a>,
+) -> Result<SoccerCompletedRunHeaderInsert<'a>, String> {
+    let game = run.game;
+    let summary_json =
+        serde_json::to_value(&game.summary).map_err(|err| format!("serialize summary: {err}"))?;
+    let stats_json = serde_json::to_value(&game.summary.stats)
+        .map_err(|err| format!("serialize stats: {err}"))?;
+    Ok(SoccerCompletedRunHeaderInsert {
+        run_id: Uuid::new_v4().to_string(),
+        base_policy_version_id: run.base_policy_version_id,
+        output_policy_version_id: run.output_policy_version_id,
+        seed: checked_i64(game.seed),
+        episode_index: checked_i32(game.episode),
+        score_home: checked_i32(game.summary.score_home),
+        score_away: checked_i32(game.summary.score_away),
+        home_goal_diff: game.score.home.goal_diff,
+        away_goal_diff: game.score.away.goal_diff,
+        home_outcome: game.score.home.outcome.as_str(),
+        away_outcome: game.score.away.outcome.as_str(),
+        home_merge_weight_micros: game.score.home.merge_weight_micros,
+        away_merge_weight_micros: game.score.away.merge_weight_micros,
+        fitness_micros: game.score.match_fitness_micros,
+        duration_ticks: checked_i64(game.summary.ticks),
+        simulated_seconds_micros: soccer_learning_to_micros(game.summary.simulated_seconds),
+        elapsed_millis: (game.elapsed_seconds * 1000.0).round().max(0.0) as i64,
+        transitions: checked_i32(game.episode_summary.transitions),
+        summary_json,
+        stats_json,
+    })
+}
+
+fn insert_completed_run_headers_in_transaction(
+    tx: &mut postgres::Transaction<'_>,
+    experiment_id: &str,
+    runner_id: &str,
+    runs: &[SoccerLearningPgCompletedRunInsert<'_>],
+) -> Result<Vec<String>, String> {
+    if runs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let batch_rows = runs
+        .iter()
+        .map(completed_run_header_insert)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut sql = String::from(
+        r#"
+        insert into des_soccer_learning_runs
+          (
+            id,
+            experiment_id,
+            base_policy_version_id,
+            output_policy_version_id,
+            runner_id,
+            seed,
+            episode_index,
+            status,
+            score_home,
+            score_away,
+            home_goal_diff,
+            away_goal_diff,
+            home_outcome,
+            away_outcome,
+            home_merge_weight_micros,
+            away_merge_weight_micros,
+            fitness_micros,
+            duration_ticks,
+            simulated_seconds_micros,
+            elapsed_millis,
+            transitions,
+            summary,
+            stats
+          )
+        values
+        "#,
+    );
+    let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(batch_rows.len() * 22);
+    for (idx, row) in batch_rows.iter().enumerate() {
+        if idx > 0 {
+            sql.push_str(", ");
+        }
+        append_completed_run_header_value_tuple(&mut sql, idx * 22 + 1);
+        params.push(&row.run_id);
+        params.push(&experiment_id);
+        params.push(&row.base_policy_version_id);
+        params.push(&row.output_policy_version_id);
+        params.push(&runner_id);
+        params.push(&row.seed);
+        params.push(&row.episode_index);
+        params.push(&row.score_home);
+        params.push(&row.score_away);
+        params.push(&row.home_goal_diff);
+        params.push(&row.away_goal_diff);
+        params.push(&row.home_outcome);
+        params.push(&row.away_outcome);
+        params.push(&row.home_merge_weight_micros);
+        params.push(&row.away_merge_weight_micros);
+        params.push(&row.fitness_micros);
+        params.push(&row.duration_ticks);
+        params.push(&row.simulated_seconds_micros);
+        params.push(&row.elapsed_millis);
+        params.push(&row.transitions);
+        params.push(&row.summary_json);
+        params.push(&row.stats_json);
+    }
+    let inserted = tx
+        .execute(&sql, &params)
+        .map_err(|err| format!("insert soccer learning run header batch: {err}"))?;
+    if inserted as usize != batch_rows.len() {
+        return Err(format!(
+            "insert soccer learning run header batch inserted {inserted} rows for {} inputs",
+            batch_rows.len()
+        ));
+    }
+    Ok(batch_rows.into_iter().map(|row| row.run_id).collect())
+}
+
+#[derive(Clone, Debug)]
 struct SoccerRunDeltaEntryInsert {
     team: &'static str,
     entry_kind: &'static str,
@@ -870,10 +1014,92 @@ struct SoccerRunDeltaEntryInsert {
     effective_visit_micros: i64,
 }
 
+#[derive(Clone, Debug)]
+struct SoccerRunDeltaBatchEntryInsert {
+    run_index: usize,
+    row: SoccerRunDeltaEntryInsert,
+}
+
+fn soccer_run_delta_entry_insert(
+    delta: &SoccerLearningPolicyDeltaEntry,
+) -> SoccerRunDeltaEntryInsert {
+    SoccerRunDeltaEntryInsert {
+        team: soccer_team_label(delta.team),
+        entry_kind: delta.entry_kind.as_str(),
+        state_hash: delta.state_hash.clone(),
+        state_json: delta.state_json.clone(),
+        action: delta.action.clone(),
+        target_fine_cell_id: delta.target_fine_cell_id,
+        target_tactical_cell_id: delta.target_tactical_cell_id,
+        target_macro_cell_id: delta.target_macro_cell_id,
+        target_root_cell_id: delta.target_root_cell_id,
+        before_value_micros: delta.before_value_micros,
+        after_value_micros: delta.after_value_micros,
+        value_delta_micros: delta.value_delta_micros,
+        visit_delta: checked_i32(delta.visit_delta),
+        merge_weight_micros: delta.merge_weight_micros,
+        effective_visit_micros: delta.effective_visit_micros,
+    }
+}
+
 fn insert_run_delta_rows(
     tx: &mut postgres::Transaction<'_>,
     run_id: &str,
     rows: &[SoccerLearningPolicyDeltaEntry],
+) -> Result<(), String> {
+    let run_ids = [run_id.to_string()];
+    let mut batch_rows = Vec::with_capacity(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE);
+    for delta in rows {
+        batch_rows.push(SoccerRunDeltaBatchEntryInsert {
+            run_index: 0,
+            row: soccer_run_delta_entry_insert(delta),
+        });
+        if batch_rows.len() == SOCCER_RUN_DELTA_INSERT_BATCH_SIZE {
+            insert_run_delta_batch_rows(tx, &run_ids, &batch_rows)?;
+            batch_rows.clear();
+        }
+    }
+    if !batch_rows.is_empty() {
+        insert_run_delta_batch_rows(tx, &run_ids, &batch_rows)?;
+    }
+    Ok(())
+}
+
+fn insert_completed_run_delta_rows_in_transaction(
+    tx: &mut postgres::Transaction<'_>,
+    run_ids: &[String],
+    runs: &[SoccerLearningPgCompletedRunInsert<'_>],
+) -> Result<(), String> {
+    if run_ids.len() != runs.len() {
+        return Err(format!(
+            "insert soccer learning run delta batch got {} run ids for {} runs",
+            run_ids.len(),
+            runs.len()
+        ));
+    }
+    let mut batch_rows = Vec::with_capacity(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE);
+    for (run_index, run) in runs.iter().enumerate() {
+        for delta in &run.game.delta.entries {
+            batch_rows.push(SoccerRunDeltaBatchEntryInsert {
+                run_index,
+                row: soccer_run_delta_entry_insert(delta),
+            });
+            if batch_rows.len() == SOCCER_RUN_DELTA_INSERT_BATCH_SIZE {
+                insert_run_delta_batch_rows(tx, run_ids, &batch_rows)?;
+                batch_rows.clear();
+            }
+        }
+    }
+    if !batch_rows.is_empty() {
+        insert_run_delta_batch_rows(tx, run_ids, &batch_rows)?;
+    }
+    Ok(())
+}
+
+fn insert_run_delta_batch_rows(
+    tx: &mut postgres::Transaction<'_>,
+    run_ids: &[String],
+    rows: &[SoccerRunDeltaBatchEntryInsert],
 ) -> Result<(), String> {
     for chunk in rows.chunks(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE) {
         let mut sql = String::from(
@@ -900,33 +1126,20 @@ fn insert_run_delta_rows(
             values
             "#,
         );
-        let batch_rows = chunk
-            .iter()
-            .map(|delta| SoccerRunDeltaEntryInsert {
-                team: soccer_team_label(delta.team),
-                entry_kind: delta.entry_kind.as_str(),
-                state_hash: delta.state_hash.clone(),
-                state_json: delta.state_json.clone(),
-                action: delta.action.clone(),
-                target_fine_cell_id: delta.target_fine_cell_id,
-                target_tactical_cell_id: delta.target_tactical_cell_id,
-                target_macro_cell_id: delta.target_macro_cell_id,
-                target_root_cell_id: delta.target_root_cell_id,
-                before_value_micros: delta.before_value_micros,
-                after_value_micros: delta.after_value_micros,
-                value_delta_micros: delta.value_delta_micros,
-                visit_delta: checked_i32(delta.visit_delta),
-                merge_weight_micros: delta.merge_weight_micros,
-                effective_visit_micros: delta.effective_visit_micros,
-            })
-            .collect::<Vec<_>>();
-        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(batch_rows.len() * 16);
-        for (idx, row) in batch_rows.iter().enumerate() {
+        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 16);
+        for (idx, batch_row) in chunk.iter().enumerate() {
+            let row = &batch_row.row;
+            let run_id = run_ids.get(batch_row.run_index).ok_or_else(|| {
+                format!(
+                    "insert soccer learning run delta batch has row for missing run index {}",
+                    batch_row.run_index
+                )
+            })?;
             if idx > 0 {
                 sql.push_str(", ");
             }
             append_run_delta_value_tuple(&mut sql, idx * 16 + 1);
-            params.push(&run_id);
+            params.push(run_id);
             params.push(&row.team);
             params.push(&row.entry_kind);
             params.push(&row.state_hash);
@@ -1126,6 +1339,34 @@ fn insert_policy_target_entry_rows(
             .map_err(|err| format!("insert soccer policy target entry batch: {err}"))?;
     }
     Ok(())
+}
+
+fn append_completed_run_header_value_tuple(sql: &mut String, first_param: usize) {
+    sql.push_str(&format!(
+        "(${}::text::uuid, ${}::text::uuid, ${}::text::uuid, ${}::text::uuid, ${}, ${}, ${}, 'completed', ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+        first_param,
+        first_param + 1,
+        first_param + 2,
+        first_param + 3,
+        first_param + 4,
+        first_param + 5,
+        first_param + 6,
+        first_param + 7,
+        first_param + 8,
+        first_param + 9,
+        first_param + 10,
+        first_param + 11,
+        first_param + 12,
+        first_param + 13,
+        first_param + 14,
+        first_param + 15,
+        first_param + 16,
+        first_param + 17,
+        first_param + 18,
+        first_param + 19,
+        first_param + 20,
+        first_param + 21
+    ));
 }
 
 fn append_run_delta_value_tuple(sql: &mut String, first_param: usize) {
@@ -1645,6 +1886,15 @@ mod tests {
 
     #[test]
     fn policy_entry_batch_placeholders_preserve_uuid_casts_and_offsets() {
+        let mut completed_run_sql = String::new();
+        append_completed_run_header_value_tuple(&mut completed_run_sql, 1);
+        completed_run_sql.push_str(", ");
+        append_completed_run_header_value_tuple(&mut completed_run_sql, 23);
+        assert_eq!(
+            completed_run_sql,
+            "($1::text::uuid, $2::text::uuid, $3::text::uuid, $4::text::uuid, $5, $6, $7, 'completed', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22), ($23::text::uuid, $24::text::uuid, $25::text::uuid, $26::text::uuid, $27, $28, $29, 'completed', $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)"
+        );
+
         let mut delta_sql = String::new();
         append_run_delta_value_tuple(&mut delta_sql, 1);
         delta_sql.push_str(", ");

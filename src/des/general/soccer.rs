@@ -1443,7 +1443,6 @@ impl SoccerTacticalLearningSummary {
     pub fn merge(&mut self, other: &Self) {
         let attack_count = self.attack_transitions;
         let defense_count = self.defense_transitions;
-        let shape_count = self.shape_transitions;
 
         self.mean_attack_team_width_yards = weighted_mean(
             self.mean_attack_team_width_yards,
@@ -1517,8 +1516,12 @@ impl SoccerTacticalLearningSummary {
             other.mean_defense_tactical_reward,
             other.defense_transitions,
         );
-        self.total_transitions = self.total_transitions.saturating_add(other.total_transitions);
-        self.shape_transitions = self.shape_transitions.saturating_add(other.shape_transitions);
+        self.total_transitions = self
+            .total_transitions
+            .saturating_add(other.total_transitions);
+        self.shape_transitions = self
+            .shape_transitions
+            .saturating_add(other.shape_transitions);
         self.attack_transitions = self
             .attack_transitions
             .saturating_add(other.attack_transitions);
@@ -1608,8 +1611,7 @@ impl SoccerTacticalLearningSummary {
         }
 
         if self.shape_transitions > 0 {
-            self.mean_tactical_reward =
-                self.total_tactical_reward / self.shape_transitions as f64;
+            self.mean_tactical_reward = self.total_tactical_reward / self.shape_transitions as f64;
         }
     }
 }
@@ -12346,12 +12348,8 @@ fn tactical_shape_trace(
     let before_possession = before.controlled_possession_team();
     if before_possession == Some(team) {
         let spacing_weight = before.possession_spacing_weight(team).max(0.35);
-        let before_width = team_field_player_lateral_width_for_candidate(
-            before,
-            team,
-            player_id,
-            before_pos,
-        );
+        let before_width =
+            team_field_player_lateral_width_for_candidate(before, team, player_id, before_pos);
         let after_width =
             team_field_player_lateral_width_for_candidate(after, team, player_id, after_pos);
         let width_delta = ((after_width - before_width) / field_width).clamp(-1.0, 1.0);
@@ -12392,12 +12390,8 @@ fn tactical_shape_trace(
     }
 
     if before_possession == Some(team.other()) {
-        let before_width = team_field_player_lateral_width_for_candidate(
-            before,
-            team,
-            player_id,
-            before_pos,
-        );
+        let before_width =
+            team_field_player_lateral_width_for_candidate(before, team, player_id, before_pos);
         let after_width =
             team_field_player_lateral_width_for_candidate(after, team, player_id, after_pos);
         let contract_delta = ((before_width - after_width) / field_width).clamp(-1.0, 1.0);

@@ -697,7 +697,9 @@ mod tests {
             Some("require")
         );
         assert_eq!(
-            soccer_learning_pg_sslmode("postgres://u:p@host/db?connect_timeout=5&sslmode=verify-full"),
+            soccer_learning_pg_sslmode(
+                "postgres://u:p@host/db?connect_timeout=5&sslmode=verify-full"
+            ),
             Some("verify-full")
         );
         assert_eq!(soccer_learning_pg_sslmode("postgres://u:p@host/db"), None);

@@ -633,8 +633,8 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "clingo",
         env_key: "CLINGO",
         family: ExternalValidationFamily::ConstraintModeling,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["clingo"],
         capabilities: &[
             ExternalValidationCapability::CompileModel,
@@ -10837,6 +10837,7 @@ fn external_validation_python_modules(
         "pulp" => &["pulp"],
         "pyscipopt" => &["pyscipopt"],
         "python-mip" => &["mip"],
+        "clingo" => &["clingo"],
         "gurobipy" => &["gurobipy"],
         "cplex-python" => &["cplex"],
         "xpress-python" => &["xpress"],
@@ -11335,6 +11336,11 @@ mod tests {
             .iter()
             .any(|tool| { tool.id == "clingo" && tool.input_formats.contains(&"asp") }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "clingo"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "pyomo" && tool.family == ExternalValidationFamily::ConstraintModeling
         }));
         assert!(tools
@@ -11687,6 +11693,11 @@ mod tests {
         );
         assert!(external_validation_command_dir_env_names(choco)
             .contains(&"CHOCO_SOLVER_HOME".to_string()));
+        let clingo = find_external_validation_tool("clingo").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(clingo)[0],
+            "ORES_CLINGO_PYTHON"
+        );
         let cp_optimizer = find_external_validation_tool("ibm_cp_optimizer").unwrap();
         assert_eq!(cp_optimizer.id, "ibm-cp-optimizer");
         assert!(external_validation_command_dir_env_names(cp_optimizer)

@@ -360,7 +360,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Osqp
             | ExternalOptimizationTool::Scs
             | ExternalOptimizationTool::Clarabel
-            | ExternalOptimizationTool::Ecos => ExternalOptimizationLanguage::Python,
+            | ExternalOptimizationTool::Ecos
+            | ExternalOptimizationTool::Clingo => ExternalOptimizationLanguage::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationLanguage::Julia,
             ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
@@ -408,7 +409,6 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::LindoCli
             | ExternalOptimizationTool::Conjure
             | ExternalOptimizationTool::Picat
-            | ExternalOptimizationTool::Clingo
             | ExternalOptimizationTool::Clingcon
             | ExternalOptimizationTool::OpenWbo => ExternalOptimizationLanguage::Native,
             ExternalOptimizationTool::GoodLp
@@ -849,6 +849,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Pyomo => &["pyomo"],
             ExternalOptimizationTool::Cpmpy => &["cpmpy"],
             ExternalOptimizationTool::PyCsp3 => &["pycsp3"],
+            ExternalOptimizationTool::Clingo => &["clingo"],
             ExternalOptimizationTool::PySat => &["pysat"],
             ExternalOptimizationTool::Pulp => &["pulp"],
             ExternalOptimizationTool::Cvxpy => &["cvxpy"],
@@ -4313,7 +4314,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
                 .count(),
-            23
+            24
         );
         assert_eq!(
             specs
@@ -4327,7 +4328,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            49
+            48
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -4405,6 +4406,7 @@ mod tests {
         }));
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::Clingo
+                && spec.language == ExternalOptimizationLanguage::Python
                 && spec.family == ExternalOptimizationFamily::ConstraintProgramming
                 && spec.exactness == ExternalOptimizationExactness::Exact
         }));
@@ -4614,6 +4616,13 @@ mod tests {
             artifact_env_names(ExternalOptimizationTool::Cpmpy)[0],
             "ORES_CPMPY_PYTHON"
         );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Clingo)[0],
+            "ORES_CLINGO_PYTHON"
+        );
+        assert!(ExternalOptimizationTool::Clingo
+            .python_modules()
+            .contains(&"clingo"));
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Conjure)[0],
             "ORES_CONJURE_DIR"

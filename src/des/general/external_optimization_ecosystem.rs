@@ -477,11 +477,11 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Osqp
             | ExternalOptimizationTool::Scs
             | ExternalOptimizationTool::Clarabel
-            | ExternalOptimizationTool::Ecos => ExternalOptimizationEcosystem::Python,
+            | ExternalOptimizationTool::Ecos
+            | ExternalOptimizationTool::Clingo => ExternalOptimizationEcosystem::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationEcosystem::Julia,
             ExternalOptimizationTool::Conjure
             | ExternalOptimizationTool::Picat
-            | ExternalOptimizationTool::Clingo
             | ExternalOptimizationTool::Clingcon
             | ExternalOptimizationTool::OpenWbo
             | ExternalOptimizationTool::Ampl
@@ -563,7 +563,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Conjure => "CONJURE_DIR",
             ExternalOptimizationTool::SavileRow => "SAVILE_ROW_CLASSPATH",
             ExternalOptimizationTool::Picat => "PICAT_DIR",
-            ExternalOptimizationTool::Clingo => "CLINGO_DIR",
+            ExternalOptimizationTool::Clingo => "CLINGO_PYTHON",
             ExternalOptimizationTool::Clingcon => "CLINGCON_DIR",
             ExternalOptimizationTool::Sat4j => "SAT4J_CLASSPATH",
             ExternalOptimizationTool::PySat => "PYSAT_PYTHON",
@@ -2066,6 +2066,10 @@ mod tests {
         assert!(ExternalOptimizationTool::Cpmpy
             .python_modules()
             .contains(&"cpmpy"));
+        assert_eq!(ExternalOptimizationTool::Clingo.env_var(), "CLINGO_PYTHON");
+        assert!(ExternalOptimizationTool::Clingo
+            .python_modules()
+            .contains(&"clingo"));
         assert!(ExternalOptimizationTool::Osqp
             .python_modules()
             .contains(&"osqp"));

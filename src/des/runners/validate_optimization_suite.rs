@@ -6628,7 +6628,7 @@ impl Driver {
                             == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
                     })
                     .count()
-                    == 23
+                    == 24
                 && legacy_tools
                     .iter()
                     .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
@@ -6665,7 +6665,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 23 && julia_count == 1 && native_count == 49,
+            python_count == 24 && julia_count == 1 && native_count == 48,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(

@@ -1194,24 +1194,24 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "Kissat",
         env_key: "KISSAT",
         family: ExternalValidationFamily::SatSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["kissat"],
         capabilities: SAT_CAPS,
         input_formats: SAT_FORMATS,
-        notes: "CDCL SAT solver for DIMACS CNF cross-checks",
+        notes: "CDCL SAT solver for DIMACS CNF cross-checks via native CLI or PySAT backend",
     },
     ExternalValidationToolSpec {
         id: "cadical",
         display_name: "CaDiCaL",
         env_key: "CADICAL",
         family: ExternalValidationFamily::SatSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["cadical"],
         capabilities: SAT_CAPS,
         input_formats: SAT_FORMATS,
-        notes: "SAT solver with proof-generation and checker ecosystem support",
+        notes: "SAT solver with proof-generation and checker ecosystem support via native CLI or PySAT backend",
     },
     ExternalValidationToolSpec {
         id: "cryptominisat",
@@ -1230,36 +1230,36 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "MiniSat",
         env_key: "MINISAT",
         family: ExternalValidationFamily::SatSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["minisat"],
         capabilities: SAT_CAPS,
         input_formats: SAT_FORMATS,
-        notes: "Classic CDCL SAT solver for DIMACS CNF smoke-model validation",
+        notes: "Classic CDCL SAT solver for DIMACS CNF smoke-model validation via native CLI or PySAT backend",
     },
     ExternalValidationToolSpec {
         id: "glucose",
         display_name: "Glucose",
         env_key: "GLUCOSE",
         family: ExternalValidationFamily::SatSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["glucose", "glucose-syrup"],
         capabilities: SAT_CAPS,
         input_formats: SAT_FORMATS,
-        notes: "CDCL SAT solver family for independent DIMACS satisfiability checks",
+        notes: "CDCL SAT solver family for independent DIMACS satisfiability checks via native CLI or PySAT backend",
     },
     ExternalValidationToolSpec {
         id: "maplesat",
         display_name: "MapleSAT",
         env_key: "MAPLESAT",
         family: ExternalValidationFamily::SatSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["maplesat", "maple-sat", "maple-lcm"],
         capabilities: SAT_CAPS,
         input_formats: SAT_FORMATS,
-        notes: "Maple-family SAT solver for CDCL branching and restart cross-checks",
+        notes: "Maple-family SAT solver for CDCL branching and restart cross-checks via native CLI or PySAT backend",
     },
     ExternalValidationToolSpec {
         id: "varisat",
@@ -11389,6 +11389,11 @@ fn external_validation_python_modules(
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ortools"],
         "scipy-optimize" => &["scipy.optimize", "scipy"],
         "nlopt" => &["nlopt"],
+        "kissat" => &["pysat.solvers:kissat"],
+        "cadical" => &["pysat.solvers:cadical153"],
+        "minisat" => &["pysat.solvers:minisat22"],
+        "glucose" => &["pysat.solvers:glucose4"],
+        "maplesat" => &["pysat.solvers:maplesat"],
         "pysat" => &["pysat"],
         "casadi" => &["casadi"],
         "osqp" => &["osqp"],
@@ -11672,7 +11677,11 @@ fn python_probe_command_from_env(
 }
 
 fn python_can_import(python: &Path, module: &str) -> bool {
-    let probe = if module == "pycsp3" {
+    let probe = if let Some(solver_name) = module.strip_prefix("pysat.solvers:") {
+        format!(
+            "import sys; from pysat.solvers import Solver; solver = Solver(name={solver_name:?}, bootstrap_with=[[1], [-1]]); result = solver.solve(); solver.delete(); sys.exit(0 if result is False else 1)"
+        )
+    } else if module == "pycsp3" {
         format!(
             "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module:?}) else 1)"
         )
@@ -11773,8 +11782,28 @@ mod tests {
         {
             assert!(
                 !external_validation_python_modules(tool).is_empty(),
-                "{} is declared as a Python package but has no probe module",
-                tool.id
+            "{} is declared as a Python package but has no probe module",
+            tool.id
+        );
+    }
+
+        let expected_pysat_backends = [
+            ("kissat", "pysat.solvers:kissat"),
+            ("cadical", "pysat.solvers:cadical153"),
+            ("minisat", "pysat.solvers:minisat22"),
+            ("glucose", "pysat.solvers:glucose4"),
+            ("maplesat", "pysat.solvers:maplesat"),
+        ];
+        for (tool_id, backend) in expected_pysat_backends {
+            let tool = find_external_validation_tool(tool_id).unwrap();
+            assert_eq!(tool.runtime, ExternalValidationRuntime::Python);
+            assert_eq!(
+                tool.artifact_kind,
+                ExternalValidationArtifactKind::PythonPackage
+            );
+            assert!(
+                external_validation_python_modules(tool).contains(&backend),
+                "{tool_id} should probe its concrete PySAT backend"
             );
         }
     }

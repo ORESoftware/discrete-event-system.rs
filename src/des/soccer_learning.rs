@@ -1016,6 +1016,8 @@ mod tests {
         assert_eq!(report.completed_games, 2);
         assert_eq!(report.failed_games, 0);
         assert_eq!(report.episode_summaries.len(), 2);
+        assert!(report.tactical_summary.total_transitions > 0);
+        assert!(report.tactical_summary.shape_transitions > 0);
     }
 
     #[test]

@@ -1430,10 +1430,14 @@ pub struct SoccerTacticalLearningSummary {
 impl SoccerTacticalLearningSummary {
     pub fn from_transitions(transitions: &[SoccerLearningTransition]) -> Self {
         let mut summary = SoccerTacticalLearningSummary::default();
-        for transition in transitions {
-            summary.record_transition(transition);
-        }
+        summary.record_transitions(transitions);
         summary
+    }
+
+    pub fn record_transitions(&mut self, transitions: &[SoccerLearningTransition]) {
+        for transition in transitions {
+            self.record_transition(transition);
+        }
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -1513,26 +1517,29 @@ impl SoccerTacticalLearningSummary {
             other.mean_defense_tactical_reward,
             other.defense_transitions,
         );
-        self.mean_tactical_reward = weighted_mean(
-            self.mean_tactical_reward,
-            shape_count,
-            other.mean_tactical_reward,
-            other.shape_transitions,
-        );
-
-        self.total_transitions += other.total_transitions;
-        self.shape_transitions += other.shape_transitions;
-        self.attack_transitions += other.attack_transitions;
-        self.defense_transitions += other.defense_transitions;
-        self.total_tactical_reward += other.total_tactical_reward;
+        self.total_transitions = self.total_transitions.saturating_add(other.total_transitions);
+        self.shape_transitions = self.shape_transitions.saturating_add(other.shape_transitions);
+        self.attack_transitions = self
+            .attack_transitions
+            .saturating_add(other.attack_transitions);
+        self.defense_transitions = self
+            .defense_transitions
+            .saturating_add(other.defense_transitions);
+        self.total_tactical_reward =
+            finite_metric(self.total_tactical_reward) + finite_metric(other.total_tactical_reward);
+        self.mean_tactical_reward = if self.shape_transitions > 0 {
+            self.total_tactical_reward / self.shape_transitions as f64
+        } else {
+            0.0
+        };
     }
 
     fn record_transition(&mut self, transition: &SoccerLearningTransition) {
-        self.total_transitions += 1;
+        self.total_transitions = self.total_transitions.saturating_add(1);
         let trace = &transition.tactical_trace;
         if trace.attack_shape {
-            self.shape_transitions += 1;
-            self.attack_transitions += 1;
+            self.shape_transitions = self.shape_transitions.saturating_add(1);
+            self.attack_transitions = self.attack_transitions.saturating_add(1);
             record_running_mean(
                 &mut self.mean_attack_team_width_yards,
                 self.attack_transitions,
@@ -1570,8 +1577,8 @@ impl SoccerTacticalLearningSummary {
             );
             self.total_tactical_reward += finite_metric(trace.tactical_reward);
         } else if trace.defense_shape {
-            self.shape_transitions += 1;
-            self.defense_transitions += 1;
+            self.shape_transitions = self.shape_transitions.saturating_add(1);
+            self.defense_transitions = self.defense_transitions.saturating_add(1);
             record_running_mean(
                 &mut self.mean_defense_team_width_yards,
                 self.defense_transitions,
@@ -1624,12 +1631,13 @@ fn record_running_mean(mean: &mut f64, count: usize, value: f64) {
 }
 
 fn weighted_mean(left_mean: f64, left_count: usize, right_mean: f64, right_count: usize) -> f64 {
+    let left_count = left_count as f64;
+    let right_count = right_count as f64;
     let total = left_count + right_count;
-    if total == 0 {
+    if total <= 0.0 {
         return 0.0;
     }
-    (finite_metric(left_mean) * left_count as f64 + finite_metric(right_mean) * right_count as f64)
-        / total as f64
+    (finite_metric(left_mean) * left_count + finite_metric(right_mean) * right_count) / total
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -14931,6 +14939,7 @@ pub struct SoccerMatch {
     pub stats: MatchStats,
     pub events: Vec<MatchEvent>,
     pub learning_transitions: Vec<SoccerLearningTransition>,
+    pub tactical_summary: SoccerTacticalLearningSummary,
     pub learned_policy: Option<SoccerQPolicy>,
     pub team_policies: Option<SoccerTeamQPolicies>,
     neural_learner: Option<SoccerNeuralLearner>,
@@ -15028,6 +15037,7 @@ impl SoccerMatch {
             stats: MatchStats::default(),
             events: Vec::new(),
             learning_transitions: Vec::new(),
+            tactical_summary: SoccerTacticalLearningSummary::default(),
             learned_policy: None,
             team_policies: None,
             neural_learner: if config.learning_enabled && config.neural_learning.enabled {
@@ -15436,9 +15446,7 @@ impl SoccerMatch {
             config: self.config.clone(),
             summary: self.summary(),
             learning: self.learning_snapshot(),
-            tactical_summary: SoccerTacticalLearningSummary::from_transitions(
-                &self.learning_transitions,
-            ),
+            tactical_summary: self.tactical_summary.clone(),
             adversarial: self.team_policies.is_some(),
             home_options,
             away_options,
@@ -16255,6 +16263,7 @@ impl SoccerMatch {
                 if !self.deferred_reward_transitions.is_empty() {
                     new_transitions.extend(self.deferred_reward_transitions.drain(..));
                 }
+                self.tactical_summary.record_transitions(&new_transitions);
                 let neural_samples = if self.neural_learning_due(learning_due) {
                     self.neural_training_samples_for(&new_transitions)
                 } else {
@@ -19659,6 +19668,7 @@ impl SoccerMatch {
     ) {
         let transitions =
             self.learning_transitions_for(before, after, score_home_before, score_away_before, &[]);
+        self.tactical_summary.record_transitions(&transitions);
         self.learning_transitions.extend(transitions);
     }
 
@@ -22959,9 +22969,7 @@ where
             .team_policies
             .take()
             .unwrap_or_else(|| SoccerTeamQPolicies::new(options.clone()));
-        tactical_summary.merge(&SoccerTacticalLearningSummary::from_transitions(
-            &sim.learning_transitions,
-        ));
+        tactical_summary.merge(&sim.tactical_summary);
         let summary = SoccerSelfPlayEpisodeSummary {
             episode,
             seed: episode_seed as u64,
@@ -31285,6 +31293,85 @@ mod tests {
     }
 
     #[test]
+    fn tactical_summary_tracks_logged_transitions_incrementally() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 15061,
+            ..Default::default()
+        });
+        for _ in 0..sim.config.total_ticks() {
+            sim.run_time_step();
+        }
+
+        let recomputed = SoccerTacticalLearningSummary::from_transitions(&sim.learning_transitions);
+        assert_eq!(
+            sim.tactical_summary.total_transitions,
+            sim.learning_transitions.len()
+        );
+        assert_eq!(
+            sim.tactical_summary.total_transitions,
+            recomputed.total_transitions
+        );
+        assert_eq!(
+            sim.tactical_summary.shape_transitions,
+            recomputed.shape_transitions
+        );
+        assert_eq!(
+            sim.tactical_summary.attack_transitions,
+            recomputed.attack_transitions
+        );
+        assert_eq!(
+            sim.tactical_summary.defense_transitions,
+            recomputed.defense_transitions
+        );
+        assert!(
+            (sim.tactical_summary.total_tactical_reward - recomputed.total_tactical_reward).abs()
+                < 1e-9
+        );
+        assert!(
+            (sim.tactical_summary.mean_tactical_reward - recomputed.mean_tactical_reward).abs()
+                < 1e-12
+        );
+
+        let artifact = sim.team_policy_artifact();
+        assert_eq!(
+            artifact.tactical_summary.total_transitions,
+            sim.tactical_summary.total_transitions
+        );
+    }
+
+    #[test]
+    fn tactical_summary_accumulates_without_retained_transition_logs() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            learning_logging_enabled: false,
+            seed: 15062,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+        for _ in 0..sim.config.total_ticks() {
+            sim.run_time_step();
+        }
+
+        assert!(sim.learning_transitions.is_empty());
+        assert!(sim.tactical_summary.total_transitions > 0);
+        assert!(sim.tactical_summary.shape_transitions > 0);
+        assert_eq!(
+            sim.tactical_summary.shape_transitions,
+            sim.tactical_summary.attack_transitions + sim.tactical_summary.defense_transitions
+        );
+
+        let artifact = sim.team_policy_artifact();
+        assert_eq!(artifact.learning.total_transitions, 0);
+        assert_eq!(
+            artifact.tactical_summary.total_transitions,
+            sim.tactical_summary.total_transitions
+        );
+        assert!(!artifact.home_entries.is_empty());
+        assert!(!artifact.away_entries.is_empty());
+    }
+
+    #[test]
     fn learning_runtime_can_pause_learned_decisions_and_logging() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -31977,6 +32064,19 @@ mod tests {
         assert_eq!(artifact.episodes.len(), 2);
         assert_eq!(artifact.episodes[0].transitions, 44);
         assert_eq!(artifact.episodes[1].transitions, 44);
+        assert_eq!(
+            artifact.tactical_summary.total_transitions,
+            artifact
+                .episodes
+                .iter()
+                .map(|episode| episode.transitions)
+                .sum::<usize>()
+        );
+        assert_eq!(
+            artifact.tactical_summary.shape_transitions,
+            artifact.tactical_summary.attack_transitions
+                + artifact.tactical_summary.defense_transitions
+        );
         assert!(!artifact.home_entries.is_empty());
         assert!(!artifact.away_entries.is_empty());
         assert!(!artifact.home_target_entries.is_empty());
@@ -32069,14 +32169,28 @@ mod tests {
             value["config"]["tacticalLearning"]["defenseContractDeltaWeight"],
             serde_json::json!(0.42)
         );
+        assert!(artifact.tactical_summary.total_transitions > 0);
+        assert!(artifact.tactical_summary.shape_transitions > 0);
+        assert_eq!(
+            value["tacticalSummary"]["shapeTransitions"],
+            serde_json::json!(artifact.tactical_summary.shape_transitions)
+        );
         let params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
         let params_value = serde_json::to_value(&params).expect("learned params json");
         assert_eq!(params.version, SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION);
         assert_eq!(params.episodes, 1);
         assert_eq!(params.tactical_learning.attack_flank_lane_weight, 0.31);
         assert_eq!(
+            params.tactical_summary.shape_transitions,
+            artifact.tactical_summary.shape_transitions
+        );
+        assert_eq!(
             params_value["tacticalLearning"]["attackFlankLaneWeight"],
             serde_json::json!(0.31)
+        );
+        assert_eq!(
+            params_value["tacticalSummary"]["shapeTransitions"],
+            serde_json::json!(artifact.tactical_summary.shape_transitions)
         );
         assert_eq!(params.home_entries.len(), artifact.home_entries.len());
         let restored =

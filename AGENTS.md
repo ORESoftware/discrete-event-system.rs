@@ -1,5 +1,7 @@
 # Agent Notes
 
+- Stay on the `main` branch for now. Do not create feature branches unless the
+  user explicitly asks for one.
 - Rust-first rule: implement production library behavior, solver features,
   validation logic, and reusable tooling in Rust whenever practical. Use Python
   only for external/reference bridges, small compatibility smoke scripts, or

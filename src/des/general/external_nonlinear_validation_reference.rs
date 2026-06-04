@@ -121,13 +121,13 @@ impl ExternalNonlinearValidationReferenceSolver {
     pub fn notes(self) -> &'static str {
         match self.family() {
             ExternalNonlinearValidationReferenceFamily::Auto => {
-                "Prefer installed SciPy-backed validation, then use the bounded pattern-search fallback."
+                "Use the dependency-free Rust bounded grid plus pattern-search reference for small NLP validation models."
             }
             ExternalNonlinearValidationReferenceFamily::ScipyBridge => {
-                "Registered NLP solver label routed through the local SciPy validation bridge when available, with deterministic fallback recovery."
+                "Registered NLP solver label validated through the deterministic Rust bounded pattern-search reference."
             }
             ExternalNonlinearValidationReferenceFamily::PackageBridge => {
-                "Package-specific bridge that checks the named Python package before falling back for smoke validation."
+                "Package-specific solver label validated through the deterministic Rust bounded pattern-search reference."
             }
             ExternalNonlinearValidationReferenceFamily::Fallback => {
                 "Dependency-free bounded grid plus pattern-search reference for small NLP smoke models."
@@ -964,6 +964,48 @@ mod tests {
             item.get("id").and_then(|value| value.as_str()) == Some("knitro")
                 && item.get("family").and_then(|value| value.as_str()) == Some("scipy-bridge")
         }));
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let request = ExternalNonlinearValidationRequest {
+            variables: vec![
+                ExternalNonlinearValidationVariable {
+                    name: "x".to_string(),
+                    lb: 0.0,
+                    ub: 3.0,
+                    start: Some(0.2),
+                },
+                ExternalNonlinearValidationVariable {
+                    name: "y".to_string(),
+                    lb: 0.0,
+                    ub: 3.0,
+                    start: Some(0.2),
+                },
+            ],
+            objective: "(x - 1)**2 + (y - 2)**2".to_string(),
+            constraints: vec![ExternalNonlinearValidationConstraint {
+                name: "demand".to_string(),
+                expr: "x + y".to_string(),
+                sense: ">=".to_string(),
+                rhs: 1.0,
+            }],
+            sense: "min".to_string(),
+        };
+        let result = solve_nonlinear_validation_with_external_reference(
+            &request,
+            &ExternalNonlinearValidationReferenceOptions {
+                solver: ExternalNonlinearValidationReferenceSolver::Auto,
+            },
+        );
+
+        assert_eq!(
+            result.status,
+            ExternalNonlinearValidationReferenceStatus::Optimal
+        );
+        assert_eq!(result.solver, "builtin:nlp-pattern-search");
+        assert_eq!(result.x.len(), 2);
+        assert!(result.objective.is_some_and(|objective| objective <= 1e-6));
     }
 
     #[test]

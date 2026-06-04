@@ -154,7 +154,9 @@ use crate::des::general::external_validation_tools::{
     prism_validation_model_to_string, prism_validation_properties_to_string,
     probe_external_validation_tool, run_external_validation_artifact_cli,
     run_external_validation_consensus, run_external_validation_file_cli,
-    run_external_validation_text_cli, run_simulation_validation_json_with_external_reference,
+    run_external_validation_text_cli, run_model_validation_json_with_rust_reference,
+    run_output_validation_json_with_rust_reference, run_proof_validation_json_with_rust_reference,
+    run_simulation_validation_json_with_external_reference,
     run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
     smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf,
     ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
@@ -7051,11 +7053,8 @@ impl Driver {
                 solver: None,
                 checker_model: None,
             });
-        let minizinc_bridge_run = self.run_python_json(
-            "model_validation_reference.py",
-            &["--tool", "minizinc"],
-            &minizinc_bridge_payload.to_string(),
-        );
+        let minizinc_bridge_run =
+            run_model_validation_json_with_rust_reference(&minizinc_bridge_payload, "minizinc");
         self.check(
             "External validation MiniZinc bridge sat payload",
             minizinc_bridge_run["status"].as_str() == Some("ok")
@@ -7080,10 +7079,9 @@ impl Driver {
             "ortools-cp-sat",
             "minizinc-solution-checker",
         ] {
-            let registered_tool_run = self.run_python_json(
-                "model_validation_reference.py",
-                &["--tool", tool],
-                &minizinc_registered_tool_payload.to_string(),
+            let registered_tool_run = run_model_validation_json_with_rust_reference(
+                &minizinc_registered_tool_payload,
+                tool,
             );
             self.check(
                 format!("External validation {tool} MiniZinc-family registered-tool payload"),
@@ -7107,11 +7105,8 @@ impl Driver {
                     "kind": "asp-validation",
                     "program": "1 { choose(a); choose(b) } 1.\n#show choose/1.",
                 });
-                let clingo_run = self.run_python_json(
-                    "model_validation_reference.py",
-                    &["--tool", "clingo"],
-                    &clingo_payload.to_string(),
-                );
+                let clingo_run =
+                    run_model_validation_json_with_rust_reference(&clingo_payload, "clingo");
                 self.check(
                     "External validation clingo ASP registered-tool payload",
                     clingo_run["status"].as_str() == Some("ok")
@@ -7134,34 +7129,45 @@ impl Driver {
             }
         }
 
-        let smt_bridge_payload = serde_json::json!({
-            "kind": "smtlib-validation",
-            "script": smtlib,
-        });
-        let smt_bridge_run = self.run_python_json(
-            "model_validation_reference.py",
-            &["--tool", "z3"],
-            &smt_bridge_payload.to_string(),
-        );
-        self.check(
-            "External validation SMT-LIB bridge sat payload",
-            smt_bridge_run["status"].as_str() == Some("ok")
-                && smt_bridge_run["verdict"].as_str() == Some("sat"),
-            format!(
-                "status={} verdict={} validator={}",
-                smt_bridge_run["status"].as_str().unwrap_or(""),
-                smt_bridge_run["verdict"].as_str().unwrap_or(""),
-                smt_bridge_run["validator"].as_str().unwrap_or("")
-            ),
-        );
+        if let Some(z3) = specs.iter().find(|spec| spec.id == "z3") {
+            let z3_probe = probe_external_validation_tool(z3);
+            if z3_probe.status == ExternalValidationProbeStatus::Ready {
+                let smt_bridge_run = run_external_validation_text_cli(
+                    &smtlib,
+                    &ExternalValidationTextCliOptions {
+                        tool_id: "z3".to_string(),
+                        input_format: ExternalValidationTextFormat::SmtLib2,
+                        command_path: z3_probe.command.clone(),
+                        working_dir: None,
+                        extra_args: Vec::new(),
+                        use_default_args: true,
+                    },
+                );
+                let smt_bridge_verdict = smt_bridge_run
+                    .output
+                    .as_ref()
+                    .and_then(|output| output["verdict"].as_str())
+                    .unwrap_or("");
+                self.check(
+                    "External validation SMT-LIB Rust CLI sat payload",
+                    smt_bridge_run.status == ExternalValidationRunStatus::Ok
+                        && smt_bridge_verdict == "sat",
+                    format!(
+                        "status={} verdict={} validator={}",
+                        smt_bridge_run.status.as_str(),
+                        smt_bridge_verdict,
+                        smt_bridge_run.tool_id
+                    ),
+                );
+            } else {
+                println!("  SKIP  SMT-LIB Rust CLI sat payload: {}", z3_probe.message);
+            }
+        }
         let yices_smt_bridge_payload = serde_json::json!({
             "script": smtlib,
         });
-        let yices_smt_bridge_run = self.run_python_json(
-            "model_validation_reference.py",
-            &["--tool", "yices"],
-            &yices_smt_bridge_payload.to_string(),
-        );
+        let yices_smt_bridge_run =
+            run_model_validation_json_with_rust_reference(&yices_smt_bridge_payload, "yices");
         self.check(
             "External validation Yices SMT-LIB bridge registered-tool payload",
             yices_smt_bridge_run["status"].as_str() == Some("ok")
@@ -7186,11 +7192,8 @@ impl Driver {
             "smtinterpol",
             "princess",
         ] {
-            let registered_smt_run = self.run_python_json(
-                "model_validation_reference.py",
-                &["--tool", tool],
-                &generic_smt_sat_payload.to_string(),
-            );
+            let registered_smt_run =
+                run_model_validation_json_with_rust_reference(&generic_smt_sat_payload, tool);
             self.check(
                 format!("External validation {tool} SMT-LIB registered-tool sat payload"),
                 registered_smt_run["status"].as_str() == Some("ok")
@@ -7217,11 +7220,8 @@ impl Driver {
             "smtinterpol",
             "princess",
         ] {
-            let registered_smt_unsat_run = self.run_python_json(
-                "model_validation_reference.py",
-                &["--tool", tool],
-                &generic_smt_unsat_payload.to_string(),
-            );
+            let registered_smt_unsat_run =
+                run_model_validation_json_with_rust_reference(&generic_smt_unsat_payload, tool);
             self.check(
                 format!("External validation {tool} SMT-LIB registered-tool unsat payload"),
                 registered_smt_unsat_run["status"].as_str() == Some("ok")
@@ -7239,11 +7239,8 @@ impl Driver {
             "kind": "dimacs-cnf-validation",
             "dimacs": dimacs,
         });
-        let dimacs_bridge_run = self.run_python_json(
-            "model_validation_reference.py",
-            &["--tool", "kissat"],
-            &dimacs_bridge_payload.to_string(),
-        );
+        let dimacs_bridge_run =
+            run_model_validation_json_with_rust_reference(&dimacs_bridge_payload, "kissat");
         self.check(
             "External validation DIMACS bridge sat payload",
             dimacs_bridge_run["status"].as_str() == Some("ok")
@@ -7260,11 +7257,8 @@ impl Driver {
             "kind": "dimacs-cnf-validation",
             "dimacs": "p cnf 1 2\n1 0\n-1 0\n",
         });
-        let unsat_dimacs_bridge_run = self.run_python_json(
-            "model_validation_reference.py",
-            &["--tool", "kissat"],
-            &unsat_dimacs_bridge_payload.to_string(),
-        );
+        let unsat_dimacs_bridge_run =
+            run_model_validation_json_with_rust_reference(&unsat_dimacs_bridge_payload, "kissat");
         self.check(
             "External validation DIMACS bridge unsat payload",
             unsat_dimacs_bridge_run["status"].as_str() == Some("ok")
@@ -7290,11 +7284,7 @@ impl Driver {
             ("maplesat", &unsat_dimacs_bridge_payload, "unsat"),
             ("varisat", &unsat_dimacs_bridge_payload, "unsat"),
         ] {
-            let registered_sat_run = self.run_python_json(
-                "model_validation_reference.py",
-                &["--tool", tool],
-                &payload.to_string(),
-            );
+            let registered_sat_run = run_model_validation_json_with_rust_reference(payload, tool);
             self.check(
                 format!("External validation {tool} DIMACS registered-tool {expected} payload"),
                 registered_sat_run["status"].as_str() == Some("ok")
@@ -7313,11 +7303,8 @@ impl Driver {
             "wcnf": "p wcnf 2 3 10\n10 1 0\n3 -1 2 0\n2 -2 0\n",
         });
         for tool in ["open-wbo", "maxhs"] {
-            let registered_wcnf_run = self.run_python_json(
-                "model_validation_reference.py",
-                &["--tool", tool],
-                &wcnf_bridge_payload.to_string(),
-            );
+            let registered_wcnf_run =
+                run_model_validation_json_with_rust_reference(&wcnf_bridge_payload, tool);
             self.check(
                 format!("External validation {tool} WCNF registered-tool optimal payload"),
                 registered_wcnf_run["status"].as_str() == Some("ok")
@@ -7347,11 +7334,7 @@ impl Driver {
             ("roundingsat", &opb_unsat_bridge_payload, "unsat"),
             ("roundingsat", &opb_sat_bridge_payload, "sat"),
         ] {
-            let registered_opb_run = self.run_python_json(
-                "model_validation_reference.py",
-                &["--tool", tool],
-                &payload.to_string(),
-            );
+            let registered_opb_run = run_model_validation_json_with_rust_reference(payload, tool);
             self.check(
                 format!("External validation {tool} OPB registered-tool {expected} payload"),
                 registered_opb_run["status"].as_str() == Some("ok")
@@ -7372,11 +7355,8 @@ impl Driver {
             "cnf": "p cnf 1 2\n1 0\n-1 0\n",
             "proof": "0\n",
         });
-        let proof_bridge_run = self.run_python_json(
-            "proof_validation_reference.py",
-            &["--tool", "drat"],
-            &proof_bridge_payload.to_string(),
-        );
+        let proof_bridge_run =
+            run_proof_validation_json_with_rust_reference(&proof_bridge_payload, "drat");
         self.check(
             "External validation DRAT proof bridge valid payload",
             proof_bridge_run["status"].as_str() == Some("ok")
@@ -7396,11 +7376,8 @@ impl Driver {
             "cnf": "p cnf 1 1\n1 0\n",
             "proof": "2 0 1 0\n",
         });
-        let invalid_proof_bridge_run = self.run_python_json(
-            "proof_validation_reference.py",
-            &["--tool", "lrat"],
-            &invalid_proof_bridge_payload.to_string(),
-        );
+        let invalid_proof_bridge_run =
+            run_proof_validation_json_with_rust_reference(&invalid_proof_bridge_payload, "lrat");
         self.check(
             "External validation LRAT proof bridge invalid payload",
             invalid_proof_bridge_run["status"].as_str() == Some("ok")
@@ -7420,11 +7397,8 @@ impl Driver {
             "cnf": "p cnf 1 2\n1 0\n-1 0\n",
             "proof": "a 1 0\n",
         });
-        let frat_proof_bridge_run = self.run_python_json(
-            "proof_validation_reference.py",
-            &["--tool", "frat"],
-            &frat_proof_bridge_payload.to_string(),
-        );
+        let frat_proof_bridge_run =
+            run_proof_validation_json_with_rust_reference(&frat_proof_bridge_payload, "frat");
         self.check(
             "External validation FRAT proof bridge valid payload",
             frat_proof_bridge_run["status"].as_str() == Some("ok")
@@ -7443,11 +7417,8 @@ impl Driver {
             "opb": "1 x1 >= 1;\n-1 x1 >= 0;\n",
             "proof": "rup contradiction\n",
         });
-        let veripb_bridge_run = self.run_python_json(
-            "proof_validation_reference.py",
-            &["--tool", "veripb"],
-            &veripb_bridge_payload.to_string(),
-        );
+        let veripb_bridge_run =
+            run_proof_validation_json_with_rust_reference(&veripb_bridge_payload, "veripb");
         self.check(
             "External validation VeriPB proof bridge valid payload",
             veripb_bridge_run["status"].as_str() == Some("ok")
@@ -7466,11 +7437,8 @@ impl Driver {
             "opb": "1 x1 >= 0;\n",
             "proof": "rup contradiction\n",
         });
-        let invalid_veripb_bridge_run = self.run_python_json(
-            "proof_validation_reference.py",
-            &["--tool", "veripb"],
-            &invalid_veripb_bridge_payload.to_string(),
-        );
+        let invalid_veripb_bridge_run =
+            run_proof_validation_json_with_rust_reference(&invalid_veripb_bridge_payload, "veripb");
         self.check(
             "External validation VeriPB proof bridge invalid payload",
             invalid_veripb_bridge_run["status"].as_str() == Some("ok")
@@ -8295,11 +8263,8 @@ impl Driver {
                 infeasible_nonlinear_run.message
             ),
         );
-        let schema_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "json-schema"],
-            &schema_payload.to_string(),
-        );
+        let schema_run =
+            run_output_validation_json_with_rust_reference(&schema_payload, "json-schema");
         self.check(
             "External validation JSON Schema bridge valid payload",
             schema_run["status"].as_str() == Some("ok")
@@ -8321,11 +8286,8 @@ impl Driver {
                 instance: serde_json::json!({"objective": "bad"}),
                 draft: Some("2020-12".to_string()),
             });
-        let invalid_schema_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "json-schema"],
-            &invalid_schema_payload.to_string(),
-        );
+        let invalid_schema_run =
+            run_output_validation_json_with_rust_reference(&invalid_schema_payload, "json-schema");
         self.check(
             "External validation JSON Schema bridge invalid payload",
             invalid_schema_run["status"].as_str() == Some("ok")
@@ -8357,11 +8319,8 @@ impl Driver {
                 "additionalColumns": false
             }
         });
-        let table_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "great-expectations"],
-            &table_payload.to_string(),
-        );
+        let table_run =
+            run_output_validation_json_with_rust_reference(&table_payload, "great-expectations");
         self.check(
             "External validation table bridge valid payload",
             table_run["status"].as_str() == Some("ok")
@@ -8376,11 +8335,8 @@ impl Driver {
             ),
         );
 
-        let csv_validator_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "csv-validator"],
-            &table_payload.to_string(),
-        );
+        let csv_validator_run =
+            run_output_validation_json_with_rust_reference(&table_payload, "csv-validator");
         self.check(
             "External validation CSV validator registered-tool payload",
             csv_validator_run["status"].as_str() == Some("ok")
@@ -8407,11 +8363,8 @@ impl Driver {
             "tensorflow-data-validation",
             "openrefine",
         ] {
-            let registered_table_run = self.run_python_json(
-                "output_validation_reference.py",
-                &["--tool", tool],
-                &table_payload.to_string(),
-            );
+            let registered_table_run =
+                run_output_validation_json_with_rust_reference(&table_payload, tool);
             self.check(
                 format!("External validation {tool} table-quality registered-tool payload"),
                 registered_table_run["status"].as_str() == Some("ok")
@@ -8441,11 +8394,8 @@ impl Driver {
                 }
             }
         });
-        let invalid_table_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "pandera"],
-            &invalid_table_payload.to_string(),
-        );
+        let invalid_table_run =
+            run_output_validation_json_with_rust_reference(&invalid_table_payload, "pandera");
         self.check(
             "External validation table bridge invalid payload",
             invalid_table_run["status"].as_str() == Some("ok")
@@ -8470,11 +8420,7 @@ impl Driver {
             },
             "instance": {"objective": 3.5}
         });
-        let ajv_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "ajv"],
-            &ajv_payload.to_string(),
-        );
+        let ajv_run = run_output_validation_json_with_rust_reference(&ajv_payload, "ajv");
         self.check(
             "External validation AJV bridge valid payload",
             ajv_run["status"].as_str() == Some("ok")
@@ -8488,11 +8434,8 @@ impl Driver {
             ),
         );
         for tool in ["check-jsonschema", "cue"] {
-            let schema_alias_run = self.run_python_json(
-                "output_validation_reference.py",
-                &["--tool", tool],
-                &ajv_payload.to_string(),
-            );
+            let schema_alias_run =
+                run_output_validation_json_with_rust_reference(&ajv_payload, tool);
             self.check(
                 format!("External validation {tool} JSON-schema registered-tool payload"),
                 schema_alias_run["status"].as_str() == Some("ok")
@@ -8520,11 +8463,8 @@ impl Driver {
                 }
             }
         });
-        let openapi_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "spectral"],
-            &openapi_payload.to_string(),
-        );
+        let openapi_run =
+            run_output_validation_json_with_rust_reference(&openapi_payload, "spectral");
         self.check(
             "External validation OpenAPI/Spectral bridge valid payload",
             openapi_run["status"].as_str() == Some("ok")
@@ -8538,11 +8478,8 @@ impl Driver {
                 openapi_run["validator"].as_str().unwrap_or("")
             ),
         );
-        let openapi_validator_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "openapi-validator"],
-            &openapi_payload.to_string(),
-        );
+        let openapi_validator_run =
+            run_output_validation_json_with_rust_reference(&openapi_payload, "openapi-validator");
         self.check(
             "External validation OpenAPI validator registered-tool payload",
             openapi_validator_run["status"].as_str() == Some("ok")
@@ -8557,11 +8494,8 @@ impl Driver {
             ),
         );
         for tool in ["openapi-spec-validator", "redocly-cli", "asyncapi-cli"] {
-            let api_alias_run = self.run_python_json(
-                "output_validation_reference.py",
-                &["--tool", tool],
-                &openapi_payload.to_string(),
-            );
+            let api_alias_run =
+                run_output_validation_json_with_rust_reference(&openapi_payload, tool);
             self.check(
                 format!("External validation {tool} API registered-tool payload"),
                 api_alias_run["status"].as_str() == Some("ok")
@@ -8583,11 +8517,8 @@ impl Driver {
             "schematron": "<schema><pattern><rule context='run'><assert test='objective'>objective required</assert></rule></pattern></schema>",
             "required_elements": ["objective"]
         });
-        let schematron_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "schematron"],
-            &schematron_payload.to_string(),
-        );
+        let schematron_run =
+            run_output_validation_json_with_rust_reference(&schematron_payload, "schematron");
         self.check(
             "External validation Schematron bridge valid payload",
             schematron_run["status"].as_str() == Some("ok")
@@ -8606,11 +8537,8 @@ impl Driver {
             "xsd": "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'><xs:element name='run'/></xs:schema>",
             "required_elements": ["objective"]
         });
-        let xml_schema_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "xml-schema"],
-            &xml_schema_payload.to_string(),
-        );
+        let xml_schema_run =
+            run_output_validation_json_with_rust_reference(&xml_schema_payload, "xml-schema");
         self.check(
             "External validation XML Schema registered-tool payload",
             xml_schema_run["status"].as_str() == Some("ok")
@@ -8630,11 +8558,8 @@ impl Driver {
                 "builtin:xml-schema-structural-for-python-xmlschema",
             ),
         ] {
-            let registered_xml_run = self.run_python_json(
-                "output_validation_reference.py",
-                &["--tool", tool],
-                &xml_schema_payload.to_string(),
-            );
+            let registered_xml_run =
+                run_output_validation_json_with_rust_reference(&xml_schema_payload, tool);
             self.check(
                 format!("External validation {tool} XML schema registered-tool payload"),
                 registered_xml_run["status"].as_str() == Some("ok")
@@ -8654,11 +8579,8 @@ impl Driver {
             "required_elements": ["objective"]
         });
         for tool in ["jing", "saxon"] {
-            let xml_rule_run = self.run_python_json(
-                "output_validation_reference.py",
-                &["--tool", tool],
-                &xml_rule_payload.to_string(),
-            );
+            let xml_rule_run =
+                run_output_validation_json_with_rust_reference(&xml_rule_payload, tool);
             self.check(
                 format!("External validation {tool} XML rule bridge registered-tool payload"),
                 xml_rule_run["status"].as_str() == Some("ok")
@@ -8683,11 +8605,8 @@ impl Driver {
             },
             "instance": {"objective": 3.5, "status": "optimal"}
         });
-        let pydantic_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "pydantic"],
-            &pydantic_payload.to_string(),
-        );
+        let pydantic_run =
+            run_output_validation_json_with_rust_reference(&pydantic_payload, "pydantic");
         self.check(
             "External validation Pydantic bridge valid payload",
             pydantic_run["status"].as_str() == Some("ok")
@@ -8701,11 +8620,8 @@ impl Driver {
             ),
         );
         for tool in ["zod", "valibot", "marshmallow", "cerberus"] {
-            let pydantic_alias_run = self.run_python_json(
-                "output_validation_reference.py",
-                &["--tool", tool],
-                &pydantic_payload.to_string(),
-            );
+            let pydantic_alias_run =
+                run_output_validation_json_with_rust_reference(&pydantic_payload, tool);
             self.check(
                 format!("External validation {tool} structured-schema registered-tool payload"),
                 pydantic_alias_run["status"].as_str() == Some("ok")
@@ -8733,10 +8649,9 @@ impl Driver {
             },
             "message": {"id": 42, "status": "ok", "scores": [1.5, 2.0]}
         });
-        let protobuf_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "protobuf-conformance"],
-            &protobuf_payload.to_string(),
+        let protobuf_run = run_output_validation_json_with_rust_reference(
+            &protobuf_payload,
+            "protobuf-conformance",
         );
         self.check(
             "External validation Protobuf bridge valid payload",
@@ -8752,11 +8667,8 @@ impl Driver {
             ),
         );
 
-        let protoc_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "protoc"],
-            &protobuf_payload.to_string(),
-        );
+        let protoc_run =
+            run_output_validation_json_with_rust_reference(&protobuf_payload, "protoc");
         self.check(
             "External validation protoc registered-tool payload",
             protoc_run["status"].as_str() == Some("ok")
@@ -8781,10 +8693,9 @@ impl Driver {
             },
             "message": {"id": "bad", "status": "bad", "extra": 1}
         });
-        let invalid_protobuf_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "protobuf-conformance"],
-            &invalid_protobuf_payload.to_string(),
+        let invalid_protobuf_run = run_output_validation_json_with_rust_reference(
+            &invalid_protobuf_payload,
+            "protobuf-conformance",
         );
         self.check(
             "External validation Protobuf bridge invalid payload",
@@ -8819,11 +8730,7 @@ impl Driver {
             },
             "record": {"id": 7, "objective": 3.5, "status": "ok", "tags": ["smoke"]}
         });
-        let avro_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "avro-tools"],
-            &avro_payload.to_string(),
-        );
+        let avro_run = run_output_validation_json_with_rust_reference(&avro_payload, "avro-tools");
         self.check(
             "External validation Avro bridge valid payload",
             avro_run["status"].as_str() == Some("ok")
@@ -8837,11 +8744,8 @@ impl Driver {
             ),
         );
 
-        let apache_avro_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "apache-avro"],
-            &avro_payload.to_string(),
-        );
+        let apache_avro_run =
+            run_output_validation_json_with_rust_reference(&avro_payload, "apache-avro");
         self.check(
             "External validation Apache Avro registered-tool payload",
             apache_avro_run["status"].as_str() == Some("ok")
@@ -8868,11 +8772,8 @@ impl Driver {
             },
             "record": {"id": "bad", "extra": 1}
         });
-        let invalid_avro_run = self.run_python_json(
-            "output_validation_reference.py",
-            &["--tool", "avro-tools"],
-            &invalid_avro_payload.to_string(),
-        );
+        let invalid_avro_run =
+            run_output_validation_json_with_rust_reference(&invalid_avro_payload, "avro-tools");
         self.check(
             "External validation Avro bridge invalid payload",
             invalid_avro_run["status"].as_str() == Some("ok")

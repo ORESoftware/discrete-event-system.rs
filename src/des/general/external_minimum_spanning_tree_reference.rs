@@ -469,7 +469,8 @@ pub fn solve_minimum_spanning_tree_with_external_reference(
 ) -> ExternalMinimumSpanningTreeReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalMinimumSpanningTreeReferenceSolver::RustKruskal
+        ExternalMinimumSpanningTreeReferenceSolver::Auto
+            | ExternalMinimumSpanningTreeReferenceSolver::RustKruskal
             | ExternalMinimumSpanningTreeReferenceSolver::Fallback
     ) {
         return solve_minimum_spanning_tree_with_rust_reference(problem);
@@ -543,5 +544,23 @@ mod tests {
         assert_eq!(solution.solver, "rust:kruskal-mst");
         assert!(solution.selected_edge_indices.is_empty());
         assert!(solution.objective.is_none());
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_minimum_spanning_tree_problem();
+
+        let solution = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions::default(),
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinimumSpanningTreeReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:kruskal-mst");
+        assert_eq!(solution.objective, Some(6.0));
+        assert_eq!(solution.selected_edge_ids, vec!["AB", "BC", "CD", "DE"]);
     }
 }

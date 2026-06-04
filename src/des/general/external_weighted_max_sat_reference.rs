@@ -504,7 +504,8 @@ pub fn solve_weighted_max_sat_with_external_reference(
 ) -> ExternalWeightedMaxSatReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalWeightedMaxSatReferenceSolver::RustEnumeration
+        ExternalWeightedMaxSatReferenceSolver::Auto
+            | ExternalWeightedMaxSatReferenceSolver::RustEnumeration
             | ExternalWeightedMaxSatReferenceSolver::Fallback
     ) {
         return solve_weighted_max_sat_with_rust_reference(problem);
@@ -587,5 +588,23 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-weighted-max-sat");
         assert!(solution.assignment.is_empty());
         assert!(solution.objective.is_none());
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_weighted_max_sat_problem();
+
+        let solution = solve_weighted_max_sat_with_external_reference(
+            &problem,
+            &ExternalWeightedMaxSatReferenceOptions::default(),
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedMaxSatReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:exact-weighted-max-sat");
+        assert_eq!(solution.objective, Some(16.0));
+        assert_eq!(solution.assignment, vec![true, true, true]);
     }
 }

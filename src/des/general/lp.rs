@@ -11,8 +11,8 @@
 //!   4. An external scipy.optimize.linprog dispatcher (`ExternalSolver` /
 //!      `solve_lp_external`) that shells out via `std::process::Command`.
 //!   5. `LPSolver` / `solve_lp`: selects a solver via the `LP_SOLVER` env var,
-//!      falling back to the internal simplex if the external bridge is
-//!      unavailable (no python / no scipy / parse failure).
+//!      defaulting to the native internal simplex. Explicit external choices
+//!      fall back to the internal simplex if the bridge is unavailable.
 //!   6. `LpPrinter` / `lp_to_string`: a human-readable pretty-printer.
 //!
 //! Mapping notes vs. the TypeScript source:
@@ -3947,13 +3947,16 @@ impl LpSolverOptions {
     }
 }
 
-/// Solve an LP using the solver selected by env var `LP_SOLVER`, falling back
-/// to the internal simplex if the external bridge is unavailable.
+const DEFAULT_LP_SOLVER: &str = "internal";
+
+/// Solve an LP using the solver selected by env var `LP_SOLVER`, defaulting to
+/// the native internal simplex. Explicit external choices fall back to the
+/// internal simplex if the external bridge is unavailable.
 ///
 /// ```text
-///   LP_SOLVER=internal              in-process two-phase simplex
+///   LP_SOLVER=internal              in-process two-phase simplex (DEFAULT)
 ///   LP_SOLVER=internal-ipm          in-process primal-dual interior-point method
-///   LP_SOLVER=scipy:highs           scipy linprog method=highs (DEFAULT)
+///   LP_SOLVER=scipy:highs           scipy linprog method=highs
 ///   LP_SOLVER=scipy:highs-ipm       scipy interior-point HiGHS
 ///   LP_SOLVER=scipy:highs-ds        scipy dual simplex HiGHS
 ///   LP_SOLVER=scipy:simplex         legacy scipy simplex
@@ -3974,7 +3977,7 @@ impl LPSolver {
 
 impl Transform<LPProblem, LPSolution> for LPSolver {
     fn transform(&self, input: LPProblem) -> LPSolution {
-        let choice = std::env::var("LP_SOLVER").unwrap_or_else(|_| "scipy:highs".to_string());
+        let choice = std::env::var("LP_SOLVER").unwrap_or_else(|_| DEFAULT_LP_SOLVER.to_string());
         let choice = choice.trim();
         if choice == "internal" {
             return run_internal_simplex(&input, &self.opts.internal());
@@ -4540,6 +4543,11 @@ mod tests {
         assert_eq!(external_solver_label("pdlp"), "ortools:pdlp");
         assert_eq!(external_solver_label("ortools-PDLP"), "ortools:pdlp");
         assert_eq!(external_solver_label("highs"), "scipy:highs");
+    }
+
+    #[test]
+    fn default_lp_solver_is_native_internal() {
+        assert_eq!(DEFAULT_LP_SOLVER, "internal");
     }
 
     #[test]

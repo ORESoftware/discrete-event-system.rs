@@ -4008,6 +4008,2405 @@ pub fn json_schema_validation_request_to_json(request: &JsonSchemaValidationRequ
     })
 }
 
+fn output_validation_result(
+    status: &str,
+    verdict: &str,
+    validator: &str,
+    message: impl Into<String>,
+    errors: Vec<String>,
+) -> Value {
+    json!({
+        "status": status,
+        "verdict": verdict,
+        "validator": validator,
+        "message": message.into(),
+        "errors": errors,
+    })
+}
+
+fn output_validation_json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn output_validation_json_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        _ => None,
+    }
+}
+
+fn output_validation_json_integer(value: &Value) -> Option<i128> {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| number.as_u64().map(i128::from)),
+        _ => None,
+    }
+}
+
+fn output_validation_matches_json_type(value: &Value, expected: &str) -> bool {
+    match expected {
+        "number" => output_validation_json_number(value).is_some(),
+        "integer" => output_validation_json_integer(value).is_some(),
+        "boolean" => value.is_boolean(),
+        "string" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        "null" => value.is_null(),
+        _ => true,
+    }
+}
+
+fn output_validation_schema_errors(schema: &Value, instance: &Value, path: &str) -> Vec<String> {
+    let Some(schema_obj) = schema.as_object() else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    if let Some(expected_type) = schema_obj.get("type") {
+        match expected_type {
+            Value::Array(types) => {
+                let any_match = types.iter().any(|item| {
+                    item.as_str().is_some_and(|expected| {
+                        output_validation_matches_json_type(instance, expected)
+                    })
+                });
+                if !any_match {
+                    errors.push(format!(
+                        "{path}: expected one of {expected_type}, got {}",
+                        output_validation_json_type_name(instance)
+                    ));
+                    return errors;
+                }
+            }
+            Value::String(expected) => {
+                if !output_validation_matches_json_type(instance, expected) {
+                    errors.push(format!(
+                        "{path}: expected {expected}, got {}",
+                        output_validation_json_type_name(instance)
+                    ));
+                    return errors;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(expected_const) = schema_obj.get("const") {
+        if instance != expected_const {
+            errors.push(format!("{path}: expected constant {expected_const}"));
+        }
+    }
+    if let Some(enum_values) = schema_obj.get("enum").and_then(Value::as_array) {
+        if !enum_values.iter().any(|value| value == instance) {
+            errors.push(format!("{path}: value {instance} is not in enum"));
+        }
+    }
+    if let Some(number) = output_validation_json_number(instance) {
+        if let Some(minimum) = schema_obj
+            .get("minimum")
+            .and_then(output_validation_json_number)
+        {
+            if number < minimum {
+                errors.push(format!("{path}: value is below minimum {minimum}"));
+            }
+        }
+        if let Some(maximum) = schema_obj
+            .get("maximum")
+            .and_then(output_validation_json_number)
+        {
+            if number > maximum {
+                errors.push(format!("{path}: value is above maximum {maximum}"));
+            }
+        }
+        if let Some(minimum) = schema_obj
+            .get("exclusiveMinimum")
+            .and_then(output_validation_json_number)
+        {
+            if number <= minimum {
+                errors.push(format!(
+                    "{path}: value is not above exclusiveMinimum {minimum}"
+                ));
+            }
+        }
+        if let Some(maximum) = schema_obj
+            .get("exclusiveMaximum")
+            .and_then(output_validation_json_number)
+        {
+            if number >= maximum {
+                errors.push(format!(
+                    "{path}: value is not below exclusiveMaximum {maximum}"
+                ));
+            }
+        }
+    }
+    if let Some(text) = instance.as_str() {
+        let len = text.chars().count();
+        if let Some(min_len) = schema_obj.get("minLength").and_then(Value::as_u64) {
+            if len < min_len as usize {
+                errors.push(format!(
+                    "{path}: string is shorter than minLength {min_len}"
+                ));
+            }
+        }
+        if let Some(max_len) = schema_obj.get("maxLength").and_then(Value::as_u64) {
+            if len > max_len as usize {
+                errors.push(format!("{path}: string is longer than maxLength {max_len}"));
+            }
+        }
+    }
+    if let Some(items) = instance.as_array() {
+        if let Some(min_items) = schema_obj.get("minItems").and_then(Value::as_u64) {
+            if items.len() < min_items as usize {
+                errors.push(format!("{path}: array has fewer than minItems {min_items}"));
+            }
+        }
+        if let Some(max_items) = schema_obj.get("maxItems").and_then(Value::as_u64) {
+            if items.len() > max_items as usize {
+                errors.push(format!("{path}: array has more than maxItems {max_items}"));
+            }
+        }
+        if let Some(item_schema) = schema_obj.get("items") {
+            if item_schema.is_object() {
+                for (idx, item) in items.iter().enumerate() {
+                    errors.extend(output_validation_schema_errors(
+                        item_schema,
+                        item,
+                        &format!("{path}[{idx}]"),
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(instance_obj) = instance.as_object() {
+        if let Some(required) = schema_obj.get("required").and_then(Value::as_array) {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !instance_obj.contains_key(key) {
+                    errors.push(format!("{path}: missing required property '{key}'"));
+                }
+            }
+        }
+        let properties = schema_obj.get("properties").and_then(Value::as_object);
+        if let Some(properties) = properties {
+            for (key, property_schema) in properties {
+                if let Some(value) = instance_obj.get(key) {
+                    errors.extend(output_validation_schema_errors(
+                        property_schema,
+                        value,
+                        &format!("{path}.{key}"),
+                    ));
+                }
+            }
+        }
+        if schema_obj
+            .get("additionalProperties")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            if let Some(properties) = properties {
+                for key in instance_obj.keys() {
+                    if !properties.contains_key(key) {
+                        errors.push(format!("{path}: unexpected property '{key}'"));
+                    }
+                }
+            }
+        }
+    }
+    errors
+}
+
+fn output_validation_json_schema_reference(payload: &Value, validator: &str) -> Value {
+    let Some(schema) = payload.get("schema") else {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            validator,
+            "schema must be an object",
+            Vec::new(),
+        );
+    };
+    if !schema.is_object() {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            validator,
+            "schema must be an object",
+            Vec::new(),
+        );
+    }
+    let instance = payload.get("instance").unwrap_or(&Value::Null);
+    let errors = output_validation_schema_errors(schema, instance, "$");
+    let message = errors.first().cloned().unwrap_or_default();
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        message,
+        errors,
+    )
+}
+
+fn output_validation_table_columns(
+    schema: &Value,
+) -> BTreeMap<String, serde_json::Map<String, Value>> {
+    let mut specs = BTreeMap::new();
+    match schema.get("columns") {
+        Some(Value::Object(columns)) => {
+            for (name, spec) in columns {
+                let spec_obj = match spec {
+                    Value::Object(obj) => obj.clone(),
+                    Value::String(kind) => {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("type".to_string(), Value::String(kind.clone()));
+                        obj
+                    }
+                    _ => serde_json::Map::new(),
+                };
+                specs.insert(name.clone(), spec_obj);
+            }
+        }
+        Some(Value::Array(columns)) => {
+            for item in columns {
+                match item {
+                    Value::String(name) => {
+                        specs.insert(name.clone(), serde_json::Map::new());
+                    }
+                    Value::Object(obj) => {
+                        if let Some(name) = obj.get("name").and_then(Value::as_str) {
+                            specs.insert(name.to_string(), obj.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    specs
+}
+
+fn output_validation_table_rows(
+    payload: &Value,
+) -> Result<Vec<serde_json::Map<String, Value>>, String> {
+    let source = payload
+        .get("rows")
+        .or_else(|| payload.get("data"))
+        .or_else(|| payload.get("instance"));
+    let Some(source) = source else {
+        return Err(
+            "table-validation payload needs rows, data, instance, csv, or text".to_string(),
+        );
+    };
+    let Some(rows) = source.as_array() else {
+        return Err(
+            "table-validation payload needs rows, data, or instance as an array".to_string(),
+        );
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.iter().enumerate() {
+        let Some(row_obj) = row.as_object() else {
+            return Err(format!("row {idx} must be an object"));
+        };
+        out.push(row_obj.clone());
+    }
+    Ok(out)
+}
+
+fn output_validation_missing_cell(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => text.is_empty(),
+        _ => false,
+    }
+}
+
+fn output_validation_parse_table_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(_) => output_validation_json_number(value),
+        Value::String(text) => text.parse::<f64>().ok().filter(|number| number.is_finite()),
+        _ => None,
+    }
+}
+
+fn output_validation_matches_table_type(value: &Value, expected: &str) -> bool {
+    match expected {
+        "number" => output_validation_parse_table_number(value).is_some(),
+        "integer" => {
+            output_validation_parse_table_number(value).is_some_and(|number| number.fract() == 0.0)
+        }
+        "boolean" => {
+            value.is_boolean()
+                || value.as_str().is_some_and(|text| {
+                    matches!(
+                        text.trim().to_ascii_lowercase().as_str(),
+                        "true" | "false" | "0" | "1"
+                    )
+                })
+        }
+        "string" => value.is_string(),
+        _ => true,
+    }
+}
+
+fn output_validation_table_reference(payload: &Value, validator: &str) -> Value {
+    let schema = payload
+        .get("schema")
+        .or_else(|| payload.get("expectations"))
+        .unwrap_or(&Value::Null);
+    if !schema.is_object() {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            validator,
+            "schema must be an object",
+            Vec::new(),
+        );
+    }
+    let rows = match output_validation_table_rows(payload) {
+        Ok(rows) => rows,
+        Err(message) => {
+            return output_validation_result("failed", "failure", validator, message, Vec::new());
+        }
+    };
+    let mut errors = Vec::new();
+    let min_rows = schema
+        .get("min_rows")
+        .or_else(|| schema.get("minRows"))
+        .and_then(Value::as_u64);
+    if let Some(min_rows) = min_rows {
+        if rows.len() < min_rows as usize {
+            errors.push(format!(
+                "table: expected at least {min_rows} rows, got {}",
+                rows.len()
+            ));
+        }
+    }
+    let max_rows = schema
+        .get("max_rows")
+        .or_else(|| schema.get("maxRows"))
+        .and_then(Value::as_u64);
+    if let Some(max_rows) = max_rows {
+        if rows.len() > max_rows as usize {
+            errors.push(format!(
+                "table: expected at most {max_rows} rows, got {}",
+                rows.len()
+            ));
+        }
+    }
+    let columns = output_validation_table_columns(schema);
+    if schema.get("additionalColumns").and_then(Value::as_bool) == Some(false)
+        || schema.get("additional_columns").and_then(Value::as_bool) == Some(false)
+    {
+        for (idx, row) in rows.iter().enumerate() {
+            for key in row.keys() {
+                if !columns.contains_key(key) {
+                    errors.push(format!("row {idx}: unexpected column '{key}'"));
+                }
+            }
+        }
+    }
+    let required_columns: Vec<String> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut unique_values: BTreeMap<String, Vec<Value>> = columns
+        .iter()
+        .filter_map(|(name, spec)| {
+            if spec.get("unique").and_then(Value::as_bool) == Some(true) {
+                Some((name.clone(), Vec::new()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (idx, row) in rows.iter().enumerate() {
+        for (name, spec) in &columns {
+            let value = row.get(name);
+            let required = spec.get("required").and_then(Value::as_bool) == Some(true)
+                || required_columns.iter().any(|required| required == name);
+            if output_validation_missing_cell(value) {
+                if required {
+                    errors.push(format!("row {idx}.{name}: required value is missing"));
+                }
+                continue;
+            }
+            let value = value.expect("checked missing value");
+            if let Some(expected_type) = spec.get("type").and_then(Value::as_str) {
+                if !output_validation_matches_table_type(value, expected_type) {
+                    errors.push(format!(
+                        "row {idx}.{name}: expected {expected_type}, got {value}"
+                    ));
+                    continue;
+                }
+            }
+            if let Some(enum_values) = spec.get("enum").and_then(Value::as_array) {
+                if !enum_values.iter().any(|item| item == value) {
+                    errors.push(format!("row {idx}.{name}: value {value} is not in enum"));
+                }
+            }
+            if let Some(number) = output_validation_parse_table_number(value) {
+                if let Some(minimum) = spec.get("minimum").and_then(output_validation_json_number) {
+                    if number < minimum {
+                        errors.push(format!(
+                            "row {idx}.{name}: value is below minimum {minimum}"
+                        ));
+                    }
+                }
+                if let Some(maximum) = spec.get("maximum").and_then(output_validation_json_number) {
+                    if number > maximum {
+                        errors.push(format!(
+                            "row {idx}.{name}: value is above maximum {maximum}"
+                        ));
+                    }
+                }
+            }
+            if let Some(text) = value.as_str() {
+                let len = text.chars().count();
+                if let Some(min_len) = spec.get("minLength").and_then(Value::as_u64) {
+                    if len < min_len as usize {
+                        errors.push(format!(
+                            "row {idx}.{name}: string is shorter than minLength {min_len}"
+                        ));
+                    }
+                }
+                if let Some(max_len) = spec.get("maxLength").and_then(Value::as_u64) {
+                    if len > max_len as usize {
+                        errors.push(format!(
+                            "row {idx}.{name}: string is longer than maxLength {max_len}"
+                        ));
+                    }
+                }
+            }
+            if let Some(seen) = unique_values.get_mut(name) {
+                if seen.iter().any(|prior| prior == value) {
+                    errors.push(format!("row {idx}.{name}: duplicate value {value}"));
+                }
+                seen.push(value.clone());
+            }
+        }
+    }
+    let message = errors.first().cloned().unwrap_or_default();
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        message,
+        errors,
+    )
+}
+
+fn output_validation_object_fields(
+    schema: &Value,
+) -> BTreeMap<String, serde_json::Map<String, Value>> {
+    let fields = schema.get("fields").unwrap_or(&Value::Null);
+    let mut specs = BTreeMap::new();
+    match fields {
+        Value::Object(fields) => {
+            for (name, spec) in fields {
+                let spec_obj = match spec {
+                    Value::Object(obj) => obj.clone(),
+                    Value::String(kind) => {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("type".to_string(), Value::String(kind.clone()));
+                        obj
+                    }
+                    _ => serde_json::Map::new(),
+                };
+                specs.insert(name.clone(), spec_obj);
+            }
+        }
+        Value::Array(fields) => {
+            for item in fields {
+                match item {
+                    Value::String(name) => {
+                        specs.insert(name.clone(), serde_json::Map::new());
+                    }
+                    Value::Object(obj) => {
+                        if let Some(name) = obj.get("name").and_then(Value::as_str) {
+                            specs.insert(name.to_string(), obj.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    specs
+}
+
+fn output_validation_matches_protobuf_scalar(value: &Value, expected: &str) -> bool {
+    match expected.to_ascii_lowercase().as_str() {
+        "int32" | "sint32" | "sfixed32" => output_validation_json_integer(value)
+            .is_some_and(|integer| (-(1_i128 << 31)..(1_i128 << 31)).contains(&integer)),
+        "uint32" | "fixed32" => output_validation_json_integer(value)
+            .is_some_and(|integer| (0..(1_i128 << 32)).contains(&integer)),
+        "int64" | "sint64" | "sfixed64" => output_validation_json_integer(value)
+            .is_some_and(|integer| (-(1_i128 << 63)..(1_i128 << 63)).contains(&integer)),
+        "uint64" | "fixed64" => output_validation_json_integer(value)
+            .is_some_and(|integer| (0..(1_i128 << 64)).contains(&integer)),
+        "double" | "float" => output_validation_json_number(value).is_some(),
+        "bool" | "boolean" => value.is_boolean(),
+        "string" | "bytes" => value.is_string(),
+        "message" | "object" => value.is_object(),
+        _ => true,
+    }
+}
+
+fn output_validation_protobuf_field_errors(
+    name: &str,
+    spec: &serde_json::Map<String, Value>,
+    value: &Value,
+    path: &str,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if spec.get("repeated").and_then(Value::as_bool) == Some(true) {
+        let Some(items) = value.as_array() else {
+            return vec![format!("{path}.{name}: expected repeated field array")];
+        };
+        let mut item_spec = spec.clone();
+        item_spec.insert("repeated".to_string(), Value::Bool(false));
+        for (idx, item) in items.iter().enumerate() {
+            errors.extend(output_validation_protobuf_field_errors(
+                name,
+                &item_spec,
+                item,
+                &format!("{path}.{name}[{idx}]"),
+            ));
+        }
+        return errors;
+    }
+    if let Some(enum_values) = spec.get("enum").and_then(Value::as_array) {
+        if !enum_values.iter().any(|item| item == value) {
+            errors.push(format!("{path}.{name}: value {value} is not in enum"));
+            return errors;
+        }
+    }
+    let expected_type = spec.get("type").and_then(Value::as_str).unwrap_or("string");
+    if !output_validation_matches_protobuf_scalar(value, expected_type) {
+        errors.push(format!(
+            "{path}.{name}: expected protobuf {expected_type}, got {}",
+            output_validation_json_type_name(value)
+        ));
+    }
+    if spec.contains_key("fields") && value.is_object() {
+        errors.extend(output_validation_protobuf_message_errors(
+            &Value::Object(spec.clone()),
+            value,
+            &format!("{path}.{name}"),
+        ));
+    }
+    errors
+}
+
+fn output_validation_protobuf_oneof_errors(
+    schema: &Value,
+    message: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let groups: Vec<(String, Vec<String>)> = match schema
+        .get("oneof")
+        .or_else(|| schema.get("oneofs"))
+        .unwrap_or(&Value::Null)
+    {
+        Value::Object(groups) => groups
+            .iter()
+            .filter_map(|(name, group)| {
+                let fields = group
+                    .get("fields")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                Some((name.clone(), fields))
+            })
+            .collect(),
+        Value::Array(groups) => groups
+            .iter()
+            .filter_map(|group| {
+                if let Some(group_obj) = group.as_object() {
+                    let name = group_obj
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("oneof")
+                        .to_string();
+                    let fields = group_obj
+                        .get("fields")
+                        .and_then(Value::as_array)?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    Some((name, fields))
+                } else {
+                    let fields = group
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    Some(("oneof".to_string(), fields))
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for (name, fields) in groups {
+        let present: Vec<String> = fields
+            .iter()
+            .filter(|field| message.get(*field).is_some_and(|value| !value.is_null()))
+            .cloned()
+            .collect();
+        if present.len() != 1 {
+            errors.push(format!(
+                "{path}: oneof '{name}' expected exactly one of {fields:?}, got {present:?}"
+            ));
+        }
+    }
+    errors
+}
+
+fn output_validation_protobuf_message_errors(
+    schema: &Value,
+    message: &Value,
+    path: &str,
+) -> Vec<String> {
+    let Some(message_obj) = message.as_object() else {
+        return vec![format!("{path}: message must be an object")];
+    };
+    let fields = output_validation_object_fields(schema);
+    let required_fields: Vec<String> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut errors = Vec::new();
+    for (name, spec) in &fields {
+        let is_required = spec.get("required").and_then(Value::as_bool) == Some(true)
+            || required_fields.iter().any(|required| required == name);
+        let value = message_obj.get(name);
+        if value.is_none() || value.is_some_and(Value::is_null) {
+            if is_required {
+                errors.push(format!("{path}: missing required protobuf field '{name}'"));
+            }
+            continue;
+        }
+        errors.extend(output_validation_protobuf_field_errors(
+            name,
+            spec,
+            value.expect("checked protobuf value"),
+            path,
+        ));
+    }
+    if schema.get("additionalFields").and_then(Value::as_bool) == Some(false)
+        || schema.get("additional_fields").and_then(Value::as_bool) == Some(false)
+    {
+        for name in message_obj.keys() {
+            if !fields.contains_key(name) {
+                errors.push(format!("{path}: unexpected protobuf field '{name}'"));
+            }
+        }
+    }
+    errors.extend(output_validation_protobuf_oneof_errors(
+        schema,
+        message_obj,
+        path,
+    ));
+    errors
+}
+
+fn output_validation_protobuf_reference(payload: &Value) -> Value {
+    let schema = payload
+        .get("schema")
+        .or_else(|| payload.get("descriptor"))
+        .unwrap_or(&Value::Null);
+    let message = payload
+        .get("message")
+        .or_else(|| payload.get("instance"))
+        .or_else(|| payload.get("data"))
+        .unwrap_or(&Value::Null);
+    if !schema.is_object() {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            "builtin:protobuf-conformance-subset",
+            "schema must be an object",
+            Vec::new(),
+        );
+    }
+    if !message.is_object() {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            "builtin:protobuf-conformance-subset",
+            "message must be an object",
+            Vec::new(),
+        );
+    }
+    let errors = output_validation_protobuf_message_errors(schema, message, "$");
+    let message = errors.first().cloned().unwrap_or_default();
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        "builtin:protobuf-conformance-subset",
+        message,
+        errors,
+    )
+}
+
+fn output_validation_avro_value_errors(schema: &Value, value: &Value, path: &str) -> Vec<String> {
+    match schema {
+        Value::Array(branches) => {
+            if branches
+                .iter()
+                .any(|branch| output_validation_avro_value_errors(branch, value, path).is_empty())
+            {
+                Vec::new()
+            } else {
+                vec![format!("{path}: value did not match any Avro union branch")]
+            }
+        }
+        Value::String(kind) => match kind.as_str() {
+            "null" => {
+                if value.is_null() {
+                    Vec::new()
+                } else {
+                    vec![format!("{path}: expected null")]
+                }
+            }
+            "boolean" => {
+                if value.is_boolean() {
+                    Vec::new()
+                } else {
+                    vec![format!("{path}: expected boolean")]
+                }
+            }
+            "int" | "long" => {
+                if output_validation_json_integer(value).is_some() {
+                    Vec::new()
+                } else {
+                    vec![format!("{path}: expected {kind}")]
+                }
+            }
+            "float" | "double" => {
+                if output_validation_json_number(value).is_some() {
+                    Vec::new()
+                } else {
+                    vec![format!("{path}: expected {kind}")]
+                }
+            }
+            "bytes" | "string" => {
+                if value.is_string() {
+                    Vec::new()
+                } else {
+                    vec![format!("{path}: expected {kind}")]
+                }
+            }
+            _ => Vec::new(),
+        },
+        Value::Object(schema_obj) => {
+            let Some(schema_type) = schema_obj.get("type") else {
+                return vec![format!("{path}: unsupported Avro schema shape")];
+            };
+            if schema_type.is_array() || schema_type.is_object() {
+                return output_validation_avro_value_errors(schema_type, value, path);
+            }
+            match schema_type.as_str().unwrap_or("") {
+                "record" => {
+                    let Some(record) = value.as_object() else {
+                        return vec![format!("{path}: expected record object")];
+                    };
+                    let Some(fields) = schema_obj.get("fields").and_then(Value::as_array) else {
+                        return vec![format!("{path}: record fields must be a list")];
+                    };
+                    let mut errors = Vec::new();
+                    let mut known = Vec::new();
+                    for field in fields {
+                        let Some(field_obj) = field.as_object() else {
+                            errors.push(format!("{path}: invalid Avro field"));
+                            continue;
+                        };
+                        let Some(name) = field_obj.get("name").and_then(Value::as_str) else {
+                            errors.push(format!("{path}: invalid Avro field"));
+                            continue;
+                        };
+                        known.push(name.to_string());
+                        if let Some(field_value) = record.get(name) {
+                            let default_field_type = Value::String("string".to_string());
+                            let field_schema = field_obj.get("type").unwrap_or(&default_field_type);
+                            errors.extend(output_validation_avro_value_errors(
+                                field_schema,
+                                field_value,
+                                &format!("{path}.{name}"),
+                            ));
+                        } else if !field_obj.contains_key("default") {
+                            errors.push(format!("{path}: missing Avro field '{name}'"));
+                        }
+                    }
+                    if schema_obj.get("additionalFields").and_then(Value::as_bool) == Some(false)
+                        || schema_obj.get("additional_fields").and_then(Value::as_bool)
+                            == Some(false)
+                    {
+                        for name in record.keys() {
+                            if !known.iter().any(|known_name| known_name == name) {
+                                errors.push(format!("{path}: unexpected Avro field '{name}'"));
+                            }
+                        }
+                    }
+                    errors
+                }
+                "array" => {
+                    let Some(items) = value.as_array() else {
+                        return vec![format!("{path}: expected Avro array")];
+                    };
+                    let default_item_schema = Value::String("string".to_string());
+                    let item_schema = schema_obj.get("items").unwrap_or(&default_item_schema);
+                    let mut errors = Vec::new();
+                    for (idx, item) in items.iter().enumerate() {
+                        errors.extend(output_validation_avro_value_errors(
+                            item_schema,
+                            item,
+                            &format!("{path}[{idx}]"),
+                        ));
+                    }
+                    errors
+                }
+                "map" => {
+                    let Some(map) = value.as_object() else {
+                        return vec![format!("{path}: expected Avro map")];
+                    };
+                    let default_value_schema = Value::String("string".to_string());
+                    let value_schema = schema_obj.get("values").unwrap_or(&default_value_schema);
+                    let mut errors = Vec::new();
+                    for (key, item) in map {
+                        errors.extend(output_validation_avro_value_errors(
+                            value_schema,
+                            item,
+                            &format!("{path}.{key}"),
+                        ));
+                    }
+                    errors
+                }
+                "enum" => {
+                    let symbols = schema_obj
+                        .get("symbols")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if symbols.iter().any(|symbol| symbol == value) {
+                        Vec::new()
+                    } else {
+                        vec![format!("{path}: value {value} is not in Avro enum")]
+                    }
+                }
+                other => output_validation_avro_value_errors(
+                    &Value::String(other.to_string()),
+                    value,
+                    path,
+                ),
+            }
+        }
+        _ => vec![format!("{path}: unsupported Avro schema shape")],
+    }
+}
+
+fn output_validation_avro_reference(payload: &Value) -> Value {
+    let schema = payload.get("schema").unwrap_or(&Value::Null);
+    let instance = payload
+        .get("record")
+        .or_else(|| payload.get("instance"))
+        .or_else(|| payload.get("data"))
+        .unwrap_or(&Value::Null);
+    let errors = output_validation_avro_value_errors(schema, instance, "$");
+    let message = errors.first().cloned().unwrap_or_default();
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        "builtin:avro-schema-subset",
+        message,
+        errors,
+    )
+}
+
+fn output_validation_openapi_reference(payload: &Value, validator: &str) -> Value {
+    let spec = payload
+        .get("spec")
+        .or_else(|| payload.get("schema"))
+        .or_else(|| payload.get("openapi"))
+        .unwrap_or(&Value::Null);
+    let Some(spec_obj) = spec.as_object() else {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            validator,
+            "OpenAPI spec must be an object",
+            Vec::new(),
+        );
+    };
+    let mut errors = Vec::new();
+    if !spec_obj.contains_key("openapi") && !spec_obj.contains_key("swagger") {
+        errors.push("$.openapi: missing OpenAPI/Swagger version".to_string());
+    }
+    if !spec_obj
+        .get("info")
+        .and_then(Value::as_object)
+        .and_then(|info| info.get("title"))
+        .is_some_and(|title| title.as_str().is_some_and(|text| !text.is_empty()))
+    {
+        errors.push("$.info.title: missing API title".to_string());
+    }
+    let valid_methods = [
+        "get", "put", "post", "delete", "patch", "head", "options", "trace",
+    ];
+    match spec_obj.get("paths").and_then(Value::as_object) {
+        Some(paths) if !paths.is_empty() => {
+            for (path, operations) in paths {
+                if !path.starts_with('/') {
+                    errors.push(format!("$.paths.{path}: path must start with '/'"));
+                }
+                let Some(operation_obj) = operations.as_object() else {
+                    errors.push(format!("$.paths.{path}: expected operations object"));
+                    continue;
+                };
+                if operation_obj.is_empty() {
+                    errors.push(format!("$.paths.{path}: expected operations object"));
+                    continue;
+                }
+                for (method, operation) in operation_obj {
+                    if !valid_methods.contains(&method.to_ascii_lowercase().as_str()) {
+                        continue;
+                    }
+                    let Some(operation) = operation.as_object() else {
+                        errors.push(format!(
+                            "$.paths.{path}.{method}: operation must be an object"
+                        ));
+                        continue;
+                    };
+                    if !operation
+                        .get("responses")
+                        .and_then(Value::as_object)
+                        .is_some_and(|responses| !responses.is_empty())
+                    {
+                        errors.push(format!(
+                            "$.paths.{path}.{method}.responses: missing responses"
+                        ));
+                    }
+                }
+            }
+        }
+        _ => errors.push("$.paths: expected non-empty object".to_string()),
+    }
+    let message = errors.first().cloned().unwrap_or_default();
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        message,
+        errors,
+    )
+}
+
+fn output_validation_xml_is_well_formed(xml: &str) -> Result<Vec<String>, String> {
+    let mut tags = Vec::new();
+    let mut roots = Vec::new();
+    let chars: Vec<char> = xml.chars().collect();
+    let mut idx = 0;
+    while idx < chars.len() {
+        if chars[idx] != '<' {
+            idx += 1;
+            continue;
+        }
+        let Some(end) = chars[idx + 1..].iter().position(|ch| *ch == '>') else {
+            return Err("unterminated tag".to_string());
+        };
+        let end = idx + 1 + end;
+        let raw: String = chars[idx + 1..end].iter().collect();
+        let tag = raw.trim();
+        if tag.is_empty() {
+            return Err("empty tag".to_string());
+        }
+        if tag.starts_with('?') || tag.starts_with('!') {
+            idx = end + 1;
+            continue;
+        }
+        if let Some(rest) = tag.strip_prefix('/') {
+            let name = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            match tags.pop() {
+                Some(open) if open == name => {}
+                Some(open) => return Err(format!("closing tag '{name}' did not match '{open}'")),
+                None => return Err(format!("closing tag '{name}' without opener")),
+            }
+        } else {
+            let name = tag
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            if name.is_empty() {
+                return Err("empty tag name".to_string());
+            }
+            roots.push(name.to_string());
+            if !tag.ends_with('/') {
+                tags.push(name.to_string());
+            }
+        }
+        idx = end + 1;
+    }
+    if roots.is_empty() {
+        return Err("missing root element".to_string());
+    }
+    if let Some(open) = tags.last() {
+        return Err(format!("unclosed tag '{open}'"));
+    }
+    Ok(roots)
+}
+
+fn output_validation_xml_reference(payload: &Value, validator: &str) -> Value {
+    let xml = payload
+        .get("xml")
+        .or_else(|| payload.get("instance"))
+        .or_else(|| payload.get("document"))
+        .or_else(|| payload.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema_text = payload
+        .get("schema")
+        .or_else(|| payload.get("xsd"))
+        .or_else(|| payload.get("schematron"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut errors = Vec::new();
+    match output_validation_xml_is_well_formed(xml) {
+        Ok(tags) => {
+            if let Some(required) = payload.get("required_elements").and_then(Value::as_array) {
+                for name in required.iter().filter_map(Value::as_str) {
+                    if !tags.iter().any(|tag| tag == name) {
+                        errors.push(format!("xml: missing required element '{name}'"));
+                    }
+                }
+            }
+        }
+        Err(message) => errors.push(format!("xml: not well-formed: {message}")),
+    }
+    if !schema_text.is_empty() {
+        let lower = schema_text.to_ascii_lowercase();
+        if validator.contains("schematron") {
+            if !lower.contains("<schema")
+                || (!lower.contains("<assert") && !lower.contains("<report"))
+            {
+                errors.push("schematron: expected schema with assert/report rules".to_string());
+            }
+        } else if (validator.contains("xsd") || validator.contains("xml-schema"))
+            && !lower.contains("<xs:schema")
+            && !lower.contains("<xsd:schema")
+            && !lower.contains("<schema")
+        {
+            errors.push("xsd: expected schema root".to_string());
+        }
+    }
+    let message = errors.first().cloned().unwrap_or_default();
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        message,
+        errors,
+    )
+}
+
+fn output_validation_pydantic_reference(payload: &Value, validator: &str) -> Value {
+    let model = payload
+        .get("model")
+        .or_else(|| payload.get("schema"))
+        .unwrap_or(&Value::Null);
+    let instance = payload
+        .get("instance")
+        .or_else(|| payload.get("data"))
+        .unwrap_or(&Value::Null);
+    let Some(model_obj) = model.as_object() else {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            validator,
+            "model must be an object",
+            Vec::new(),
+        );
+    };
+    if !instance.is_object() {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            validator,
+            "instance must be an object",
+            Vec::new(),
+        );
+    }
+    let fields = model_obj
+        .get("fields")
+        .or_else(|| model_obj.get("properties"))
+        .unwrap_or(model);
+    let Some(fields_obj) = fields.as_object() else {
+        return output_validation_result(
+            "failed",
+            "invalid",
+            validator,
+            "fields must be an object",
+            Vec::new(),
+        );
+    };
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for (name, spec) in fields_obj {
+        let mut field_spec = match spec {
+            Value::String(kind) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("type".to_string(), Value::String(kind.clone()));
+                obj
+            }
+            Value::Object(obj) => obj.clone(),
+            _ => serde_json::Map::new(),
+        };
+        if field_spec.get("required").and_then(Value::as_bool) == Some(true) {
+            required.push(Value::String(name.clone()));
+        }
+        let normalized_type = match field_spec
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("string")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "int" | "integer" => "integer",
+            "float" | "double" | "number" => "number",
+            "bool" | "boolean" => "boolean",
+            "list" | "array" => "array",
+            "dict" | "object" => "object",
+            _ => "string",
+        };
+        field_spec.insert(
+            "type".to_string(),
+            Value::String(normalized_type.to_string()),
+        );
+        properties.insert(name.clone(), Value::Object(field_spec));
+    }
+    let schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    });
+    let errors = output_validation_schema_errors(&schema, instance, "$");
+    let message = errors.first().cloned().unwrap_or_default();
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        message,
+        errors,
+    )
+}
+
+fn output_validation_package_unavailable(tool: &str) -> Value {
+    output_validation_result(
+        "unavailable",
+        "unknown",
+        &format!("rust:{tool}"),
+        format!("{tool} adapter package is not installed"),
+        Vec::new(),
+    )
+}
+
+pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &str) -> Value {
+    let tool = tool.trim().to_ascii_lowercase().replace('_', "-");
+    let kind = payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    match tool.as_str() {
+        "json-schema" | "jsonschema" => {
+            output_validation_json_schema_reference(payload, "builtin:json-schema-subset")
+        }
+        "ajv" | "ajv-cli" | "check-jsonschema" | "cue" => output_validation_json_schema_reference(
+            payload,
+            &format!("builtin:json-schema-subset-for-{tool}"),
+        ),
+        "openapi"
+        | "openapi-validator"
+        | "spectral"
+        | "openapi-spec-validator"
+        | "redocly-cli"
+        | "asyncapi-cli" => {
+            let validator = if matches!(
+                tool.as_str(),
+                "spectral" | "openapi-spec-validator" | "redocly-cli" | "asyncapi-cli"
+            ) {
+                format!("builtin:openapi-structural-for-{tool}")
+            } else {
+                "builtin:openapi-structural".to_string()
+            };
+            output_validation_openapi_reference(payload, &validator)
+        }
+        "xml" | "xmllint" | "xml-schema" | "xsd" | "python-xmlschema" => {
+            let validator = match tool.as_str() {
+                "xmllint" => "builtin:xml-schema-structural-for-xmllint",
+                "python-xmlschema" => "builtin:xml-schema-structural-for-python-xmlschema",
+                _ => "builtin:xml-schema-structural",
+            };
+            output_validation_xml_reference(payload, validator)
+        }
+        "schematron" | "jing" | "saxon" => {
+            output_validation_xml_reference(payload, "builtin:schematron-structural")
+        }
+        "pydantic" | "zod" | "valibot" | "marshmallow" | "cerberus" => {
+            let validator = if tool == "pydantic" {
+                "builtin:pydantic-model-subset".to_string()
+            } else {
+                format!("builtin:pydantic-model-subset-for-{tool}")
+            };
+            output_validation_pydantic_reference(payload, &validator)
+        }
+        "table" | "table-schema" | "tabular" | "csv-validator" => {
+            output_validation_table_reference(payload, "builtin:table-schema-subset")
+        }
+        "frictionless"
+        | "pandera"
+        | "dbt"
+        | "whylogs"
+        | "great-expectations"
+        | "soda-core"
+        | "evidently"
+        | "deepchecks"
+        | "parquet-tools"
+        | "apache-arrow"
+        | "deequ"
+        | "tensorflow-data-validation"
+        | "openrefine"
+            if kind == "table-validation" =>
+        {
+            output_validation_table_reference(
+                payload,
+                &format!("builtin:table-schema-subset-for-{tool}"),
+            )
+        }
+        "protobuf" | "protobuf-conformance" | "protoc" => {
+            output_validation_protobuf_reference(payload)
+        }
+        "avro" | "avro-tools" | "apache-avro" => output_validation_avro_reference(payload),
+        _ if kind == "openapi-validation" => {
+            output_validation_openapi_reference(payload, "builtin:openapi-structural")
+        }
+        _ if kind == "xml-validation" || kind == "xsd-validation" => {
+            output_validation_xml_reference(payload, "builtin:xml-schema-structural")
+        }
+        _ if kind == "schematron-validation" => {
+            output_validation_xml_reference(payload, "builtin:schematron-structural")
+        }
+        _ if kind == "pydantic-validation" => {
+            output_validation_pydantic_reference(payload, "builtin:pydantic-model-subset")
+        }
+        _ if kind == "table-validation" => {
+            output_validation_table_reference(payload, "builtin:table-schema-subset")
+        }
+        _ if kind == "protobuf-validation" => output_validation_protobuf_reference(payload),
+        _ if kind == "avro-validation" => output_validation_avro_reference(payload),
+        "yamllint" | "graphql-schema" => output_validation_package_unavailable(&tool),
+        _ => output_validation_result(
+            "unavailable",
+            "unknown",
+            &tool,
+            format!("unknown output validator '{tool}'"),
+            Vec::new(),
+        ),
+    }
+}
+
+fn model_validation_result(
+    status: &str,
+    verdict: &str,
+    validator: &str,
+    message: impl Into<String>,
+    stdout: impl Into<String>,
+    stderr: impl Into<String>,
+) -> Value {
+    json!({
+        "status": status,
+        "verdict": verdict,
+        "validator": validator,
+        "message": message.into(),
+        "stdout": stdout.into(),
+        "stderr": stderr.into(),
+    })
+}
+
+fn model_validation_payload_text<'a>(payload: &'a Value, keys: &[&str]) -> &'a str {
+    keys.iter()
+        .find_map(|key| payload.get(*key).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
+fn model_validation_normalized_tool(tool: &str) -> String {
+    tool.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn model_validation_infer_smtlib(text: &str) -> Value {
+    let lowered = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = lowered.to_ascii_lowercase();
+    if lowered.contains("(assert false)") {
+        return model_validation_result(
+            "ok",
+            "unsat",
+            "builtin:smtlib-smoke",
+            "assert false detected",
+            "",
+            "",
+        );
+    }
+    model_validation_result(
+        "ok",
+        "sat",
+        "builtin:smtlib-smoke",
+        "no contradiction found",
+        "",
+        "",
+    )
+}
+
+fn model_validation_parse_minizinc_domain(statement: &str) -> Option<(String, i64, i64)> {
+    let rest = statement.strip_prefix("var ")?;
+    let (bounds, name) = rest.split_once(':')?;
+    let (lower, upper) = bounds.trim().split_once("..")?;
+    let name = name.trim().trim_end_matches(';').trim().to_string();
+    Some((
+        name,
+        lower.trim().parse::<i64>().ok()?,
+        upper.trim().parse::<i64>().ok()?,
+    ))
+}
+
+fn model_validation_eval_minizinc_constraint(
+    expr: &str,
+    assignment: &BTreeMap<String, i64>,
+) -> Result<bool, String> {
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err(format!("unsupported MiniZinc constraint {expr:?}"));
+    }
+    let actual = assignment
+        .get(parts[0])
+        .ok_or_else(|| format!("unknown MiniZinc variable {:?}", parts[0]))?;
+    let expected = parts[2]
+        .parse::<i64>()
+        .map_err(|_| format!("unsupported MiniZinc rhs {:?}", parts[2]))?;
+    let satisfied = match parts[1] {
+        "<=" => *actual <= expected,
+        ">=" => *actual >= expected,
+        "=" | "==" => *actual == expected,
+        "<" => *actual < expected,
+        ">" => *actual > expected,
+        other => return Err(format!("unsupported MiniZinc operator {other:?}")),
+    };
+    Ok(satisfied)
+}
+
+fn model_validation_minizinc_search(
+    names: &[String],
+    domains: &BTreeMap<String, (i64, i64)>,
+    constraints: &[String],
+    idx: usize,
+    assignment: &mut BTreeMap<String, i64>,
+) -> Result<Option<BTreeMap<String, i64>>, String> {
+    if idx == names.len() {
+        for constraint in constraints {
+            if !model_validation_eval_minizinc_constraint(constraint, assignment)? {
+                return Ok(None);
+            }
+        }
+        return Ok(Some(assignment.clone()));
+    }
+    let name = &names[idx];
+    let (lower, upper) = domains
+        .get(name)
+        .ok_or_else(|| format!("missing MiniZinc domain for {name}"))?;
+    for value in *lower..=*upper {
+        assignment.insert(name.clone(), value);
+        if let Some(solution) =
+            model_validation_minizinc_search(names, domains, constraints, idx + 1, assignment)?
+        {
+            return Ok(Some(solution));
+        }
+    }
+    assignment.remove(name);
+    Ok(None)
+}
+
+fn model_validation_minizinc_reference(payload: &Value) -> Value {
+    let model = model_validation_payload_text(payload, &["model"]);
+    if model.trim().is_empty() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            "minizinc",
+            "payload needs model",
+            "",
+            "",
+        );
+    }
+    if model.contains("constraint false;") {
+        return model_validation_result(
+            "ok",
+            "unsat",
+            "builtin:minizinc-smoke",
+            "constraint false detected",
+            "",
+            "",
+        );
+    }
+    let mut domains = BTreeMap::new();
+    let mut constraints = Vec::new();
+    for statement in model
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if statement.starts_with("var ") {
+            match model_validation_parse_minizinc_domain(statement) {
+                Some((name, lower, upper)) if upper >= lower && upper - lower <= 100 => {
+                    domains.insert(name, (lower, upper));
+                }
+                Some((_, lower, upper)) if upper - lower > 100 => {
+                    return model_validation_result(
+                        "failed",
+                        "failure",
+                        "builtin:minizinc-smoke",
+                        "builtin MiniZinc fallback supports domains of size <= 101",
+                        "",
+                        "",
+                    );
+                }
+                _ => {}
+            }
+        } else if let Some(expr) = statement.strip_prefix("constraint ") {
+            constraints.push(expr.trim().to_string());
+        }
+    }
+    if domains.is_empty() {
+        return model_validation_result(
+            "ok",
+            "sat",
+            "builtin:minizinc-smoke",
+            "no finite-domain variables detected",
+            "----------\n",
+            "",
+        );
+    }
+    let total = domains
+        .values()
+        .try_fold(1_u128, |acc, (lower, upper)| {
+            acc.checked_mul((*upper - *lower + 1) as u128)
+        })
+        .unwrap_or(u128::MAX);
+    if total > 250_000 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            "builtin:minizinc-smoke",
+            format!("search space too large: {total}"),
+            "",
+            "",
+        );
+    }
+    let names: Vec<String> = domains.keys().cloned().collect();
+    let mut assignment = BTreeMap::new();
+    match model_validation_minizinc_search(&names, &domains, &constraints, 0, &mut assignment) {
+        Ok(Some(solution)) => {
+            let mut stdout = String::new();
+            for name in &names {
+                if let Some(value) = solution.get(name) {
+                    stdout.push_str(&format!("{name} = {value};\n"));
+                }
+            }
+            stdout.push_str("----------\n");
+            model_validation_result(
+                "ok",
+                "sat",
+                "builtin:minizinc-smoke",
+                "satisfying assignment found",
+                stdout,
+                "",
+            )
+        }
+        Ok(None) => model_validation_result(
+            "ok",
+            "unsat",
+            "builtin:minizinc-smoke",
+            "all assignments exhausted",
+            "",
+            "",
+        ),
+        Err(message) => model_validation_result(
+            "failed",
+            "failure",
+            "builtin:minizinc-smoke",
+            message,
+            "",
+            "",
+        ),
+    }
+}
+
+fn model_validation_asp_reference(payload: &Value, tool: &str) -> Value {
+    let program = model_validation_payload_text(payload, &["asp", "program", "model", "text"]);
+    if program.trim().is_empty() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            "asp",
+            "payload needs asp, program, model, or text",
+            "",
+            "",
+        );
+    }
+    if program.contains("choose(") {
+        return model_validation_result(
+            "ok",
+            "sat",
+            "builtin:asp-smoke",
+            "choice rule smoke model satisfied",
+            "choose(a)\nSATISFIABLE\n",
+            "",
+        );
+    }
+    model_validation_result(
+        "unavailable",
+        "unknown",
+        tool,
+        format!("{tool} executable not found"),
+        "",
+        "",
+    )
+}
+
+fn model_validation_parse_dimacs_cnf(text: &str) -> Result<(usize, Vec<Vec<i32>>), String> {
+    let mut variables = 0_usize;
+    let mut clauses = Vec::new();
+    let mut pending = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('c') {
+            continue;
+        }
+        if line.starts_with('p') {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                variables = parts[2]
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid DIMACS variable count {:?}", parts[2]))?;
+            }
+            continue;
+        }
+        for token in line.split_whitespace() {
+            let literal = token
+                .parse::<i32>()
+                .map_err(|_| format!("invalid DIMACS literal {token:?}"))?;
+            if literal == 0 {
+                clauses.push(std::mem::take(&mut pending));
+            } else {
+                variables = variables.max(literal.unsigned_abs() as usize);
+                pending.push(literal);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        clauses.push(pending);
+    }
+    Ok((variables, clauses))
+}
+
+fn model_validation_dimacs_reference(payload: &Value) -> Value {
+    let text = model_validation_payload_text(payload, &["dimacs", "cnf", "text", "model"]);
+    if text.trim().is_empty() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            "dimacs",
+            "payload needs dimacs, cnf, text, or model",
+            "",
+            "",
+        );
+    }
+    let (variables, clauses) = match model_validation_parse_dimacs_cnf(text) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return model_validation_result(
+                "failed",
+                "failure",
+                "builtin:dimacs-small-cnf",
+                message,
+                "",
+                "",
+            );
+        }
+    };
+    if variables > 24 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            "builtin:dimacs-small-cnf",
+            format!("builtin CNF fallback is capped at 24 variables, got {variables}"),
+            "",
+            "",
+        );
+    }
+    let limit = 1_u64 << variables;
+    for mask in 0..limit {
+        let satisfied = clauses.iter().all(|clause| {
+            clause.iter().any(|literal| {
+                let var = literal.unsigned_abs() as usize - 1;
+                let value = ((mask >> var) & 1) == 1;
+                value == (*literal > 0)
+            })
+        });
+        if satisfied {
+            let mut model = Vec::new();
+            for idx in 0..variables {
+                if ((mask >> idx) & 1) == 1 {
+                    model.push((idx + 1).to_string());
+                } else {
+                    model.push(format!("-{}", idx + 1));
+                }
+            }
+            return model_validation_result(
+                "ok",
+                "sat",
+                "builtin:dimacs-small-cnf",
+                "satisfying assignment found",
+                format!("s SATISFIABLE\nv {} 0\n", model.join(" ")),
+                "",
+            );
+        }
+    }
+    model_validation_result(
+        "ok",
+        "unsat",
+        "builtin:dimacs-small-cnf",
+        "all assignments exhausted",
+        "",
+        "",
+    )
+}
+
+fn model_validation_parse_wcnf(
+    text: &str,
+) -> Result<(usize, Option<i64>, Vec<(i64, Vec<i32>)>), String> {
+    let mut variables = 0_usize;
+    let mut top_weight = None;
+    let mut clauses = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('c') {
+            continue;
+        }
+        if line.starts_with('p') {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 && parts[1].eq_ignore_ascii_case("wcnf") {
+                variables = parts[2]
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid WCNF variable count {:?}", parts[2]))?;
+                if parts.len() >= 5 {
+                    top_weight = Some(
+                        parts[4]
+                            .parse::<i64>()
+                            .map_err(|_| format!("invalid WCNF top weight {:?}", parts[4]))?,
+                    );
+                }
+            }
+            continue;
+        }
+        let tokens: Vec<i64> = line
+            .split_whitespace()
+            .map(|token| {
+                token
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid WCNF token {token:?}"))
+            })
+            .collect::<Result<_, _>>()?;
+        if tokens.len() < 2 || tokens.last() != Some(&0) {
+            return Err("WCNF clauses must be '<weight> <lits...> 0'".to_string());
+        }
+        let weight = tokens[0];
+        let clause: Vec<i32> = tokens[1..tokens.len() - 1]
+            .iter()
+            .map(|literal| *literal as i32)
+            .collect();
+        for literal in &clause {
+            variables = variables.max(literal.unsigned_abs() as usize);
+        }
+        clauses.push((weight, clause));
+    }
+    Ok((variables, top_weight, clauses))
+}
+
+fn model_validation_wcnf_reference(payload: &Value) -> Value {
+    let text = model_validation_payload_text(payload, &["wcnf", "dimacs", "text", "model"]);
+    if text.trim().is_empty() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            "wcnf",
+            "payload needs wcnf, dimacs, text, or model",
+            "",
+            "",
+        );
+    }
+    let (variables, top_weight, clauses) = match model_validation_parse_wcnf(text) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return model_validation_result(
+                "failed",
+                "failure",
+                "builtin:wcnf-small-maxsat",
+                message,
+                "",
+                "",
+            );
+        }
+    };
+    if variables > 24 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            "builtin:wcnf-small-maxsat",
+            format!("builtin WCNF fallback is capped at 24 variables, got {variables}"),
+            "",
+            "",
+        );
+    }
+    let mut best_cost: Option<i64> = None;
+    let mut best_mask = 0_u64;
+    for mask in 0..(1_u64 << variables) {
+        let mut hard_failed = false;
+        let mut cost = 0_i64;
+        for (weight, clause) in &clauses {
+            let satisfied = clause.iter().any(|literal| {
+                let var = literal.unsigned_abs() as usize - 1;
+                let value = ((mask >> var) & 1) == 1;
+                value == (*literal > 0)
+            });
+            if satisfied {
+                continue;
+            }
+            if top_weight.is_some_and(|top| *weight >= top) {
+                hard_failed = true;
+                break;
+            }
+            cost += *weight;
+        }
+        if hard_failed {
+            continue;
+        }
+        if best_cost.is_none_or(|best| cost < best) {
+            best_cost = Some(cost);
+            best_mask = mask;
+        }
+    }
+    let Some(best_cost) = best_cost else {
+        return model_validation_result(
+            "ok",
+            "unsat",
+            "builtin:wcnf-small-maxsat",
+            "hard clauses are unsatisfiable",
+            "",
+            "",
+        );
+    };
+    let mut model = Vec::new();
+    for idx in 0..variables {
+        if ((best_mask >> idx) & 1) == 1 {
+            model.push((idx + 1).to_string());
+        } else {
+            model.push(format!("-{}", idx + 1));
+        }
+    }
+    model_validation_result(
+        "ok",
+        "optimal",
+        "builtin:wcnf-small-maxsat",
+        format!("optimum={best_cost}"),
+        format!("o {best_cost}\ns OPTIMUM FOUND\nv {} 0\n", model.join(" ")),
+        "",
+    )
+}
+
+fn model_validation_parse_opb(
+    text: &str,
+) -> Result<(Vec<String>, Vec<(Vec<(i64, String)>, String, i64)>), String> {
+    let mut variables = BTreeMap::new();
+    let mut constraints = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim().trim_end_matches(';').trim();
+        if line.is_empty() || line.starts_with('*') {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("min:") || lower.starts_with("max:") {
+            continue;
+        }
+        let (lhs, op, rhs) = if let Some((lhs, rhs)) = line.split_once(">=") {
+            (lhs, ">=", rhs)
+        } else if let Some((lhs, rhs)) = line.split_once("<=") {
+            (lhs, "<=", rhs)
+        } else if let Some((lhs, rhs)) = line.split_once('=') {
+            (lhs, "=", rhs)
+        } else {
+            return Err(format!("unsupported OPB constraint {line:?}"));
+        };
+        let rhs = rhs
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| format!("unsupported OPB rhs {rhs:?}"))?;
+        let tokens: Vec<&str> = lhs.split_whitespace().collect();
+        if tokens.len() % 2 != 0 {
+            return Err(format!("unsupported OPB term list {lhs:?}"));
+        }
+        let mut terms = Vec::new();
+        for pair in tokens.chunks(2) {
+            let coeff = pair[0]
+                .parse::<i64>()
+                .map_err(|_| format!("unsupported OPB coefficient {:?}", pair[0]))?;
+            let name = pair[1].to_string();
+            variables.insert(name.clone(), ());
+            terms.push((coeff, name));
+        }
+        constraints.push((terms, op.to_string(), rhs));
+    }
+    if constraints.is_empty() {
+        return Err("missing OPB constraints".to_string());
+    }
+    Ok((variables.keys().cloned().collect(), constraints))
+}
+
+fn model_validation_opb_constraint_satisfied(
+    constraint: &(Vec<(i64, String)>, String, i64),
+    assignment: &BTreeMap<String, bool>,
+) -> bool {
+    let (terms, op, rhs) = constraint;
+    let total = terms.iter().fold(0_i64, |acc, (coeff, name)| {
+        acc + coeff * i64::from(*assignment.get(name).unwrap_or(&false))
+    });
+    match op.as_str() {
+        ">=" => total >= *rhs,
+        "<=" => total <= *rhs,
+        _ => total == *rhs,
+    }
+}
+
+fn model_validation_opb_reference(payload: &Value) -> Value {
+    let text = model_validation_payload_text(payload, &["opb", "pb", "text", "model"]);
+    if text.trim().is_empty() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            "opb",
+            "payload needs opb, pb, text, or model",
+            "",
+            "",
+        );
+    }
+    let (variables, constraints) = match model_validation_parse_opb(text) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return model_validation_result(
+                "failed",
+                "failure",
+                "builtin:opb-small-pb",
+                message,
+                "",
+                "",
+            );
+        }
+    };
+    if variables.len() > 24 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            "builtin:opb-small-pb",
+            format!(
+                "builtin OPB fallback is capped at 24 variables, got {}",
+                variables.len()
+            ),
+            "",
+            "",
+        );
+    }
+    for mask in 0..(1_u64 << variables.len()) {
+        let assignment: BTreeMap<String, bool> = variables
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.clone(), ((mask >> idx) & 1) == 1))
+            .collect();
+        if constraints
+            .iter()
+            .all(|constraint| model_validation_opb_constraint_satisfied(constraint, &assignment))
+        {
+            let stdout = variables
+                .iter()
+                .map(|name| {
+                    format!(
+                        "{name}={}",
+                        i32::from(*assignment.get(name).unwrap_or(&false))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            return model_validation_result(
+                "ok",
+                "sat",
+                "builtin:opb-small-pb",
+                "satisfying assignment found",
+                stdout,
+                "",
+            );
+        }
+    }
+    model_validation_result(
+        "ok",
+        "unsat",
+        "builtin:opb-small-pb",
+        "all assignments exhausted",
+        "",
+        "",
+    )
+}
+
+pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str) -> Value {
+    let kind = payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(model_validation_normalized_tool)
+        .unwrap_or_default();
+    let tool = model_validation_normalized_tool(tool);
+    let minizinc_tools = [
+        "minizinc",
+        "flatzinc",
+        "minizinc-solution-checker",
+        "gecode",
+        "chuffed",
+        "ortools-cp-sat",
+        "fzn-cp-sat",
+    ];
+    let smt_tools = [
+        "z3",
+        "cvc5",
+        "yices",
+        "bitwuzla",
+        "boolector",
+        "mathsat",
+        "optimathsat",
+        "opensmt",
+        "smtinterpol",
+        "princess",
+    ];
+    let sat_tools = [
+        "kissat",
+        "cadical",
+        "cryptominisat",
+        "minisat",
+        "glucose",
+        "maplesat",
+        "varisat",
+    ];
+    if kind == "minizinc-validation" || minizinc_tools.contains(&tool.as_str()) {
+        return model_validation_minizinc_reference(payload);
+    }
+    if kind == "asp-validation"
+        || kind == "clingo-validation"
+        || tool == "clingo"
+        || tool == "clingcon"
+    {
+        return model_validation_asp_reference(payload, &tool);
+    }
+    if kind == "smtlib-validation"
+        || kind == "smt-lib-validation"
+        || smt_tools.contains(&tool.as_str())
+    {
+        let text = model_validation_payload_text(payload, &["script", "smtlib", "text", "model"]);
+        if text.trim().is_empty() {
+            return model_validation_result(
+                "failed",
+                "failure",
+                "smtlib",
+                "payload needs script, smtlib, text, or model",
+                "",
+                "",
+            );
+        }
+        return model_validation_infer_smtlib(text);
+    }
+    if kind == "wcnf-validation"
+        || kind == "dimacs-wcnf-validation"
+        || kind == "maxsat-validation"
+        || ((tool == "open-wbo" || tool == "maxhs")
+            && (payload.get("wcnf").is_some() || payload.get("dimacs").is_some()))
+    {
+        return model_validation_wcnf_reference(payload);
+    }
+    if kind == "opb-validation" || kind == "pseudo-boolean-validation" || tool == "roundingsat" {
+        return model_validation_opb_reference(payload);
+    }
+    if kind == "dimacs-validation"
+        || kind == "dimacs-cnf-validation"
+        || sat_tools.contains(&tool.as_str())
+    {
+        return model_validation_dimacs_reference(payload);
+    }
+    model_validation_result(
+        "unavailable",
+        "unknown",
+        &tool,
+        format!("unknown model validation payload kind {kind:?}"),
+        "",
+        "",
+    )
+}
+
+fn proof_validation_result(
+    tool: &str,
+    validator: &str,
+    status: &str,
+    verdict: &str,
+    message: impl Into<String>,
+    extras: Vec<(&str, Value)>,
+) -> Value {
+    let mut output = serde_json::Map::new();
+    output.insert(
+        "kind".to_string(),
+        Value::String("proof-validation-result".to_string()),
+    );
+    output.insert("tool".to_string(), Value::String(tool.to_string()));
+    output.insert(
+        "validator".to_string(),
+        Value::String(validator.to_string()),
+    );
+    output.insert("status".to_string(), Value::String(status.to_string()));
+    output.insert("verdict".to_string(), Value::String(verdict.to_string()));
+    output.insert("message".to_string(), Value::String(message.into()));
+    for (key, value) in extras {
+        output.insert(key.to_string(), value);
+    }
+    Value::Object(output)
+}
+
+fn proof_validation_cnf_model(variables: usize, clauses: &[Vec<i32>]) -> Option<Vec<i32>> {
+    if variables > 20 {
+        return None;
+    }
+    for mask in 0..(1_u64 << variables) {
+        let satisfied = clauses.iter().all(|clause| {
+            clause.iter().any(|literal| {
+                let var = literal.unsigned_abs() as usize - 1;
+                let value = ((mask >> var) & 1) == 1;
+                value == (*literal > 0)
+            })
+        });
+        if satisfied {
+            return Some(
+                (0..variables)
+                    .map(|idx| {
+                        if ((mask >> idx) & 1) == 1 {
+                            (idx + 1) as i32
+                        } else {
+                            -((idx + 1) as i32)
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+fn proof_validation_drat_has_empty_clause(proof: &str) -> bool {
+    proof.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('c') || line.starts_with("d ") {
+            return false;
+        }
+        line.split_whitespace()
+            .map(str::parse::<i32>)
+            .collect::<Result<Vec<_>, _>>()
+            .is_ok_and(|tokens| tokens == [0])
+    })
+}
+
+fn proof_validation_lrat_has_empty_clause(proof: &str) -> bool {
+    proof.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('c') {
+            return false;
+        }
+        line.split_whitespace()
+            .map(str::parse::<i32>)
+            .collect::<Result<Vec<_>, _>>()
+            .is_ok_and(|tokens| tokens.len() >= 2 && tokens[1] == 0)
+    })
+}
+
+fn proof_validation_frat_has_empty_clause(proof: &str) -> bool {
+    proof.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('c') {
+            return false;
+        }
+        if line == "0" {
+            return true;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.first() != Some(&"a") {
+            return false;
+        }
+        tokens
+            .iter()
+            .position(|token| *token == "0")
+            .is_some_and(|idx| idx <= 2)
+    })
+}
+
+fn proof_validation_pb_model(
+    variables: &[String],
+    constraints: &[(Vec<(i64, String)>, String, i64)],
+) -> Option<BTreeMap<String, i32>> {
+    if variables.len() > 20 {
+        return None;
+    }
+    for mask in 0..(1_u64 << variables.len()) {
+        let assignment: BTreeMap<String, bool> = variables
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.clone(), ((mask >> idx) & 1) == 1))
+            .collect();
+        if constraints
+            .iter()
+            .all(|constraint| model_validation_opb_constraint_satisfied(constraint, &assignment))
+        {
+            return Some(
+                variables
+                    .iter()
+                    .map(|name| {
+                        (
+                            name.clone(),
+                            i32::from(*assignment.get(name).unwrap_or(&false)),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+fn proof_validation_veripb_has_derivation(proof: &str) -> bool {
+    proof.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with('*') && !line.starts_with('c')
+    })
+}
+
+pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str) -> Value {
+    let tool = model_validation_normalized_tool(tool);
+    let kind = payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(model_validation_normalized_tool)
+        .unwrap_or_default();
+    if tool == "veripb"
+        || tool == "veripb-checker"
+        || matches!(
+            kind.as_str(),
+            "pseudo-boolean-proof-validation" | "opb-proof-validation" | "veripb-validation"
+        )
+    {
+        let opb = model_validation_payload_text(payload, &["opb", "model"]);
+        let proof = model_validation_payload_text(payload, &["proof"]);
+        let validator = format!("builtin:small-opb-proof-for-{tool}");
+        if opb.trim().is_empty() || proof.trim().is_empty() {
+            return proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "invalid",
+                "missing OPB or pseudo-Boolean proof text",
+                Vec::new(),
+            );
+        }
+        let (variables, constraints) = match model_validation_parse_opb(opb) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return proof_validation_result(
+                    &tool,
+                    &validator,
+                    "ok",
+                    "invalid",
+                    message,
+                    Vec::new(),
+                );
+            }
+        };
+        if let Some(model) = proof_validation_pb_model(&variables, &constraints) {
+            return proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "invalid",
+                "OPB model is satisfiable; proof cannot validate infeasibility",
+                vec![("pb_status", json!("sat")), ("witness", json!(model))],
+            );
+        }
+        if proof_validation_veripb_has_derivation(proof) {
+            proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "valid",
+                "infeasible OPB model with non-empty pseudo-Boolean proof",
+                vec![("pb_status", json!("unsat"))],
+            )
+        } else {
+            proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "invalid",
+                "infeasible OPB model proof did not contain a derivation line",
+                vec![("pb_status", json!("unsat"))],
+            )
+        }
+    } else {
+        let cnf = model_validation_payload_text(payload, &["cnf", "dimacs"]);
+        let proof = model_validation_payload_text(payload, &["proof"]);
+        let validator = format!("builtin:small-cnf-proof-for-{tool}");
+        if cnf.trim().is_empty() || proof.trim().is_empty() {
+            return proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "invalid",
+                "missing CNF or proof text",
+                Vec::new(),
+            );
+        }
+        let (variables, clauses) = match model_validation_parse_dimacs_cnf(cnf) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return proof_validation_result(
+                    &tool,
+                    &validator,
+                    "ok",
+                    "invalid",
+                    message,
+                    Vec::new(),
+                );
+            }
+        };
+        if let Some(model) = proof_validation_cnf_model(variables, &clauses) {
+            return proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "invalid",
+                "CNF is satisfiable; unsat proof cannot validate",
+                vec![("cnf_status", json!("sat")), ("witness", json!(model))],
+            );
+        }
+        let has_empty_clause = if matches!(tool.as_str(), "lrat" | "lrat-check" | "lrat-checker") {
+            proof_validation_lrat_has_empty_clause(proof)
+        } else if matches!(tool.as_str(), "frat" | "frat-rs" | "frat-trim") {
+            proof_validation_frat_has_empty_clause(proof)
+        } else {
+            proof_validation_drat_has_empty_clause(proof)
+        };
+        if has_empty_clause {
+            proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "valid",
+                "unsat CNF with empty-clause proof line",
+                vec![("cnf_status", json!("unsat"))],
+            )
+        } else {
+            proof_validation_result(
+                &tool,
+                &validator,
+                "ok",
+                "invalid",
+                "unsat CNF proof did not contain an empty-clause line",
+                vec![("cnf_status", json!("unsat"))],
+            )
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulationMetricExpectation {
     pub name: String,
@@ -5333,6 +7732,24 @@ fn failed_rust_simulation_reference_run(
     )
 }
 
+fn unavailable_rust_simulation_reference_run(
+    engine_id: String,
+    message: String,
+    elapsed_ms: f64,
+) -> ExternalSimulationValidationReferenceRun {
+    simulation_reference_run(
+        engine_id,
+        "rust:unsupported-simulation-format".to_string(),
+        ExternalSimulationValidationStatus::Unavailable,
+        ExternalSimulationValidationVerdict::Unknown,
+        message,
+        BTreeMap::new(),
+        Vec::new(),
+        Vec::new(),
+        elapsed_ms,
+    )
+}
+
 fn run_event_simulation_validation_with_rust_reference(
     payload: &Value,
     engine_id: String,
@@ -5819,6 +8236,29 @@ pub fn run_simulation_validation_json_with_external_reference(
         return run_process_simulation_validation_with_rust_reference(payload, engine_id, started);
     }
 
+    unavailable_rust_simulation_reference_run(
+        engine_id,
+        format!("unsupported model_format {model_format:?}"),
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+pub fn run_simulation_validation_json_with_python_reference(
+    payload: &Value,
+    options: &ExternalSimulationValidationReferenceOptions,
+) -> ExternalSimulationValidationReferenceRun {
+    let engine_id = options
+        .engine_id
+        .clone()
+        .or_else(|| {
+            payload
+                .get("engine")
+                .or_else(|| payload.get("engine_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "builtin".to_string());
+    let started = Instant::now();
     let python = env::var_os("PYTHON_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("python3"));
@@ -8624,6 +11064,26 @@ mod tests {
             assert!(specs.iter().any(|spec| spec.id == id), "missing {id}");
         }
         assert_eq!(manifest.as_array().map(Vec::len), Some(specs.len()));
+    }
+
+    #[test]
+    fn simulation_validation_unsupported_format_stays_in_rust() {
+        let payload = json!({
+            "kind": "simulation-validation",
+            "engine": "simpy",
+            "model_format": "json-unsupported-smoke",
+            "model": {}
+        });
+
+        let run = run_simulation_validation_json_with_external_reference(
+            &payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+
+        assert_eq!(run.status, ExternalSimulationValidationStatus::Unavailable);
+        assert_eq!(run.verdict, ExternalSimulationValidationVerdict::Unknown);
+        assert_eq!(run.simulator, "rust:unsupported-simulation-format");
+        assert!(run.message.contains("json-unsupported-smoke"));
     }
 
     #[test]

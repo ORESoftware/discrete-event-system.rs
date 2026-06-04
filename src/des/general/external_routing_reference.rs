@@ -392,7 +392,9 @@ pub fn solve_cvrp_with_external_reference(
 ) -> ExternalRoutingReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalRoutingReferenceSolver::RustExact | ExternalRoutingReferenceSolver::Fallback
+        ExternalRoutingReferenceSolver::Auto
+            | ExternalRoutingReferenceSolver::RustExact
+            | ExternalRoutingReferenceSolver::Fallback
     ) {
         return solve_cvrp_with_rust_reference(depot, customers, vehicle_capacity);
     }
@@ -500,5 +502,27 @@ mod tests {
         assert_eq!(solution.status, ExternalRoutingReferenceStatus::Infeasible);
         assert_eq!(solution.solver, "rust:exact-cvrp");
         assert!(solution.objective.is_none());
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let solution = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &sample_customers(),
+            5.0,
+            &ExternalRoutingReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:exact-cvrp");
+        assert_eq!(
+            solution
+                .routes
+                .iter()
+                .map(|route| route.customers.len())
+                .sum::<usize>(),
+            5
+        );
+        assert!(solution.objective.is_some());
     }
 }

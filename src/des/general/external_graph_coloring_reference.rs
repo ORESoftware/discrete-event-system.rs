@@ -532,7 +532,8 @@ pub fn solve_graph_coloring_with_external_reference(
 ) -> ExternalGraphColoringReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalGraphColoringReferenceSolver::RustDsatur
+        ExternalGraphColoringReferenceSolver::Auto
+            | ExternalGraphColoringReferenceSolver::RustDsatur
             | ExternalGraphColoringReferenceSolver::Fallback
     ) {
         return solve_graph_coloring_with_rust_reference(problem);
@@ -600,5 +601,23 @@ mod tests {
         assert_eq!(solution.solver, "rust:dsatur-graph-coloring");
         assert_eq!(solution.used_color_count, Some(3));
         assert_eq!(solution.color_indices.len(), 3);
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_graph_coloring_problem();
+
+        let solution = solve_graph_coloring_with_external_reference(
+            &problem,
+            &ExternalGraphColoringReferenceOptions::default(),
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalGraphColoringReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:dsatur-graph-coloring");
+        assert_eq!(solution.used_color_count, Some(3));
+        assert_eq!(solution.objective, Some(3.0));
     }
 }

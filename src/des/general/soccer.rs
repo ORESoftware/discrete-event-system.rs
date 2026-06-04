@@ -185,6 +185,12 @@ const DEFAULT_SOCCER_NEURAL_REPLAY_CAPACITY: usize = 512;
 const DEFAULT_SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK: usize = 16;
 const DEFAULT_SOCCER_NEURAL_TARGET_CLIP: f64 = 3.0;
 const MAX_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.25;
+const MAX_SOCCER_NEURAL_BATCH_SIZE: usize = 1024;
+const MAX_SOCCER_NEURAL_MAX_BATCHES_PER_TICK: usize = 16;
+const MAX_SOCCER_NEURAL_HIDDEN_UNITS: usize = 256;
+const MAX_SOCCER_NEURAL_MAX_PENDING_BATCHES: usize = 256;
+const MAX_SOCCER_NEURAL_REPLAY_CAPACITY: usize = 50_000;
+const MAX_SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK: usize = 4096;
 
 fn default_ball_drag_per_tick() -> f64 {
     DEFAULT_BALL_DRAG_PER_TICK
@@ -1076,6 +1082,8 @@ pub struct AgentActionOptionTrace {
     pub label: String,
     pub score: f64,
     pub probability: f64,
+    #[serde(default)]
+    pub tick_probability: f64,
     pub legal: bool,
 }
 
@@ -1089,6 +1097,7 @@ impl AgentActionOptionTrace {
                 0.0
             },
             probability: 0.0,
+            tick_probability: 0.0,
             legal,
         }
     }
@@ -1166,8 +1175,36 @@ fn normalize_action_options(
         } else {
             0.0
         };
+        option.tick_probability = option.probability;
     }
     options
+}
+
+fn annotate_tick_probabilities_from_scores(
+    options: &mut [AgentActionOptionTrace],
+    dt_seconds: f64,
+) {
+    for option in options {
+        option.tick_probability = if option.legal {
+            time_window_probability(option.score, dt_seconds)
+        } else {
+            0.0
+        };
+    }
+}
+
+fn annotate_tick_probability_from_score(
+    options: &mut [AgentActionOptionTrace],
+    label: &str,
+    dt_seconds: f64,
+) {
+    if let Some(option) = options.iter_mut().find(|option| option.label == label) {
+        option.tick_probability = if option.legal {
+            time_window_probability(option.score, dt_seconds)
+        } else {
+            0.0
+        };
+    }
 }
 
 fn single_action_option(label: &str) -> Vec<AgentActionOptionTrace> {
@@ -1175,6 +1212,7 @@ fn single_action_option(label: &str) -> Vec<AgentActionOptionTrace> {
         label: label.to_string(),
         score: 1.0,
         probability: 1.0,
+        tick_probability: 1.0,
         legal: true,
     }]
 }
@@ -3368,6 +3406,7 @@ impl PlayerAgent {
         directive: &TeamTacticalDirective,
         pass_target_count: usize,
         aerial_pass_target_count: usize,
+        dt_seconds: f64,
     ) -> Vec<AgentActionOptionTrace> {
         let shooting = ability01(self.skills.shooting);
         let dribbling = ability01(self.skills.dribbling);
@@ -3516,7 +3555,9 @@ impl PlayerAgent {
                 true,
             ));
         }
-        normalize_action_options(options)
+        let mut options = normalize_action_options(options);
+        annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
+        options
     }
 
     fn first_touch_action_options(
@@ -3580,6 +3621,7 @@ impl PlayerAgent {
         &self,
         snapshot: &WorldSnapshot,
         directive: &TeamTacticalDirective,
+        dt_seconds: f64,
     ) -> Vec<AgentActionOptionTrace> {
         let tackle_legal = snapshot.ball.holder.is_some_and(|holder| {
             snapshot
@@ -3594,11 +3636,13 @@ impl PlayerAgent {
         let aggression = ability01(self.skills.aggression);
         let tackle_score =
             ((defending * 0.6 + aggression * 0.4) * directive.press_intensity).clamp(0.02, 0.92);
-        normalize_action_options(vec![
+        let mut options = normalize_action_options(vec![
             AgentActionOptionTrace::new("tackle", tackle_score, tackle_legal),
             AgentActionOptionTrace::new("defend-shape", 0.90, true),
             AgentActionOptionTrace::new("defend-roam", 0.10, true),
-        ])
+        ]);
+        annotate_tick_probability_from_score(&mut options, "tackle", dt_seconds);
+        options
     }
 
     fn decision_trace(
@@ -4191,6 +4235,7 @@ impl PlayerAgent {
                 &directive,
                 pass_targets.len(),
                 aerial_pass_targets.len(),
+                snapshot.dt_seconds,
             );
             let mut weighted_ops = vec![
                 (
@@ -4523,7 +4568,8 @@ impl PlayerAgent {
                 "space".to_string(),
             )
         } else if possession_team == Some(self.team.other()) {
-            action_options = self.defensive_action_options(snapshot, &directive);
+            action_options =
+                self.defensive_action_options(snapshot, &directive, snapshot.dt_seconds);
             let ops = weighted_fisher_yates_order(
                 vec![
                     ("tackle", action_option_score(&action_options, "tackle")),
@@ -6672,7 +6718,7 @@ impl Default for SoccerNeuralLearningConfig {
 
 impl SoccerNeuralLearningConfig {
     fn sanitized_batch_size(&self) -> usize {
-        self.batch_size.max(1)
+        self.batch_size.clamp(1, MAX_SOCCER_NEURAL_BATCH_SIZE)
     }
 
     fn sanitized_train_every_ticks(&self) -> usize {
@@ -6680,7 +6726,12 @@ impl SoccerNeuralLearningConfig {
     }
 
     fn sanitized_max_batches_per_tick(&self) -> usize {
-        self.max_batches_per_tick.max(1)
+        self.max_batches_per_tick
+            .clamp(1, MAX_SOCCER_NEURAL_MAX_BATCHES_PER_TICK)
+    }
+
+    fn sanitized_hidden_units(&self) -> usize {
+        self.hidden_units.clamp(2, MAX_SOCCER_NEURAL_HIDDEN_UNITS)
     }
 
     fn sanitized_learning_rate(&self) -> f64 {
@@ -6701,15 +6752,17 @@ impl SoccerNeuralLearningConfig {
     }
 
     fn sanitized_max_pending_batches(&self) -> usize {
-        self.max_pending_batches.max(1)
+        self.max_pending_batches
+            .clamp(1, MAX_SOCCER_NEURAL_MAX_PENDING_BATCHES)
     }
 
     fn sanitized_replay_capacity(&self) -> usize {
-        self.replay_capacity
+        self.replay_capacity.min(MAX_SOCCER_NEURAL_REPLAY_CAPACITY)
     }
 
     fn sanitized_replay_samples_per_tick(&self) -> usize {
         self.replay_samples_per_tick
+            .min(MAX_SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK)
     }
 
     fn sanitized_target_clip(&self) -> f64 {
@@ -10394,12 +10447,7 @@ enum PassChainContinuationKind {
 
 fn pass_chain_continuation_kind(action: &str) -> Option<PassChainContinuationKind> {
     let action = normalize_soccer_action_label(action);
-    if matches!(
-        action,
-        "shoot"
-            | "first-time-shot"
-            | "first-time-header"
-    ) {
+    if matches!(action, "shoot" | "first-time-shot" | "first-time-header") {
         return Some(PassChainContinuationKind::Shot);
     }
     if matches!(action, "pass" | "aerial-pass" | "first-time-pass") {
@@ -13835,7 +13883,7 @@ fn build_soccer_neural_network(
     FeedForwardNetwork::random(
         &RandomNetworkSpec {
             input_dim: SOCCER_NEURAL_FEATURE_DIM,
-            hidden_layers: vec![config.hidden_units.max(2)],
+            hidden_layers: vec![config.sanitized_hidden_units()],
             output_dim: 1,
             hidden_activation: ActivationName::Tanh,
             output_activation: ActivationName::Linear,
@@ -14460,7 +14508,8 @@ impl SoccerMatch {
             shared_policy_target_entries,
             shared_policy_target_visits,
             team_policies_enabled: self.team_policies.is_some(),
-            adversarial_learning_enabled: self.team_policies.is_some(),
+            adversarial_learning_enabled: self.config.learning_enabled
+                && self.team_policies.is_some(),
             adversarial_embedding_exploitation_enabled: self.config.learning_enabled
                 && self.config.adversarial_embedding_exploitation_enabled,
             adversarial_embedding_memory_size: self.adversarial_moment_memory.len(),
@@ -14887,9 +14936,27 @@ impl SoccerMatch {
 
         if let Some(target_idx) = target_idx {
             self.players[target_idx].controller_slot = Some(controller_slot);
+            self.disable_learning_for_human_gameplay();
         }
 
         Ok(())
+    }
+
+    fn human_controller_assigned(&self) -> bool {
+        self.players
+            .iter()
+            .any(|player| player.controller_slot.is_some())
+    }
+
+    fn disable_learning_for_human_gameplay(&mut self) {
+        if !self.human_controller_assigned() {
+            return;
+        }
+        self.config.learning_enabled = false;
+        self.config.learning_logging_enabled = false;
+        self.config.neural_learning.enabled = false;
+        self.config.adversarial_embedding_exploitation_enabled = false;
+        self.neural_learner = None;
     }
 
     pub fn clear_controller_assignments(&mut self) {
@@ -14917,7 +14984,7 @@ impl SoccerMatch {
         request: SoccerLearningRuntimeRequest,
     ) -> SoccerLearningRuntimeResponse {
         if let Some(enabled) = request.learning_enabled {
-            self.config.learning_enabled = enabled;
+            self.config.learning_enabled = enabled && !self.human_controller_assigned();
             if !enabled {
                 self.config.neural_learning.enabled = false;
                 self.neural_learner = None;
@@ -14927,8 +14994,8 @@ impl SoccerMatch {
             self.config.learning_logging_enabled = enabled;
         }
         if let Some(enabled) = request.neural_learning_enabled {
-            self.config.neural_learning.enabled = enabled;
-            if !enabled {
+            self.config.neural_learning.enabled = enabled && self.config.learning_enabled;
+            if !self.config.neural_learning.enabled {
                 self.neural_learner = None;
             }
         }
@@ -14938,6 +15005,7 @@ impl SoccerMatch {
                 self.neural_learner = None;
             }
         }
+        self.disable_learning_for_human_gameplay();
         SoccerLearningRuntimeResponse {
             config: self.config.clone(),
             learning: self.learning_snapshot(),
@@ -16103,8 +16171,7 @@ impl SoccerMatch {
         else {
             return;
         };
-        if decision.mdp_state.tick != before.tick
-        {
+        if decision.mdp_state.tick != before.tick {
             return;
         }
         let Some(kind) = pass_chain_continuation_kind(&decision.action) else {
@@ -26168,6 +26235,60 @@ mod tests {
     }
 
     #[test]
+    fn action_option_tick_probabilities_are_event_gates_not_normalized_shares() {
+        let mut options = normalize_action_options(vec![
+            AgentActionOptionTrace::new("shoot", 0.72, true),
+            AgentActionOptionTrace::new("dribble", 0.68, true),
+            AgentActionOptionTrace::new("pass", 0.64, true),
+        ]);
+        annotate_tick_probabilities_from_scores(&mut options, 1.0);
+
+        let selection_sum = options.iter().map(|option| option.probability).sum::<f64>();
+        let tick_sum = options
+            .iter()
+            .map(|option| option.tick_probability)
+            .sum::<f64>();
+        assert!((selection_sum - 1.0).abs() < 1e-12);
+        assert!(tick_sum > 1.0);
+        for option in options {
+            assert!((0.0..=1.0).contains(&option.tick_probability));
+        }
+    }
+
+    #[test]
+    fn possession_action_options_expose_dt_scaled_tick_probabilities() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 1.0,
+            duration_seconds: 1.0,
+            seed: 150,
+            ..Default::default()
+        });
+        let holder = 5;
+        sim.ball.holder = Some(holder);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.position = sim.players[holder].position;
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(holder);
+        let directive = snapshot.tactical_directive(Team::Home);
+        let full_tick =
+            sim.players[holder].possession_action_options(&observation, &directive, 2, 1, 1.0);
+        let tenth_tick =
+            sim.players[holder].possession_action_options(&observation, &directive, 2, 1, 0.1);
+        let full_dribble = full_tick
+            .iter()
+            .find(|option| option.label == "dribble")
+            .expect("dribble option");
+        let tenth_dribble = tenth_tick
+            .iter()
+            .find(|option| option.label == "dribble")
+            .expect("dribble option");
+
+        assert!(full_dribble.tick_probability > tenth_dribble.tick_probability);
+        assert!(full_dribble.tick_probability <= 1.0);
+        assert!(tenth_dribble.tick_probability >= 0.0);
+    }
+
+    #[test]
     fn completed_pass_reward_prioritizes_forward_progression() {
         let field_length = 120.0;
 
@@ -26338,6 +26459,77 @@ mod tests {
             0.0,
             "A is outside the two-passer continuation window"
         );
+    }
+
+    #[test]
+    fn completed_pass_reward_ignores_wrong_team_receiver() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 1.0,
+            duration_seconds: 3.0,
+            seed: 153,
+            ..Default::default()
+        });
+        let pass = test_pending_pass(
+            Team::Home,
+            5,
+            11,
+            Vec2::new(34.0, 38.0),
+            Vec2::new(42.0, 52.0),
+        );
+        let event_start = sim.reward_events.len();
+
+        sim.record_completed_pass_reward(&pass, 11);
+
+        assert_eq!(sim.reward_events.len(), event_start);
+        assert!(sim.completed_pass_chain.is_empty());
+    }
+
+    #[test]
+    fn dribble_continuation_requires_retained_controlled_possession() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 1.0,
+            duration_seconds: 4.0,
+            seed: 154,
+            ..Default::default()
+        });
+        let b = 6;
+        let c = 7;
+        let d = 8;
+        let pass_bc = test_pending_pass(
+            Team::Home,
+            b,
+            c,
+            Vec2::new(42.0, 36.4),
+            Vec2::new(43.0, 49.0),
+        );
+        sim.record_completed_pass_reward(&pass_bc, c);
+        sim.tick += 1;
+        sim.clock_seconds += 1.0;
+        let pass_cd = test_pending_pass(
+            Team::Home,
+            c,
+            d,
+            Vec2::new(43.0, 49.0),
+            Vec2::new(51.0, 49.5),
+        );
+        sim.record_completed_pass_reward(&pass_cd, d);
+        sim.tick += 1;
+        sim.clock_seconds += 1.0;
+        sim.ball.holder = Some(d);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.position = Vec2::new(51.0, 49.5);
+        sim.players[d].position = sim.ball.position;
+        let before = WorldSnapshot::from_match(&sim);
+        sim.players[d].last_decision = Some(test_decision_trace(&before, d, "dribble"));
+        let mut after = before.clone();
+        after.ball.holder = None;
+        after.ball.last_touch_team = Some(Team::Home);
+        after.ball.position.y += 1.2;
+        let event_start = sim.reward_events.len();
+
+        sim.update_pass_chain_continuation_rewards(&before, &after, true);
+
+        assert_eq!(sim.reward_events.len(), event_start);
     }
 
     #[test]
@@ -29487,8 +29679,13 @@ mod tests {
         assert!(state.perceived_fatigue_advantage_bin >= 3);
 
         let directive = snapshot.tactical_directive(Team::Home);
-        let favorable =
-            sim.players[attacker].possession_action_options(&observation, &directive, 0, 0);
+        let favorable = sim.players[attacker].possession_action_options(
+            &observation,
+            &directive,
+            0,
+            0,
+            sim.config.dt_seconds,
+        );
         let mut unfavorable_observation = observation.clone();
         unfavorable_observation.perceived_nearest_defender_fatigue = 0.05;
         unfavorable_observation.perceived_fatigue_advantage = unfavorable_observation
@@ -29499,6 +29696,7 @@ mod tests {
             &directive,
             0,
             0,
+            sim.config.dt_seconds,
         );
 
         assert!(
@@ -30045,7 +30243,12 @@ mod tests {
     fn neural_learning_config_sanitizes_unstable_fast_learning_knobs() {
         let config = SoccerNeuralLearningConfig {
             learning_rate: 10_000.0,
+            batch_size: usize::MAX,
+            max_batches_per_tick: usize::MAX,
+            hidden_units: usize::MAX,
             max_pending_batches: 0,
+            replay_capacity: usize::MAX,
+            replay_samples_per_tick: usize::MAX,
             target_clip: 0.0,
             ..SoccerNeuralLearningConfig::default()
         };
@@ -30054,7 +30257,24 @@ mod tests {
             config.sanitized_learning_rate(),
             MAX_SOCCER_NEURAL_LEARNING_RATE
         );
+        assert_eq!(config.sanitized_batch_size(), MAX_SOCCER_NEURAL_BATCH_SIZE);
+        assert_eq!(
+            config.sanitized_max_batches_per_tick(),
+            MAX_SOCCER_NEURAL_MAX_BATCHES_PER_TICK
+        );
+        assert_eq!(
+            config.sanitized_hidden_units(),
+            MAX_SOCCER_NEURAL_HIDDEN_UNITS
+        );
         assert_eq!(config.sanitized_max_pending_batches(), 1);
+        assert_eq!(
+            config.sanitized_replay_capacity(),
+            MAX_SOCCER_NEURAL_REPLAY_CAPACITY
+        );
+        assert_eq!(
+            config.sanitized_replay_samples_per_tick(),
+            MAX_SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK
+        );
         assert_eq!(
             config.sanitized_target_clip(),
             DEFAULT_SOCCER_NEURAL_TARGET_CLIP
@@ -30183,6 +30403,48 @@ mod tests {
         assert!(!config.learning_logging_enabled);
         assert!(!config.neural_learning.enabled);
         assert!(!config.adversarial_embedding_exploitation_enabled);
+    }
+
+    #[test]
+    fn human_controller_assignment_forces_learning_work_off() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 1,
+            learning_enabled: true,
+            learning_logging_enabled: true,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Threaded,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            adversarial_embedding_exploitation_enabled: true,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+
+        sim.assign_controller_slot(0, Some(5))
+            .expect("assign human controller");
+
+        let learning = sim.learning_snapshot();
+        assert!(!sim.config.learning_enabled);
+        assert!(!sim.config.learning_logging_enabled);
+        assert!(!sim.config.neural_learning.enabled);
+        assert!(!sim.config.adversarial_embedding_exploitation_enabled);
+        assert!(!learning.learning_enabled);
+        assert!(!learning.learning_logging_enabled);
+        assert!(!learning.adversarial_learning_enabled);
+        assert!(!learning.neural_learning_enabled);
+
+        let response = sim.update_learning_runtime(SoccerLearningRuntimeRequest {
+            learning_enabled: Some(true),
+            learning_logging_enabled: Some(true),
+            neural_learning_enabled: Some(true),
+            neural_learning_backend: Some(SoccerNeuralLearningBackend::Inline),
+        });
+        assert!(!response.config.learning_enabled);
+        assert!(!response.config.learning_logging_enabled);
+        assert!(!response.config.neural_learning.enabled);
+        assert!(!response.learning.learning_enabled);
+        assert!(!response.learning.neural_learning_enabled);
     }
 
     #[test]
@@ -32581,8 +32843,13 @@ mod tests {
         let snapshot = WorldSnapshot::from_match(&sim);
         let observation = snapshot.observation_for(defender);
         let directive = snapshot.tactical_directive(Team::Home);
-        let options =
-            sim.players[defender].possession_action_options(&observation, directive, 1, 1);
+        let options = sim.players[defender].possession_action_options(
+            &observation,
+            directive,
+            1,
+            1,
+            sim.config.dt_seconds,
+        );
         let clearance = options
             .iter()
             .find(|option| option.label == "clearance")
@@ -32601,8 +32868,13 @@ mod tests {
 
         let mut calm_observation = observation.clone();
         calm_observation.perceived_pressure = 0.05;
-        let calm_options =
-            sim.players[defender].possession_action_options(&calm_observation, directive, 1, 1);
+        let calm_options = sim.players[defender].possession_action_options(
+            &calm_observation,
+            directive,
+            1,
+            1,
+            sim.config.dt_seconds,
+        );
         let calm_clearance = calm_options
             .iter()
             .find(|option| option.label == "clearance")
@@ -33871,8 +34143,13 @@ mod tests {
             let before = WorldSnapshot::from_match(&sim);
             let observation = before.observation_for(attacker);
             let directive = before.tactical_directive(Team::Away);
-            let options =
-                sim.players[attacker].possession_action_options(&observation, directive, 0, 0);
+            let options = sim.players[attacker].possession_action_options(
+                &observation,
+                directive,
+                0,
+                0,
+                sim.config.dt_seconds,
+            );
             let side_step = options
                 .iter()
                 .find(|option| option.label == "side-step")
@@ -35616,8 +35893,13 @@ mod tests {
         assert!(!blocked_observation.shot_lane_open);
         assert!(!shot_decision_is_qualified(&blocked_observation));
         let directive = blocked_snapshot.tactical_directive(Team::Home);
-        let blocked_options =
-            sim.players[attacker].possession_action_options(&blocked_observation, &directive, 0, 0);
+        let blocked_options = sim.players[attacker].possession_action_options(
+            &blocked_observation,
+            &directive,
+            0,
+            0,
+            sim.config.dt_seconds,
+        );
         let blocked_shot = blocked_options
             .iter()
             .find(|option| option.label == "shoot")
@@ -35636,8 +35918,13 @@ mod tests {
         assert!(clear_observation.shot_lane_open);
         assert!(shot_decision_is_qualified(&clear_observation));
         let directive = clear_snapshot.tactical_directive(Team::Home);
-        let clear_options =
-            sim.players[attacker].possession_action_options(&clear_observation, &directive, 0, 0);
+        let clear_options = sim.players[attacker].possession_action_options(
+            &clear_observation,
+            &directive,
+            0,
+            0,
+            sim.config.dt_seconds,
+        );
         let clear_shot = clear_options
             .iter()
             .find(|option| option.label == "shoot")

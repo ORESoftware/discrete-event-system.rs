@@ -21,79 +21,96 @@ use des_engine::des::soccer_learning::{
 use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde::Serialize;
 
-fn env_usize(name: &str, default: usize) -> usize {
+fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
-fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(default)
+fn env_usize(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    value.parse::<usize>().map_err(|_| {
+        invalid_data(format!("{name} must be an unsigned integer, got {value:?}")).into()
+    })
 }
 
-fn env_f64(name: &str, default: f64) -> f64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(default)
+fn env_u32(name: &str, default: u32) -> Result<u32, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    value
+        .parse::<u32>()
+        .map_err(|_| invalid_data(format!("{name} must be a u32, got {value:?}")).into())
 }
 
-fn env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "y" | "on"
-            )
-        })
-        .unwrap_or(default)
+fn env_f64(name: &str, default: f64) -> Result<f64, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| invalid_data(format!("{name} must be a finite number, got {value:?}")))?;
+    if parsed.is_finite() {
+        Ok(parsed)
+    } else {
+        Err(invalid_data(format!("{name} must be finite, got {value:?}")).into())
+    }
 }
 
-fn env_tactical_learning_weights() -> SoccerTacticalLearningWeights {
+fn env_bool(name: &str, default: bool) -> Result<bool, Box<dyn Error>> {
+    let Some(value) = env_value(name) else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" => Ok(false),
+        _ => Err(invalid_data(format!("{name} must be a boolean, got {value:?}")).into()),
+    }
+}
+
+fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<dyn Error>> {
     let default = SoccerTacticalLearningWeights::default();
-    SoccerTacticalLearningWeights {
+    Ok(SoccerTacticalLearningWeights {
         attack_spacing_delta_weight: env_f64(
             "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
             default.attack_spacing_delta_weight,
-        ),
+        )?,
         attack_spacing_score_weight: env_f64(
             "SOCCER_ATTACK_SPACING_SCORE_WEIGHT",
             default.attack_spacing_score_weight,
-        ),
+        )?,
         attack_width_delta_weight: env_f64(
             "SOCCER_ATTACK_WIDTH_DELTA_WEIGHT",
             default.attack_width_delta_weight,
-        ),
+        )?,
         attack_width_score_weight: env_f64(
             "SOCCER_ATTACK_WIDTH_SCORE_WEIGHT",
             default.attack_width_score_weight,
-        ),
+        )?,
         attack_flank_lane_weight: env_f64(
             "SOCCER_ATTACK_FLANK_LANE_WEIGHT",
             default.attack_flank_lane_weight,
-        ),
+        )?,
         defense_spacing_delta_weight: env_f64(
             "SOCCER_DEFENSE_SPACING_DELTA_WEIGHT",
             default.defense_spacing_delta_weight,
-        ),
+        )?,
         defense_spacing_score_weight: env_f64(
             "SOCCER_DEFENSE_SPACING_SCORE_WEIGHT",
             default.defense_spacing_score_weight,
-        ),
+        )?,
         defense_contract_delta_weight: env_f64(
             "SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT",
             default.defense_contract_delta_weight,
-        ),
+        )?,
         defense_compactness_score_weight: env_f64(
             "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
             default.defense_compactness_score_weight,
-        ),
-    }
+        )?,
+    })
 }
 
 fn invalid_data(message: impl Into<String>) -> IoError {
@@ -128,6 +145,67 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+fn validate_queue_settings(
+    games: usize,
+    halves: usize,
+    half_minutes: f64,
+    minutes: f64,
+    period_break_recovery_seconds: f64,
+    dt_seconds: f64,
+    learning_interval_ticks: usize,
+    parallel_games: usize,
+    options: &SoccerQPolicyOptions,
+) -> Result<(), Box<dyn Error>> {
+    if games == 0 {
+        return Err(invalid_data("SOCCER_QUEUE_GAMES/SOCCER_GAMES must be at least 1").into());
+    }
+    if !(1..=8).contains(&halves) {
+        return Err(invalid_data("SOCCER_HALVES must be between 1 and 8").into());
+    }
+    if !half_minutes.is_finite() || half_minutes <= 0.0 || half_minutes > 120.0 {
+        return Err(invalid_data("SOCCER_HALF_MINUTES must be finite and in (0, 120]").into());
+    }
+    if !minutes.is_finite() || minutes <= 0.0 || minutes > 24.0 * 60.0 {
+        return Err(invalid_data("SOCCER_MINUTES must be finite and in (0, 1440]").into());
+    }
+    if env_value("SOCCER_MINUTES").is_some() {
+        let expected = half_minutes * halves as f64;
+        if (minutes - expected).abs() > 1e-6 {
+            return Err(invalid_data(format!(
+                "SOCCER_MINUTES ({minutes}) must equal SOCCER_HALF_MINUTES * SOCCER_HALVES ({expected})"
+            ))
+            .into());
+        }
+    }
+    if !period_break_recovery_seconds.is_finite()
+        || !(0.0..=60.0 * 60.0).contains(&period_break_recovery_seconds)
+    {
+        return Err(invalid_data(
+            "SOCCER_PERIOD_BREAK_RECOVERY_SECONDS must be finite and in [0, 3600]",
+        )
+        .into());
+    }
+    if !dt_seconds.is_finite() || !(0.01..=5.0).contains(&dt_seconds) {
+        return Err(invalid_data("SOCCER_DT_SECONDS must be finite and in [0.01, 5.0]").into());
+    }
+    if learning_interval_ticks == 0 {
+        return Err(invalid_data("SOCCER_LEARNING_INTERVAL_TICKS must be at least 1").into());
+    }
+    if !(1..=100).contains(&parallel_games) {
+        return Err(invalid_data(
+            "SOCCER_QUEUE_PARALLEL_GAMES/SOCCER_PARALLEL_GAMES must be between 1 and 100",
+        )
+        .into());
+    }
+    if !options.alpha.is_finite() || !(0.0..=1.0).contains(&options.alpha) {
+        return Err(invalid_data("SOCCER_ALPHA must be finite and in [0, 1]").into());
+    }
+    if !options.gamma.is_finite() || !(0.0..=1.0).contains(&options.gamma) {
+        return Err(invalid_data("SOCCER_GAMMA must be finite and in [0, 1]").into());
+    }
+    Ok(())
+}
+
 fn load_initial_policies(
     path: Option<&str>,
     options: SoccerQPolicyOptions,
@@ -151,33 +229,43 @@ fn load_initial_policies(
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let games = env_usize("SOCCER_QUEUE_GAMES", env_usize("SOCCER_GAMES", 100));
-    let parallel_games = env_usize(
-        "SOCCER_QUEUE_PARALLEL_GAMES",
-        env_usize("SOCCER_PARALLEL_GAMES", 10),
-    )
-    .clamp(1, 100);
-    let halves = env_usize("SOCCER_HALVES", 2).max(1);
-    let half_minutes = env_f64("SOCCER_HALF_MINUTES", 45.0);
-    let minutes = env_f64("SOCCER_MINUTES", half_minutes * halves as f64);
-    let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2);
-    let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4).max(1);
-    let seed = env_u32("SOCCER_SEED", 2026);
+    let default_games = env_usize("SOCCER_GAMES", 100)?;
+    let games = env_usize("SOCCER_QUEUE_GAMES", default_games)?;
+    let default_parallel_games = env_usize("SOCCER_PARALLEL_GAMES", 10)?;
+    let parallel_games = env_usize("SOCCER_QUEUE_PARALLEL_GAMES", default_parallel_games)?;
+    let halves = env_usize("SOCCER_HALVES", 2)?;
+    let half_minutes = env_f64("SOCCER_HALF_MINUTES", 45.0)?;
+    let minutes = env_f64("SOCCER_MINUTES", half_minutes * halves as f64)?;
+    let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2)?;
+    let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4)?;
+    let seed = env_u32("SOCCER_SEED", 2026)?;
     let options = SoccerQPolicyOptions {
-        alpha: env_f64("SOCCER_ALPHA", 0.20),
-        gamma: env_f64("SOCCER_GAMMA", 0.96),
+        alpha: env_f64("SOCCER_ALPHA", 0.20)?,
+        gamma: env_f64("SOCCER_GAMMA", 0.96)?,
     };
-    let tactical_learning = env_tactical_learning_weights();
+    let period_break_recovery_seconds = env_f64(
+        "SOCCER_PERIOD_BREAK_RECOVERY_SECONDS",
+        env_f64("SOCCER_HALFTIME_RECOVERY_SECONDS", 900.0)?,
+    )?;
+    validate_queue_settings(
+        games,
+        halves,
+        half_minutes,
+        minutes,
+        period_break_recovery_seconds,
+        dt_seconds,
+        learning_interval_ticks,
+        parallel_games,
+        &options,
+    )?;
+    let tactical_learning = env_tactical_learning_weights()?;
     let config = MatchConfig {
         dt_seconds,
         duration_seconds: minutes * 60.0,
         period_count: halves,
-        period_break_recovery_seconds: env_f64(
-            "SOCCER_PERIOD_BREAK_RECOVERY_SECONDS",
-            env_f64("SOCCER_HALFTIME_RECOVERY_SECONDS", 900.0),
-        ),
+        period_break_recovery_seconds,
         learning_enabled: true,
-        learning_logging_enabled: env_bool("SOCCER_LEARNING_LOGGING", false),
+        learning_logging_enabled: env_bool("SOCCER_LEARNING_LOGGING", false)?,
         learning_interval_ticks,
         tactical_learning,
         max_human_players: 0,
@@ -243,12 +331,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             base_seed: seed,
             match_config: config.clone(),
             options: options.clone(),
-            prune_action_entries_per_team: env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0),
+            prune_action_entries_per_team: env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0)?,
             prune_target_entries_per_team: env_usize(
                 "SOCCER_MAX_POLICY_TARGET_ENTRIES_PER_TEAM",
-                env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0),
-            ),
-            min_policy_visits: env_u32("SOCCER_MIN_POLICY_VISITS", 0),
+                env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0)?,
+            )?,
+            min_policy_visits: env_u32("SOCCER_MIN_POLICY_VISITS", 0)?,
         },
         initial_policies,
         |game, merged_policies| {

@@ -399,7 +399,8 @@ pub fn solve_min_cost_flow_with_external_reference(
 ) -> ExternalMinCostFlowReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath
+        ExternalMinCostFlowReferenceSolver::Auto
+            | ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath
             | ExternalMinCostFlowReferenceSolver::Fallback
     ) {
         return solve_min_cost_flow_with_rust_reference(problem);
@@ -513,5 +514,18 @@ mod tests {
         );
         assert_eq!(solution.solver, "rust:ssp-min-cost-flow");
         assert!(solution.objective.is_none());
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let solution = solve_min_cost_flow_with_external_reference(
+            &transportation_problem(),
+            &ExternalMinCostFlowReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalMinCostFlowReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:ssp-min-cost-flow");
+        assert_eq!(solution.objective, Some(21.0));
+        assert_eq!(solution.node_balance, vec![5.0, 7.0, -6.0, -6.0]);
     }
 }

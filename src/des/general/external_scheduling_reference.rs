@@ -467,7 +467,9 @@ pub fn solve_job_shop_with_external_reference(
 ) -> ExternalJobShopReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalSchedulingReferenceSolver::RustExact | ExternalSchedulingReferenceSolver::Fallback
+        ExternalSchedulingReferenceSolver::Auto
+            | ExternalSchedulingReferenceSolver::RustExact
+            | ExternalSchedulingReferenceSolver::Fallback
     ) {
         return solve_job_shop_with_rust_reference(jobs);
     }
@@ -494,7 +496,9 @@ pub fn solve_flow_shop_with_external_reference(
 ) -> ExternalJobShopReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalSchedulingReferenceSolver::RustExact | ExternalSchedulingReferenceSolver::Fallback
+        ExternalSchedulingReferenceSolver::Auto
+            | ExternalSchedulingReferenceSolver::RustExact
+            | ExternalSchedulingReferenceSolver::Fallback
     ) {
         return solve_flow_shop_with_rust_reference(jobs);
     }
@@ -645,5 +649,31 @@ mod tests {
             ExternalSchedulingReferenceStatus::NumericalError
         );
         assert_eq!(solution.solver, "rust:exact-job-shop");
+    }
+
+    #[test]
+    fn auto_prefers_rust_job_shop_reference_without_python() {
+        let solution = solve_job_shop_with_external_reference(
+            &sample_job_shop_jobs(),
+            &ExternalSchedulingReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalSchedulingReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:exact-job-shop");
+        assert_eq!(solution.makespan, Some(9.0));
+        assert_eq!(solution.schedule.len(), 6);
+    }
+
+    #[test]
+    fn auto_prefers_rust_flow_shop_reference_without_python() {
+        let solution = solve_flow_shop_with_external_reference(
+            &sample_flow_shop_jobs(),
+            &ExternalSchedulingReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalSchedulingReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:exact-flow-shop");
+        assert!(solution.makespan.is_some());
+        assert_eq!(solution.sequence.len(), 4);
     }
 }

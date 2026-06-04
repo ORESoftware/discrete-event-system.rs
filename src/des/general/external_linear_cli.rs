@@ -3498,6 +3498,7 @@ fn solve_native_lp_solve_cli_model(
         .arg("-timeout")
         .arg(glpk_time_limit_arg(opts.time_limit_secs));
     if kind == ExternalLinearCliKind::Mip {
+        command.arg("-v5").arg("-S2");
         if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
             command.arg("-gr").arg(format!("{relative_gap:.17}"));
         }
@@ -3556,26 +3557,36 @@ fn solve_native_lp_solve_cli_model(
         return failure;
     }
 
+    let objective = dot_f64(objective_coefficients, &parsed.x);
+    let quality = parse_lp_solve_mip_quality(
+        kind,
+        status,
+        objective,
+        &stdout,
+        &stderr,
+        opts.max_nodes.is_some() || opts.node_limit.is_some(),
+    );
+
     ExternalLinearCliSolution {
         status,
         solver: bridge_solver,
         solver_version,
         x: parsed.x.clone(),
-        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective: Some(objective),
         objective_values: None,
         lp_algorithm: None,
-        best_bound: None,
+        best_bound: quality.best_bound,
         solution_limit: None,
         solution_pool_size: None,
         solutions: None,
         exhausted: None,
-        mip_gap: None,
-        absolute_gap: None,
+        mip_gap: quality.mip_gap,
+        absolute_gap: quality.absolute_gap,
         objective_limit: None,
         primal_feasibility_tolerance: None,
         dual_feasibility_tolerance: None,
         integer_feasibility_tolerance: None,
-        nodes_explored: None,
+        nodes_explored: quality.nodes_explored,
         threads: None,
         random_seed: None,
         presolve: None,
@@ -6094,6 +6105,58 @@ fn parse_glpk_mip_quality(
     quality
 }
 
+fn parse_lp_solve_mip_quality(
+    kind: ExternalLinearCliKind,
+    status: ExternalLinearCliStatus,
+    objective: f64,
+    stdout: &str,
+    stderr: &str,
+    suppress_nodes: bool,
+) -> HighsMipQuality {
+    if kind != ExternalLinearCliKind::Mip {
+        return HighsMipQuality::default();
+    }
+    let mut quality = HighsMipQuality::default();
+    for line in format!("{stdout}\n{stderr}").lines() {
+        let stripped = line.trim();
+        let lowered = stripped.to_ascii_lowercase();
+        if !lowered.contains("solution") || !lowered.contains("nodes") {
+            continue;
+        }
+
+        let parts = stripped.split_whitespace().collect::<Vec<_>>();
+        for (idx, token) in parts.iter().enumerate() {
+            if token.trim_matches(|ch: char| !ch.is_ascii_alphabetic()) == "nodes" && idx > 0 {
+                if !suppress_nodes {
+                    quality.nodes_explored = parse_f64_token(parts[idx - 1])
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .map(|value| value.round() as u64);
+                }
+                break;
+            }
+        }
+        if let Some(gap_start) = lowered.find("gap") {
+            quality.mip_gap = first_float(&stripped[gap_start..]).map(|gap| {
+                if stripped.contains('%') {
+                    gap / 100.0
+                } else {
+                    gap
+                }
+            });
+        }
+    }
+
+    let exact_optimal = quality.mip_gap.map_or(true, |gap| gap.abs() <= 1.0e-12);
+    if exact_optimal {
+        fill_optimal_mip_quality(status, objective, &mut quality);
+    }
+    quality.mip_gap = quality
+        .mip_gap
+        .filter(|value| value.is_finite())
+        .map(|value| value.max(0.0));
+    quality
+}
+
 fn parse_cbc_mip_quality(
     kind: ExternalLinearCliKind,
     status: ExternalLinearCliStatus,
@@ -7879,6 +7942,45 @@ x1                              0
             super::parse_lp_solve_solver_version(stdout),
             Some("lp_solve 5.5.2.14".to_string())
         );
+    }
+
+    #[test]
+    fn native_lp_solve_mip_quality_parser_reads_gap_nodes_and_exact_bound() {
+        let stdout = "\
+Feasible solution                  1 after          2 iter,         1 nodes (gap 0.0%)
+Optimal solution                   1 after          2 iter,         1 nodes (gap 0.0%).
+";
+        let quality = super::parse_lp_solve_mip_quality(
+            ExternalLinearCliKind::Mip,
+            ExternalLinearCliStatus::Optimal,
+            1.0,
+            stdout,
+            "",
+            false,
+        );
+        assert_eq!(quality.nodes_explored, Some(1));
+        assert_eq!(quality.best_bound, Some(1.0));
+        assert_eq!(quality.mip_gap, Some(0.0));
+        assert_eq!(quality.absolute_gap, Some(0.0));
+    }
+
+    #[test]
+    fn native_lp_solve_mip_quality_parser_respects_positive_gap_and_node_suppression() {
+        let stdout = "\
+Optimal solution                 220 after          5 iter,         4 nodes (gap 8.3%).
+";
+        let quality = super::parse_lp_solve_mip_quality(
+            ExternalLinearCliKind::Mip,
+            ExternalLinearCliStatus::Optimal,
+            220.0,
+            stdout,
+            "",
+            true,
+        );
+        assert_eq!(quality.nodes_explored, None);
+        assert_eq!(quality.best_bound, None);
+        assert!((quality.mip_gap.unwrap() - 0.083).abs() <= 1.0e-12);
+        assert_eq!(quality.absolute_gap, None);
     }
 
     #[test]

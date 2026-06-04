@@ -669,6 +669,8 @@ impl DESModelRegistration<IPMIPDESParams, IPMIPSolution> for IpMipDesAdapter {
                 solution_limit: None,
                 objective_limit: None,
                 verbose: None,
+                cancel_flag: None,
+                take_next_incumbent_signal: None,
             })
             .unwrap_or_default();
 

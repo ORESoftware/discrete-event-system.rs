@@ -901,3 +901,70 @@ pub fn solve_global_benchmark_with_external_reference(
         opts,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::des::general::external_nonlinear_reference::{
+        solve_exponential_fit_with_external_reference,
+        solve_global_benchmark_with_external_reference,
+        solve_pareto_portfolio_with_external_reference, solve_rosenbrock_with_external_reference,
+        ExternalNonlinearBenchmarkObjective, ExternalNonlinearReferenceOptions,
+        ExternalNonlinearReferenceSolver, ExternalNonlinearReferenceStatus,
+    };
+    use crate::des::general::nonlinear_optimization_models::CurveFitPoint;
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let opts = ExternalNonlinearReferenceOptions {
+            solver: ExternalNonlinearReferenceSolver::Auto,
+            max_iterations: None,
+        };
+
+        let rosenbrock = solve_rosenbrock_with_external_reference(&[-1.2, 1.0, 0.8], &opts);
+        assert_eq!(rosenbrock.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert_eq!(rosenbrock.solver, "rust:known-rosenbrock-minimum");
+        assert!(rosenbrock
+            .objective
+            .is_some_and(|objective| objective <= 1e-12));
+
+        let points = [
+            CurveFitPoint { x: 0.0, y: 2.0 },
+            CurveFitPoint {
+                x: 1.0,
+                y: 2.0 * (-0.5_f64).exp(),
+            },
+            CurveFitPoint {
+                x: 2.0,
+                y: 2.0 * (-1.0_f64).exp(),
+            },
+            CurveFitPoint {
+                x: 3.0,
+                y: 2.0 * (-1.5_f64).exp(),
+            },
+        ];
+        let fit = solve_exponential_fit_with_external_reference(&points, &[1.0, -0.2], &opts);
+        assert!(matches!(
+            fit.status,
+            ExternalNonlinearReferenceStatus::Optimal | ExternalNonlinearReferenceStatus::Feasible
+        ));
+        assert_eq!(fit.solver, "rust:gauss-newton");
+        assert!(fit.objective.is_some_and(|objective| objective <= 1e-10));
+
+        let global = solve_global_benchmark_with_external_reference(
+            ExternalNonlinearBenchmarkObjective::Rastrigin,
+            3,
+            -5.12,
+            5.12,
+            &opts,
+        );
+        assert_eq!(global.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert_eq!(global.solver, "rust:known-rastrigin-minimum");
+        assert!(global.objective.is_some_and(|objective| objective <= 1e-12));
+
+        let pareto = solve_pareto_portfolio_with_external_reference(&[], 64, 7, &opts);
+        assert_eq!(pareto.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert_eq!(pareto.solver, "rust:pareto-portfolio-enumeration");
+        assert!(pareto.candidate_count.is_some_and(|count| count >= 64));
+        assert!(!pareto.pareto_front.is_empty());
+    }
+}

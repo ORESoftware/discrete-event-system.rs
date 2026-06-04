@@ -421,7 +421,9 @@ fn panic_message(error: Box<dyn std::any::Any + Send>) -> String {
 fn is_rust_quadratic_solver(opts: &ExternalQuadraticReferenceOptions) -> bool {
     matches!(
         opts.solver,
-        ExternalQuadraticReferenceSolver::RustInternal | ExternalQuadraticReferenceSolver::Fallback
+        ExternalQuadraticReferenceSolver::Auto
+            | ExternalQuadraticReferenceSolver::RustInternal
+            | ExternalQuadraticReferenceSolver::Fallback
     )
 }
 
@@ -1315,14 +1317,16 @@ pub fn solve_miqcp_with_external_reference(
 
 #[cfg(test)]
 mod tests {
-    use crate::des::general::qp::{QuadraticConstraint, SecondOrderCone, SecondOrderConeProgram};
+    use crate::des::general::qp::{
+        QuadraticConstraint, QuadraticProgram, SecondOrderCone, SecondOrderConeProgram,
+    };
 
     use crate::des::general::external_quadratic_reference::{
         external_quadratic_reference_solver_manifest, external_quadratic_reference_solver_specs,
         solve_miqcp_with_external_reference, solve_misocp_with_external_reference,
-        ExternalQuadraticReferenceFamily, ExternalQuadraticReferenceOptions,
-        ExternalQuadraticReferenceSolution, ExternalQuadraticReferenceSolver,
-        ExternalQuadraticReferenceStatus,
+        solve_qp_with_external_reference, ExternalQuadraticReferenceFamily,
+        ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceSolution,
+        ExternalQuadraticReferenceSolver, ExternalQuadraticReferenceStatus,
     };
 
     #[test]
@@ -1424,6 +1428,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_prefers_rust_qp_reference_without_python() {
+        let problem = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        let solution = solve_qp_with_external_reference(
+            &problem,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "rust:qp-active-set");
+        assert!((solution.x[0] - 1.0).abs() <= 1e-7, "{solution:?}");
+        assert!((solution.x[1] - 2.0).abs() <= 1e-7, "{solution:?}");
+        assert!(solution.objective.is_some());
+    }
+
+    #[test]
     fn rust_internal_solves_misocp_enumeration_reference() {
         let problem = super::MixedIntegerSecondOrderConeProgram {
             socp: SecondOrderConeProgram {
@@ -1479,6 +1505,38 @@ mod tests {
             .is_some_and(|objective| { (objective - 9.0).abs() <= 1e-7 }));
         assert!((solution.x[0] - 3.0).abs() <= 1e-7, "{solution:?}");
         assert!((solution.x[1] - 9.0).abs() <= 1e-7, "{solution:?}");
+        assert_eq!(solution.enumerated, Some(21));
+    }
+
+    #[test]
+    fn auto_prefers_rust_miqcp_reference_without_python() {
+        let problem = super::MixedIntegerQuadraticallyConstrainedProgram {
+            qcp: super::QuadraticallyConstrainedProgram {
+                q: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+                c: vec![0.0, 1.0],
+                lb: Some(vec![Some(3.0), Some(0.0)]),
+                ub: Some(vec![Some(3.0), Some(20.0)]),
+                quadratic_constraints: vec![QuadraticConstraint {
+                    q: vec![vec![1.0, 0.0], vec![0.0, 0.0]],
+                    c: vec![0.0, -1.0],
+                    rhs: 0.0,
+                    name: Some("integer-square-epigraph".to_string()),
+                }],
+                ..Default::default()
+            },
+            integer_vars: vec![true, true],
+        };
+
+        let solution = solve_miqcp_with_external_reference(
+            &problem,
+            &ExternalQuadraticReferenceOptions::default(),
+        );
+
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "rust:miqcp-enumeration");
+        assert!(solution
+            .objective
+            .is_some_and(|objective| { (objective - 9.0).abs() <= 1e-7 }));
         assert_eq!(solution.enumerated, Some(21));
     }
 }

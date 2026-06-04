@@ -581,7 +581,8 @@ pub fn solve_weighted_independent_set_with_external_reference(
 ) -> ExternalWeightedIndependentSetReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound
+        ExternalWeightedIndependentSetReferenceSolver::Auto
+            | ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound
             | ExternalWeightedIndependentSetReferenceSolver::Fallback
     ) {
         return solve_weighted_independent_set_with_rust_reference(problem);
@@ -669,5 +670,26 @@ mod tests {
         );
         assert_eq!(solution.selected_vertex_ids, vec!["A"]);
         assert_eq!(solution.total_weight, Some(5.0));
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_weighted_independent_set_problem();
+
+        let solution = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions::default(),
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedIndependentSetReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:branch-and-bound-weighted-independent-set"
+        );
+        assert_eq!(solution.selected_vertex_ids, vec!["B", "D", "G"]);
+        assert_eq!(solution.objective, Some(16.0));
     }
 }

@@ -1,8 +1,8 @@
 //! Port of `src/des/main-mdp-lp.ts`.
 //!
 //! Solves a small MDP via its LP formulation, cross-checked against value
-//! iteration. (The TS optional external `scipy:highs` solve is handled inside
-//! `general::lp` / `general::des_lp_bridge`; here we use the default solver.)
+//! iteration. Optional external solves remain available through `LP_SOLVER`,
+//! while the default LP bridge uses the native internal simplex.
 //!
 //! Conversion notes:
 //!   - the TS `MDPSpec` callbacks (`numActions`, `outcomes`, …) become the
@@ -220,7 +220,7 @@ pub fn run() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.95);
-    let solver_env = std::env::var("LP_SOLVER").unwrap_or_else(|_| "scipy:highs".to_string());
+    let solver_env = std::env::var("LP_SOLVER").unwrap_or_else(|_| "internal".to_string());
 
     let Some(mdp_vi) = build_mdp(&which) else {
         eprintln!(
@@ -265,7 +265,7 @@ pub fn run() {
     println!("#   solver      = {}", lp.lp.solver);
     println!("#   iterations  = {}", lp.lp.iters.unwrap_or(0));
     println!(
-        "#   wall time   = {}ms (incl. Python startup if external)",
+        "#   wall time   = {}ms (incl. external bridge startup if selected)",
         t_lp
     );
     println!();

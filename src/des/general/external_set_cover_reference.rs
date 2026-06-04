@@ -604,7 +604,9 @@ pub fn solve_set_cover_with_external_reference(
 ) -> ExternalSetCoverReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalSetCoverReferenceSolver::RustExact | ExternalSetCoverReferenceSolver::Fallback
+        ExternalSetCoverReferenceSolver::Auto
+            | ExternalSetCoverReferenceSolver::RustExact
+            | ExternalSetCoverReferenceSolver::Fallback
     ) {
         return solve_set_cover_with_rust_reference(problem);
     }
@@ -669,5 +671,20 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-set-cover");
         assert!(solution.selected_set_indices.is_empty());
         assert!(solution.objective.is_none());
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_set_cover_problem();
+
+        let solution = solve_set_cover_with_external_reference(
+            &problem,
+            &ExternalSetCoverReferenceOptions::default(),
+        );
+
+        assert_eq!(solution.status, ExternalSetCoverReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:exact-set-cover");
+        assert_eq!(solution.objective, Some(7.0));
+        assert_eq!(solution.selected_set_ids, vec!["A", "B", "D"]);
     }
 }

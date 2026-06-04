@@ -5,7 +5,7 @@ M	Cargo.toml	36	20	KEEP-main	main-lb version is a stub / alt-phrasing of same lo
 A	MIGRATION_MANIFEST.md	397	0	SKIP	main-lb doc; main keeps its own docs (main-only per strategy)
 A	MIGRATION_STATUS.md	155	0	SKIP	main-lb doc; main keeps its own docs (main-only per strategy)
 A	README.md	35	0	SKIP	main-lb doc; main keeps its own docs (main-only per strategy)
-D	scripts/migration_status.py	0	62	KEEP	main-only file (complete, tested content kept verbatim)
+D	scripts/migration_status.py	0	34	KEEP	compatibility shim; implementation moved to Rust bin migration_status
 A	src/bin/compare_elevator_dispatch.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
 A	src/bin/compare_external_fel_models.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()
 A	src/bin/compare_traffic_engines.rs	20	0	ADOPT-idea	rewrote as thin wrapper binary delegating to library run()

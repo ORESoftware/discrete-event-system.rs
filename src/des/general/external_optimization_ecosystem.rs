@@ -1226,9 +1226,7 @@ fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
     let primary_env_var = tool.env_var();
     let configured_python = configured_python_command(tool)
         .or_else(|| python_command_from_install_dirs(tool))
-        .or_else(|| {
-            find_first_command(&["python3", "python"]).map(|python| (python, primary_env_var, None))
-        });
+        .or_else(|| default_python_probe_command().map(|python| (python, primary_env_var, None)));
     let Some((python, env_var, source_artifact)) = configured_python else {
         return probe_result(
             tool,
@@ -1250,7 +1248,7 @@ fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
     let mut last_error = String::new();
     for module in tool.python_modules() {
         let mut command = Command::new(&python);
-        command.arg("-c").arg(format!("import {module}"));
+        command.arg("-c").arg(python_import_probe_code(module));
         if let Some(python_path) = python_path.as_ref() {
             command.env("PYTHONPATH", python_path);
         }
@@ -1307,6 +1305,30 @@ fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
             )
         },
     )
+}
+
+fn default_python_probe_command() -> Option<PathBuf> {
+    python_probe_command_from_env(env::var_os("PYTHON_BIN"), env::var_os("PYTHON"))
+        .or_else(|| find_first_command(&["python3", "python"]))
+}
+
+fn python_probe_command_from_env(
+    python_bin: Option<OsString>,
+    python: Option<OsString>,
+) -> Option<PathBuf> {
+    python_bin
+        .filter(|value| !value.is_empty())
+        .or_else(|| python.filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+fn python_import_probe_code(module: &str) -> String {
+    if module == "pycsp3" {
+        return format!(
+            "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module:?}) else 1)"
+        );
+    }
+    format!("import {module}")
 }
 
 fn probe_julia_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
@@ -1821,6 +1843,37 @@ fn elapsed_ms(t0: Instant) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_probe_command_honors_python_bin_precedence() {
+        assert_eq!(
+            python_probe_command_from_env(
+                Some(OsString::from("/tmp/python-bin")),
+                Some(OsString::from("/tmp/python")),
+            ),
+            Some(PathBuf::from("/tmp/python-bin")),
+        );
+        assert_eq!(
+            python_probe_command_from_env(None, Some(OsString::from("/tmp/python"))),
+            Some(PathBuf::from("/tmp/python")),
+        );
+        assert_eq!(
+            python_probe_command_from_env(
+                Some(OsString::new()),
+                Some(OsString::from("/tmp/python"))
+            ),
+            Some(PathBuf::from("/tmp/python")),
+        );
+        assert_eq!(python_probe_command_from_env(None, None), None);
+    }
+
+    #[test]
+    fn pycsp3_probe_uses_spec_lookup_to_avoid_import_side_effects() {
+        let pycsp3_probe = python_import_probe_code("pycsp3");
+        assert!(pycsp3_probe.contains("find_spec"));
+        assert!(pycsp3_probe.contains("\"pycsp3\""));
+        assert_eq!(python_import_probe_code("pyomo"), "import pyomo");
+    }
 
     #[test]
     fn ecosystem_probe_wait_enforces_timeout() {

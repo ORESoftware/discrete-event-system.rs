@@ -3104,7 +3104,7 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         family: ExternalValidationFamily::OutputDataValidator,
         runtime: ExternalValidationRuntime::GenericAdapter,
         artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
-        command_aliases: &["xmlschema", "xsd-validator"],
+        command_aliases: &["xmlschema", "xmlschema-validate", "xsd-validator"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: XML_OUTPUT_FORMATS,
         notes: "XSD/XML Schema validation adapter for structured XML run artifacts",
@@ -9239,7 +9239,7 @@ pub fn run_simulation_validation_json_with_python_reference(
         }
     };
 
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = stdin.write_all(payload.to_string().as_bytes()) {
             return ExternalSimulationValidationReferenceRun {
                 engine_id,
@@ -10649,6 +10649,9 @@ pub fn probe_external_validation_tool(
             return probe_configured_artifact(tool, classpath.to_string_lossy().to_string());
         }
     }
+    if tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage {
+        return probe_python_validation_package(tool);
+    }
 
     ExternalValidationProbe {
         tool_id: tool.id.to_string(),
@@ -10783,6 +10786,99 @@ fn run_json_adapter(
             elapsed_ms,
             message: err.to_string(),
         },
+    }
+}
+
+fn probe_python_validation_package(tool: &ExternalValidationToolSpec) -> ExternalValidationProbe {
+    let Some(python) = default_python_probe_command() else {
+        return ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} needs a local adapter command or Python env; set {} or {}",
+                tool.display_name,
+                external_validation_adapter_env_names(tool)[0],
+                external_validation_artifact_hint(tool)
+            ),
+        };
+    };
+    if external_validation_python_modules(tool)
+        .iter()
+        .any(|module| python_can_import(&python, module))
+    {
+        return ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::Ready,
+            command: Some(python),
+            message: format!("{} Python module is importable", tool.display_name),
+        };
+    }
+    ExternalValidationProbe {
+        tool_id: tool.id.to_string(),
+        status: ExternalValidationProbeStatus::NotConfigured,
+        command: Some(python),
+        message: format!(
+            "{} needs a local adapter command or importable package; set {} or {}",
+            tool.display_name,
+            external_validation_adapter_env_names(tool)[0],
+            external_validation_artifact_hint(tool)
+        ),
+    }
+}
+
+fn external_validation_python_modules(
+    tool: &ExternalValidationToolSpec,
+) -> &'static [&'static str] {
+    match tool.id {
+        "cpmpy" => &["cpmpy"],
+        "pycsp3" => &["pycsp3"],
+        "pyomo" => &["pyomo.environ", "pyomo"],
+        "pulp" => &["pulp"],
+        "pyscipopt" => &["pyscipopt"],
+        "python-mip" => &["mip"],
+        "gurobipy" => &["gurobipy"],
+        "cplex-python" => &["cplex"],
+        "xpress-python" => &["xpress"],
+        "docplex" => &["docplex"],
+        "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ortools"],
+        "scipy-optimize" => &["scipy.optimize", "scipy"],
+        "pysat" => &["pysat"],
+        "casadi" => &["casadi"],
+        "osqp" => &["osqp"],
+        "scs" => &["scs"],
+        "clarabel" => &["clarabel"],
+        "ecos" => &["ecos"],
+        "proxqp" => &["proxsuite.proxqp", "proxsuite"],
+        "cvxpy" => &["cvxpy"],
+        "cvxopt" => &["cvxopt"],
+        "simpy" => &["simpy"],
+        "salabim" => &["salabim"],
+        "ciw" => &["ciw"],
+        "simulus" => &["simulus"],
+        "pandapower" => &["pandapower"],
+        "tellurium" => &["tellurium"],
+        "mujoco" => &["mujoco"],
+        "drake" => &["pydrake"],
+        "pybullet" => &["pybullet"],
+        "mesa" => &["mesa"],
+        "agentpy" => &["agentpy"],
+        "check-jsonschema" => &["check_jsonschema"],
+        "openapi-spec-validator" => &["openapi_spec_validator"],
+        "pydantic" => &["pydantic"],
+        "marshmallow" => &["marshmallow"],
+        "cerberus" => &["cerberus"],
+        "python-xmlschema" => &["xmlschema"],
+        "great-expectations" => &["great_expectations"],
+        "pandera" => &["pandera"],
+        "whylogs" => &["whylogs"],
+        "soda-core" => &["soda_core.scan", "soda_core", "soda.scan", "soda"],
+        "evidently" => &["evidently"],
+        "deepchecks" => &["deepchecks"],
+        "frictionless" => &["frictionless"],
+        "apache-arrow" => &["pyarrow"],
+        "tensorflow-data-validation" => &["tensorflow_data_validation"],
+        _ => &[],
     }
 }
 
@@ -11014,6 +11110,36 @@ fn find_first_command(aliases: &[&str]) -> Option<PathBuf> {
     None
 }
 
+fn default_python_probe_command() -> Option<PathBuf> {
+    python_probe_command_from_env(env::var_os("PYTHON_BIN"), env::var_os("PYTHON"))
+        .or_else(|| find_first_command(&["python3", "python"]))
+}
+
+fn python_probe_command_from_env(
+    python_bin: Option<OsString>,
+    python: Option<OsString>,
+) -> Option<PathBuf> {
+    python_bin
+        .filter(|value| !value.is_empty())
+        .or_else(|| python.filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+fn python_can_import(python: &Path, module: &str) -> bool {
+    let probe = if module == "pycsp3" {
+        format!(
+            "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module:?}) else 1)"
+        )
+    } else {
+        format!("import importlib; importlib.import_module({module:?})")
+    };
+    Command::new(python)
+        .arg("-c")
+        .arg(probe)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 fn resolve_command_path(command: &Path) -> Option<PathBuf> {
     if command.components().count() > 1 {
         return command.is_file().then(|| command.to_path_buf());
@@ -11039,13 +11165,14 @@ mod tests {
         external_validation_consensus_report_to_json,
         external_validation_default_artifact_cli_args, external_validation_default_file_cli_args,
         external_validation_default_text_cli_args, external_validation_file_cli_args,
-        external_validation_tool_specs, find_command_in_install_dir, find_external_validation_tool,
+        external_validation_python_modules, external_validation_tool_specs,
+        find_command_in_install_dir, find_external_validation_tool,
         find_java_classpath_in_install_dir, infer_external_validation_text_verdict, is_jar_file,
         json_schema_validation_request_to_json, minizinc_validation_request_to_json,
         prism_validation_model_to_string, prism_validation_properties_to_string,
-        run_external_validation_artifact_cli, run_external_validation_consensus,
-        run_external_validation_file_cli, run_external_validation_text_cli,
-        run_simulation_validation_json_with_external_reference,
+        python_probe_command_from_env, run_external_validation_artifact_cli,
+        run_external_validation_consensus, run_external_validation_file_cli,
+        run_external_validation_text_cli, run_simulation_validation_json_with_external_reference,
         run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
         smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
         DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
@@ -11062,8 +11189,46 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn validation_python_probe_command_honors_python_bin_precedence() {
+        assert_eq!(
+            python_probe_command_from_env(
+                Some(OsString::from("/tmp/python-bin")),
+                Some(OsString::from("/tmp/python")),
+            ),
+            Some(PathBuf::from("/tmp/python-bin")),
+        );
+        assert_eq!(
+            python_probe_command_from_env(None, Some(OsString::from("/tmp/python"))),
+            Some(PathBuf::from("/tmp/python")),
+        );
+        assert_eq!(
+            python_probe_command_from_env(
+                Some(OsString::new()),
+                Some(OsString::from("/tmp/python")),
+            ),
+            Some(PathBuf::from("/tmp/python")),
+        );
+        assert_eq!(python_probe_command_from_env(None, None), None);
+    }
+
+    #[test]
+    fn python_package_import_map_covers_declared_validation_tools() {
+        for tool in external_validation_tool_specs()
+            .iter()
+            .filter(|tool| tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage)
+        {
+            assert!(
+                !external_validation_python_modules(tool).is_empty(),
+                "{} is declared as a Python package but has no probe module",
+                tool.id
+            );
+        }
+    }
 
     #[test]
     fn registry_covers_recommended_validation_layers() {
@@ -11448,6 +11613,9 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "xml-schema" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "xml-schema" && tool.command_aliases.contains(&"xmlschema-validate")
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "jing" && tool.family == ExternalValidationFamily::OutputDataValidator

@@ -559,6 +559,7 @@ fn run_bin_packing_reference_json(
             );
         }
     }
+    drop(child.stdin.take());
     let timeout_ms = bin_packing_reference_timeout_ms();
     let (mut output, timed_out) = match wait_for_bin_packing_reference_output(child, timeout_ms) {
         Ok(output) => output,
@@ -722,5 +723,31 @@ mod tests {
 
         assert!(timed_out);
         assert!(!output.status.success());
+    }
+
+    #[test]
+    fn bin_packing_python_bridge_wait_observes_closed_stdin() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("cat >/dev/null; printf done")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stdin reader");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(b"{\"capacity\":1,\"items\":[{\"id\":\"A\",\"weight\":1}]}")
+            .expect("write stdin");
+        drop(child.stdin.take());
+
+        let (output, timed_out) =
+            wait_for_bin_packing_reference_output(child, 1_000).expect("closed stdin output");
+
+        assert!(!timed_out);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "done");
     }
 }

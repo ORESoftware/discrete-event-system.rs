@@ -2081,8 +2081,8 @@ pub fn solve_linear_cli_json(
         }
     };
 
-    match child.stdin.as_mut() {
-        Some(stdin) => {
+    match child.stdin.take() {
+        Some(mut stdin) => {
             if let Err(err) = stdin.write_all(stdin_json.as_bytes()) {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -8736,6 +8736,7 @@ mod tests {
         LexicographicObjective, MultiObjectiveIPMIPProblem,
     };
     use crate::des::general::lp::{LPProblem, Sense};
+    use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
@@ -8768,6 +8769,32 @@ mod tests {
 
         assert!(timed_out);
         assert!(!output.status.success());
+    }
+
+    #[test]
+    fn linear_cli_python_bridge_wait_observes_closed_stdin() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("cat >/dev/null; printf done")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stdin reader");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(b"{\"kind\":\"lp\",\"solver\":\"highs\"}")
+            .expect("write stdin");
+        drop(child.stdin.take());
+
+        let (output, timed_out) =
+            wait_for_linear_cli_reference_output(child, 1_000).expect("closed stdin output");
+
+        assert!(!timed_out);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "done");
     }
 
     #[test]

@@ -14890,11 +14890,15 @@ impl SoccerNeuralLearner {
             SoccerNeuralLearningBackend::Inline => {
                 if let Some(network) = &mut self.inline_network {
                     for batch in samples.chunks(batch_size).take(max_batches) {
-                        let pairs = batch
-                            .iter()
-                            .map(|sample| (sample.input.clone(), vec![sample.target]))
-                            .collect::<Vec<_>>();
-                        let loss = network.train_batch(&pairs, learning_rate);
+                        let loss = network.train_batch_slices(
+                            batch.iter().map(|sample| {
+                                (
+                                    sample.input.as_slice(),
+                                    std::slice::from_ref(&sample.target),
+                                )
+                            }),
+                            learning_rate,
+                        );
                         self.stats.record_result(SoccerNeuralTrainingResult {
                             samples: batch.len(),
                             loss,
@@ -14962,11 +14966,15 @@ fn spawn_soccer_neural_learning_worker(
                     if batch.is_empty() {
                         continue;
                     }
-                    let pairs = batch
-                        .iter()
-                        .map(|sample| (sample.input.clone(), vec![sample.target]))
-                        .collect::<Vec<_>>();
-                    let loss = network.train_batch(&pairs, learning_rate);
+                    let loss = network.train_batch_slices(
+                        batch.iter().map(|sample| {
+                            (
+                                sample.input.as_slice(),
+                                std::slice::from_ref(&sample.target),
+                            )
+                        }),
+                        learning_rate,
+                    );
                     let snapshot = soccer_neural_network_snapshot(&network);
                     let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Trained(
                         SoccerNeuralTrainingResult {

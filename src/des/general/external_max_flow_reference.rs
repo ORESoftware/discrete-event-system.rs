@@ -491,7 +491,7 @@ fn run_max_flow_reference_json(
             )
         }
     };
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return empty_solution(
                 ExternalMaxFlowReferenceStatus::NumericalError,

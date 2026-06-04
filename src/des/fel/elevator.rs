@@ -2265,6 +2265,15 @@ mod tests {
             data["meta"]["served"].as_u64().unwrap() > 0,
             "online neural TD FEL should still serve passengers"
         );
+        assert_eq!(data["policyState"]["kind"], "neural-td");
+        assert_eq!(
+            data["policyState"]["network"]["inputDim"],
+            DISPATCH_FEATURE_DIM
+        );
+        assert!(
+            data["policyState"]["lossHistory"].as_array().unwrap().len() > 0,
+            "final policy state should include TD loss history for persistence"
+        );
     }
 
     #[test]

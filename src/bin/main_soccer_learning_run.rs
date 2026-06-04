@@ -32,6 +32,7 @@ const DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE: usize = 4;
 const DEFAULT_SOCCER_MAX_AUTO_PARALLEL_GAMES: usize = 10;
 const DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS: bool = false;
 const DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT: bool = true;
+const DEFAULT_SOCCER_WRITE_EPISODE_LOG: bool = true;
 const DEFAULT_SOCCER_PRINT_COMPLETED_GAMES: bool = false;
 
 fn env_value(name: &str) -> Option<String> {
@@ -120,6 +121,22 @@ fn default_postgres_policy_version_interval_games(parallel_games: usize) -> usiz
 
 fn default_postgres_completed_run_batch_games(parallel_games: usize) -> usize {
     parallel_games.max(DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES)
+}
+
+fn default_disk_learning_artifacts_enabled(postgres_configured: bool) -> bool {
+    !postgres_configured
+}
+
+fn soccer_learning_database_url_env_configured() -> bool {
+    [
+        "SOCCER_DATABASE_URL",
+        "AGENT_TASKS_RDS_DATABASE_URL",
+        "RDS_DATABASE_URL",
+        "DATABASE_URL",
+        "PG_DATABASE_URL",
+    ]
+    .into_iter()
+    .any(|name| env_value(name).is_some())
 }
 
 fn default_soccer_parallel_games() -> usize {
@@ -1333,17 +1350,27 @@ fn run() -> Result<(), Box<dyn Error>> {
     let moment_replay_limit = env_usize("SOCCER_MOMENT_REPLAY_LIMIT", 0)?;
     let moment_replay_passes = env_usize("SOCCER_MOMENT_REPLAY_PASSES", 1)?;
     let moment_replay_reward_scale = env_f64("SOCCER_MOMENT_REPLAY_REWARD_SCALE", 1.0)?;
+    let postgres_store_configured = soccer_learning_database_url_env_configured();
+    let default_disk_learning_artifacts =
+        default_disk_learning_artifacts_enabled(postgres_store_configured);
     let write_game_artifacts = env_bool(
         "SOCCER_WRITE_GAME_ARTIFACTS",
         DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS,
     )?;
-    let write_final_artifacts = env_bool("SOCCER_WRITE_FINAL_ARTIFACTS", true)?;
+    let write_final_artifacts = env_bool(
+        "SOCCER_WRITE_FINAL_ARTIFACTS",
+        default_disk_learning_artifacts,
+    )?;
     let write_final_policy_artifact = env_bool(
         "SOCCER_WRITE_FINAL_POLICY_ARTIFACT",
-        DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT,
+        write_final_artifacts && DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT,
     )?;
     let write_checkpoint_artifacts =
         env_bool("SOCCER_WRITE_CHECKPOINT_ARTIFACTS", write_final_artifacts)?;
+    let write_episode_log_file = env_bool(
+        "SOCCER_WRITE_EPISODE_LOG",
+        default_disk_learning_artifacts && DEFAULT_SOCCER_WRITE_EPISODE_LOG,
+    )?;
     let print_progress = env_bool("SOCCER_PRINT_PROGRESS", false)?;
     let print_completed_games = env_bool(
         "SOCCER_PRINT_COMPLETED_GAMES",
@@ -1468,15 +1495,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     let episode_log_path = env_value("SOCCER_EPISODE_LOG_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| run_dir.join("episodes.jsonl"));
-    if let Some(parent) = episode_log_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let episode_log_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&episode_log_path)?;
-    let mut episode_log = BufWriter::new(episode_log_file);
+    let mut episode_log = if write_episode_log_file {
+        if let Some(parent) = episode_log_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let episode_log_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&episode_log_path)?;
+        Some(BufWriter::new(episode_log_file))
+    } else {
+        None
+    };
     let manifest_path = run_dir.join("manifest.json");
     let resume_artifact =
         env_value("SOCCER_RESUME_ARTIFACT").or_else(|| env_value("SOCCER_RESUME_ARTIFACT_PATH"));
@@ -1595,10 +1626,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("artifact={}", final_artifact_path.display());
     println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
-    println!("episode_log={}", episode_log_path.display());
+    println!("postgres_store_configured={postgres_store_configured}");
+    println!("default_disk_learning_artifacts={default_disk_learning_artifacts}");
+    if write_episode_log_file {
+        println!("episode_log={}", episode_log_path.display());
+    } else {
+        println!("episode_log=disabled");
+    }
     println!("write_final_artifacts={write_final_artifacts}");
     println!("write_final_policy_artifact={write_final_policy_artifact}");
     println!("write_checkpoint_artifacts={write_checkpoint_artifacts}");
+    println!("write_episode_log={write_episode_log_file}");
     if checkpoint_interval_games == 0 || !write_checkpoint_artifacts {
         println!("checkpoint_artifact=disabled");
     } else {
@@ -1807,12 +1845,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             let mut manifest_entry = game_manifest_entry(&game, game_artifact_path);
             manifest_entry.artifact_kind = game_artifact_kind;
             manifest_games.push(manifest_entry);
-            write_episode_log(&mut episode_log, &game.episode_summary)?;
+            if let Some(episode_log) = episode_log.as_mut() {
+                write_episode_log(episode_log, &game.episode_summary)?;
+            }
             episode_summaries.push(game.episode_summary);
-            if episode_log_flush_interval_games > 0
-                && episode_summaries.len() % episode_log_flush_interval_games == 0
-            {
-                episode_log.flush()?;
+            if let Some(episode_log) = episode_log.as_mut() {
+                if episode_log_flush_interval_games > 0
+                    && episode_summaries.len() % episode_log_flush_interval_games == 0
+                {
+                    episode_log.flush()?;
+                }
             }
         }
 
@@ -1948,7 +1990,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
     worker_pool.shutdown()?;
-    episode_log.flush()?;
+    if let Some(episode_log) = episode_log.as_mut() {
+        episode_log.flush()?;
+    }
     if let Some(writer) = pg_completed_writer {
         pg_persisted_games += writer.finish().map_err(invalid_data)?;
     }
@@ -2036,7 +2080,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("artifact={}", final_artifact_path.display());
     println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
-    println!("episode_log={}", episode_log_path.display());
+    if write_episode_log_file {
+        println!("episode_log={}", episode_log_path.display());
+    } else {
+        println!("episode_log=disabled");
+    }
     println!(
         "aggregate goals_per_game={:.2} home_goals={} away_goals={} shots_per_game={:.2} on_target_rate={:.2} pass_completion={:.2} interceptions_per_game={:.2}",
         (total_home_goals + total_away_goals) as f64 / game_count,
@@ -2135,6 +2183,13 @@ mod tests {
     fn default_batch_runner_outputs_keep_per_game_io_off_hot_path() {
         assert!(!DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS);
         assert!(DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT);
+        assert!(DEFAULT_SOCCER_WRITE_EPISODE_LOG);
         assert!(!DEFAULT_SOCCER_PRINT_COMPLETED_GAMES);
+    }
+
+    #[test]
+    fn default_disk_learning_artifacts_are_disabled_when_postgres_is_configured() {
+        assert!(default_disk_learning_artifacts_enabled(false));
+        assert!(!default_disk_learning_artifacts_enabled(true));
     }
 }

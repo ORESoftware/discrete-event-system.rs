@@ -493,7 +493,7 @@ fn run_facility_location_reference_json(
             )
         }
     };
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return numerical_error(
                 format!("failed to write facility_location_reference.py stdin: {err}"),

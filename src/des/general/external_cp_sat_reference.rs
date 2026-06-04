@@ -2222,7 +2222,7 @@ pub fn solve_cp_sat_json_with_external_reference(
         }
     };
 
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = stdin.write_all(model.to_string().as_bytes()) {
             return ExternalCpSatReferenceRun {
                 solver: options.solver,

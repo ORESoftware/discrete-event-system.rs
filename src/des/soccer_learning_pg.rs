@@ -24,6 +24,13 @@ pub struct SoccerLearningPgPolicyVersion {
     pub policies: SoccerTeamQPolicies,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SoccerLearningPgCompletedRunInsert<'a> {
+    pub base_policy_version_id: Option<&'a str>,
+    pub output_policy_version_id: Option<&'a str>,
+    pub game: &'a SoccerLearningCompletedGame,
+}
+
 pub struct SoccerLearningPgStore {
     client: Client,
 }
@@ -259,180 +266,51 @@ impl SoccerLearningPgStore {
         output_policy_version_id: Option<&str>,
         game: &SoccerLearningCompletedGame,
     ) -> Result<String, String> {
-        let summary_json = serde_json::to_value(&game.summary)
-            .map_err(|err| format!("serialize summary: {err}"))?;
-        let stats_json = serde_json::to_value(&game.summary.stats)
-            .map_err(|err| format!("serialize stats: {err}"))?;
-        let seed = checked_i64(game.seed);
-        let episode_index = checked_i32(game.episode);
-        let score_home = checked_i32(game.summary.score_home);
-        let score_away = checked_i32(game.summary.score_away);
-        let home_goal_diff = game.score.home.goal_diff;
-        let away_goal_diff = game.score.away.goal_diff;
-        let home_outcome = game.score.home.outcome.as_str();
-        let away_outcome = game.score.away.outcome.as_str();
-        let home_merge_weight_micros = game.score.home.merge_weight_micros;
-        let away_merge_weight_micros = game.score.away.merge_weight_micros;
-        let duration_ticks = checked_i64(game.summary.ticks);
-        let simulated_seconds_micros = soccer_learning_to_micros(game.summary.simulated_seconds);
-        let elapsed_millis = (game.elapsed_seconds * 1000.0).round().max(0.0) as i64;
-        let transitions = checked_i32(game.episode_summary.transitions);
         let mut tx = self
             .client
             .transaction()
             .map_err(|err| format!("begin soccer run transaction: {err}"))?;
-        let row = tx
-            .query_one(
-                r#"
-                insert into des_soccer_learning_runs
-                  (
-                    experiment_id,
-                    base_policy_version_id,
-                    output_policy_version_id,
-                    runner_id,
-                    seed,
-                    episode_index,
-                    status,
-                    score_home,
-                    score_away,
-                    home_goal_diff,
-                    away_goal_diff,
-                    home_outcome,
-                    away_outcome,
-                    home_merge_weight_micros,
-                    away_merge_weight_micros,
-                    fitness_micros,
-                    duration_ticks,
-                    simulated_seconds_micros,
-                    elapsed_millis,
-                    transitions,
-                    summary,
-                    stats
-                  )
-                values
-                  (
-                    $1::text::uuid,
-                    $2::text::uuid,
-                    $3::text::uuid,
-                    $4,
-                    $5,
-                    $6,
-                    'completed',
-                    $7,
-                    $8,
-                    $9,
-                    $10,
-                    $11,
-                    $12,
-                    $13,
-                    $14,
-                    $15,
-                    $16,
-                    $17,
-                    $18,
-                    $19,
-                    $20,
-                    $21
-                  )
-                returning id::text
-                "#,
-                &[
-                    &experiment_id,
-                    &base_policy_version_id,
-                    &output_policy_version_id,
-                    &runner_id,
-                    &seed,
-                    &episode_index,
-                    &score_home,
-                    &score_away,
-                    &home_goal_diff,
-                    &away_goal_diff,
-                    &home_outcome,
-                    &away_outcome,
-                    &home_merge_weight_micros,
-                    &away_merge_weight_micros,
-                    &game.score.match_fitness_micros,
-                    &duration_ticks,
-                    &simulated_seconds_micros,
-                    &elapsed_millis,
-                    &transitions,
-                    &summary_json,
-                    &stats_json,
-                ],
-            )
-            .map_err(|err| format!("insert soccer learning run: {err}"))?;
-        let run_id: String = row.get(0);
-
-        for delta in &game.delta.entries {
-            let team = soccer_team_label(delta.team);
-            let entry_kind = delta.entry_kind.as_str();
-            let visit_delta = checked_i32(delta.visit_delta);
-            tx.execute(
-                r#"
-                insert into des_soccer_learning_run_deltas
-                  (
-                    run_id,
-                    team,
-                    entry_kind,
-                    state_hash,
-                    state_key,
-                    action,
-                    target_fine_cell_id,
-                    target_tactical_cell_id,
-                    target_macro_cell_id,
-                    target_root_cell_id,
-                    before_value_micros,
-                    after_value_micros,
-                    value_delta_micros,
-                    visit_delta,
-                    merge_weight_micros,
-                    effective_visit_micros
-                  )
-                values
-                  (
-                    $1::text::uuid,
-                    $2,
-                    $3,
-                    $4,
-                    $5,
-                    $6,
-                    $7,
-                    $8,
-                    $9,
-                    $10,
-                    $11,
-                    $12,
-                    $13,
-                    $14,
-                    $15,
-                    $16
-                  )
-                "#,
-                &[
-                    &run_id,
-                    &team,
-                    &entry_kind,
-                    &delta.state_hash,
-                    &delta.state_json,
-                    &delta.action,
-                    &delta.target_fine_cell_id,
-                    &delta.target_tactical_cell_id,
-                    &delta.target_macro_cell_id,
-                    &delta.target_root_cell_id,
-                    &delta.before_value_micros,
-                    &delta.after_value_micros,
-                    &delta.value_delta_micros,
-                    &visit_delta,
-                    &delta.merge_weight_micros,
-                    &delta.effective_visit_micros,
-                ],
-            )
-            .map_err(|err| format!("insert soccer learning run delta: {err}"))?;
-        }
-
+        let run_id = insert_completed_run_in_transaction(
+            &mut tx,
+            experiment_id,
+            runner_id,
+            base_policy_version_id,
+            output_policy_version_id,
+            game,
+        )?;
         tx.commit()
             .map_err(|err| format!("commit soccer learning run: {err}"))?;
         Ok(run_id)
+    }
+
+    pub fn insert_completed_runs(
+        &mut self,
+        experiment_id: &str,
+        runner_id: &str,
+        runs: &[SoccerLearningPgCompletedRunInsert<'_>],
+    ) -> Result<Vec<String>, String> {
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|err| format!("begin soccer run batch transaction: {err}"))?;
+        let mut run_ids = Vec::with_capacity(runs.len());
+        for run in runs {
+            run_ids.push(insert_completed_run_in_transaction(
+                &mut tx,
+                experiment_id,
+                runner_id,
+                run.base_policy_version_id,
+                run.output_policy_version_id,
+                run.game,
+            )?);
+        }
+        tx.commit()
+            .map_err(|err| format!("commit soccer learning run batch: {err}"))?;
+        Ok(run_ids)
     }
 
     pub fn insert_set_play_training_artifact(
@@ -854,6 +732,184 @@ impl SoccerLearningPgStore {
             )?,
         })
     }
+}
+
+fn insert_completed_run_in_transaction(
+    tx: &mut postgres::Transaction<'_>,
+    experiment_id: &str,
+    runner_id: &str,
+    base_policy_version_id: Option<&str>,
+    output_policy_version_id: Option<&str>,
+    game: &SoccerLearningCompletedGame,
+) -> Result<String, String> {
+    let summary_json =
+        serde_json::to_value(&game.summary).map_err(|err| format!("serialize summary: {err}"))?;
+    let stats_json = serde_json::to_value(&game.summary.stats)
+        .map_err(|err| format!("serialize stats: {err}"))?;
+    let seed = checked_i64(game.seed);
+    let episode_index = checked_i32(game.episode);
+    let score_home = checked_i32(game.summary.score_home);
+    let score_away = checked_i32(game.summary.score_away);
+    let home_goal_diff = game.score.home.goal_diff;
+    let away_goal_diff = game.score.away.goal_diff;
+    let home_outcome = game.score.home.outcome.as_str();
+    let away_outcome = game.score.away.outcome.as_str();
+    let home_merge_weight_micros = game.score.home.merge_weight_micros;
+    let away_merge_weight_micros = game.score.away.merge_weight_micros;
+    let duration_ticks = checked_i64(game.summary.ticks);
+    let simulated_seconds_micros = soccer_learning_to_micros(game.summary.simulated_seconds);
+    let elapsed_millis = (game.elapsed_seconds * 1000.0).round().max(0.0) as i64;
+    let transitions = checked_i32(game.episode_summary.transitions);
+    let row = tx
+        .query_one(
+            r#"
+            insert into des_soccer_learning_runs
+              (
+                experiment_id,
+                base_policy_version_id,
+                output_policy_version_id,
+                runner_id,
+                seed,
+                episode_index,
+                status,
+                score_home,
+                score_away,
+                home_goal_diff,
+                away_goal_diff,
+                home_outcome,
+                away_outcome,
+                home_merge_weight_micros,
+                away_merge_weight_micros,
+                fitness_micros,
+                duration_ticks,
+                simulated_seconds_micros,
+                elapsed_millis,
+                transitions,
+                summary,
+                stats
+              )
+            values
+              (
+                $1::text::uuid,
+                $2::text::uuid,
+                $3::text::uuid,
+                $4,
+                $5,
+                $6,
+                'completed',
+                $7,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14,
+                $15,
+                $16,
+                $17,
+                $18,
+                $19,
+                $20,
+                $21
+              )
+            returning id::text
+            "#,
+            &[
+                &experiment_id,
+                &base_policy_version_id,
+                &output_policy_version_id,
+                &runner_id,
+                &seed,
+                &episode_index,
+                &score_home,
+                &score_away,
+                &home_goal_diff,
+                &away_goal_diff,
+                &home_outcome,
+                &away_outcome,
+                &home_merge_weight_micros,
+                &away_merge_weight_micros,
+                &game.score.match_fitness_micros,
+                &duration_ticks,
+                &simulated_seconds_micros,
+                &elapsed_millis,
+                &transitions,
+                &summary_json,
+                &stats_json,
+            ],
+        )
+        .map_err(|err| format!("insert soccer learning run: {err}"))?;
+    let run_id: String = row.get(0);
+
+    for delta in &game.delta.entries {
+        let team = soccer_team_label(delta.team);
+        let entry_kind = delta.entry_kind.as_str();
+        let visit_delta = checked_i32(delta.visit_delta);
+        tx.execute(
+            r#"
+            insert into des_soccer_learning_run_deltas
+              (
+                run_id,
+                team,
+                entry_kind,
+                state_hash,
+                state_key,
+                action,
+                target_fine_cell_id,
+                target_tactical_cell_id,
+                target_macro_cell_id,
+                target_root_cell_id,
+                before_value_micros,
+                after_value_micros,
+                value_delta_micros,
+                visit_delta,
+                merge_weight_micros,
+                effective_visit_micros
+              )
+            values
+              (
+                $1::text::uuid,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14,
+                $15,
+                $16
+              )
+            "#,
+            &[
+                &run_id,
+                &team,
+                &entry_kind,
+                &delta.state_hash,
+                &delta.state_json,
+                &delta.action,
+                &delta.target_fine_cell_id,
+                &delta.target_tactical_cell_id,
+                &delta.target_macro_cell_id,
+                &delta.target_root_cell_id,
+                &delta.before_value_micros,
+                &delta.after_value_micros,
+                &delta.value_delta_micros,
+                &visit_delta,
+                &delta.merge_weight_micros,
+                &delta.effective_visit_micros,
+            ],
+        )
+        .map_err(|err| format!("insert soccer learning run delta: {err}"))?;
+    }
+
+    Ok(run_id)
 }
 
 fn insert_policy_entries_for_team(

@@ -14654,6 +14654,33 @@ impl SoccerNeuralLearner {
         }
     }
 
+    fn drain_results_until_idle(&mut self, max_wait: Duration) {
+        self.drain_results();
+        if self.stats.pending_batches == 0 || max_wait.is_zero() {
+            return;
+        }
+
+        let started = Instant::now();
+        while self.stats.pending_batches > 0 {
+            let elapsed = started.elapsed();
+            if elapsed >= max_wait {
+                break;
+            }
+            let Some(worker) = &self.worker else {
+                break;
+            };
+            let wait = max_wait
+                .saturating_sub(elapsed)
+                .min(Duration::from_millis(2));
+            match worker.receiver.recv_timeout(wait) {
+                Ok(result) => self.stats.record_result(result),
+                Err(mpsc::RecvTimeoutError::Timeout) => self.drain_results(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        self.drain_results();
+    }
+
     fn refresh_replay_stats(&mut self, capacity: usize) {
         if capacity == 0 {
             self.replay.clear();
@@ -15433,6 +15460,12 @@ impl SoccerMatch {
             ticks: self.tick,
             simulated_seconds: self.clock_seconds,
             stats: self.stats.clone(),
+        }
+    }
+
+    pub fn drain_neural_learning(&mut self, max_wait: Duration) {
+        if let Some(learner) = &mut self.neural_learner {
+            learner.drain_results_until_idle(max_wait);
         }
     }
 

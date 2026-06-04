@@ -2766,7 +2766,15 @@ fn solve_native_plain_cli_json_direct(
     let use_cbc = should_use_native_cbc_cli(opts);
     let use_clp = kind == ExternalLinearCliKind::Lp && should_use_native_clp_cli(opts);
     let use_soplex = kind == ExternalLinearCliKind::Lp && should_use_native_soplex_cli(opts);
-    if !use_highs && !use_glpk && !use_scip && !use_cbc && !use_clp && !use_soplex {
+    let use_lp_solve = should_use_native_lp_solve_cli(kind, opts);
+    if !use_highs
+        && !use_glpk
+        && !use_scip
+        && !use_cbc
+        && !use_clp
+        && !use_soplex
+        && !use_lp_solve
+    {
         return None;
     }
 
@@ -2851,6 +2859,15 @@ fn solve_native_plain_cli_json_direct(
                 opts,
             )
         }
+        ExternalLinearCliSolver::LpSolve => solve_native_lp_solve_cli_model(
+            kind,
+            &plain_linear_model_to_lpsolve_lp_string(&model),
+            model.c.len(),
+            model.le_rows.len(),
+            model.eq_rows.len(),
+            &model.c,
+            opts,
+        ),
         _ => return None,
     };
     Some(solution)
@@ -2993,6 +3010,20 @@ fn plain_linear_model_to_string(
             include_objsense,
         ),
     }
+}
+
+fn plain_linear_model_to_lpsolve_lp_string(model: &PlainLinearCliModel) -> String {
+    lpsolve_lp_string(
+        model.sense,
+        &model.c,
+        &model.le_rows,
+        &model.le_rhs,
+        &model.eq_rows,
+        &model.eq_rhs,
+        &model.lbs,
+        &model.ubs,
+        &model.integer_vars,
+    )
 }
 
 fn parse_cli_sense(value: Option<&Value>) -> Result<Sense, String> {
@@ -3435,7 +3466,6 @@ fn should_use_native_lp_solve_cli(
     opts: &ExternalLinearCliOptions,
 ) -> bool {
     if opts.solver != ExternalLinearCliSolver::LpSolve
-        || opts.python.is_some()
         || opts.script_path.is_some()
         || opts.lp_algorithm.is_some()
         || opts.solution_limit.is_some()
@@ -8716,6 +8746,29 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(solution
             .objective
             .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_lpsolve_json_plain_mip_stays_off_python_bridge() {
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::LpSolve,
+                command_path: Some(PathBuf::from("/definitely/not-an-lp-solve-binary")),
+                python: Some("/definitely/not-a-python-for-lpsolve-json-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "lp-solve:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
     }
 
     #[test]

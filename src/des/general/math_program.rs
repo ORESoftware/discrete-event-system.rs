@@ -5229,9 +5229,10 @@ impl Default for MathProgramSolveOptions {
 /// When `method` is omitted for linear LP/MIP models, the facade defaults to
 /// the Rust-native `highs-cli` adapter. Python remains the fallback bridge for
 /// explicit SciPy, OR-Tools, nonlinear oracles, and external API bindings.
-/// Explicit Python-binding HiGHS and GLPK methods fall back to local
-/// `highs`/`glpsol` for LP/MIP models if the corresponding Python stack is
-/// missing.
+/// Compatibility HiGHS and GLPK method names use the Rust CLI adapter for
+/// LP/MIP models unless a Python executable or script is explicitly provided.
+/// The Python bridge remains a fallback when an explicit bridge is requested
+/// but its optional Python solver stack is missing.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalMathProgramOptions {
     /// Solver method, such as `highs`, `highs-cli`, `clp-cli`,
@@ -9218,7 +9219,8 @@ fn solve_math_program_external_linear_cli(
     opts: &ExternalMathProgramOptions,
     method: &str,
 ) -> Result<Option<MathProgramSolution>, MathProgramError> {
-    let Some(solver) = parse_external_math_program_linear_cli_method(method) else {
+    let Some(solver) = resolve_external_math_program_linear_cli_solver(program, opts, method)
+    else {
         return Ok(None);
     };
 
@@ -9324,6 +9326,29 @@ fn parse_external_math_program_linear_cli_method(method: &str) -> Option<Externa
         }
         _ => None,
     }
+}
+
+fn resolve_external_math_program_linear_cli_solver(
+    program: &MathProgram,
+    opts: &ExternalMathProgramOptions,
+    method: &str,
+) -> Option<ExternalLinearCliSolver> {
+    if let Some(solver) = parse_external_math_program_linear_cli_method(method) {
+        return Some(solver);
+    }
+    if opts.python.is_some()
+        || opts.script.is_some()
+        || !program_supports_linear_cli_fallback(program)
+    {
+        return None;
+    }
+    if is_highs_default_method(method) {
+        return Some(ExternalLinearCliSolver::Highs);
+    }
+    if is_glpk_default_method(method) {
+        return Some(ExternalLinearCliSolver::Glpk);
+    }
+    None
 }
 
 fn external_linear_cli_options_from_math(
@@ -21151,12 +21176,88 @@ mod tests {
             parse_external_math_program_linear_cli_method("lindo-cli"),
             Some(ExternalLinearCliSolver::Lindo)
         );
+        assert_eq!(parse_external_math_program_linear_cli_method("highs"), None);
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("glpk:default"),
+            None
+        );
         assert_eq!(
             parse_external_math_program_linear_cli_method("gurobi:default"),
             None
         );
         assert_eq!(
             parse_external_math_program_linear_cli_method("ortools:CP-SAT"),
+            None
+        );
+    }
+
+    #[test]
+    fn external_math_program_rust_first_alias_resolver_prefers_cli_for_linear_models() {
+        let mut lp = MathProgram::new(ObjectiveSense::Max);
+        let x = lp.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
+        lp.add_constraint("limit", vec![(x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "highs"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "HiGHS-DS:default"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "glpk:default"
+            ),
+            Some(ExternalLinearCliSolver::Glpk)
+        );
+
+        let explicit_python = ExternalMathProgramOptions {
+            python: Some("python3".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &explicit_python, "highs"),
+            None
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &explicit_python, "glpk"),
+            None
+        );
+
+        let custom_script = ExternalMathProgramOptions {
+            script: Some("custom_bridge.py".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "highs"),
+            None
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "highs-cli"),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+
+        let mut qp = MathProgram::new(ObjectiveSense::Min);
+        let q = qp.add_continuous_var("q", 0.0, Some(0.0), None).unwrap();
+        qp.add_quadratic_objective_term(q, q, 1.0).unwrap();
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &qp,
+                &ExternalMathProgramOptions::default(),
+                "highs"
+            ),
             None
         );
     }

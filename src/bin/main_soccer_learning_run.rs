@@ -966,6 +966,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let moment_replay_passes = env_usize("SOCCER_MOMENT_REPLAY_PASSES", 1)?;
     let moment_replay_reward_scale = env_f64("SOCCER_MOMENT_REPLAY_REWARD_SCALE", 1.0)?;
     let write_game_artifacts = env_bool("SOCCER_WRITE_GAME_ARTIFACTS", true)?;
+    let write_final_artifacts = env_bool("SOCCER_WRITE_FINAL_ARTIFACTS", true)?;
+    let write_checkpoint_artifacts =
+        env_bool("SOCCER_WRITE_CHECKPOINT_ARTIFACTS", write_final_artifacts)?;
     let game_artifact_mode = env_value("SOCCER_GAME_ARTIFACT_MODE")
         .unwrap_or_else(|| "summary".to_string())
         .to_ascii_lowercase();
@@ -1173,7 +1176,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
     println!("episode_log={}", episode_log_path.display());
-    if checkpoint_interval_games == 0 {
+    println!("write_final_artifacts={write_final_artifacts}");
+    println!("write_checkpoint_artifacts={write_checkpoint_artifacts}");
+    if checkpoint_interval_games == 0 || !write_checkpoint_artifacts {
         println!("checkpoint_artifact=disabled");
     } else {
         println!("checkpoint_artifact={}", checkpoint_artifact_path.display());
@@ -1404,7 +1409,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         next_episode += batch_size;
 
-        let should_checkpoint = checkpoint_interval_games > 0
+        let should_checkpoint = write_checkpoint_artifacts
+            && checkpoint_interval_games > 0
             && (next_episode >= games
                 || next_episode.saturating_sub(last_checkpoint_episode)
                     >= checkpoint_interval_games);
@@ -1480,52 +1486,56 @@ fn run() -> Result<(), Box<dyn Error>> {
         episode_summaries,
         &policies,
     );
-    let final_export =
-        compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
-    write_json(&final_artifact_path, &final_export)?;
-    let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
-    write_json(&learned_params_path, &learned_params)?;
+    if write_final_artifacts {
+        let final_export =
+            compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
+        write_json(&final_artifact_path, &final_export)?;
+        let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+        write_json(&learned_params_path, &learned_params)?;
 
-    let manifest = run_manifest(
-        &run_id,
-        &run_dir,
-        &game_dir,
-        games,
-        parallel_games,
-        shard_index,
-        shard_count,
-        seed,
-        effective_seed,
-        config.clone(),
-        options,
-        &final_artifact_path,
-        &learned_params_path,
-        &checkpoint_artifact_path,
-        &episode_log_path,
-        checkpoint_interval_games,
-        artifact_max_entries_per_policy,
-        max_policy_entries_per_team,
-        max_policy_target_entries_per_team,
-        min_policy_visits,
-        moment_replay_path.clone(),
-        moment_replay_records,
-        moment_replay_transitions,
-        if moment_replay_path.is_some() {
-            moment_replay_passes
-        } else {
-            0
-        },
-        moment_replay_reward_scale,
-        pg_store.is_some(),
-        pg_experiment_slug.clone(),
-        pg_experiment_id.clone(),
-        pg_last_policy_version_id.clone(),
-        pg_persisted_games,
-        write_game_artifacts,
-        &game_artifact_mode,
-        manifest_games,
-    );
-    write_json(&manifest_path, &manifest)?;
+        let manifest = run_manifest(
+            &run_id,
+            &run_dir,
+            &game_dir,
+            games,
+            parallel_games,
+            shard_index,
+            shard_count,
+            seed,
+            effective_seed,
+            config.clone(),
+            options,
+            &final_artifact_path,
+            &learned_params_path,
+            &checkpoint_artifact_path,
+            &episode_log_path,
+            checkpoint_interval_games,
+            artifact_max_entries_per_policy,
+            max_policy_entries_per_team,
+            max_policy_target_entries_per_team,
+            min_policy_visits,
+            moment_replay_path.clone(),
+            moment_replay_records,
+            moment_replay_transitions,
+            if moment_replay_path.is_some() {
+                moment_replay_passes
+            } else {
+                0
+            },
+            moment_replay_reward_scale,
+            pg_store.is_some(),
+            pg_experiment_slug.clone(),
+            pg_experiment_id.clone(),
+            pg_last_policy_version_id.clone(),
+            pg_persisted_games,
+            write_game_artifacts,
+            &game_artifact_mode,
+            manifest_games,
+        );
+        write_json(&manifest_path, &manifest)?;
+    } else {
+        println!("final_artifacts=disabled");
+    }
 
     let elapsed = started.elapsed();
     let game_count = games.max(1) as f64;

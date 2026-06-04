@@ -4,7 +4,13 @@
 //! elevator dispatch, printing a table + per-rate summary and writing a JSON
 //! dump. The TS top-level `main()` becomes [`run`].
 //!
-//! Other notes:
+//! ## PORT NOTE
+//!
+//! This driver imports `ElevatorConfig`/`build_schedule`/`run_elevator` from the
+//! real Rust `crate::des::main_elevator` port and keeps only the comparison
+//! sweep/reporting logic here.
+//!
+//! Notes:
 //!   * `process.env.{SEEDS,LAMBDAS,SIM_T}` → `std::env::var` + split/parse.
 //!   * `fs`/`path` + `JSON.stringify(.., null, 2)` → `std::fs` + `JsonValue`.
 
@@ -14,9 +20,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::des::main_elevator::{
-    build_schedule, run_elevator, Aggregates, ElevatorConfig, ElevatorResult, ScheduledArrival,
-};
+use crate::des::main_elevator::{build_schedule, run_elevator, Aggregates, ElevatorConfig};
 use crate::des::observability::logger::JsonValue;
 
 struct TrialAggregate {
@@ -63,12 +67,6 @@ fn agg_json(a: &Aggregates) -> JsonValue {
         ("p95Wait".to_string(), jn(a.p95_wait)),
         ("meanTotal".to_string(), jn(a.mean_total)),
     ])
-}
-
-fn run_mode(base: &ElevatorConfig, mode: &str, schedule: &[ScheduledArrival]) -> ElevatorResult {
-    let mut cfg = base.clone();
-    cfg.dispatch_mode = mode.to_string();
-    run_elevator(cfg, schedule.to_vec())
 }
 
 /// `main()` — run the dispatch sweep.
@@ -123,8 +121,12 @@ pub fn run() {
                 dispatch_mode: String::new(),
             };
             let schedule = build_schedule(&base);
-            let u = run_mode(&base, "uncoordinated", &schedule).aggregates;
-            let c = run_mode(&base, "coordinated", &schedule).aggregates;
+            let mut uncoord_cfg = base.clone();
+            uncoord_cfg.dispatch_mode = "uncoordinated".to_string();
+            let mut coord_cfg = base;
+            coord_cfg.dispatch_mode = "coordinated".to_string();
+            let u = run_elevator(uncoord_cfg, schedule.clone()).aggregates;
+            let c = run_elevator(coord_cfg, schedule).aggregates;
             trials.push(TrialAggregate {
                 seed,
                 lambda,

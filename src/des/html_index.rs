@@ -78,6 +78,13 @@ const MODELING_TOOLS: &[HtmlIndexSpec] = &[
             "Paste delivery addresses with drop-off windows, solve a time-window route, copy the itinerary, and play the route animation.",
     },
     HtmlIndexSpec {
+        kind: "tool",
+        title: "Voting Algorithm Lab",
+        href: "voting-lab.html",
+        description:
+            "Compare majority, unanimity, approval, score, ranked-choice, Condorcet, USACC supermajority, and wagered voting with animated edge cases.",
+    },
+    HtmlIndexSpec {
         kind: "workbench",
         title: "Music URL Seed Workbench",
         href: "music/url-source-inputs.html",
@@ -408,6 +415,11 @@ pub fn generate_html_artifacts() {
     }
     eprintln!("Generating Delivery Scheduler...");
     crate::des::delivery_planner::write_delivery_planner_artifacts();
+    eprintln!("Generating Voting Algorithm Lab...");
+    match crate::des::voting_algorithms::write_voting_lab_html("out") {
+        Ok(path) => eprintln!("  • {}", path.display()),
+        Err(e) => eprintln!("  ! Voting Algorithm Lab generation failed: {e}"),
+    }
     eprintln!("Generating Music URL Seed Workbench...");
     match crate::des::general::music_production::write_music_url_seed_form_html(
         "out/music/url-source-inputs.html",

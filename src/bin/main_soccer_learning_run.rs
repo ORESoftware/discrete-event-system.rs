@@ -13,7 +13,8 @@ use des_engine::des::general::soccer::{
     SoccerMatch, SoccerMomentWindow, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
     SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry,
     SoccerSelfPlayEpisodeSummary, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
-    SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
+    SoccerTacticalLearningSummary, SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact,
+    SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
     soccer_learning_run_score, soccer_policy_delta_entries, SoccerLearningCompletedGame,
@@ -537,6 +538,7 @@ struct CompactGameArtifact {
     seed: u64,
     config: MatchConfig,
     summary: des_engine::des::general::soccer::MatchSummary,
+    tactical_summary: SoccerTacticalLearningSummary,
     transitions: usize,
     home_policy_entries: usize,
     away_policy_entries: usize,
@@ -749,6 +751,7 @@ fn soccer_learning_completed_game_from_completed(
         seed: game.episode_summary.seed,
         summary,
         episode_summary: game.episode_summary.clone(),
+        tactical_summary: game.artifact.tactical_summary.clone(),
         policies: game.policies.clone(),
         score,
         delta,
@@ -837,6 +840,7 @@ fn compact_game_artifact(game: &CompletedGame) -> CompactGameArtifact {
         seed: game.episode_summary.seed,
         config: game.artifact.config.clone(),
         summary: game.episode_summary.summary.clone(),
+        tactical_summary: game.artifact.tactical_summary.clone(),
         transitions: game.episode_summary.transitions,
         home_policy_entries: game.episode_summary.home_policy_entries,
         away_policy_entries: game.episode_summary.away_policy_entries,
@@ -851,11 +855,13 @@ fn compact_game_artifact(game: &CompletedGame) -> CompactGameArtifact {
 fn self_play_artifact_from_policies(
     config: MatchConfig,
     options: SoccerQPolicyOptions,
+    tactical_summary: SoccerTacticalLearningSummary,
     episode_summaries: Vec<SoccerSelfPlayEpisodeSummary>,
     policies: &SoccerTeamQPolicies,
 ) -> SoccerSelfPlayTrainingArtifact {
     SoccerSelfPlayTrainingArtifact {
         tactical_learning: config.tactical_learning.clone(),
+        tactical_summary,
         config,
         options,
         episodes: episode_summaries,
@@ -966,6 +972,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let moment_replay_passes = env_usize("SOCCER_MOMENT_REPLAY_PASSES", 1)?;
     let moment_replay_reward_scale = env_f64("SOCCER_MOMENT_REPLAY_REWARD_SCALE", 1.0)?;
     let write_game_artifacts = env_bool("SOCCER_WRITE_GAME_ARTIFACTS", true)?;
+    let write_final_artifacts = env_bool("SOCCER_WRITE_FINAL_ARTIFACTS", true)?;
+    let write_checkpoint_artifacts =
+        env_bool("SOCCER_WRITE_CHECKPOINT_ARTIFACTS", write_final_artifacts)?;
     let game_artifact_mode = env_value("SOCCER_GAME_ARTIFACT_MODE")
         .unwrap_or_else(|| "summary".to_string())
         .to_ascii_lowercase();
@@ -1173,7 +1182,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
     println!("episode_log={}", episode_log_path.display());
-    if checkpoint_interval_games == 0 {
+    println!("write_final_artifacts={write_final_artifacts}");
+    println!("write_checkpoint_artifacts={write_checkpoint_artifacts}");
+    if checkpoint_interval_games == 0 || !write_checkpoint_artifacts {
         println!("checkpoint_artifact=disabled");
     } else {
         println!("checkpoint_artifact={}", checkpoint_artifact_path.display());
@@ -1230,6 +1241,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     let mut episode_summaries = Vec::new();
     let mut manifest_games = Vec::new();
+    let mut tactical_summary = SoccerTacticalLearningSummary::default();
     let mut total_home_goals = 0u32;
     let mut total_away_goals = 0u32;
     let mut total_shots = 0u32;
@@ -1372,6 +1384,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             total_pass_attempts += stats.passes_attempted_home + stats.passes_attempted_away;
             total_pass_completions += stats.passes_completed_home + stats.passes_completed_away;
             total_interceptions += stats.interceptions_home + stats.interceptions_away;
+            tactical_summary.merge(&game.artifact.tactical_summary);
 
             let mut manifest_entry = game_manifest_entry(&game, game_artifact_path);
             manifest_entry.artifact_kind = game_artifact_kind;
@@ -1404,7 +1417,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         next_episode += batch_size;
 
-        let should_checkpoint = checkpoint_interval_games > 0
+        let should_checkpoint = write_checkpoint_artifacts
+            && checkpoint_interval_games > 0
             && (next_episode >= games
                 || next_episode.saturating_sub(last_checkpoint_episode)
                     >= checkpoint_interval_games);
@@ -1412,6 +1426,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let checkpoint_artifact = self_play_artifact_from_policies(
                 config.clone(),
                 options.clone(),
+                tactical_summary.clone(),
                 episode_summaries.clone(),
                 &policies,
             );
@@ -1477,55 +1492,60 @@ fn run() -> Result<(), Box<dyn Error>> {
     let artifact = self_play_artifact_from_policies(
         config.clone(),
         options.clone(),
+        tactical_summary,
         episode_summaries,
         &policies,
     );
-    let final_export =
-        compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
-    write_json(&final_artifact_path, &final_export)?;
-    let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
-    write_json(&learned_params_path, &learned_params)?;
+    if write_final_artifacts {
+        let final_export =
+            compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
+        write_json(&final_artifact_path, &final_export)?;
+        let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+        write_json(&learned_params_path, &learned_params)?;
 
-    let manifest = run_manifest(
-        &run_id,
-        &run_dir,
-        &game_dir,
-        games,
-        parallel_games,
-        shard_index,
-        shard_count,
-        seed,
-        effective_seed,
-        config.clone(),
-        options,
-        &final_artifact_path,
-        &learned_params_path,
-        &checkpoint_artifact_path,
-        &episode_log_path,
-        checkpoint_interval_games,
-        artifact_max_entries_per_policy,
-        max_policy_entries_per_team,
-        max_policy_target_entries_per_team,
-        min_policy_visits,
-        moment_replay_path.clone(),
-        moment_replay_records,
-        moment_replay_transitions,
-        if moment_replay_path.is_some() {
-            moment_replay_passes
-        } else {
-            0
-        },
-        moment_replay_reward_scale,
-        pg_store.is_some(),
-        pg_experiment_slug.clone(),
-        pg_experiment_id.clone(),
-        pg_last_policy_version_id.clone(),
-        pg_persisted_games,
-        write_game_artifacts,
-        &game_artifact_mode,
-        manifest_games,
-    );
-    write_json(&manifest_path, &manifest)?;
+        let manifest = run_manifest(
+            &run_id,
+            &run_dir,
+            &game_dir,
+            games,
+            parallel_games,
+            shard_index,
+            shard_count,
+            seed,
+            effective_seed,
+            config.clone(),
+            options,
+            &final_artifact_path,
+            &learned_params_path,
+            &checkpoint_artifact_path,
+            &episode_log_path,
+            checkpoint_interval_games,
+            artifact_max_entries_per_policy,
+            max_policy_entries_per_team,
+            max_policy_target_entries_per_team,
+            min_policy_visits,
+            moment_replay_path.clone(),
+            moment_replay_records,
+            moment_replay_transitions,
+            if moment_replay_path.is_some() {
+                moment_replay_passes
+            } else {
+                0
+            },
+            moment_replay_reward_scale,
+            pg_store.is_some(),
+            pg_experiment_slug.clone(),
+            pg_experiment_id.clone(),
+            pg_last_policy_version_id.clone(),
+            pg_persisted_games,
+            write_game_artifacts,
+            &game_artifact_mode,
+            manifest_games,
+        );
+        write_json(&manifest_path, &manifest)?;
+    } else {
+        println!("final_artifacts=disabled");
+    }
 
     let elapsed = started.elapsed();
     let game_count = games.max(1) as f64;
@@ -1552,6 +1572,17 @@ fn run() -> Result<(), Box<dyn Error>> {
         if total_shots == 0 { 0.0 } else { total_on_target as f64 / total_shots as f64 },
         if total_pass_attempts == 0 { 0.0 } else { total_pass_completions as f64 / total_pass_attempts as f64 },
         total_interceptions as f64 / game_count,
+    );
+    println!(
+        "tactical_summary shape_transitions={} attack={} defense={} attack_width_score={:.3} attack_flank_lane={:.3} defense_contract_score={:.3} defense_contract_delta_yards={:.3} mean_tactical_reward={:.3}",
+        artifact.tactical_summary.shape_transitions,
+        artifact.tactical_summary.attack_transitions,
+        artifact.tactical_summary.defense_transitions,
+        artifact.tactical_summary.mean_attack_width_score,
+        artifact.tactical_summary.mean_attack_flank_lane_score,
+        artifact.tactical_summary.mean_defense_contract_score,
+        artifact.tactical_summary.mean_defense_contract_delta_yards,
+        artifact.tactical_summary.mean_tactical_reward,
     );
 
     println!("home learned actions action visits mean_q");

@@ -3,22 +3,22 @@
 //! Compares four independent reference kernels (FEL-individual, Gillespie SSA,
 //! ODE-RK4, PerIndividual) on the SEIR-with-hospitalization model via Welch
 //! t-tests on time-averaged populations plus one deterministic ODE run.
-//! Top-level `main()` -> [`run`].
+//! Top-level `main()` → [`run`].
 //!
-//! The early Rust runner used local zero-output mirrors of the SEIR kernels.
-//! The shared runner modules are now available, so this driver calls the real
-//! FEL, per-individual, Gillespie, ODE, stats, and type implementations.
+//! The runner delegates to the shared SEIR runner modules and statistics helpers.
 
 #![allow(dead_code)]
 
 use std::time::Instant;
 
-use super::fel_runner::run_fel_once;
-use super::gillespie_runner::run_gillespie_once;
-use super::ode_runner::run_ode_once;
-use super::per_individual_runner::run_per_individual_once;
-use super::stats::{mean, stddev, welch};
-use super::types::{default_config, RunOpts, RunResult, ServiceDiscipline, COMPARTMENT_ORDER};
+use crate::des::runners::fel_runner::run_fel_once;
+use crate::des::runners::gillespie_runner::run_gillespie_once;
+use crate::des::runners::ode_runner::run_ode_once;
+use crate::des::runners::per_individual_runner::run_per_individual_once;
+use crate::des::runners::stats::{mean, stddev, welch};
+use crate::des::runners::types::{
+    default_config, RunOpts, RunResult, ServiceDiscipline, COMPARTMENT_ORDER,
+};
 
 // =============================================================================
 // Formatting helpers.
@@ -69,24 +69,9 @@ fn collect_pop(rs: &[RunResult], c: &str) -> Vec<f64> {
 fn kernel_stats<F: Fn(&RunResult) -> f64>(rs: &[RunResult], extractor: F) -> String {
     let xs: Vec<f64> = rs.iter().map(extractor).collect();
     pad_start(
-        &format!("{} +- {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)),
+        &format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)),
         20,
     )
-}
-
-fn seeded_opts(seed: u64) -> RunOpts {
-    RunOpts {
-        seed: Some(seed),
-        ..Default::default()
-    }
-}
-
-fn fel_individual_opts(seed: u64) -> RunOpts {
-    RunOpts {
-        seed: Some(seed),
-        service: Some(ServiceDiscipline::Individual),
-        ..Default::default()
-    }
 }
 
 /// `validate-references.ts` `main()`.
@@ -121,15 +106,25 @@ pub fn run() {
     for i in 0..n {
         pi_runs.push(run_per_individual_once(
             &cfg,
-            &seeded_opts(0xC0000 + i as u64),
+            &RunOpts {
+                seed: Some(0xC0000 + i as u64),
+                ..Default::default()
+            },
         ));
         fel_runs.push(run_fel_once(
             &default_cfg,
-            &fel_individual_opts(0xD0000 + i as u64),
+            &RunOpts {
+                seed: Some(0xD0000 + i as u64),
+                service: Some(ServiceDiscipline::Individual),
+                ..Default::default()
+            },
         ));
         ssa_runs.push(run_gillespie_once(
             &default_cfg,
-            &seeded_opts(0xE0000 + i as u64),
+            &RunOpts {
+                seed: Some(0xE0000 + i as u64),
+                ..Default::default()
+            },
         ));
     }
     let ode = run_ode_once(&default_cfg, &RunOpts::default());
@@ -229,15 +224,15 @@ pub fn run() {
             pad_end(&format!("{} -> {}", from, to), 14),
             pad_start(&fmt(expected, 4), 20),
             pad_start(
-                &format!("{} +- {}", fmt(mean(&pi), 4), fmt(stddev(&pi), 4)),
+                &format!("{} ± {}", fmt(mean(&pi), 4), fmt(stddev(&pi), 4)),
                 20
             ),
             pad_start(
-                &format!("{} +- {}", fmt(mean(&fel), 4), fmt(stddev(&fel), 4)),
+                &format!("{} ± {}", fmt(mean(&fel), 4), fmt(stddev(&fel), 4)),
                 20
             ),
             pad_start(
-                &format!("{} +- {}", fmt(mean(&ssa), 4), fmt(stddev(&ssa), 4)),
+                &format!("{} ± {}", fmt(mean(&ssa), 4), fmt(stddev(&ssa), 4)),
                 20
             ),
             pad_start(&fmt(ode_val, 4), 20),
@@ -263,15 +258,15 @@ pub fn run() {
             "{}{}{}{}{}",
             pad_end(&format!("<{}>", c), 14),
             pad_start(
-                &format!("{} +- {}", fmt(mean(&pi), 3), fmt(stddev(&pi), 3)),
+                &format!("{} ± {}", fmt(mean(&pi), 3), fmt(stddev(&pi), 3)),
                 20
             ),
             pad_start(
-                &format!("{} +- {}", fmt(mean(&fel), 3), fmt(stddev(&fel), 3)),
+                &format!("{} ± {}", fmt(mean(&fel), 3), fmt(stddev(&fel), 3)),
                 20
             ),
             pad_start(
-                &format!("{} +- {}", fmt(mean(&ssa), 3), fmt(stddev(&ssa), 3)),
+                &format!("{} ± {}", fmt(mean(&ssa), 3), fmt(stddev(&ssa), 3)),
                 20
             ),
             pad_start(

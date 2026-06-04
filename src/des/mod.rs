@@ -106,6 +106,7 @@ pub mod model;
 // an animated artifact. Additive.
 pub mod decision;
 pub mod delivery_planner;
+pub mod voting_algorithms;
 
 // Equation-based modeling citizen: JSON/LaTeX/XML equations normalize into
 // runnable ODE/PDE traces under the first-class model contract.
@@ -207,6 +208,7 @@ pub mod main_temp_control_anim;
 pub mod main_traffic;
 pub mod main_two_disease;
 pub mod main_vehicle_jump;
+pub mod main_voting_algorithms;
 pub mod main_wind_mppt;
 pub mod main_wind_mppt_anim;
 pub mod max_flow;

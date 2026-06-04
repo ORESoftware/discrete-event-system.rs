@@ -3,142 +3,218 @@
 //! Side-by-side comparison of every in-repo SEIR kernel (PerIndividual, FEL,
 //! Gillespie, ODE) plus external JSON drops, with pairwise Welch t-tests against
 //! FEL-individual. This driver only reads JSON files; it never invokes an
-//! interpreter. Driver -> [`run`].
+//! interpreter. Driver → [`run`].
 //!
-//! The early Rust runner used zero-output local mirrors and skipped external
-//! JSON parsing. The shared runner modules and serde boundary are now available,
-//! so the in-repo columns use the real kernels and external directories are
-//! scanned for SEIR-shaped JSON payloads.
+//! The in-repo columns delegate to the shared SEIR runner modules. Optional
+//! external JSON drops remain dependency-gated and are skipped when absent.
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
-use serde_json::Value;
-
-use super::fel_runner::run_fel_once;
-use super::gillespie_runner::run_gillespie_once;
-use super::ode_runner::run_ode_once;
-use super::per_individual_runner::run_per_individual_once;
-use super::stats::{mean, stddev, welch};
-use super::types::{
-    default_config, Kernel, RunOpts, RunResult, ServiceDiscipline, Totals, COMPARTMENT_ORDER,
+use crate::des::observability::logger::{parse_json, JsonValue};
+use crate::des::runners::fel_runner::run_fel_once;
+use crate::des::runners::gillespie_runner::run_gillespie_once;
+use crate::des::runners::ode_runner::run_ode_once;
+use crate::des::runners::per_individual_runner::run_per_individual_once;
+use crate::des::runners::stats::{mean, stddev, welch};
+use crate::des::runners::types::{
+    default_config, Kernel, Probabilities, RunOpts, RunResult, ServiceDiscipline, SimConfig,
+    Totals, COMPARTMENT_ORDER,
 };
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct ExternalTotals {
-    created: f64,
-    absorbed: f64,
+fn get_any<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a JsonValue> {
+    names.iter().find_map(|name| value.get(name))
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct ExternalRunResult {
-    kernel: Option<String>,
-    seed: Option<u64>,
-    totals: ExternalTotals,
-    #[serde(alias = "final_populations")]
-    final_populations: HashMap<String, f64>,
-    #[serde(alias = "transition_counts")]
-    transition_counts: HashMap<String, HashMap<String, f64>>,
-    #[serde(alias = "split_probs")]
-    split_probs: HashMap<String, HashMap<String, f64>>,
-    #[serde(alias = "time_avg_populations")]
-    time_avg_populations: HashMap<String, f64>,
-    #[serde(alias = "peak_populations")]
-    peak_populations: HashMap<String, f64>,
-    #[serde(alias = "elapsed_ms")]
-    elapsed_ms: Option<f64>,
+fn number_field(value: &JsonValue, names: &[&str]) -> Option<f64> {
+    get_any(value, names).and_then(|v| v.as_f64())
 }
 
-fn kernel_from_external(value: Option<&str>) -> Kernel {
-    match value.unwrap_or("").to_ascii_lowercase().as_str() {
-        "fel" | "fel-individual" => Kernel::Fel,
-        "per-individual" | "perindividual" => Kernel::PerIndividual,
-        "gillespie" | "gillespie-ssa" | "ssa" => Kernel::Gillespie,
-        "ode" | "ode-rk4" => Kernel::Ode,
-        "difference" => Kernel::Difference,
-        _ => Kernel::Framework,
+fn string_field<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a str> {
+    get_any(value, names).and_then(|v| v.as_str())
+}
+
+fn number_pair(value: &JsonValue) -> Option<(f64, f64)> {
+    let items = value.as_array()?;
+    let a = items.first()?.as_f64()?;
+    let b = items.get(1)?.as_f64()?;
+    Some((a, b))
+}
+
+fn number_map(value: &JsonValue) -> Option<HashMap<String, f64>> {
+    let entries = value.as_object()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n)))
+            .collect(),
+    )
+}
+
+fn nested_number_map(value: &JsonValue) -> Option<HashMap<String, HashMap<String, f64>>> {
+    let entries = value.as_object()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|(k, v)| number_map(v).map(|row| (k.clone(), row)))
+            .collect(),
+    )
+}
+
+fn parse_kernel(value: &JsonValue) -> Kernel {
+    match string_field(value, &["kernel"]).unwrap_or_default() {
+        "framework" => Kernel::Framework,
+        "fel" => Kernel::Fel,
+        "per-individual" | "perIndividual" => Kernel::PerIndividual,
+        "gillespie" => Kernel::Gillespie,
+        "ode" => Kernel::Ode,
+        _ => Kernel::Difference,
     }
 }
 
-fn has_seir_shape(run: &ExternalRunResult) -> bool {
-    COMPARTMENT_ORDER.iter().any(|c| {
-        run.time_avg_populations.contains_key(*c) || run.final_populations.contains_key(*c)
-    }) || ["I-P", "I-S", "I-H"]
-        .iter()
-        .any(|from| run.split_probs.contains_key(*from))
+fn parse_probabilities(value: &JsonValue, defaults: Probabilities) -> Probabilities {
+    Probabilities {
+        asymptomatic_share: number_field(value, &["asymptomaticShare", "asymptomatic_share"])
+            .unwrap_or(defaults.asymptomatic_share),
+        hospitalization_given_symptom: number_field(
+            value,
+            &[
+                "hospitalizationGivenSymptom",
+                "hospitalization_given_symptom",
+            ],
+        )
+        .unwrap_or(defaults.hospitalization_given_symptom),
+        case_fatality_given_hospital: number_field(
+            value,
+            &["caseFatalityGivenHospital", "case_fatality_given_hospital"],
+        )
+        .unwrap_or(defaults.case_fatality_given_hospital),
+    }
 }
 
-fn external_run_to_result(run: ExternalRunResult) -> Option<RunResult> {
-    if !has_seir_shape(&run) {
+fn parse_config(value: Option<&JsonValue>) -> SimConfig {
+    let mut cfg = default_config();
+    let Some(value) = value else {
+        return cfg;
+    };
+    cfg.step_size = number_field(value, &["stepSize", "step_size"]).unwrap_or(cfg.step_size);
+    cfg.horizon_days =
+        number_field(value, &["horizonDays", "horizon_days"]).unwrap_or(cfg.horizon_days);
+    cfg.phase1_days =
+        number_field(value, &["phase1Days", "phase1_days"]).unwrap_or(cfg.phase1_days);
+    cfg.source_cap = number_field(value, &["sourceCap", "source_cap"]).unwrap_or(cfg.source_cap);
+    if let Some(pair) =
+        get_any(value, &["arrivalsInterarrival", "arrivals_interarrival"]).and_then(number_pair)
+    {
+        cfg.arrivals_interarrival = pair;
+    }
+    if let Some(probabilities) = get_any(value, &["probabilities"]) {
+        cfg.probabilities = parse_probabilities(probabilities, cfg.probabilities);
+    }
+    if let Some(entries) = get_any(value, &["residence"]).and_then(|v| v.as_object()) {
+        let mut residence = HashMap::new();
+        for (key, raw) in entries {
+            if let Some(pair) = number_pair(raw) {
+                residence.insert(key.clone(), pair);
+            }
+        }
+        if !residence.is_empty() {
+            cfg.residence = residence;
+        }
+    }
+    cfg
+}
+
+fn parse_run_result(value: &JsonValue) -> Option<RunResult> {
+    let totals = get_any(value, &["totals"])?;
+    let split_probs = get_any(value, &["splitProbs", "split_probs"]).and_then(nested_number_map)?;
+    let time_avg_populations =
+        get_any(value, &["timeAvgPopulations", "time_avg_populations"]).and_then(number_map)?;
+    if split_probs.is_empty() || time_avg_populations.is_empty() {
         return None;
     }
-
-    let elapsed_ms = run
-        .elapsed_ms
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .map(|v| v.round() as u128)
-        .unwrap_or_default();
-
+    let created = number_field(totals, &["created"])?;
+    let absorbed = number_field(totals, &["absorbed"])?;
+    let seed = number_field(value, &["seed"]).unwrap_or(0.0);
+    let elapsed_ms = number_field(value, &["elapsedMs", "elapsed_ms"]).unwrap_or(0.0);
     Some(RunResult {
-        kernel: kernel_from_external(run.kernel.as_deref()),
-        config: default_config(),
-        seed: run.seed.unwrap_or_default(),
-        totals: Totals {
-            created: run.totals.created,
-            absorbed: run.totals.absorbed,
-        },
-        final_populations: run.final_populations,
-        transition_counts: run.transition_counts,
-        split_probs: run.split_probs,
-        time_avg_populations: run.time_avg_populations,
-        peak_populations: run.peak_populations,
-        elapsed_ms,
+        kernel: parse_kernel(value),
+        config: parse_config(get_any(value, &["config"])),
+        seed: seed.max(0.0).round() as u64,
+        totals: Totals { created, absorbed },
+        final_populations: get_any(value, &["finalPopulations", "final_populations"])
+            .and_then(number_map)
+            .unwrap_or_default(),
+        transition_counts: get_any(value, &["transitionCounts", "transition_counts"])
+            .and_then(nested_number_map)
+            .unwrap_or_default(),
+        split_probs,
+        time_avg_populations,
+        peak_populations: get_any(value, &["peakPopulations", "peak_populations"])
+            .and_then(number_map)
+            .unwrap_or_default(),
+        elapsed_ms: elapsed_ms.max(0.0).round() as u128,
     })
 }
 
-fn external_runs_from_value(value: Value) -> Vec<RunResult> {
-    match value {
-        Value::Array(items) => items
-            .into_iter()
-            .filter_map(|item| serde_json::from_value::<ExternalRunResult>(item).ok())
-            .filter_map(external_run_to_result)
-            .collect(),
-        Value::Object(_) => serde_json::from_value::<ExternalRunResult>(value)
-            .ok()
-            .and_then(external_run_to_result)
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
+fn append_run_results(value: &JsonValue, out: &mut Vec<RunResult>) {
+    if let Some(run) = parse_run_result(value) {
+        out.push(run);
+        return;
+    }
+    if let Some(items) = value.as_array() {
+        for item in items {
+            append_run_results(item, out);
+        }
+        return;
+    }
+    for key in ["runs", "results"] {
+        if let Some(items) = value.get(key).and_then(|v| v.as_array()) {
+            for item in items {
+                append_run_results(item, out);
+            }
+        }
+    }
+    if let Some(result) = value.get("result") {
+        append_run_results(result, out);
     }
 }
 
-fn load_external(tool_dir: &Path) -> Vec<RunResult> {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(tool_dir) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("json"))
-            .collect(),
-        Err(_) => return Vec::new(),
+fn collect_json_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_json_files(&path, files);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+}
+
+fn load_external(tool_dir: &PathBuf) -> Vec<RunResult> {
+    let mut files = Vec::new();
+    collect_json_files(tool_dir, &mut files);
     files.sort();
 
     let mut runs = Vec::new();
     for path in files {
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        runs.extend(external_runs_from_value(value));
+        match parse_json(&text) {
+            Ok(value) => append_run_results(&value, &mut runs),
+            Err(err) => eprintln!(
+                "[validate-with-externals] ignoring malformed JSON {}: {}",
+                path.display(),
+                err
+            ),
+        }
     }
-    runs.sort_by_key(|run| run.seed);
     runs
 }
 
@@ -153,7 +229,6 @@ fn collect_split(rs: &[RunResult], from: &str, to: &str) -> Vec<f64> {
         })
         .collect()
 }
-
 fn collect_pop(rs: &[RunResult], c: &str) -> Vec<f64> {
     rs.iter()
         .map(|r| r.time_avg_populations.get(c).copied().unwrap_or(0.0))
@@ -167,7 +242,6 @@ fn fmt(n: f64, d: usize) -> String {
         format!("{}", n)
     }
 }
-
 fn pad_end(s: &str, w: usize) -> String {
     if s.len() >= w {
         s.to_string()
@@ -175,27 +249,11 @@ fn pad_end(s: &str, w: usize) -> String {
         format!("{}{}", s, " ".repeat(w - s.len()))
     }
 }
-
 fn pad_start(s: &str, w: usize) -> String {
     if s.len() >= w {
         s.to_string()
     } else {
         format!("{}{}", " ".repeat(w - s.len()), s)
-    }
-}
-
-fn seeded_opts(seed: u64) -> RunOpts {
-    RunOpts {
-        seed: Some(seed),
-        ..Default::default()
-    }
-}
-
-fn fel_individual_opts(seed: u64) -> RunOpts {
-    RunOpts {
-        seed: Some(seed),
-        service: Some(ServiceDiscipline::Individual),
-        ..Default::default()
     }
 }
 
@@ -242,24 +300,34 @@ pub fn run() {
     let mut fel_runs = Vec::new();
     let mut ssa_runs = Vec::new();
     let t0 = std::time::Instant::now();
-    let default_cfg = default_config();
     for i in 0..n {
         pi_runs.push(run_per_individual_once(
             &cfg,
-            &seeded_opts(0xC0000 + i as u64),
+            &RunOpts {
+                seed: Some(0xC0000 + i as u64),
+                ..Default::default()
+            },
         ));
         fel_runs.push(run_fel_once(
-            &default_cfg,
-            &fel_individual_opts(0xD0000 + i as u64),
+            &default_config(),
+            &RunOpts {
+                seed: Some(0xD0000 + i as u64),
+                service: Some(ServiceDiscipline::Individual),
+                ..Default::default()
+            },
         ));
         ssa_runs.push(run_gillespie_once(
-            &default_cfg,
-            &seeded_opts(0xE0000 + i as u64),
+            &default_config(),
+            &RunOpts {
+                seed: Some(0xE0000 + i as u64),
+                ..Default::default()
+            },
         ));
     }
-    let ode = run_ode_once(&default_cfg, &RunOpts::default());
+    let ode = run_ode_once(&default_config(), &RunOpts::default());
     let in_repo_ms = t0.elapsed().as_millis();
 
+    // Discover external tool runs.
     let mut external_dirs: Vec<PathBuf> = Vec::new();
     if external_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&external_dir) {
@@ -270,8 +338,6 @@ pub fn run() {
             }
         }
     }
-    external_dirs.sort();
-
     let mut externals: Vec<(String, Vec<RunResult>)> = Vec::new();
     for tool in &external_dirs {
         let runs = load_external(tool);
@@ -284,7 +350,7 @@ pub fn run() {
     }
     if externals.is_empty() {
         println!(
-            "NOTE: no external JSONs found under {}",
+            "NOTE: no SEIR-shaped external JSON runs found under {}",
             external_dir.display()
         );
         println!("      run `bash external-references/run-all.sh` first to populate them.");
@@ -365,7 +431,7 @@ pub fn run() {
                 Column::Runs(_, runs) => {
                     let xs = collect_split(runs, from, to);
                     pad_start(
-                        &format!("{} +- {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)),
+                        &format!("{} ± {}", fmt(mean(&xs), 4), fmt(stddev(&xs), 4)),
                         col_width,
                     )
                 }
@@ -405,7 +471,7 @@ pub fn run() {
                 Column::Runs(_, runs) => {
                     let xs = collect_pop(runs, c);
                     pad_start(
-                        &format!("{} +- {}", fmt(mean(&xs), 3), fmt(stddev(&xs), 3)),
+                        &format!("{} ± {}", fmt(mean(&xs), 3), fmt(stddev(&xs), 3)),
                         col_width,
                     )
                 }
@@ -484,7 +550,7 @@ pub fn run() {
                 Column::Runs(_, runs) => {
                     let xs: Vec<f64> = runs.iter().map(&extract).collect();
                     pad_start(
-                        &format!("{} +- {}", fmt(mean(&xs), 1), fmt(stddev(&xs), 1)),
+                        &format!("{} ± {}", fmt(mean(&xs), 1), fmt(stddev(&xs), 1)),
                         col_width,
                     )
                 }

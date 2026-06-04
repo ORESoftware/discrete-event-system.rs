@@ -400,7 +400,11 @@ fn total_count(groups: &[VoteGroup]) -> u32 {
 }
 
 fn assert_thousand(groups: &[VoteGroup]) {
-    assert_eq!(total_count(groups), 1000, "scenario must model 1,000 vote records");
+    assert_eq!(
+        total_count(groups),
+        1000,
+        "scenario must model 1,000 vote records"
+    );
 }
 
 fn first_choice_tally(groups: &[VoteGroup]) -> BTreeMap<String, u32> {
@@ -766,7 +770,7 @@ fn usacc_panel_case(
             color: candidate_color(&candidates, "recused"),
         }];
     }
-    let mut case = election_case(
+    election_case(
         id,
         label,
         kind,
@@ -852,7 +856,14 @@ fn majority_case(
             "Collect binary vote records",
             "Each record contributes exactly one yes/no vote.",
             0,
-            bars_from_u32(&candidates, &totals, 1000.0, None, &BTreeSet::new(), "votes"),
+            bars_from_u32(
+                &candidates,
+                &totals,
+                1000.0,
+                None,
+                &BTreeSet::new(),
+                "votes",
+            ),
             Some(501.0),
             &["The reference denominator is 1,000 valid vote records."],
         ),
@@ -992,7 +1003,14 @@ fn unanimity_case(
             "Check every record",
             "Unanimity is a veto scan: the first valid block changes the result.",
             0,
-            bars_from_u32(&candidates, &totals, 1000.0, None, &BTreeSet::new(), "records"),
+            bars_from_u32(
+                &candidates,
+                &totals,
+                1000.0,
+                None,
+                &BTreeSet::new(),
+                "records",
+            ),
             Some(0.0),
             &["The threshold line here means zero blockers, not a minimum support count."],
         ),
@@ -1124,7 +1142,14 @@ fn plurality_case(
             "Sort first choices",
             "Each ballot goes to its first listed active candidate.",
             0,
-            bars_from_u32(&candidates, &totals, 1000.0, None, &BTreeSet::new(), "first-choice votes"),
+            bars_from_u32(
+                &candidates,
+                &totals,
+                1000.0,
+                None,
+                &BTreeSet::new(),
+                "first-choice votes",
+            ),
             None,
             &["Only the top name on each record is used."],
         ),
@@ -1145,6 +1170,10 @@ fn plurality_case(
         ),
     ];
     frames[0].packets = packets_from_first_choices(&candidates, &groups);
+    let outcome = winner
+        .as_deref()
+        .map(|id| format!("{} wins by plurality.", candidate_label(&candidates, id)))
+        .unwrap_or_else(|| "No plurality winner.".to_string());
     election_case(
         id,
         label,
@@ -1155,10 +1184,7 @@ fn plurality_case(
         1000,
         None,
         winner.clone(),
-        winner
-            .as_deref()
-            .map(|id| format!("{} wins by plurality.", candidate_label(&candidates, id)))
-            .unwrap_or_else(|| "No plurality winner.".to_string()),
+        outcome,
         caveats,
         frames,
     )
@@ -1267,6 +1293,15 @@ fn approval_case(
             note: format!("approves {} candidate(s)", g.approvals.len()),
         })
         .collect();
+    let outcome = winner
+        .as_deref()
+        .map(|id| {
+            format!(
+                "{} wins on approval breadth.",
+                candidate_label(&candidates, id)
+            )
+        })
+        .unwrap_or_else(|| "No approval winner.".to_string());
     election_case(
         id,
         label,
@@ -1277,10 +1312,7 @@ fn approval_case(
         1000,
         None,
         winner.clone(),
-        winner
-            .as_deref()
-            .map(|id| format!("{} wins on approval breadth.", candidate_label(&candidates, id)))
-            .unwrap_or_else(|| "No approval winner.".to_string()),
+        outcome,
         caveats,
         frames,
     )
@@ -1372,7 +1404,7 @@ fn score_case(
     let candidates = civic_candidates();
     let totals = score_tally(&groups);
     let winner = sorted_winner(&totals);
-    let mut bars = score_bars(&candidates, &totals, winner.as_deref());
+    let bars = score_bars(&candidates, &totals, winner.as_deref());
     let mut preview = bars.clone();
     for bar in &mut preview {
         bar.status = "active".to_string();
@@ -1395,6 +1427,15 @@ fn score_case(
             caveats,
         ),
     ];
+    let outcome = winner
+        .as_deref()
+        .map(|id| {
+            format!(
+                "{} wins by average score.",
+                candidate_label(&candidates, id)
+            )
+        })
+        .unwrap_or_else(|| "No score winner.".to_string());
     election_case(
         id,
         label,
@@ -1405,10 +1446,7 @@ fn score_case(
         1000,
         Some("highest average score".to_string()),
         winner.clone(),
-        winner
-            .as_deref()
-            .map(|id| format!("{} wins by average score.", candidate_label(&candidates, id)))
-            .unwrap_or_else(|| "No score winner.".to_string()),
+        outcome,
         caveats,
         frames,
     )
@@ -1546,14 +1584,22 @@ fn ranked_choice_case(
         winner.clone(),
         winner
             .as_deref()
-            .map(|id| format!("{} wins after ranked transfers.", candidate_label(&civic_candidates(), id)))
+            .map(|id| {
+                format!(
+                    "{} wins after ranked transfers.",
+                    candidate_label(&civic_candidates(), id)
+                )
+            })
             .unwrap_or_else(|| "No ranked-choice winner.".to_string()),
         caveats,
         frames,
     )
 }
 
-fn irv_trace(candidates: &[Candidate], groups: &[VoteGroup]) -> (Option<String>, Vec<ElectionFrame>) {
+fn irv_trace(
+    candidates: &[Candidate],
+    groups: &[VoteGroup],
+) -> (Option<String>, Vec<ElectionFrame>) {
     let mut active: BTreeSet<String> = candidate_ids_from_groups(groups).into_iter().collect();
     let mut eliminated: BTreeSet<String> = BTreeSet::new();
     let mut frames = Vec::new();
@@ -1627,7 +1673,10 @@ fn irv_trace(candidates: &[Candidate], groups: &[VoteGroup]) -> (Option<String>,
                     candidate_label(candidates, &id)
                 ));
             } else {
-                f.notes.push(format!("{} is lowest and is eliminated.", candidate_label(candidates, &id)));
+                f.notes.push(format!(
+                    "{} is lowest and is eliminated.",
+                    candidate_label(candidates, &id)
+                ));
             }
             let mut next_active = active.clone();
             next_active.remove(&id);
@@ -1674,10 +1723,7 @@ fn first_active_choice(ranking: &[String], active: &BTreeSet<String>) -> Option<
     ranking.iter().find(|id| active.contains(*id)).cloned()
 }
 
-fn active_tally(
-    groups: &[VoteGroup],
-    active: &BTreeSet<String>,
-) -> (BTreeMap<String, u32>, u32) {
+fn active_tally(groups: &[VoteGroup], active: &BTreeSet<String>) -> (BTreeMap<String, u32>, u32) {
     let mut totals = BTreeMap::new();
     let mut exhausted = 0;
     for group in groups {
@@ -1797,7 +1843,14 @@ fn borda_case(
             "Convert ranks to points",
             "Each ballot distributes descending points across its ranked candidates.",
             0,
-            bars_from_u32(&candidates, &totals, 1000.0 * max_per_ballot, None, &BTreeSet::new(), "points"),
+            bars_from_u32(
+                &candidates,
+                &totals,
+                1000.0 * max_per_ballot,
+                None,
+                &BTreeSet::new(),
+                "points",
+            ),
             None,
             &["Unranked candidates receive zero points in this demo."],
         ),
@@ -1830,7 +1883,12 @@ fn borda_case(
         winner.clone(),
         winner
             .as_deref()
-            .map(|id| format!("{} wins by Borda points.", candidate_label(&frames_candidates_hint(), id)))
+            .map(|id| {
+                format!(
+                    "{} wins by Borda points.",
+                    candidate_label(&frames_candidates_hint(), id)
+                )
+            })
             .unwrap_or_else(|| "No Borda winner.".to_string()),
         caveats,
         frames,
@@ -1923,7 +1981,10 @@ fn condorcet_case(
 ) -> ElectionCase {
     assert_thousand(&groups);
     let result = pairwise_result(&candidates, &groups);
-    let winner = result.condorcet_winner.clone().or(result.copeland_winner.clone());
+    let winner = result
+        .condorcet_winner
+        .clone()
+        .or(result.copeland_winner.clone());
     let mut frames = vec![
         frame(
             "Build pairwise matrix",
@@ -1934,7 +1995,11 @@ fn condorcet_case(
             &["The matrix records margins for every head-to-head race."],
         ),
         frame(
-            if result.condorcet_winner.is_some() { "Condorcet winner found" } else { "No Condorcet winner" },
+            if result.condorcet_winner.is_some() {
+                "Condorcet winner found"
+            } else {
+                "No Condorcet winner"
+            },
             if result.condorcet_winner.is_some() {
                 "One candidate beats every other candidate head-to-head."
             } else {
@@ -1960,9 +2025,15 @@ fn condorcet_case(
         Some("beats every rival head-to-head".to_string()),
         winner.clone(),
         match result.condorcet_winner.as_deref() {
-            Some(id) => format!("{} is the Condorcet winner.", candidate_label(&candidates, id)),
+            Some(id) => format!(
+                "{} is the Condorcet winner.",
+                candidate_label(&candidates, id)
+            ),
             None => match result.copeland_winner.as_deref() {
-                Some(id) => format!("No Condorcet winner; {} leads the Copeland fallback.", candidate_label(&candidates, id)),
+                Some(id) => format!(
+                    "No Condorcet winner; {} leads the Copeland fallback.",
+                    candidate_label(&candidates, id)
+                ),
                 None => "No Condorcet winner and Copeland fallback is tied.".to_string(),
             },
         },
@@ -2096,7 +2167,11 @@ fn pairwise_bars(
         b.value
             .partial_cmp(&a.value)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| b.secondary_value.partial_cmp(&a.secondary_value).unwrap_or(Ordering::Equal))
+            .then_with(|| {
+                b.secondary_value
+                    .partial_cmp(&a.secondary_value)
+                    .unwrap_or(Ordering::Equal)
+            })
             .then_with(|| a.label.cmp(&b.label))
     });
     bars
@@ -2164,7 +2239,11 @@ fn wager_case(
     let candidates = civic_candidates();
     let raw = wager_tally(&groups);
     let raw_winner = sorted_i32_winner(&raw);
-    let raw_denominator: f64 = raw.values().map(|v| (*v as f64).abs()).sum::<f64>().max(1.0);
+    let raw_denominator: f64 = raw
+        .values()
+        .map(|v| (*v as f64).abs())
+        .sum::<f64>()
+        .max(1.0);
     let quadratic = quadratic_voice_tally(&groups);
     let quadratic_winner = sorted_f64_winner(&quadratic);
     let quadratic_denominator: f64 = quadratic.values().map(|v| v.abs()).sum::<f64>().max(1.0);
@@ -2234,7 +2313,7 @@ fn wager_case(
             }
         })
         .collect();
-    election_case(
+    let mut case = election_case(
         id,
         label,
         kind,
@@ -2274,6 +2353,91 @@ fn quadratic_voice_tally(groups: &[VoteGroup]) -> BTreeMap<String, f64> {
         }
     }
     totals
+}
+
+fn wager_betting_lines(
+    candidates: &[Candidate],
+    raw: &BTreeMap<String, i32>,
+    quadratic: &BTreeMap<String, f64>,
+) -> Vec<BettingLine> {
+    let mut ranked_raw: Vec<(String, f64)> = raw
+        .iter()
+        .map(|(id, value)| (id.clone(), *value as f64))
+        .collect();
+    ranked_raw.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    let Some((favorite, favorite_value)) = ranked_raw.first().cloned() else {
+        return Vec::new();
+    };
+    let underdog = ranked_raw
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| ("field".to_string(), 0.0));
+    let over_line = if favorite_value > 4000.0 {
+        3000.0
+    } else {
+        (favorite_value * 0.88).round()
+    };
+    let actual_margin = favorite_value - underdog.1;
+    let spread_line = if actual_margin.abs() < 1.0 {
+        0.0
+    } else {
+        (actual_margin * 0.60).round()
+    };
+    let q_favorite = quadratic.get(&favorite).copied().unwrap_or(0.0);
+    let q_underdog = quadratic.get(&underdog.0).copied().unwrap_or(0.0);
+    vec![
+        BettingLine {
+            id: "raw-over-under".to_string(),
+            label: format!("{} raw dollar-voice O/U", candidate_label(candidates, &favorite)),
+            line_kind: "over_under".to_string(),
+            market: "candidate raw dollar-backed vote weight".to_string(),
+            line: over_line,
+            actual: favorite_value,
+            over_or_favorite: "over".to_string(),
+            under_or_underdog: "under".to_string(),
+            covered_by: if favorite_value > over_line { "over" } else { "under" }.to_string(),
+            margin: favorite_value - over_line,
+            note: "A market-style over/under on the leading candidate's raw dollar-weighted support.".to_string(),
+        },
+        BettingLine {
+            id: "favorite-spread".to_string(),
+            label: format!(
+                "{} spread vs {}",
+                candidate_label(candidates, &favorite),
+                candidate_label(candidates, &underdog.0)
+            ),
+            line_kind: "spread".to_string(),
+            market: "raw dollar-voice margin".to_string(),
+            line: spread_line,
+            actual: actual_margin,
+            over_or_favorite: candidate_label(candidates, &favorite),
+            under_or_underdog: candidate_label(candidates, &underdog.0),
+            covered_by: if actual_margin > spread_line {
+                candidate_label(candidates, &favorite)
+            } else {
+                candidate_label(candidates, &underdog.0)
+            },
+            margin: actual_margin - spread_line,
+            note: "The favorite covers when the raw dollar margin exceeds the quoted spread.".to_string(),
+        },
+        BettingLine {
+            id: "quadratic-swing".to_string(),
+            label: "raw-vs-quadratic swing".to_string(),
+            line_kind: "model_compare".to_string(),
+            market: "damped voice margin after sqrt cost".to_string(),
+            line: 0.0,
+            actual: q_favorite - q_underdog,
+            over_or_favorite: candidate_label(candidates, &favorite),
+            under_or_underdog: candidate_label(candidates, &underdog.0),
+            covered_by: if q_favorite >= q_underdog {
+                candidate_label(candidates, &favorite)
+            } else {
+                candidate_label(candidates, &underdog.0)
+            },
+            margin: q_favorite - q_underdog,
+            note: "A zero line asks which side leads after square-root damping instead of raw dollar weighting.".to_string(),
+        },
+    ]
 }
 
 fn sorted_f64_winner(totals: &BTreeMap<String, f64>) -> Option<String> {
@@ -2329,4 +2493,89 @@ fn bars_from_f64(
             .then_with(|| a.label.cmp(&b.label))
     });
     bars
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_has_ten_voting_systems() {
+        let lab = voting_lab_payload();
+        assert_eq!(lab.total_vote_records, 1000);
+        assert_eq!(lab.systems.len(), 10);
+        assert!(lab.systems.iter().any(|s| s.id == "ranked-choice"));
+        assert!(lab.systems.iter().any(|s| s.id == "usacc-supermajority"));
+        assert!(lab.systems.iter().any(|s| s.id == "wagered-magnitude"));
+    }
+
+    #[test]
+    fn every_case_models_one_thousand_vote_records() {
+        let lab = voting_lab_payload();
+        for system in &lab.systems {
+            for case in &system.cases {
+                assert_eq!(case.total_vote_records, 1000, "{} / {}", system.id, case.id);
+                assert!(!case.frames.is_empty(), "{} / {}", system.id, case.id);
+            }
+        }
+    }
+
+    #[test]
+    fn usacc_cases_count_seated_panel_votes() {
+        let lab = voting_lab_payload();
+        let usacc = lab
+            .systems
+            .iter()
+            .find(|s| s.id == "usacc-supermajority")
+            .expect("USACC system");
+        assert!(usacc.cases.iter().all(|c| c.counted_votes == 15));
+        assert!(usacc
+            .cases
+            .iter()
+            .any(|c| c.frames.iter().any(|f| !f.transfers.is_empty())));
+    }
+
+    #[test]
+    fn ranked_choice_animates_transfers_and_exhaustion() {
+        let lab = voting_lab_payload();
+        let ranked = lab
+            .systems
+            .iter()
+            .find(|s| s.id == "ranked-choice")
+            .expect("ranked-choice system");
+        assert!(ranked
+            .cases
+            .iter()
+            .any(|c| c.frames.iter().any(|f| !f.transfers.is_empty())));
+        assert!(ranked
+            .cases
+            .iter()
+            .any(|c| c.frames.iter().any(|f| f.exhausted > 0)));
+    }
+
+    #[test]
+    fn wagered_cases_include_betting_lines() {
+        let lab = voting_lab_payload();
+        let wager = lab
+            .systems
+            .iter()
+            .find(|s| s.id == "wagered-magnitude")
+            .expect("wagered system");
+        assert!(wager.cases.iter().all(|c| c.betting_lines.len() >= 3));
+        assert!(wager
+            .cases
+            .iter()
+            .flat_map(|c| &c.betting_lines)
+            .any(|line| line.line_kind == "spread"));
+    }
+
+    #[test]
+    fn html_embeds_payload_and_controls() {
+        let html = voting_lab_page_html();
+        assert!(html.contains("Voting Algorithm Lab"));
+        assert!(html.contains("voting-lab-payload"));
+        assert!(html.contains("Betting Lines"));
+        assert!(html.contains("systemTabs"));
+        assert!(!html.contains("__VOTING_LAB_PAYLOAD__"));
+    }
 }

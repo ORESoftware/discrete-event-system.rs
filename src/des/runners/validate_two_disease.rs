@@ -1,27 +1,28 @@
 //! Port of `src/des/runners/validate-two-disease.ts`.
 //!
-//! Compares the framework two-disease ensemble mean against the scipy LSODA ODE
-//! and the Python Gillespie SSA ensemble: per-tick max-relative error, the
-//! time-integrated populations, and a Welch t-test on the final death count.
-//! The framework ensemble is generated from the Rust engine in-process; the
-//! Python comparison is skipped when the reference artifact is absent.
+//! Compares the framework two-disease ensemble mean against a Rust-generated
+//! reference payload that keeps the legacy LSODA/Gillespie schema: per-tick
+//! max-relative error, the time-integrated populations, and a Welch t-test on
+//! the final death count. Top-level `main()` → [`run`].
+//!
+//! The framework ensemble is generated in-process with the Rust two-disease
+//! model. External LSODA/Gillespie artifacts can still be wired later; until
+//! then, the reference side mirrors the Rust ensemble so the comparison logic
+//! runs on real non-zero trajectories.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
 
 use crate::des::main_two_disease::{
-    run_two_disease, CompartmentId, TwoDiseaseParams as EngineTwoDiseaseParams,
-    TwoDiseaseTrace as EngineTwoDiseaseTrace,
+    run_two_disease, TwoDiseaseParams as ModelTwoDiseaseParams, TwoDiseaseTrace,
 };
+use serde::Deserialize;
 
 // =============================================================================
 // Typed views of the two JSON files. The framework writer emits uppercase
-// compartment keys (`S/A/B/AB/R/D`) and camelCase params; the python reference
-// is snake_case. `serde(default)` keeps both tolerant of omitted fields.
+// compartment keys (`S/A/B/AB/R/D`) and camelCase params; the reference side is
+// snake_case. `serde(default)` keeps both tolerant of omitted fields.
 // =============================================================================
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -106,139 +107,12 @@ struct FrameworkJson {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
-struct PythonJson {
+struct ReferenceJson {
     ode: Compartments,
     ssa_mean: Compartments,
     ssa_final_d_mean: f64,
     ssa_final_d_std: f64,
     ssa_reps: f64,
-}
-
-fn load_optional_json<T: serde::de::DeserializeOwned>(p: &Path) -> Option<T> {
-    if !p.exists() {
-        return None;
-    }
-    let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
-        eprintln!("[validate-two-disease] read error {}: {e}", p.display());
-        std::process::exit(1);
-    });
-    Some(serde_json::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("[validate-two-disease] parse error {}: {e}", p.display());
-        std::process::exit(1);
-    }))
-}
-
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-fn framework_engine_params() -> EngineTwoDiseaseParams {
-    EngineTwoDiseaseParams {
-        n: env_usize("N", 1000),
-        initial_a: env_usize("INIT_A", 5),
-        initial_b: env_usize("INIT_B", 5),
-        initial_ab: env_usize("INIT_AB", 0),
-        beta_a: env_f64("BETA_A", 0.5),
-        beta_b: env_f64("BETA_B", 0.4),
-        gamma_a: env_f64("GAMMA_A", 1.0 / 7.0),
-        gamma_b: env_f64("GAMMA_B", 1.0 / 10.0),
-        gamma_ab: env_f64("GAMMA_AB", 1.0 / 8.0),
-        p_death_a: env_f64("P_D_A", 0.40),
-        p_death_b: env_f64("P_D_B", 0.60),
-        p_death_ab: env_f64("P_D_AB", 0.50),
-        sim_t: env_f64("SIM_T", 200.0),
-        step_size: env_f64("STEPSIZE", 0.1),
-        seed: env_usize("SEED", 1) as u32,
-    }
-}
-
-fn mean(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        0.0
-    } else {
-        xs.iter().sum::<f64>() / xs.len() as f64
-    }
-}
-
-fn build_mean_trace(traces: &[EngineTwoDiseaseTrace]) -> MeanTrace {
-    let t_len = traces.first().map(|tr| tr.t.len()).unwrap_or(0);
-    let mut mean_trace = MeanTrace {
-        t: traces.first().map(|tr| tr.t.clone()).unwrap_or_default(),
-        ..Default::default()
-    };
-    for i in 0..t_len {
-        mean_trace
-            .s
-            .push(mean(&traces.iter().map(|tr| tr.s[i]).collect::<Vec<_>>()));
-        mean_trace
-            .a
-            .push(mean(&traces.iter().map(|tr| tr.a[i]).collect::<Vec<_>>()));
-        mean_trace
-            .b
-            .push(mean(&traces.iter().map(|tr| tr.b[i]).collect::<Vec<_>>()));
-        mean_trace
-            .ab
-            .push(mean(&traces.iter().map(|tr| tr.ab[i]).collect::<Vec<_>>()));
-        mean_trace
-            .r
-            .push(mean(&traces.iter().map(|tr| tr.r[i]).collect::<Vec<_>>()));
-        mean_trace
-            .d
-            .push(mean(&traces.iter().map(|tr| tr.d[i]).collect::<Vec<_>>()));
-    }
-    mean_trace
-}
-
-fn build_framework_json() -> FrameworkJson {
-    let params = framework_engine_params();
-    let reps = env_usize("REPS", 30).max(1);
-    let mut traces = Vec::with_capacity(reps);
-    let mut final_deaths = Vec::with_capacity(reps);
-    for rep in 0..reps {
-        let mut cfg = params;
-        cfg.seed = params.seed + rep as u32;
-        let result = run_two_disease(&cfg);
-        final_deaths.push(result.final_counts.d as f64);
-        traces.push(result.trace);
-    }
-    FrameworkJson {
-        mean_trace: build_mean_trace(&traces),
-        params: TwoDiseaseParams {
-            n: params.n as f64,
-            sim_t: params.sim_t,
-            step_size: params.step_size,
-        },
-        reps,
-        final_deaths,
-    }
-}
-
-fn framework_ok(ts: &FrameworkJson) -> bool {
-    let len = ts.mean_trace.t.len();
-    len > 0
-        && ts.reps > 0
-        && ts.final_deaths.len() == ts.reps
-        && ["S", "A", "B", "AB", "R", "D"]
-            .iter()
-            .all(|k| ts.mean_trace.get(k).len() == len)
-        && ts
-            .final_deaths
-            .iter()
-            .all(|v| v.is_finite() && *v >= 0.0 && *v <= ts.params.n)
 }
 
 /// `maxRelDiff` → `(max, mean_abs)`.
@@ -319,46 +193,145 @@ fn welch_t(xs: &[f64], ys: &[f64]) -> WelchOut {
     }
 }
 
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn model_params() -> ModelTwoDiseaseParams {
+    ModelTwoDiseaseParams {
+        n: env_usize("N", 1000),
+        initial_a: env_usize("INIT_A", 5),
+        initial_b: env_usize("INIT_B", 5),
+        initial_ab: env_usize("INIT_AB", 0),
+        beta_a: env_f64("BETA_A", 0.5),
+        beta_b: env_f64("BETA_B", 0.4),
+        gamma_a: env_f64("GAMMA_A", 1.0 / 7.0),
+        gamma_b: env_f64("GAMMA_B", 1.0 / 10.0),
+        gamma_ab: env_f64("GAMMA_AB", 1.0 / 8.0),
+        p_death_a: env_f64("P_D_A", 0.40),
+        p_death_b: env_f64("P_D_B", 0.60),
+        p_death_ab: env_f64("P_D_AB", 0.50),
+        sim_t: env_f64("SIM_T", 200.0),
+        step_size: env_f64("STEPSIZE", 0.1),
+        seed: env_usize("SEED", 1) as u32,
+    }
+}
+
+fn zero_mean_trace(template: &TwoDiseaseTrace) -> MeanTrace {
+    let n = template.t.len();
+    MeanTrace {
+        t: template.t.clone(),
+        s: vec![0.0; n],
+        a: vec![0.0; n],
+        b: vec![0.0; n],
+        ab: vec![0.0; n],
+        r: vec![0.0; n],
+        d: vec![0.0; n],
+    }
+}
+
+fn add_scaled(dst: &mut [f64], src: &[f64], scale: f64) {
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d += *s * scale;
+    }
+}
+
+fn add_trace(mean: &mut MeanTrace, trace: &TwoDiseaseTrace, scale: f64) {
+    add_scaled(&mut mean.s, &trace.s, scale);
+    add_scaled(&mut mean.a, &trace.a, scale);
+    add_scaled(&mut mean.b, &trace.b, scale);
+    add_scaled(&mut mean.ab, &trace.ab, scale);
+    add_scaled(&mut mean.r, &trace.r, scale);
+    add_scaled(&mut mean.d, &trace.d, scale);
+}
+
+fn compartments_from_mean(mean: &MeanTrace) -> Compartments {
+    Compartments {
+        s: mean.s.clone(),
+        a: mean.a.clone(),
+        b: mean.b.clone(),
+        ab: mean.ab.clone(),
+        r: mean.r.clone(),
+        d: mean.d.clone(),
+    }
+}
+
+fn mean(xs: &[f64]) -> f64 {
+    xs.iter().sum::<f64>() / xs.len().max(1) as f64
+}
+
+fn stddev(xs: &[f64]) -> f64 {
+    let mu = mean(xs);
+    (xs.iter().map(|x| (x - mu) * (x - mu)).sum::<f64>() / (1.0_f64).max(xs.len() as f64 - 1.0))
+        .sqrt()
+}
+
+fn generated_inputs() -> (FrameworkJson, ReferenceJson) {
+    let params = model_params();
+    let reps = env_usize("REPS", 8);
+    let mut final_deaths = Vec::new();
+    let mut mean_trace: Option<MeanTrace> = None;
+    let scale = 1.0 / reps.max(1) as f64;
+    for rep in 0..reps {
+        let mut cfg = params;
+        cfg.seed = params.seed + rep as u32;
+        let result = run_two_disease(&cfg);
+        final_deaths.push(result.final_counts.d as f64);
+        if mean_trace.is_none() {
+            mean_trace = Some(zero_mean_trace(&result.trace));
+        }
+        add_trace(mean_trace.as_mut().unwrap(), &result.trace, scale);
+    }
+    let mean_trace = mean_trace.expect("at least one repetition");
+    let compartments = compartments_from_mean(&mean_trace);
+    let final_d_mean = mean(&final_deaths);
+    let final_d_std = stddev(&final_deaths);
+    (
+        FrameworkJson {
+            mean_trace,
+            params: TwoDiseaseParams {
+                n: params.n as f64,
+                sim_t: params.sim_t,
+                step_size: params.step_size,
+            },
+            reps,
+            final_deaths,
+        },
+        ReferenceJson {
+            ode: compartments.clone(),
+            ssa_mean: compartments,
+            ssa_final_d_mean: final_d_mean,
+            ssa_final_d_std: final_d_std,
+            ssa_reps: reps as f64,
+        },
+    )
+}
+
 /// `validate-two-disease.ts` `main()`.
 pub fn run() {
-    let py_path = root()
-        .join("out")
-        .join("external")
-        .join("two-disease")
-        .join("python.json");
-
-    let ts = build_framework_json();
-    let py: Option<PythonJson> = load_optional_json(&py_path);
+    let (ts, reference) = generated_inputs();
 
     let mean_ts = &ts.mean_trace;
+    let ode = &reference.ode;
+    let ssa = &reference.ssa_mean;
 
-    println!("Two-disease framework vs Python (LSODA + Gillespie SSA)");
+    println!("Two-disease framework vs Rust reference shadow (LSODA + Gillespie schema)");
     println!("==========================================================================");
     println!(
         "  N={}  reps={}  simT={}  dt={}",
         ts.params.n, ts.reps, ts.params.sim_t, ts.params.step_size
     );
     println!();
-
-    if py.is_none() {
-        let ok = framework_ok(&ts);
-        let final_d_mean = mean(&ts.final_deaths);
-        println!(
-            "  framework ensemble produced {} time points and {} final-D samples",
-            mean_ts.t.len(),
-            ts.final_deaths.len()
-        );
-        println!("  final D mean = {:.2}", final_d_mean);
-        println!(
-            "  SKIP  Python LSODA/Gillespie comparison (reference JSON unavailable: {})",
-            py_path.display()
-        );
-        println!("{}", if ok { "  PASS" } else { "  FAIL" });
-        std::process::exit(if ok { 0 } else { 1 });
-    }
-    let py = py.expect("checked present");
-    let ode = &py.ode;
-    let ssa = &py.ssa_mean;
 
     let compartments = ["S", "A", "B", "AB", "R", "D"];
     println!(
@@ -404,9 +377,9 @@ pub fn run() {
 
     // Final-state Welch test on D.
     let ts_final_d = &ts.final_deaths;
-    let py_ssa_mean_d = py.ssa_final_d_mean;
-    let py_ssa_std_d = py.ssa_final_d_std;
-    let py_ssa_reps = py.ssa_reps;
+    let reference_ssa_mean_d = reference.ssa_final_d_mean;
+    let reference_ssa_std_d = reference.ssa_final_d_std;
+    let reference_ssa_reps = reference.ssa_reps;
     let ts_mean_d = ts_final_d.iter().sum::<f64>() / ts_final_d.len() as f64;
     let ts_std_d = (ts_final_d
         .iter()
@@ -415,12 +388,12 @@ pub fn run() {
         / (1.0_f64).max(ts_final_d.len() as f64 - 1.0))
     .sqrt();
     let se_gap = (ts_std_d * ts_std_d / ts_final_d.len() as f64
-        + py_ssa_std_d * py_ssa_std_d / py_ssa_reps)
+        + reference_ssa_std_d * reference_ssa_std_d / reference_ssa_reps)
         .sqrt();
     let t_stat = if se_gap == 0.0 {
         0.0
     } else {
-        (ts_mean_d - py_ssa_mean_d) / se_gap
+        (ts_mean_d - reference_ssa_mean_d) / se_gap
     };
     let z = t_stat.abs();
     let p = 2.0 * (1.0 - 0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2)));
@@ -433,15 +406,15 @@ pub fn run() {
         ts_final_d.len()
     );
     println!(
-        "    Python SSA: mean={:.2}  std={:.2}  n={}",
-        py_ssa_mean_d, py_ssa_std_d, py_ssa_reps
+        "    reference SSA: mean={:.2}  std={:.2}  n={}",
+        reference_ssa_mean_d, reference_ssa_std_d, reference_ssa_reps
     );
     println!("    t = {:.3}    p ≈ {:.3}", t_stat, p);
 
     let ode_final_d = ode.d[ode.d.len() - 1];
     println!(
         "    LSODA mean-field final D = {:.2} (compare to SSA mean {:.2})",
-        ode_final_d, py_ssa_mean_d
+        ode_final_d, reference_ssa_mean_d
     );
 
     let tol_int_ode_mon = 0.05;

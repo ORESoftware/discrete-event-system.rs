@@ -183,7 +183,7 @@ impl ExternalQuadraticReferenceSolver {
     pub fn notes(self) -> &'static str {
         match self.family() {
             ExternalQuadraticReferenceFamily::Auto => {
-                "Prefer installed Python-backed solvers, then use the checked-in fallback for small models."
+                "Use the native Rust reference by default; explicit solver ids opt into Python-backed external bridges."
             }
             ExternalQuadraticReferenceFamily::DirectPythonApi => {
                 "Direct Python package bridge; reports unavailable when the package is not installed."
@@ -1404,6 +1404,13 @@ mod tests {
         assert!(items.iter().any(|item| {
             item.get("id").and_then(|value| value.as_str()) == Some("rust")
                 && item.get("supportsMiqp").and_then(|value| value.as_bool()) == Some(true)
+        }));
+        assert!(items.iter().any(|item| {
+            item.get("id").and_then(|value| value.as_str()) == Some("auto")
+                && item
+                    .get("notes")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|notes| notes.contains("native Rust reference"))
         }));
         assert!(items.iter().any(|item| {
             item.get("id").and_then(|value| value.as_str()) == Some("mosek")

@@ -8,8 +8,11 @@
 //! ## PORT NOTE
 //!
 //!   * Reuses the real `crate::des::general::network_flow` traffic types +
-//!     `build_five_intersection_traffic_network`, the real `smart_traffic_flow`
-//!     kernel, and the real computer-network problem/result/simulation.
+//!     `build_five_intersection_traffic_network`, and the real
+//!     `crate::des::general::computer_network` problem/result/simulation.
+//!   * The internal smart-traffic side delegates to the real
+//!     `crate::des::general::smart_traffic_flow` module, then reduces the result
+//!     to the source/sink summary shape used by the external comparisons.
 //!   * `import './external-modules'` (import-time registration) → explicit
 //!     [`register_built_in_external_modules`] call; if it fails (missing
 //!     `external-references/` scripts) we log and continue, so external engines
@@ -34,7 +37,8 @@ use crate::des::general::network_flow::{
 };
 use crate::des::general::prng::mulberry32;
 use crate::des::general::smart_traffic_flow::{
-    run_smart_traffic_flow, SmartTrafficParams, SmartTrafficResult,
+    run_smart_traffic_flow as run_smart_traffic_flow_model,
+    SmartTrafficParams as SmartTrafficModelParams,
 };
 use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::shared::capabilities::RandomSource;
@@ -48,6 +52,98 @@ use super::external_program::{
     repo_root_from_runner, run_external_module, ExternalModuleParams, ExternalProgramResult,
     ParamValue,
 };
+
+// =============================================================================
+// Smart-traffic source/sink comparison params + summary.
+// =============================================================================
+
+#[derive(Clone, Debug, Default)]
+pub struct SmartTrafficParams {
+    pub duration_sec: f64,
+    pub dt_sec: f64,
+    pub seed: f64,
+    pub actor_shuffle_seed: Option<f64>,
+    pub max_cars: Option<f64>,
+    pub smart_car_pool_size: Option<f64>,
+    pub spawn_rate_multiplier: Option<f64>,
+    pub car_length_m: Option<f64>,
+    pub car_width_m: Option<f64>,
+    pub lane_width_m: Option<f64>,
+    pub min_gap_m: Option<f64>,
+    pub max_accel_mps2: Option<f64>,
+    pub max_decel_mps2: Option<f64>,
+    pub max_jerk_mps3: Option<f64>,
+    pub reaction_time_sec: Option<f64>,
+    pub time_headway_sec: Option<f64>,
+    pub grid_cell_size_m: Option<f64>,
+    pub accident_risk_scale: Option<f64>,
+    pub accident_probability: Option<f64>,
+    pub distance_preference_spread: Option<f64>,
+    pub start_preference_spread: Option<f64>,
+    pub scheduled_trips_len: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SmartTrafficResult {
+    pub entered: usize,
+    pub exited: usize,
+    pub dropped: usize,
+    pub final_cars_len: usize,
+    pub mean_travel_time_sec: f64,
+    pub mean_speed_mps: f64,
+    pub scheduled_trips_len: usize,
+}
+
+pub fn run_smart_traffic_flow(
+    params: &SmartTrafficParams,
+    network: &TrafficNetwork,
+    scheduled_trips: &[TrafficScheduledTrip],
+) -> SmartTrafficResult {
+    let result = run_smart_traffic_flow_model(
+        SmartTrafficModelParams {
+            base: TrafficParams {
+                builtin: None,
+                network: Some(network.clone()),
+                duration_sec: params.duration_sec,
+                dt_sec: params.dt_sec,
+                seed: params.seed,
+                max_cars: params.max_cars.unwrap_or(100.0).max(1.0) as usize,
+                car_length_m: params.car_length_m,
+                car_width_m: params.car_width_m,
+                lane_width_m: params.lane_width_m,
+                min_gap_m: params.min_gap_m,
+                max_accel_mps2: params.max_accel_mps2,
+                max_decel_mps2: params.max_decel_mps2,
+                max_jerk_mps3: params.max_jerk_mps3,
+                reaction_time_sec: params.reaction_time_sec,
+                time_headway_sec: params.time_headway_sec,
+                grid_cell_size_m: params.grid_cell_size_m,
+                grid_look_ahead_m: None,
+                spawn_rate_multiplier: Some(0.0),
+                scheduled_trips: Some(scheduled_trips.to_vec()),
+            },
+            smart_car_pool_size: params.smart_car_pool_size.map(|v| v.max(1.0) as usize),
+            actor_shuffle_seed: params.actor_shuffle_seed,
+            accident_risk_scale: params.accident_risk_scale,
+            accident_probability: params.accident_probability,
+            accident_accel_boost_mps2: None,
+            accident_fault_duration_sec: None,
+            distance_preference_spread: params.distance_preference_spread,
+            start_preference_spread: params.start_preference_spread,
+            accident_flash_seconds: None,
+        },
+        None,
+    );
+    SmartTrafficResult {
+        entered: result.entered,
+        exited: result.exited,
+        dropped: result.dropped,
+        final_cars_len: result.final_cars.len(),
+        mean_travel_time_sec: result.mean_travel_time_sec,
+        mean_speed_mps: result.mean_speed_mps,
+        scheduled_trips_len: scheduled_trips.len(),
+    }
+}
 
 // =============================================================================
 // Report types.
@@ -138,42 +234,34 @@ pub fn run() -> i32 {
 fn compare_traffic() -> Vec<EngineReport> {
     let network = build_five_intersection_traffic_network();
     let params = SmartTrafficParams {
-        base: TrafficParams {
-            builtin: Some("five-intersection".to_string()),
-            network: None,
-            duration_sec: 180.0,
-            dt_sec: 0.1,
-            seed: 19.0,
-            max_cars: 180,
-            car_length_m: Some(4.8),
-            car_width_m: Some(1.8),
-            lane_width_m: Some(3.7),
-            min_gap_m: Some(2.5),
-            max_accel_mps2: Some(2.2),
-            max_decel_mps2: Some(4.0),
-            max_jerk_mps3: Some(6.0),
-            reaction_time_sec: Some(0.8),
-            time_headway_sec: Some(1.1),
-            grid_cell_size_m: Some(0.3048),
-            grid_look_ahead_m: None,
-            spawn_rate_multiplier: Some(0.35),
-            scheduled_trips: None,
-        },
+        duration_sec: 180.0,
+        dt_sec: 0.1,
+        seed: 19.0,
         actor_shuffle_seed: Some(2026.0),
-        smart_car_pool_size: Some(260),
+        max_cars: Some(180.0),
+        smart_car_pool_size: Some(260.0),
+        spawn_rate_multiplier: Some(0.35),
+        car_length_m: Some(4.8),
+        car_width_m: Some(1.8),
+        lane_width_m: Some(3.7),
+        min_gap_m: Some(2.5),
+        max_accel_mps2: Some(2.2),
+        max_decel_mps2: Some(4.0),
+        max_jerk_mps3: Some(6.0),
+        reaction_time_sec: Some(0.8),
+        time_headway_sec: Some(1.1),
+        grid_cell_size_m: Some(0.3048),
         accident_risk_scale: Some(0.0),
         accident_probability: Some(0.0),
-        accident_accel_boost_mps2: None,
-        accident_fault_duration_sec: None,
         distance_preference_spread: Some(0.0),
         start_preference_spread: Some(0.0),
-        accident_flash_seconds: None,
+        scheduled_trips_len: 0,
     };
     let demand_end_sec = 120.0;
     let trips = generate_scheduled_trips(
         &network,
         &params,
-        (params.base.seed + 4242.0) as u32,
+        (params.seed + 4242.0) as u32,
         demand_end_sec,
     );
     let input_path = out_dir().join("traffic-shared-input.json");
@@ -204,10 +292,8 @@ fn compare_traffic() -> Vec<EngineReport> {
         })
         .collect();
     let mut internal_params = params.clone();
-    internal_params.base.builtin = None;
-    internal_params.base.network = Some(network.clone());
-    internal_params.base.scheduled_trips = Some(internal_trips);
-    let internal = run_smart_traffic_flow(internal_params, None);
+    internal_params.scheduled_trips_len = internal_trips.len();
+    let internal = run_smart_traffic_flow(&internal_params, &network, &internal_trips);
 
     let mut reports: Vec<EngineReport> = vec![
         run_traffic_external(
@@ -263,10 +349,29 @@ fn run_external_module_safe(id: &str, params: &ExternalModuleParams) -> External
     }
 }
 
-fn external_unavailable(ext: &ExternalProgramResult) -> bool {
-    ext.status.is_none()
-        && (ext.stderr.contains("unknown external module")
-            || ext.stderr.contains("external script not found"))
+fn optional_external_unavailable(ext: &ExternalProgramResult) -> Option<String> {
+    let stderr = ext.stderr.trim();
+    let stdout = ext.stdout.trim();
+    let message = if stderr.is_empty() { stdout } else { stderr };
+    let lower = message.to_ascii_lowercase();
+    let looks_unavailable = lower.contains("unknown external module")
+        || lower.contains("not registered")
+        || lower.contains("external script not found")
+        || lower.contains("no such file")
+        || lower.contains("no module named")
+        || lower.contains("modulenotfounderror")
+        || lower.contains("not installed")
+        || lower.contains("unavailable");
+
+    if looks_unavailable {
+        Some(if message.is_empty() {
+            "optional external dependency unavailable".to_string()
+        } else {
+            slice_chars(message, 500)
+        })
+    } else {
+        None
+    }
 }
 
 fn run_traffic_external(
@@ -315,21 +420,23 @@ fn run_traffic_external(
     };
 
     if ext.status != Some(0) || !output_path.exists() {
-        let skipped = external_unavailable(&ext);
+        if let Some(message) = optional_external_unavailable(&ext) {
+            return base(
+                "skipped",
+                vec![check_row(
+                    "optional external dependency unavailable",
+                    true,
+                    message,
+                )],
+                notes,
+            );
+        }
         return base(
-            if skipped { "skipped" } else { "failed" },
+            "failed",
             vec![check_row(
-                if skipped {
-                    "external module is available"
-                } else {
-                    "external process writes output JSON"
-                },
-                skipped,
-                if skipped {
-                    slice_chars(ext.stderr.trim(), 300)
-                } else {
-                    format!("status={}", status_str(ext.status))
-                },
+                "external process writes output JSON",
+                false,
+                format!("status={}", status_str(ext.status)),
             )],
             notes,
         );
@@ -462,26 +569,34 @@ fn compare_computer_network() -> Vec<EngineReport> {
             notes.push(slice_chars(ext.stderr.trim(), 500));
         }
         if ext.status != Some(0) || !output_path.exists() {
-            let skipped = external_unavailable(&ext);
+            if let Some(message) = optional_external_unavailable(&ext) {
+                reports.push(EngineReport {
+                    domain: "computer-network".to_string(),
+                    scenario: name.to_string(),
+                    engine: "Python computer-network FEL".to_string(),
+                    status: "skipped".to_string(),
+                    input_path: input_path.display().to_string(),
+                    output_path: Some(output_path.display().to_string()),
+                    checks: vec![check_row(
+                        "optional external dependency unavailable",
+                        true,
+                        message,
+                    )],
+                    notes,
+                });
+                continue;
+            }
             reports.push(EngineReport {
                 domain: "computer-network".to_string(),
                 scenario: name.to_string(),
                 engine: "Python computer-network FEL".to_string(),
-                status: if skipped { "skipped" } else { "failed" }.to_string(),
+                status: "failed".to_string(),
                 input_path: input_path.display().to_string(),
                 output_path: Some(output_path.display().to_string()),
                 checks: vec![check_row(
-                    if skipped {
-                        "external module is available"
-                    } else {
-                        "external process writes output JSON"
-                    },
-                    skipped,
-                    if skipped {
-                        slice_chars(ext.stderr.trim(), 300)
-                    } else {
-                        format!("status={}", status_str(ext.status))
-                    },
+                    "external process writes output JSON",
+                    false,
+                    format!("status={}", status_str(ext.status)),
                 )],
                 notes,
             });
@@ -580,7 +695,7 @@ fn validate_shared_traffic_input(
         ));
         checks.push(check_row(
             &format!("{}: departSec is in horizon", trip.id),
-            trip.depart_sec >= 0.0 && trip.depart_sec <= params.base.duration_sec,
+            trip.depart_sec >= 0.0 && trip.depart_sec <= params.duration_sec,
             format!("depart={}", trip.depart_sec),
         ));
     }
@@ -589,17 +704,11 @@ fn validate_shared_traffic_input(
 
 fn compare_traffic_stats(internal: &SmartTrafficResult, external: &JsonValue) -> Vec<CheckRow> {
     let g = |k: &str| external.get(k).and_then(|v| v.as_f64());
-    let scheduled_trips_len = internal
-        .params
-        .base
-        .scheduled_trips
-        .as_ref()
-        .map_or(0, Vec::len);
     let mut checks = vec![
         exact_number(
             "generated demand matches internal scheduled input",
             g("generatedDemand").unwrap_or(f64::NAN),
-            scheduled_trips_len as f64,
+            internal.scheduled_trips_len as f64,
         ),
         relative_number(
             "departures align with internal entered count",
@@ -616,7 +725,7 @@ fn compare_traffic_stats(internal: &SmartTrafficResult, external: &JsonValue) ->
         close_number(
             "active-at-end aligns with internal final cars",
             g("activeAtEnd").unwrap_or(f64::NAN),
-            internal.final_cars.len() as f64,
+            internal.final_cars_len as f64,
             2.0,
         ),
         finite_number(
@@ -744,7 +853,7 @@ fn generate_scheduled_trips(
     let mut rng = mulberry32(seed);
     let mut accumulators: HashMap<String, f64> = HashMap::new();
     let mut trips: Vec<SharedTrafficTrip> = Vec::new();
-    let ticks = (demand_end_sec / params.base.dt_sec).ceil() as i64;
+    let ticks = (demand_end_sec / params.dt_sec).ceil() as i64;
     let sink_by_id: HashMap<&str, &str> = network
         .sinks
         .iter()
@@ -753,11 +862,11 @@ fn generate_scheduled_trips(
     for source in &network.sources {
         accumulators.insert(source.id.clone(), 0.0);
     }
-    let spawn_mult = params.base.spawn_rate_multiplier.unwrap_or(1.0);
+    let spawn_mult = params.spawn_rate_multiplier.unwrap_or(1.0);
     for tick in 0..ticks {
-        let depart_sec = round_time(tick as f64 * params.base.dt_sec);
+        let depart_sec = round_time(tick as f64 * params.dt_sec);
         for source in &network.sources {
-            let expected = source.rate_per_min * spawn_mult * params.base.dt_sec / 60.0;
+            let expected = source.rate_per_min * spawn_mult * params.dt_sec / 60.0;
             let mut acc = accumulators.get(&source.id).copied().unwrap_or(0.0) + expected;
             let count = acc.floor() as i64;
             acc -= count as f64;
@@ -1034,35 +1143,26 @@ fn shared_traffic_input_json(
 
 fn params_json(p: &SmartTrafficParams) -> JsonValue {
     JsonValue::Object(vec![
-        (
-            "durationSec".to_string(),
-            JsonValue::Number(p.base.duration_sec),
-        ),
-        ("dtSec".to_string(), JsonValue::Number(p.base.dt_sec)),
-        ("seed".to_string(), JsonValue::Number(p.base.seed)),
+        ("durationSec".to_string(), JsonValue::Number(p.duration_sec)),
+        ("dtSec".to_string(), JsonValue::Number(p.dt_sec)),
+        ("seed".to_string(), JsonValue::Number(p.seed)),
         ("actorShuffleSeed".to_string(), opt(p.actor_shuffle_seed)),
-        (
-            "maxCars".to_string(),
-            JsonValue::Number(p.base.max_cars as f64),
-        ),
-        (
-            "smartCarPoolSize".to_string(),
-            opt(p.smart_car_pool_size.map(|v| v as f64)),
-        ),
+        ("maxCars".to_string(), opt(p.max_cars)),
+        ("smartCarPoolSize".to_string(), opt(p.smart_car_pool_size)),
         (
             "spawnRateMultiplier".to_string(),
-            opt(p.base.spawn_rate_multiplier),
+            opt(p.spawn_rate_multiplier),
         ),
-        ("carLengthM".to_string(), opt(p.base.car_length_m)),
-        ("carWidthM".to_string(), opt(p.base.car_width_m)),
-        ("laneWidthM".to_string(), opt(p.base.lane_width_m)),
-        ("minGapM".to_string(), opt(p.base.min_gap_m)),
-        ("maxAccelMps2".to_string(), opt(p.base.max_accel_mps2)),
-        ("maxDecelMps2".to_string(), opt(p.base.max_decel_mps2)),
-        ("maxJerkMps3".to_string(), opt(p.base.max_jerk_mps3)),
-        ("reactionTimeSec".to_string(), opt(p.base.reaction_time_sec)),
-        ("timeHeadwaySec".to_string(), opt(p.base.time_headway_sec)),
-        ("gridCellSizeM".to_string(), opt(p.base.grid_cell_size_m)),
+        ("carLengthM".to_string(), opt(p.car_length_m)),
+        ("carWidthM".to_string(), opt(p.car_width_m)),
+        ("laneWidthM".to_string(), opt(p.lane_width_m)),
+        ("minGapM".to_string(), opt(p.min_gap_m)),
+        ("maxAccelMps2".to_string(), opt(p.max_accel_mps2)),
+        ("maxDecelMps2".to_string(), opt(p.max_decel_mps2)),
+        ("maxJerkMps3".to_string(), opt(p.max_jerk_mps3)),
+        ("reactionTimeSec".to_string(), opt(p.reaction_time_sec)),
+        ("timeHeadwaySec".to_string(), opt(p.time_headway_sec)),
+        ("gridCellSizeM".to_string(), opt(p.grid_cell_size_m)),
         ("accidentRiskScale".to_string(), opt(p.accident_risk_scale)),
         (
             "accidentProbability".to_string(),

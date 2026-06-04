@@ -3,7 +3,9 @@
 //! The canonical table contract lives in `remote/libs/pg-defs/schema/schema.sql`.
 //! This module is a small Rust adapter over that contract for queue runners.
 
-use postgres::{Client, NoTls};
+use native_tls::TlsConnector;
+use postgres::Client;
+use postgres_native_tls::MakeTlsConnector;
 use serde_json::{json, Value};
 
 use crate::des::general::soccer::{
@@ -28,7 +30,17 @@ pub struct SoccerLearningPgStore {
 
 impl SoccerLearningPgStore {
     pub fn connect(database_url: &str) -> Result<Self, String> {
-        let client = Client::connect(database_url, NoTls)
+        let mut tls_builder = TlsConnector::builder();
+        if !soccer_learning_pg_should_verify_certificates(database_url) {
+            // Match libpq sslmode=require/prefer semantics: encrypt the wire,
+            // but do not require an RDS CA bundle in minimal runner images.
+            tls_builder.danger_accept_invalid_certs(true);
+            tls_builder.danger_accept_invalid_hostnames(true);
+        }
+        let tls = tls_builder
+            .build()
+            .map_err(|err| format!("build soccer learning postgres tls connector: {err}"))?;
+        let client = Client::connect(database_url, MakeTlsConnector::new(tls))
             .map_err(|err| format!("connect soccer learning postgres: {err}"))?;
         Ok(Self { client })
     }
@@ -1330,6 +1342,20 @@ fn soccer_learning_database_url() -> Option<String> {
     })
 }
 
+fn soccer_learning_pg_should_verify_certificates(database_url: &str) -> bool {
+    soccer_learning_pg_sslmode(database_url).is_some_and(|sslmode| {
+        sslmode.eq_ignore_ascii_case("verify-ca") || sslmode.eq_ignore_ascii_case("verify-full")
+    })
+}
+
+fn soccer_learning_pg_sslmode(database_url: &str) -> Option<&str> {
+    let query = database_url.split_once('?')?.1;
+    query.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        key.eq_ignore_ascii_case("sslmode").then_some(value)
+    })
+}
+
 fn state_hash(state_json: &Value) -> String {
     let raw = serde_json::to_string(state_json).unwrap_or_default();
     let mut hash = 0xcbf29ce484222325u64;
@@ -1348,4 +1374,40 @@ fn checked_i32(value: impl TryInto<i64>) -> i32 {
 fn checked_i64(value: impl TryInto<u64>) -> i64 {
     let value = value.try_into().unwrap_or(u64::MAX);
     value.min(i64::MAX as u64) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soccer_learning_pg_sslmode_parses_query_param() {
+        assert_eq!(
+            soccer_learning_pg_sslmode("postgres://u:p@host/db?sslmode=require"),
+            Some("require")
+        );
+        assert_eq!(
+            soccer_learning_pg_sslmode(
+                "postgres://u:p@host/db?connect_timeout=5&sslmode=verify-full"
+            ),
+            Some("verify-full")
+        );
+        assert_eq!(soccer_learning_pg_sslmode("postgres://u:p@host/db"), None);
+    }
+
+    #[test]
+    fn soccer_learning_pg_only_verifies_explicit_verify_modes() {
+        assert!(!soccer_learning_pg_should_verify_certificates(
+            "postgres://u:p@host/db"
+        ));
+        assert!(!soccer_learning_pg_should_verify_certificates(
+            "postgres://u:p@host/db?sslmode=require"
+        ));
+        assert!(soccer_learning_pg_should_verify_certificates(
+            "postgres://u:p@host/db?sslmode=verify-ca"
+        ));
+        assert!(soccer_learning_pg_should_verify_certificates(
+            "postgres://u:p@host/db?sslmode=VERIFY-FULL"
+        ));
+    }
 }

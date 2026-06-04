@@ -4,22 +4,21 @@
 //! mean-field in three studies (N→∞ convergence, heterogeneity/super-spreader
 //! Gini, triplet threshold). The TS top-level driver becomes [`run`].
 //!
-//! ## PORT NOTE — production contact-SEIR kernel
+//! ## Model under test
 //!
-//! The early Rust port reproduced the Contact-SEIR kernel locally before
-//! `main_contact_seir` existed. This validator now calls the production
-//! [`crate::des::main_contact_seir::run_contact_seir`] implementation directly
-//! and keeps only the study/statistics code local.
-
-#![allow(dead_code)]
+//! The validator now calls the canonical Rust contact-SEIR implementation in
+//! [`crate::des::main_contact_seir`] instead of maintaining a copied kernel.
+//! The studies are tolerance-based (Welch p-values, Gini thresholds), so this
+//! keeps the validator aimed at production behavior rather than a private
+//! reference implementation.
 
 use crate::des::main_contact_seir::{
-    run_contact_seir as run_production_contact_seir, ContactSEIRParams as ContactSeirParams,
+    run_contact_seir as run_contact_seir_model, ContactSEIRParams as ContactSeirParams,
     ContactSEIRResult as ContactSeirResult, Kernel,
 };
 
 fn run_contact_seir(params: ContactSeirParams) -> ContactSeirResult {
-    run_production_contact_seir(&params, None)
+    run_contact_seir_model(&params, None)
 }
 
 // =============================================================================

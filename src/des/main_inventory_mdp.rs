@@ -8,8 +8,9 @@
 //!   * `MDPSpec`/`Outcome`/`value_iteration` are reused from
 //!     `crate::des::general::value_iteration`; `mulberry32`/`with_seed` from
 //!     `crate::des::general::prng`.
-//!   * The TS imports `DemandDist`/`demandPoissonPMF`/`sampleDemand` from
-//!     `main-newsvendor`; the Rust port reuses `crate::des::main_newsvendor`.
+//!   * Newsvendor demand helpers are shared with
+//!     `crate::des::main_newsvendor` so the single-period and multi-period
+//!     inventory models use one PMF/sampling implementation.
 //!   * PORT NOTE: the optional HTML animation (FrameRecorder / newsvendor scene)
 //!     and the `out/*.json` artifact writes are omitted (no animation engine /
 //!     serde dependency assumed).

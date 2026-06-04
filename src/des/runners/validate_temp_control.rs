@@ -4,28 +4,32 @@
 //! tracking, steady-state error, MDP-MPC cost dominance, reproducibility, fuzzy
 //! boundary behaviour, and trackWeight monotonicity. Driver → [`run`].
 //!
-//! The early Rust runner kept local controller and simulation stand-ins. The
-//! production temp-control module is now available, so these studies exercise
-//! the real house physics, fuzzy controller, and DES controller episode.
+//! PORT NOTES:
+//!   * Uses the real Rust temperature-control DES simulation, house physics,
+//!     fuzzy controller, and MDP-MPC controller.
 
 #![allow(dead_code)]
 
 use crate::des::general::temp_control::{
-    fuzzy_delta_controller, house_step, run_temp_control as real_run_temp_control, ControllerSpec,
-    HouseParams, OutdoorPatternPartial, RunResult as TempResult, SimConfig, DEFAULT_HOUSE,
+    fuzzy_delta_controller as fuzzy_delta_controller_model, house_step as house_step_model,
+    run_temp_control as run_temp_control_model, ControllerSpec, HouseParams, OutdoorPatternPartial,
+    RunResult, SimConfig, DEFAULT_HOUSE,
 };
 
-fn run_temp_control(cfg: &SimConfig) -> TempResult {
-    real_run_temp_control(cfg.clone())
+type House = HouseParams;
+type Outdoor = OutdoorPatternPartial;
+type TempResult = RunResult;
+
+fn house_step(t_in: f64, t_out: f64, q: f64, dt_h: f64, house: House) -> f64 {
+    house_step_model(t_in, t_out, q, dt_h, &house)
 }
 
-fn outdoor(mean: f64, amp: f64, phase: f64, noise_std: f64) -> OutdoorPatternPartial {
-    OutdoorPatternPartial {
-        mean: Some(mean),
-        amp: Some(amp),
-        phase: Some(phase),
-        noise_std: Some(noise_std),
-    }
+fn fuzzy_delta_controller(e: f64, dedt: f64) -> f64 {
+    fuzzy_delta_controller_model(e, dedt)
+}
+
+fn run_temp_control(cfg: &SimConfig) -> TempResult {
+    run_temp_control_model(cfg.clone())
 }
 
 // =============================================================================
@@ -80,15 +84,15 @@ fn base_config(controller: ControllerSpec) -> SimConfig {
         band: Some(2.0),
         duration_h: 24.0,
         dt_min: 1.0,
-        controller,
-        house: None,
-        outdoor: None,
         cost_per_kwh: 0.15,
         comfort_penalty: 0.5,
         sensor_noise_std: Some(0.2),
         forecast_noise_std: Some(1.5),
         forecast_horizon_h: Some(6.0),
         seed: Some(42),
+        house: None,
+        outdoor: None,
+        controller,
     }
 }
 
@@ -98,26 +102,27 @@ pub fn run() {
 
     println!("\nStudy 1 — House physics: forward-Euler self-consistency");
     {
-        let t1 = house_step(60.0, 80.0, 0.0, 1.0, &DEFAULT_HOUSE);
+        let t1 = house_step(60.0, 80.0, 0.0, 1.0, DEFAULT_HOUSE);
         c.check(
             "Q=0, hot outside: T rises",
             t1 > 60.0,
             &format!("T_in: 60 → {:.3}", t1),
         );
-        let t2 = house_step(70.0, 30.0, 0.0, 1.0, &DEFAULT_HOUSE);
+        let t2 = house_step(70.0, 30.0, 0.0, 1.0, DEFAULT_HOUSE);
         c.check(
             "Q=0, cold outside: T falls",
             t2 < 70.0,
             &format!("T_in: 70 → {:.3}", t2),
         );
         let q_ss = (70.0 - 30.0) / (DEFAULT_HOUSE.tau * DEFAULT_HOUSE.g);
-        let t3 = house_step(70.0, 30.0, q_ss, 1.0, &DEFAULT_HOUSE);
+        let t3 = house_step(70.0, 30.0, q_ss, 1.0, DEFAULT_HOUSE);
         c.close("Q = Q_ss → no change in 1h", t3, 70.0, 1e-12);
-        let insulated = HouseParams {
+        let insulated = House {
             tau: 1e9,
+            g: DEFAULT_HOUSE.g,
             ..DEFAULT_HOUSE
         };
-        let t4 = house_step(70.0, 30.0, 5.0, 1.0, &insulated);
+        let t4 = house_step(70.0, 30.0, 5.0, 1.0, insulated);
         c.close("insulated, Q=5, Δt=1h: ΔT = 5°F", t4 - 70.0, 5.0, 1e-3);
     }
 
@@ -167,15 +172,20 @@ pub fn run() {
             band: Some(2.0),
             duration_h: 8.0,
             dt_min: 1.0,
-            controller: ControllerSpec::BangBang,
-            house: None,
-            outdoor: Some(outdoor(30.0, 0.0, 0.0, 0.0)),
             cost_per_kwh: 0.15,
             comfort_penalty: 0.5,
             sensor_noise_std: Some(0.0),
             forecast_noise_std: Some(0.0),
             forecast_horizon_h: Some(1.0),
             seed: Some(1),
+            house: None,
+            outdoor: Some(Outdoor {
+                mean: Some(30.0),
+                amp: Some(0.0),
+                phase: Some(0.0),
+                noise_std: Some(0.0),
+            }),
+            controller: ControllerSpec::BangBang,
         };
         for (name, spec) in [
             (
@@ -232,15 +242,20 @@ pub fn run() {
             band: Some(1.0),
             duration_h: 24.0,
             dt_min: 1.0,
-            controller: ControllerSpec::BangBang,
-            house: None,
-            outdoor: Some(outdoor(15.0, 20.0, 9.0, 2.0)),
             cost_per_kwh: 0.15,
             comfort_penalty: 2.0,
             sensor_noise_std: Some(0.1),
             forecast_noise_std: Some(1.0),
             forecast_horizon_h: Some(6.0),
             seed: Some(11),
+            house: None,
+            outdoor: Some(Outdoor {
+                mean: Some(15.0),
+                amp: Some(20.0),
+                phase: Some(9.0),
+                noise_std: Some(2.0),
+            }),
+            controller: ControllerSpec::BangBang,
         };
         let bb = run_temp_control(&stress);
         let mut mpc_cfg = stress.clone();
@@ -266,19 +281,19 @@ pub fn run() {
             band: Some(2.0),
             duration_h: 6.0,
             dt_min: 1.0,
-            controller: ControllerSpec::Pid {
-                kp: 3.0,
-                ki: 0.5,
-                kd: 0.5,
-            },
-            house: None,
-            outdoor: None,
             cost_per_kwh: 0.15,
             comfort_penalty: 0.5,
             sensor_noise_std: Some(0.2),
             forecast_noise_std: Some(1.5),
             forecast_horizon_h: Some(2.0),
             seed: Some(99),
+            house: None,
+            outdoor: None,
+            controller: ControllerSpec::Pid {
+                kp: 3.0,
+                ki: 0.5,
+                kd: 0.5,
+            },
         };
         let r1 = run_temp_control(&cfg);
         let r2 = run_temp_control(&cfg);
@@ -319,15 +334,15 @@ pub fn run() {
             band: Some(2.0),
             duration_h: 12.0,
             dt_min: 1.0,
-            controller: ControllerSpec::BangBang,
-            house: None,
-            outdoor: None,
             cost_per_kwh: 0.15,
             comfort_penalty: 0.5,
             sensor_noise_std: Some(0.0),
             forecast_noise_std: Some(0.0),
             forecast_horizon_h: Some(4.0),
             seed: Some(5),
+            house: None,
+            outdoor: None,
+            controller: ControllerSpec::BangBang,
         };
         let mut loose = cfg.clone();
         loose.controller = ControllerSpec::MdpMpc {

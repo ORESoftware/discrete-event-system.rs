@@ -4,49 +4,35 @@
 //! augmentation for fairness, cross-solver LP agreement, Hungarian dominance, and
 //! a stochastic-match Welch-t study. Driver → [`run`].
 //!
-//! The first Rust port left local zero-value stubs here. The soccer-rotation,
-//! LP, external LP, and DES-simplex modules are now available, so this runner
-//! keeps the original studies but routes them through the production code.
+//! PORT NOTES:
+//!   * Uses the real Rust soccer-rotation model, LP relaxation, exact MDP-VI,
+//!     greedy/random schedules, DES match simulator, and LP solver adapters.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
 use crate::des::general::lp::{
-    solve_lp_external as real_solve_lp_external, solve_lp_internal as real_solve_lp_internal,
-    ExternalSolverOptions, InternalSimplexOptions, LPProblem as LpProblem,
-    LPSolution as RealLpSolution,
+    solve_lp_internal as solve_lp_internal_model, ExternalSolver, ExternalSolverOptions,
+    InternalSimplexOptions, LPProblem,
 };
-use crate::des::general::lp_des::{
-    solve_lp_via_des as real_solve_lp_via_des, DESSimplexOptions,
-    DESSimplexSolution as RealDesLpSolution,
-};
+use crate::des::general::lp_des::{solve_lp_via_des as solve_lp_via_des_model, DESSimplexOptions};
 use crate::des::general::soccer_rotation::{
-    build_sample_soccer_problem as real_build_sample_soccer_problem,
-    build_soccer_lp as real_build_soccer_lp, evaluate_schedule as real_evaluate_schedule,
-    policy_greedy_hungarian as real_policy_greedy_hungarian,
-    policy_lp_relaxed as real_policy_lp_relaxed, policy_mdp_vi as real_policy_mdp_vi,
-    policy_mdp_vi_memoryless as real_policy_mdp_vi_memoryless,
-    policy_random_schedule as real_policy_random_schedule,
-    run_many_matches as real_run_many_matches,
-    validate_schedule_structure as real_validate_schedule_structure, welch_t as real_welch_t,
-    AffinityBuilderOptions, GreedyHungarianOptions, MatchSimOptions, Schedule, SoccerProblem,
+    build_sample_soccer_problem as build_sample_soccer_problem_model,
+    build_soccer_lp as build_soccer_lp_model, evaluate_schedule as evaluate_schedule_model,
+    policy_greedy_hungarian as policy_greedy_hungarian_model,
+    policy_lp_relaxed as policy_lp_relaxed_model, policy_mdp_vi as policy_mdp_vi_model,
+    policy_mdp_vi_memoryless as policy_mdp_vi_memoryless_model,
+    policy_random_schedule as policy_random_schedule_model,
+    run_many_matches as run_many_matches_model,
+    validate_schedule_structure as validate_schedule_structure_model, welch_t as welch_t_model,
+    AffinityBuilderOptions, GreedyHungarianOptions, LPRelaxedScheduleResult, MatchAggregate,
+    MatchSimOptions, Schedule, ScheduleEvaluation, SoccerProblem,
 };
+use crate::des::shared::transform::Transform;
 
-// =============================================================================
-// Thin validation adapters over soccer_rotation + LP.
-// =============================================================================
-
-#[derive(Clone, Debug, Default)]
-struct ScheduleEval {
-    affinity_sum: f64,
-    fairness_ok: bool,
-    fairness_violations: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct LpRelaxedResult {
-    lp_value: f64,
-    schedule: Schedule,
-}
+type ScheduleEval = ScheduleEvaluation;
+type LpRelaxedResult = LPRelaxedScheduleResult;
+type ManyMatchesResult = MatchAggregate;
+type LpProblem = LPProblem;
 
 #[derive(Clone, Debug)]
 struct MdpViResult {
@@ -60,49 +46,38 @@ struct MemorylessResult {
 }
 
 #[derive(Clone, Debug, Default)]
-struct ManyMatchesResult {
-    mean_goal_diff: f64,
-    sd_goal_diff: f64,
-    raw_goal_diffs: Vec<f64>,
-    fairness_ok: bool,
-}
-
-#[derive(Clone, Debug, Default)]
 struct LpSolution {
     status: String,
     objective: f64,
 }
 
 fn build_sample_soccer_problem(seed: u64) -> SoccerProblem {
-    real_build_sample_soccer_problem(&AffinityBuilderOptions {
+    build_sample_soccer_problem_model(&AffinityBuilderOptions {
         seed: Some(seed as u32),
         ..Default::default()
     })
 }
 fn policy_lp_relaxed(p: &SoccerProblem) -> LpRelaxedResult {
-    let result = real_policy_lp_relaxed(p);
-    LpRelaxedResult {
-        lp_value: result.lp_value,
-        schedule: result.schedule,
-    }
+    policy_lp_relaxed_model(p)
 }
 fn policy_mdp_vi(p: &SoccerProblem) -> MdpViResult {
-    let result = real_policy_mdp_vi(p);
+    let result = policy_mdp_vi_model(p);
     MdpViResult {
         optimal_value: result.optimal_value,
         schedule: result.to_schedule(),
     }
 }
 fn policy_mdp_vi_memoryless(p: &SoccerProblem) -> MemorylessResult {
+    let result = policy_mdp_vi_memoryless_model(p);
     MemorylessResult {
-        schedule: real_policy_mdp_vi_memoryless(p).schedule,
+        schedule: result.schedule,
     }
 }
-fn policy_random_schedule(p: &SoccerProblem, k: usize) -> Schedule {
-    real_policy_random_schedule(p, k as u32)
+fn policy_random_schedule(p: &SoccerProblem, seed: usize) -> Schedule {
+    policy_random_schedule_model(p, seed as u32)
 }
 fn policy_greedy_hungarian(p: &SoccerProblem, fairness_aware: bool) -> Schedule {
-    real_policy_greedy_hungarian(
+    policy_greedy_hungarian_model(
         p,
         &GreedyHungarianOptions {
             fairness_aware: Some(fairness_aware),
@@ -110,22 +85,13 @@ fn policy_greedy_hungarian(p: &SoccerProblem, fairness_aware: bool) -> Schedule 
     )
 }
 fn evaluate_schedule(p: &SoccerProblem, s: &Schedule) -> ScheduleEval {
-    let result = real_evaluate_schedule(p, s);
-    ScheduleEval {
-        affinity_sum: result.affinity_sum,
-        fairness_ok: result.fairness_ok,
-        fairness_violations: result
-            .fairness_violations
-            .iter()
-            .map(|v| format!("{:?}", v))
-            .collect(),
-    }
+    evaluate_schedule_model(p, s)
 }
 fn validate_schedule_structure(p: &SoccerProblem, s: &Schedule) -> Option<String> {
-    real_validate_schedule_structure(p, s)
+    validate_schedule_structure_model(p, s)
 }
 fn build_soccer_lp(p: &SoccerProblem) -> LpProblem {
-    real_build_soccer_lp(p)
+    build_soccer_lp_model(p)
 }
 fn run_many_matches(
     p: &SoccerProblem,
@@ -134,54 +100,40 @@ fn run_many_matches(
     num_matches: usize,
     seed: u64,
 ) -> ManyMatchesResult {
-    let result = real_run_many_matches(
+    run_many_matches_model(
         p,
         s,
         name,
         num_matches,
         seed as u32,
         &MatchSimOptions::default(),
-    );
-    ManyMatchesResult {
-        mean_goal_diff: result.mean_goal_diff,
-        sd_goal_diff: result.sd_goal_diff,
-        raw_goal_diffs: result.raw_goal_diffs,
-        fairness_ok: result.fairness_ok,
-    }
+    )
 }
 fn welch_t(a: &[f64], b: &[f64]) -> f64 {
-    real_welch_t(a, b)
+    welch_t_model(a, b)
 }
 
-fn lp_solution_from_real(sol: RealLpSolution) -> LpSolution {
+fn lp_solution(status: crate::des::general::lp::LPStatus, objective: f64) -> LpSolution {
     LpSolution {
-        status: sol.status.as_str().to_string(),
-        objective: sol.objective,
-    }
-}
-fn lp_solution_from_des(sol: RealDesLpSolution) -> LpSolution {
-    LpSolution {
-        status: sol.status.as_str().to_string(),
-        objective: sol.objective,
+        status: status.as_str().to_string(),
+        objective,
     }
 }
 fn solve_lp_internal(lp: &LpProblem) -> LpSolution {
-    lp_solution_from_real(real_solve_lp_internal(
-        lp,
-        &InternalSimplexOptions::default(),
-    ))
+    let sol = solve_lp_internal_model(lp, &InternalSimplexOptions::default());
+    lp_solution(sol.status, sol.objective)
 }
 fn solve_lp_via_des(lp: &LpProblem) -> LpSolution {
-    lp_solution_from_des(real_solve_lp_via_des(lp, &DESSimplexOptions::default()))
+    let sol = solve_lp_via_des_model(lp, &DESSimplexOptions::default());
+    lp_solution(sol.status, sol.objective)
 }
 fn solve_lp_external(lp: &LpProblem, method: &str) -> LpSolution {
-    lp_solution_from_real(real_solve_lp_external(
-        lp,
-        &ExternalSolverOptions {
-            method: Some(method.to_string()),
-            ..Default::default()
-        },
-    ))
+    let sol = ExternalSolver::new(ExternalSolverOptions {
+        method: Some(method.to_string()),
+        ..Default::default()
+    })
+    .transform(lp.clone());
+    lp_solution(sol.status, sol.objective)
 }
 
 // =============================================================================
@@ -326,11 +278,11 @@ pub fn run() {
             s_des.status, s_des.objective
         );
         println!(
-            "    scipy:highs-ds       status={} obj={:.8}",
+            "    external:highs-ds    status={} obj={:.8}",
             s_ds.status, s_ds.objective
         );
         println!(
-            "    scipy:highs-ipm      status={} obj={:.8}",
+            "    external:highs-ipm   status={} obj={:.8}",
             s_ipm.status, s_ipm.objective
         );
         let objs: Vec<f64> = [&s_int, &s_des, &s_ds, &s_ipm]

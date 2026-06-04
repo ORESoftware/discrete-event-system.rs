@@ -628,7 +628,7 @@ pub struct LPSolution {
     pub infeasibility_certificate: Option<LPInfeasibilityCertificate>,
     /// Iteration count if reported by the solver.
     pub iters: Option<usize>,
-    /// Solver name (e.g. `"internal"`, `"scipy:highs"`).
+    /// Solver name (e.g. `"internal"`, `"highs:cli"`).
     pub solver: String,
     /// Wall-clock time in milliseconds.
     pub elapsed_ms: f64,
@@ -3699,9 +3699,70 @@ fn ortools_linear_method(method: &str) -> Option<&'static str> {
     }
 }
 
+fn normalized_external_lp_method(method: &str) -> String {
+    method.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn rust_external_lp_cli_method(
+    method: &str,
+) -> Option<(
+    ExternalLinearCliSolver,
+    Option<ExternalLinearCliLpAlgorithm>,
+)> {
+    let normalized = normalized_external_lp_method(method);
+    match normalized.as_str() {
+        "highs" | "scipy:highs" | "highs:cli" | "highs-cli" => {
+            Some((ExternalLinearCliSolver::Highs, None))
+        }
+        "highs-ds" | "scipy:highs-ds" | "highs-simplex" | "highs:dual-simplex" => Some((
+            ExternalLinearCliSolver::Highs,
+            Some(ExternalLinearCliLpAlgorithm::Simplex),
+        )),
+        "highs-ipm" | "scipy:highs-ipm" | "highs:ipm" => Some((
+            ExternalLinearCliSolver::Highs,
+            Some(ExternalLinearCliLpAlgorithm::Ipm),
+        )),
+        "glpk" | "glpsol" | "glpk:cli" | "glpk-cli" => Some((ExternalLinearCliSolver::Glpk, None)),
+        "scip" | "scip:cli" | "scip-cli" => Some((ExternalLinearCliSolver::Scip, None)),
+        "cbc" | "coin-cbc" | "coin-or-cbc" | "cbc:cli" | "cbc-cli" => {
+            Some((ExternalLinearCliSolver::Cbc, None))
+        }
+        "clp" | "clp:cli" | "clp-cli" => Some((ExternalLinearCliSolver::Clp, None)),
+        "soplex" | "soplex:cli" | "soplex-cli" => Some((ExternalLinearCliSolver::Soplex, None)),
+        "qsopt-ex" | "qsopt" | "qsopt-ex:cli" | "qsopt-ex-cli" => {
+            Some((ExternalLinearCliSolver::QsoptEx, None))
+        }
+        "lp-solve" | "lpsolve" | "lp-solve:cli" | "lp-solve-cli" => {
+            Some((ExternalLinearCliSolver::LpSolve, None))
+        }
+        "gurobi" | "gurobi-cl" | "gurobi:cli" | "gurobi-cli" => {
+            Some((ExternalLinearCliSolver::Gurobi, None))
+        }
+        "cplex" | "cplex:cli" | "cplex-cli" => Some((ExternalLinearCliSolver::Cplex, None)),
+        "xpress" | "optimizer" | "xpress:cli" | "xpress-cli" => {
+            Some((ExternalLinearCliSolver::Xpress, None))
+        }
+        "lindo" | "runlindo" | "lindoapi" | "lindo:cli" | "lindo-cli" => {
+            Some((ExternalLinearCliSolver::Lindo, None))
+        }
+        _ => None,
+    }
+}
+
 fn external_solver_label(method: &str) -> String {
     if let Some(method) = ortools_linear_method(method) {
         format!("ortools:{method}")
+    } else if let Some((solver, _)) = rust_external_lp_cli_method(method) {
+        let normalized = normalized_external_lp_method(method);
+        match normalized.as_str() {
+            "highs" | "highs:cli" | "highs-cli" => "highs:cli".to_string(),
+            "highs-ds" | "highs-simplex" | "highs:dual-simplex" => "highs-ds:cli".to_string(),
+            "highs-ipm" | "highs:ipm" => "highs-ipm:cli".to_string(),
+            "scipy:highs" => "scipy:highs".to_string(),
+            "scipy:highs-ds" => "scipy:highs-ds".to_string(),
+            "scipy:highs-ipm" => "scipy:highs-ipm".to_string(),
+            _ => format!("{}:cli", solver.as_str()),
+        }
     } else {
         format!("scipy:{method}")
     }
@@ -3727,15 +3788,9 @@ fn rust_external_lp_cli_options(
     if opts.python.is_some() || opts.script.is_some() || lp_external_bridge_forced_python() {
         return None;
     }
-    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
-    let lp_algorithm = match normalized.as_str() {
-        "highs" | "scipy:highs" => None,
-        "highs-ds" | "scipy:highs-ds" => Some(ExternalLinearCliLpAlgorithm::Simplex),
-        "highs-ipm" | "scipy:highs-ipm" => Some(ExternalLinearCliLpAlgorithm::Ipm),
-        _ => return None,
-    };
+    let (solver, lp_algorithm) = rust_external_lp_cli_method(method)?;
     Some(ExternalLinearCliOptions {
-        solver: ExternalLinearCliSolver::Highs,
+        solver,
         lp_algorithm,
         ..ExternalLinearCliOptions::default()
     })
@@ -4064,14 +4119,19 @@ const DEFAULT_LP_SOLVER: &str = "internal";
 /// ```text
 ///   LP_SOLVER=internal              in-process two-phase simplex (DEFAULT)
 ///   LP_SOLVER=internal-ipm          in-process primal-dual interior-point method
-///   LP_SOLVER=scipy:highs           scipy linprog method=highs
-///   LP_SOLVER=scipy:highs-ipm       scipy interior-point HiGHS
-///   LP_SOLVER=scipy:highs-ds        scipy dual simplex HiGHS
+///   LP_SOLVER=highs                 local HiGHS CLI bridge
+///   LP_SOLVER=highs-ipm             local HiGHS interior-point method
+///   LP_SOLVER=highs-ds              local HiGHS dual simplex method
 ///   LP_SOLVER=scipy:simplex         legacy scipy simplex
 ///   LP_SOLVER=scipy:interior-point  legacy scipy interior-point
 ///   LP_SOLVER=ortools:glop          OR-Tools GLOP linear solver
 ///   LP_SOLVER=ortools:pdlp          OR-Tools PDLP first-order LP solver
+///   LP_SOLVER=glpk|scip|cbc|clp|soplex|lp-solve  local Rust CLI bridge
+///   LP_SOLVER=gurobi|cplex|xpress|lindo           local commercial CLI bridge
 /// ```
+///
+/// `scipy:highs`, `scipy:highs-ipm`, and `scipy:highs-ds` remain accepted as
+/// legacy aliases for the corresponding HiGHS external methods.
 #[derive(Clone, Debug, Default)]
 pub struct LPSolver {
     pub opts: LpSolverOptions,
@@ -4116,6 +4176,26 @@ impl Transform<LPProblem, LPSolution> for LPSolver {
         }
         if let Some(method) = ortools_linear_method(choice) {
             let ext = ExternalSolver::new(self.opts.external(Some(method.to_string()))).run(&input);
+            if ext.status != LPStatus::NumericalError {
+                return ext;
+            }
+            eprintln!(
+                "[lp.solveLP] external solver '{choice}' unavailable/failed ({}); falling back to internal simplex.",
+                ext.message.as_deref().unwrap_or("unknown")
+            );
+            let mut fallback = run_internal_simplex(&input, &self.opts.internal());
+            let prefix = match &fallback.message {
+                Some(m) => format!("{m} | "),
+                None => String::new(),
+            };
+            fallback.message = Some(format!(
+                "{prefix}external solver unavailable, fell back to internal: {}",
+                ext.message.as_deref().unwrap_or("")
+            ));
+            return fallback;
+        }
+        if rust_external_lp_cli_method(choice).is_some() {
+            let ext = ExternalSolver::new(self.opts.external(Some(choice.to_string()))).run(&input);
             if ext.status != LPStatus::NumericalError {
                 return ext;
             }
@@ -4650,11 +4730,15 @@ mod tests {
         assert_eq!(external_solver_label("ortools:GLOP"), "ortools:glop");
         assert_eq!(external_solver_label("pdlp"), "ortools:pdlp");
         assert_eq!(external_solver_label("ortools-PDLP"), "ortools:pdlp");
-        assert_eq!(external_solver_label("highs"), "scipy:highs");
+        assert_eq!(external_solver_label("highs"), "highs:cli");
+        assert_eq!(external_solver_label("scipy:highs"), "scipy:highs");
+        assert_eq!(external_solver_label("glpk"), "glpk:cli");
+        assert_eq!(external_solver_label("cbc"), "cbc:cli");
+        assert_eq!(external_solver_label("gurobi"), "gurobi:cli");
     }
 
     #[test]
-    fn rust_external_lp_cli_options_cover_highs_without_python_override() {
+    fn rust_external_lp_cli_options_cover_local_solvers_without_python_override() {
         if lp_external_bridge_forced_python() {
             eprintln!("skipping Rust LP CLI option test because LP_EXTERNAL_BRIDGE=python");
             return;
@@ -4676,6 +4760,25 @@ mod tests {
         let ipm = rust_external_lp_cli_options("highs_ipm", &opts).expect("highs-ipm should map");
         assert_eq!(ipm.solver, ExternalLinearCliSolver::Highs);
         assert_eq!(ipm.lp_algorithm, Some(ExternalLinearCliLpAlgorithm::Ipm));
+
+        for (method, solver) in [
+            ("glpk", ExternalLinearCliSolver::Glpk),
+            ("glpsol", ExternalLinearCliSolver::Glpk),
+            ("scip", ExternalLinearCliSolver::Scip),
+            ("cbc", ExternalLinearCliSolver::Cbc),
+            ("clp", ExternalLinearCliSolver::Clp),
+            ("soplex", ExternalLinearCliSolver::Soplex),
+            ("lp_solve", ExternalLinearCliSolver::LpSolve),
+            ("gurobi", ExternalLinearCliSolver::Gurobi),
+            ("cplex", ExternalLinearCliSolver::Cplex),
+            ("xpress", ExternalLinearCliSolver::Xpress),
+            ("lindo", ExternalLinearCliSolver::Lindo),
+        ] {
+            let mapped = rust_external_lp_cli_options(method, &opts)
+                .unwrap_or_else(|| panic!("{method} should map to the Rust CLI bridge"));
+            assert_eq!(mapped.solver, solver, "{method}");
+            assert_eq!(mapped.lp_algorithm, None, "{method}");
+        }
 
         let python_opts = ExternalSolverOptions {
             python: Some("python3".to_string()),
@@ -4717,7 +4820,7 @@ mod tests {
         };
         let sol = solve_lp_external(&p, &ExternalSolverOptions::default());
         assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
-        assert_eq!(sol.solver, "scipy:highs");
+        assert_eq!(sol.solver, "highs:cli");
         assert!((sol.objective - 7.0).abs() <= 1e-7, "{sol:?}");
         assert!((sol.x[0] - 4.0).abs() <= 1e-7, "{:?}", sol.x);
         assert!((sol.x[1] - 3.0).abs() <= 1e-7, "{:?}", sol.x);

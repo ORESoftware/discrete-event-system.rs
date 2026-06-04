@@ -3,8 +3,8 @@
 //! Thin runner: packet-switched computer-network DES, prints a flow summary for
 //! a chosen scenario. `process.env.SCENARIO` → `std::env::var`.
 //!
-//! The TS delegates to `./general/computer-network`; this runner uses the real
-//! Rust `crate::des::general::computer_network` problem builders and DES kernel.
+//! PORT NOTE: the TS delegates to `./general/computer-network`; this runner now
+//! uses the real Rust `crate::des::general::computer_network` implementation.
 
 #![allow(dead_code)]
 
@@ -19,10 +19,6 @@ fn fmt(x: f64, digits: usize) -> String {
     } else {
         "n/a".to_string()
     }
-}
-
-fn count(x: f64) -> String {
-    format!("{:.0}", x)
 }
 
 fn routing_metric_label(metric: NetworkRoutingMetric) -> &'static str {
@@ -67,11 +63,11 @@ pub fn run() {
     println!();
 
     println!("## Flow summary");
-    println!("  generated packets: {}", count(result.generated_packets));
-    println!("  delivered packets: {}", count(result.delivered_packets));
-    println!("  dropped packets:   {}", count(result.dropped_packets));
-    println!("  active at stop:    {}", count(result.active_packets));
-    println!("  max active:        {}", count(result.max_active_packets));
+    println!("  generated packets: {}", result.generated_packets);
+    println!("  delivered packets: {}", result.delivered_packets);
+    println!("  dropped packets:   {}", result.dropped_packets);
+    println!("  active at stop:    {}", result.active_packets);
+    println!("  max active:        {}", result.max_active_packets);
     println!("  delivery ratio:    {}", fmt(result.delivery_ratio, 4));
     println!(
         "  offered load:      {} Mbps",
@@ -98,9 +94,9 @@ pub fn run() {
             f.protocol.as_str(),
             f.source,
             f.destination,
-            count(f.delivered_packets),
-            count(f.generated_packets),
-            count(f.dropped_packets),
+            f.delivered_packets,
+            f.generated_packets,
+            f.dropped_packets,
             fmt(f.mean_time_in_system_ms, 2),
             fmt(f.goodput_mbps, 3),
             fmt(f.total_cost, 6)
@@ -115,7 +111,7 @@ pub fn run() {
             l.id,
             l.from,
             l.to,
-            count(l.delivered_packets),
+            l.delivered_packets,
             fmt(l.utilization, 3),
             fmt(l.avg_in_flight, 2),
             fmt(l.mean_queue_delay_ms, 2),
@@ -140,7 +136,7 @@ pub fn run() {
             fmt(b.avg_queue, 2),
             fmt(b.max_queue, 0),
             fmt(b.mean_queue_delay_ms, 2),
-            count(b.dropped_packets)
+            b.dropped_packets
         );
     }
 
@@ -149,10 +145,7 @@ pub fn run() {
     for s in result.time_series.iter().take(6) {
         println!(
             "  t={:>4}ms active={:>4} delivered={:>4} dropped={:>4}",
-            count(s.t_ms),
-            count(s.active_packets),
-            count(s.delivered_packets),
-            count(s.dropped_packets)
+            s.t_ms, s.active_packets, s.delivered_packets, s.dropped_packets
         );
     }
     if result.time_series.len() > 8 {
@@ -168,10 +161,7 @@ pub fn run() {
         {
             println!(
                 "  t={:>4}ms active={:>4} delivered={:>4} dropped={:>4}",
-                count(s.t_ms),
-                count(s.active_packets),
-                count(s.delivered_packets),
-                count(s.dropped_packets)
+                s.t_ms, s.active_packets, s.delivered_packets, s.dropped_packets
             );
         }
     }

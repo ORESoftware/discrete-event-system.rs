@@ -1030,8 +1030,8 @@ mod tests {
         let mut command = Command::new("sleep");
         command.arg("1");
 
-        let output = run_ip_mip_external_command_with_timeout(&mut command, 10)
-            .expect("timeout output");
+        let output =
+            run_ip_mip_external_command_with_timeout(&mut command, 10).expect("timeout output");
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(!output.status.success());

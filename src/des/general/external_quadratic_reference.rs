@@ -8,8 +8,9 @@
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1096,6 +1097,42 @@ fn reference_script() -> PathBuf {
     root.join("scripts").join("qp_reference.py")
 }
 
+fn quadratic_reference_timeout_ms() -> u64 {
+    std::env::var("QUADRATIC_REFERENCE_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_quadratic_reference_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll qp_reference.py: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for qp_reference.py: {err}"))
+}
+
 fn run_quadratic_reference_json(
     payload: Value,
     opts: &ExternalQuadraticReferenceOptions,
@@ -1134,16 +1171,22 @@ fn run_quadratic_reference_json(
             );
         }
     }
-    let output = match child.wait_with_output() {
+    let timeout_ms = quadratic_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_quadratic_reference_output(child, timeout_ms) {
         Ok(output) => output,
-        Err(err) => {
-            return numerical_error(
-                format!("failed to wait for qp_reference.py: {err}"),
-                started.elapsed().as_secs_f64() * 1000.0,
-            )
-        }
+        Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("qp_reference.py timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; qp_reference.py timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     match serde_json::from_slice::<QuadraticReferencePayload>(&output.stdout) {
         Ok(parsed) => ExternalQuadraticReferenceSolution {
             status: status_from_str(&parsed.status),
@@ -1163,7 +1206,7 @@ fn run_quadratic_reference_json(
                 if output.status.success() {
                     "ok".to_string()
                 } else {
-                    String::from_utf8_lossy(&output.stderr).trim().to_string()
+                    stderr.clone()
                 }
             }),
             elapsed_ms,
@@ -1171,7 +1214,7 @@ fn run_quadratic_reference_json(
         Err(err) => numerical_error(
             format!(
                 "failed to parse qp_reference.py output: {err}; stderr={}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr
             ),
             elapsed_ms,
         ),
@@ -1317,6 +1360,7 @@ pub fn solve_miqcp_with_external_reference(
 
 #[cfg(test)]
 mod tests {
+    use super::wait_for_quadratic_reference_output;
     use crate::des::general::qp::{
         QuadraticConstraint, QuadraticProgram, SecondOrderCone, SecondOrderConeProgram,
     };
@@ -1328,6 +1372,7 @@ mod tests {
         ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceSolution,
         ExternalQuadraticReferenceSolver, ExternalQuadraticReferenceStatus,
     };
+    use std::process::{Command, Stdio};
 
     #[test]
     fn solver_args_cover_python_bridge_names() {
@@ -1593,5 +1638,21 @@ mod tests {
             .objective
             .is_some_and(|objective| { (objective - 9.0).abs() <= 1e-7 }));
         assert_eq!(solution.enumerated, Some(21));
+    }
+
+    #[test]
+    fn quadratic_python_bridge_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_quadratic_reference_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 }

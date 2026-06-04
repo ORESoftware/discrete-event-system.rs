@@ -564,13 +564,12 @@ fn run_knapsack_reference_json(
         }
     }
     let timeout_ms = knapsack_reference_timeout_ms();
-    let (mut output, timed_out) =
-        match wait_for_knapsack_reference_output(child, timeout_ms) {
-            Ok(output) => output,
-            Err(err) => {
-                return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
-            }
-        };
+    let (mut output, timed_out) = match wait_for_knapsack_reference_output(child, timeout_ms) {
+        Ok(output) => output,
+        Err(err) => {
+            return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
     if timed_out {
         let timeout_message = format!("knapsack_reference.py timed out after {timeout_ms}ms");
         if output.stderr.is_empty() {

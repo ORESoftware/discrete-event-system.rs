@@ -11,7 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::des::general::external_linear_cli::{
     solve_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliBranchRule,
@@ -9863,9 +9865,9 @@ fn run_external_math_program(
             .map_err(|e| MathProgramError::External(format!("external stdin failed: {e}")))?;
     }
 
-    let out = child
-        .wait_with_output()
-        .map_err(|e| MathProgramError::External(format!("external solver wait failed: {e}")))?;
+    let timeout_ms = math_program_external_timeout_ms();
+    let (out, timed_out) = wait_for_math_program_external_output(child, timeout_ms)
+        .map_err(MathProgramError::External)?;
 
     if out.status.code() != Some(0) {
         let code = out
@@ -9873,7 +9875,16 @@ fn run_external_math_program(
             .code()
             .map(|v| v.to_string())
             .unwrap_or_else(|| "null".to_string());
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = if timed_out {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.trim().is_empty() {
+                format!("external math-program solver timed out after {timeout_ms}ms")
+            } else {
+                format!("{stderr}; external math-program solver timed out after {timeout_ms}ms")
+            }
+        } else {
+            String::from_utf8_lossy(&out.stderr).to_string()
+        };
         return Ok(json!({
             "status": "numerical-error",
             "x": [],
@@ -9884,6 +9895,46 @@ fn run_external_math_program(
 
     serde_json::from_slice(&out.stdout)
         .map_err(|e| MathProgramError::External(format!("external JSON parse failed: {e}")))
+}
+
+fn math_program_external_timeout_ms() -> u64 {
+    std::env::var("MATH_PROGRAM_EXTERNAL_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_math_program_external_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "failed to poll external math-program solver: {err}"
+                ))
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("external solver wait failed: {err}"))
 }
 
 fn encode_lp_problem(lp: &LPProblem) -> Value {
@@ -17937,9 +17988,26 @@ mod tests {
     use crate::des::general::ip_mip_des::{
         BranchRule, ConcreteLpRelaxationAlgorithm, LpRelaxationAlgorithm, TraceAction,
     };
+    use std::process::{Command, Stdio};
 
     fn assert_close(a: f64, b: f64) {
         assert!((a - b).abs() <= 1e-6, "left={a}, right={b}");
+    }
+
+    #[test]
+    fn math_program_external_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_math_program_external_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 
     #[test]

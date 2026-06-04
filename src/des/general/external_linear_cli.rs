@@ -10,9 +10,10 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
@@ -2104,7 +2105,8 @@ pub fn solve_linear_cli_json(
         }
     }
 
-    let output = match child.wait_with_output() {
+    let timeout_ms = linear_cli_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_linear_cli_reference_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => {
             return external_cli_failure(
@@ -2116,12 +2118,22 @@ pub fn solve_linear_cli_json(
         }
     };
     let elapsed = elapsed_ms(t0);
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("linear_cli_reference.py timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; linear_cli_reference.py timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
 
     if !output.status.success() {
         return external_cli_failure(
             ExternalLinearCliStatus::NumericalError,
             bridge_solver,
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            stderr,
             elapsed,
         );
     }
@@ -2181,7 +2193,7 @@ pub fn solve_linear_cli_json(
             format!(
                 "failed to parse local CLI bridge output: {err}; stdout='{}'; stderr='{}'",
                 String::from_utf8_lossy(&output.stdout).trim(),
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr
             ),
             elapsed,
         ),
@@ -2767,13 +2779,7 @@ fn solve_native_plain_cli_json_direct(
     let use_clp = kind == ExternalLinearCliKind::Lp && should_use_native_clp_cli(opts);
     let use_soplex = kind == ExternalLinearCliKind::Lp && should_use_native_soplex_cli(opts);
     let use_lp_solve = should_use_native_lp_solve_cli(kind, opts);
-    if !use_highs
-        && !use_glpk
-        && !use_scip
-        && !use_cbc
-        && !use_clp
-        && !use_soplex
-        && !use_lp_solve
+    if !use_highs && !use_glpk && !use_scip && !use_cbc && !use_clp && !use_soplex && !use_lp_solve
     {
         return None;
     }
@@ -7370,6 +7376,42 @@ fn elapsed_ms(t0: Instant) -> f64 {
     t0.elapsed().as_secs_f64() * 1000.0
 }
 
+fn linear_cli_reference_timeout_ms() -> u64 {
+    std::env::var("LINEAR_CLI_REFERENCE_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_linear_cli_reference_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll local CLI bridge: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed while waiting for local CLI bridge: {err}"))
+}
+
 fn f64_value(value: f64) -> Value {
     Number::from_f64(value)
         .map(Value::Number)
@@ -7557,6 +7599,7 @@ fn option_strings(values: Option<&Vec<String>>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::wait_for_linear_cli_reference_output;
     use crate::des::general::external_linear_cli::{
         external_linear_cli_command, external_linear_cli_command_with_options,
         external_linear_cli_solver_manifest, external_linear_cli_solver_specs,
@@ -7582,6 +7625,7 @@ mod tests {
     };
     use crate::des::general::lp::{LPProblem, Sense};
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn lp_payload_wraps_problem_for_bridge() {
@@ -7596,6 +7640,22 @@ mod tests {
         assert_eq!(payload["lp"]["sense"], "min");
         assert_eq!(payload["lp"]["c"][1], 2.0);
         assert!(payload["lp"]["lb"].is_null());
+    }
+
+    #[test]
+    fn linear_cli_python_bridge_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_linear_cli_reference_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 
     #[test]

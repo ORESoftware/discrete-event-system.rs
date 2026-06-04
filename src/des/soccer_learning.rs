@@ -15,8 +15,8 @@ use serde_json::Value;
 use crate::des::general::soccer::{
     MatchConfig, MatchSummary, SoccerMatch, SoccerNeuralNetworkSnapshot, SoccerQEntry,
     SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey, SoccerQTargetEntry,
-    SoccerSelfPlayEpisodeSummary,
-    SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary, SoccerTeamQPolicies, Team,
+    SoccerSelfPlayEpisodeSummary, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary,
+    SoccerTeamQPolicies, Team,
 };
 
 pub const SOCCER_LEARNING_FIXED_SCALE: i64 = 1_000_000;
@@ -510,7 +510,8 @@ where
 
         match game_result {
             Ok(game) => {
-                let merged = merge_soccer_policy_deltas(&policies, &[game.delta.clone()], 1.0)?;
+                let merged =
+                    merge_soccer_policy_deltas(&policies, std::slice::from_ref(&game.delta), 1.0)?;
                 policies = merged;
                 policies.prune(
                     config.prune_action_entries_per_team,

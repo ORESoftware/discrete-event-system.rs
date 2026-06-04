@@ -10,8 +10,9 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Broad ecosystem for an optional optimization integration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1081,6 +1082,57 @@ pub fn probe_external_optimization_tools() -> Vec<ExternalOptimizationProbe> {
         .collect()
 }
 
+fn optimization_ecosystem_probe_timeout_ms() -> u64 {
+    env::var("EXTERNAL_OPTIMIZATION_ECOSYSTEM_PROBE_TIMEOUT_MS")
+        .or_else(|_| env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000)
+}
+
+fn wait_for_optimization_ecosystem_probe_output(
+    mut child: Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let timeout = Duration::from_millis(timeout_ms);
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map(|output| (output, false))
+                    .map_err(|err| format!("failed to wait for ecosystem probe: {err}"));
+            }
+            Ok(None) => {}
+            Err(err) => return Err(format!("failed to poll ecosystem probe: {err}")),
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            return child
+                .wait_with_output()
+                .map(|output| (output, true))
+                .map_err(|err| format!("failed to collect timed-out ecosystem probe: {err}"));
+        }
+
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn run_optimization_ecosystem_probe_command(
+    command: &mut Command,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to start ecosystem probe: {err}"))?;
+    wait_for_optimization_ecosystem_probe_output(child, timeout_ms)
+}
+
 fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
     let t0 = Instant::now();
     let primary_env_var = tool.env_var();
@@ -1116,14 +1168,15 @@ fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe 
     };
 
     let mut last_error = String::new();
+    let timeout_ms = optimization_ecosystem_probe_timeout_ms();
     for class_name in tool.java_probe_classes() {
-        match Command::new(&javap)
+        let mut command = Command::new(&javap);
+        command
             .arg("-classpath")
             .arg(&classpath)
-            .arg(class_name)
-            .output()
-        {
-            Ok(output) if output.status.success() => {
+            .arg(class_name);
+        match run_optimization_ecosystem_probe_command(&mut command, timeout_ms) {
+            Ok((output, false)) if output.status.success() => {
                 return probe_result(
                     tool,
                     ExternalOptimizationProbeStatus::Ready,
@@ -1137,8 +1190,17 @@ fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe 
                     ),
                 );
             }
-            Ok(output) => {
-                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Ok((output, timed_out)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                last_error = if timed_out {
+                    if stderr.is_empty() {
+                        format!("javap probe timed out after {timeout_ms}ms")
+                    } else {
+                        format!("{stderr}; javap probe timed out after {timeout_ms}ms")
+                    }
+                } else {
+                    stderr
+                };
             }
             Err(err) => {
                 last_error = err.to_string();
@@ -1187,14 +1249,16 @@ fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
     };
     let python_path_roots = python_module_search_paths_from_install_dirs(tool);
     let python_path = joined_python_path(&python_path_roots);
+    let timeout_ms = optimization_ecosystem_probe_timeout_ms();
+    let mut last_error = String::new();
     for module in tool.python_modules() {
         let mut command = Command::new(&python);
         command.arg("-c").arg(format!("import {module}"));
         if let Some(python_path) = python_path.as_ref() {
             command.env("PYTHONPATH", python_path);
         }
-        match command.output() {
-            Ok(output) if output.status.success() => {
+        match run_optimization_ecosystem_probe_command(&mut command, timeout_ms) {
+            Ok((output, false)) if output.status.success() => {
                 return probe_result(
                     tool,
                     ExternalOptimizationProbeStatus::Ready,
@@ -1208,7 +1272,21 @@ fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
                     ),
                 );
             }
-            Ok(_) | Err(_) => {}
+            Ok((output, timed_out)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                last_error = if timed_out {
+                    if stderr.is_empty() {
+                        format!("Python import probe timed out after {timeout_ms}ms")
+                    } else {
+                        format!("{stderr}; Python import probe timed out after {timeout_ms}ms")
+                    }
+                } else {
+                    stderr
+                };
+            }
+            Err(err) => {
+                last_error = err;
+            }
         }
     }
     probe_result(
@@ -1218,11 +1296,19 @@ fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
         env_var,
         None,
         elapsed_ms(t0),
-        format!(
-            "{} Python modules {:?} are not importable; set {env_var}",
-            tool.display_name(),
-            tool.python_modules()
-        ),
+        if last_error.is_empty() {
+            format!(
+                "{} Python modules {:?} are not importable; set {env_var}",
+                tool.display_name(),
+                tool.python_modules()
+            )
+        } else {
+            format!(
+                "{} Python modules {:?} are not importable; set {env_var}: {last_error}",
+                tool.display_name(),
+                tool.python_modules()
+            )
+        },
     )
 }
 
@@ -1738,6 +1824,24 @@ fn elapsed_ms(t0: Instant) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ecosystem_probe_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_optimization_ecosystem_probe_output(child, 10).expect("timeout output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(timed_out);
+        assert!(!output.status.success());
+        assert!(stderr.is_empty());
+    }
 
     #[test]
     fn ecosystem_tool_metadata_covers_supported_languages() {

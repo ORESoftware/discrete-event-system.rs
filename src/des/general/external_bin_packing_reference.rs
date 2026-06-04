@@ -560,18 +560,14 @@ fn run_bin_packing_reference_json(
         }
     }
     let timeout_ms = bin_packing_reference_timeout_ms();
-    let (mut output, timed_out) =
-        match wait_for_bin_packing_reference_output(child, timeout_ms) {
-            Ok(output) => output,
-            Err(err) => {
-                return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
-            }
-        };
+    let (mut output, timed_out) = match wait_for_bin_packing_reference_output(child, timeout_ms) {
+        Ok(output) => output,
+        Err(err) => {
+            return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
     if timed_out {
-        let timeout_message = format!(
-            "bin_packing_reference.py timed out after {}ms",
-            timeout_ms
-        );
+        let timeout_message = format!("bin_packing_reference.py timed out after {}ms", timeout_ms);
         if output.stderr.is_empty() {
             output.stderr = timeout_message.into_bytes();
         } else {

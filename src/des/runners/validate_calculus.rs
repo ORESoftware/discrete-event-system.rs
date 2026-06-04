@@ -21,7 +21,9 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::des::general::equation_to_stations::{
     build_field1d, build_ode_system, solve_poisson2d, to_function, Bc, Field1DFamily,
@@ -56,6 +58,46 @@ fn root() -> PathBuf {
     }
 }
 
+fn calculus_python_timeout_ms() -> u64 {
+    std::env::var("CALCULUS_PY_TIMEOUT_MS")
+        .ok()
+        .or_else(|| std::env::var("PYTHON_REFERENCE_TIMEOUT_MS").ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_calculus_python_output(
+    mut child: Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let timeout = Duration::from_millis(timeout_ms);
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map(|output| (output, false))
+                    .map_err(|err| format!("failed to wait for optional scipy sidecar: {err}"));
+            }
+            Ok(None) => {}
+            Err(err) => return Err(format!("failed to poll optional scipy sidecar: {err}")),
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            return child
+                .wait_with_output()
+                .map(|output| (output, true))
+                .map_err(|err| {
+                    format!("failed to collect timed-out optional scipy sidecar: {err}")
+                });
+        }
+
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// `runPython(env)` — runs the optional scipy sidecar and parses the last stdout line.
 fn run_python(extra_env: &[(&str, String)]) -> Result<Option<JsonValue>, String> {
     let Some(python) = std::env::var("CALCULUS_PY").ok() else {
@@ -70,9 +112,24 @@ fn run_python(extra_env: &[(&str, String)]) -> Result<Option<JsonValue>, String>
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to run optional scipy sidecar: {e}"))?;
+    let timeout_ms = calculus_python_timeout_ms();
+    let child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to start optional scipy sidecar: {e}"))?;
+    let (mut out, timed_out) = wait_for_calculus_python_output(child, timeout_ms)?;
+    if timed_out {
+        let timeout_message = format!("optional scipy sidecar timed out after {timeout_ms}ms");
+        if out.stderr.is_empty() {
+            out.stderr = timeout_message.into_bytes();
+        } else {
+            let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            stderr.push_str("; ");
+            stderr.push_str(&timeout_message);
+            out.stderr = stderr.into_bytes();
+        }
+    }
     if !out.status.success() {
         return Err(format!(
             "optional scipy sidecar exited with status {:?}: {}",
@@ -596,5 +653,28 @@ pub fn run() -> i32 {
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calculus_python_sidecar_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_calculus_python_output(child, 10).expect("timeout output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(timed_out);
+        assert!(!output.status.success());
+        assert!(stderr.is_empty());
     }
 }

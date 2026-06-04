@@ -15,8 +15,9 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExternalOptimizationTool {
@@ -2061,7 +2062,9 @@ pub fn run_external_optimization_adapter(
             };
         }
     }
-    let output = match child.wait_with_output() {
+    let timeout_ms = external_optimization_adapter_timeout_ms();
+    let (output, timed_out) = match wait_for_external_optimization_adapter_output(child, timeout_ms)
+    {
         Ok(output) => output,
         Err(err) => {
             return ExternalOptimizationAdapterRun {
@@ -2074,13 +2077,23 @@ pub fn run_external_optimization_adapter(
         }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stderr = if timed_out {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            format!("external optimization adapter timed out after {timeout_ms}ms")
+        } else {
+            format!("{stderr}; external optimization adapter timed out after {timeout_ms}ms")
+        }
+    } else {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    };
     if !output.status.success() {
         return ExternalOptimizationAdapterRun {
             tool: opts.tool,
             status: ExternalOptimizationAdapterStatus::Failed,
             output: None,
             elapsed_ms,
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            message: stderr,
         };
     }
     match serde_json::from_slice::<Value>(&output.stdout) {
@@ -2099,6 +2112,46 @@ pub fn run_external_optimization_adapter(
             message: err.to_string(),
         },
     }
+}
+
+fn external_optimization_adapter_timeout_ms() -> u64 {
+    env::var("EXTERNAL_OPTIMIZATION_ADAPTER_TIMEOUT_MS")
+        .or_else(|_| env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_external_optimization_adapter_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "failed to poll external optimization adapter: {err}"
+                ))
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for external optimization adapter: {err}"))
 }
 
 pub fn external_optimization_normalized_result_from_value(
@@ -2675,6 +2728,7 @@ fn numeric_vector_from_value(value: &Value) -> Option<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
+    use super::wait_for_external_optimization_adapter_output;
     use crate::des::general::external_optimization_tools::{
         adapter_env_names, artifact_env_names, external_optimization_command_dir_env_names,
         external_optimization_comparison_report_to_json,
@@ -2691,6 +2745,7 @@ mod tests {
     };
     use serde_json::json;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
@@ -2929,6 +2984,22 @@ mod tests {
             ExternalOptimizationTool::QsoptExCli.linear_cli_solver(),
             Some(ExternalLinearCliSolver::QsoptEx)
         );
+    }
+
+    #[test]
+    fn external_optimization_adapter_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_external_optimization_adapter_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 
     #[test]

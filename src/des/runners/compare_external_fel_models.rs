@@ -53,6 +53,8 @@ use super::external_program::{
     ParamValue,
 };
 
+const ENABLE_EXTERNAL_REFERENCES_ENV: &str = "COMPARE_EXTERNAL_FEL_ENABLE_EXTERNAL_REFERENCES";
+
 // =============================================================================
 // Smart-traffic source/sink comparison params + summary.
 // =============================================================================
@@ -295,27 +297,56 @@ fn compare_traffic() -> Vec<EngineReport> {
     internal_params.scheduled_trips_len = internal_trips.len();
     let internal = run_smart_traffic_flow(&internal_params, &network, &internal_trips);
 
-    let mut reports: Vec<EngineReport> = vec![
-        run_traffic_external(
-            "Python traffic FEL",
-            TRAFFIC_FEL_REFERENCE_ID,
-            &input_path_str,
-            &internal,
-        ),
-        run_traffic_external(
-            "SimPy",
-            TRAFFIC_SIMPY_REFERENCE_ID,
-            &input_path_str,
-            &internal,
-        ),
-        run_traffic_external("Ciw", TRAFFIC_CIW_REFERENCE_ID, &input_path_str, &internal),
-        run_traffic_external(
-            "SUMO",
-            TRAFFIC_SUMO_REFERENCE_ID,
-            &input_path_str,
-            &internal,
-        ),
-    ];
+    let mut reports: Vec<EngineReport> = if external_fel_references_enabled() {
+        vec![
+            run_traffic_external(
+                "Python traffic FEL",
+                TRAFFIC_FEL_REFERENCE_ID,
+                &input_path_str,
+                &internal,
+            ),
+            run_traffic_external(
+                "SimPy",
+                TRAFFIC_SIMPY_REFERENCE_ID,
+                &input_path_str,
+                &internal,
+            ),
+            run_traffic_external("Ciw", TRAFFIC_CIW_REFERENCE_ID, &input_path_str, &internal),
+            run_traffic_external(
+                "SUMO",
+                TRAFFIC_SUMO_REFERENCE_ID,
+                &input_path_str,
+                &internal,
+            ),
+        ]
+    } else {
+        vec![
+            skipped_external_reference_report(
+                "traffic",
+                "five-intersection-scheduled-trips",
+                "Python traffic FEL",
+                &input_path_str,
+            ),
+            skipped_external_reference_report(
+                "traffic",
+                "five-intersection-scheduled-trips",
+                "SimPy",
+                &input_path_str,
+            ),
+            skipped_external_reference_report(
+                "traffic",
+                "five-intersection-scheduled-trips",
+                "Ciw",
+                &input_path_str,
+            ),
+            skipped_external_reference_report(
+                "traffic",
+                "five-intersection-scheduled-trips",
+                "SUMO",
+                &input_path_str,
+            ),
+        ]
+    };
     reports.insert(
         0,
         EngineReport {
@@ -346,6 +377,45 @@ fn run_external_module_safe(id: &str, params: &ExternalModuleParams) -> External
             stderr: e,
             module_id: Some(id.to_string()),
         },
+    }
+}
+
+fn external_fel_references_enabled() -> bool {
+    std::env::var(ENABLE_EXTERNAL_REFERENCES_ENV)
+        .map(|value| external_fel_reference_flag_value_enabled(&value))
+        .unwrap_or(false)
+}
+
+fn external_fel_reference_flag_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
+fn skipped_external_reference_report(
+    domain: &str,
+    scenario: &str,
+    engine: &str,
+    input_path: &str,
+) -> EngineReport {
+    EngineReport {
+        domain: domain.to_string(),
+        scenario: scenario.to_string(),
+        engine: engine.to_string(),
+        status: "skipped".to_string(),
+        input_path: input_path.to_string(),
+        output_path: None,
+        checks: vec![check_row(
+            "external reference disabled by default",
+            true,
+            format!(
+                "set {ENABLE_EXTERNAL_REFERENCES_ENV}=1 to run Python-backed external references"
+            ),
+        )],
+        notes: vec![
+            "Rust internal scenario ran; external reference process was not spawned".to_string(),
+        ],
     }
 }
 
@@ -551,6 +621,15 @@ fn compare_computer_network() -> Vec<EngineReport> {
         let _ = fs::write(&input_path, input.to_string_pretty(2));
 
         let internal = run_computer_network_simulation(&problem);
+        if !external_fel_references_enabled() {
+            reports.push(skipped_external_reference_report(
+                "computer-network",
+                name,
+                "Python computer-network FEL",
+                &input_path.display().to_string(),
+            ));
+            continue;
+        }
         let mut params = ExternalModuleParams::new();
         params.insert(
             "problem".to_string(),
@@ -1380,4 +1459,26 @@ fn render_markdown(reports: &[EngineReport], root: &Path) -> String {
 
 fn escape_markdown_cell(value: &str) -> String {
     value.replace('|', "\\|")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_fel_reference_flag_requires_explicit_enable_value() {
+        for value in ["1", "true", "TRUE", " yes ", "y", "on"] {
+            assert!(
+                external_fel_reference_flag_value_enabled(value),
+                "{value:?} should enable external FEL references"
+            );
+        }
+
+        for value in ["", "0", "false", "no", "off", "python", "auto", "fallback"] {
+            assert!(
+                !external_fel_reference_flag_value_enabled(value),
+                "{value:?} should keep external Python references disabled"
+            );
+        }
+    }
 }

@@ -8,18 +8,34 @@ use std::error::Error;
 use std::fs;
 use std::io::{BufWriter, Error as IoError, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
-    MatchConfig, SoccerQPolicyOptions, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
-    SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
+    MatchConfig, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig, SoccerQPolicyOptions,
+    SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights,
+    SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
     run_soccer_learning_queue_with_observer, soccer_self_play_artifact_from_queue_report,
-    SoccerLearningQueueRunnerConfig,
+    SoccerLearningCompletedGame, SoccerLearningQueueRunnerConfig,
 };
-use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
+use des_engine::des::soccer_learning_pg::{
+    SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
+};
 use serde::Serialize;
+
+const DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
+const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 200;
+
+#[derive(Clone, Debug)]
+struct PendingPostgresCompletedRun {
+    completed_game: SoccerLearningCompletedGame,
+    base_policy_version_id: Option<String>,
+    output_policy_version_id: Option<String>,
+    generation: i32,
+    policy_version_written: bool,
+}
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
@@ -34,6 +50,16 @@ fn env_usize(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
     };
     value.parse::<usize>().map_err(|_| {
         invalid_data(format!("{name} must be an unsigned integer, got {value:?}")).into()
+    })
+}
+
+fn env_usize_alias(primary: &str, alias: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    let Some(value) = env_value(primary).or_else(|| env_value(alias)) else {
+        return Ok(default);
+    };
+    value.parse::<usize>().map_err(|_| {
+        invalid_data(format!("{primary}/{alias} must be an unsigned integer, got {value:?}"))
+            .into()
     })
 }
 
@@ -60,6 +86,25 @@ fn env_f64(name: &str, default: f64) -> Result<f64, Box<dyn Error>> {
     }
 }
 
+fn env_f64_alias(primary: &str, alias: &str, default: f64) -> Result<f64, Box<dyn Error>> {
+    let Some(value) = env_value(primary).or_else(|| env_value(alias)) else {
+        return Ok(default);
+    };
+    let parsed = value.parse::<f64>().map_err(|_| {
+        invalid_data(format!(
+            "{primary}/{alias} must be a finite number, got {value:?}"
+        ))
+    })?;
+    if parsed.is_finite() {
+        Ok(parsed)
+    } else {
+        Err(invalid_data(format!(
+            "{primary}/{alias} must be finite, got {value:?}"
+        ))
+        .into())
+    }
+}
+
 fn env_bool(name: &str, default: bool) -> Result<bool, Box<dyn Error>> {
     let Some(value) = env_value(name) else {
         return Ok(default);
@@ -69,6 +114,103 @@ fn env_bool(name: &str, default: bool) -> Result<bool, Box<dyn Error>> {
         "0" | "false" | "no" | "n" | "off" => Ok(false),
         _ => Err(invalid_data(format!("{name} must be a boolean, got {value:?}")).into()),
     }
+}
+
+fn env_bool_alias(primary: &str, alias: &str, default: bool) -> Result<bool, Box<dyn Error>> {
+    let Some(value) = env_value(primary).or_else(|| env_value(alias)) else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" => Ok(false),
+        _ => Err(invalid_data(format!("{primary}/{alias} must be a boolean, got {value:?}"))
+            .into()),
+    }
+}
+
+fn env_neural_learning_backend(
+    default: SoccerNeuralLearningBackend,
+) -> Result<SoccerNeuralLearningBackend, Box<dyn Error>> {
+    let Some(value) =
+        env_value("SOCCER_NEURAL_LEARNING_BACKEND").or_else(|| env_value("SOCCER_NEURAL_BACKEND"))
+    else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "threaded" | "thread" | "worker" => Ok(SoccerNeuralLearningBackend::Threaded),
+        "inline" | "sync" => Ok(SoccerNeuralLearningBackend::Inline),
+        _ => Err(invalid_data(format!(
+            "SOCCER_NEURAL_LEARNING_BACKEND/SOCCER_NEURAL_BACKEND must be inline or threaded, got {value:?}"
+        ))
+        .into()),
+    }
+}
+
+fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Error>> {
+    let default = SoccerNeuralLearningConfig {
+        enabled: true,
+        backend: SoccerNeuralLearningBackend::Threaded,
+        max_pending_batches: 128,
+        ..SoccerNeuralLearningConfig::default()
+    };
+    Ok(SoccerNeuralLearningConfig {
+        enabled: env_bool_alias(
+            "SOCCER_NEURAL_LEARNING_ENABLED",
+            "SOCCER_NEURAL_LEARNING",
+            default.enabled,
+        )?,
+        backend: env_neural_learning_backend(default.backend)?,
+        learning_rate: env_f64_alias(
+            "SOCCER_NEURAL_LEARNING_RATE",
+            "SOCCER_NEURAL_RATE",
+            default.learning_rate,
+        )?,
+        batch_size: env_usize_alias(
+            "SOCCER_NEURAL_BATCH_SIZE",
+            "SOCCER_NEURAL_LEARNING_BATCH_SIZE",
+            default.batch_size,
+        )?,
+        train_every_ticks: env_usize_alias(
+            "SOCCER_NEURAL_TRAIN_EVERY_TICKS",
+            "SOCCER_NEURAL_LEARNING_TRAIN_EVERY_TICKS",
+            default.train_every_ticks,
+        )?,
+        max_batches_per_tick: env_usize_alias(
+            "SOCCER_NEURAL_MAX_BATCHES_PER_TICK",
+            "SOCCER_NEURAL_LEARNING_MAX_BATCHES_PER_TICK",
+            default.max_batches_per_tick,
+        )?,
+        hidden_units: env_usize_alias(
+            "SOCCER_NEURAL_HIDDEN_UNITS",
+            "SOCCER_NEURAL_LEARNING_HIDDEN_UNITS",
+            default.hidden_units,
+        )?,
+        target_scale: env_f64_alias(
+            "SOCCER_NEURAL_TARGET_SCALE",
+            "SOCCER_NEURAL_LEARNING_TARGET_SCALE",
+            default.target_scale,
+        )?,
+        max_pending_batches: env_usize_alias(
+            "SOCCER_NEURAL_MAX_PENDING_BATCHES",
+            "SOCCER_NEURAL_LEARNING_MAX_PENDING_BATCHES",
+            default.max_pending_batches,
+        )?,
+        replay_capacity: env_usize_alias(
+            "SOCCER_NEURAL_REPLAY_CAPACITY",
+            "SOCCER_NEURAL_LEARNING_REPLAY_CAPACITY",
+            default.replay_capacity,
+        )?,
+        replay_samples_per_tick: env_usize_alias(
+            "SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK",
+            "SOCCER_NEURAL_LEARNING_REPLAY_SAMPLES_PER_TICK",
+            default.replay_samples_per_tick,
+        )?,
+        target_clip: env_f64_alias(
+            "SOCCER_NEURAL_TARGET_CLIP",
+            "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
+            default.target_clip,
+        )?,
+    })
 }
 
 fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<dyn Error>> {
@@ -123,6 +265,55 @@ fn default_run_id() -> String {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     format!("soccer-learning-queue-{seconds}")
+}
+
+fn default_postgres_policy_version_interval_games(parallel_games: usize) -> usize {
+    parallel_games.max(DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES)
+}
+
+fn default_postgres_completed_run_batch_games(parallel_games: usize) -> usize {
+    parallel_games.max(DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES)
+}
+
+fn flush_postgres_completed_runs(
+    store: &mut SoccerLearningPgStore,
+    experiment_id: &str,
+    runner_id: &str,
+    pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+) -> Result<usize, String> {
+    if pending_runs.is_empty() {
+        return Ok(0);
+    }
+
+    let inserts = pending_runs
+        .iter()
+        .map(|pending| SoccerLearningPgCompletedRunInsert {
+            base_policy_version_id: pending.base_policy_version_id.as_deref(),
+            output_policy_version_id: pending.output_policy_version_id.as_deref(),
+            game: &pending.completed_game,
+        })
+        .collect::<Vec<_>>();
+    let batch_size = inserts.len();
+    let run_ids = store
+        .insert_completed_runs(experiment_id, runner_id, &inserts)?;
+    drop(inserts);
+    for (pending, run_id) in pending_runs.iter().zip(run_ids.iter()) {
+        println!(
+            "postgres_persisted_game episode={} run_id={} policy_version={} generation={} policy_version_written={} batch_size={}",
+            pending.completed_game.episode + 1,
+            run_id,
+            pending
+                .output_policy_version_id
+                .as_deref()
+                .unwrap_or("none"),
+            pending.generation,
+            pending.policy_version_written,
+            batch_size,
+        );
+    }
+    let flushed = pending_runs.len();
+    pending_runs.clear();
+    Ok(flushed)
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>> {
@@ -246,6 +437,26 @@ fn run() -> Result<(), Box<dyn Error>> {
     let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2)?;
     let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4)?;
     let seed = env_u32("SOCCER_SEED", 2026)?;
+    let neural_learning = env_neural_learning_config()?;
+    let neural_drain_timeout_ms = env_usize_alias(
+        "SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS",
+        "SOCCER_NEURAL_DRAIN_TIMEOUT_MS",
+        DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS,
+    )?;
+    let neural_drain_timeout =
+        Duration::from_millis(neural_drain_timeout_ms.min(u64::MAX as usize) as u64);
+    let pg_policy_version_interval_games = env_usize_alias(
+        "SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES",
+        "SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES",
+        default_postgres_policy_version_interval_games(parallel_games),
+    )?;
+    let pg_completed_run_batch_games = env_usize_alias(
+        "SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES",
+        "SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES",
+        default_postgres_completed_run_batch_games(parallel_games),
+    )?;
+    let pg_policy_version_interval_games = pg_policy_version_interval_games.max(1);
+    let pg_completed_run_batch_games = pg_completed_run_batch_games.max(1);
     let options = SoccerQPolicyOptions {
         alpha: env_f64("SOCCER_ALPHA", 0.20)?,
         gamma: env_f64("SOCCER_GAMMA", 0.96)?,
@@ -284,6 +495,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         learning_logging_enabled: env_bool("SOCCER_LEARNING_LOGGING", false)?,
         learning_interval_ticks,
         tactical_learning,
+        neural_learning: neural_learning.clone(),
         max_human_players: 0,
         seed,
         ..MatchConfig::default()
@@ -304,7 +516,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_store = SoccerLearningPgStore::connect_from_env().map_err(invalid_data)?;
     let mut pg_experiment_id = None::<String>;
     let mut pg_base_policy_version_id = None::<String>;
+    let mut pg_last_policy_version_id = None::<String>;
     let mut pg_generation = 0i32;
+    let mut pg_completed_games_seen = 0usize;
+    let mut pg_completed_buffer = Vec::<PendingPostgresCompletedRun>::new();
+    let mut pg_persisted_games = 0usize;
 
     let mut initial_policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
     if let Some(store) = pg_store.as_mut() {
@@ -325,7 +541,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                     experiment_slug, version.id, version.generation
                 );
                 initial_policies = version.policies;
-                pg_base_policy_version_id = Some(version.id);
+                pg_base_policy_version_id = Some(version.id.clone());
+                pg_last_policy_version_id = Some(version.id);
                 pg_generation = version.generation;
             }
         }
@@ -333,14 +550,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={}",
+        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_drain_timeout_ms={} pg_policy_version_interval_games={} pg_completed_run_batch_games={}",
         run_id,
         games,
         parallel_games,
         minutes,
         dt_seconds,
         config.total_ticks(),
-        seed
+        seed,
+        neural_learning.enabled,
+        neural_learning.backend,
+        neural_drain_timeout_ms,
+        pg_policy_version_interval_games,
+        pg_completed_run_batch_games,
     );
     if let Some(path) = &resume_artifact {
         println!("resume_artifact={path}");
@@ -352,6 +574,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             parallel_games,
             base_seed: seed,
             match_config: config.clone(),
+            neural_drain_timeout,
             options: options.clone(),
             prune_action_entries_per_team: env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0)?,
             prune_target_entries_per_team: env_usize(
@@ -368,56 +591,78 @@ fn run() -> Result<(), Box<dyn Error>> {
             let Some(experiment_id) = pg_experiment_id.as_deref() else {
                 return Ok(());
             };
-            let next_generation = pg_generation.saturating_add(1);
-            let version_label = format!("{}-episode-{:06}", run_id, game.episode + 1);
-            let output_policy_version_id = store.insert_policy_version(
-                experiment_id,
-                pg_base_policy_version_id.as_deref(),
-                next_generation,
-                &version_label,
-                "merge",
-                "active",
-                &config,
-                options.clone(),
-                options.clone(),
-                merged_policies,
-                game.score.match_fitness,
-            )?;
-            let run_row_id = store.insert_completed_run(
-                experiment_id,
-                &run_id,
-                pg_base_policy_version_id.as_deref(),
-                Some(&output_policy_version_id),
-                game,
-            )?;
-            println!(
-                "postgres_persisted_game episode={} run_id={} policy_version={} generation={}",
-                game.episode + 1,
-                run_row_id,
+            pg_completed_games_seen = pg_completed_games_seen.saturating_add(1);
+            let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
+            let should_write_policy_version = pg_policy_version_interval_games <= 1
+                || pg_completed_games_seen >= games
+                || pg_completed_games_seen % pg_policy_version_interval_games == 0;
+            let output_policy_version_id = if should_write_policy_version {
+                let next_generation = pg_generation.saturating_add(1);
+                let version_label = format!("{}-episode-{:06}", run_id, game.episode + 1);
+                let output_policy_version_id = store.insert_policy_version(
+                    experiment_id,
+                    pg_batch_base_policy_version_id.as_deref(),
+                    next_generation,
+                    &version_label,
+                    "merge",
+                    "active",
+                    &config,
+                    options.clone(),
+                    options.clone(),
+                    merged_policies,
+                    game.score.match_fitness,
+                )?;
+                pg_base_policy_version_id = Some(output_policy_version_id.clone());
+                pg_last_policy_version_id = Some(output_policy_version_id.clone());
+                pg_generation = next_generation;
+                Some(output_policy_version_id)
+            } else {
+                pg_last_policy_version_id.clone()
+            };
+            pg_completed_buffer.push(PendingPostgresCompletedRun {
+                completed_game: game.clone(),
+                base_policy_version_id: pg_batch_base_policy_version_id,
                 output_policy_version_id,
-                next_generation
-            );
-            pg_base_policy_version_id = Some(output_policy_version_id);
-            pg_generation = next_generation;
+                generation: pg_generation,
+                policy_version_written: should_write_policy_version,
+            });
+            if pg_completed_buffer.len() >= pg_completed_run_batch_games {
+                pg_persisted_games += flush_postgres_completed_runs(
+                    store,
+                    experiment_id,
+                    &run_id,
+                    &mut pg_completed_buffer,
+                )?;
+            }
             Ok(())
         },
     )
     .map_err(invalid_data)?;
 
+    if let (Some(store), Some(experiment_id)) = (pg_store.as_mut(), pg_experiment_id.as_deref()) {
+        pg_persisted_games +=
+            flush_postgres_completed_runs(store, experiment_id, &run_id, &mut pg_completed_buffer)
+                .map_err(invalid_data)?;
+    }
+
     let artifact = soccer_self_play_artifact_from_queue_report(config, options, &report);
     write_json(&artifact_path, &artifact)?;
-    let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+    let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact_with_neural_network(
+        &artifact,
+        report.latest_neural_network.clone(),
+    );
     write_json(&learned_params_path, &learned_params)?;
 
     println!(
-        "soccer_learning_queue_done completed={} failed={} elapsed={:.2}s home_goals={} away_goals={} policy_entries={} target_entries={}",
+        "soccer_learning_queue_done completed={} failed={} elapsed={:.2}s home_goals={} away_goals={} policy_entries={} target_entries={} postgres_persisted_games={}",
         report.completed_games,
         report.failed_games,
         report.elapsed_seconds,
         report.total_home_goals,
         report.total_away_goals,
         report.final_policy_entries,
-        report.final_target_entries
+        report.final_target_entries,
+        pg_persisted_games,
     );
     println!("run_dir={}", run_dir.display());
     println!("artifact={}", artifact_path.display());
@@ -429,5 +674,29 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("soccer learning queue failed: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_queue_postgres_policy_versions_are_batched() {
+        assert_eq!(default_postgres_policy_version_interval_games(0), 10);
+        assert_eq!(default_postgres_policy_version_interval_games(1), 10);
+        assert_eq!(default_postgres_policy_version_interval_games(4), 10);
+    }
+
+    #[test]
+    fn default_queue_postgres_batches_respect_parallelism() {
+        assert_eq!(default_postgres_completed_run_batch_games(4), 10);
+        assert_eq!(default_postgres_completed_run_batch_games(16), 16);
+        assert_eq!(default_postgres_completed_run_batch_games(64), 64);
+    }
+
+    #[test]
+    fn default_queue_neural_drain_timeout_keeps_worker_wait_bounded() {
+        assert_eq!(DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS, 200);
     }
 }

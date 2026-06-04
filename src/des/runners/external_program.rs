@@ -12,10 +12,9 @@
 //! ## PORT NOTE
 //!
 //!   * `spawnSync(cmd, args, {shell:false, encoding:'utf8', ...})` →
-//!     [`std::process::Command`]`::output()`. The TS `timeout`/`maxBuffer`
-//!     options have **no std equivalent**, so they are recorded on the module
-//!     but not enforced (would need `wait-timeout`/a reaper thread). The
-//!     `EXTERNAL_TIMEOUT_MS` env var is still read for parity.
+//!     [`std::process::Command`] with a Rust polling timeout. `maxBuffer` is
+//!     still recorded for parity, while `timeout` and `EXTERNAL_TIMEOUT_MS` are
+//!     enforced by killing long-running children.
 //!   * `status: number | null` → `Option<i32>` (`ExitStatus::code()`).
 //!   * `fs.existsSync` / `path.resolve` → `Path::exists` / `PathBuf`.
 //!   * `repoRootFromRunner()` uses `__dirname/../../..`; a compiled Rust binary
@@ -31,8 +30,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// `ExternalProgramResult`.
 #[derive(Clone, Debug)]
@@ -217,27 +218,59 @@ pub fn run_external_program(
     opts: &RunExternalOpts,
 ) -> Result<ExternalProgramResult, String> {
     let cwd = opts.cwd.clone().unwrap_or_else(repo_root_from_runner);
-    // PORT NOTE: timeout/maxBuffer are not enforced by std; read for parity.
-    let _timeout_ms = opts.timeout_ms.unwrap_or_else(|| {
+    let timeout_ms = opts.timeout_ms.unwrap_or_else(|| {
         std::env::var("EXTERNAL_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(120_000)
     });
     let _max_buffer = opts.max_buffer_bytes.unwrap_or(10 * 1024 * 1024);
-
-    let output = Command::new(command)
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut child = Command::new(command)
         .args(args)
         .current_dir(&cwd)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to run {command}: {e}"))?;
+
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll {command}: {err}")),
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for {command}: {e}"))?;
+    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if timed_out {
+        let timeout_message = format!("external program timed out after {timeout_ms}ms");
+        if stderr.trim().is_empty() {
+            stderr = timeout_message;
+        } else {
+            stderr = format!("{timeout_message}\n{stderr}");
+        }
+    }
 
     Ok(ExternalProgramResult {
         command: command.to_string(),
         args: args.to_vec(),
         status: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stderr,
         module_id: opts.module_id.clone(),
     })
 }
@@ -294,5 +327,21 @@ mod tests {
         assert!(!valid_module_id("-bad"));
         assert!(!valid_module_id("Bad"));
         assert!(!valid_module_id("has space"));
+    }
+
+    #[test]
+    fn run_external_program_enforces_timeout() {
+        let result = run_external_program(
+            "sleep",
+            &["1".to_string()],
+            &RunExternalOpts {
+                timeout_ms: Some(10),
+                ..RunExternalOpts::default()
+            },
+        )
+        .expect("timeout result");
+
+        assert_ne!(result.status, Some(0));
+        assert!(result.stderr.contains("timed out after 10ms"));
     }
 }

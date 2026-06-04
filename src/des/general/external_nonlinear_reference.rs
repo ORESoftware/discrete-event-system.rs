@@ -967,4 +967,48 @@ mod tests {
         assert!(pareto.candidate_count.is_some_and(|count| count >= 64));
         assert!(!pareto.pareto_front.is_empty());
     }
+
+    #[test]
+    fn fallback_alias_uses_rust_reference_without_python() {
+        let opts = ExternalNonlinearReferenceOptions {
+            solver: ExternalNonlinearReferenceSolver::Fallback,
+            max_iterations: Some(64),
+        };
+
+        let rosenbrock = solve_rosenbrock_with_external_reference(&[-1.2, 1.0], &opts);
+        assert_eq!(rosenbrock.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert!(rosenbrock.solver.starts_with("rust:"));
+
+        let points = [
+            CurveFitPoint { x: 0.0, y: 2.0 },
+            CurveFitPoint {
+                x: 1.0,
+                y: 2.0 * (-0.5_f64).exp(),
+            },
+            CurveFitPoint {
+                x: 2.0,
+                y: 2.0 * (-1.0_f64).exp(),
+            },
+        ];
+        let fit = solve_exponential_fit_with_external_reference(&points, &[1.0, -0.2], &opts);
+        assert!(matches!(
+            fit.status,
+            ExternalNonlinearReferenceStatus::Optimal | ExternalNonlinearReferenceStatus::Feasible
+        ));
+        assert!(fit.solver.starts_with("rust:"));
+
+        let global = solve_global_benchmark_with_external_reference(
+            ExternalNonlinearBenchmarkObjective::Sphere,
+            3,
+            -5.0,
+            5.0,
+            &opts,
+        );
+        assert_eq!(global.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert!(global.solver.starts_with("rust:"));
+
+        let pareto = solve_pareto_portfolio_with_external_reference(&[], 32, 11, &opts);
+        assert_eq!(pareto.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert!(pareto.solver.starts_with("rust:"));
+    }
 }

@@ -9,7 +9,9 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -74,6 +76,58 @@ struct Driver {
     checks: Vec<CheckRow>,
     root: PathBuf,
     out_dir: PathBuf,
+}
+
+fn ip_mip_external_timeout_ms() -> u64 {
+    std::env::var("IP_MIP_EXTERNAL_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn run_ip_mip_external_command_with_timeout(
+    command: &mut Command,
+    timeout_ms: u64,
+) -> Result<Output, String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to start external IP/MIP reference: {err}"))?;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll external IP/MIP reference: {err}")),
+        }
+    }
+    let mut output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for external IP/MIP reference: {err}"))?;
+    if timed_out {
+        let timeout_message = format!("external IP/MIP reference timed out after {timeout_ms}ms");
+        if output.stderr.is_empty() {
+            output.stderr = timeout_message.into_bytes();
+        } else {
+            let mut stderr = timeout_message.into_bytes();
+            stderr.push(b'\n');
+            stderr.extend(output.stderr);
+            output.stderr = stderr;
+        }
+    }
+    Ok(output)
 }
 
 impl Driver {
@@ -202,7 +256,8 @@ impl Driver {
         let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
         let max_enumerations =
             std::env::var("IP_MIP_MAX_ENUMERATIONS").unwrap_or_else(|_| "1000000".to_string());
-        let output_result = Command::new(&python)
+        let mut command = Command::new(&python);
+        command
             .arg(&script)
             .arg("--problem")
             .arg(&problem_path)
@@ -211,8 +266,9 @@ impl Driver {
             .arg("--solver")
             .arg(solver)
             .arg("--max-enumerations")
-            .arg(max_enumerations)
-            .output();
+            .arg(max_enumerations);
+        let output_result =
+            run_ip_mip_external_command_with_timeout(&mut command, ip_mip_external_timeout_ms());
         let output = match output_result {
             Ok(output) => output,
             Err(e) => {
@@ -967,5 +1023,18 @@ mod tests {
                 "{value:?} should keep the Rust CLI-first bridge"
             );
         }
+    }
+
+    #[test]
+    fn ip_mip_python_compatibility_bridge_enforces_timeout() {
+        let mut command = Command::new("sleep");
+        command.arg("1");
+
+        let output = run_ip_mip_external_command_with_timeout(&mut command, 10)
+            .expect("timeout output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(!output.status.success());
+        assert!(stderr.contains("timed out after 10ms"));
     }
 }

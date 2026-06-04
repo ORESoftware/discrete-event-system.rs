@@ -791,6 +791,7 @@ fn soccer_learning_completed_game_from_completed(
         policies: game.policies.clone(),
         score,
         delta,
+        neural_network: game.artifact.learning.neural_network.clone(),
         elapsed_seconds: game.elapsed_seconds,
     }
 }

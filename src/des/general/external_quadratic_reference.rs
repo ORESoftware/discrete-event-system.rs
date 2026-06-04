@@ -1426,6 +1426,13 @@ mod tests {
         }
     }
 
+    fn fallback_solver_options() -> ExternalQuadraticReferenceOptions {
+        ExternalQuadraticReferenceOptions {
+            solver: ExternalQuadraticReferenceSolver::Fallback,
+            ..Default::default()
+        }
+    }
+
     fn assert_optimal(solution: &ExternalQuadraticReferenceSolution) {
         assert_eq!(
             solution.status,
@@ -1454,6 +1461,47 @@ mod tests {
         assert!((solution.x[0] - 1.0).abs() <= 1e-7, "{solution:?}");
         assert!((solution.x[1] - 2.0).abs() <= 1e-7, "{solution:?}");
         assert!(solution.objective.is_some());
+    }
+
+    #[test]
+    fn fallback_alias_uses_rust_quadratic_reference_without_python() {
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+        let qp_solution = solve_qp_with_external_reference(&qp, &fallback_solver_options());
+        assert_optimal(&qp_solution);
+        assert_eq!(qp_solution.solver, "rust:qp-active-set");
+        assert!((qp_solution.x[0] - 1.0).abs() <= 1e-7, "{qp_solution:?}");
+        assert!((qp_solution.x[1] - 2.0).abs() <= 1e-7, "{qp_solution:?}");
+
+        let miqcp = super::MixedIntegerQuadraticallyConstrainedProgram {
+            qcp: super::QuadraticallyConstrainedProgram {
+                q: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+                c: vec![0.0, 1.0],
+                lb: Some(vec![Some(3.0), Some(0.0)]),
+                ub: Some(vec![Some(3.0), Some(20.0)]),
+                quadratic_constraints: vec![QuadraticConstraint {
+                    q: vec![vec![1.0, 0.0], vec![0.0, 0.0]],
+                    c: vec![0.0, -1.0],
+                    rhs: 0.0,
+                    name: Some("integer-square-epigraph".to_string()),
+                }],
+                ..Default::default()
+            },
+            integer_vars: vec![true, true],
+        };
+        let miqcp_solution =
+            solve_miqcp_with_external_reference(&miqcp, &fallback_solver_options());
+        assert_optimal(&miqcp_solution);
+        assert_eq!(miqcp_solution.solver, "rust:miqcp-enumeration");
+        assert!(miqcp_solution
+            .objective
+            .is_some_and(|objective| { (objective - 9.0).abs() <= 1e-7 }));
+        assert_eq!(miqcp_solution.enumerated, Some(21));
     }
 
     #[test]

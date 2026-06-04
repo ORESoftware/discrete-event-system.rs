@@ -4,79 +4,43 @@
 //! small instances and against the LP solver when integrality is dropped.
 //! Top-level driver → [`run`].
 //!
-//! PORT NOTES (stubbed cross-module deps):
-//!   * `crate::des::general::milp_bnb::{solve_milp, build_knapsack_milp,
-//!     MilpProblem}` and `crate::des::general::lp::solve_lp_internal`.
+//! PORT NOTES:
+//!   * Uses the real Rust branch-and-bound MILP solver and simplex LP solver.
 //!   * `bruteKnapsack`/`feasible`/`close` are file-local helpers, ported faithfully.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
 use std::time::Instant;
 
-// =============================================================================
-// Stubbed MILP / LP layer.
-// =============================================================================
+use crate::des::general::lp::{
+    solve_lp_internal as solve_lp_internal_model, InternalSimplexOptions, LPProblem,
+    Sense as LPSense,
+};
+use crate::des::general::milp_bnb::{
+    build_knapsack_milp as build_knapsack_milp_model, solve_milp as solve_milp_model, MILPProblem,
+    MILPSolution, MILPSolveOptions, MILPStatus, Sense as MILPSense,
+};
 
-#[derive(Clone, Debug, Default)]
-struct MilpProblem {
-    sense: &'static str,
-    c: Vec<f64>,
-    a: Vec<Vec<f64>>,
-    b: Vec<f64>,
-    integer_vars: Vec<bool>,
-    ub: Option<Vec<f64>>,
-}
+type MilpProblem = MILPProblem;
+type MilpResult = MILPSolution;
+type LpProblem = LPProblem;
 
-#[derive(Clone, Debug, Default)]
-struct MilpResult {
-    status: String,
-    z: f64,
-    x: Vec<f64>,
-    gap: f64,
-    nodes_explored: usize,
-}
-
-/// PORT NOTE: `milp_bnb::build_knapsack_milp`. Binary knapsack: maximise
-/// `Σ vᵢ xᵢ` s.t. `Σ wᵢ xᵢ ≤ cap`, `xᵢ ∈ {0,1}`.
 fn build_knapsack_milp(values: &[f64], weights: &[f64], capacity: f64) -> MilpProblem {
-    let n = values.len();
-    MilpProblem {
-        sense: "max",
-        c: values.to_vec(),
-        a: vec![weights.to_vec()],
-        b: vec![capacity],
-        integer_vars: vec![true; n],
-        ub: Some(vec![1.0; n]),
-    }
+    build_knapsack_milp_model(values.to_vec(), weights.to_vec(), capacity)
 }
 
-/// PORT NOTE: `milp_bnb::solve_milp`. Stub returns the all-zero incumbent.
-fn solve_milp(milp: &MilpProblem, _max_nodes: Option<usize>) -> MilpResult {
-    MilpResult {
-        status: "optimal".to_string(),
-        z: 0.0,
-        x: vec![0.0; milp.c.len()],
-        gap: 0.0,
-        nodes_explored: 1,
-    }
+fn solve_milp(milp: &MilpProblem, max_nodes: Option<usize>) -> MilpResult {
+    solve_milp_model(
+        milp,
+        MILPSolveOptions {
+            max_nodes,
+            ..Default::default()
+        },
+    )
 }
 
-#[derive(Clone, Debug, Default)]
-struct LpProblem {
-    sense: &'static str,
-    c: Vec<f64>,
-    a_ub: Vec<Vec<f64>>,
-    b_ub: Vec<f64>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct LpResult {
-    objective: f64,
-}
-
-/// PORT NOTE: `lp::solve_lp_internal`.
-fn solve_lp_internal(_lp: &LpProblem) -> LpResult {
-    LpResult { objective: 0.0 }
+fn solve_lp_internal(lp: &LpProblem) -> crate::des::general::lp::LPSolution {
+    solve_lp_internal_model(lp, &InternalSimplexOptions::default())
 }
 
 // =============================================================================
@@ -181,7 +145,7 @@ pub fn run() {
         let r = solve_milp(&milp, None);
         let (brute_z, _brute_x) =
             brute_knapsack(&[10.0, 40.0, 30.0, 50.0], &[5.0, 4.0, 6.0, 3.0], 10.0);
-        c.check("1.1 status optimal", r.status == "optimal", "");
+        c.check("1.1 status optimal", r.status == MILPStatus::Optimal, "");
         c.check(
             "1.2 z matches brute force",
             close(r.z, brute_z),
@@ -243,23 +207,31 @@ pub fn run() {
     println!("\nStudy 3 — Pure LP (no integer vars) reduces to root LP");
     {
         let lp = MilpProblem {
-            sense: "max",
+            sense: MILPSense::Max,
             c: vec![3.0, 5.0],
             a: vec![vec![1.0, 0.0], vec![0.0, 2.0], vec![3.0, 2.0]],
             b: vec![4.0, 12.0, 18.0],
             integer_vars: vec![false, false],
             ub: None,
+            var_names: None,
+            con_names: None,
         };
         let milp_r = solve_milp(&lp, None);
         let lp_r = solve_lp_internal(&LpProblem {
-            sense: "max",
+            sense: LPSense::Max,
             c: vec![3.0, 5.0],
-            a_ub: vec![vec![1.0, 0.0], vec![0.0, 2.0], vec![3.0, 2.0]],
-            b_ub: vec![4.0, 12.0, 18.0],
+            a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 2.0], vec![3.0, 2.0]]),
+            b_ub: Some(vec![4.0, 12.0, 18.0]),
+            a_eq: None,
+            b_eq: None,
+            lb: None,
+            ub: None,
+            var_names: None,
+            con_names: None,
         });
         c.check(
             "3.1 MILP-no-integers status optimal",
-            milp_r.status == "optimal",
+            milp_r.status == MILPStatus::Optimal,
             "",
         );
         c.check(
@@ -278,7 +250,7 @@ pub fn run() {
     println!("\nStudy 4 — Mixed integer/continuous (3 vars)");
     {
         let milp = MilpProblem {
-            sense: "max",
+            sense: MILPSense::Max,
             c: vec![3.0, 5.0, 7.0],
             a: vec![
                 vec![1.0, 1.0, 1.0],
@@ -288,9 +260,15 @@ pub fn run() {
             b: vec![10.0, 8.0, 15.0],
             integer_vars: vec![true, true, false],
             ub: None,
+            var_names: None,
+            con_names: None,
         };
         let r = solve_milp(&milp, None);
-        c.check("4.1 mixed MILP optimal", r.status == "optimal", "");
+        c.check(
+            "4.1 mixed MILP optimal",
+            r.status == MILPStatus::Optimal,
+            "",
+        );
         c.check(
             "4.2 x_0, x_1 are integer",
             (r.x[0] - r.x[0].round()).abs() < 1e-4 && (r.x[1] - r.x[1].round()).abs() < 1e-4,
@@ -298,14 +276,20 @@ pub fn run() {
         );
         c.check("4.3 solution feasible", feasible(&milp, &r.x), "");
         let lp = solve_lp_internal(&LpProblem {
-            sense: "max",
+            sense: LPSense::Max,
             c: vec![3.0, 5.0, 7.0],
-            a_ub: vec![
+            a_ub: Some(vec![
                 vec![1.0, 1.0, 1.0],
                 vec![2.0, 1.0, 0.0],
                 vec![1.0, 2.0, 3.0],
-            ],
-            b_ub: vec![10.0, 8.0, 15.0],
+            ]),
+            b_ub: Some(vec![10.0, 8.0, 15.0]),
+            a_eq: None,
+            b_eq: None,
+            lb: None,
+            ub: None,
+            var_names: None,
+            con_names: None,
         });
         c.check(
             "4.4 MILP z ≤ LP relaxation z (max)",
@@ -321,7 +305,7 @@ pub fn run() {
         let r = solve_milp(&milp, None);
         c.check(
             "5.1 zero-capacity knapsack: optimal",
-            r.status == "optimal",
+            r.status == MILPStatus::Optimal,
             "",
         );
         c.check("5.2 z = 0 (no items selected)", close(r.z, 0.0), "");
@@ -345,7 +329,7 @@ pub fn run() {
         let dt = t0.elapsed().as_millis();
         c.check(
             "6.1 24-item knapsack solves to optimum",
-            r.status == "optimal",
+            r.status == MILPStatus::Optimal,
             &format!("dt={}ms, nodes={}", dt, r.nodes_explored),
         );
         c.check(

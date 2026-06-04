@@ -4,41 +4,19 @@
 //! `solve_lp_internal` solver after every modification step (add/remove
 //! constraint, change objective, add/remove variable). Top-level driver → [`run`].
 //!
-//! PORT NOTES (stubbed cross-module deps):
-//!   * `crate::des::general::incremental_lp::{IncrementalLp, LpEvent}` and
-//!     `crate::des::general::lp::{solve_lp_internal, LpProblem}`.
-//!   * The stub `IncrementalLp` only tracks the LP *shape* (so the static and
-//!     incremental variable counts stay aligned); both solvers return the
-//!     all-zero point until the real simplex is wired.
+//! PORT NOTES:
+//!   * Uses the real Rust warm-startable `IncrementalLP` and static simplex
+//!     solver. The local `State`/`LpEvent` types are only validator-side adapters.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
-// =============================================================================
-// Stubbed LP layer.
-// =============================================================================
-
-#[derive(Clone, Debug, Default)]
-struct LpProblem {
-    sense: &'static str,
-    c: Vec<f64>,
-    a_ub: Vec<Vec<f64>>,
-    b_ub: Vec<f64>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct LpResult {
-    status: String,
-    x: Vec<f64>,
-    objective: f64,
-}
-
-fn solve_lp_internal(lp: &LpProblem) -> LpResult {
-    LpResult {
-        status: "optimal".to_string(),
-        x: vec![0.0; lp.c.len()],
-        objective: 0.0,
-    }
-}
+use crate::des::general::incremental_lp::{
+    IncrementalLP as RealIncrementalLp, IncrementalLPInit, LPEvent as RealLpEvent,
+    Sense as IncSense,
+};
+use crate::des::general::lp::{
+    solve_lp_internal, InternalSimplexOptions, LPProblem, Sense as StaticSense,
+};
 
 /// `interface State` from the validator.
 #[derive(Clone, Debug)]
@@ -60,56 +38,85 @@ enum LpEvent {
     RemoveVariable { struct_index: usize },
 }
 
-/// PORT NOTE: `incremental_lp::IncrementalLp`. The stub mirrors the LP shape so
-/// the variable count stays in sync with the static reference; solving is a no-op
-/// (both sides return zeros until the real simplex is wired).
 struct IncrementalLp {
-    state: State,
+    inner: RealIncrementalLp,
 }
 
 impl IncrementalLp {
     fn new(init: State) -> Self {
-        IncrementalLp { state: init }
-    }
-
-    fn solve_to_optimum(&mut self) {
-        // PORT NOTE: dual/primal warm-started simplex restart.
-    }
-
-    fn apply_event(&mut self, ev: LpEvent) {
-        match ev {
-            LpEvent::AddConstraint { coefs, rhs } => {
-                self.state.a.push(coefs);
-                self.state.b.push(rhs);
-            }
-            LpEvent::RemoveConstraint { index } => {
-                self.state.a.remove(index);
-                self.state.b.remove(index);
-            }
-            LpEvent::ChangeObjective { new_c } => {
-                self.state.c = new_c;
-            }
-            LpEvent::AddVariable { column, c_new } => {
-                for (i, row) in self.state.a.iter_mut().enumerate() {
-                    row.push(column[i]);
-                }
-                self.state.c.push(c_new);
-            }
-            LpEvent::RemoveVariable { struct_index } => {
-                for row in self.state.a.iter_mut() {
-                    row.remove(struct_index);
-                }
-                self.state.c.remove(struct_index);
-            }
+        IncrementalLp {
+            inner: RealIncrementalLp::new(incremental_init(init)),
         }
     }
 
+    fn solve_to_optimum(&mut self) {
+        self.inner.solve_to_optimum(1000);
+    }
+
+    fn apply_event(&mut self, ev: LpEvent) {
+        let real = match ev {
+            LpEvent::AddConstraint { coefs, rhs } => RealLpEvent::AddConstraint {
+                tick: 0.0,
+                coefs,
+                rhs,
+                name: None,
+            },
+            LpEvent::RemoveConstraint { index } => RealLpEvent::RemoveConstraint {
+                tick: 0.0,
+                index,
+                name: None,
+            },
+            LpEvent::ChangeObjective { new_c } => RealLpEvent::ChangeObjective {
+                tick: 0.0,
+                new_c,
+                name: None,
+            },
+            LpEvent::AddVariable { column, c_new } => RealLpEvent::AddVariable {
+                tick: 0.0,
+                column,
+                c_new,
+                name: None,
+            },
+            LpEvent::RemoveVariable { struct_index } => RealLpEvent::RemoveVariable {
+                tick: 0.0,
+                struct_index,
+                name: None,
+            },
+        };
+        self.inner.apply_event(real);
+    }
+
     fn get_x(&self) -> Vec<f64> {
-        vec![0.0; self.state.c.len()]
+        self.inner.get_x()
     }
 
     fn get_z(&self) -> f64 {
-        0.0
+        self.inner.get_z()
+    }
+}
+
+fn incremental_sense(sense: &str) -> IncSense {
+    match sense {
+        "min" => IncSense::Min,
+        _ => IncSense::Max,
+    }
+}
+
+fn static_sense(sense: &str) -> StaticSense {
+    match sense {
+        "min" => StaticSense::Min,
+        _ => StaticSense::Max,
+    }
+}
+
+fn incremental_init(state: State) -> IncrementalLPInit {
+    IncrementalLPInit {
+        sense: incremental_sense(state.sense),
+        c: state.c,
+        a: state.a,
+        b: state.b,
+        var_names: None,
+        con_names: None,
     }
 }
 
@@ -165,14 +172,15 @@ impl Checker {
 }
 
 fn solve_static(s: &State) -> (Vec<f64>, f64, String) {
-    let lp = LpProblem {
-        sense: s.sense,
+    let lp = LPProblem {
+        sense: static_sense(s.sense),
         c: s.c.clone(),
-        a_ub: s.a.iter().cloned().collect(),
-        b_ub: s.b.clone(),
+        a_ub: Some(s.a.clone()),
+        b_ub: Some(s.b.clone()),
+        ..Default::default()
     };
-    let sol = solve_lp_internal(&lp);
-    (sol.x, sol.objective, sol.status)
+    let sol = solve_lp_internal(&lp, &InternalSimplexOptions::default());
+    (sol.x, sol.objective, sol.status.as_str().to_string())
 }
 
 fn st(sense: &'static str, c: &[f64], a: &[&[f64]], b: &[f64]) -> State {

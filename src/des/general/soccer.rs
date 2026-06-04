@@ -28243,10 +28243,7 @@ mod tests {
         assert!(result.ticks <= SOCCER_SET_PLAY_MAX_TRIAL_TICKS);
         assert!(result.ticks <= 25);
         assert!(result.simulated_seconds.is_finite());
-        assert!(result
-            .events
-            .iter()
-            .any(|event| event.kind == "set-play"));
+        assert!(result.events.iter().any(|event| event.kind == "set-play"));
     }
 
     #[test]

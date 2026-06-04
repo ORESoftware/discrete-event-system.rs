@@ -17,11 +17,14 @@ use serde::Deserialize;
 use serde_json::{json, Number, Value};
 
 use crate::des::general::ip_mip_des::{
-    BranchOrCutConstraint, ConstraintKind, GeneralLinearIPMIPProblem, IPMIPProblem,
-    IndicatorConstraint, IndicatorIPMIPProblem, LinearRowConstraint, LowerBoundedIPMIPProblem,
-    MultiObjectiveIPMIPProblem, PiecewiseLinearConstraint, PwlIPMIPProblem,
-    QuadraticObjectiveIPMIPProblem, QuadraticObjectiveTerm, SemiIPMIPProblem, SemiVariable,
-    SosIPMIPProblem, SourceIPMIPProblem, SpecialOrderedSet,
+    linearize_general_linear_problem, linearize_indicator_problem, linearize_lower_bounds_problem,
+    linearize_pwl_problem, linearize_quadratic_objective_problem, linearize_semi_problem,
+    linearize_sos_problem, linearize_source_ipmip_problem, BranchOrCutConstraint, ConstraintKind,
+    GeneralLinearIPMIPProblem, IPMIPProblem, IndicatorConstraint, IndicatorIPMIPProblem,
+    LinearRowConstraint, LowerBoundedIPMIPProblem, MultiObjectiveIPMIPProblem,
+    PiecewiseLinearConstraint, PwlIPMIPProblem, QuadraticObjectiveIPMIPProblem,
+    QuadraticObjectiveTerm, SemiIPMIPProblem, SemiVariable, SosIPMIPProblem, SourceIPMIPProblem,
+    SpecialOrderedSet,
 };
 use crate::des::general::lp::{LPProblem, Sense};
 
@@ -1150,6 +1153,46 @@ pub fn ipmip_problem_to_cplex_lp_string(problem: &IPMIPProblem) -> String {
     )
 }
 
+fn lp_problem_to_lpsolve_lp_string(problem: &LPProblem) -> String {
+    let n = problem.c.len();
+    let lbs = problem.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]);
+    let ubs = problem.ub.clone().unwrap_or_else(|| vec![None; n]);
+    let integer_vars = vec![false; n];
+    lpsolve_lp_string(
+        problem.sense,
+        &problem.c,
+        problem.a_ub.as_deref().unwrap_or(&[]),
+        problem.b_ub.as_deref().unwrap_or(&[]),
+        problem.a_eq.as_deref().unwrap_or(&[]),
+        problem.b_eq.as_deref().unwrap_or(&[]),
+        &lbs,
+        &ubs,
+        &integer_vars,
+    )
+}
+
+fn ipmip_problem_to_lpsolve_lp_string(problem: &IPMIPProblem) -> String {
+    let n = problem.c.len();
+    let lbs = vec![Some(0.0); n];
+    let ubs = problem
+        .ub
+        .as_ref()
+        .map(|upper| upper.iter().copied().map(Some).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![None; n]);
+    let (le_rows, le_rhs) = ipmip_le_rows_with_lazy(problem);
+    lpsolve_lp_string(
+        problem.sense,
+        &problem.c,
+        &le_rows,
+        &le_rhs,
+        &[],
+        &[],
+        &lbs,
+        &ubs,
+        &problem.integer_vars,
+    )
+}
+
 /// Export an LP as a free-format MPS string.
 ///
 /// MPS is the common file interchange format for commercial and open-source
@@ -1285,6 +1328,9 @@ pub fn solve_lp_with_external_cli(
     if should_use_native_soplex_cli(opts) {
         return solve_lp_with_native_soplex_cli(problem, opts);
     }
+    if should_use_native_lp_solve_cli(ExternalLinearCliKind::Lp, opts) {
+        return solve_lp_with_native_lp_solve_cli(problem, opts);
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Lp,
         lp_problem_to_cli_json(problem),
@@ -1309,6 +1355,9 @@ pub fn solve_ipmip_with_external_cli(
     if should_use_native_cbc_cli(opts) {
         return solve_ipmip_with_native_cbc_cli(problem, opts);
     }
+    if should_use_native_lp_solve_cli(ExternalLinearCliKind::Mip, opts) {
+        return solve_ipmip_with_native_lp_solve_cli(problem, opts);
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         ipmip_problem_to_cli_json(problem),
@@ -1321,6 +1370,17 @@ pub fn solve_lower_bounded_ipmip_with_external_cli(
     problem: &LowerBoundedIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let source_lb = problem.lb.clone();
+        let (linearized, objective_offset) = linearize_lower_bounds_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &source_lb,
+            objective_offset,
+            source_lb.len(),
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         lower_bounded_ipmip_problem_to_cli_json(problem),
@@ -1333,6 +1393,16 @@ pub fn solve_general_linear_ipmip_with_external_cli(
     problem: &GeneralLinearIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let linearized = linearize_general_linear_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &[],
+            0.0,
+            problem.base.c.len(),
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         general_linear_ipmip_problem_to_cli_json(problem),
@@ -1345,6 +1415,16 @@ pub fn solve_indicator_ipmip_with_external_cli(
     problem: &IndicatorIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let linearized = linearize_indicator_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &[],
+            0.0,
+            problem.base.c.len(),
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         indicator_ipmip_problem_to_cli_json(problem),
@@ -1357,6 +1437,16 @@ pub fn solve_sos_ipmip_with_external_cli(
     problem: &SosIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let linearized = linearize_sos_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &[],
+            0.0,
+            problem.base.c.len(),
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         sos_ipmip_problem_to_cli_json(problem),
@@ -1369,6 +1459,16 @@ pub fn solve_semi_ipmip_with_external_cli(
     problem: &SemiIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let linearized = linearize_semi_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &[],
+            0.0,
+            problem.base.c.len(),
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         semi_ipmip_problem_to_cli_json(problem),
@@ -1381,6 +1481,16 @@ pub fn solve_pwl_ipmip_with_external_cli(
     problem: &PwlIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let linearized = linearize_pwl_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &[],
+            0.0,
+            problem.base.c.len(),
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         pwl_ipmip_problem_to_cli_json(problem),
@@ -1393,6 +1503,21 @@ pub fn solve_quadratic_objective_ipmip_with_external_cli(
     problem: &QuadraticObjectiveIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let source_lb = problem
+            .lb
+            .clone()
+            .unwrap_or_else(|| vec![0.0; problem.base.c.len()]);
+        let (linearized, objective_offset, original_var_count) =
+            linearize_quadratic_objective_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &source_lb,
+            objective_offset,
+            original_var_count,
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         quadratic_objective_ipmip_problem_to_cli_json(problem),
@@ -1405,6 +1530,9 @@ pub fn solve_multi_objective_ipmip_with_external_cli(
     problem: &MultiObjectiveIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_multi_objective_cli(opts) {
+        return solve_multi_objective_ipmip_with_rust_external_cli(problem, opts);
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         multi_objective_ipmip_problem_to_cli_json(problem),
@@ -1417,11 +1545,220 @@ pub fn solve_source_ipmip_with_external_cli(
     problem: &SourceIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if should_use_rust_linearized_source_cli(opts) {
+        let source_lb = problem
+            .lb
+            .clone()
+            .unwrap_or_else(|| vec![0.0; problem.base.c.len()]);
+        let (linearized, objective_offset, original_var_count) =
+            linearize_source_ipmip_problem(problem);
+        return solve_linearized_ipmip_with_external_cli(
+            &linearized,
+            opts,
+            &source_lb,
+            objective_offset,
+            original_var_count,
+        );
+    }
     solve_linear_cli_json(
         ExternalLinearCliKind::Mip,
         source_ipmip_problem_to_cli_json(problem),
         opts,
     )
+}
+
+fn should_use_rust_linearized_source_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.python.is_none()
+        && opts.script_path.is_none()
+        && opts.branch_priorities.is_none()
+        && opts.mip_start.is_none()
+}
+
+fn should_use_rust_multi_objective_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.python.is_none() && opts.script_path.is_none()
+}
+
+fn solve_multi_objective_ipmip_with_rust_external_cli(
+    problem: &MultiObjectiveIPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let solver_name = opts.solver.as_str();
+    let bridge_solver = format!("{solver_name}:cli");
+    if problem.objectives.is_empty() {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "multi_objectives must be non-empty".to_string(),
+            elapsed_ms(t0),
+        );
+    }
+    let variable_count = problem.base.c.len();
+    for (idx, objective) in problem.objectives.iter().enumerate() {
+        if objective.c.len() != variable_count {
+            return external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                format!(
+                    "multi_objective {idx} coefficient length {} does not match variable count {variable_count}",
+                    objective.c.len()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+        if objective
+            .c
+            .iter()
+            .enumerate()
+            .any(|(_, coef)| !coef.is_finite())
+        {
+            return external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                format!("multi_objective {idx} coefficients must be finite"),
+                elapsed_ms(t0),
+            );
+        }
+    }
+
+    let mut working = problem.base.clone();
+    let last_stage = problem.objectives.len() - 1;
+    let mut final_solution = None;
+    for (idx, objective) in problem.objectives.iter().enumerate() {
+        working.sense = objective.sense;
+        working.c = objective.c.clone();
+        let mut stage_opts = opts.clone();
+        if idx > 0 {
+            stage_opts.mip_start = None;
+        }
+        let mut stage_solution = solve_ipmip_with_external_cli(&working, &stage_opts);
+        if stage_solution.status != ExternalLinearCliStatus::Optimal {
+            stage_solution.objective_values = Some(Vec::new());
+            stage_solution.elapsed_ms = elapsed_ms(t0);
+            return stage_solution;
+        }
+
+        let optimum = dot_f64(&objective.c, &stage_solution.x);
+        if idx < last_stage {
+            append_external_lexicographic_lock_rows(
+                &mut working,
+                objective.c.clone(),
+                optimum,
+                objective
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("multi_objective_{idx}")),
+            );
+        } else {
+            final_solution = Some(stage_solution);
+        }
+    }
+
+    let mut solution = final_solution.expect("non-empty objectives produce a final stage");
+    debug_assert_eq!(solution.status, ExternalLinearCliStatus::Optimal);
+    let final_x = solution.x.clone();
+    let objective_values = problem
+        .objectives
+        .iter()
+        .map(|objective| dot_f64(&objective.c, &final_x))
+        .collect::<Vec<_>>();
+    solution.objective = objective_values.last().copied();
+    solution.objective_values = Some(objective_values);
+    solution.elapsed_ms = elapsed_ms(t0);
+    solution.message = "sequential lexicographic optimization".to_string();
+    solution
+}
+
+fn append_external_lexicographic_lock_rows(
+    problem: &mut IPMIPProblem,
+    row: Vec<f64>,
+    rhs: f64,
+    name: String,
+) {
+    problem.a.push(row.clone());
+    problem.b.push(rhs);
+    problem.a.push(row.into_iter().map(|coef| -coef).collect());
+    problem.b.push(-rhs);
+    if let Some(con_names) = problem.con_names.as_mut() {
+        con_names.push(format!("{name}_le"));
+        con_names.push(format!("{name}_ge"));
+    }
+}
+
+fn solve_linearized_ipmip_with_external_cli(
+    linearized: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+    source_lb: &[f64],
+    objective_offset: f64,
+    original_var_count: usize,
+) -> ExternalLinearCliSolution {
+    let mut solve_opts = opts.clone();
+    if let Some(objective_limit) = solve_opts.objective_limit.as_mut() {
+        if objective_offset.is_finite() {
+            *objective_limit -= objective_offset;
+        }
+    }
+    let solution = solve_ipmip_with_external_cli(linearized, &solve_opts);
+    postprocess_linearized_external_solution(
+        solution,
+        opts,
+        source_lb,
+        objective_offset,
+        original_var_count,
+    )
+}
+
+fn postprocess_linearized_external_solution(
+    mut solution: ExternalLinearCliSolution,
+    opts: &ExternalLinearCliOptions,
+    source_lb: &[f64],
+    objective_offset: f64,
+    original_var_count: usize,
+) -> ExternalLinearCliSolution {
+    shift_external_solution_x(&mut solution.x, source_lb, original_var_count);
+    solution.objective = solution
+        .objective
+        .map(|objective| add_finite_objective_offset(objective, objective_offset));
+    solution.best_bound = solution
+        .best_bound
+        .map(|best_bound| add_finite_objective_offset(best_bound, objective_offset));
+    solution.mip_start_objective = solution
+        .mip_start_objective
+        .map(|objective| add_finite_objective_offset(objective, objective_offset));
+    if let Some(solutions) = solution.solutions.as_mut() {
+        for member in solutions {
+            shift_external_solution_x(&mut member.x, source_lb, original_var_count);
+            member.objective = add_finite_objective_offset(member.objective, objective_offset);
+        }
+    }
+    if let Some(objective_limit) = opts.objective_limit {
+        solution.objective_limit = Some(objective_limit);
+    }
+    if let (Some(best_bound), Some(objective)) = (solution.best_bound, solution.objective) {
+        if best_bound.is_finite() && objective.is_finite() {
+            let absolute_gap = (best_bound - objective).abs().max(0.0);
+            solution.absolute_gap = Some(absolute_gap);
+            solution.mip_gap = Some(absolute_gap / objective.abs().max(1.0));
+        }
+    }
+    solution
+}
+
+fn shift_external_solution_x(x: &mut [f64], source_lb: &[f64], original_var_count: usize) {
+    if x.is_empty() {
+        return;
+    }
+    for (value, lower) in x.iter_mut().take(original_var_count).zip(source_lb.iter()) {
+        *value += *lower;
+    }
+}
+
+fn add_finite_objective_offset(value: f64, offset: f64) -> f64 {
+    if value.is_finite() && offset.is_finite() {
+        value + offset
+    } else {
+        value
+    }
 }
 
 /// Return the first executable-like command path found for a solver's aliases.
@@ -2458,6 +2795,209 @@ fn solve_lp_with_native_soplex_cli(
         ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
     };
     solve_native_soplex_cli_model(&model_text, problem.c.len(), &problem.c, opts)
+}
+
+fn should_use_native_lp_solve_cli(
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::LpSolve
+        || opts.python.is_some()
+        || opts.script_path.is_some()
+        || opts.lp_algorithm.is_some()
+        || opts.solution_limit.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.objective_limit.is_some()
+        || opts.primal_feasibility_tolerance.is_some()
+        || opts.dual_feasibility_tolerance.is_some()
+        || opts.integer_feasibility_tolerance.is_some()
+        || opts.presolve.is_some()
+        || opts.cuts.is_some()
+        || opts.heuristics.is_some()
+        || opts.branch_rule.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.node_selection.is_some()
+        || opts.mip_start.is_some()
+    {
+        return false;
+    }
+
+    if kind == ExternalLinearCliKind::Lp {
+        return opts.max_nodes.is_none()
+            && opts.node_limit.is_none()
+            && opts.relative_gap.is_none()
+            && opts.absolute_gap.is_none();
+    }
+
+    true
+}
+
+fn solve_lp_with_native_lp_solve_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = lp_problem_to_lpsolve_lp_string(problem);
+    solve_native_lp_solve_cli_model(
+        ExternalLinearCliKind::Lp,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_lp_solve_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = ipmip_problem_to_lpsolve_lp_string(problem);
+    solve_native_lp_solve_cli_model(
+        ExternalLinearCliKind::Mip,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_native_lp_solve_cli_model(
+    kind: ExternalLinearCliKind,
+    model_text: &str,
+    variable_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "lp-solve:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::LpSolve, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "lp_solve executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let model_path = native_lp_solve_temp_path("model", "lp");
+    let cleanup_paths = vec![model_path.clone()];
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_lp_solve_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write lp_solve model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg("-timeout")
+        .arg(glpk_time_limit_arg(opts.time_limit_secs));
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+            command.arg("-gr").arg(format!("{relative_gap:.17}"));
+        }
+        if let Some(absolute_gap) = normalized_absolute_gap(opts.absolute_gap) {
+            command.arg("-ga").arg(format!("{absolute_gap:.17}"));
+        }
+    }
+    command
+        .arg(&model_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_lp_solve_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start lp_solve executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_lp_solve_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_lp_solve_solver_version(&command_path));
+    let parsed =
+        parse_native_lp_solve_solution_text(&format!("{stdout}\n{stderr}"), variable_count);
+    cleanup_native_lp_solve_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
 }
 
 fn solve_native_cbc_cli_model(
@@ -3527,6 +4067,12 @@ struct ParsedNativeSoplexSolution {
 }
 
 #[derive(Default)]
+struct ParsedNativeLpSolveSolution {
+    status: String,
+    x: Vec<f64>,
+}
+
+#[derive(Default)]
 struct HighsMipQuality {
     best_bound: Option<f64>,
     mip_gap: Option<f64>,
@@ -3631,6 +4177,23 @@ fn native_soplex_temp_path(stem: &str, extension: &str) -> PathBuf {
 }
 
 fn cleanup_native_soplex_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn native_lp_solve_temp_path(stem: &str, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "ores-native-lp-solve-{stem}-{}-{nanos}.{extension}",
+        std::process::id()
+    ))
+}
+
+fn cleanup_native_lp_solve_temp_files(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
     }
@@ -4186,6 +4749,33 @@ fn parse_native_soplex_solution_text(
     ParsedNativeSoplexSolution { status, x }
 }
 
+fn parse_native_lp_solve_solution_text(
+    text: &str,
+    variable_count: usize,
+) -> ParsedNativeLpSolveSolution {
+    let mut parsed = ParsedNativeLpSolveSolution {
+        status: "unknown".to_string(),
+        x: vec![0.0; variable_count],
+    };
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("infeasible") || lowered.contains("no feasible") {
+        parsed.status = "infeasible".to_string();
+    } else if lowered.contains("unbounded") {
+        parsed.status = "unbounded".to_string();
+    } else if lowered.contains("value of objective function")
+        || lowered.contains("actual values of the variables")
+    {
+        parsed.status = "optimal".to_string();
+    }
+
+    for line in text.lines() {
+        if let Some((index, value)) = parse_named_variable_value_line(line.trim(), variable_count) {
+            parsed.x[index] = value;
+        }
+    }
+    parsed
+}
+
 fn parse_named_variable_value_line(line: &str, variable_count: usize) -> Option<(usize, f64)> {
     let bytes = line.as_bytes();
     for start in 0..bytes.len() {
@@ -4541,6 +5131,37 @@ fn probe_soplex_solver_version(command_path: &Path) -> Option<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     parse_soplex_solver_version(&text)
+}
+
+fn parse_lp_solve_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some((_, rest)) = line.split_once("lp_solve version ") {
+            let version = rest
+                .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ':')
+                .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                .unwrap_or("")
+                .trim();
+            if !version.is_empty() {
+                return Some(format!("lp_solve {version}"));
+            }
+        }
+    }
+    None
+}
+
+fn probe_lp_solve_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("-h")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_lp_solve_solver_version(&text)
 }
 
 fn parse_highs_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
@@ -4906,6 +5527,85 @@ fn cplex_lp_string(
         out.push('\n');
     }
     out.push_str("End\n");
+    out
+}
+
+fn lpsolve_lp_string(
+    sense: Sense,
+    c: &[f64],
+    le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
+    eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    lbs: &[Option<f64>],
+    ubs: &[Option<f64>],
+    integer_vars: &[bool],
+) -> String {
+    let n = c.len();
+    let names = (0..n).map(|i| format!("x{i}")).collect::<Vec<_>>();
+    let mut out = String::new();
+    out.push_str(match sense {
+        Sense::Max => "max: ",
+        Sense::Min => "min: ",
+    });
+    out.push_str(&lp_term_expr(c, &names));
+    out.push_str(";\n");
+
+    for (i, (row, rhs)) in le_rows.iter().zip(le_rhs).enumerate() {
+        out.push_str(&format!(
+            "c{i}: {} <= {};\n",
+            lp_term_expr(row, &names),
+            fmt_lp_number(*rhs)
+        ));
+    }
+    for (i, (row, rhs)) in eq_rows.iter().zip(eq_rhs).enumerate() {
+        out.push_str(&format!(
+            "e{i}: {} = {};\n",
+            lp_term_expr(row, &names),
+            fmt_lp_number(*rhs)
+        ));
+    }
+    if le_rows.is_empty() && eq_rows.is_empty() {
+        out.push_str(&format!(
+            "c0: 0 {} <= 0;\n",
+            names.first().map(String::as_str).unwrap_or("x0")
+        ));
+    }
+
+    for (i, name) in names.iter().enumerate() {
+        if let Some(lower) = lbs
+            .get(i)
+            .copied()
+            .flatten()
+            .filter(|value| value.is_finite())
+        {
+            out.push_str(&format!("{name} >= {};\n", fmt_lp_number(lower)));
+        }
+        if let Some(upper) = ubs
+            .get(i)
+            .copied()
+            .flatten()
+            .filter(|value| value.is_finite())
+        {
+            out.push_str(&format!("{name} <= {};\n", fmt_lp_number(upper)));
+        }
+    }
+    let integer_names = names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, name)| {
+            integer_vars
+                .get(i)
+                .copied()
+                .unwrap_or(false)
+                .then_some(name.as_str())
+        })
+        .collect::<Vec<_>>();
+    if !integer_names.is_empty() {
+        out.push_str("int ");
+        out.push_str(&integer_names.join(", "));
+        out.push_str(";\n");
+    }
     out
 }
 
@@ -5674,6 +6374,28 @@ mod tests {
     }
 
     #[test]
+    fn ipmip_lp_solve_export_uses_solver_lp_dialect() {
+        let p = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 2.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, false],
+            ub: Some(vec![1.0, 2.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let text = super::ipmip_problem_to_lpsolve_lp_string(&p);
+        assert!(text.starts_with("max: x0 + 2 x1;\n"));
+        assert!(text.contains("c0: x0 + x1 <= 1;\n"));
+        assert!(text.contains("x0 <= 1;\n"));
+        assert!(text.contains("int x0;\n"));
+    }
+
+    #[test]
     fn ipmip_exports_lazy_constraints_as_cli_rows() {
         let p = IPMIPProblem {
             sense: Sense::Max,
@@ -6032,6 +6754,26 @@ Gap                : 0.00 %
         assert_eq!(quality.best_bound, Some(4.0));
         assert_eq!(quality.mip_gap, Some(0.0));
         assert_eq!(quality.absolute_gap, Some(0.0));
+    }
+
+    #[test]
+    fn native_lp_solve_solution_parser_reads_stdout_values_and_version() {
+        let stdout = "\
+Usage of lp_solve version 5.5.2.14:
+
+Value of objective function: 12.00000000
+
+Actual values of the variables:
+x0                              4
+x1                              0
+";
+        let parsed = super::parse_native_lp_solve_solution_text(stdout, 2);
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![4.0, 0.0]);
+        assert_eq!(
+            super::parse_lp_solve_solver_version(stdout),
+            Some("lp_solve 5.5.2.14".to_string())
+        );
     }
 
     #[test]

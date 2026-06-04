@@ -3612,7 +3612,9 @@ fn solve_native_lp_solve_cli_model(
         return failure;
     }
 
-    let objective = dot_f64(objective_coefficients, &parsed.x);
+    let objective = parsed
+        .objective
+        .unwrap_or_else(|| dot_f64(objective_coefficients, &parsed.x));
     let quality = parse_lp_solve_mip_quality(
         kind,
         status,
@@ -4772,6 +4774,7 @@ struct ParsedNativeSoplexSolution {
 struct ParsedNativeLpSolveSolution {
     status: String,
     x: Vec<f64>,
+    objective: Option<f64>,
 }
 
 #[derive(Default)]
@@ -5740,6 +5743,7 @@ fn parse_native_lp_solve_solution_text(
     let mut parsed = ParsedNativeLpSolveSolution {
         status: "unknown".to_string(),
         x: vec![0.0; variable_count],
+        objective: None,
     };
     let lowered = text.to_ascii_lowercase();
     if lowered.contains("infeasible") || lowered.contains("no feasible") {
@@ -5756,6 +5760,11 @@ fn parse_native_lp_solve_solution_text(
     for line in text.lines() {
         let stripped = line.trim();
         let lowered = stripped.to_ascii_lowercase();
+        if lowered.starts_with("value of objective function") {
+            parsed.objective = stripped
+                .split_once(':')
+                .and_then(|(_, value)| parse_f64_token(value.trim()));
+        }
         if lowered.starts_with("actual values of the variables") {
             in_variable_values = true;
             continue;
@@ -8299,6 +8308,7 @@ x0                                  0          -1e+30           1e+30
 ";
         let parsed = super::parse_native_lp_solve_solution_text(stdout, 2);
         assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.objective, Some(12.0));
         assert_eq!(parsed.x, vec![4.0, 0.0]);
         assert_eq!(
             super::parse_lp_solve_solver_version(stdout),

@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voting Algorithm Lab</title>
+<style>
+:root {
+  color-scheme: light;
+  --ink: #172033;
+  --muted: #64748b;
+  --panel: #ffffff;
+  --line: #d8dee8;
+  --soft: #f5f7fb;
+  --accent: #0f766e;
+  --danger: #dc2626;
+  --focus: #2563eb;
+  --shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+}
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #eef2f7;
+  color: var(--ink);
+}
+button, input { font: inherit; }
+button {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+.app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+}
+.topbar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 20px;
+  align-items: end;
+  padding: 22px 28px 16px;
+  background: #172033;
+  color: #f8fafc;
+}
+h1 {
+  margin: 0;
+  font-size: clamp(1.35rem, 2.5vw, 2.2rem);
+  letter-spacing: 0;
+}
+.subtitle {
+  margin: 6px 0 0;
+  color: #cbd5e1;
+  max-width: 860px;
+  line-height: 1.45;
+}
+.metric {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  white-space: nowrap;
+}
+.metric strong { font-size: 1.35rem; }
+.metric span { color: #cbd5e1; font-size: .85rem; }
+.requirements {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px 28px;
+  background: #dfe7f1;
+  border-bottom: 1px solid #cbd5e1;
+}
+.req {
+  background: rgba(255,255,255,.72);
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.req b { display: block; font-size: .78rem; color: #475569; text-transform: uppercase; letter-spacing: .08em; }
+.req strong { display: block; margin-top: 2px; font-size: .98rem; }
+.req p { margin: 5px 0 0; color: #475569; font-size: .84rem; line-height: 1.35; }
+.workspace {
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+  min-height: 0;
+}
+.system-nav {
+  background: #f8fafc;
+  border-right: 1px solid #cbd5e1;
+  padding: 14px;
+  overflow: auto;
+}
+.system-tabs {
+  display: grid;
+  gap: 8px;
+}
+.system-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  border-radius: 8px;
+  padding: 10px 11px;
+  min-height: 56px;
+  transition: border-color .2s, background .2s, transform .2s;
+}
+.system-tab:hover { transform: translateX(2px); }
+.system-tab.active {
+  border-color: #0f766e;
+  background: #e7f7f2;
+}
+.system-tab .name { font-weight: 700; font-size: .94rem; overflow-wrap: anywhere; }
+.system-tab .family { color: var(--muted); font-size: .75rem; margin-top: 2px; }
+.system-tab .count {
+  min-width: 2.2rem;
+  height: 1.6rem;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #edf2f7;
+  color: #334155;
+  font-size: .78rem;
+}
+.main {
+  min-width: 0;
+  padding: 18px 22px 24px;
+  overflow: auto;
+}
+.case-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.case-tab {
+  border-radius: 8px;
+  padding: 8px 11px;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.case-tab.active {
+  color: #fff;
+  background: #172033;
+  border-color: #172033;
+}
+.case-tab .kind {
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  opacity: .76;
+}
+.summary-band {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, .38fr);
+  gap: 14px;
+  align-items: stretch;
+  margin-bottom: 14px;
+}
+.summary, .outcome {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+}
+.eyebrow {
+  margin: 0 0 5px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 800;
+}
+.summary h2 {
+  margin: 0;
+  font-size: 1.18rem;
+}
+.summary p, .outcome p {
+  margin: 8px 0 0;
+  color: #475569;
+  line-height: 1.45;
+}
+.edge {
+  display: none;
+  margin-top: 9px;
+  color: #8a4b00;
+  font-weight: 700;
+}
+.edge.visible { display: block; }
+.outcome strong {
+  display: block;
+  font-size: 1.08rem;
+}
+.visual-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 350px;
+  gap: 14px;
+}
+.arena, .side {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.arena {
+  padding: 14px;
+  min-height: 560px;
+}
+.frame-title-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.frame-title-row h3 {
+  margin: 0;
+  font-size: 1.08rem;
+}
+.frame-title-row p {
+  margin: 5px 0 0;
+  color: #475569;
+  line-height: 1.4;
+}
+.round-pill {
+  border-radius: 999px;
+  background: #edf2f7;
+  color: #334155;
+  padding: 6px 10px;
+  font-weight: 800;
+  font-size: .78rem;
+  white-space: nowrap;
+}
+.bar-stack {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 18px 4px 8px;
+}
+.threshold {
+  position: absolute;
+  top: 12px;
+  bottom: 0;
+  width: 0;
+  border-left: 2px dashed #111827;
+  opacity: .62;
+  pointer-events: none;
+}
+.threshold span {
+  position: absolute;
+  top: -12px;
+  left: 5px;
+  white-space: nowrap;
+  background: #111827;
+  color: #fff;
+  border-radius: 5px;
+  padding: 2px 5px;
+  font-size: .68rem;
+}
+.bar-row {
+  display: grid;
+  grid-template-columns: 136px minmax(120px, 1fr) 112px;
+  gap: 10px;
+  align-items: center;
+  min-height: 48px;
+}
+.cand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+.cand span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 800;
+}
+.track {
+  position: relative;
+  height: 32px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #edf2f7;
+}
+.fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 6px;
+  transition: width .85s cubic-bezier(.19, 1, .22, 1), opacity .2s;
+  box-shadow: inset 0 -10px 18px rgba(0,0,0,.12);
+}
+.bar-row.winner .track { outline: 2px solid #0f766e; outline-offset: 2px; }
+.bar-row.eliminated { opacity: .45; }
+.bar-value {
+  font-variant-numeric: tabular-nums;
+  color: #334155;
+  font-size: .84rem;
+  text-align: right;
+}
+.packet-lane {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 9px;
+  margin-top: 18px;
+}
+.packet {
+  min-height: 62px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #f8fafc;
+  position: relative;
+  overflow: hidden;
+}
+.packet:before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: var(--packet-color);
+}
+.packet strong { display: block; font-size: .88rem; }
+.packet span { display: block; color: #475569; font-size: .78rem; margin-top: 4px; line-height: 1.3; }
+.packet .dot {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  width: 12px;
+  height: 12px;
+  border-radius: 99px;
+  background: var(--packet-color);
+  animation: drift 1.4s ease-in-out infinite alternate;
+}
+@keyframes drift {
+  from { transform: translateX(-8px); opacity: .55; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.side {
+  min-width: 0;
+  padding: 14px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+.panel-section {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 13px;
+}
+.panel-section:last-child { border-bottom: 0; padding-bottom: 0; }
+.panel-section h4 {
+  margin: 0 0 8px;
+  font-size: .9rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: #475569;
+}
+.note-list, .caveat-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+}
+.note-list li, .caveat-list li {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  padding: 8px 9px;
+  color: #475569;
+  line-height: 1.35;
+  font-size: .84rem;
+}
+.transfer-list, .pairwise-list, .bet-list {
+  display: grid;
+  gap: 8px;
+}
+.transfer, .pair, .bet {
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+.transfer strong, .pair strong, .bet strong { display: block; font-size: .86rem; }
+.transfer span, .pair span, .bet span {
+  display: block;
+  color: #475569;
+  font-size: .78rem;
+  margin-top: 4px;
+  line-height: 1.35;
+}
+.controls {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(140px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.icon-btn {
+  width: 38px;
+  height: 34px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-weight: 900;
+}
+input[type="range"] {
+  width: 100%;
+  accent-color: #0f766e;
+}
+.frame-counter {
+  color: var(--muted);
+  font-size: .82rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.empty {
+  color: var(--muted);
+  font-size: .84rem;
+}
+@media (max-width: 1120px) {
+  .workspace { grid-template-columns: 1fr; }
+  .system-nav { border-right: 0; border-bottom: 1px solid #cbd5e1; }
+  .system-tabs { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .visual-grid, .summary-band { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .topbar { grid-template-columns: 1fr; }
+  .metric { justify-items: start; }
+  .requirements { grid-template-columns: 1fr; padding: 10px 14px; }
+  .main { padding: 14px; }
+  .bar-row { grid-template-columns: 1fr; gap: 5px; }
+  .bar-value { text-align: left; }
+  .controls { grid-template-columns: repeat(3, auto) 1fr; }
+  .frame-counter { grid-column: 1 / -1; }
+}
+</style>
+</head>
+<body>
+<script id="voting-lab-payload" type="application/json">__VOTING_LAB_PAYLOAD__</script>
+<div class="app">
+  <header class="topbar">
+    <div>
+      <h1 id="labTitle">Voting Algorithm Lab</h1>
+      <p class="subtitle" id="labSubtitle"></p>
+    </div>
+    <div class="metric">
+      <strong id="voteRecords">1,000</strong>
+      <span>vote records per scenario</span>
+    </div>
+  </header>
+  <section class="requirements" id="requirements"></section>
+  <div class="workspace">
+    <nav class="system-nav">
+      <div class="system-tabs" id="systemTabs"></div>
+    </nav>
+    <main class="main">
+      <div class="case-tabs" id="caseTabs"></div>
+      <section class="summary-band">
+        <div class="summary">
+          <p class="eyebrow" id="systemFamily"></p>
+          <h2 id="systemName"></h2>
+          <p id="systemDescription"></p>
+          <p id="scenarioFit"></p>
+          <p class="edge" id="edgeFocus"></p>
+        </div>
+        <div class="outcome">
+          <p class="eyebrow">Outcome</p>
+          <strong id="caseOutcome"></strong>
+          <p id="thresholdLabel"></p>
+        </div>
+      </section>
+      <section class="visual-grid">
+        <div class="arena">
+          <div class="frame-title-row">
+            <div>
+              <h3 id="frameTitle"></h3>
+              <p id="frameDetail"></p>
+            </div>
+            <div class="round-pill" id="roundPill"></div>
+          </div>
+          <div class="bar-stack" id="barStack"></div>
+          <div class="packet-lane" id="packetLane"></div>
+          <div class="controls">
+            <button class="icon-btn" id="prevBtn" title="Previous frame" aria-label="Previous frame">&lt;</button>
+            <button class="icon-btn" id="playBtn" title="Play or pause" aria-label="Play or pause">&gt;</button>
+            <button class="icon-btn" id="nextBtn" title="Next frame" aria-label="Next frame">&gt;</button>
+            <input id="scrubber" type="range" min="0" max="0" value="0" aria-label="Frame">
+            <span class="frame-counter" id="frameCounter"></span>
+          </div>
+        </div>
+        <aside class="side">
+          <section class="panel-section">
+            <h4>Frame Notes</h4>
+            <ul class="note-list" id="frameNotes"></ul>
+          </section>
+          <section class="panel-section">
+            <h4>Transfers</h4>
+            <div class="transfer-list" id="transferList"></div>
+          </section>
+          <section class="panel-section">
+            <h4>Pairwise</h4>
+            <div class="pairwise-list" id="pairwiseList"></div>
+          </section>
+          <section class="panel-section" id="bettingSection">
+            <h4>Betting Lines</h4>
+            <div class="bet-list" id="bettingList"></div>
+          </section>
+          <section class="panel-section">
+            <h4>Case Caveats</h4>
+            <ul class="caveat-list" id="caseCaveats"></ul>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </div>
+</div>
+<script>
+const LAB = JSON.parse(document.getElementById("voting-lab-payload").textContent);
+const state = { system: 0, case: 0, frame: 0, playing: false, timer: null };
+const els = {
+  title: document.getElementById("labTitle"),
+  subtitle: document.getElementById("labSubtitle"),
+  voteRecords: document.getElementById("voteRecords"),
+  requirements: document.getElementById("requirements"),
+  systemTabs: document.getElementById("systemTabs"),
+  caseTabs: document.getElementById("caseTabs"),
+  family: document.getElementById("systemFamily"),
+  systemName: document.getElementById("systemName"),
+  systemDescription: document.getElementById("systemDescription"),
+  scenarioFit: document.getElementById("scenarioFit"),
+  edgeFocus: document.getElementById("edgeFocus"),
+  outcome: document.getElementById("caseOutcome"),
+  threshold: document.getElementById("thresholdLabel"),
+  frameTitle: document.getElementById("frameTitle"),
+  frameDetail: document.getElementById("frameDetail"),
+  roundPill: document.getElementById("roundPill"),
+  barStack: document.getElementById("barStack"),
+  packetLane: document.getElementById("packetLane"),
+  notes: document.getElementById("frameNotes"),
+  transfers: document.getElementById("transferList"),
+  pairwise: document.getElementById("pairwiseList"),
+  bettingSection: document.getElementById("bettingSection"),
+  betting: document.getElementById("bettingList"),
+  caveats: document.getElementById("caseCaveats"),
+  prev: document.getElementById("prevBtn"),
+  play: document.getElementById("playBtn"),
+  next: document.getElementById("nextBtn"),
+  scrubber: document.getElementById("scrubber"),
+  counter: document.getElementById("frameCounter")
+};
+
+function fmt(value) {
+  if (!Number.isFinite(value)) return "";
+  if (Math.abs(value - Math.round(value)) < 1e-9) return String(Math.round(value));
+  return value.toFixed(2);
+}
+
+function system() { return LAB.systems[state.system]; }
+function kase() { return system().cases[state.case]; }
+function frame() { return kase().frames[state.frame]; }
+
+function candidateName(id) {
+  const c = kase().candidates.find(x => x.id === id);
+  return c ? c.name : (id || "exhausted");
+}
+
+function renderShell() {
+  els.title.textContent = LAB.title;
+  els.subtitle.textContent = LAB.subtitle;
+  els.voteRecords.textContent = LAB.totalVoteRecords.toLocaleString();
+  els.requirements.innerHTML = LAB.requirements.map(req => `
+    <article class="req">
+      <b>${req.label}</b>
+      <strong>${req.value}</strong>
+      <p>${req.detail}</p>
+    </article>
+  `).join("");
+  renderSystemTabs();
+  renderAll();
+}
+
+function renderSystemTabs() {
+  els.systemTabs.innerHTML = LAB.systems.map((sys, index) => `
+    <button class="system-tab ${index === state.system ? "active" : ""}" data-system="${index}">
+      <span>
+        <span class="name">${sys.shortLabel}</span>
+        <span class="family">${sys.family}</span>
+      </span>
+      <span class="count">${sys.cases.length}</span>
+    </button>
+  `).join("");
+  els.systemTabs.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.system = Number(btn.dataset.system);
+      state.case = 0;
+      state.frame = 0;
+      stop();
+      renderAll();
+    });
+  });
+}
+
+function renderCaseTabs() {
+  els.caseTabs.innerHTML = system().cases.map((c, index) => `
+    <button class="case-tab ${index === state.case ? "active" : ""}" data-case="${index}">
+      <span>${c.label}</span>
+      <span class="kind">${c.kind}</span>
+    </button>
+  `).join("");
+  els.caseTabs.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.case = Number(btn.dataset.case);
+      state.frame = 0;
+      stop();
+      renderAll();
+    });
+  });
+}
+
+function renderAll() {
+  renderSystemTabs();
+  renderCaseTabs();
+  const sys = system();
+  const c = kase();
+  els.family.textContent = sys.family;
+  els.systemName.textContent = sys.label;
+  els.systemDescription.textContent = sys.description;
+  els.scenarioFit.textContent = sys.scenarioFit;
+  els.edgeFocus.textContent = c.edgeFocus || "";
+  els.edgeFocus.classList.toggle("visible", Boolean(c.edgeFocus));
+  els.outcome.textContent = c.outcome;
+  els.threshold.textContent = c.thresholdLabel ? `Threshold: ${c.thresholdLabel}` : "Threshold: none";
+  els.caveats.innerHTML = c.caveats.map(x => `<li>${x}</li>`).join("") || `<li class="empty">No special caveats.</li>`;
+  els.scrubber.max = Math.max(0, c.frames.length - 1);
+  renderFrame();
+}
+
+function renderFrame() {
+  const c = kase();
+  const f = frame();
+  els.frameTitle.textContent = f.title;
+  els.frameDetail.textContent = f.detail;
+  els.roundPill.textContent = `round ${f.round}`;
+  els.scrubber.value = state.frame;
+  els.counter.textContent = `${state.frame + 1} / ${c.frames.length}`;
+  els.play.textContent = state.playing ? "||" : ">";
+  renderBars(f);
+  renderPackets(f);
+  renderNotes(f);
+  renderTransfers(f);
+  renderPairwise(f);
+  renderBetting(c);
+}
+
+function renderBars(f) {
+  const denomBar = f.totals.find(b => b.percent > 0 && b.value > 0);
+  const denom = denomBar ? denomBar.value * 100 / denomBar.percent : Math.max(1, ...f.totals.map(b => b.value));
+  const thresholdPct = f.threshold == null ? null : Math.max(0, Math.min(100, f.threshold * 100 / Math.max(denom, f.threshold)));
+  els.barStack.innerHTML = `
+    ${thresholdPct == null ? "" : `<div class="threshold" style="left:${thresholdPct}%"><span>${fmt(f.threshold)}</span></div>`}
+    ${f.totals.map((bar, index) => `
+      <div class="bar-row ${bar.status}" style="--row:${index}">
+        <div class="cand"><span class="swatch" style="background:${bar.color}"></span><span>${bar.label}</span></div>
+        <div class="track"><div class="fill" data-width="${Math.max(0, Math.min(100, bar.percent))}" style="background:${bar.color}"></div></div>
+        <div class="bar-value">${bar.detail}${bar.secondaryLabel ? `<br>${bar.secondaryLabel}: ${fmt(bar.secondaryValue)}` : ""}</div>
+      </div>
+    `).join("")}
+  `;
+  requestAnimationFrame(() => {
+    els.barStack.querySelectorAll(".fill").forEach(fill => {
+      fill.style.width = `${fill.dataset.width}%`;
+    });
+  });
+}
+
+function renderPackets(f) {
+  els.packetLane.innerHTML = f.packets.map((p, index) => `
+    <div class="packet" style="--packet-color:${p.color}; animation-delay:${index * 80}ms">
+      <span class="dot"></span>
+      <strong>${p.count.toLocaleString()} ${p.label}</strong>
+      <span>${p.note}</span>
+    </div>
+  `).join("");
+}
+
+function renderNotes(f) {
+  els.notes.innerHTML = f.notes.map(n => `<li>${n}</li>`).join("") || `<li class="empty">No frame-specific notes.</li>`;
+}
+
+function renderTransfers(f) {
+  els.transfers.innerHTML = f.transfers.map(t => `
+    <div class="transfer">
+      <strong>${candidateName(t.from)} -> ${t.to ? candidateName(t.to) : "exhausted"}</strong>
+      <span>${t.count.toLocaleString()} records, ${t.label}</span>
+    </div>
+  `).join("") || `<div class="empty">No transfers in this frame.</div>`;
+}
+
+function renderPairwise(f) {
+  els.pairwise.innerHTML = f.pairwise.map(p => `
+    <div class="pair">
+      <strong>${candidateName(p.row)} vs ${candidateName(p.col)}</strong>
+      <span>${p.rowVotes}-${p.colVotes}; margin ${p.margin}; winner ${p.winner ? candidateName(p.winner) : "tie"}</span>
+    </div>
+  `).join("") || `<div class="empty">No pairwise matrix for this system.</div>`;
+}
+
+function renderBetting(c) {
+  const lines = c.bettingLines || [];
+  els.bettingSection.style.display = lines.length ? "" : "none";
+  els.betting.innerHTML = lines.map(line => `
+    <div class="bet">
+      <strong>${line.label}</strong>
+      <span>${line.lineKind}: line ${fmt(line.line)}, actual ${fmt(line.actual)}, covered by ${line.coveredBy}</span>
+      <span>${line.note}</span>
+    </div>
+  `).join("");
+}
+
+function step(delta) {
+  const max = kase().frames.length - 1;
+  state.frame = Math.max(0, Math.min(max, state.frame + delta));
+  renderFrame();
+}
+
+function play() {
+  if (state.playing) return;
+  state.playing = true;
+  els.play.textContent = "||";
+  state.timer = setInterval(() => {
+    if (state.frame >= kase().frames.length - 1) {
+      state.frame = 0;
+    } else {
+      state.frame += 1;
+    }
+    renderFrame();
+  }, 1450);
+}
+
+function stop() {
+  state.playing = false;
+  if (state.timer) clearInterval(state.timer);
+  state.timer = null;
+  els.play.textContent = ">";
+}
+
+els.prev.addEventListener("click", () => { stop(); step(-1); });
+els.next.addEventListener("click", () => { stop(); step(1); });
+els.play.addEventListener("click", () => state.playing ? stop() : play());
+els.scrubber.addEventListener("input", () => {
+  stop();
+  state.frame = Number(els.scrubber.value);
+  renderFrame();
+});
+window.addEventListener("keydown", event => {
+  if (event.key === "ArrowLeft") { stop(); step(-1); }
+  if (event.key === "ArrowRight") { stop(); step(1); }
+  if (event.key === " ") { event.preventDefault(); state.playing ? stop() : play(); }
+});
+
+renderShell();
+</script>
+</body>
+</html>

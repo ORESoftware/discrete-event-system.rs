@@ -368,9 +368,147 @@ pub struct RunFromSpecOptions {
     pub verbose: Option<bool>,
 }
 
+/// Render a [`ParamSchema`] as the JSON-ish schema object printed by CLI
+/// helpers. This mirrors the TS discriminated-union shape closely enough for
+/// humans to copy model specs without adding a serde dependency to the
+/// registry path.
+pub fn param_schema_to_json(schema: &ParamSchema) -> JsonValue {
+    let mut out = JsonObject::new();
+    match schema {
+        ParamSchema::Number {
+            min,
+            max,
+            integer,
+            default,
+            description,
+        } => {
+            out.insert("kind".to_string(), JsonValue::String("number".to_string()));
+            insert_optional_number(&mut out, "min", *min);
+            insert_optional_number(&mut out, "max", *max);
+            insert_optional_bool(&mut out, "integer", *integer);
+            insert_optional_number(&mut out, "default", *default);
+            insert_optional_string(&mut out, "description", description);
+        }
+        ParamSchema::String {
+            allowed,
+            default,
+            description,
+        } => {
+            out.insert("kind".to_string(), JsonValue::String("string".to_string()));
+            if let Some(allowed) = allowed {
+                out.insert(
+                    "enum".to_string(),
+                    JsonValue::Array(
+                        allowed
+                            .iter()
+                            .cloned()
+                            .map(JsonValue::String)
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+            }
+            insert_optional_string(&mut out, "default", default);
+            insert_optional_string(&mut out, "description", description);
+        }
+        ParamSchema::Boolean {
+            default,
+            description,
+        } => {
+            out.insert("kind".to_string(), JsonValue::String("boolean".to_string()));
+            insert_optional_bool(&mut out, "default", *default);
+            insert_optional_string(&mut out, "description", description);
+        }
+        ParamSchema::Array {
+            items,
+            min_length,
+            max_length,
+            description,
+        } => {
+            out.insert("kind".to_string(), JsonValue::String("array".to_string()));
+            out.insert("items".to_string(), param_schema_to_json(items));
+            insert_optional_usize(&mut out, "minLength", *min_length);
+            insert_optional_usize(&mut out, "maxLength", *max_length);
+            insert_optional_string(&mut out, "description", description);
+        }
+        ParamSchema::Object {
+            fields,
+            required,
+            description,
+        } => {
+            out.insert("kind".to_string(), JsonValue::String("object".to_string()));
+            let mut field_obj = JsonObject::new();
+            for (key, value) in fields {
+                field_obj.insert(key.clone(), param_schema_to_json(value));
+            }
+            out.insert("fields".to_string(), JsonValue::Object(field_obj));
+            if let Some(required) = required {
+                out.insert(
+                    "required".to_string(),
+                    JsonValue::Array(
+                        required
+                            .iter()
+                            .cloned()
+                            .map(JsonValue::String)
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+            }
+            insert_optional_string(&mut out, "description", description);
+        }
+        ParamSchema::OneOf {
+            variants,
+            description,
+        } => {
+            out.insert("kind".to_string(), JsonValue::String("oneOf".to_string()));
+            out.insert(
+                "variants".to_string(),
+                JsonValue::Array(
+                    variants
+                        .iter()
+                        .map(|variant| {
+                            let mut v = JsonObject::new();
+                            v.insert("tag".to_string(), JsonValue::String(variant.tag.clone()));
+                            insert_optional_string(&mut v, "tagField", &variant.tag_field);
+                            v.insert("schema".to_string(), param_schema_to_json(&variant.schema));
+                            insert_optional_string(&mut v, "description", &variant.description);
+                            JsonValue::Object(v)
+                        })
+                        .collect(),
+                ),
+            );
+            insert_optional_string(&mut out, "description", description);
+        }
+    }
+    JsonValue::Object(out)
+}
+
 // =============================================================================
 // Helpers.
 // =============================================================================
+
+fn insert_optional_number(obj: &mut JsonObject, key: &str, value: Option<f64>) {
+    if let Some(value) = value {
+        obj.insert(key.to_string(), JsonValue::Number(value));
+    }
+}
+
+fn insert_optional_usize(obj: &mut JsonObject, key: &str, value: Option<usize>) {
+    if let Some(value) = value {
+        obj.insert(key.to_string(), JsonValue::Number(value as f64));
+    }
+}
+
+fn insert_optional_bool(obj: &mut JsonObject, key: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        obj.insert(key.to_string(), JsonValue::Bool(value));
+    }
+}
+
+fn insert_optional_string(obj: &mut JsonObject, key: &str, value: &Option<String>) {
+    if let Some(value) = value {
+        obj.insert(key.to_string(), JsonValue::String(value.clone()));
+    }
+}
 
 fn mkdir_parent(path: &str) {
     if let Some(parent) = Path::new(path).parent() {
@@ -937,6 +1075,48 @@ mod tests {
         o.insert("k".to_string(), JsonValue::Number(1.0));
         let text = to_pretty_json(&JsonValue::Object(o), 0);
         assert_eq!(text, "{\n  \"k\": 1\n}");
+    }
+
+    #[test]
+    fn param_schema_to_json_renders_cli_shape() {
+        let schema = ParamSchema::Object {
+            fields: vec![
+                (
+                    "x".to_string(),
+                    ParamSchema::Number {
+                        min: Some(0.0),
+                        max: None,
+                        integer: Some(false),
+                        default: Some(1.5),
+                        description: None,
+                    },
+                ),
+                (
+                    "mode".to_string(),
+                    ParamSchema::String {
+                        allowed: Some(vec!["a".to_string(), "b".to_string()]),
+                        default: Some("a".to_string()),
+                        description: None,
+                    },
+                ),
+            ],
+            required: Some(vec!["x".to_string()]),
+            description: Some("example".to_string()),
+        };
+        let rendered = param_schema_to_json(&schema);
+        let obj = match rendered {
+            JsonValue::Object(obj) => obj,
+            _ => panic!("expected object schema"),
+        };
+        assert_eq!(
+            obj.get("kind"),
+            Some(&JsonValue::String("object".to_string()))
+        );
+        assert!(matches!(obj.get("fields"), Some(JsonValue::Object(_))));
+        assert_eq!(
+            obj.get("required"),
+            Some(&JsonValue::Array(vec![JsonValue::String("x".to_string())]))
+        );
     }
 
     #[test]

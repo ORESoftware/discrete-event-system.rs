@@ -37,6 +37,47 @@ scripts/soccer_self_play_status.sh out/soccer-self-play/wide-flanks-audit
 node scripts/soccer_self_play_verify_artifacts.js out/soccer-self-play/wide-flanks-audit
 ```
 
+## Free-Kick Restart Learning
+
+Use the set-play runner to repeat 10-second indirect and direct free-kicks from
+25 yards and train both the MDP/POMDP Q-policy and the bounded neural gradient
+learner. Indirect free-kicks are trained first by default:
+
+```bash
+SOCCER_SET_PLAY_RUN_ID=free-kick-25y-audit \
+SOCCER_SET_PLAY_EPISODES=100 \
+cargo run --release --bin main_soccer_set_play_learning_run
+```
+
+Useful overrides:
+
+```bash
+SOCCER_FREE_KICK_DISTANCE_YARDS=25 \
+SOCCER_SET_PLAY_DURATION_SECONDS=10 \
+SOCCER_SET_PLAY_RESTARTS=indirect-free-kick,direct-free-kick \
+SOCCER_NEURAL_LEARNING_ENABLED=true \
+SOCCER_NEURAL_LEARNING_BACKEND=threaded \
+SOCCER_RESUME_POSTGRES_POLICY=true \
+cargo run --release --bin main_soccer_set_play_learning_run
+```
+
+When one of `SOCCER_DATABASE_URL`, `AGENT_TASKS_RDS_DATABASE_URL`,
+`RDS_DATABASE_URL`, `DATABASE_URL`, or `PG_DATABASE_URL` is present, the runner
+loads the latest active policy for `SOCCER_EXPERIMENT_SLUG` and writes the
+result back to Postgres. The portable JSONB summaries remain on the main run and
+policy rows, but the queryable learning facts are normalized into:
+
+- `des_soccer_learning_policy_versions` and
+  `des_soccer_learning_policy_entries` for MDP/POMDP action and target Q-values;
+- `des_soccer_learning_runs` for the completed training run;
+- `des_soccer_learning_set_play_runs` for typed restart-training run metrics;
+- `des_soccer_learning_set_play_restart_mix` for the direct/indirect restart
+  schedule;
+- `des_soccer_learning_set_play_episode_metrics` for per-episode goal,
+  policy-update, and restart metrics;
+- `des_soccer_learning_neural_run_metrics` for neural gradient steps, sample
+  counts, replay stats, parameter count, and loss.
+
 ## Docker
 
 ```bash

@@ -7,17 +7,18 @@
 //! `fs` → `std::fs`.
 //!
 //! PORT NOTE: the TS imports `./general/des-registry`
-//! (`runFromJsonFile`, `listModels`, `getModel`). There is no
-//! `crate::des::general::des_registry` in the Rust tree yet, so a minimal
-//! registry is stubbed locally (empty model set; `run_from_json_file` reads the
-//! file but reports that no models are registered). The CLI dispatch — the
-//! substance of this script — is ported faithfully. Replace the local
-//! `des_registry` stub with `use crate::des::general::des_registry::{...}` once
-//! that module is ported. JSON rendering uses pre-built strings (no `serde`).
+//! (`runFromJsonFile`, `listModels`, `getModel`). Rust uses the production
+//! `crate::des::general::des_registry::Registry`, but built-in typed adapters
+//! are not auto-registered yet because the concrete adapters still need a
+//! `JsonValue <-> P` codec bridge. The CLI therefore exercises the real
+//! registry/parsing/validation path and reports an empty model set until those
+//! wrappers are added.
 
 #![allow(dead_code)]
 
-use des_registry::{get_model, list_models, run_from_json_file, RunFromJsonOptions};
+use crate::des::general::des_registry::{
+    param_schema_to_json, to_pretty_json, Registry, RunFromSpecOptions,
+};
 
 fn print_help() {
     println!("Usage:");
@@ -32,6 +33,10 @@ fn print_help() {
     println!("  {{ \"$schema\": \"des/universal-model/v1\", \"originalInput\": ..., \"math\": ..., \"des\": ... }}");
 }
 
+fn build_registry() -> Registry {
+    Registry::new()
+}
+
 /// Entry point (TS top-level `main`).
 pub fn run() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -42,44 +47,48 @@ pub fn run() {
         return;
     }
 
+    let registry = build_registry();
+
     if argv[0] == "--list" {
-        let models = list_models();
+        let models = registry.list_models();
         println!("Registered models ({}):", models.len());
         for m in &models {
-            println!("  {:<24} — {}", m.id, m.description);
+            println!("  {:<24} - {}", m.id, m.description);
         }
         return;
     }
     if argv[0] == "--schema" && argv.len() > 1 {
-        match get_model(&argv[1]) {
-            Some(reg) => {
-                println!("Model: {}", reg.id);
-                println!("Description: {}", reg.description);
+        match registry.get_model(&argv[1]) {
+            Ok(reg) => {
+                println!("Model: {}", reg.id());
+                println!("Description: {}", reg.description());
                 println!("Schema:");
-                println!("{}", reg.schema_json);
+                println!(
+                    "{}",
+                    to_pretty_json(&param_schema_to_json(&reg.schema()), 0)
+                );
             }
-            None => {
-                eprintln!("Unknown model: {}", argv[1]);
+            Err(e) => {
+                eprintln!("{e}");
                 return;
             }
         }
         return;
     }
     if argv[0] == "--example" && argv.len() > 1 {
-        match get_model(&argv[1]) {
-            Some(reg) if !reg.examples.is_empty() => {
-                println!("{}", reg.examples[0].spec_json);
-            }
-            Some(_) => {
-                eprintln!("No examples registered for \"{}\".", argv[1]);
+        match registry.get_model(&argv[1]) {
+            Ok(_) => {
+                eprintln!(
+                    "Examples for \"{}\" require typed adapter wrappers; none are registered yet.",
+                    argv[1]
+                );
                 return;
             }
-            None => {
-                eprintln!("Unknown model: {}", argv[1]);
+            Err(e) => {
+                eprintln!("{e}");
                 return;
             }
         }
-        return;
     }
 
     let spec_path = &argv[0];
@@ -87,13 +96,18 @@ pub fn run() {
         eprintln!("Spec file not found: {spec_path}");
         return;
     }
-    match run_from_json_file(spec_path, RunFromJsonOptions { verbose: true }) {
+    match registry.run_from_json_file(
+        spec_path,
+        &RunFromSpecOptions {
+            verbose: Some(true),
+        },
+    ) {
         Ok(summary) => {
             if !summary.outputs.is_empty() {
                 println!();
                 println!("Outputs written:");
                 for o in &summary.outputs {
-                    println!("  [{}] {}", o.kind, o.path);
+                    println!("  [{}] {}", output_kind_label(o.kind), o.path);
                 }
             }
             println!();
@@ -105,62 +119,12 @@ pub fn run() {
     }
 }
 
-// -----------------------------------------------------------------------------
-// PORT NOTE: local stub of `crate::des::general::des_registry` (not yet ported).
-// Empty model registry; the runner reads the spec file but reports that no
-// models are registered. Replace with the real registry once available.
-// -----------------------------------------------------------------------------
-mod des_registry {
-    #[derive(Clone, Debug)]
-    pub struct ModelInfo {
-        pub id: String,
-        pub description: String,
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct ModelExample {
-        pub spec_json: String,
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct ModelRegistration {
-        pub id: String,
-        pub description: String,
-        pub schema_json: String,
-        pub examples: Vec<ModelExample>,
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct RunOutput {
-        pub kind: String,
-        pub path: String,
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct RunSummary {
-        pub outputs: Vec<RunOutput>,
-        pub runtime_ms: u128,
-    }
-
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct RunFromJsonOptions {
-        pub verbose: bool,
-    }
-
-    /// Stub: no models registered (see PORT NOTE).
-    pub fn list_models() -> Vec<ModelInfo> {
-        Vec::new()
-    }
-
-    /// Stub: no models registered (see PORT NOTE).
-    pub fn get_model(_id: &str) -> Option<ModelRegistration> {
-        None
-    }
-
-    /// Stub: reads the file to validate it exists, then reports the registry is
-    /// empty (the real dispatcher lives in the un-ported `des_registry`).
-    pub fn run_from_json_file(path: &str, _opts: RunFromJsonOptions) -> Result<RunSummary, String> {
-        let _spec = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-        Err("des_registry not ported: no models registered (see PORT NOTE)".to_string())
+fn output_kind_label(kind: crate::des::general::des_spec::OutputKind) -> &'static str {
+    match kind {
+        crate::des::general::des_spec::OutputKind::Csv => "csv",
+        crate::des::general::des_spec::OutputKind::Html => "html",
+        crate::des::general::des_spec::OutputKind::Frames => "frames",
+        crate::des::general::des_spec::OutputKind::Summary => "summary",
+        crate::des::general::des_spec::OutputKind::Log => "log",
     }
 }

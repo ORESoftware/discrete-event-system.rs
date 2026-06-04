@@ -9,4 +9,4 @@ Each saved policy response also reports a `historyPath`. That file is JSONL, wit
 
 The live server exposes recent history through `/api/team-policy/history`, and the UI's Policy History panel reads the same route.
 
-For now the live soccer learner persists policy weights as JSON artifacts on disk. Q-values, target-grid Q-values, and visit counts are saved; action probabilities are derived at runtime from those values. Postgres policy storage is not wired into this simulator yet.
+The live UI snapshot path still writes JSON artifacts on disk. Batch self-play and set-play restart learning can also persist to Postgres when a supported database URL env var is present; those runs store policy versions, action/target Q-value rows, run summaries, and neural-learning metrics in the `des_soccer_learning_*` tables.

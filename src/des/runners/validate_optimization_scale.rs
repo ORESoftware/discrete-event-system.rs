@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -24,6 +25,9 @@ use crate::des::general::external_cp_sat_reference::{
 use crate::des::general::external_linear_cli::{
     solve_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliModelFormat,
     ExternalLinearCliOptions, ExternalLinearCliSolver, ExternalLinearCliStatus,
+};
+use crate::des::general::external_optimization_ecosystem::{
+    probe_external_optimization_tool, ExternalOptimizationProbeStatus, ExternalOptimizationTool,
 };
 use crate::des::general::ip_mip_des::{
     build_binary_knapsack_ip, solve_ipmip_with_des, ConcreteLpRelaxationAlgorithm, IPMIPProblem,
@@ -131,6 +135,10 @@ impl Driver {
     }
 
     fn run_lp_case(&mut self, n: usize, method: &str) {
+        if let Some(message) = skip_large_lp_method_without_ortools(n, method) {
+            println!("  SKIP  LP n={n} method={method}: {message}");
+            return;
+        }
         let m = (n / 2).max(2);
         let problem = build_resource_lp(n, m);
         let native_t0 = Instant::now();
@@ -582,6 +590,9 @@ fn external_solver_from_name(name: &str) -> Option<ExternalLinearCliSolver> {
         "scip" => Some(ExternalLinearCliSolver::Scip),
         "cbc" => Some(ExternalLinearCliSolver::Cbc),
         "clp" => Some(ExternalLinearCliSolver::Clp),
+        "soplex" => Some(ExternalLinearCliSolver::Soplex),
+        "qsopt-ex" | "qsopt_ex" | "qsopt" | "esolver" => Some(ExternalLinearCliSolver::QsoptEx),
+        "lp-solve" | "lp_solve" | "lpsolve" => Some(ExternalLinearCliSolver::LpSolve),
         "gurobi" | "gurobi_cl" => Some(ExternalLinearCliSolver::Gurobi),
         "cplex" => Some(ExternalLinearCliSolver::Cplex),
         "xpress" | "optimizer" => Some(ExternalLinearCliSolver::Xpress),
@@ -818,6 +829,40 @@ fn lp_method_objective_tolerance(
         1e-7
     }
 }
+
+const VERTEX_ENUMERATION_SCALE_LIMIT: usize = 8;
+
+fn skip_large_lp_method_without_ortools(n: usize, method: &str) -> Option<String> {
+    if n <= VERTEX_ENUMERATION_SCALE_LIMIT {
+        return None;
+    }
+    let Some(ready) = ortools_linear_solver_ready(method) else {
+        return None;
+    };
+    (!ready).then(|| {
+        format!(
+            "OR-Tools Python linear solver is unavailable; skipping n>{VERTEX_ENUMERATION_SCALE_LIMIT} instead of using exponential vertex-enumeration fallback"
+        )
+    })
+}
+
+fn ortools_linear_solver_ready(method: &str) -> Option<bool> {
+    let method = method.trim().to_ascii_lowercase().replace('_', "-");
+    match method.as_str() {
+        "glop" | "ortools-glop" | "ortools:glop" => Some(*ORTOOLS_GLOP_READY.get_or_init(|| {
+            probe_external_optimization_tool(ExternalOptimizationTool::OrToolsGlop).status
+                == ExternalOptimizationProbeStatus::Ready
+        })),
+        "pdlp" | "ortools-pdlp" | "ortools:pdlp" => Some(*ORTOOLS_PDLP_READY.get_or_init(|| {
+            probe_external_optimization_tool(ExternalOptimizationTool::OrToolsPdlp).status
+                == ExternalOptimizationProbeStatus::Ready
+        })),
+        _ => None,
+    }
+}
+
+static ORTOOLS_GLOP_READY: OnceLock<bool> = OnceLock::new();
+static ORTOOLS_PDLP_READY: OnceLock<bool> = OnceLock::new();
 
 pub fn run() {
     println!("Optimization scale envelope: native solvers vs external engines");

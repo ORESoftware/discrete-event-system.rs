@@ -106,7 +106,9 @@ const DEFENSIVE_CLEAR_AND_HOLD_SECOND_REWARD_POINTS: f64 = 20.0;
 const DEFENSIVE_DISPOSSESSION_REWARD_POINTS: f64 = 10.0;
 const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 4.0;
 const BEATEN_BY_DRIBBLE_PENALTY_POINTS: f64 = 3.0;
-const SIDE_STEP_BEAT_REWARD_POINTS: f64 = 6.0;
+const DRIBBLE_BEAT_REWARD_POINTS: f64 = 6.0;
+const NUTMEG_BEAT_REWARD_POINTS: f64 = 7.0;
+const SIDE_STEP_BEAT_REWARD_POINTS: f64 = DRIBBLE_BEAT_REWARD_POINTS;
 const DRIBBLE_LEFT_CUT_CHANCE: f64 = 0.45;
 const DRIBBLE_RIGHT_CUT_CHANCE: f64 = 0.45;
 const DRIBBLE_CUT_LATERAL_YARDS: f64 = 1.0;
@@ -165,6 +167,7 @@ const SOCCER_MOMENT_FEATURES_PER_ENTITY: usize = 6;
 const SOCCER_MOMENT_FEATURES_PER_FRAME: usize =
     (SOCCER_MOMENT_ROLE_ALIGNED_PLAYERS + 1) * SOCCER_MOMENT_FEATURES_PER_ENTITY;
 const SOCCER_SET_PLAY_WINDOW_SECONDS: f64 = 15.0;
+const SOCCER_SET_PLAY_TRAINING_WINDOW_SECONDS: f64 = 10.0;
 const SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS: f64 = 3.0;
 const SOCCER_SET_PLAY_MAX_TRIAL_SECONDS: f64 = 60.0;
 const SOCCER_SET_PLAY_MIN_TRIAL_DT_SECONDS: f64 = 0.02;
@@ -5330,6 +5333,13 @@ impl DribbleMoveKind {
     fn event_kind(self) -> &'static str {
         self.label()
     }
+
+    fn beat_reward_points(self) -> f64 {
+        match self {
+            DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => DRIBBLE_BEAT_REWARD_POINTS,
+            DribbleMoveKind::Nutmeg => NUTMEG_BEAT_REWARD_POINTS,
+        }
+    }
 }
 
 impl SoccerAction {
@@ -7744,6 +7754,17 @@ fn default_set_play_restart_kind() -> SoccerSetPlayRestartKind {
     SoccerSetPlayRestartKind::DirectFreeKick
 }
 
+fn default_set_play_training_restart_kind() -> SoccerSetPlayRestartKind {
+    SoccerSetPlayRestartKind::IndirectFreeKick
+}
+
+fn default_set_play_training_restarts() -> Vec<SoccerSetPlayRestartKind> {
+    vec![
+        SoccerSetPlayRestartKind::IndirectFreeKick,
+        SoccerSetPlayRestartKind::DirectFreeKick,
+    ]
+}
+
 fn default_set_play_team() -> Team {
     Team::Home
 }
@@ -7761,6 +7782,121 @@ pub struct SoccerSetPlayTrialResult {
     pub summary: MatchSummary,
     pub learning: SoccerLearningSnapshot,
     pub events: Vec<MatchEvent>,
+}
+
+fn default_set_play_training_duration_seconds() -> f64 {
+    SOCCER_SET_PLAY_TRAINING_WINDOW_SECONDS
+}
+
+fn default_set_play_training_config() -> MatchConfig {
+    let mut config = MatchConfig::default();
+    config.duration_seconds = SOCCER_SET_PLAY_TRAINING_WINDOW_SECONDS;
+    config.learning_enabled = true;
+    config.learning_logging_enabled = false;
+    config.max_human_players = 0;
+    config.neural_learning = SoccerNeuralLearningConfig {
+        enabled: true,
+        backend: SoccerNeuralLearningBackend::Threaded,
+        train_every_ticks: 1,
+        batch_size: 32,
+        max_batches_per_tick: 1,
+        hidden_units: 24,
+        replay_capacity: 1024,
+        replay_samples_per_tick: 16,
+        ..SoccerNeuralLearningConfig::default()
+    };
+    config
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerSetPlayTrainingRequest {
+    #[serde(default = "default_set_play_training_config")]
+    pub config: MatchConfig,
+    #[serde(default = "default_self_play_training_episodes")]
+    pub episodes: usize,
+    #[serde(default = "default_set_play_training_restart_kind")]
+    pub restart: SoccerSetPlayRestartKind,
+    #[serde(default = "default_set_play_training_restarts")]
+    pub restarts: Vec<SoccerSetPlayRestartKind>,
+    #[serde(default = "default_set_play_team")]
+    pub team: Team,
+    #[serde(default)]
+    pub spot: Option<Vec2>,
+    #[serde(default = "default_set_play_training_duration_seconds")]
+    pub duration_seconds: f64,
+    #[serde(default)]
+    pub options: Option<SoccerQPolicyOptions>,
+    #[serde(default)]
+    pub vector_hint: Option<SoccerSetPlayVectorHint>,
+}
+
+impl Default for SoccerSetPlayTrainingRequest {
+    fn default() -> Self {
+        SoccerSetPlayTrainingRequest {
+            config: default_set_play_training_config(),
+            episodes: default_self_play_training_episodes(),
+            restart: default_set_play_training_restart_kind(),
+            restarts: default_set_play_training_restarts(),
+            team: default_set_play_team(),
+            spot: None,
+            duration_seconds: default_set_play_training_duration_seconds(),
+            options: None,
+            vector_hint: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerSetPlayTrainingEpisodeSummary {
+    pub episode: usize,
+    pub seed: u64,
+    pub restart: SoccerSetPlayRestartKind,
+    #[serde(default)]
+    pub routine: Option<SoccerSetPlayRoutineKind>,
+    pub scored: bool,
+    pub score_delta_for_team: i32,
+    pub ticks: u64,
+    pub simulated_seconds: f64,
+    pub policy_updates: u64,
+    pub home_policy_entries: usize,
+    pub home_policy_target_entries: usize,
+    pub away_policy_entries: usize,
+    pub away_policy_target_entries: usize,
+    pub neural_training_steps: usize,
+    pub neural_samples: usize,
+    pub neural_replay_samples: usize,
+    #[serde(default)]
+    pub neural_last_loss: Option<f64>,
+    pub cumulative_goals: usize,
+    pub goal_rate_so_far: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerSetPlayTrainingArtifact {
+    pub config: MatchConfig,
+    pub restart: SoccerSetPlayRestartKind,
+    #[serde(default)]
+    pub restarts: Vec<SoccerSetPlayRestartKind>,
+    pub team: Team,
+    pub spot: Vec2,
+    pub duration_seconds: f64,
+    pub options: SoccerQPolicyOptions,
+    pub episodes: Vec<SoccerSetPlayTrainingEpisodeSummary>,
+    pub goals: usize,
+    pub goal_rate: f64,
+    pub first_window_goal_rate: f64,
+    pub last_window_goal_rate: f64,
+    pub goal_rate_delta: f64,
+    pub learning: SoccerLearningSnapshot,
+    pub home_entries: Vec<SoccerQEntry>,
+    #[serde(default)]
+    pub home_target_entries: Vec<SoccerQTargetEntry>,
+    pub away_entries: Vec<SoccerQEntry>,
+    #[serde(default)]
+    pub away_target_entries: Vec<SoccerQTargetEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -17295,6 +17431,11 @@ impl SoccerMatch {
         if defender_id >= self.players.len() || attacker_id >= self.players.len() {
             return;
         }
+        if self.players[defender_id].team == self.players[attacker_id].team
+            || self.ball.holder != Some(attacker_id)
+        {
+            return;
+        }
         let defender_team = self.players[defender_id].team;
         let defender_name = self.players[defender_id].name.clone();
         let attacker_name = self.players[attacker_id].name.clone();
@@ -17334,6 +17475,11 @@ impl SoccerMatch {
         if attacker_id >= self.players.len() || defender_id >= self.players.len() {
             return;
         }
+        if self.players[attacker_id].team == self.players[defender_id].team
+            || self.ball.holder != Some(attacker_id)
+        {
+            return;
+        }
         let attacker_team = self.players[attacker_id].team;
         let attacker_name = self.players[attacker_id].name.clone();
         let defender_name = self.players[defender_id].name.clone();
@@ -17351,7 +17497,7 @@ impl SoccerMatch {
         self.ball.last_touch_team = Some(attacker_team);
         self.pending_pass = None;
         self.pending_shot = None;
-        self.record_reward_event(attacker_id, SIDE_STEP_BEAT_REWARD_POINTS);
+        self.record_reward_event(attacker_id, kind.beat_reward_points());
         self.record_reward_event(defender_id, -BEATEN_BY_DRIBBLE_PENALTY_POINTS);
         self.record_possession_touch(attacker_id);
         self.events.push(MatchEvent {
@@ -22209,6 +22355,202 @@ pub fn run_soccer_set_play_trial(request: SoccerSetPlayTrialRequest) -> SoccerSe
         learning,
         events: sim.events,
     }
+}
+
+fn drain_soccer_neural_learner_for_restart_training(learner: &mut SoccerNeuralLearner) {
+    for _ in 0..24 {
+        learner.drain_results();
+        if learner.stats.pending_batches == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn soccer_set_play_window_goal_rate(
+    episodes: &[SoccerSetPlayTrainingEpisodeSummary],
+    first: bool,
+) -> f64 {
+    if episodes.is_empty() {
+        return 0.0;
+    }
+    let window = episodes.len().min(10);
+    let iter: Box<dyn Iterator<Item = &SoccerSetPlayTrainingEpisodeSummary> + '_> = if first {
+        Box::new(episodes.iter().take(window))
+    } else {
+        Box::new(episodes.iter().rev().take(window))
+    };
+    let goals = iter.filter(|episode| episode.scored).count();
+    goals as f64 / window as f64
+}
+
+pub fn train_soccer_set_play_restarts(
+    request: SoccerSetPlayTrainingRequest,
+) -> Result<SoccerSetPlayTrainingArtifact, String> {
+    let options = request.options.clone().unwrap_or_default();
+    train_soccer_set_play_restarts_with_initial_policies(request, SoccerTeamQPolicies::new(options))
+}
+
+pub fn train_soccer_set_play_restarts_with_initial_policies(
+    request: SoccerSetPlayTrainingRequest,
+    mut policies: SoccerTeamQPolicies,
+) -> Result<SoccerSetPlayTrainingArtifact, String> {
+    if request.episodes == 0 {
+        return Err("set-play training episodes must be at least 1".to_string());
+    }
+
+    let mut config = sanitized_set_play_trial_config(request.config.clone());
+    let duration_seconds = if request.duration_seconds.is_finite() && request.duration_seconds > 0.0
+    {
+        request
+            .duration_seconds
+            .min(SOCCER_SET_PLAY_MAX_TRIAL_SECONDS)
+    } else {
+        SOCCER_SET_PLAY_TRAINING_WINDOW_SECONDS
+    };
+    let dt = config.dt_seconds;
+    config.duration_seconds = duration_seconds + dt;
+    config.learning_enabled = true;
+    config.learning_logging_enabled = false;
+    config.max_human_players = 0;
+    config.learning_interval_ticks = config.learning_interval_ticks.max(1);
+    config.tactical_learning.validate()?;
+    let options = request
+        .options
+        .clone()
+        .unwrap_or_else(|| policies.home.options.clone());
+    validate_soccer_q_policy_options(&options)?;
+    policies.home.options = options.clone();
+    policies.away.options = options.clone();
+    let mut restarts = request.restarts.clone();
+    if restarts.is_empty() {
+        restarts.push(request.restart);
+    }
+    restarts.retain(|restart| restart.ball_restart_kind() == Some(BallRestartKind::FreeKick));
+    if restarts.is_empty() {
+        return Err("set-play training restarts must include a free-kick restart".to_string());
+    }
+    let primary_restart = restarts[0];
+    let spot = finite_pitch_point(
+        request
+            .spot
+            .unwrap_or_else(|| default_set_play_spot(&config, primary_restart, request.team)),
+        config.field_width_yards,
+        config.field_length_yards,
+        default_set_play_spot(&config, primary_restart, request.team),
+    );
+
+    let mut neural_learner: Option<SoccerNeuralLearner> = None;
+    let mut episode_summaries = Vec::with_capacity(request.episodes);
+    let mut goals = 0usize;
+    let base_seed = config.seed;
+    let mut final_learning = None;
+
+    for episode in 0..request.episodes {
+        let restart = restarts[episode % restarts.len()];
+        let episode_seed = base_seed.wrapping_add(episode as u32);
+        let before_policy_visits = policies.home.visit_count() + policies.away.visit_count();
+        let mut episode_config = config.clone();
+        episode_config.seed = episode_seed;
+        let mut sim = SoccerMatch::default_11v11(episode_config).with_team_policies(policies);
+        if sim.config.learning_enabled && sim.config.neural_learning.enabled {
+            if let Some(learner) = neural_learner.take() {
+                sim.neural_learner = Some(learner);
+            }
+        } else {
+            sim.neural_learner = None;
+        }
+        if let Some(hint) = request.vector_hint.clone() {
+            sim.set_coach_set_play_hint(hint);
+        }
+
+        let start_tick = sim.tick;
+        let start_clock = sim.clock_seconds;
+        let start_score = match request.team {
+            Team::Home => sim.score_home,
+            Team::Away => sim.score_away,
+        };
+        sim.stage_set_play_restart(restart, request.team, spot);
+        let routine = sim.active_set_play.as_ref().map(|call| call.routine);
+        let total_ticks =
+            ((duration_seconds / dt).ceil() as u64).min(SOCCER_SET_PLAY_MAX_TRIAL_TICKS);
+        for _ in 0..total_ticks {
+            if sim.is_done() {
+                break;
+            }
+            sim.run_time_step();
+        }
+        if let Some(learner) = &mut sim.neural_learner {
+            drain_soccer_neural_learner_for_restart_training(learner);
+        }
+
+        let end_score = match request.team {
+            Team::Home => sim.score_home,
+            Team::Away => sim.score_away,
+        };
+        let score_delta_for_team = end_score as i32 - start_score as i32;
+        let scored = score_delta_for_team > 0;
+        if scored {
+            goals = goals.saturating_add(1);
+        }
+
+        let learning = sim.learning_snapshot();
+        policies = sim
+            .team_policies
+            .take()
+            .unwrap_or_else(|| SoccerTeamQPolicies::new(options.clone()));
+        neural_learner = sim.neural_learner.take();
+        let after_policy_visits = policies.home.visit_count() + policies.away.visit_count();
+        let policy_updates = after_policy_visits.saturating_sub(before_policy_visits);
+        let summary = SoccerSetPlayTrainingEpisodeSummary {
+            episode,
+            seed: u64::from(episode_seed),
+            restart,
+            routine,
+            scored,
+            score_delta_for_team,
+            ticks: sim.tick.saturating_sub(start_tick),
+            simulated_seconds: sim.clock_seconds - start_clock,
+            policy_updates,
+            home_policy_entries: policies.home.q_values.len(),
+            home_policy_target_entries: policies.home.target_values.len(),
+            away_policy_entries: policies.away.q_values.len(),
+            away_policy_target_entries: policies.away.target_values.len(),
+            neural_training_steps: learning.neural_learning_training_steps,
+            neural_samples: learning.neural_learning_samples,
+            neural_replay_samples: learning.neural_learning_replay_samples,
+            neural_last_loss: learning.neural_learning_last_loss,
+            cumulative_goals: goals,
+            goal_rate_so_far: goals as f64 / (episode + 1) as f64,
+        };
+        final_learning = Some(learning);
+        episode_summaries.push(summary);
+    }
+
+    let first_window_goal_rate = soccer_set_play_window_goal_rate(&episode_summaries, true);
+    let last_window_goal_rate = soccer_set_play_window_goal_rate(&episode_summaries, false);
+    Ok(SoccerSetPlayTrainingArtifact {
+        config,
+        restart: primary_restart,
+        restarts,
+        team: request.team,
+        spot,
+        duration_seconds,
+        options,
+        goals,
+        goal_rate: goals as f64 / episode_summaries.len() as f64,
+        first_window_goal_rate,
+        last_window_goal_rate,
+        goal_rate_delta: last_window_goal_rate - first_window_goal_rate,
+        learning: final_learning.unwrap_or_else(|| {
+            SoccerMatch::default_11v11(default_set_play_training_config()).learning_snapshot()
+        }),
+        home_entries: policies.home.entries(),
+        home_target_entries: policies.home.target_entries(),
+        away_entries: policies.away.entries(),
+        away_target_entries: policies.away.target_entries(),
+        episodes: episode_summaries,
+    })
 }
 
 pub fn soccer_tracking_dataset_from_json(raw: &str) -> Result<SoccerTrackingDataset, String> {
@@ -30071,6 +30413,65 @@ mod tests {
     }
 
     #[test]
+    fn set_play_restart_training_repeats_ten_second_free_kicks_with_neural_learning() {
+        let mut config = default_set_play_training_config();
+        config.dt_seconds = 0.2;
+        config.seed = 19_221;
+        config.neural_learning.backend = SoccerNeuralLearningBackend::Inline;
+        config.neural_learning.hidden_units = 8;
+        config.neural_learning.batch_size = 8;
+        config.neural_learning.replay_capacity = 64;
+        config.neural_learning.replay_samples_per_tick = 8;
+
+        let artifact = train_soccer_set_play_restarts(SoccerSetPlayTrainingRequest {
+            config,
+            episodes: 3,
+            ..SoccerSetPlayTrainingRequest::default()
+        })
+        .expect("set-play restart training");
+
+        let (width, length) = sane_pitch_dimensions(
+            artifact.config.field_width_yards,
+            artifact.config.field_length_yards,
+        );
+        let goal = Vec2::new(width * 0.5, artifact.team.goal_y(length));
+        let policy_updates = artifact
+            .episodes
+            .iter()
+            .map(|episode| episode.policy_updates)
+            .sum::<u64>();
+
+        assert_eq!(artifact.restart, SoccerSetPlayRestartKind::IndirectFreeKick);
+        assert_eq!(
+            artifact.restarts,
+            vec![
+                SoccerSetPlayRestartKind::IndirectFreeKick,
+                SoccerSetPlayRestartKind::DirectFreeKick
+            ]
+        );
+        assert_eq!(artifact.team, Team::Home);
+        assert!((artifact.duration_seconds - 10.0).abs() < 1e-9);
+        assert!((artifact.spot.distance(goal) - 25.0).abs() < 1e-9);
+        assert_eq!(artifact.episodes.len(), 3);
+        assert_eq!(
+            artifact.episodes[0].restart,
+            SoccerSetPlayRestartKind::IndirectFreeKick
+        );
+        assert_eq!(
+            artifact.episodes[1].restart,
+            SoccerSetPlayRestartKind::DirectFreeKick
+        );
+        assert!(artifact.episodes.iter().all(|episode| episode.ticks == 50));
+        assert!(policy_updates > 0);
+        assert!(artifact.home_entries.len() + artifact.away_entries.len() > 0);
+        assert!(artifact.learning.neural_learning_enabled);
+        assert!(artifact.learning.neural_learning_training_steps > 0);
+        assert!(artifact.learning.neural_learning_samples > 0);
+        assert!(artifact.goal_rate.is_finite());
+        assert!(artifact.goal_rate_delta.is_finite());
+    }
+
+    #[test]
     fn set_play_hints_accept_aliases_and_indirect_free_kicks_block_direct_shots() {
         let parsed: SoccerSetPlayTrialRequest =
             serde_json::from_str("{}").expect("default set play trial request");
@@ -35658,6 +36059,37 @@ mod tests {
         }
 
         assert!(observed, "expected side-step escape branch");
+    }
+
+    #[test]
+    fn dribble_beat_event_uses_move_reward_and_rejects_invalid_contests() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 0;
+        let attacker = 11;
+        sim.players[defender].position = Vec2::new(40.0, 60.0);
+        sim.players[attacker].position = Vec2::new(41.0, 60.0);
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+
+        sim.record_dribble_beat_event(attacker, defender, DribbleMoveKind::Nutmeg);
+
+        let attacker_reward = sim
+            .reward_events
+            .iter()
+            .filter(|event| event.player_id == attacker)
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert_eq!(attacker_reward, NUTMEG_BEAT_REWARD_POINTS);
+        assert!(sim.events.iter().any(|event| event.kind == "nutmeg"));
+
+        let reward_count = sim.reward_events.len();
+        let event_count = sim.events.len();
+        sim.record_dribble_beat_event(attacker, 12, DribbleMoveKind::Nutmeg);
+        sim.ball.holder = Some(defender);
+        sim.record_dribble_beat_event(attacker, defender, DribbleMoveKind::Nutmeg);
+
+        assert_eq!(sim.reward_events.len(), reward_count);
+        assert_eq!(sim.events.len(), event_count);
     }
 
     #[test]

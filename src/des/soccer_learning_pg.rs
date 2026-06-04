@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::des::general::soccer::{
     MatchConfig, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey,
-    SoccerQTargetEntry, SoccerTeamQPolicies, Team,
+    SoccerQTargetEntry, SoccerSetPlayTrainingArtifact, SoccerTeamQPolicies, Team,
 };
 use crate::des::soccer_learning::{
     soccer_learning_from_micros, soccer_learning_to_micros, soccer_team_label,
@@ -435,6 +435,327 @@ impl SoccerLearningPgStore {
         Ok(run_id)
     }
 
+    pub fn insert_set_play_training_artifact(
+        &mut self,
+        experiment_id: &str,
+        runner_id: &str,
+        base_policy_version_id: Option<&str>,
+        generation: i32,
+        version_label: &str,
+        status: &str,
+        artifact: &SoccerSetPlayTrainingArtifact,
+        elapsed_seconds: f64,
+    ) -> Result<(String, String), String> {
+        let policies = SoccerTeamQPolicies {
+            home: SoccerQPolicy::from_entries_with_targets(
+                artifact.options.clone(),
+                &artifact.home_entries,
+                &artifact.home_target_entries,
+            )?,
+            away: SoccerQPolicy::from_entries_with_targets(
+                artifact.options.clone(),
+                &artifact.away_entries,
+                &artifact.away_target_entries,
+            )?,
+        };
+        let config_json = serde_json::to_value(&artifact.config)
+            .map_err(|err| format!("serialize set-play config: {err}"))?;
+        let options_json = json!({
+            "home": &artifact.options,
+            "away": &artifact.options,
+        });
+        let lineage = base_policy_version_id
+            .map(|id| json!([id]))
+            .unwrap_or_else(|| json!([]));
+        let neural = json!({
+            "enabled": artifact.learning.neural_learning_enabled,
+            "backend": artifact.learning.neural_learning_backend,
+            "trainingSteps": artifact.learning.neural_learning_training_steps,
+            "samples": artifact.learning.neural_learning_samples,
+            "pendingBatches": artifact.learning.neural_learning_pending_batches,
+            "droppedBatches": artifact.learning.neural_learning_dropped_batches,
+            "replaySamples": artifact.learning.neural_learning_replay_samples,
+            "replayCapacity": artifact.learning.neural_learning_replay_capacity,
+            "parameterCount": artifact.learning.neural_learning_parameter_count,
+            "targetClip": artifact.learning.neural_learning_target_clip,
+            "lastLoss": artifact.learning.neural_learning_last_loss,
+            "averageLoss": artifact.learning.neural_learning_average_loss,
+        });
+        let metrics = json!({
+            "fitness": artifact.goal_rate,
+            "kind": "set-play-restart-training",
+            "restart": &artifact.restart,
+            "restarts": &artifact.restarts,
+            "team": &artifact.team,
+            "spot": &artifact.spot,
+            "durationSeconds": artifact.duration_seconds,
+            "episodes": artifact.episodes.len(),
+            "goals": artifact.goals,
+            "goalRate": artifact.goal_rate,
+            "firstWindowGoalRate": artifact.first_window_goal_rate,
+            "lastWindowGoalRate": artifact.last_window_goal_rate,
+            "goalRateDelta": artifact.goal_rate_delta,
+            "neural": neural,
+        });
+        let summary_json = json!({
+            "kind": "set-play-restart-training",
+            "restart": &artifact.restart,
+            "restarts": &artifact.restarts,
+            "team": &artifact.team,
+            "spot": &artifact.spot,
+            "durationSeconds": artifact.duration_seconds,
+            "episodes": artifact.episodes.len(),
+            "goals": artifact.goals,
+            "goalRate": artifact.goal_rate,
+            "firstWindowGoalRate": artifact.first_window_goal_rate,
+            "lastWindowGoalRate": artifact.last_window_goal_rate,
+            "goalRateDelta": artifact.goal_rate_delta,
+        });
+        let stats_json = json!({
+            "learning": &artifact.learning,
+            "neural": metrics["neural"].clone(),
+            "episodes": &artifact.episodes,
+        });
+        let entry_count =
+            checked_i32(policies.home.entries().len() + policies.away.entries().len());
+        let target_entry_count = checked_i32(
+            policies.home.target_entries().len() + policies.away.target_entries().len(),
+        );
+        let visit_count = checked_i64(policies.home.visit_count() + policies.away.visit_count());
+        let fitness_micros = soccer_learning_to_micros(artifact.goal_rate);
+        let score_home = checked_i32(if artifact.team == Team::Home {
+            artifact.goals
+        } else {
+            0
+        });
+        let score_away = checked_i32(if artifact.team == Team::Away {
+            artifact.goals
+        } else {
+            0
+        });
+        let home_goal_diff = if artifact.team == Team::Home {
+            score_home
+        } else {
+            -score_away
+        };
+        let away_goal_diff = -home_goal_diff;
+        let trained_team_scored = artifact.goals > 0;
+        let (home_outcome, away_outcome) = match (artifact.team, trained_team_scored) {
+            (Team::Home, true) => ("win", "loss"),
+            (Team::Away, true) => ("loss", "win"),
+            _ => ("draw", "draw"),
+        };
+        let trained_merge_weight = soccer_learning_to_micros(1.0 + artifact.goal_rate);
+        let defending_merge_weight = soccer_learning_to_micros((1.0 - artifact.goal_rate) * 0.5);
+        let (home_merge_weight_micros, away_merge_weight_micros) = match artifact.team {
+            Team::Home => (trained_merge_weight, defending_merge_weight),
+            Team::Away => (defending_merge_weight, trained_merge_weight),
+        };
+        let duration_ticks = checked_i64(
+            artifact
+                .episodes
+                .iter()
+                .map(|episode| episode.ticks)
+                .sum::<u64>(),
+        );
+        let simulated_seconds = artifact
+            .episodes
+            .iter()
+            .map(|episode| episode.simulated_seconds)
+            .sum::<f64>();
+        let simulated_seconds_micros = soccer_learning_to_micros(simulated_seconds);
+        let elapsed_millis = (elapsed_seconds.max(0.0) * 1000.0).round() as i64;
+        let transitions = checked_i32(
+            artifact
+                .episodes
+                .iter()
+                .map(|episode| episode.policy_updates)
+                .sum::<u64>(),
+        );
+
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|err| format!("begin soccer set-play training transaction: {err}"))?;
+        ensure_soccer_learning_set_play_tables(&mut tx)?;
+
+        if status == "active" {
+            tx.execute(
+                r#"
+                update des_soccer_learning_policy_versions
+                set status = 'archived', updated_at = now()
+                where experiment_id = $1::uuid and status = 'active'
+                "#,
+                &[&experiment_id],
+            )
+            .map_err(|err| format!("archive old soccer policy versions: {err}"))?;
+        }
+
+        let policy_row = tx
+            .query_one(
+                r#"
+                insert into des_soccer_learning_policy_versions
+                  (
+                    experiment_id,
+                    parent_policy_version_id,
+                    generation,
+                    version_label,
+                    source_kind,
+                    status,
+                    options,
+                    config,
+                    lineage,
+                    metrics,
+                    entry_count,
+                    target_entry_count,
+                    visit_count,
+                    fitness_micros
+                  )
+                values
+                  (
+                    $1::uuid,
+                    $2::uuid,
+                    $3,
+                    $4,
+                    'replay',
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9,
+                    $10,
+                    $11,
+                    $12,
+                    $13
+                  )
+                returning id::text
+                "#,
+                &[
+                    &experiment_id,
+                    &base_policy_version_id,
+                    &generation,
+                    &version_label,
+                    &status,
+                    &options_json,
+                    &config_json,
+                    &lineage,
+                    &metrics,
+                    &entry_count,
+                    &target_entry_count,
+                    &visit_count,
+                    &fitness_micros,
+                ],
+            )
+            .map_err(|err| format!("insert soccer set-play policy version: {err}"))?;
+        let policy_version_id: String = policy_row.get(0);
+
+        let run_row = tx
+            .query_one(
+                r#"
+                insert into des_soccer_learning_runs
+                  (
+                    experiment_id,
+                    base_policy_version_id,
+                    output_policy_version_id,
+                    runner_id,
+                    seed,
+                    episode_index,
+                    status,
+                    score_home,
+                    score_away,
+                    home_goal_diff,
+                    away_goal_diff,
+                    home_outcome,
+                    away_outcome,
+                    home_merge_weight_micros,
+                    away_merge_weight_micros,
+                    fitness_micros,
+                    duration_ticks,
+                    simulated_seconds_micros,
+                    elapsed_millis,
+                    transitions,
+                    summary,
+                    stats
+                  )
+                values
+                  (
+                    $1::uuid,
+                    $2::uuid,
+                    $3::uuid,
+                    $4,
+                    $5,
+                    0,
+                    'completed',
+                    $6,
+                    $7,
+                    $8,
+                    $9,
+                    $10,
+                    $11,
+                    $12,
+                    $13,
+                    $14,
+                    $15,
+                    $16,
+                    $17,
+                    $18,
+                    $19,
+                    $20
+                  )
+                returning id::text
+                "#,
+                &[
+                    &experiment_id,
+                    &base_policy_version_id,
+                    &policy_version_id,
+                    &runner_id,
+                    &(artifact.config.seed as i64),
+                    &score_home,
+                    &score_away,
+                    &home_goal_diff,
+                    &away_goal_diff,
+                    &home_outcome,
+                    &away_outcome,
+                    &home_merge_weight_micros,
+                    &away_merge_weight_micros,
+                    &fitness_micros,
+                    &duration_ticks,
+                    &simulated_seconds_micros,
+                    &elapsed_millis,
+                    &transitions,
+                    &summary_json,
+                    &stats_json,
+                ],
+            )
+            .map_err(|err| format!("insert soccer set-play learning run: {err}"))?;
+        let run_id: String = run_row.get(0);
+
+        insert_policy_entries_for_team(
+            &mut tx,
+            &policy_version_id,
+            Team::Home,
+            &policies.home,
+            Some(&run_id),
+        )?;
+        insert_policy_entries_for_team(
+            &mut tx,
+            &policy_version_id,
+            Team::Away,
+            &policies.away,
+            Some(&run_id),
+        )?;
+        insert_normalized_set_play_training_records(
+            &mut tx,
+            &run_id,
+            &policy_version_id,
+            artifact,
+        )?;
+
+        tx.commit()
+            .map_err(|err| format!("commit soccer set-play training transaction: {err}"))?;
+        Ok((policy_version_id, run_id))
+    }
+
     fn load_policy_entries(
         &mut self,
         policy_version_id: &str,
@@ -632,6 +953,375 @@ fn insert_policy_entries_for_team(
         )
         .map_err(|err| format!("insert soccer policy target entry: {err}"))?;
     }
+    Ok(())
+}
+
+fn ensure_soccer_learning_set_play_tables(
+    tx: &mut postgres::Transaction<'_>,
+) -> Result<(), String> {
+    tx.batch_execute(
+        r#"
+        create table if not exists des_soccer_learning_set_play_runs (
+          run_id uuid primary key references des_soccer_learning_runs(id) on delete cascade,
+          policy_version_id uuid not null references des_soccer_learning_policy_versions(id) on delete cascade,
+          primary_restart varchar(40) not null,
+          team varchar(8) not null,
+          spot_x_micros bigint not null,
+          spot_y_micros bigint not null,
+          duration_seconds_micros bigint not null,
+          episode_count integer not null,
+          goals integer not null,
+          goal_rate_micros bigint not null,
+          first_window_goal_rate_micros bigint not null,
+          last_window_goal_rate_micros bigint not null,
+          goal_rate_delta_micros bigint not null,
+          created_at timestamptz default now() not null,
+          constraint des_soccer_learning_set_play_runs_restart_chk
+            check (primary_restart in ('direct-free-kick', 'indirect-free-kick')),
+          constraint des_soccer_learning_set_play_runs_team_chk
+            check (team in ('home', 'away')),
+          constraint des_soccer_learning_set_play_runs_duration_chk
+            check (duration_seconds_micros >= 0),
+          constraint des_soccer_learning_set_play_runs_episode_chk
+            check (episode_count >= 0),
+          constraint des_soccer_learning_set_play_runs_goals_chk
+            check (goals >= 0),
+          constraint des_soccer_learning_set_play_runs_goal_rate_chk
+            check (goal_rate_micros between 0 and 1000000)
+        );
+
+        create table if not exists des_soccer_learning_set_play_restart_mix (
+          run_id uuid not null references des_soccer_learning_set_play_runs(run_id) on delete cascade,
+          ordinal integer not null,
+          restart varchar(40) not null,
+          primary key (run_id, ordinal),
+          constraint des_soccer_learning_set_play_restart_mix_ordinal_chk
+            check (ordinal >= 0),
+          constraint des_soccer_learning_set_play_restart_mix_restart_chk
+            check (restart in ('direct-free-kick', 'indirect-free-kick'))
+        );
+
+        create table if not exists des_soccer_learning_set_play_episode_metrics (
+          run_id uuid not null references des_soccer_learning_set_play_runs(run_id) on delete cascade,
+          episode_index integer not null,
+          seed bigint not null,
+          restart varchar(40) not null,
+          routine varchar(80),
+          scored boolean not null,
+          score_delta_for_team integer not null,
+          ticks bigint not null,
+          simulated_seconds_micros bigint not null,
+          policy_updates bigint not null,
+          home_policy_entries integer not null,
+          home_policy_target_entries integer not null,
+          away_policy_entries integer not null,
+          away_policy_target_entries integer not null,
+          neural_training_steps integer not null,
+          neural_samples bigint not null,
+          neural_replay_samples integer not null,
+          neural_last_loss_micros bigint,
+          cumulative_goals integer not null,
+          goal_rate_so_far_micros bigint not null,
+          primary key (run_id, episode_index),
+          constraint des_soccer_learning_set_play_episode_idx_chk
+            check (episode_index >= 0),
+          constraint des_soccer_learning_set_play_episode_seed_chk
+            check (seed >= 0),
+          constraint des_soccer_learning_set_play_episode_restart_chk
+            check (restart in ('direct-free-kick', 'indirect-free-kick')),
+          constraint des_soccer_learning_set_play_episode_ticks_chk
+            check (ticks >= 0),
+          constraint des_soccer_learning_set_play_episode_seconds_chk
+            check (simulated_seconds_micros >= 0),
+          constraint des_soccer_learning_set_play_episode_policy_updates_chk
+            check (policy_updates >= 0),
+          constraint des_soccer_learning_set_play_episode_entries_chk
+            check (
+              home_policy_entries >= 0
+              and home_policy_target_entries >= 0
+              and away_policy_entries >= 0
+              and away_policy_target_entries >= 0
+            ),
+          constraint des_soccer_learning_set_play_episode_neural_chk
+            check (
+              neural_training_steps >= 0
+              and neural_samples >= 0
+              and neural_replay_samples >= 0
+            ),
+          constraint des_soccer_learning_set_play_episode_goals_chk
+            check (cumulative_goals >= 0),
+          constraint des_soccer_learning_set_play_episode_goal_rate_chk
+            check (goal_rate_so_far_micros between 0 and 1000000)
+        );
+
+        create table if not exists des_soccer_learning_neural_run_metrics (
+          run_id uuid primary key references des_soccer_learning_runs(id) on delete cascade,
+          policy_version_id uuid not null references des_soccer_learning_policy_versions(id) on delete cascade,
+          enabled boolean not null,
+          backend varchar(32) not null,
+          training_steps integer not null,
+          samples bigint not null,
+          pending_batches integer not null,
+          dropped_batches integer not null,
+          replay_samples integer not null,
+          replay_capacity integer not null,
+          parameter_count integer not null,
+          target_clip_micros bigint not null,
+          last_loss_micros bigint,
+          average_loss_micros bigint,
+          created_at timestamptz default now() not null,
+          constraint des_soccer_learning_neural_run_backend_chk
+            check (backend in ('inline', 'threaded')),
+          constraint des_soccer_learning_neural_run_counts_chk
+            check (
+              training_steps >= 0
+              and samples >= 0
+              and pending_batches >= 0
+              and dropped_batches >= 0
+              and replay_samples >= 0
+              and replay_capacity >= 0
+              and parameter_count >= 0
+            )
+        );
+
+        create index if not exists des_soccer_learning_set_play_episode_restart_idx
+          on des_soccer_learning_set_play_episode_metrics (restart, scored, episode_index);
+
+        create index if not exists des_soccer_learning_neural_run_steps_idx
+          on des_soccer_learning_neural_run_metrics (training_steps desc, samples desc);
+        "#,
+    )
+    .map_err(|err| format!("ensure soccer set-play learning tables: {err}"))?;
+    Ok(())
+}
+
+fn insert_normalized_set_play_training_records(
+    tx: &mut postgres::Transaction<'_>,
+    run_id: &str,
+    policy_version_id: &str,
+    artifact: &SoccerSetPlayTrainingArtifact,
+) -> Result<(), String> {
+    let team = soccer_team_label(artifact.team);
+    let primary_restart = artifact.restart.as_label();
+    let spot_x_micros = soccer_learning_to_micros(artifact.spot.x);
+    let spot_y_micros = soccer_learning_to_micros(artifact.spot.y);
+    let duration_seconds_micros = soccer_learning_to_micros(artifact.duration_seconds);
+    let episode_count = checked_i32(artifact.episodes.len());
+    let goals = checked_i32(artifact.goals);
+    let goal_rate_micros = soccer_learning_to_micros(artifact.goal_rate);
+    let first_window_goal_rate_micros = soccer_learning_to_micros(artifact.first_window_goal_rate);
+    let last_window_goal_rate_micros = soccer_learning_to_micros(artifact.last_window_goal_rate);
+    let goal_rate_delta_micros = soccer_learning_to_micros(artifact.goal_rate_delta);
+
+    tx.execute(
+        r#"
+        insert into des_soccer_learning_set_play_runs
+          (
+            run_id,
+            policy_version_id,
+            primary_restart,
+            team,
+            spot_x_micros,
+            spot_y_micros,
+            duration_seconds_micros,
+            episode_count,
+            goals,
+            goal_rate_micros,
+            first_window_goal_rate_micros,
+            last_window_goal_rate_micros,
+            goal_rate_delta_micros
+          )
+        values
+          ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        "#,
+        &[
+            &run_id,
+            &policy_version_id,
+            &primary_restart,
+            &team,
+            &spot_x_micros,
+            &spot_y_micros,
+            &duration_seconds_micros,
+            &episode_count,
+            &goals,
+            &goal_rate_micros,
+            &first_window_goal_rate_micros,
+            &last_window_goal_rate_micros,
+            &goal_rate_delta_micros,
+        ],
+    )
+    .map_err(|err| format!("insert soccer set-play run metrics: {err}"))?;
+
+    for (ordinal, restart) in artifact.restarts.iter().enumerate() {
+        let ordinal = checked_i32(ordinal);
+        let restart_label = restart.as_label();
+        tx.execute(
+            r#"
+            insert into des_soccer_learning_set_play_restart_mix
+              (run_id, ordinal, restart)
+            values
+              ($1::uuid, $2, $3)
+            "#,
+            &[&run_id, &ordinal, &restart_label],
+        )
+        .map_err(|err| format!("insert soccer set-play restart mix: {err}"))?;
+    }
+
+    for episode in &artifact.episodes {
+        let episode_index = checked_i32(episode.episode);
+        let seed = checked_i64(episode.seed);
+        let restart = episode.restart.as_label();
+        let routine = episode
+            .routine
+            .map(|routine| routine.as_label().to_string());
+        let ticks = checked_i64(episode.ticks);
+        let simulated_seconds_micros = soccer_learning_to_micros(episode.simulated_seconds);
+        let policy_updates = checked_i64(episode.policy_updates);
+        let home_policy_entries = checked_i32(episode.home_policy_entries);
+        let home_policy_target_entries = checked_i32(episode.home_policy_target_entries);
+        let away_policy_entries = checked_i32(episode.away_policy_entries);
+        let away_policy_target_entries = checked_i32(episode.away_policy_target_entries);
+        let neural_training_steps = checked_i32(episode.neural_training_steps);
+        let neural_samples = checked_i64(episode.neural_samples as u64);
+        let neural_replay_samples = checked_i32(episode.neural_replay_samples);
+        let neural_last_loss_micros = episode.neural_last_loss.map(soccer_learning_to_micros);
+        let cumulative_goals = checked_i32(episode.cumulative_goals);
+        let goal_rate_so_far_micros = soccer_learning_to_micros(episode.goal_rate_so_far);
+        tx.execute(
+            r#"
+            insert into des_soccer_learning_set_play_episode_metrics
+              (
+                run_id,
+                episode_index,
+                seed,
+                restart,
+                routine,
+                scored,
+                score_delta_for_team,
+                ticks,
+                simulated_seconds_micros,
+                policy_updates,
+                home_policy_entries,
+                home_policy_target_entries,
+                away_policy_entries,
+                away_policy_target_entries,
+                neural_training_steps,
+                neural_samples,
+                neural_replay_samples,
+                neural_last_loss_micros,
+                cumulative_goals,
+                goal_rate_so_far_micros
+              )
+            values
+              (
+                $1::uuid,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14,
+                $15,
+                $16,
+                $17,
+                $18,
+                $19,
+                $20
+              )
+            "#,
+            &[
+                &run_id,
+                &episode_index,
+                &seed,
+                &restart,
+                &routine,
+                &episode.scored,
+                &episode.score_delta_for_team,
+                &ticks,
+                &simulated_seconds_micros,
+                &policy_updates,
+                &home_policy_entries,
+                &home_policy_target_entries,
+                &away_policy_entries,
+                &away_policy_target_entries,
+                &neural_training_steps,
+                &neural_samples,
+                &neural_replay_samples,
+                &neural_last_loss_micros,
+                &cumulative_goals,
+                &goal_rate_so_far_micros,
+            ],
+        )
+        .map_err(|err| format!("insert soccer set-play episode metrics: {err}"))?;
+    }
+
+    let enabled = artifact.learning.neural_learning_enabled;
+    let backend = artifact.learning.neural_learning_backend.as_str();
+    let training_steps = checked_i32(artifact.learning.neural_learning_training_steps);
+    let samples = checked_i64(artifact.learning.neural_learning_samples as u64);
+    let pending_batches = checked_i32(artifact.learning.neural_learning_pending_batches);
+    let dropped_batches = checked_i32(artifact.learning.neural_learning_dropped_batches);
+    let replay_samples = checked_i32(artifact.learning.neural_learning_replay_samples);
+    let replay_capacity = checked_i32(artifact.learning.neural_learning_replay_capacity);
+    let parameter_count = checked_i32(artifact.learning.neural_learning_parameter_count);
+    let target_clip_micros =
+        soccer_learning_to_micros(artifact.learning.neural_learning_target_clip);
+    let last_loss_micros = artifact
+        .learning
+        .neural_learning_last_loss
+        .map(soccer_learning_to_micros);
+    let average_loss_micros = artifact
+        .learning
+        .neural_learning_average_loss
+        .map(soccer_learning_to_micros);
+    tx.execute(
+        r#"
+        insert into des_soccer_learning_neural_run_metrics
+          (
+            run_id,
+            policy_version_id,
+            enabled,
+            backend,
+            training_steps,
+            samples,
+            pending_batches,
+            dropped_batches,
+            replay_samples,
+            replay_capacity,
+            parameter_count,
+            target_clip_micros,
+            last_loss_micros,
+            average_loss_micros
+          )
+        values
+          ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        "#,
+        &[
+            &run_id,
+            &policy_version_id,
+            &enabled,
+            &backend,
+            &training_steps,
+            &samples,
+            &pending_batches,
+            &dropped_batches,
+            &replay_samples,
+            &replay_capacity,
+            &parameter_count,
+            &target_clip_micros,
+            &last_loss_micros,
+            &average_loss_micros,
+        ],
+    )
+    .map_err(|err| format!("insert soccer neural run metrics: {err}"))?;
+
     Ok(())
 }
 

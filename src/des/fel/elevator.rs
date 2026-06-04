@@ -74,20 +74,26 @@ struct Passenger {
 /// Per-shaft mutable car state.
 #[derive(Clone)]
 struct CarState {
+    home_floor: usize,
     floor: usize,
     dir: Dir,
     doors_open: bool,
     active: bool,
+    moving: bool,
+    boarding_claim: Option<usize>,
     onboard: Vec<usize>,
 }
 
 impl CarState {
-    fn new() -> Self {
+    fn new(home_floor: usize) -> Self {
         CarState {
-            floor: 0,
+            home_floor,
+            floor: home_floor,
             dir: Dir::Idle,
             doors_open: false,
             active: false,
+            moving: false,
+            boarding_claim: None,
             onboard: Vec::new(),
         }
     }
@@ -127,7 +133,9 @@ impl ElevWorld {
             travel,
             dwell,
             arrival_rate: rate,
-            cars: (0..shafts).map(|_| CarState::new()).collect(),
+            cars: (0..shafts)
+                .map(|i| CarState::new(home_floor(i, shafts, floors)))
+                .collect(),
             waiting: (0..floors).map(|_| VecDeque::new()).collect(),
             served: 0,
             boarded: 0,
@@ -167,10 +175,12 @@ impl ElevWorld {
             .map(|(i, car)| {
                 json!({
                     "id": i,
+                    "home": car.home_floor,
                     "floor": car.floor,
                     "dir": car.dir.label(),
                     "doors": car.doors_open,
                     "active": car.active,
+                    "moving": car.moving,
                     "inCar": car.onboard.len(),
                 })
             })
@@ -202,10 +212,12 @@ impl ElevWorld {
             .min_by(|(a_id, a), (b_id, b)| {
                 let score_a = self.look_distance(a, floor)
                     + a.onboard.len() as f64 * 0.35
-                    + if a.active { 0.15 } else { 0.0 };
+                    + if a.active { 0.15 } else { 0.0 }
+                    + (*a_id as f64 * 0.01);
                 let score_b = self.look_distance(b, floor)
                     + b.onboard.len() as f64 * 0.35
-                    + if b.active { 0.15 } else { 0.0 };
+                    + if b.active { 0.15 } else { 0.0 }
+                    + (*b_id as f64 * 0.01);
                 score_a.total_cmp(&score_b).then_with(|| a_id.cmp(b_id))
             })
             .map(|(id, _)| id)
@@ -218,6 +230,15 @@ impl ElevWorld {
         (0..self.floors)
             .filter(|&f| car.onboard.contains(&f) || self.hall_owner(f) == Some(car_id))
             .collect()
+    }
+}
+
+fn home_floor(car_id: usize, shafts: usize, floors: usize) -> usize {
+    if shafts <= 1 {
+        0
+    } else {
+        let top = floors.saturating_sub(1);
+        ((car_id * top) + (shafts - 1) / 2) / (shafts - 1)
     }
 }
 
@@ -263,6 +284,9 @@ fn car_step(eng: &mut Engine<ElevWorld>, car_id: usize) {
     if car_id >= eng.world.cars.len() {
         return;
     }
+    if !eng.world.cars[car_id].moving || eng.world.cars[car_id].doors_open {
+        return;
+    }
     let floors = eng.world.floors;
     let f = eng.world.cars[car_id].floor as i64;
     let nf = match eng.world.cars[car_id].dir {
@@ -272,6 +296,7 @@ fn car_step(eng: &mut Engine<ElevWorld>, car_id: usize) {
     }
     .clamp(0, floors as i64 - 1) as usize;
     eng.world.cars[car_id].floor = nf;
+    eng.world.cars[car_id].moving = false;
     record(eng, &format!("move:{car_id}"));
     on_arrive(eng, car_id);
 }
@@ -284,7 +309,10 @@ fn on_arrive(eng: &mut Engine<ElevWorld>, car_id: usize) {
         && eng.world.cars[car_id].onboard.len() < eng.world.capacity
         && eng.world.hall_owner(f) == Some(car_id);
     if need_alight || need_board {
+        eng.world.cars[car_id].moving = false;
+        eng.world.cars[car_id].active = true;
         eng.world.cars[car_id].doors_open = true;
+        eng.world.cars[car_id].boarding_claim = need_board.then_some(f);
         record(eng, &format!("doors_open:{car_id}"));
         let dwell = eng.world.dwell;
         eng.schedule_after(dwell, move |eng| doors_close(eng, car_id));
@@ -304,7 +332,10 @@ fn doors_close(eng: &mut Engine<ElevWorld>, car_id: usize) {
     let before = eng.world.cars[car_id].onboard.len();
     eng.world.cars[car_id].onboard.retain(|&d| d != f);
     eng.world.served += (before - eng.world.cars[car_id].onboard.len()) as u64;
-    while !eng.world.waiting[f].is_empty()
+    let may_board =
+        eng.world.cars[car_id].boarding_claim == Some(f) || eng.world.hall_owner(f) == Some(car_id);
+    while may_board
+        && !eng.world.waiting[f].is_empty()
         && eng.world.cars[car_id].onboard.len() < eng.world.capacity
     {
         let p = eng.world.waiting[f].pop_front().expect("nonempty");
@@ -313,6 +344,7 @@ fn doors_close(eng: &mut Engine<ElevWorld>, car_id: usize) {
         eng.world.cars[car_id].onboard.push(p.dest);
     }
     eng.world.cars[car_id].doors_open = false;
+    eng.world.cars[car_id].boarding_claim = None;
     record(eng, &format!("doors_close:{car_id}"));
     decide_step(eng, car_id);
     wake_idle_cars(eng);
@@ -325,10 +357,14 @@ fn decide_step(eng: &mut Engine<ElevWorld>, car_id: usize) {
     if car_id >= eng.world.cars.len() {
         return;
     }
+    if eng.world.cars[car_id].moving || eng.world.cars[car_id].doors_open {
+        return;
+    }
     let targets = eng.world.targets_for(car_id);
     if targets.is_empty() {
         eng.world.cars[car_id].dir = Dir::Idle;
         eng.world.cars[car_id].active = false;
+        eng.world.cars[car_id].moving = false;
         record(eng, &format!("idle:{car_id}"));
         return;
     }
@@ -365,11 +401,13 @@ fn decide_step(eng: &mut Engine<ElevWorld>, car_id: usize) {
         // full); idle to avoid spinning.
         eng.world.cars[car_id].dir = Dir::Idle;
         eng.world.cars[car_id].active = false;
+        eng.world.cars[car_id].moving = false;
         record(eng, &format!("idle:{car_id}"));
         return;
     }
     eng.world.cars[car_id].dir = dir;
     eng.world.cars[car_id].active = true;
+    eng.world.cars[car_id].moving = true;
     let travel = eng.world.travel;
     eng.schedule_after(travel, move |eng| car_step(eng, car_id));
 }
@@ -416,10 +454,14 @@ pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
     let floors = cfg.floors.max(2);
     let shafts = cfg.shafts.max(1);
     let capacity = cfg.capacity.max(1);
-    let travel = cfg.travel.max(0.0);
-    let dwell = cfg.dwell.max(0.0);
-    let arrival_rate = cfg.arrival_rate.max(f64::MIN_POSITIVE);
-    let horizon = cfg.horizon.max(0.0);
+    let travel = finite_at_least(cfg.travel, 0.0, ElevatorConfig::default().travel);
+    let dwell = finite_at_least(cfg.dwell, 0.0, ElevatorConfig::default().dwell);
+    let arrival_rate = finite_at_least(
+        cfg.arrival_rate,
+        f64::MIN_POSITIVE,
+        ElevatorConfig::default().arrival_rate,
+    );
+    let horizon = finite_at_least(cfg.horizon, 0.0, ElevatorConfig::default().horizon);
     let mut eng = Engine::new(ElevWorld::new(
         cfg.seed,
         floors,
@@ -468,11 +510,20 @@ pub fn run_fel_elevator(cfg: &ElevatorConfig) -> Value {
             "horizon": horizon,
             "events": events,
             "arrivals": eng.world.arrivals,
+            "boarded": eng.world.boarded,
             "served": eng.world.served,
             "meanWait": mean_wait,
         },
         "frames": frames,
     })
+}
+
+fn finite_at_least(value: f64, min: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value.max(min)
+    } else {
+        fallback.max(min)
+    }
 }
 
 // ===========================================================================
@@ -610,18 +661,24 @@ const HTML_TEMPLATE: &str = r####"<!doctype html>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#0b1021;color:#e6edf3}
-main{max-width:1080px;margin:0 auto;padding:22px 20px 60px}
+main{max-width:1120px;margin:0 auto;padding:22px 20px 60px}
 h1{font-size:1.4rem;margin:0 0 4px}
 .sub{color:#9aa4b2;margin:0 0 14px;font-size:.9rem;line-height:1.5;max-width:82ch}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
 .chip{font-size:.78rem;border:1px solid #2b3344;border-radius:6px;padding:3px 9px;color:#c9d4e3;background:#0f1422}
 .chip b{color:#fff}
-.stage{display:grid;grid-template-columns:340px 1fr;gap:16px}
-.panel{border:1px solid #21262d;border-radius:12px;background:#0f1422;padding:14px}
+.stage{display:grid;grid-template-columns:minmax(320px,360px) minmax(420px,1fr);gap:16px;align-items:start}
+.panel{border:1px solid #21262d;border-radius:8px;background:#0f1422;padding:14px;min-width:0}
 .stats{display:flex;gap:16px;flex-wrap:wrap;font-size:.82rem;color:#9aa4b2;margin:0 0 10px}
 .stats b{color:#e6edf3;font-variant-numeric:tabular-nums}
 .clock{color:#fff;font-weight:600}
 svg{display:block;width:100%}
+.shaft-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px}
+.shaft{border:1px solid #273244;border-radius:6px;background:#0b1021;padding:8px;min-height:58px}
+.shaft b{display:block;color:#e6edf3;font-size:.78rem;margin-bottom:4px}
+.shaft span{display:block;color:#9aa4b2;font-size:.72rem;line-height:1.35;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.shaft.open{border-color:#22c55e}
+.shaft.move{border-color:#3b82f6}
 .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:16px;border-top:1px solid #21262d;padding-top:14px}
 button{font:inherit;font-size:.85rem;cursor:pointer;border-radius:8px;padding:7px 12px;border:1px solid #2b3344;background:#161b22;color:#e6edf3}
 button:hover{border-color:#3b82f6}
@@ -630,6 +687,12 @@ button.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
 #scrub{flex:1;min-width:160px}
 .legend{display:flex;gap:16px;align-items:center;font-size:.78rem;color:#9aa4b2;margin:14px 0 4px}
 .legend .sw{width:14px;height:3px;border-radius:2px;display:inline-block}
+@media (max-width:820px){
+  main{padding:18px 12px 42px}
+  .stage{grid-template-columns:1fr}
+  .panel{padding:12px}
+  .shaft-strip{grid-template-columns:repeat(auto-fit,minmax(92px,1fr))}
+}
 </style>
 </head>
 <body>
@@ -646,12 +709,14 @@ button.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
       <span>fleet <b id="dir">idle</b></span>
     </div>
     <svg id="bld" viewBox="0 0 360 420"></svg>
+    <div class="shaft-strip" id="shaftState"></div>
   </div>
   <div class="panel">
     <div class="stats">
       <span>in&nbsp;car <b id="incar">0</b></span>
       <span>waiting <b id="waiting">0</b></span>
       <span>served <b id="served">0</b></span>
+      <span>event <b id="event">start</b></span>
     </div>
     <div class="legend">
       <span><span class="sw" style="background:#f59e0b"></span>waiting (total)</span>
@@ -672,15 +737,63 @@ button.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
 
 <script>
 const DATA = __DES_DATA__;
-const M = DATA.meta, F = M.floors, T = M.horizon, FR = DATA.frames;
+const M = DATA.meta || {};
+const F = Math.max(2, Number(M.floors) || 2);
+const T = Math.max(1, Number(M.horizon) || 1);
+const shaftCount = Math.max(1, Number(M.shafts) || 1);
+const sourceFrames = Array.isArray(DATA.frames) && DATA.frames.length ? DATA.frames : [{
+  t:0, car:0, dir:'idle', doors:false, wait:Array(F).fill(0), inCar:0, served:0, events:0, kind:'start'
+}];
+const FR = sourceFrames.map(normalizeFrame);
+
+function homeFloor(i){
+  return shaftCount <= 1 ? 0 : Math.round(i * (F - 1) / (shaftCount - 1));
+}
+function normalizeDir(dir){
+  return dir === 'up' || dir === 'down' ? dir : 'idle';
+}
+function normalizeFrame(fr){
+  const wait = Array.isArray(fr.wait) ? fr.wait.slice(0, F).map(function(v){return Math.max(0, Number(v) || 0);}) : [];
+  while(wait.length < F) wait.push(0);
+  const rawCars = Array.isArray(fr.cars) && fr.cars.length ? fr.cars : [{
+    id:0, home:0, floor:fr.car, dir:fr.dir, doors:fr.doors, active:fr.dir !== 'idle', moving:fr.dir !== 'idle', inCar:fr.inCar
+  }];
+  const cars = [];
+  for(let i=0;i<shaftCount;i++){
+    const src = rawCars[i] || {};
+    const floor = Math.min(F - 1, Math.max(0, Math.round(Number(src.floor ?? homeFloor(i)) || 0)));
+    const load = Math.max(0, Number(src.inCar) || 0);
+    cars.push({
+      id:i,
+      home:Math.min(F - 1, Math.max(0, Math.round(Number(src.home ?? homeFloor(i)) || 0))),
+      floor:floor,
+      dir:normalizeDir(src.dir),
+      doors:!!src.doors,
+      active:!!src.active,
+      moving:!!src.moving,
+      inCar:load
+    });
+  }
+  return {
+    t:Math.max(0, Number(fr.t) || 0),
+    car:Math.min(F - 1, Math.max(0, Math.round(Number(fr.car) || 0))),
+    dir:String(fr.dir || 'idle'),
+    doors:!!fr.doors,
+    cars:cars,
+    wait:wait,
+    inCar:Math.max(0, Number(fr.inCar) || cars.reduce(function(a,c){return a+c.inCar;},0)),
+    served:Math.max(0, Number(fr.served) || 0),
+    events:Math.max(0, Number(fr.events) || 0),
+    kind:String(fr.kind || '')
+  };
+}
 
 (function(){
   const c=document.getElementById('chips');
-  const shafts = M.shafts || 1;
-  const it=[['floors',F],['shafts',shafts],['capacity/shaft',M.capacity],['arrival &lambda;',M.arrivalRate+' /s'],
-    ['travel',M.travel+' s/floor'],['dwell',M.dwell+' s'],['horizon',T+' s'],
-    ['FEL events',M.events.toLocaleString()],['arrivals',M.arrivals],['served',M.served],
-    ['mean wait',M.meanWait.toFixed(1)+' s']];
+  const it=[['floors',F],['shafts',shaftCount],['capacity/shaft',M.capacity],['arrival &lambda;',M.arrivalRate+' /s'],
+    ['travel',M.travel+' s/floor'],['dwell',M.dwell+' s'],['horizon',M.horizon+' s'],
+    ['FEL events',Number(M.events || 0).toLocaleString()],['arrivals',M.arrivals],['served',M.served],
+    ['mean wait',Number(M.meanWait || 0).toFixed(1)+' s']];
   c.innerHTML=it.map(function(p){return '<span class="chip">'+p[0]+' <b>'+p[1]+'</b></span>';}).join('');
 })();
 
@@ -691,12 +804,11 @@ function frameAt(t){
 }
 
 // ---- building renderer ----
-const BW=360, BH=420, MTOP=18, MBOT=22, SHX=148, SHW=42, SHG=8;
+const BW=360, BH=420, MTOP=18, MBOT=22, SHX=132, SHG=8;
+const SHW=Math.max(28,Math.min(48,(BW-SHX-16-(shaftCount-1)*SHG)/shaftCount));
 const lane = (BH-MTOP-MBOT)/F;
 function floorY(f){ return MTOP + (F-1-f)*lane; }  // floor 0 at the bottom
-function carsOf(fr){
-  return fr.cars || [{id:0,floor:fr.car,dir:fr.dir,doors:fr.doors,active:fr.dir!=='idle',inCar:fr.inCar}];
-}
+function carsOf(fr){ return fr.cars; }
 function drawBuilding(fr){
   let s='';
   const cars=carsOf(fr);
@@ -733,6 +845,15 @@ function drawBuilding(fr){
     s+='<text x="'+(sx+SHW/2)+'" y="'+(cy+3)+'" fill="#9ecbff" font-size="10" text-anchor="middle">'+arrow+'</text>';
   }
   document.getElementById('bld').innerHTML=s;
+}
+
+function drawShaftState(fr){
+  const html=carsOf(fr).map(function(car){
+    const state=car.doors?'open':(car.moving?'move':'');
+    const dir=car.dir==='up'?'up':(car.dir==='down'?'down':'idle');
+    return '<div class="shaft '+state+'"><b>S'+(car.id+1)+'</b><span>floor '+car.floor+' / home '+car.home+'</span><span>'+dir+' · load '+car.inCar+'</span></div>';
+  }).join('');
+  document.getElementById('shaftState').innerHTML=html;
 }
 
 // ---- chart: waiting + in-car over time ----
@@ -774,7 +895,7 @@ let tPlay=0,playing=false,last=null;
 const scrub=document.getElementById('scrub');
 function render(){
   const fr=frameAt(tPlay);
-  drawBuilding(fr); drawChart(tPlay);
+  drawBuilding(fr); drawShaftState(fr); drawChart(tPlay);
   document.getElementById('clock').textContent=tPlay.toFixed(1)+'s';
   document.getElementById('events').textContent=fr.events.toLocaleString();
   const active=carsOf(fr).filter(function(c){return c.active || c.doors;}).length;
@@ -782,6 +903,7 @@ function render(){
   document.getElementById('incar').textContent=fr.inCar;
   document.getElementById('waiting').textContent=fr.wait.reduce(function(a,b){return a+b;},0);
   document.getElementById('served').textContent=fr.served;
+  document.getElementById('event').textContent=fr.kind || 'event';
   scrub.value=Math.round(1000*tPlay/T);
 }
 function tick(ts){
@@ -829,9 +951,21 @@ mod tests {
         let frames = data["frames"].as_array().unwrap();
         let floors = data["meta"]["floors"].as_u64().unwrap() as usize;
         let shafts = data["meta"]["shafts"].as_u64().unwrap() as usize;
+        let capacity = data["meta"]["capacity"].as_u64().unwrap() as usize;
         assert_eq!(shafts, 3, "default FEL elevator should use three shafts");
         assert!(served > 0, "expected some passengers served");
         assert!(frames.len() > 10, "expected a frame stream");
+        let homes: Vec<usize> = frames[0]["cars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|car| car["home"].as_u64().unwrap() as usize)
+            .collect();
+        assert_eq!(
+            homes,
+            vec![0, 3, 5],
+            "three shafts park across the building"
+        );
         // No car may ever be outside the building.
         for f in frames {
             let cars = f["cars"].as_array().expect("frame includes shaft states");
@@ -839,7 +973,47 @@ mod tests {
             for car in cars {
                 let floor = car["floor"].as_u64().unwrap() as usize;
                 assert!(floor < floors, "car floor out of range: {floor}");
+                let in_car = car["inCar"].as_u64().unwrap() as usize;
+                assert!(in_car <= capacity, "car exceeded capacity: {in_car}");
+                let moving = car["moving"].as_bool().unwrap();
+                let doors = car["doors"].as_bool().unwrap();
+                if moving {
+                    assert!(!doors, "car cannot move with doors open");
+                    assert_ne!(
+                        car["dir"].as_str().unwrap(),
+                        "idle",
+                        "moving car needs direction"
+                    );
+                }
             }
+        }
+    }
+
+    #[test]
+    fn fel_elevator_sanitizes_extreme_config_values() {
+        let data = run_fel_elevator(&ElevatorConfig {
+            floors: 0,
+            shafts: 0,
+            capacity: 0,
+            travel: f64::NAN,
+            dwell: f64::INFINITY,
+            arrival_rate: f64::NEG_INFINITY,
+            horizon: 8.0,
+            seed: 7,
+        });
+        assert_eq!(data["meta"]["floors"], 2);
+        assert_eq!(data["meta"]["shafts"], 1);
+        assert_eq!(data["meta"]["capacity"], 1);
+        assert_eq!(data["meta"]["travel"], ElevatorConfig::default().travel);
+        assert_eq!(data["meta"]["dwell"], ElevatorConfig::default().dwell);
+        assert_eq!(
+            data["meta"]["arrivalRate"],
+            ElevatorConfig::default().arrival_rate
+        );
+        assert_eq!(data["meta"]["horizon"], 8.0);
+        for frame in data["frames"].as_array().unwrap() {
+            assert_eq!(frame["cars"].as_array().unwrap().len(), 1);
+            assert_eq!(frame["wait"].as_array().unwrap().len(), 2);
         }
     }
 

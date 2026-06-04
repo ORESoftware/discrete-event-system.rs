@@ -6853,6 +6853,10 @@ impl Driver {
                     "ortools-python-reference",
                     ExternalOptimizationTool::OrToolsPython,
                 ),
+                ecosystem_invocation(
+                    "ortools-cp-sat-reference",
+                    ExternalOptimizationTool::OrToolsCpSat,
+                ),
                 ecosystem_invocation("cpmpy-reference", ExternalOptimizationTool::Cpmpy),
                 ecosystem_invocation("pycsp3-reference", ExternalOptimizationTool::PyCsp3),
                 ecosystem_invocation("conjure-reference", ExternalOptimizationTool::Conjure),
@@ -6969,6 +6973,14 @@ impl Driver {
                 ecosystem_invocation("pyscipopt-reference", ExternalOptimizationTool::PyScipOpt),
                 ecosystem_invocation("python-mip-reference", ExternalOptimizationTool::PythonMip),
                 ecosystem_invocation("gurobipy-reference", ExternalOptimizationTool::GurobiPy),
+                ecosystem_invocation(
+                    "cplex-python-reference",
+                    ExternalOptimizationTool::CplexPython,
+                ),
+                ecosystem_invocation(
+                    "xpress-python-reference",
+                    ExternalOptimizationTool::XpressPython,
+                ),
                 ecosystem_invocation("docplex-reference", ExternalOptimizationTool::Docplex),
                 ecosystem_invocation(
                     "ortools-glop-reference",
@@ -6983,6 +6995,10 @@ impl Driver {
                 ecosystem_invocation("gams-reference", ExternalOptimizationTool::Gams),
                 ecosystem_invocation("symphony-reference", ExternalOptimizationTool::Symphony),
                 ecosystem_invocation("mosek-reference", ExternalOptimizationTool::Mosek),
+                ecosystem_invocation(
+                    "mosek-python-reference",
+                    ExternalOptimizationTool::MosekPython,
+                ),
                 ecosystem_invocation("copt-reference", ExternalOptimizationTool::Copt),
                 ecosystem_invocation("osqp-reference", ExternalOptimizationTool::Osqp),
                 ecosystem_invocation("scs-reference", ExternalOptimizationTool::Scs),
@@ -6998,6 +7014,15 @@ impl Driver {
                 ecosystem_invocation("scip-cli-reference", ExternalOptimizationTool::ScipCli),
                 ecosystem_invocation("cbc-cli-reference", ExternalOptimizationTool::CbcCli),
                 ecosystem_invocation("clp-cli-reference", ExternalOptimizationTool::ClpCli),
+                ecosystem_invocation("soplex-cli-reference", ExternalOptimizationTool::SoplexCli),
+                ecosystem_invocation(
+                    "qsopt-ex-cli-reference",
+                    ExternalOptimizationTool::QsoptExCli,
+                ),
+                ecosystem_invocation(
+                    "lp-solve-cli-reference",
+                    ExternalOptimizationTool::LpSolveCli,
+                ),
                 ecosystem_invocation("gurobi-cli-reference", ExternalOptimizationTool::GurobiCli),
                 ecosystem_invocation("cplex-cli-reference", ExternalOptimizationTool::CplexCli),
                 ecosystem_invocation("xpress-cli-reference", ExternalOptimizationTool::XpressCli),
@@ -7005,6 +7030,11 @@ impl Driver {
                 ecosystem_invocation("highs-rust-reference", ExternalOptimizationTool::HighsRust),
                 ecosystem_invocation("scip-rust-reference", ExternalOptimizationTool::ScipRust),
                 ecosystem_invocation("cbc-rust-reference", ExternalOptimizationTool::CbcRust),
+                ecosystem_invocation(
+                    "gurobi-rust-reference",
+                    ExternalOptimizationTool::GurobiRust,
+                ),
+                ecosystem_invocation("cplex-rust-reference", ExternalOptimizationTool::CplexRust),
             ],
             1e-9,
             1e-9,
@@ -7118,6 +7148,7 @@ impl Driver {
                 ),
                 ecosystem_invocation("minotaur-reference", ExternalOptimizationTool::Minotaur),
                 ecosystem_invocation("ipopt-reference", ExternalOptimizationTool::Ipopt),
+                ecosystem_invocation("ipopt-rust-reference", ExternalOptimizationTool::IpoptRust),
                 ecosystem_invocation("bonmin-reference", ExternalOptimizationTool::Bonmin),
                 ecosystem_invocation("couenne-reference", ExternalOptimizationTool::Couenne),
                 ecosystem_invocation("knitro-reference", ExternalOptimizationTool::Knitro),

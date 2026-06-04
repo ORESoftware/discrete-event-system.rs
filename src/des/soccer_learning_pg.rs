@@ -1048,14 +1048,21 @@ fn insert_run_delta_rows(
     rows: &[SoccerLearningPolicyDeltaEntry],
 ) -> Result<(), String> {
     let run_ids = [run_id.to_string()];
-    let batch_rows = rows
-        .iter()
-        .map(|delta| SoccerRunDeltaBatchEntryInsert {
+    let mut batch_rows = Vec::with_capacity(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE);
+    for delta in rows {
+        batch_rows.push(SoccerRunDeltaBatchEntryInsert {
             run_index: 0,
             row: soccer_run_delta_entry_insert(delta),
-        })
-        .collect::<Vec<_>>();
-    insert_run_delta_batch_rows(tx, &run_ids, &batch_rows)
+        });
+        if batch_rows.len() == SOCCER_RUN_DELTA_INSERT_BATCH_SIZE {
+            insert_run_delta_batch_rows(tx, &run_ids, &batch_rows)?;
+            batch_rows.clear();
+        }
+    }
+    if !batch_rows.is_empty() {
+        insert_run_delta_batch_rows(tx, &run_ids, &batch_rows)?;
+    }
+    Ok(())
 }
 
 fn insert_completed_run_delta_rows_in_transaction(
@@ -1070,16 +1077,23 @@ fn insert_completed_run_delta_rows_in_transaction(
             runs.len()
         ));
     }
-    let mut batch_rows = Vec::new();
+    let mut batch_rows = Vec::with_capacity(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE);
     for (run_index, run) in runs.iter().enumerate() {
-        batch_rows.extend(run.game.delta.entries.iter().map(|delta| {
-            SoccerRunDeltaBatchEntryInsert {
+        for delta in &run.game.delta.entries {
+            batch_rows.push(SoccerRunDeltaBatchEntryInsert {
                 run_index,
                 row: soccer_run_delta_entry_insert(delta),
+            });
+            if batch_rows.len() == SOCCER_RUN_DELTA_INSERT_BATCH_SIZE {
+                insert_run_delta_batch_rows(tx, run_ids, &batch_rows)?;
+                batch_rows.clear();
             }
-        }));
+        }
     }
-    insert_run_delta_batch_rows(tx, run_ids, &batch_rows)
+    if !batch_rows.is_empty() {
+        insert_run_delta_batch_rows(tx, run_ids, &batch_rows)?;
+    }
+    Ok(())
 }
 
 fn insert_run_delta_batch_rows(

@@ -1085,8 +1085,8 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "cvc5",
         env_key: "CVC5",
         family: ExternalValidationFamily::SmtSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["cvc5"],
         capabilities: SMT_CAPS,
         input_formats: SMT_FORMATS,
@@ -10838,6 +10838,7 @@ fn external_validation_python_modules(
         "pyscipopt" => &["pyscipopt"],
         "python-mip" => &["mip"],
         "clingo" => &["clingo"],
+        "cvc5" => &["cvc5"],
         "gurobipy" => &["gurobipy"],
         "cplex-python" => &["cplex"],
         "xpress-python" => &["xpress"],
@@ -11341,6 +11342,11 @@ mod tests {
                 && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
         }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "cvc5"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "pyomo" && tool.family == ExternalValidationFamily::ConstraintModeling
         }));
         assert!(tools
@@ -11697,6 +11703,11 @@ mod tests {
         assert_eq!(
             external_validation_artifact_env_names(clingo)[0],
             "ORES_CLINGO_PYTHON"
+        );
+        let cvc5 = find_external_validation_tool("cvc5").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(cvc5)[0],
+            "ORES_CVC5_PYTHON"
         );
         let cp_optimizer = find_external_validation_tool("ibm_cp_optimizer").unwrap();
         assert_eq!(cp_optimizer.id, "ibm-cp-optimizer");

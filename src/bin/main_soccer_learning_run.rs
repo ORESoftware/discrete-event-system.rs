@@ -422,7 +422,6 @@ fn write_episode_log(
 ) -> Result<(), Box<dyn Error>> {
     serde_json::to_writer(&mut *file, episode)?;
     writeln!(file)?;
-    file.flush()?;
     Ok(())
 }
 fn action_summary(entries: &[SoccerQEntry]) -> Vec<(String, u64, f64)> {
@@ -975,6 +974,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let write_final_artifacts = env_bool("SOCCER_WRITE_FINAL_ARTIFACTS", true)?;
     let write_checkpoint_artifacts =
         env_bool("SOCCER_WRITE_CHECKPOINT_ARTIFACTS", write_final_artifacts)?;
+    let print_progress = env_bool("SOCCER_PRINT_PROGRESS", false)?;
+    let print_completed_games = env_bool("SOCCER_PRINT_COMPLETED_GAMES", true)?;
+    let episode_log_flush_interval_games =
+        env_usize("SOCCER_EPISODE_LOG_FLUSH_INTERVAL_GAMES", parallel_games.max(1))?;
+    let pg_policy_version_interval_games = env_usize(
+        "SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES",
+        parallel_games.max(1),
+    )?;
     let game_artifact_mode = env_value("SOCCER_GAME_ARTIFACT_MODE")
         .unwrap_or_else(|| "summary".to_string())
         .to_ascii_lowercase();
@@ -1151,7 +1158,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
+        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
         run_id,
         games,
         parallel_games,
@@ -1167,6 +1174,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         seed,
         effective_seed,
         learning_logging_enabled,
+        print_progress,
+        print_completed_games,
+        episode_log_flush_interval_games,
+        pg_policy_version_interval_games,
         game_artifact_mode,
         checkpoint_interval_games,
         artifact_max_entries_per_policy,
@@ -1270,7 +1281,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             episode_config.seed = effective_seed.wrapping_add(episode as u32);
             let starting_policies = batch_start_policies.clone();
             let adversarial_moment_windows = adversarial_moment_windows.clone();
-            let print_progress = true;
+            let print_progress = print_progress;
             handles.push(thread::spawn(move || {
                 run_game(
                     episode,
@@ -1305,52 +1316,64 @@ fn run() -> Result<(), Box<dyn Error>> {
             if let (Some(store), Some(experiment_id)) =
                 (pg_store.as_mut(), pg_experiment_id.as_deref())
             {
-                let next_generation = pg_generation.saturating_add(1);
-                let version_label = soccer_learning_pg_version_label(
-                    &run_id,
-                    shard_index,
-                    game.episode_summary.episode,
-                );
-                let output_policy_version_id = store
-                    .insert_policy_version(
-                        experiment_id,
-                        pg_batch_base_policy_version_id.as_deref(),
-                        next_generation,
-                        &version_label,
-                        "merge",
-                        "active",
-                        &config,
-                        options.clone(),
-                        options.clone(),
-                        &policies,
-                        completed_learning_game.score.match_fitness,
-                    )
-                    .map_err(invalid_data)?;
+                let completed_episode = game.episode_summary.episode + 1;
+                let should_write_policy_version = pg_policy_version_interval_games <= 1
+                    || completed_episode >= games
+                    || completed_episode % pg_policy_version_interval_games == 0;
+                let output_policy_version_id = if should_write_policy_version {
+                    let next_generation = pg_generation.saturating_add(1);
+                    let version_label = soccer_learning_pg_version_label(
+                        &run_id,
+                        shard_index,
+                        game.episode_summary.episode,
+                    );
+                    let output_policy_version_id = store
+                        .insert_policy_version(
+                            experiment_id,
+                            pg_batch_base_policy_version_id.as_deref(),
+                            next_generation,
+                            &version_label,
+                            "merge",
+                            "active",
+                            &config,
+                            options.clone(),
+                            options.clone(),
+                            &policies,
+                            completed_learning_game.score.match_fitness,
+                        )
+                        .map_err(invalid_data)?;
+                    pg_base_policy_version_id = Some(output_policy_version_id.clone());
+                    pg_last_policy_version_id = Some(output_policy_version_id.clone());
+                    pg_generation = next_generation;
+                    Some(output_policy_version_id)
+                } else {
+                    pg_last_policy_version_id.clone()
+                };
                 let runner_id = soccer_learning_pg_runner_id(&run_id, shard_index, shard_count);
                 let run_row_id = store
                     .insert_completed_run(
                         experiment_id,
                         &runner_id,
                         pg_batch_base_policy_version_id.as_deref(),
-                        Some(&output_policy_version_id),
+                        output_policy_version_id.as_deref(),
                         &completed_learning_game,
                     )
                     .map_err(invalid_data)?;
                 println!(
-                    "postgres_persisted_game episode={} shard={}/{} run_id={} policy_version={} generation={}",
-                    game.episode_summary.episode + 1,
+                    "postgres_persisted_game episode={} shard={}/{} run_id={} policy_version={} generation={} policy_version_written={}",
+                    completed_episode,
                     shard_index,
                     shard_count,
                     run_row_id,
-                    output_policy_version_id,
-                    next_generation
+                    output_policy_version_id.as_deref().unwrap_or("none"),
+                    pg_generation,
+                    should_write_policy_version
                 );
-                pg_base_policy_version_id = Some(output_policy_version_id.clone());
-                pg_last_policy_version_id = Some(output_policy_version_id);
-                pg_generation = next_generation;
                 pg_persisted_games += 1;
             }
-            print_completed_game(&game);
+            if print_completed_games {
+                print_completed_game(&game);
+            }
 
             let (game_artifact_path, game_artifact_kind) = if write_game_artifacts {
                 let path = game_dir.join(format!(
@@ -1391,6 +1414,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             manifest_games.push(manifest_entry);
             write_episode_log(&mut episode_log, &game.episode_summary)?;
             episode_summaries.push(game.episode_summary);
+            if episode_log_flush_interval_games > 0
+                && episode_summaries.len() % episode_log_flush_interval_games == 0
+            {
+                episode_log.flush()?;
+            }
         }
 
         let prune_summary = policies.prune(
@@ -1488,6 +1516,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let _ = std::io::stdout().flush();
         }
     }
+    episode_log.flush()?;
 
     let artifact = self_play_artifact_from_policies(
         config.clone(),

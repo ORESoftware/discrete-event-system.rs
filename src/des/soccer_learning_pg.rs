@@ -104,7 +104,7 @@ impl SoccerLearningPgStore {
                 r#"
                 select id::text, generation
                 from des_soccer_learning_policy_versions
-                where experiment_id = $1::uuid and status = 'active'
+                where experiment_id = $1::text::uuid and status = 'active'
                 order by generation desc, updated_at desc
                 limit 1
                 "#,
@@ -165,7 +165,7 @@ impl SoccerLearningPgStore {
                 r#"
                 update des_soccer_learning_policy_versions
                 set status = 'archived', updated_at = now()
-                where experiment_id = $1::uuid and status = 'active'
+                where experiment_id = $1::text::uuid and status = 'active'
                 "#,
                 &[&experiment_id],
             )
@@ -194,8 +194,8 @@ impl SoccerLearningPgStore {
                   )
                 values
                   (
-                    $1::uuid,
-                    $2::uuid,
+                    $1::text::uuid,
+                    $2::text::uuid,
                     $3,
                     $4,
                     $5,
@@ -311,9 +311,9 @@ impl SoccerLearningPgStore {
                   )
                 values
                   (
-                    $1::uuid,
-                    $2::uuid,
-                    $3::uuid,
+                    $1::text::uuid,
+                    $2::text::uuid,
+                    $3::text::uuid,
                     $4,
                     $5,
                     $6,
@@ -390,7 +390,7 @@ impl SoccerLearningPgStore {
                   )
                 values
                   (
-                    $1::uuid,
+                    $1::text::uuid,
                     $2,
                     $3,
                     $4,
@@ -584,7 +584,7 @@ impl SoccerLearningPgStore {
                 r#"
                 update des_soccer_learning_policy_versions
                 set status = 'archived', updated_at = now()
-                where experiment_id = $1::uuid and status = 'active'
+                where experiment_id = $1::text::uuid and status = 'active'
                 "#,
                 &[&experiment_id],
             )
@@ -613,8 +613,8 @@ impl SoccerLearningPgStore {
                   )
                 values
                   (
-                    $1::uuid,
-                    $2::uuid,
+                    $1::text::uuid,
+                    $2::text::uuid,
                     $3,
                     $4,
                     'replay',
@@ -679,9 +679,9 @@ impl SoccerLearningPgStore {
                   )
                 values
                   (
-                    $1::uuid,
-                    $2::uuid,
-                    $3::uuid,
+                    $1::text::uuid,
+                    $2::text::uuid,
+                    $3::text::uuid,
                     $4,
                     $5,
                     0,
@@ -778,7 +778,7 @@ impl SoccerLearningPgStore {
                   value_micros,
                   visits
                 from des_soccer_learning_policy_entries
-                where policy_version_id = $1::uuid
+                where policy_version_id = $1::text::uuid
                 order by team, entry_kind, state_hash, action
                 "#,
                 &[&policy_version_id],
@@ -886,7 +886,7 @@ fn insert_policy_entries_for_team(
                 source_run_id
               )
             values
-              ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::uuid)
+              ($1::text::uuid, $2, $3, $4, $5, $6, $7, $8, $9::text::uuid)
             "#,
             &[
                 &policy_version_id,
@@ -933,7 +933,7 @@ fn insert_policy_entries_for_team(
                 source_run_id
               )
             values
-              ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::uuid)
+              ($1::text::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::uuid)
             "#,
             &[
                 &policy_version_id,
@@ -1132,7 +1132,7 @@ fn insert_normalized_set_play_training_records(
             goal_rate_delta_micros
           )
         values
-          ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          ($1::text::uuid, $2::text::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
         &[
             &run_id,
@@ -1160,7 +1160,7 @@ fn insert_normalized_set_play_training_records(
             insert into des_soccer_learning_set_play_restart_mix
               (run_id, ordinal, restart)
             values
-              ($1::uuid, $2, $3)
+              ($1::text::uuid, $2, $3)
             "#,
             &[&run_id, &ordinal, &restart_label],
         )
@@ -1214,7 +1214,7 @@ fn insert_normalized_set_play_training_records(
               )
             values
               (
-                $1::uuid,
+                $1::text::uuid,
                 $2,
                 $3,
                 $4,
@@ -1301,7 +1301,7 @@ fn insert_normalized_set_play_training_records(
             average_loss_micros
           )
         values
-          ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          ($1::text::uuid, $2::text::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         "#,
         &[
             &run_id,

@@ -24,6 +24,7 @@ use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
 };
 use serde::Serialize;
+use uuid::Uuid;
 
 const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 0;
 const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
@@ -620,12 +621,27 @@ struct PendingPostgresCompletedRun {
     base_policy_version_id: Option<String>,
     output_policy_version_id: Option<String>,
     generation: i32,
-    policy_version_written: bool,
+}
+
+#[derive(Debug)]
+struct PendingPostgresPolicyVersion {
+    id: String,
+    parent_policy_version_id: Option<String>,
+    generation: i32,
+    version_label: String,
+    source_kind: &'static str,
+    status: &'static str,
+    config: MatchConfig,
+    home_options: SoccerQPolicyOptions,
+    away_options: SoccerQPolicyOptions,
+    policies: SoccerTeamQPolicies,
+    fitness: f64,
 }
 
 struct PostgresCompletedRunBatch {
     experiment_id: String,
     runner_id: String,
+    pending_policy_versions: Vec<PendingPostgresPolicyVersion>,
     pending_runs: Vec<PendingPostgresCompletedRun>,
     shard_index: usize,
     shard_count: usize,
@@ -670,6 +686,7 @@ impl AsyncPostgresCompletedRunWriter {
                     &mut store,
                     &batch.experiment_id,
                     &batch.runner_id,
+                    &mut batch.pending_policy_versions,
                     &mut batch.pending_runs,
                     batch.shard_index,
                     batch.shard_count,
@@ -714,12 +731,13 @@ impl AsyncPostgresCompletedRunWriter {
         &mut self,
         experiment_id: &str,
         runner_id: &str,
+        pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
         pending_runs: &mut Vec<PendingPostgresCompletedRun>,
         shard_index: usize,
         shard_count: usize,
     ) -> Result<usize, String> {
         let persisted = self.drain_finished()?;
-        if pending_runs.is_empty() {
+        if pending_policy_versions.is_empty() && pending_runs.is_empty() {
             return Ok(persisted);
         }
         let Some(sender) = &self.sender else {
@@ -728,6 +746,7 @@ impl AsyncPostgresCompletedRunWriter {
         let batch = PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            pending_policy_versions: std::mem::take(pending_policy_versions),
             pending_runs: std::mem::take(pending_runs),
             shard_index,
             shard_count,
@@ -1095,11 +1114,35 @@ fn flush_postgres_completed_runs(
     store: &mut SoccerLearningPgStore,
     experiment_id: &str,
     runner_id: &str,
+    pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
     pending_runs: &mut Vec<PendingPostgresCompletedRun>,
     shard_index: usize,
     shard_count: usize,
 ) -> Result<usize, Box<dyn Error>> {
+    if pending_policy_versions.is_empty() && pending_runs.is_empty() {
+        return Ok(0);
+    }
+    let policy_versions_written = pending_policy_versions.len();
+    for policy_version in pending_policy_versions.iter() {
+        store
+            .insert_policy_version_with_id(
+                &policy_version.id,
+                experiment_id,
+                policy_version.parent_policy_version_id.as_deref(),
+                policy_version.generation,
+                &policy_version.version_label,
+                policy_version.source_kind,
+                policy_version.status,
+                &policy_version.config,
+                policy_version.home_options.clone(),
+                policy_version.away_options.clone(),
+                &policy_version.policies,
+                policy_version.fitness,
+            )
+            .map_err(invalid_data)?;
+    }
     if pending_runs.is_empty() {
+        pending_policy_versions.clear();
         return Ok(0);
     }
     let inserts = pending_runs
@@ -1120,10 +1163,6 @@ fn flush_postgres_completed_runs(
         run_row_ids.first(),
         run_row_ids.last(),
     ) {
-        let policy_versions_written = pending_runs
-            .iter()
-            .filter(|pending| pending.policy_version_written)
-            .count();
         println!(
             "postgres_persisted_batch episodes={}..{} shard={}/{} first_run_id={} last_run_id={} first_policy_version={} last_policy_version={} first_generation={} last_generation={} policy_versions_written={} batch_size={}",
             first.completed_episode,
@@ -1143,6 +1182,7 @@ fn flush_postgres_completed_runs(
             persisted
         );
     }
+    pending_policy_versions.clear();
     pending_runs.clear();
     Ok(persisted)
 }
@@ -1720,6 +1760,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut next_episode = 0usize;
     let mut last_checkpoint_episode = 0usize;
     let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
+    let mut pg_policy_version_buffer = Vec::new();
     let mut pg_completed_buffer = Vec::new();
     let worker_pool = SoccerLearningWorkerPool::start(parallel_games);
 
@@ -1772,9 +1813,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             } else {
                 policies = game.policies.clone();
             }
-            if let (Some(store), Some(experiment_id)) =
-                (pg_store.as_mut(), pg_experiment_id.as_deref())
-            {
+            if pg_experiment_id.is_some() {
                 let completed_episode = game.episode_summary.episode + 1;
                 let should_write_policy_version = pg_policy_version_interval_games <= 1
                     || completed_episode >= games
@@ -1786,21 +1825,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                         shard_index,
                         game.episode_summary.episode,
                     );
-                    let output_policy_version_id = store
-                        .insert_policy_version(
-                            experiment_id,
-                            pg_batch_base_policy_version_id.as_deref(),
-                            next_generation,
-                            &version_label,
-                            "merge",
-                            "active",
-                            &config,
-                            options.clone(),
-                            options.clone(),
-                            &policies,
-                            completed_learning_game.score.match_fitness,
-                        )
-                        .map_err(invalid_data)?;
+                    let output_policy_version_id = Uuid::new_v4().to_string();
+                    pg_policy_version_buffer.push(PendingPostgresPolicyVersion {
+                        id: output_policy_version_id.clone(),
+                        parent_policy_version_id: pg_batch_base_policy_version_id.clone(),
+                        generation: next_generation,
+                        version_label,
+                        source_kind: "merge",
+                        status: "active",
+                        config: config.clone(),
+                        home_options: options.clone(),
+                        away_options: options.clone(),
+                        policies: policies.clone(),
+                        fitness: completed_learning_game.score.match_fitness,
+                    });
                     pg_base_policy_version_id = Some(output_policy_version_id.clone());
                     pg_last_policy_version_id = Some(output_policy_version_id.clone());
                     pg_generation = next_generation;
@@ -1814,7 +1852,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                     base_policy_version_id: pg_batch_base_policy_version_id.clone(),
                     output_policy_version_id,
                     generation: pg_generation,
-                    policy_version_written: should_write_policy_version,
                 });
             }
             if print_completed_games {
@@ -1912,6 +1949,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         .enqueue(
                             experiment_id,
                             &runner_id,
+                            &mut pg_policy_version_buffer,
                             &mut pg_completed_buffer,
                             shard_index,
                             shard_count,
@@ -1922,6 +1960,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         store,
                         experiment_id,
                         &runner_id,
+                        &mut pg_policy_version_buffer,
                         &mut pg_completed_buffer,
                         shard_index,
                         shard_count,

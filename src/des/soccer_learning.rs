@@ -533,23 +533,25 @@ where
     let mut first_error = None::<String>;
 
     while completed_games + failed_games < config.games && first_error.is_none() {
-        while active < parallel_games && next_episode < config.games {
-            let episode = next_episode;
+        if active < parallel_games && next_episode < config.games {
             let starting_policies = Arc::new(policies.clone());
-            let mut match_config = config.match_config.clone();
-            match_config.seed = config.base_seed;
-            let neural_drain_timeout = config.neural_drain_timeout;
-            if let Err(err) = task_tx.send(SoccerLearningQueueTask {
-                episode,
-                match_config,
-                starting_policies: Arc::clone(&starting_policies),
-                neural_drain_timeout,
-            }) {
-                first_error = Some(format!("soccer learning queue task send failed: {err}"));
-                break;
+            while active < parallel_games && next_episode < config.games {
+                let episode = next_episode;
+                let mut match_config = config.match_config.clone();
+                match_config.seed = config.base_seed;
+                let neural_drain_timeout = config.neural_drain_timeout;
+                if let Err(err) = task_tx.send(SoccerLearningQueueTask {
+                    episode,
+                    match_config,
+                    starting_policies: Arc::clone(&starting_policies),
+                    neural_drain_timeout,
+                }) {
+                    first_error = Some(format!("soccer learning queue task send failed: {err}"));
+                    break;
+                }
+                active += 1;
+                next_episode += 1;
             }
-            active += 1;
-            next_episode += 1;
         }
 
         if first_error.is_some() {

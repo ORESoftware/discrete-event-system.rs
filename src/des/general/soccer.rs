@@ -22545,13 +22545,18 @@ pub fn run_soccer_set_play_trial(request: SoccerSetPlayTrialRequest) -> SoccerSe
     }
 }
 
-fn drain_soccer_neural_learner_for_restart_training(learner: &mut SoccerNeuralLearner) {
-    for _ in 0..24 {
+const SOCCER_SET_PLAY_NEURAL_FINAL_DRAIN_TIMEOUT_MS: u64 = 200;
+
+fn collect_soccer_neural_learner_for_restart_training(
+    learner: &mut SoccerNeuralLearner,
+    final_episode: bool,
+) {
+    if final_episode {
+        learner.drain_results_until_idle(Duration::from_millis(
+            SOCCER_SET_PLAY_NEURAL_FINAL_DRAIN_TIMEOUT_MS,
+        ));
+    } else {
         learner.drain_results();
-        if learner.stats.pending_batches == 0 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -22669,7 +22674,10 @@ pub fn train_soccer_set_play_restarts_with_initial_policies(
             sim.run_time_step();
         }
         if let Some(learner) = &mut sim.neural_learner {
-            drain_soccer_neural_learner_for_restart_training(learner);
+            collect_soccer_neural_learner_for_restart_training(
+                learner,
+                episode + 1 == request.episodes,
+            );
         }
 
         let end_score = match request.team {
@@ -30657,6 +30665,34 @@ mod tests {
         assert!(artifact.learning.neural_learning_samples > 0);
         assert!(artifact.goal_rate.is_finite());
         assert!(artifact.goal_rate_delta.is_finite());
+    }
+
+    #[test]
+    fn set_play_restart_training_finalizes_threaded_neural_learning_once() {
+        let mut config = default_set_play_training_config();
+        config.dt_seconds = 0.2;
+        config.seed = 30_119;
+        config.neural_learning.backend = SoccerNeuralLearningBackend::Threaded;
+        config.neural_learning.hidden_units = 8;
+        config.neural_learning.batch_size = 8;
+        config.neural_learning.max_pending_batches = 16;
+        config.neural_learning.replay_capacity = 64;
+        config.neural_learning.replay_samples_per_tick = 8;
+
+        let artifact = train_soccer_set_play_restarts(SoccerSetPlayTrainingRequest {
+            config,
+            episodes: 2,
+            duration_seconds: 1.0,
+            ..SoccerSetPlayTrainingRequest::default()
+        })
+        .expect("threaded set-play restart training");
+
+        assert!(artifact.learning.neural_learning_enabled);
+        assert_eq!(artifact.learning.neural_learning_backend, "threaded");
+        assert!(artifact.learning.neural_learning_training_steps > 0);
+        assert!(artifact.learning.neural_learning_samples > 0);
+        assert_eq!(artifact.learning.neural_learning_pending_batches, 0);
+        assert!(artifact.learning.neural_network.is_some());
     }
 
     #[test]

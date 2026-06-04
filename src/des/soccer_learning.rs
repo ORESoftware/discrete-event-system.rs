@@ -7,14 +7,15 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::des::general::soccer::{
-    MatchConfig, MatchSummary, SoccerMatch, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions,
-    SoccerQStateKey, SoccerQTargetEntry, SoccerSelfPlayEpisodeSummary,
+    MatchConfig, MatchSummary, SoccerMatch, SoccerNeuralNetworkSnapshot, SoccerQEntry,
+    SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey, SoccerQTargetEntry,
+    SoccerSelfPlayEpisodeSummary,
     SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary, SoccerTeamQPolicies, Team,
 };
 
@@ -119,6 +120,7 @@ pub struct SoccerLearningCompletedGame {
     pub policies: SoccerTeamQPolicies,
     pub score: SoccerLearningRunScore,
     pub delta: SoccerLearningPolicyDelta,
+    pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
     pub elapsed_seconds: f64,
 }
 
@@ -129,6 +131,7 @@ pub struct SoccerLearningQueueRunnerConfig {
     pub parallel_games: usize,
     pub base_seed: u32,
     pub match_config: MatchConfig,
+    pub neural_drain_timeout: Duration,
     pub options: SoccerQPolicyOptions,
     pub prune_action_entries_per_team: usize,
     pub prune_target_entries_per_team: usize,
@@ -147,6 +150,7 @@ pub struct SoccerLearningQueueReport {
     pub final_target_entries: usize,
     pub episode_summaries: Vec<SoccerSelfPlayEpisodeSummary>,
     pub final_policies: SoccerTeamQPolicies,
+    pub latest_neural_network: Option<SoccerNeuralNetworkSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -403,6 +407,7 @@ pub fn run_soccer_learning_game(
     episode: usize,
     mut config: MatchConfig,
     starting_policies: SoccerTeamQPolicies,
+    neural_drain_timeout: Duration,
 ) -> Result<SoccerLearningCompletedGame, String> {
     let started = Instant::now();
     config.seed = config.seed.wrapping_add(episode as u32);
@@ -414,8 +419,12 @@ pub fn run_soccer_learning_game(
         sim.run_time_step();
     }
 
+    sim.drain_neural_learning(neural_drain_timeout);
+    let policies = sim
+        .team_policies()
+        .cloned()
+        .ok_or_else(|| "soccer learning produced no team policies".to_string())?;
     let artifact = sim.team_policy_artifact();
-    let policies = SoccerTeamQPolicies::from_artifact(&artifact)?;
     let summary = artifact.summary.clone();
     let score = soccer_learning_run_score(&summary);
     let delta = soccer_policy_delta_entries(&starting_policies, &policies, &score);
@@ -439,6 +448,7 @@ pub fn run_soccer_learning_game(
         policies,
         score,
         delta,
+        neural_network: artifact.learning.neural_network.clone(),
         elapsed_seconds: started.elapsed().as_secs_f64(),
     })
 }
@@ -470,6 +480,7 @@ where
     let mut tactical_summary = SoccerTacticalLearningSummary::default();
     let mut total_home_goals = 0u32;
     let mut total_away_goals = 0u32;
+    let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
 
     while completed_games + failed_games < config.games {
         while active < parallel_games && next_episode < config.games {
@@ -478,8 +489,14 @@ where
             let starting_policies = policies.clone();
             let mut match_config = config.match_config.clone();
             match_config.seed = config.base_seed;
+            let neural_drain_timeout = config.neural_drain_timeout;
             thread::spawn(move || {
-                let result = run_soccer_learning_game(episode, match_config, starting_policies);
+                let result = run_soccer_learning_game(
+                    episode,
+                    match_config,
+                    starting_policies,
+                    neural_drain_timeout,
+                );
                 let _ = tx.send((episode, result));
             });
             active += 1;
@@ -501,6 +518,9 @@ where
                     config.min_policy_visits,
                 );
                 on_completed_game(&game, &policies)?;
+                if let Some(snapshot) = game.neural_network.clone() {
+                    latest_neural_network = Some(snapshot);
+                }
                 total_home_goals = total_home_goals.saturating_add(game.summary.score_home);
                 total_away_goals = total_away_goals.saturating_add(game.summary.score_away);
                 tactical_summary.merge(&game.tactical_summary);
@@ -529,6 +549,7 @@ where
         final_target_entries,
         episode_summaries,
         final_policies: policies,
+        latest_neural_network,
     })
 }
 
@@ -1004,6 +1025,7 @@ mod tests {
                     max_human_players: 0,
                     ..Default::default()
                 },
+                neural_drain_timeout: Duration::from_millis(0),
                 options: options.clone(),
                 prune_action_entries_per_team: 0,
                 prune_target_entries_per_team: 0,

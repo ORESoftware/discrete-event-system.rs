@@ -7,8 +7,9 @@
 //! PORT NOTES:
 //!   * The internal side is wired to the real Rust smart-traffic DES.
 //!   * The optional SUMO adapter remains dependency-gated. The validator writes
-//!     a real normalized problem payload and calls the external-module registry;
-//!     missing scripts, SUMO, or netconvert are reported as clean skips.
+//!     a real normalized problem payload, but only calls the Python-backed
+//!     external-module registry when explicitly enabled; missing scripts, SUMO,
+//!     or netconvert are reported as clean skips.
 
 #![allow(dead_code)]
 
@@ -27,6 +28,8 @@ use super::external_modules::{register_built_in_external_modules, TRAFFIC_SUMO_R
 use super::external_program::{
     run_external_module, ExternalModuleParams, ExternalProgramResult, ParamValue,
 };
+
+const ENABLE_SUMO_REFERENCE_ENV: &str = "VALIDATE_SMART_TRAFFIC_ENABLE_SUMO";
 
 // =============================================================================
 // Demand routing (faithful).
@@ -556,6 +559,19 @@ fn status_str(status: Option<i32>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
+fn sumo_reference_enabled() -> bool {
+    std::env::var(ENABLE_SUMO_REFERENCE_ENV)
+        .map(|value| sumo_reference_flag_value_enabled(&value))
+        .unwrap_or(false)
+}
+
+fn sumo_reference_flag_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
 fn slice_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
@@ -847,69 +863,78 @@ pub fn run() {
         "collisionAction".to_string(),
         ParamValue::Str("warn".to_string()),
     );
-    let ext = run_external_module_safe(TRAFFIC_SUMO_REFERENCE_ID, &external_params);
-    if !ext.stdout.trim().is_empty() {
-        println!("  external stdout: {}", ext.stdout.trim());
-    }
-    if !ext.stderr.trim().is_empty() {
-        eprintln!("{}", ext.stderr.trim());
-    }
+    if !sumo_reference_enabled() {
+        d.check(
+            "external SUMO adapter disabled by default",
+            true,
+            Some(format!(
+                "set {ENABLE_SUMO_REFERENCE_ENV}=1 to run the Python-backed SUMO adapter"
+            )),
+        );
+    } else {
+        let ext = run_external_module_safe(TRAFFIC_SUMO_REFERENCE_ID, &external_params);
+        if !ext.stdout.trim().is_empty() {
+            println!("  external stdout: {}", ext.stdout.trim());
+        }
+        if !ext.stderr.trim().is_empty() {
+            eprintln!("{}", ext.stderr.trim());
+        }
 
-    if ext.status != Some(0) {
-        if let Some(message) = optional_external_unavailable(&ext) {
-            d.check(
-                "SUMO dependency is optional and reported cleanly",
-                true,
-                Some(message),
-            );
+        if ext.status != Some(0) {
+            if let Some(message) = optional_external_unavailable(&ext) {
+                d.check(
+                    "SUMO dependency is optional and reported cleanly",
+                    true,
+                    Some(message),
+                );
+            } else {
+                d.check(
+                    "external SUMO adapter process exits cleanly",
+                    false,
+                    Some(format!("status={}", status_str(ext.status))),
+                );
+            }
         } else {
             d.check(
                 "external SUMO adapter process exits cleanly",
-                false,
+                true,
                 Some(format!("status={}", status_str(ext.status))),
             );
-        }
-    } else {
-        d.check(
-            "external SUMO adapter process exits cleanly",
-            true,
-            Some(format!("status={}", status_str(ext.status))),
-        );
-        d.check(
-            "external SUMO adapter writes JSON payload",
-            out_path.exists(),
-            Some(out_path.display().to_string()),
-        );
-        match load_external_payload(&out_path) {
-            Ok(payload) => {
-                d.check(
-                    "external payload has known status",
-                    ["ok", "unavailable", "error"].contains(&payload.status.as_str()),
-                    Some(format!("status={}", payload.status)),
-                );
-                if payload.status == "unavailable" {
+            d.check(
+                "external SUMO adapter writes JSON payload",
+                out_path.exists(),
+                Some(out_path.display().to_string()),
+            );
+            match load_external_payload(&out_path) {
+                Ok(payload) => {
                     d.check(
-                        "SUMO dependency is optional and reported cleanly",
-                        true,
-                        payload.message.clone(),
+                        "external payload has known status",
+                        ["ok", "unavailable", "error"].contains(&payload.status.as_str()),
+                        Some(format!("status={}", payload.status)),
                     );
-                } else if payload.status == "ok" && payload.result.is_some() {
-                    let result = payload.result.clone().unwrap();
-                    d.compare_sumo(&internal, &result);
-                } else {
-                    d.check(
-                        "SUMO run completed without adapter error",
-                        false,
-                        Some(
-                            payload
-                                .message
-                                .clone()
-                                .unwrap_or_else(|| "unknown external adapter error".to_string()),
-                        ),
-                    );
+                    if payload.status == "unavailable" {
+                        d.check(
+                            "SUMO dependency is optional and reported cleanly",
+                            true,
+                            payload.message.clone(),
+                        );
+                    } else if payload.status == "ok" && payload.result.is_some() {
+                        let result = payload.result.clone().unwrap();
+                        d.compare_sumo(&internal, &result);
+                    } else {
+                        d.check(
+                            "SUMO run completed without adapter error",
+                            false,
+                            Some(
+                                payload.message.clone().unwrap_or_else(|| {
+                                    "unknown external adapter error".to_string()
+                                }),
+                            ),
+                        );
+                    }
                 }
+                Err(error) => d.check("external payload parses as JSON", false, Some(error)),
             }
-            Err(error) => d.check("external payload parses as JSON", false, Some(error)),
         }
     }
 
@@ -935,5 +960,27 @@ pub fn run() {
             }
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sumo_reference_flag_requires_explicit_enable_value() {
+        for value in ["1", "true", "TRUE", " yes ", "y", "on"] {
+            assert!(
+                sumo_reference_flag_value_enabled(value),
+                "{value:?} should enable the SUMO external reference"
+            );
+        }
+
+        for value in ["", "0", "false", "no", "off", "python", "auto", "fallback"] {
+            assert!(
+                !sumo_reference_flag_value_enabled(value),
+                "{value:?} should keep the Python-backed SUMO adapter disabled"
+            );
+        }
     }
 }

@@ -10,11 +10,10 @@
 //!     `build_five_intersection_traffic_network`.
 //!   * The DES row is backed by the real `smart_traffic_flow` module; the
 //!     comparison params below are only the shared scenario/serialization shape.
-//!   * `spawnSync` (SUMO/netconvert/UXsim) → [`std::process::Command`]; the SUMO
-//!     and UXsim branches early-return "not found" when the binaries are absent
-//!     (the usual case in this repo). `runCommand` returns a `Result` and a
-//!     failed external command yields a notes-only `EngineStats` instead of the
-//!     TS uncaught `throw`.
+//!   * `spawnSync` (SUMO/netconvert/UXsim) → [`std::process::Command`]; optional
+//!     external engines are disabled by default and only run when explicitly
+//!     enabled. `runCommand` returns a `Result` and a failed external command
+//!     yields a notes-only `EngineStats` instead of the TS uncaught `throw`.
 //!   * `JSON.parse`/`stringify` → [`parse_json`] / `JsonValue::to_string_pretty`.
 //!   * regex XML scraping → hand-written attribute scanners.
 //!   * `mulberry32`/`Date.now()` → `mulberry32` / `SystemClock`.
@@ -37,6 +36,8 @@ use crate::des::general::smart_traffic_flow::{
 };
 use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::shared::capabilities::{Clock, RandomSource, SystemClock};
+
+const ENABLE_EXTERNAL_TRAFFIC_ENGINES_ENV: &str = "COMPARE_TRAFFIC_ENGINES_ENABLE_EXTERNALS";
 
 // =============================================================================
 // Shared traffic comparison params.
@@ -120,6 +121,32 @@ fn venv_dir() -> PathBuf {
     }
 }
 
+fn external_traffic_engines_enabled() -> bool {
+    std::env::var(ENABLE_EXTERNAL_TRAFFIC_ENGINES_ENV)
+        .map(|value| external_traffic_engine_flag_value_enabled(&value))
+        .unwrap_or(false)
+}
+
+fn external_traffic_engine_flag_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
+fn skipped_external_engine(engine: &str, generated: usize) -> EngineStats {
+    EngineStats {
+        engine: engine.to_string(),
+        generated: generated as f64,
+        completed: 0.0,
+        active_at_end: generated as f64,
+        notes: vec![format!(
+            "external traffic engine disabled by default; set {ENABLE_EXTERNAL_TRAFFIC_ENGINES_ENV}=1 to run optional SUMO/UXsim engines"
+        )],
+        ..Default::default()
+    }
+}
+
 /// `main()`.
 pub fn run() {
     let out = out_dir();
@@ -149,8 +176,17 @@ pub fn run() {
     write_shared_input(&network, &params, &trips);
 
     let des_stats = run_des(&params, &network, &trips);
-    let sumo_stats = run_sumo(&network, &params, &trips);
-    let uxsim_stats = run_uxsim(&network, &params, &trips);
+    let external_engines_enabled = external_traffic_engines_enabled();
+    let sumo_stats = if external_engines_enabled {
+        run_sumo(&network, &params, &trips)
+    } else {
+        skipped_external_engine("SUMO", trips.len())
+    };
+    let uxsim_stats = if external_engines_enabled {
+        run_uxsim(&network, &params, &trips)
+    } else {
+        skipped_external_engine("UXsim", trips.len())
+    };
 
     let scenario = Scenario {
         network: "five-intersection".to_string(),
@@ -1148,4 +1184,39 @@ fn trip_json(t: &SharedTrip) -> JsonValue {
             JsonValue::String(t.sink_node_id.clone()),
         ),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_traffic_engine_flag_requires_explicit_enable_value() {
+        for value in ["1", "true", "TRUE", " yes ", "y", "on"] {
+            assert!(
+                external_traffic_engine_flag_value_enabled(value),
+                "{value:?} should enable optional external traffic engines"
+            );
+        }
+
+        for value in ["", "0", "false", "no", "off", "python", "auto", "fallback"] {
+            assert!(
+                !external_traffic_engine_flag_value_enabled(value),
+                "{value:?} should keep optional SUMO/UXsim engines disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn skipped_external_engine_records_default_disable_note() {
+        let skipped = skipped_external_engine("UXsim", 12);
+
+        assert_eq!(skipped.engine, "UXsim");
+        assert_eq!(skipped.generated, 12.0);
+        assert_eq!(skipped.active_at_end, 12.0);
+        assert!(skipped.notes.iter().any(|note| {
+            note.contains(ENABLE_EXTERNAL_TRAFFIC_ENGINES_ENV)
+                && note.contains("disabled by default")
+        }));
+    }
 }

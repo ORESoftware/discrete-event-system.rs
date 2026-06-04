@@ -9,8 +9,9 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -300,6 +301,42 @@ fn reference_script() -> PathBuf {
     root.join("scripts").join("assignment_reference.py")
 }
 
+fn assignment_reference_timeout_ms() -> u64 {
+    std::env::var("ASSIGNMENT_REFERENCE_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000)
+}
+
+fn wait_for_assignment_reference_output(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if timeout_ms > 0 && started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(format!("failed to poll assignment_reference.py: {err}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| (output, timed_out))
+        .map_err(|err| format!("failed to wait for assignment_reference.py: {err}"))
+}
+
 fn run_assignment_reference_json(
     payload: Value,
     opts: &ExternalAssignmentReferenceOptions,
@@ -333,15 +370,28 @@ fn run_assignment_reference_json(
             );
         }
     }
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(err) => {
-            return numerical_error(
-                format!("failed to wait for assignment_reference.py: {err}"),
-                started.elapsed().as_secs_f64() * 1000.0,
-            )
+    let timeout_ms = assignment_reference_timeout_ms();
+    let (mut output, timed_out) =
+        match wait_for_assignment_reference_output(child, timeout_ms) {
+            Ok(output) => output,
+            Err(err) => {
+                return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
+            }
+        };
+    if timed_out {
+        let timeout_message = format!(
+            "assignment_reference.py timed out after {}ms",
+            timeout_ms
+        );
+        if output.stderr.is_empty() {
+            output.stderr = timeout_message.into_bytes();
+        } else {
+            let mut stderr = timeout_message.into_bytes();
+            stderr.push(b'\n');
+            stderr.extend(output.stderr);
+            output.stderr = stderr;
         }
-    };
+    }
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     match serde_json::from_slice::<AssignmentReferencePayload>(&output.stdout) {
         Ok(parsed) => ExternalAssignmentReferenceSolution {
@@ -455,5 +505,21 @@ mod tests {
         assert_eq!(solution.solver, "rust:assignment-dp");
         assert_eq!(solution.assignment, vec![1, 0]);
         assert_eq!(solution.objective, Some(3.0));
+    }
+
+    #[test]
+    fn assignment_python_bridge_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_assignment_reference_output(child, 10).expect("timeout output");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
     }
 }

@@ -478,7 +478,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Scs
             | ExternalOptimizationTool::Clarabel
             | ExternalOptimizationTool::Ecos
-            | ExternalOptimizationTool::Clingo => ExternalOptimizationEcosystem::Python,
+            | ExternalOptimizationTool::Clingo
+            | ExternalOptimizationTool::Cvc5 => ExternalOptimizationEcosystem::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationEcosystem::Julia,
             ExternalOptimizationTool::Conjure
             | ExternalOptimizationTool::Picat
@@ -506,7 +507,6 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Sdpa
             | ExternalOptimizationTool::Csdp
             | ExternalOptimizationTool::Z3
-            | ExternalOptimizationTool::Cvc5
             | ExternalOptimizationTool::Yices
             | ExternalOptimizationTool::Bitwuzla
             | ExternalOptimizationTool::Boolector
@@ -608,7 +608,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Sdpa => "SDPA_DIR",
             ExternalOptimizationTool::Csdp => "CSDP_DIR",
             ExternalOptimizationTool::Z3 => "Z3_DIR",
-            ExternalOptimizationTool::Cvc5 => "CVC5_DIR",
+            ExternalOptimizationTool::Cvc5 => "CVC5_PYTHON",
             ExternalOptimizationTool::Yices => "YICES_DIR",
             ExternalOptimizationTool::Bitwuzla => "BITWUZLA_DIR",
             ExternalOptimizationTool::Boolector => "BOOLECTOR_DIR",
@@ -948,6 +948,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Scs => &["scs"],
             ExternalOptimizationTool::Clarabel => &["clarabel"],
             ExternalOptimizationTool::Ecos => &["ecos"],
+            ExternalOptimizationTool::Cvc5 => &["cvc5"],
             _ => &[],
         }
     }
@@ -2070,6 +2071,10 @@ mod tests {
         assert!(ExternalOptimizationTool::Clingo
             .python_modules()
             .contains(&"clingo"));
+        assert_eq!(ExternalOptimizationTool::Cvc5.env_var(), "CVC5_PYTHON");
+        assert!(ExternalOptimizationTool::Cvc5
+            .python_modules()
+            .contains(&"cvc5"));
         assert!(ExternalOptimizationTool::Osqp
             .python_modules()
             .contains(&"osqp"));

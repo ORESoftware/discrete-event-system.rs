@@ -363,7 +363,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Scs
             | ExternalOptimizationTool::Clarabel
             | ExternalOptimizationTool::Ecos
-            | ExternalOptimizationTool::Clingo => ExternalOptimizationLanguage::Python,
+            | ExternalOptimizationTool::Clingo
+            | ExternalOptimizationTool::Cvc5 => ExternalOptimizationLanguage::Python,
             ExternalOptimizationTool::Jump => ExternalOptimizationLanguage::Julia,
             ExternalOptimizationTool::Ampl
             | ExternalOptimizationTool::Gams
@@ -388,7 +389,6 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Sdpa
             | ExternalOptimizationTool::Csdp
             | ExternalOptimizationTool::Z3
-            | ExternalOptimizationTool::Cvc5
             | ExternalOptimizationTool::Yices
             | ExternalOptimizationTool::Bitwuzla
             | ExternalOptimizationTool::Boolector
@@ -852,6 +852,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Cpmpy => &["cpmpy"],
             ExternalOptimizationTool::PyCsp3 => &["pycsp3"],
             ExternalOptimizationTool::Clingo => &["clingo"],
+            ExternalOptimizationTool::Cvc5 => &["cvc5"],
             ExternalOptimizationTool::PySat => &["pysat"],
             ExternalOptimizationTool::Pulp => &["pulp"],
             ExternalOptimizationTool::Cvxpy => &["cvxpy"],
@@ -4178,7 +4179,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
                 .count(),
-            24
+            25
         );
         assert_eq!(
             specs
@@ -4192,7 +4193,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            48
+            47
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -4358,6 +4359,13 @@ mod tests {
                 && spec.exactness == ExternalOptimizationExactness::Exact
         }));
         assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Cvc5
+                && spec.language == ExternalOptimizationLanguage::Python
+                && spec.family == ExternalOptimizationFamily::SmtOmt
+                && spec.exactness == ExternalOptimizationExactness::Exact
+                && spec.tool.python_modules().contains(&"cvc5")
+        }));
+        assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::OptiMathSat
                 && spec.family == ExternalOptimizationFamily::SmtOmt
                 && spec.exactness == ExternalOptimizationExactness::Exact
@@ -4487,6 +4495,13 @@ mod tests {
         assert!(ExternalOptimizationTool::Clingo
             .python_modules()
             .contains(&"clingo"));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Cvc5)[0],
+            "ORES_CVC5_PYTHON"
+        );
+        assert!(ExternalOptimizationTool::Cvc5
+            .python_modules()
+            .contains(&"cvc5"));
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Conjure)[0],
             "ORES_CONJURE_DIR"

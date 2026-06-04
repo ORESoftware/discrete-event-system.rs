@@ -53,5 +53,6 @@
 pub mod compare;
 pub mod elevator;
 pub mod engine;
+pub mod learning_pg;
 pub mod mm1;
 pub mod time_stepped_mm1;

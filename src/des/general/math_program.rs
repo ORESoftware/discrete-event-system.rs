@@ -5240,7 +5240,7 @@ pub struct ExternalMathProgramOptions {
     /// `ortools:PDLP`, `ortools:SCIP`, `ortools:CP-SAT`, `glpk:default`,
     /// `gurobi:default`, `cplex:default`, `xpress:default`, or `lindo-cli`.
     pub method: Option<String>,
-    /// Python executable. Defaults to `PYTHON` or `python3`.
+    /// Python executable. Defaults to `PYTHON_BIN`, then `PYTHON`, then `python3`.
     pub python: Option<String>,
     /// Script path. Defaults to `external-references/math-program/math_program_solve.py`.
     pub script: Option<String>,
@@ -8890,11 +8890,7 @@ fn solve_math_program_external_single_objective(
     if let Some(solution) = solve_math_program_external_linear_cli(program, opts, &method)? {
         return Ok(solution);
     }
-    let python = opts
-        .python
-        .clone()
-        .or_else(|| std::env::var("PYTHON").ok())
-        .unwrap_or_else(|| "python3".to_string());
+    let python = resolve_external_math_program_python(opts);
     let script = opts
         .script
         .clone()
@@ -9135,6 +9131,24 @@ fn solve_math_program_external_single_objective(
     };
     infer_missing_external_lp_basis(program, &mut solution)?;
     Ok(solution)
+}
+
+fn resolve_external_math_program_python(opts: &ExternalMathProgramOptions) -> String {
+    let python_bin = std::env::var("PYTHON_BIN").ok();
+    let python = std::env::var("PYTHON").ok();
+    resolve_external_math_program_python_from(opts, python_bin.as_deref(), python.as_deref())
+}
+
+fn resolve_external_math_program_python_from(
+    opts: &ExternalMathProgramOptions,
+    python_bin: Option<&str>,
+    python: Option<&str>,
+) -> String {
+    opts.python
+        .clone()
+        .or_else(|| python_bin.map(str::to_string))
+        .or_else(|| python.map(str::to_string))
+        .unwrap_or_else(|| "python3".to_string())
 }
 
 fn should_fallback_highs_default_to_cli(
@@ -21259,6 +21273,45 @@ mod tests {
                 "highs"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn external_math_program_python_resolver_honors_python_bin_precedence() {
+        assert_eq!(
+            resolve_external_math_program_python_from(
+                &ExternalMathProgramOptions::default(),
+                Some("/tmp/python-bin"),
+                Some("/tmp/python"),
+            ),
+            "/tmp/python-bin"
+        );
+        assert_eq!(
+            resolve_external_math_program_python_from(
+                &ExternalMathProgramOptions {
+                    python: Some("/tmp/explicit-python".to_string()),
+                    ..Default::default()
+                },
+                Some("/tmp/python-bin"),
+                Some("/tmp/python"),
+            ),
+            "/tmp/explicit-python"
+        );
+        assert_eq!(
+            resolve_external_math_program_python_from(
+                &ExternalMathProgramOptions::default(),
+                None,
+                Some("/tmp/python"),
+            ),
+            "/tmp/python"
+        );
+        assert_eq!(
+            resolve_external_math_program_python_from(
+                &ExternalMathProgramOptions::default(),
+                None,
+                None,
+            ),
+            "python3"
         );
     }
 

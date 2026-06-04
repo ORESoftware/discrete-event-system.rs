@@ -15,8 +15,8 @@ use serde_json::Value;
 use crate::des::general::soccer::{
     MatchConfig, MatchSummary, SoccerMatch, SoccerNeuralNetworkSnapshot, SoccerQEntry,
     SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey, SoccerQTargetEntry,
-    SoccerSelfPlayEpisodeSummary,
-    SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary, SoccerTeamQPolicies, Team,
+    SoccerSelfPlayEpisodeSummary, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary,
+    SoccerTeamQPolicies, Team,
 };
 
 pub const SOCCER_LEARNING_FIXED_SCALE: i64 = 1_000_000;

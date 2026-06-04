@@ -12,6 +12,7 @@ use super::external_linear_cli::{
 };
 use serde_json::{json, Value};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -744,20 +745,47 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Cosmo => &["ores-cosmo-adapter", "cosmo-adapter"],
             ExternalOptimizationTool::Sdpa => &["ores-sdpa-adapter", "sdpa-adapter"],
             ExternalOptimizationTool::Csdp => &["ores-csdp-adapter", "csdp-adapter"],
-            ExternalOptimizationTool::Z3 => &["ores-z3-adapter", "z3-adapter"],
-            ExternalOptimizationTool::Cvc5 => &["ores-cvc5-adapter", "cvc5-adapter"],
-            ExternalOptimizationTool::Yices => &["ores-yices-adapter", "yices-adapter"],
-            ExternalOptimizationTool::Bitwuzla => &["ores-bitwuzla-adapter", "bitwuzla-adapter"],
-            ExternalOptimizationTool::Boolector => &["ores-boolector-adapter", "boolector-adapter"],
-            ExternalOptimizationTool::MathSat => &["ores-mathsat-adapter", "mathsat-adapter"],
-            ExternalOptimizationTool::OptiMathSat => {
-                &["ores-optimathsat-adapter", "optimathsat-adapter"]
+            ExternalOptimizationTool::Z3 => &["ores-z3-adapter", "z3-adapter", "z3"],
+            ExternalOptimizationTool::Cvc5 => &["ores-cvc5-adapter", "cvc5-adapter", "cvc5"],
+            ExternalOptimizationTool::Yices => {
+                &["ores-yices-adapter", "yices-adapter", "yices-smt2", "yices"]
             }
-            ExternalOptimizationTool::OpenSmt => &["ores-opensmt-adapter", "opensmt-adapter"],
-            ExternalOptimizationTool::SmtInterpol => {
-                &["ores-smtinterpol-adapter", "smtinterpol-adapter"]
+            ExternalOptimizationTool::Bitwuzla => {
+                &["ores-bitwuzla-adapter", "bitwuzla-adapter", "bitwuzla"]
             }
-            ExternalOptimizationTool::Princess => &["ores-princess-adapter", "princess-adapter"],
+            ExternalOptimizationTool::Boolector => {
+                &["ores-boolector-adapter", "boolector-adapter", "boolector"]
+            }
+            ExternalOptimizationTool::MathSat => &[
+                "ores-mathsat-adapter",
+                "mathsat-adapter",
+                "mathsat",
+                "mathsat5",
+            ],
+            ExternalOptimizationTool::OptiMathSat => &[
+                "ores-optimathsat-adapter",
+                "optimathsat-adapter",
+                "optimathsat",
+                "optimathsat5",
+            ],
+            ExternalOptimizationTool::OpenSmt => &[
+                "ores-opensmt-adapter",
+                "opensmt-adapter",
+                "opensmt",
+                "opensmt2",
+            ],
+            ExternalOptimizationTool::SmtInterpol => &[
+                "ores-smtinterpol-adapter",
+                "smtinterpol-adapter",
+                "smtinterpol",
+                "smtinterpol.sh",
+            ],
+            ExternalOptimizationTool::Princess => &[
+                "ores-princess-adapter",
+                "princess-adapter",
+                "princess",
+                "princess-smt",
+            ],
             ExternalOptimizationTool::HighsCli
             | ExternalOptimizationTool::GlpkCli
             | ExternalOptimizationTool::ScipCli
@@ -2358,7 +2386,7 @@ fn probe_python_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptim
             ),
         };
     }
-    let Some(python) = find_first_command(&["python3", "python"]) else {
+    let Some(python) = default_python_probe_command() else {
         return ExternalOptimizationProbe {
             tool: opts.tool,
             status: ExternalOptimizationProbeStatus::NotConfigured,
@@ -2395,6 +2423,21 @@ fn probe_python_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptim
             artifact_env_names(opts.tool)[0]
         ),
     }
+}
+
+fn default_python_probe_command() -> Option<PathBuf> {
+    python_probe_command_from_env(env::var_os("PYTHON_BIN"), env::var_os("PYTHON"))
+        .or_else(|| find_first_command(&["python3", "python"]))
+}
+
+fn python_probe_command_from_env(
+    python_bin: Option<OsString>,
+    python: Option<OsString>,
+) -> Option<PathBuf> {
+    python_bin
+        .filter(|value| !value.is_empty())
+        .or_else(|| python.filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
 }
 
 fn probe_julia_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptimizationProbe {
@@ -2487,9 +2530,18 @@ fn probe_external_optimization_linear_cli_tool(
 fn python_can_import(python: &Path, module: &str) -> bool {
     Command::new(python)
         .arg("-c")
-        .arg(format!("import {module}"))
+        .arg(python_import_probe_code(module))
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+fn python_import_probe_code(module: &str) -> String {
+    if module == "pycsp3" {
+        return format!(
+            "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module:?}) else 1)"
+        );
+    }
+    format!("import {module}")
 }
 
 fn cargo_manifest_contains_any_crate(opts: &ExternalOptimizationAdapterOptions) -> bool {
@@ -2675,6 +2727,7 @@ fn numeric_vector_from_value(value: &Value) -> Option<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{python_import_probe_code, python_probe_command_from_env};
     use crate::des::general::external_optimization_tools::{
         adapter_env_names, artifact_env_names, external_optimization_command_dir_env_names,
         external_optimization_comparison_report_to_json,
@@ -2690,6 +2743,7 @@ mod tests {
         ExternalOptimizationTool,
     };
     use serde_json::json;
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     #[test]
@@ -3167,6 +3221,37 @@ mod tests {
             external_optimization_command_dir_env_names(ExternalOptimizationTool::CplexCli)
                 .contains(&"CPLEX_STUDIO_DIR".to_string())
         );
+    }
+
+    #[test]
+    fn python_probe_command_honors_python_bin_precedence() {
+        assert_eq!(
+            python_probe_command_from_env(
+                Some(OsString::from("/tmp/python-bin")),
+                Some(OsString::from("/tmp/python")),
+            ),
+            Some(PathBuf::from("/tmp/python-bin")),
+        );
+        assert_eq!(
+            python_probe_command_from_env(None, Some(OsString::from("/tmp/python"))),
+            Some(PathBuf::from("/tmp/python")),
+        );
+        assert_eq!(
+            python_probe_command_from_env(
+                Some(OsString::new()),
+                Some(OsString::from("/tmp/python"))
+            ),
+            Some(PathBuf::from("/tmp/python")),
+        );
+        assert_eq!(python_probe_command_from_env(None, None), None);
+    }
+
+    #[test]
+    fn pycsp3_probe_uses_spec_lookup_to_avoid_import_side_effects() {
+        let pycsp3_probe = python_import_probe_code("pycsp3");
+        assert!(pycsp3_probe.contains("find_spec"));
+        assert!(pycsp3_probe.contains("\"pycsp3\""));
+        assert_eq!(python_import_probe_code("pyomo"), "import pyomo");
     }
 
     #[test]

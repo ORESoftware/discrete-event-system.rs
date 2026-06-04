@@ -58,8 +58,10 @@ fn env_usize_alias(primary: &str, alias: &str, default: usize) -> Result<usize, 
         return Ok(default);
     };
     value.parse::<usize>().map_err(|_| {
-        invalid_data(format!("{primary}/{alias} must be an unsigned integer, got {value:?}"))
-            .into()
+        invalid_data(format!(
+            "{primary}/{alias} must be an unsigned integer, got {value:?}"
+        ))
+        .into()
     })
 }
 
@@ -98,10 +100,7 @@ fn env_f64_alias(primary: &str, alias: &str, default: f64) -> Result<f64, Box<dy
     if parsed.is_finite() {
         Ok(parsed)
     } else {
-        Err(invalid_data(format!(
-            "{primary}/{alias} must be finite, got {value:?}"
-        ))
-        .into())
+        Err(invalid_data(format!("{primary}/{alias} must be finite, got {value:?}")).into())
     }
 }
 
@@ -123,8 +122,10 @@ fn env_bool_alias(primary: &str, alias: &str, default: bool) -> Result<bool, Box
     match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "y" | "on" => Ok(true),
         "0" | "false" | "no" | "n" | "off" => Ok(false),
-        _ => Err(invalid_data(format!("{primary}/{alias} must be a boolean, got {value:?}"))
-            .into()),
+        _ => Err(invalid_data(format!(
+            "{primary}/{alias} must be a boolean, got {value:?}"
+        ))
+        .into()),
     }
 }
 
@@ -294,8 +295,7 @@ fn flush_postgres_completed_runs(
         })
         .collect::<Vec<_>>();
     let batch_size = inserts.len();
-    let run_ids = store
-        .insert_completed_runs(experiment_id, runner_id, &inserts)?;
+    let run_ids = store.insert_completed_runs(experiment_id, runner_id, &inserts)?;
     drop(inserts);
     for (pending, run_id) in pending_runs.iter().zip(run_ids.iter()) {
         println!(

@@ -1171,10 +1171,7 @@ fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe 
     let timeout_ms = optimization_ecosystem_probe_timeout_ms();
     for class_name in tool.java_probe_classes() {
         let mut command = Command::new(&javap);
-        command
-            .arg("-classpath")
-            .arg(&classpath)
-            .arg(class_name);
+        command.arg("-classpath").arg(&classpath).arg(class_name);
         match run_optimization_ecosystem_probe_command(&mut command, timeout_ms) {
             Ok((output, false)) if output.status.success() => {
                 return probe_result(

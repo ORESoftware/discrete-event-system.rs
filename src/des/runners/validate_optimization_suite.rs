@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -287,6 +289,61 @@ use crate::des::general::weighted_max_sat::{
     solve_weighted_max_sat_greedy, weighted_max_sat_solution_feasible, WeightedMaxSatProblem,
     WeightedMaxSatSolution, WeightedMaxSatStatus,
 };
+
+fn validate_optimization_suite_external_timeout_ms() -> u64 {
+    std::env::var("VALIDATE_OPTIMIZATION_SUITE_EXTERNAL_TIMEOUT_MS")
+        .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
+        .or_else(|_| std::env::var("EXTERNAL_TIMEOUT_MS"))
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000)
+}
+
+fn wait_for_validate_optimization_suite_output(
+    mut child: Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let timeout = Duration::from_millis(timeout_ms);
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map(|output| (output, false))
+                    .map_err(|err| {
+                        format!("failed to wait for external validator command: {err}")
+                    });
+            }
+            Ok(None) => {}
+            Err(err) => return Err(format!("failed to poll external validator command: {err}")),
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            return child
+                .wait_with_output()
+                .map(|output| (output, true))
+                .map_err(|err| {
+                    format!("failed to collect timed-out external validator command: {err}")
+                });
+        }
+
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn run_validate_optimization_suite_command(
+    command: &mut Command,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to start external validator command: {err}"))?;
+    wait_for_validate_optimization_suite_output(child, timeout_ms)
+}
 
 #[derive(Clone, Debug)]
 struct CheckRow {
@@ -10497,20 +10554,27 @@ impl Driver {
             return;
         }
 
-        let output = Command::new(&highs)
+        let mut command = Command::new(&highs);
+        command
             .arg("--model_file")
             .arg(&model_path)
             .arg("--solution_file")
             .arg(&solution_path)
             .arg("--options_file")
-            .arg(&options_path)
-            .output();
+            .arg(&options_path);
+        let timeout_ms = validate_optimization_suite_external_timeout_ms();
+        let output = run_validate_optimization_suite_command(&mut command, timeout_ms);
         let result = match output {
-            Ok(output) => {
+            Ok((output, timed_out)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let solution = std::fs::read_to_string(&solution_path).unwrap_or_default();
-                let combined = format!("{stdout}\n{stderr}\n{solution}");
+                let timeout_detail = if timed_out {
+                    format!("\nprocess timed out after {timeout_ms}ms")
+                } else {
+                    String::new()
+                };
+                let combined = format!("{stdout}\n{stderr}\n{solution}{timeout_detail}");
                 let normalized = combined.to_ascii_lowercase();
                 let objective = highs_objective_from_text(&combined);
                 let objective_ok = match expected_objective {
@@ -10522,7 +10586,8 @@ impl Driver {
                 let solution_detail = solution_check
                     .map(|check| math_program_export_solution_detail(&solution, check));
                 let solution_ok = solution_detail.as_ref().map_or(true, |(ok, _)| *ok);
-                let passed = output.status.success()
+                let passed = !timed_out
+                    && output.status.success()
                     && normalized.contains("optimal")
                     && objective_ok
                     && solution_ok;
@@ -23713,7 +23778,25 @@ impl Driver {
 
 #[cfg(test)]
 mod tests {
-    use super::highs_objective_from_text;
+    use super::*;
+
+    #[test]
+    fn validate_optimization_suite_command_wait_enforces_timeout() {
+        let child = Command::new("sleep")
+            .arg("1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+
+        let (output, timed_out) =
+            wait_for_validate_optimization_suite_output(child, 10).expect("timeout output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(timed_out);
+        assert!(!output.status.success());
+        assert!(stderr.is_empty());
+    }
 
     #[test]
     fn highs_objective_parser_ignores_integrality_scale_metadata() {

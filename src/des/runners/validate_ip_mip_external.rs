@@ -786,8 +786,16 @@ fn feasible_with_lb(p: &IPMIPProblem, lb: &[f64], x: &[f64], tol: f64) -> bool {
 
 fn force_python_reference() -> bool {
     std::env::var("IP_MIP_EXTERNAL_BRIDGE")
-        .map(|value| value.eq_ignore_ascii_case("python"))
+        .map(|value| force_python_reference_value(&value))
         .unwrap_or(false)
+}
+
+fn force_python_reference_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "python" | "python-reference" | "python-bridge"
+    )
 }
 
 fn is_auto_solver_request(value: &str) -> bool {
@@ -931,5 +939,33 @@ pub fn run() {
             }
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ip_mip_external_bridge_switch_only_accepts_explicit_python_values() {
+        for value in [
+            "python",
+            "Python",
+            " python ",
+            "python-reference",
+            "python_bridge",
+        ] {
+            assert!(
+                force_python_reference_value(value),
+                "{value:?} should opt into the compatibility Python bridge"
+            );
+        }
+
+        for value in ["", "auto", "fallback", "rust", "native", "true", "1"] {
+            assert!(
+                !force_python_reference_value(value),
+                "{value:?} should keep the Rust CLI-first bridge"
+            );
+        }
     }
 }

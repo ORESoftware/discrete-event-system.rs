@@ -11,10 +11,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use des_engine::des::general::soccer::{
     soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset, MatchConfig,
     SoccerMatch, SoccerMomentWindow, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
-    SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQTargetEntry,
-    SoccerSelfPlayEpisodeSummary, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
-    SoccerTacticalLearningSummary, SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact,
-    SoccerTeamQPolicies,
+    SoccerNeuralNetworkSnapshot, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions,
+    SoccerQTargetEntry, SoccerSelfPlayEpisodeSummary, SoccerSelfPlayLearnedParams,
+    SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary, SoccerTacticalLearningWeights,
+    SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
     soccer_learning_run_score, soccer_policy_delta_entries, SoccerLearningCompletedGame,
@@ -23,6 +23,12 @@ use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
 };
 use serde::Serialize;
+
+const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 200;
+const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
+const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
+const DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS: bool = false;
+const DEFAULT_SOCCER_PRINT_COMPLETED_GAMES: bool = false;
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
@@ -102,6 +108,14 @@ fn neural_backend_label(backend: SoccerNeuralLearningBackend) -> &'static str {
         SoccerNeuralLearningBackend::Inline => "inline",
         SoccerNeuralLearningBackend::Threaded => "threaded",
     }
+}
+
+fn default_postgres_policy_version_interval_games(parallel_games: usize) -> usize {
+    parallel_games.max(DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES)
+}
+
+fn default_postgres_completed_run_batch_games(parallel_games: usize) -> usize {
+    parallel_games.max(DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES)
 }
 
 fn env_neural_learning_backend(
@@ -533,6 +547,7 @@ struct RunManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     postgres_last_policy_version_id: Option<String>,
     postgres_persisted_games: usize,
+    postgres_completed_run_batch_games: usize,
     write_game_artifacts: bool,
     game_artifact_mode: String,
     game_artifacts: Vec<GameManifestEntry>,
@@ -685,8 +700,11 @@ fn run_game(
     }
 
     sim.drain_neural_learning(neural_drain_timeout);
+    let policies = sim
+        .team_policies()
+        .cloned()
+        .ok_or_else(|| "soccer learning produced no team policies".to_string())?;
     let artifact = sim.team_policy_artifact();
-    let policies = SoccerTeamQPolicies::from_artifact(&artifact)?;
     let episode_summary = SoccerSelfPlayEpisodeSummary {
         episode,
         seed: episode_seed,
@@ -775,6 +793,49 @@ fn soccer_learning_completed_game_from_completed(
         delta,
         elapsed_seconds: game.elapsed_seconds,
     }
+}
+
+fn flush_postgres_completed_runs(
+    store: &mut SoccerLearningPgStore,
+    experiment_id: &str,
+    runner_id: &str,
+    pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+    shard_index: usize,
+    shard_count: usize,
+) -> Result<usize, Box<dyn Error>> {
+    if pending_runs.is_empty() {
+        return Ok(0);
+    }
+    let inserts = pending_runs
+        .iter()
+        .map(|pending| SoccerLearningPgCompletedRunInsert {
+            base_policy_version_id: pending.base_policy_version_id.as_deref(),
+            output_policy_version_id: pending.output_policy_version_id.as_deref(),
+            game: &pending.game,
+        })
+        .collect::<Vec<_>>();
+    let run_row_ids = store
+        .insert_completed_runs(experiment_id, runner_id, &inserts)
+        .map_err(invalid_data)?;
+    for (pending, run_row_id) in pending_runs.iter().zip(run_row_ids.iter()) {
+        println!(
+            "postgres_persisted_game episode={} shard={}/{} run_id={} policy_version={} generation={} policy_version_written={} batch_size={}",
+            pending.completed_episode,
+            shard_index,
+            shard_count,
+            run_row_id,
+            pending
+                .output_policy_version_id
+                .as_deref()
+                .unwrap_or("none"),
+            pending.generation,
+            pending.policy_version_written,
+            run_row_ids.len()
+        );
+    }
+    let persisted = run_row_ids.len();
+    pending_runs.clear();
+    Ok(persisted)
 }
 
 fn soccer_learning_pg_version_label(run_id: &str, shard_index: usize, episode: usize) -> String {
@@ -921,6 +982,7 @@ fn run_manifest(
     postgres_experiment_id: Option<String>,
     postgres_last_policy_version_id: Option<String>,
     postgres_persisted_games: usize,
+    postgres_completed_run_batch_games: usize,
     write_game_artifacts: bool,
     game_artifact_mode: &str,
     game_artifacts: Vec<GameManifestEntry>,
@@ -956,6 +1018,7 @@ fn run_manifest(
         postgres_experiment_id,
         postgres_last_policy_version_id,
         postgres_persisted_games,
+        postgres_completed_run_batch_games,
         write_game_artifacts,
         game_artifact_mode: game_artifact_mode.to_string(),
         game_artifacts,
@@ -989,19 +1052,35 @@ fn run() -> Result<(), Box<dyn Error>> {
     let moment_replay_limit = env_usize("SOCCER_MOMENT_REPLAY_LIMIT", 0)?;
     let moment_replay_passes = env_usize("SOCCER_MOMENT_REPLAY_PASSES", 1)?;
     let moment_replay_reward_scale = env_f64("SOCCER_MOMENT_REPLAY_REWARD_SCALE", 1.0)?;
-    let write_game_artifacts = env_bool("SOCCER_WRITE_GAME_ARTIFACTS", true)?;
+    let write_game_artifacts = env_bool(
+        "SOCCER_WRITE_GAME_ARTIFACTS",
+        DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS,
+    )?;
     let write_final_artifacts = env_bool("SOCCER_WRITE_FINAL_ARTIFACTS", true)?;
     let write_checkpoint_artifacts =
         env_bool("SOCCER_WRITE_CHECKPOINT_ARTIFACTS", write_final_artifacts)?;
     let print_progress = env_bool("SOCCER_PRINT_PROGRESS", false)?;
-    let print_completed_games = env_bool("SOCCER_PRINT_COMPLETED_GAMES", true)?;
-    let episode_log_flush_interval_games =
-        env_usize("SOCCER_EPISODE_LOG_FLUSH_INTERVAL_GAMES", parallel_games.max(1))?;
-    let pg_policy_version_interval_games = env_usize(
-        "SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES",
+    let print_completed_games = env_bool(
+        "SOCCER_PRINT_COMPLETED_GAMES",
+        DEFAULT_SOCCER_PRINT_COMPLETED_GAMES,
+    )?;
+    let episode_log_flush_interval_games = env_usize(
+        "SOCCER_EPISODE_LOG_FLUSH_INTERVAL_GAMES",
         parallel_games.max(1),
     )?;
-    let neural_drain_timeout_ms = env_usize("SOCCER_NEURAL_DRAIN_TIMEOUT_MS", 1_000)?;
+    let pg_policy_version_interval_games = env_usize(
+        "SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES",
+        default_postgres_policy_version_interval_games(parallel_games),
+    )?;
+    let pg_completed_run_batch_games = env_usize(
+        "SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES",
+        default_postgres_completed_run_batch_games(parallel_games),
+    )?
+    .max(1);
+    let neural_drain_timeout_ms = env_usize(
+        "SOCCER_NEURAL_DRAIN_TIMEOUT_MS",
+        DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS,
+    )?;
     let neural_drain_timeout =
         Duration::from_millis(neural_drain_timeout_ms.min(u64::MAX as usize) as u64);
     let game_artifact_mode = env_value("SOCCER_GAME_ARTIFACT_MODE")
@@ -1180,7 +1259,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
+        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
         run_id,
         games,
         parallel_games,
@@ -1200,6 +1279,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         print_completed_games,
         episode_log_flush_interval_games,
         pg_policy_version_interval_games,
+        pg_completed_run_batch_games,
         neural_drain_timeout_ms,
         game_artifact_mode,
         checkpoint_interval_games,
@@ -1270,7 +1350,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         adversarial_embedding_memory_limit,
         adversarial_moment_windows.len(),
     );
-    println!("game seed score shots on_target passes_completed/pass_attempted interceptions");
+    if print_completed_games {
+        println!("game seed score shots on_target passes_completed/pass_attempted interceptions");
+    }
 
     let started = Instant::now();
     let mut episode_summaries = Vec::new();
@@ -1285,6 +1367,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut total_interceptions = 0u32;
     let mut next_episode = 0usize;
     let mut last_checkpoint_episode = 0usize;
+    let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
+    let mut pg_completed_buffer = Vec::new();
 
     while next_episode < games {
         let batch_size = parallel_games.min(games - next_episode);
@@ -1330,8 +1414,10 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         let merge_deltas = completed_games.len() > 1;
         let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
-        let mut pg_completed_batch = Vec::new();
         for game in completed_games {
+            if let Some(snapshot) = game.artifact.learning.neural_network.clone() {
+                latest_neural_network = Some(snapshot);
+            }
             let completed_learning_game =
                 soccer_learning_completed_game_from_completed(&game, &batch_start_policies);
             if merge_deltas {
@@ -1375,7 +1461,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     pg_last_policy_version_id.clone()
                 };
-                pg_completed_batch.push(PendingPostgresCompletedRun {
+                pg_completed_buffer.push(PendingPostgresCompletedRun {
                     completed_episode,
                     game: completed_learning_game,
                     base_policy_version_id: pg_batch_base_policy_version_id.clone(),
@@ -1434,42 +1520,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        if let (Some(store), Some(experiment_id)) =
-            (pg_store.as_mut(), pg_experiment_id.as_deref())
-        {
-            if !pg_completed_batch.is_empty() {
-                let runner_id = soccer_learning_pg_runner_id(&run_id, shard_index, shard_count);
-                let inserts = pg_completed_batch
-                    .iter()
-                    .map(|pending| SoccerLearningPgCompletedRunInsert {
-                        base_policy_version_id: pending.base_policy_version_id.as_deref(),
-                        output_policy_version_id: pending.output_policy_version_id.as_deref(),
-                        game: &pending.game,
-                    })
-                    .collect::<Vec<_>>();
-                let run_row_ids = store
-                    .insert_completed_runs(experiment_id, &runner_id, &inserts)
-                    .map_err(invalid_data)?;
-                for (pending, run_row_id) in pg_completed_batch.iter().zip(run_row_ids.iter()) {
-                    println!(
-                        "postgres_persisted_game episode={} shard={}/{} run_id={} policy_version={} generation={} policy_version_written={} batch_size={}",
-                        pending.completed_episode,
-                        shard_index,
-                        shard_count,
-                        run_row_id,
-                        pending
-                            .output_policy_version_id
-                            .as_deref()
-                            .unwrap_or("none"),
-                        pending.generation,
-                        pending.policy_version_written,
-                        run_row_ids.len()
-                    );
-                }
-                pg_persisted_games += run_row_ids.len();
-            }
-        }
-
         let prune_summary = policies.prune(
             max_policy_entries_per_team,
             max_policy_target_entries_per_team,
@@ -1499,6 +1549,24 @@ fn run() -> Result<(), Box<dyn Error>> {
             && (next_episode >= games
                 || next_episode.saturating_sub(last_checkpoint_episode)
                     >= checkpoint_interval_games);
+        if let (Some(store), Some(experiment_id)) = (pg_store.as_mut(), pg_experiment_id.as_deref())
+        {
+            let should_flush_completed_runs = !pg_completed_buffer.is_empty()
+                && (next_episode >= games
+                    || should_checkpoint
+                    || pg_completed_buffer.len() >= pg_completed_run_batch_games);
+            if should_flush_completed_runs {
+                let runner_id = soccer_learning_pg_runner_id(&run_id, shard_index, shard_count);
+                pg_persisted_games += flush_postgres_completed_runs(
+                    store,
+                    experiment_id,
+                    &runner_id,
+                    &mut pg_completed_buffer,
+                    shard_index,
+                    shard_count,
+                )?;
+            }
+        }
         if should_checkpoint {
             let checkpoint_artifact = self_play_artifact_from_policies(
                 config.clone(),
@@ -1513,7 +1581,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             );
             write_json(&checkpoint_artifact_path, &checkpoint_export)?;
             let checkpoint_params =
-                SoccerSelfPlayLearnedParams::from_training_artifact(&checkpoint_artifact);
+                SoccerSelfPlayLearnedParams::from_training_artifact_with_neural_network(
+                    &checkpoint_artifact,
+                    latest_neural_network.clone(),
+                );
             write_json(&learned_params_path, &checkpoint_params)?;
             let checkpoint_manifest = run_manifest(
                 &run_id,
@@ -1550,6 +1621,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 pg_experiment_id.clone(),
                 pg_last_policy_version_id.clone(),
                 pg_persisted_games,
+                pg_completed_run_batch_games,
                 write_game_artifacts,
                 &game_artifact_mode,
                 manifest_games.clone(),
@@ -1578,7 +1650,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         let final_export =
             compact_training_artifact_for_export(&artifact, artifact_max_entries_per_policy);
         write_json(&final_artifact_path, &final_export)?;
-        let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+        let learned_params =
+            SoccerSelfPlayLearnedParams::from_training_artifact_with_neural_network(
+                &artifact,
+                latest_neural_network.clone(),
+            );
         write_json(&learned_params_path, &learned_params)?;
 
         let manifest = run_manifest(
@@ -1616,6 +1692,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             pg_experiment_id.clone(),
             pg_last_policy_version_id.clone(),
             pg_persisted_games,
+            pg_completed_run_batch_games,
             write_game_artifacts,
             &game_artifact_mode,
             manifest_games,
@@ -1686,5 +1763,47 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("soccer learning run failed: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_postgres_policy_versions_are_batched_for_single_game_workers() {
+        assert_eq!(default_postgres_policy_version_interval_games(0), 10);
+        assert_eq!(default_postgres_policy_version_interval_games(1), 10);
+        assert_eq!(default_postgres_policy_version_interval_games(4), 10);
+    }
+
+    #[test]
+    fn default_postgres_policy_versions_respect_large_parallel_batches() {
+        assert_eq!(default_postgres_policy_version_interval_games(16), 16);
+        assert_eq!(default_postgres_policy_version_interval_games(64), 64);
+    }
+
+    #[test]
+    fn default_postgres_completed_runs_are_batched_for_single_game_workers() {
+        assert_eq!(default_postgres_completed_run_batch_games(0), 10);
+        assert_eq!(default_postgres_completed_run_batch_games(1), 10);
+        assert_eq!(default_postgres_completed_run_batch_games(4), 10);
+    }
+
+    #[test]
+    fn default_postgres_completed_runs_respect_large_parallel_batches() {
+        assert_eq!(default_postgres_completed_run_batch_games(16), 16);
+        assert_eq!(default_postgres_completed_run_batch_games(64), 64);
+    }
+
+    #[test]
+    fn default_neural_drain_timeout_keeps_worker_boundary_wait_bounded() {
+        assert_eq!(DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS, 200);
+    }
+
+    #[test]
+    fn default_batch_runner_outputs_keep_per_game_io_off_hot_path() {
+        assert!(!DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS);
+        assert!(!DEFAULT_SOCCER_PRINT_COMPLETED_GAMES);
     }
 }

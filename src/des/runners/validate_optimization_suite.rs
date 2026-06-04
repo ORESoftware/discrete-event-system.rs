@@ -6693,11 +6693,21 @@ impl Driver {
             .iter()
             .filter(|spec| spec.supports_ecosystem_cp_assignment)
             .count();
+        let cp_rust_fallback_specs = cp_specs
+            .iter()
+            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::Fallback)
+            .count();
+        let cp_python_bridge_specs = cp_specs
+            .iter()
+            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::PythonBridge)
+            .count();
         self.check(
             "External CP-SAT reference registry splits direct and ecosystem contracts",
             cp_specs.len() == 19
                 && direct_cp_specs == 4
                 && ecosystem_cp_specs == 15
+                && cp_rust_fallback_specs == 1
+                && cp_python_bridge_specs == 1
                 && cp_specs.iter().any(|spec| {
                     spec.solver == ExternalCpSatReferenceSolver::OrToolsCpSat
                         && spec.family == ExternalCpSatReferenceFamily::CpSatScript
@@ -6709,15 +6719,22 @@ impl Driver {
                         && spec.supports_cp_sat_json
                 })
                 && cp_specs.iter().any(|spec| {
+                    spec.solver == ExternalCpSatReferenceSolver::PythonEnumeration
+                        && spec.family == ExternalCpSatReferenceFamily::PythonBridge
+                        && spec.supports_cp_sat_json
+                })
+                && cp_specs.iter().any(|spec| {
                     spec.solver == ExternalCpSatReferenceSolver::ChocoSolver
                         && spec.family == ExternalCpSatReferenceFamily::EcosystemReference
                         && spec.supports_ecosystem_cp_assignment
                 }),
             format!(
-                "cp_specs={} direct={} ecosystem={}",
+                "cp_specs={} direct={} ecosystem={} rust_fallback={} python_bridge={}",
                 cp_specs.len(),
                 direct_cp_specs,
-                ecosystem_cp_specs
+                ecosystem_cp_specs,
+                cp_rust_fallback_specs,
+                cp_python_bridge_specs
             ),
         );
         let cp_sat_smoke = serde_json::json!({

@@ -1,13 +1,14 @@
 //! Port of `src/des/runners/validate-computer-network.ts`.
 //!
-//! Runs the computer-network DES in Rust, validates a Rust reference JSON
-//! projection of the result, and optionally cross-checks the same problem with
-//! the external-program module system. The TS top-level `main()` becomes
-//! [`run`], returning the process exit code.
+//! Runs the computer-network DES in Rust and validates a Rust reference JSON
+//! projection of the result. A Python external-program reference can be enabled
+//! explicitly for cross-checking. The TS top-level `main()` becomes [`run`],
+//! returning the process exit code.
 //!
 //! ## PORT NOTE
 //!   * `import './external-modules'` (registration side-effect) →
-//!     an explicit [`register_built_in_external_modules`] call in [`run`].
+//!     an explicit, opt-in [`register_built_in_external_modules`] call in
+//!     [`run`].
 //!   * `JSON.stringify(problem, null, 2)` → [`problem_to_json`] (there is no
 //!     `Serialize` derive on [`ComputerNetworkProblem`]; this helper mirrors the
 //!     camelCase shape optional external references consume).
@@ -498,6 +499,23 @@ fn optional_external_error(e: &str) -> bool {
         || lower.contains("unavailable")
 }
 
+fn computer_network_python_reference_requested() -> bool {
+    [
+        "COMPUTER_NETWORK_REFERENCE_BACKEND",
+        "COMPUTER_NETWORK_EXTERNAL_REFERENCE",
+    ]
+    .iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .any(|value| computer_network_python_reference_value_requested(&value))
+}
+
+fn computer_network_python_reference_value_requested(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "python" | "py" | "external"
+    )
+}
+
 fn compare_result_fields(
     checks: &mut Checks,
     name: &str,
@@ -705,6 +723,7 @@ fn compare_scenario(
     name: &str,
     problem: &ComputerNetworkProblem,
     external_enabled: bool,
+    external_skip_detail: &str,
 ) -> Result<(), String> {
     println!();
     println!("-- {name} --");
@@ -752,7 +771,7 @@ fn compare_scenario(
         checks.check(
             &format!("{name}: optional external reference skipped"),
             true,
-            Some("external modules unavailable".to_string()),
+            Some(external_skip_detail.to_string()),
         );
         return Ok(());
     }
@@ -789,16 +808,25 @@ fn index_by_id(arr: Option<&JsonValue>) -> HashMap<String, JsonValue> {
 
 /// `main()` — returns the exit code (0 = all checks pass).
 pub fn run() -> i32 {
-    let external_enabled = match register_built_in_external_modules() {
-        Ok(()) => true,
-        Err(e) => {
-            eprintln!("external modules unavailable; running Rust-only checks: {e}");
-            false
-        }
-    };
-
-    println!("Computer-network DES: framework vs Rust reference + optional external");
+    println!("Computer-network DES: framework vs Rust reference");
     println!("====================================================================");
+
+    let (external_enabled, external_skip_detail) = if computer_network_python_reference_requested()
+    {
+        match register_built_in_external_modules() {
+            Ok(()) => (true, "external Python reference enabled".to_string()),
+            Err(e) => {
+                eprintln!("external modules unavailable; running Rust-only checks: {e}");
+                (false, format!("external modules unavailable: {e}"))
+            }
+        }
+    } else {
+        println!("SKIP external Python reference (set COMPUTER_NETWORK_REFERENCE_BACKEND=python)");
+        (
+            false,
+            "set COMPUTER_NETWORK_REFERENCE_BACKEND=python".to_string(),
+        )
+    };
 
     let mut checks = Checks::default();
     if let Err(e) = compare_scenario(
@@ -806,6 +834,7 @@ pub fn run() -> i32 {
         "small-enterprise",
         &build_default_computer_network_problem(),
         external_enabled,
+        &external_skip_detail,
     ) {
         eprintln!("{e}");
         return 1;
@@ -815,6 +844,7 @@ pub fn run() -> i32 {
         "bottleneck-lab",
         &build_bottleneck_computer_network_problem(),
         external_enabled,
+        &external_skip_detail,
     ) {
         eprintln!("{e}");
         return 1;
@@ -842,4 +872,19 @@ pub fn run() -> i32 {
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_reference_switch_only_accepts_explicit_opt_in_values() {
+        for value in ["1", "true", "YES", "python", "py", "external"] {
+            assert!(computer_network_python_reference_value_requested(value));
+        }
+        for value in ["", "0", "false", "rust", "none", "skip"] {
+            assert!(!computer_network_python_reference_value_requested(value));
+        }
+    }
 }

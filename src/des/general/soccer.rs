@@ -3521,10 +3521,19 @@ pub struct SoccerSelfPlayLearnedParams {
     pub away_entries: Vec<SoccerQEntry>,
     #[serde(default)]
     pub away_target_entries: Vec<SoccerQTargetEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
 }
 
 impl SoccerSelfPlayLearnedParams {
     pub fn from_training_artifact(artifact: &SoccerSelfPlayTrainingArtifact) -> Self {
+        Self::from_training_artifact_with_neural_network(artifact, None)
+    }
+
+    pub fn from_training_artifact_with_neural_network(
+        artifact: &SoccerSelfPlayTrainingArtifact,
+        neural_network: Option<SoccerNeuralNetworkSnapshot>,
+    ) -> Self {
         SoccerSelfPlayLearnedParams {
             version: SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION,
             config: artifact.config.clone(),
@@ -3536,6 +3545,7 @@ impl SoccerSelfPlayLearnedParams {
             home_target_entries: artifact.home_target_entries.clone(),
             away_entries: artifact.away_entries.clone(),
             away_target_entries: artifact.away_target_entries.clone(),
+            neural_network,
         }
     }
 }
@@ -13956,6 +13966,24 @@ pub struct SoccerMomentReplayImportResponse {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerNeuralLayerSnapshot {
+    pub activation: String,
+    pub weights: Vec<Vec<f64>>,
+    pub biases: Vec<f64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerNeuralNetworkSnapshot {
+    pub input_dim: usize,
+    pub output_dim: usize,
+    pub parameter_count: usize,
+    pub l2_norm: f64,
+    pub layers: Vec<SoccerNeuralLayerSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerLearningSnapshot {
     pub total_transitions: usize,
     #[serde(default = "default_learning_enabled")]
@@ -14011,6 +14039,8 @@ pub struct SoccerLearningSnapshot {
     pub neural_learning_last_loss: Option<f64>,
     #[serde(default)]
     pub neural_learning_average_loss: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -14564,6 +14594,16 @@ struct SoccerNeuralTrainingResult {
     parameter_count: usize,
 }
 
+enum SoccerNeuralLearningWorkerCommand {
+    Train(Vec<SoccerNeuralTrainingSample>),
+    Snapshot,
+}
+
+enum SoccerNeuralLearningWorkerResult {
+    Trained(SoccerNeuralTrainingResult),
+    Snapshot(SoccerNeuralNetworkSnapshot),
+}
+
 #[derive(Clone, Debug, Default)]
 struct SoccerNeuralLearningStatsState {
     training_steps: usize,
@@ -14599,8 +14639,8 @@ impl SoccerNeuralLearningStatsState {
 }
 
 struct SoccerNeuralLearningWorker {
-    sender: mpsc::SyncSender<Vec<SoccerNeuralTrainingSample>>,
-    receiver: mpsc::Receiver<SoccerNeuralTrainingResult>,
+    sender: mpsc::SyncSender<SoccerNeuralLearningWorkerCommand>,
+    receiver: mpsc::Receiver<SoccerNeuralLearningWorkerResult>,
 }
 
 struct SoccerNeuralLearner {
@@ -14610,6 +14650,7 @@ struct SoccerNeuralLearner {
     replay: VecDeque<SoccerNeuralTrainingSample>,
     replay_cursor: usize,
     stats: SoccerNeuralLearningStatsState,
+    last_network_snapshot: Option<SoccerNeuralNetworkSnapshot>,
 }
 
 impl SoccerNeuralLearner {
@@ -14617,6 +14658,7 @@ impl SoccerNeuralLearner {
         let neural_config = &config.neural_learning;
         let network = build_soccer_neural_network(neural_config, config.seed);
         let parameter_count = network.num_parameters();
+        let initial_snapshot = soccer_neural_network_snapshot(&network);
         let stats = SoccerNeuralLearningStatsState {
             parameter_count,
             replay_capacity: neural_config.sanitized_replay_capacity(),
@@ -14630,6 +14672,7 @@ impl SoccerNeuralLearner {
                 replay: VecDeque::with_capacity(neural_config.sanitized_replay_capacity()),
                 replay_cursor: 0,
                 stats,
+                last_network_snapshot: Some(initial_snapshot),
             },
             SoccerNeuralLearningBackend::Threaded => SoccerNeuralLearner {
                 backend: SoccerNeuralLearningBackend::Threaded,
@@ -14642,43 +14685,109 @@ impl SoccerNeuralLearner {
                 replay: VecDeque::with_capacity(neural_config.sanitized_replay_capacity()),
                 replay_cursor: 0,
                 stats,
+                last_network_snapshot: Some(initial_snapshot),
             },
         }
     }
 
+    fn record_worker_result(&mut self, result: SoccerNeuralLearningWorkerResult) {
+        match result {
+            SoccerNeuralLearningWorkerResult::Trained(result) => self.stats.record_result(result),
+            SoccerNeuralLearningWorkerResult::Snapshot(snapshot) => {
+                self.last_network_snapshot = Some(snapshot);
+            }
+        }
+    }
+
     fn drain_results(&mut self) {
-        if let Some(worker) = &self.worker {
-            while let Ok(result) = worker.receiver.try_recv() {
-                self.stats.record_result(result);
+        loop {
+            let result = {
+                let Some(worker) = &self.worker else { break };
+                worker.receiver.try_recv()
+            };
+            match result {
+                Ok(result) => self.record_worker_result(result),
+                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn refresh_network_snapshot(&mut self, max_wait: Duration) {
+        match self.backend {
+            SoccerNeuralLearningBackend::Inline => {
+                if let Some(network) = &self.inline_network {
+                    self.last_network_snapshot = Some(soccer_neural_network_snapshot(network));
+                }
+            }
+            SoccerNeuralLearningBackend::Threaded => {
+                self.drain_results();
+                let Some(sender) = self.worker.as_ref().map(|worker| worker.sender.clone()) else {
+                    return;
+                };
+                if sender
+                    .try_send(SoccerNeuralLearningWorkerCommand::Snapshot)
+                    .is_err()
+                {
+                    return;
+                }
+                if max_wait.is_zero() {
+                    self.drain_results();
+                    return;
+                }
+
+                let started = Instant::now();
+                while started.elapsed() < max_wait {
+                    let wait = max_wait
+                        .saturating_sub(started.elapsed())
+                        .min(Duration::from_millis(2));
+                    let result = {
+                        let Some(worker) = &self.worker else { break };
+                        worker.receiver.recv_timeout(wait)
+                    };
+                    match result {
+                        Ok(SoccerNeuralLearningWorkerResult::Snapshot(snapshot)) => {
+                            self.last_network_snapshot = Some(snapshot);
+                            break;
+                        }
+                        Ok(result) => self.record_worker_result(result),
+                        Err(mpsc::RecvTimeoutError::Timeout) => self.drain_results(),
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                self.drain_results();
             }
         }
     }
 
     fn drain_results_until_idle(&mut self, max_wait: Duration) {
+        let started = Instant::now();
         self.drain_results();
-        if self.stats.pending_batches == 0 || max_wait.is_zero() {
+        if self.stats.pending_batches > 0 && !max_wait.is_zero() {
+            while self.stats.pending_batches > 0 {
+                let elapsed = started.elapsed();
+                if elapsed >= max_wait {
+                    break;
+                }
+                let wait = max_wait
+                    .saturating_sub(elapsed)
+                    .min(Duration::from_millis(2));
+                let result = {
+                    let Some(worker) = &self.worker else { break };
+                    worker.receiver.recv_timeout(wait)
+                };
+                match result {
+                    Ok(result) => self.record_worker_result(result),
+                    Err(mpsc::RecvTimeoutError::Timeout) => self.drain_results(),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            self.drain_results();
+        }
+        let remaining = max_wait.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
             return;
         }
-
-        let started = Instant::now();
-        while self.stats.pending_batches > 0 {
-            let elapsed = started.elapsed();
-            if elapsed >= max_wait {
-                break;
-            }
-            let Some(worker) = &self.worker else {
-                break;
-            };
-            let wait = max_wait
-                .saturating_sub(elapsed)
-                .min(Duration::from_millis(2));
-            match worker.receiver.recv_timeout(wait) {
-                Ok(result) => self.stats.record_result(result),
-                Err(mpsc::RecvTimeoutError::Timeout) => self.drain_results(),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        self.drain_results();
+        self.refresh_network_snapshot(remaining);
     }
 
     fn refresh_replay_stats(&mut self, capacity: usize) {
@@ -14782,12 +14891,16 @@ impl SoccerNeuralLearner {
                             parameter_count: network.num_parameters(),
                         });
                     }
+                    self.last_network_snapshot = Some(soccer_neural_network_snapshot(network));
                 }
             }
             SoccerNeuralLearningBackend::Threaded => {
                 if let Some(worker) = &self.worker {
                     for batch in samples.chunks(batch_size).take(max_batches) {
-                        match worker.sender.try_send(batch.to_vec()) {
+                        match worker
+                            .sender
+                            .try_send(SoccerNeuralLearningWorkerCommand::Train(batch.to_vec()))
+                        {
                             Ok(()) => {
                                 self.stats.pending_batches =
                                     self.stats.pending_batches.saturating_add(1);
@@ -14829,23 +14942,34 @@ fn spawn_soccer_neural_learning_worker(
     max_pending_batches: usize,
 ) -> SoccerNeuralLearningWorker {
     let (sample_tx, sample_rx) =
-        mpsc::sync_channel::<Vec<SoccerNeuralTrainingSample>>(max_pending_batches.max(1));
-    let (result_tx, result_rx) = mpsc::channel::<SoccerNeuralTrainingResult>();
+        mpsc::sync_channel::<SoccerNeuralLearningWorkerCommand>(max_pending_batches.max(1));
+    let (result_tx, result_rx) = mpsc::channel::<SoccerNeuralLearningWorkerResult>();
     thread::spawn(move || {
-        while let Ok(batch) = sample_rx.recv() {
-            if batch.is_empty() {
-                continue;
+        while let Ok(command) = sample_rx.recv() {
+            match command {
+                SoccerNeuralLearningWorkerCommand::Train(batch) => {
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    let pairs = batch
+                        .iter()
+                        .map(|sample| (sample.input.clone(), vec![sample.target]))
+                        .collect::<Vec<_>>();
+                    let loss = network.train_batch(&pairs, learning_rate);
+                    let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Trained(
+                        SoccerNeuralTrainingResult {
+                            samples: batch.len(),
+                            loss,
+                            parameter_count: network.num_parameters(),
+                        },
+                    ));
+                }
+                SoccerNeuralLearningWorkerCommand::Snapshot => {
+                    let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Snapshot(
+                        soccer_neural_network_snapshot(&network),
+                    ));
+                }
             }
-            let pairs = batch
-                .iter()
-                .map(|sample| (sample.input.clone(), vec![sample.target]))
-                .collect::<Vec<_>>();
-            let loss = network.train_batch(&pairs, learning_rate);
-            let _ = result_tx.send(SoccerNeuralTrainingResult {
-                samples: batch.len(),
-                loss,
-                parameter_count: network.num_parameters(),
-            });
         }
     });
     SoccerNeuralLearningWorker {
@@ -14870,6 +14994,33 @@ fn build_soccer_neural_network(
         },
         &mut rng,
     )
+}
+
+fn soccer_neural_activation_label(activation: ActivationName) -> &'static str {
+    match activation {
+        ActivationName::Linear => "linear",
+        ActivationName::Sigmoid => "sigmoid",
+        ActivationName::Tanh => "tanh",
+        ActivationName::Relu => "relu",
+    }
+}
+
+fn soccer_neural_network_snapshot(network: &FeedForwardNetwork) -> SoccerNeuralNetworkSnapshot {
+    SoccerNeuralNetworkSnapshot {
+        input_dim: network.input_dim,
+        output_dim: network.output_dim,
+        parameter_count: network.num_parameters(),
+        l2_norm: network.l2_norm(),
+        layers: network
+            .layers
+            .iter()
+            .map(|layer| SoccerNeuralLayerSnapshot {
+                activation: soccer_neural_activation_label(layer.activation).to_string(),
+                weights: layer.weights.clone(),
+                biases: layer.biases.clone(),
+            })
+            .collect(),
+    }
 }
 
 fn soccer_neural_bool(value: bool) -> f64 {
@@ -15562,6 +15713,10 @@ impl SoccerMatch {
             neural_learning_target_clip: self.config.neural_learning.sanitized_target_clip(),
             neural_learning_last_loss: neural_stats.and_then(|stats| stats.last_loss),
             neural_learning_average_loss: neural_stats.and_then(|stats| stats.average_loss()),
+            neural_network: self
+                .neural_learner
+                .as_ref()
+                .and_then(|learner| learner.last_network_snapshot.clone()),
         }
     }
 
@@ -32145,6 +32300,32 @@ mod tests {
         assert!(learning.neural_learning_samples > 0);
         assert!(learning.neural_learning_parameter_count > 0);
         assert!(learning.neural_learning_last_loss.is_some());
+
+        sim.drain_neural_learning(Duration::from_millis(50));
+        let artifact = sim.team_policy_artifact();
+        let snapshot = artifact
+            .learning
+            .neural_network
+            .as_ref()
+            .expect("threaded neural snapshot");
+        assert_eq!(
+            snapshot.parameter_count,
+            artifact.learning.neural_learning_parameter_count
+        );
+        assert_eq!(snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert!(!snapshot.layers.is_empty());
+        assert!(snapshot
+            .layers
+            .iter()
+            .all(|layer| !layer.weights.is_empty()));
+        let value = serde_json::to_value(&artifact).expect("team artifact json");
+        assert!(
+            value["learning"]["neuralNetwork"]["layers"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 0
+        );
     }
 
     #[test]

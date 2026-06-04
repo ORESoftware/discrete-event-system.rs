@@ -622,12 +622,12 @@ fn parse_external_solver_list(
 fn cp_reference_solver_from_name(name: &str) -> Option<ExternalCpSatReferenceSolver> {
     let key = name.trim().to_ascii_lowercase();
     let solver = match key.as_str() {
-        "rust" | "rust-enumeration" | "rust_enumeration" => {
+        "rust" | "rust-enumeration" | "rust_enumeration" | "fallback" | "rust-fallback"
+        | "rust_fallback" | "native" | "native-rust" | "native_rust" => {
             ExternalCpSatReferenceSolver::RustEnumeration
         }
-        "python" | "fallback" | "python-enumeration" | "python_enumeration" => {
-            ExternalCpSatReferenceSolver::PythonEnumeration
-        }
+        "python" | "python-enumeration" | "python_enumeration" | "python-fallback"
+        | "python_fallback" => ExternalCpSatReferenceSolver::PythonEnumeration,
         "ortools" | "ortools-cp-sat" | "ortools_cp_sat" | "cp-sat" | "cp_sat" => {
             ExternalCpSatReferenceSolver::OrToolsCpSat
         }
@@ -926,4 +926,44 @@ pub fn run() {
         &cp_sizes,
     );
     driver.finish();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cp_scale_fallback_aliases_stay_rust_first() {
+        for alias in [
+            "fallback",
+            "rust-fallback",
+            "rust_fallback",
+            "native",
+            "native-rust",
+            "native_rust",
+        ] {
+            assert_eq!(
+                cp_reference_solver_from_name(alias),
+                Some(ExternalCpSatReferenceSolver::RustEnumeration),
+                "{alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn cp_scale_python_aliases_remain_explicit() {
+        for alias in [
+            "python",
+            "python-enumeration",
+            "python_enumeration",
+            "python-fallback",
+            "python_fallback",
+        ] {
+            assert_eq!(
+                cp_reference_solver_from_name(alias),
+                Some(ExternalCpSatReferenceSolver::PythonEnumeration),
+                "{alias}"
+            );
+        }
+    }
 }

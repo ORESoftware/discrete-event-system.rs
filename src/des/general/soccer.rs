@@ -16899,6 +16899,11 @@ impl SoccerMatch {
         if defender_id >= self.players.len() || attacker_id >= self.players.len() {
             return;
         }
+        if self.players[defender_id].team == self.players[attacker_id].team
+            || self.ball.holder != Some(attacker_id)
+        {
+            return;
+        }
         let defender_team = self.players[defender_id].team;
         let defender_name = self.players[defender_id].name.clone();
         let attacker_name = self.players[attacker_id].name.clone();
@@ -16938,6 +16943,11 @@ impl SoccerMatch {
         if attacker_id >= self.players.len() || defender_id >= self.players.len() {
             return;
         }
+        if self.players[attacker_id].team == self.players[defender_id].team
+            || self.ball.holder != Some(attacker_id)
+        {
+            return;
+        }
         let attacker_team = self.players[attacker_id].team;
         let attacker_name = self.players[attacker_id].name.clone();
         let defender_name = self.players[defender_id].name.clone();
@@ -16955,7 +16965,7 @@ impl SoccerMatch {
         self.ball.last_touch_team = Some(attacker_team);
         self.pending_pass = None;
         self.pending_shot = None;
-        self.record_reward_event(attacker_id, SIDE_STEP_BEAT_REWARD_POINTS);
+        self.record_reward_event(attacker_id, kind.beat_reward_points());
         self.record_reward_event(defender_id, -BEATEN_BY_DRIBBLE_PENALTY_POINTS);
         self.record_possession_touch(attacker_id);
         self.events.push(MatchEvent {

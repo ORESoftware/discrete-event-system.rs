@@ -408,7 +408,9 @@ pub fn solve_tsp_with_external_reference(
 ) -> ExternalTspReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalTspReferenceSolver::RustHeldKarp | ExternalTspReferenceSolver::Fallback
+        ExternalTspReferenceSolver::Auto
+            | ExternalTspReferenceSolver::RustHeldKarp
+            | ExternalTspReferenceSolver::Fallback
     ) {
         return solve_tsp_with_rust_reference(distance_matrix);
     }
@@ -427,7 +429,9 @@ pub fn solve_euclidean_tsp_with_external_reference(
 ) -> ExternalTspReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalTspReferenceSolver::RustHeldKarp | ExternalTspReferenceSolver::Fallback
+        ExternalTspReferenceSolver::Auto
+            | ExternalTspReferenceSolver::RustHeldKarp
+            | ExternalTspReferenceSolver::Fallback
     ) {
         let distance_matrix = rust_tsp_points_to_distance_matrix(points);
         return solve_tsp_with_rust_reference(&distance_matrix);
@@ -511,6 +515,19 @@ mod tests {
             &ExternalTspReferenceOptions {
                 solver: ExternalTspReferenceSolver::Fallback,
             },
+        );
+
+        assert_eq!(solution.status, ExternalTspReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:held-karp-tsp");
+        assert_eq!(solution.tour, vec![0, 1, 2, 3]);
+        assert_eq!(solution.objective, Some(4.0));
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let solution = solve_tsp_with_external_reference(
+            &unit_square_matrix(),
+            &ExternalTspReferenceOptions::default(),
         );
 
         assert_eq!(solution.status, ExternalTspReferenceStatus::Optimal);

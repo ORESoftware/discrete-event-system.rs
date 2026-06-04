@@ -8,8 +8,8 @@
 //! ## Rust shape
 //!   * `LPProblem`/`LPSolution`, `solve_lp_then_simulate` are reused from
 //!     `crate::des::general::{lp, des_lp_bridge}`. The solver is selected by the
-//!     `LP_SOLVER` env var inside `solve_lp` (matching the TS default
-//!     `scipy:highs`, internal fallback).
+//!     `LP_SOLVER` env var inside `solve_lp`, defaulting to the native internal
+//!     simplex with explicit external bridge support still available.
 //!   * The minimal in-file DES (`simulate_factory`) is ported 1:1 with `f64`
 //!     numeric state and `mulberry32` (`crate::des::general::prng`) for the
 //!     log-normal / breakdown sampling.
@@ -269,7 +269,7 @@ pub fn run() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30usize);
-    let solver_label = std::env::var("LP_SOLVER").unwrap_or_else(|_| "scipy:highs".to_string());
+    let solver_label = std::env::var("LP_SOLVER").unwrap_or_else(|_| "internal".to_string());
 
     let prob = factory();
     let params_base = SimParams {

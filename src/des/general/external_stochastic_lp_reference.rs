@@ -412,7 +412,8 @@ pub fn solve_stochastic_lp_with_external_reference(
 ) -> ExternalStochasticLpReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalStochasticLpReferenceSolver::RustMonolithic
+        ExternalStochasticLpReferenceSolver::Auto
+            | ExternalStochasticLpReferenceSolver::RustMonolithic
             | ExternalStochasticLpReferenceSolver::Fallback
     ) {
         return solve_stochastic_lp_with_rust_reference(problem, scenarios);
@@ -492,6 +493,32 @@ mod tests {
             &ExternalStochasticLpReferenceOptions {
                 solver: ExternalStochasticLpReferenceSolver::Fallback,
             },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalStochasticLpReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:monolithic-slp");
+        assert_eq!(solution.x.len(), 1);
+        assert_eq!(solution.y_by_scenario.len(), scenarios.len());
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_production_slp(vec![1.0], vec![3.0], None);
+        let scenarios = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: vec![(5.0, 15.0)],
+                seed: 9,
+            },
+            5,
+        );
+
+        let solution = solve_stochastic_lp_with_external_reference(
+            &problem,
+            &scenarios,
+            &ExternalStochasticLpReferenceOptions::default(),
         );
 
         assert_eq!(

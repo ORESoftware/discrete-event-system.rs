@@ -14,11 +14,10 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::des::general::external_linear_cli::{
-    ipmip_problem_to_cli_json, lp_problem_to_cli_json, solve_linear_cli_json,
-    ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliMipSwitch,
-    ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection, ExternalLinearCliOptions,
-    ExternalLinearCliPresolve, ExternalLinearCliSolution, ExternalLinearCliSolver,
-    ExternalLinearCliStatus,
+    solve_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliBranchRule,
+    ExternalLinearCliKind, ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat,
+    ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
+    ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
 use crate::des::general::ip_mip_des::{
     solve_ipmip_with_des, BranchOrCutConstraint, ConstraintKind, IPMIPProblem, IPMIPSolveOptions,
@@ -5227,8 +5226,9 @@ impl Default for MathProgramSolveOptions {
 /// Explicit local CLI methods such as `highs-cli`, `highs:cli`, `glpk-cli`,
 /// `cbc-cli`, `clp-cli`, `soplex-cli`, `qsopt-ex-cli`, `lp-solve-cli`, and
 /// `lindo-cli` use the Rust `external_linear_cli` adapter for LP/MIP models.
-/// Python remains the fallback bridge for SciPy, OR-Tools, nonlinear oracles,
-/// and external API bindings.
+/// When `method` is omitted for linear LP/MIP models, the facade defaults to
+/// the Rust-native `highs-cli` adapter. Python remains the fallback bridge for
+/// explicit SciPy, OR-Tools, nonlinear oracles, and external API bindings.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalMathProgramOptions {
     /// Solver method, such as `highs`, `highs-cli`, `clp-cli`,
@@ -8845,7 +8845,7 @@ fn add_solution_pool_no_good_cut(
     Ok(())
 }
 
-/// Solve a model through the optional Python external-solver oracle.
+/// Solve a model through the optional external-solver oracle.
 pub fn solve_math_program_external_scipy(
     program: &MathProgram,
     opts: &ExternalMathProgramOptions,
@@ -8870,7 +8870,7 @@ fn solve_math_program_external_scipy_single_objective(
         {
             "SLSQP".to_string()
         } else {
-            "highs".to_string()
+            "highs-cli".to_string()
         }
     });
     if let Some(solution) = solve_math_program_external_linear_cli(program, opts, &method)? {
@@ -9148,11 +9148,7 @@ fn solve_math_program_external_linear_cli(
             cli_opts.branch_priorities =
                 Some(canonical_branch_priorities(program, &compiled, priorities)?);
         }
-        let cli_solution = solve_linear_cli_json(
-            kind,
-            ipmip_problem_to_cli_json(&compiled.problem),
-            &cli_opts,
-        );
+        let cli_solution = solve_ipmip_with_external_cli(&compiled.problem, &cli_opts);
         return Ok(Some(math_program_solution_from_external_linear_cli(
             program,
             Some(&compiled),
@@ -9182,11 +9178,8 @@ fn solve_math_program_external_linear_cli(
         )));
     }
     let lp = program.to_lp_problem()?;
-    let cli_solution = solve_linear_cli_json(
-        kind,
-        lp_problem_to_cli_json(&lp),
-        &external_linear_cli_options_from_math(opts, solver)?,
-    );
+    let cli_solution =
+        solve_lp_with_external_cli(&lp, &external_linear_cli_options_from_math(opts, solver)?);
     Ok(Some(math_program_solution_from_external_linear_cli(
         program,
         None,
@@ -20846,6 +20839,31 @@ mod tests {
             parse_external_math_program_linear_cli_method("ortools:CP-SAT"),
             None
         );
+    }
+
+    #[test]
+    fn external_default_linear_method_uses_native_highs_cli_when_available() {
+        if std::process::Command::new("highs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping MathProgram default external CLI test; highs is not installed");
+            return;
+        }
+
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
+        p.add_constraint("cap", vec![(x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+
+        let solution =
+            solve_math_program_external_scipy(&p, &ExternalMathProgramOptions::default()).unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::Optimal);
+        assert_eq!(solution.solver, "highs:cli");
+        assert_close(solution.objective, 1.0);
+        assert_close(solution.x[x], 1.0);
     }
 
     #[test]

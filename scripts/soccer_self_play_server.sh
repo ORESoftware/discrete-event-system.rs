@@ -45,12 +45,15 @@ response_path="${SOCCER_SERVER_RESPONSE_PATH:-$shard_out/response.json}"
 artifact_path="${SOCCER_SERVER_LOCAL_ARTIFACT_PATH:-$shard_out/artifact.json}"
 learned_params_path="${SOCCER_SERVER_LOCAL_LEARNED_PARAMS_PATH:-$shard_out/learned-params.json}"
 episode_log_path="${SOCCER_SERVER_EPISODE_LOG_PATH:-$shard_out/episodes.jsonl}"
+server_binary="${SOCCER_SERVER_BINARY:-target/release/main_soccer_learning_server}"
+build_release="${SOCCER_SERVER_BUILD_RELEASE:-${SOCCER_BUILD_RELEASE:-1}}"
 
 mkdir -p "$shard_out"
 cat > "$local_out/run.env" <<EOF
 run_id=$run_id
 mode=server
 endpoint=$endpoint
+server_binary=$server_binary
 server_artifact_path=$server_artifact_path
 server_learned_params_path=$server_learned_params_path
 local_artifact_path=$artifact_path
@@ -75,95 +78,18 @@ parallel_shards=1
 EOF
 payload_path="$shard_out/payload.json"
 
-python3 - "$server_artifact_path" "$server_learned_params_path" > "$payload_path" <<'PY'
-import json
-import os
-import sys
-
-def as_float(name: str) -> float:
-    return float(os.environ[name])
-
-def as_int(name: str) -> int:
-    return int(os.environ[name])
-
-def as_bool(name: str) -> bool:
-    return os.environ.get(name, "1").strip().lower() not in {"0", "false", "no", "off"}
-
-artifact_path = sys.argv[1]
-learned_params_path = sys.argv[2]
-payload = {
-    "episodes": as_int("SOCCER_GAMES"),
-    "minutes": as_float("SOCCER_MINUTES"),
-    "periodCount": as_int("SOCCER_HALVES"),
-    "periodBreakRecoverySeconds": as_float("SOCCER_PERIOD_BREAK_RECOVERY_SECONDS"),
-    "dtSeconds": as_float("SOCCER_DT_SECONDS"),
-    "learningIntervalTicks": as_int("SOCCER_LEARNING_INTERVAL_TICKS"),
-    "seed": as_int("SOCCER_SEED"),
-    "options": {
-        "alpha": as_float("SOCCER_ALPHA"),
-        "gamma": as_float("SOCCER_GAMMA"),
-    },
-    "tacticalLearning": {
-        "attackSpacingDeltaWeight": as_float("SOCCER_ATTACK_SPACING_DELTA_WEIGHT"),
-        "attackSpacingScoreWeight": as_float("SOCCER_ATTACK_SPACING_SCORE_WEIGHT"),
-        "attackWidthDeltaWeight": as_float("SOCCER_ATTACK_WIDTH_DELTA_WEIGHT"),
-        "attackWidthScoreWeight": as_float("SOCCER_ATTACK_WIDTH_SCORE_WEIGHT"),
-        "attackFlankLaneWeight": as_float("SOCCER_ATTACK_FLANK_LANE_WEIGHT"),
-        "defenseSpacingDeltaWeight": as_float("SOCCER_DEFENSE_SPACING_DELTA_WEIGHT"),
-        "defenseSpacingScoreWeight": as_float("SOCCER_DEFENSE_SPACING_SCORE_WEIGHT"),
-        "defenseContractDeltaWeight": as_float("SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT"),
-        "defenseCompactnessScoreWeight": as_float("SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT"),
-    },
-    "artifactPath": artifact_path,
-    "learnedParamsPath": learned_params_path,
-    "importIntoSession": as_bool("SOCCER_IMPORT_INTO_SESSION"),
-}
-print(json.dumps(payload, indent=2, sort_keys=True))
-PY
-
-curl_args=(
-  -fsS
-  -X POST
-  "$endpoint"
-  -H "Content-Type: application/json"
-  --data-binary "@$payload_path"
-  -o "$response_path"
-)
-if [[ -n "$auth_value" ]]; then
-  curl_args+=(-H "$auth_header_name: $auth_value")
+if (( build_release != 0 )); then
+  cargo build --release --bin main_soccer_learning_server
 fi
 
-curl "${curl_args[@]}"
-
-python3 - "$response_path" "$artifact_path" "$learned_params_path" "$episode_log_path" <<'PY'
-import json
-import pathlib
-import sys
-
-response_path = pathlib.Path(sys.argv[1])
-artifact_path = pathlib.Path(sys.argv[2])
-learned_params_path = pathlib.Path(sys.argv[3])
-episode_log_path = pathlib.Path(sys.argv[4])
-response = json.loads(response_path.read_text())
-if response.get("ok") is False:
-    raise SystemExit(f"server returned error response: {response.get('error', response)}")
-artifact = response.get("artifact")
-if not isinstance(artifact, dict):
-    raise SystemExit("server response did not include an artifact object")
-learned_params = response.get("learnedParams")
-if not isinstance(learned_params, dict):
-    raise SystemExit("server response did not include learnedParams")
-artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
-learned_params_path.write_text(json.dumps(learned_params, indent=2, sort_keys=True) + "\n")
-episodes = artifact.get("episodes") or []
-episode_log_path.write_text(
-    "".join(json.dumps(episode, sort_keys=True) + "\n" for episode in episodes)
-)
-print(f"server_response={response_path}")
-print(f"artifact={artifact_path}")
-print(f"learned_params={learned_params_path}")
-print(f"episode_log={episode_log_path}")
-print(f"episodes={len(episodes)}")
-print(f"home_entries={len(artifact.get('homeEntries') or [])}")
-print(f"away_entries={len(artifact.get('awayEntries') or [])}")
-PY
+"$server_binary" \
+  --endpoint "$endpoint" \
+  --payload "$payload_path" \
+  --response "$response_path" \
+  --artifact "$artifact_path" \
+  --learned-params "$learned_params_path" \
+  --episode-log "$episode_log_path" \
+  --server-artifact-path "$server_artifact_path" \
+  --server-learned-params-path "$server_learned_params_path" \
+  --auth-header-name "$auth_header_name" \
+  --auth-value "$auth_value"

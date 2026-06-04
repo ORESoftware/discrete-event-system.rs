@@ -207,7 +207,7 @@ impl ExternalCpSatReferenceSolver {
     pub fn notes(self) -> &'static str {
         match self {
             ExternalCpSatReferenceSolver::Auto => {
-                "Use the configured direct CP-SAT bridge; rust-enumeration is the dependency-free same-input fallback for small models."
+                "Try native Rust exact enumeration first for small models; fall back to the configured direct CP-SAT bridge only when Rust reports unsupported features."
             }
             ExternalCpSatReferenceSolver::OrToolsCpSat => {
                 "Direct same-input OR-Tools CP-SAT bridge through scripts/cp_sat_reference.py."
@@ -2122,6 +2122,12 @@ pub fn solve_cp_sat_json_with_external_reference(
     if options.solver == ExternalCpSatReferenceSolver::RustEnumeration {
         return solve_cp_sat_json_with_rust_enumeration(model, options, started);
     }
+    if options.solver == ExternalCpSatReferenceSolver::Auto {
+        let rust_run = solve_cp_sat_json_with_rust_enumeration(model, options, started);
+        if rust_run.status != ExternalCpSatReferenceStatus::Unsupported {
+            return rust_run;
+        }
+    }
 
     let Some(solver_arg) = options.solver.direct_cp_sat_json_solver_arg() else {
         return ExternalCpSatReferenceRun {
@@ -2518,6 +2524,20 @@ mod tests {
         );
 
         assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
+        assert_eq!(run.assignment, vec![1, 0]);
+        assert_eq!(run.objective, Some(1.0));
+        assert_eq!(run.backend, "rust:cp-native-enumeration");
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let run = solve_cp_sat_json_with_external_reference(
+            &tiny_cp_sat_model(),
+            &ExternalCpSatReferenceOptions::default(),
+        );
+
+        assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
+        assert_eq!(run.solver, ExternalCpSatReferenceSolver::Auto);
         assert_eq!(run.assignment, vec![1, 0]);
         assert_eq!(run.objective, Some(1.0));
         assert_eq!(run.backend, "rust:cp-native-enumeration");

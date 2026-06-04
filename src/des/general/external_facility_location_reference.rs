@@ -511,7 +511,8 @@ pub fn solve_facility_location_with_external_reference(
 ) -> ExternalFacilityLocationReferenceSolution {
     if matches!(
         opts.solver,
-        ExternalFacilityLocationReferenceSolver::RustExact
+        ExternalFacilityLocationReferenceSolver::Auto
+            | ExternalFacilityLocationReferenceSolver::RustExact
             | ExternalFacilityLocationReferenceSolver::Fallback
     ) {
         return solve_facility_location_with_rust_reference(problem);
@@ -579,5 +580,23 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-facility-location");
         assert_eq!(solution.open_facility_ids, vec!["A"]);
         assert_eq!(solution.objective, Some(2.0));
+    }
+
+    #[test]
+    fn auto_prefers_rust_reference_without_python() {
+        let problem = build_sample_facility_location_problem();
+
+        let solution = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions::default(),
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalFacilityLocationReferenceStatus::Optimal
+        );
+        assert_eq!(solution.solver, "rust:exact-facility-location");
+        assert_eq!(solution.open_facility_ids, vec!["North", "South"]);
+        assert_eq!(solution.objective, Some(28.0));
     }
 }

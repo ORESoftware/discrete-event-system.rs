@@ -4,149 +4,23 @@
 //! simulator via the sanctioned external-module registry. SUMO/netconvert are
 //! never vendored. Driver → [`run`].
 //!
-//! PORT NOTES — wire to real modules:
-//!   * `crate::des::runners::external_modules::TRAFFIC_SUMO_REFERENCE_ID` +
-//!     `crate::des::runners::external_program::run_external_module`.
-//!   * `crate::des::general::network_flow::{TrafficLane, TrafficNetwork, TrafficSource}`.
-//!   * `crate::des::general::smart_traffic_flow::{run_smart_traffic_flow,
-//!     SmartTrafficParams, SmartTrafficResult}`.
-//!   * `build_demand` + `shortest_lane_path` are ported faithfully. The kernel
-//!     `run_smart_traffic_flow` is stubbed (returns a small synthetic network +
-//!     observable throughput). Problem/payload JSON I/O needs `serde_json`
-//!     (absent): the problem file is a placeholder and the SUMO payload is
-//!     synthesized as `unavailable` (the optional-dependency path).
+//! PORT NOTES:
+//!   * The internal side is wired to the real Rust smart-traffic DES.
+//!   * The optional SUMO adapter remains dependency-gated. Problem/payload JSON
+//!     I/O is intentionally minimal here, so missing SUMO is reported cleanly
+//!     instead of making the in-repo validator fail.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-// =============================================================================
-// Traffic network types (faithful structure).
-// =============================================================================
-
-#[derive(Clone, Debug, Default)]
-struct TrafficNode {
-    id: String,
-    kind: String,
-    x: f64,
-    y: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct TrafficLane {
-    id: String,
-    from: String,
-    to: String,
-    length_m: f64,
-    speed_limit_mps: f64,
-    capacity: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct TrafficSource {
-    id: String,
-    node_id: String,
-    rate_per_min: f64,
-    destination_sink_ids: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct TrafficSink {
-    id: String,
-    node_id: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct TrafficNetwork {
-    nodes: Vec<TrafficNode>,
-    lanes: Vec<TrafficLane>,
-    sources: Vec<TrafficSource>,
-    sinks: Vec<TrafficSink>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct SmartTrafficParams {
-    builtin: Option<String>,
-    duration_sec: f64,
-    dt_sec: f64,
-    seed: u64,
-    accident_risk_scale: f64,
-    accident_probability: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ValidationCheck {
-    passed: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-struct SmartTrafficResult {
-    validation: Vec<ValidationCheck>,
-    params: SmartTrafficParams,
-    network: TrafficNetwork,
-    crashed: f64,
-    entered: f64,
-    exited: f64,
-    dropped: f64,
-    final_cars: Vec<usize>,
-    mean_travel_time_sec: f64,
-    mean_speed_mps: f64,
-    max_active_cars: f64,
-}
-
-fn run_smart_traffic_flow(params: &SmartTrafficParams) -> SmartTrafficResult {
-    // PORT NOTE: real DES kernel. Stub returns observable throughput on a tiny
-    // synthetic network so the in-repo invariants hold and `build_demand`
-    // exercises its real code path.
-    let network = TrafficNetwork {
-        nodes: vec![
-            TrafficNode {
-                id: "A".to_string(),
-                kind: "source".to_string(),
-                x: 0.0,
-                y: 0.0,
-            },
-            TrafficNode {
-                id: "B".to_string(),
-                kind: "sink".to_string(),
-                x: 1.0,
-                y: 0.0,
-            },
-        ],
-        lanes: vec![TrafficLane {
-            id: "A-B".to_string(),
-            from: "A".to_string(),
-            to: "B".to_string(),
-            length_m: 100.0,
-            speed_limit_mps: 12.0,
-            capacity: 8.0,
-        }],
-        sources: vec![TrafficSource {
-            id: "src".to_string(),
-            node_id: "A".to_string(),
-            rate_per_min: 10.0,
-            destination_sink_ids: Some(vec!["dst".to_string()]),
-        }],
-        sinks: vec![TrafficSink {
-            id: "dst".to_string(),
-            node_id: "B".to_string(),
-        }],
-    };
-    SmartTrafficResult {
-        validation: vec![ValidationCheck { passed: true }],
-        params: params.clone(),
-        network,
-        crashed: 0.0,
-        entered: 50.0,
-        exited: 47.0,
-        dropped: 0.0,
-        final_cars: vec![0, 1, 2],
-        mean_travel_time_sec: 12.5,
-        mean_speed_mps: 8.0,
-        max_active_cars: 9.0,
-    }
-}
+use crate::des::general::network_flow::{
+    TrafficLane, TrafficNetwork, TrafficParams, TrafficSink, TrafficSource,
+};
+use crate::des::general::smart_traffic_flow::{
+    run_smart_traffic_flow, SmartTrafficParams, SmartTrafficResult,
+};
 
 // =============================================================================
 // Demand routing (faithful).
@@ -272,7 +146,7 @@ fn build_demand(
                     route,
                     vehicles: 0,
                     begin_sec: 0.0,
-                    end_sec: params.duration_sec,
+                    end_sec: params.base.duration_sec,
                 },
                 weight: demand_weight(source, sink_ids.len()),
                 fractional: 0.0,
@@ -384,6 +258,8 @@ impl Driver {
     }
 
     fn compare_sumo(&mut self, internal: &SmartTrafficResult, external: &ExternalTrafficResult) {
+        let internal_entered = internal.entered as f64;
+        let internal_exited = internal.exited as f64;
         self.check(
             "SUMO generated at least one vehicle",
             external.generated_demand > 0.0,
@@ -392,11 +268,11 @@ impl Driver {
         self.relative_close(
             "SUMO departures align with DES entered count",
             external.departed,
-            internal.entered,
+            internal_entered,
             0.15,
         );
-        let internal_exit_rate = if internal.entered > 0.0 {
-            internal.exited / internal.entered
+        let internal_exit_rate = if internal_entered > 0.0 {
+            internal_exited / internal_entered
         } else {
             0.0
         };
@@ -449,29 +325,54 @@ pub fn run() {
     println!("================================================================");
 
     let params = SmartTrafficParams {
-        builtin: Some("five-intersection".to_string()),
-        duration_sec: 180.0,
-        dt_sec: 0.1,
-        seed: 19,
-        accident_risk_scale: 0.0,
-        accident_probability: 0.0,
+        base: TrafficParams {
+            builtin: Some("five-intersection".to_string()),
+            network: None,
+            duration_sec: 60.0,
+            dt_sec: 0.5,
+            seed: 19.0,
+            max_cars: 80,
+            car_length_m: None,
+            car_width_m: None,
+            lane_width_m: None,
+            min_gap_m: None,
+            max_accel_mps2: None,
+            max_decel_mps2: None,
+            max_jerk_mps3: None,
+            reaction_time_sec: None,
+            time_headway_sec: None,
+            grid_cell_size_m: None,
+            grid_look_ahead_m: None,
+            spawn_rate_multiplier: Some(1.0),
+            scheduled_trips: None,
+        },
+        smart_car_pool_size: None,
+        actor_shuffle_seed: None,
+        accident_risk_scale: Some(0.0),
+        accident_probability: Some(0.0),
+        accident_accel_boost_mps2: None,
+        accident_fault_duration_sec: None,
+        distance_preference_spread: None,
+        start_preference_spread: None,
+        accident_flash_seconds: None,
     };
 
-    let internal = run_smart_traffic_flow(&params);
+    let internal = run_smart_traffic_flow(params, None);
     d.check(
         "internal smart traffic validators pass",
         internal.validation.iter().all(|c| c.passed),
         None,
     );
+    let accident_risk_scale = internal.params.accident_risk_scale.unwrap_or(1.0);
+    let accident_probability = internal.params.accident_probability.unwrap_or(1.0);
     d.check(
         "external cross-check uses no-accident baseline",
-        (internal.params.accident_risk_scale == 0.0 || internal.params.accident_probability == 0.0)
-            && internal.crashed == 0.0,
+        (accident_risk_scale == 0.0 || accident_probability == 0.0) && internal.crashed == 0,
         Some(format!("crashed={}", internal.crashed)),
     );
     d.check(
         "internal baseline has observable throughput",
-        internal.entered > 0.0 && internal.exited > 0.0,
+        internal.entered > 0 && internal.exited > 0,
         Some(format!(
             "entered={} exited={}",
             internal.entered, internal.exited
@@ -481,7 +382,20 @@ pub fn run() {
     std::fs::create_dir_all(&out_dir).ok();
     let problem_path = out_dir.join("smart-traffic-sumo-problem.json");
     let out_path = out_dir.join("smart-traffic-sumo-reference.json");
-    let _demand = build_demand(&internal.network, &internal.params, internal.entered as i64);
+    let demand = build_demand(&internal.network, &internal.params, internal.entered as i64);
+    let demand_vehicles: i64 = demand.iter().map(|row| row.vehicles).sum();
+    d.check(
+        "normalized external traffic demand is routed",
+        !demand.is_empty()
+            && demand_vehicles == internal.entered as i64
+            && demand.iter().all(|row| !row.route.is_empty()),
+        Some(format!(
+            "rows={} vehicles={} entered={}",
+            demand.len(),
+            demand_vehicles,
+            internal.entered
+        )),
+    );
     // PORT NOTE: JSON.stringify(problem, null, 2) needs serde_json (absent).
     std::fs::write(&problem_path, "{}\n").ok();
     d.check(

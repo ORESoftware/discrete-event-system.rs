@@ -126,7 +126,10 @@ pub fn repo_root_from_runner() -> PathBuf {
 }
 
 /// `resolveExternalScript(root, relativeScript)`.
-pub fn resolve_external_script(root: &Path, relative_script: &str) -> Result<PathBuf, String> {
+fn validate_external_script_location(
+    root: &Path,
+    relative_script: &str,
+) -> Result<PathBuf, String> {
     let external_root = root.join("external-references");
     let script = root.join(relative_script);
     let prefix = format!("{}{}", external_root.display(), std::path::MAIN_SEPARATOR);
@@ -137,6 +140,11 @@ pub fn resolve_external_script(root: &Path, relative_script: &str) -> Result<Pat
             script.display()
         ));
     }
+    Ok(script)
+}
+
+pub fn resolve_external_script(root: &Path, relative_script: &str) -> Result<PathBuf, String> {
+    let script = validate_external_script_location(root, relative_script)?;
     if !script.exists() {
         return Err(format!("external script not found: {}", script.display()));
     }
@@ -166,8 +174,9 @@ pub fn register_external_module(module: ExternalProgramModule) -> Result<(), Str
     if !valid_module_id(&module.id) {
         return Err(format!("invalid external module id \"{}\"", module.id));
     }
-    // Validate source path at registration time when possible.
-    resolve_external_script(&repo_root_from_runner(), &module.source_path)?;
+    // Validate source paths at registration time, but leave optional
+    // installation/existence checks to run time.
+    validate_external_script_location(&repo_root_from_runner(), &module.source_path)?;
     registry().lock().unwrap().insert(module.id.clone(), module);
     Ok(())
 }

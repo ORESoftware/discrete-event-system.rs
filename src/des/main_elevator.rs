@@ -62,13 +62,13 @@ enum ElevatorState {
 }
 
 #[derive(Clone)]
-struct Person {
-    id: i64,
-    from_floor: i64,
-    to_floor: i64,
-    arrival_time: f64,
-    board_time: f64,
-    exit_time: f64,
+pub struct Person {
+    pub id: i64,
+    pub from_floor: i64,
+    pub to_floor: i64,
+    pub arrival_time: f64,
+    pub board_time: f64,
+    pub exit_time: f64,
 }
 impl Person {
     fn new(id: i64, from_floor: i64, to_floor: i64) -> Self {
@@ -84,10 +84,10 @@ impl Person {
 }
 
 #[derive(Clone, Copy)]
-struct ScheduledArrival {
-    t: f64,
-    from_floor: i64,
-    to_floor: i64,
+pub struct ScheduledArrival {
+    pub t: f64,
+    pub from_floor: i64,
+    pub to_floor: i64,
 }
 
 struct PersonSource {
@@ -196,39 +196,39 @@ struct ExitSink {
 }
 
 #[derive(Clone)]
-struct ElevatorConfig {
-    n_floors: i64,
-    n_elevators: usize,
-    capacity: usize,
-    floor_travel_time: f64,
-    service_time: f64,
-    arrival_rate: f64,
-    sim_t: f64,
-    step_size: f64,
-    seed: u32,
-    dispatch_mode: String,
+pub struct ElevatorConfig {
+    pub n_floors: i64,
+    pub n_elevators: usize,
+    pub capacity: usize,
+    pub floor_travel_time: f64,
+    pub service_time: f64,
+    pub arrival_rate: f64,
+    pub sim_t: f64,
+    pub step_size: f64,
+    pub seed: u32,
+    pub dispatch_mode: String,
 }
 
 #[derive(Clone)]
-struct Aggregates {
-    n: usize,
-    n_served: usize,
-    mean_wait: f64,
-    mean_travel: f64,
-    mean_total: f64,
-    p95_wait: f64,
-    p95_total: f64,
+pub struct Aggregates {
+    pub n: usize,
+    pub n_served: usize,
+    pub mean_wait: f64,
+    pub mean_travel: f64,
+    pub mean_total: f64,
+    pub p95_wait: f64,
+    pub p95_total: f64,
 }
 
-struct ElevatorResult {
-    config: ElevatorConfig,
-    schedule: Vec<ScheduledArrival>,
-    people: Vec<Person>,
-    aggregates: Aggregates,
+pub struct ElevatorResult {
+    pub config: ElevatorConfig,
+    pub schedule: Vec<ScheduledArrival>,
+    pub people: Vec<Person>,
+    pub aggregates: Aggregates,
 }
 
 /// `buildSchedule(cfg)` — deterministic Poisson arrival schedule.
-fn build_schedule(cfg: &ElevatorConfig) -> Vec<ScheduledArrival> {
+pub fn build_schedule(cfg: &ElevatorConfig) -> Vec<ScheduledArrival> {
     let seed = cfg.seed;
     with_seed(seed, |_g| {
         let mut rng = mulberry32(seed);
@@ -630,7 +630,7 @@ fn p95(xs: &[f64]) -> f64 {
     sorted[(0.95 * (sorted.len() - 1) as f64).floor() as usize]
 }
 
-fn run_elevator(cfg: ElevatorConfig, schedule: Vec<ScheduledArrival>) -> ElevatorResult {
+pub fn run_elevator(cfg: ElevatorConfig, schedule: Vec<ScheduledArrival>) -> ElevatorResult {
     let schedule_len = schedule.len();
     let mut b = Building::new(cfg.clone(), schedule.clone());
     let n = (cfg.sim_t / cfg.step_size).round() as i64;

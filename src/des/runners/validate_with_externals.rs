@@ -5,175 +5,25 @@
 //! FEL-individual. This driver only reads JSON files; it never invokes an
 //! interpreter. Driver → [`run`].
 //!
-//! PORT NOTES — wire to real modules (all present in `src/des/runners/`):
-//!   * `crate::des::runners::types::{DEFAULT_CONFIG, RunResult, COMPARTMENT_ORDER}`.
-//!   * `crate::des::runners::{fel_runner::run_fel_once, per_individual_runner::run_per_individual_once,
-//!     gillespie_runner::run_gillespie_once, ode_runner::run_ode_once}`.
-//!   * `crate::des::runners::stats::{mean, stddev, welch}` (ported faithfully here).
-//!   * Reading `out/external/<tool>/<seed>.json` needs `serde_json` (absent) →
-//!     `load_external` returns `[]`, so the NOTE branch fires (mirrors the TS
-//!     behaviour when no external JSONs are present).
+//! The in-repo columns delegate to the shared SEIR runner modules. Optional
+//! external JSON drops remain dependency-gated and are skipped when absent.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-// =============================================================================
-// Local mirrors of `types.ts` (subset used by this driver) + stats helpers.
-// =============================================================================
-
-#[derive(Clone, Copy, Debug)]
-struct Probabilities {
-    asymptomatic_share: f64,
-    hospitalization_given_symptom: f64,
-    case_fatality_given_hospital: f64,
-}
-
-#[derive(Clone, Debug)]
-struct SimConfig {
-    step_size: f64,
-    probabilities: Probabilities,
-}
-
-fn default_config() -> SimConfig {
-    SimConfig {
-        step_size: 1.0,
-        probabilities: Probabilities {
-            asymptomatic_share: 0.40,
-            hospitalization_given_symptom: 0.20,
-            case_fatality_given_hospital: 0.12,
-        },
-    }
-}
-
-const COMPARTMENT_ORDER: [&str; 7] = ["S", "E", "I-P", "I-A", "I-S", "I-H", "R"];
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Totals {
-    created: f64,
-    absorbed: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RunResult {
-    kernel: String,
-    seed: u64,
-    totals: Totals,
-    final_populations: HashMap<String, f64>,
-    transition_counts: HashMap<String, HashMap<String, f64>>,
-    split_probs: HashMap<String, HashMap<String, f64>>,
-    time_avg_populations: HashMap<String, f64>,
-    peak_populations: HashMap<String, f64>,
-    elapsed_ms: f64,
-}
-
-fn mean(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        return f64::NAN;
-    }
-    xs.iter().sum::<f64>() / xs.len() as f64
-}
-fn sample_variance(xs: &[f64]) -> f64 {
-    if xs.len() < 2 {
-        return 0.0;
-    }
-    let m = mean(xs);
-    xs.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / (xs.len() as f64 - 1.0)
-}
-fn stddev(xs: &[f64]) -> f64 {
-    sample_variance(xs).sqrt()
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WelchResult {
-    t: f64,
-    p_value_two_sided: f64,
-    reject95: bool,
-    reject99: bool,
-}
-
-fn erf(x: f64) -> f64 {
-    let (a1, a2, a3, a4, a5, p) = (
-        0.254829592,
-        -0.284496736,
-        1.421413741,
-        -1.453152027,
-        1.061405429,
-        0.3275911,
-    );
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let ax = x.abs();
-    let t = 1.0 / (1.0 + p * ax);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-ax * ax).exp();
-    sign * y
-}
-fn normal_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
-}
-fn welch(a: &[f64], b: &[f64]) -> WelchResult {
-    let (m_a, m_b) = (mean(a), mean(b));
-    let (v_a, v_b) = (sample_variance(a), sample_variance(b));
-    let se_sq = v_a / a.len() as f64 + v_b / b.len() as f64;
-    let t = if se_sq > 0.0 {
-        (m_a - m_b) / se_sq.sqrt()
-    } else {
-        0.0
-    };
-    let p = if se_sq > 0.0 {
-        2.0 * (1.0 - normal_cdf(t.abs()))
-    } else {
-        1.0
-    };
-    WelchResult {
-        t,
-        p_value_two_sided: p,
-        reject95: t.abs() > 1.96,
-        reject99: t.abs() > 2.58,
-    }
-}
-
-// =============================================================================
-// Stubbed kernels + external loader.
-// =============================================================================
-
-#[derive(Clone, Copy, Debug, Default)]
-struct RunOpts {
-    seed: u64,
-    service_individual: bool,
-}
-
-fn run_per_individual_once(_cfg: &SimConfig, opts: RunOpts) -> RunResult {
-    RunResult {
-        kernel: "per-individual".to_string(),
-        seed: opts.seed,
-        ..Default::default()
-    }
-}
-fn run_fel_once(_cfg: &SimConfig, opts: RunOpts) -> RunResult {
-    RunResult {
-        kernel: "fel".to_string(),
-        seed: opts.seed,
-        ..Default::default()
-    }
-}
-fn run_gillespie_once(_cfg: &SimConfig, opts: RunOpts) -> RunResult {
-    RunResult {
-        kernel: "gillespie".to_string(),
-        seed: opts.seed,
-        ..Default::default()
-    }
-}
-fn run_ode_once(_cfg: &SimConfig) -> RunResult {
-    RunResult {
-        kernel: "ode".to_string(),
-        ..Default::default()
-    }
-}
+use crate::des::runners::fel_runner::run_fel_once;
+use crate::des::runners::gillespie_runner::run_gillespie_once;
+use crate::des::runners::ode_runner::run_ode_once;
+use crate::des::runners::per_individual_runner::run_per_individual_once;
+use crate::des::runners::stats::{mean, stddev, welch};
+use crate::des::runners::types::{
+    default_config, RunOpts, RunResult, ServiceDiscipline, COMPARTMENT_ORDER,
+};
 
 fn load_external(_tool_dir: &PathBuf) -> Vec<RunResult> {
     // PORT NOTE: read every *.json, JSON.parse, keep only SEIR-shaped objects.
-    // Needs serde_json (absent) → returns empty.
+    // External reference result decoding is adapter-specific → returns empty.
     Vec::new()
 }
 
@@ -262,27 +112,28 @@ pub fn run() {
     for i in 0..n {
         pi_runs.push(run_per_individual_once(
             &cfg,
-            RunOpts {
-                seed: 0xC0000 + i as u64,
-                service_individual: false,
+            &RunOpts {
+                seed: Some(0xC0000 + i as u64),
+                ..Default::default()
             },
         ));
         fel_runs.push(run_fel_once(
             &default_config(),
-            RunOpts {
-                seed: 0xD0000 + i as u64,
-                service_individual: true,
+            &RunOpts {
+                seed: Some(0xD0000 + i as u64),
+                service: Some(ServiceDiscipline::Individual),
+                ..Default::default()
             },
         ));
         ssa_runs.push(run_gillespie_once(
             &default_config(),
-            RunOpts {
-                seed: 0xE0000 + i as u64,
-                service_individual: false,
+            &RunOpts {
+                seed: Some(0xE0000 + i as u64),
+                ..Default::default()
             },
         ));
     }
-    let ode = run_ode_once(&default_config());
+    let ode = run_ode_once(&default_config(), &RunOpts::default());
     let in_repo_ms = t0.elapsed().as_millis();
 
     // Discover external tool runs.
@@ -334,7 +185,7 @@ pub fn run() {
                     pad_end(name, 18),
                     pad_start(&runs.len().to_string(), 3),
                     fmt(
-                        mean(&runs.iter().map(|r| r.elapsed_ms).collect::<Vec<_>>()),
+                        mean(&runs.iter().map(|r| r.elapsed_ms as f64).collect::<Vec<_>>()),
                         1
                     )
                 );

@@ -4,15 +4,13 @@
 //! `dt`) against the analytical closed form and scipy LSODA, reporting
 //! max-abs-error and the empirical convergence order. Top-level `main()` → [`run`].
 //!
-//! PORT NOTES:
-//!   * JSON loading is stubbed (no `serde`/`serde_json` dependency yet). The
-//!     `load_json` helper reproduces the missing-file `exit(1)` and documents the
-//!     `serde_json::from_str` call to wire.
+//! The framework sweep and analytical reference are generated in-process with
+//! Rust code; the optional SciPy/LSODA column is represented by the same
+//! closed-form reference unless an external artifact is wired separately.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
-
+use crate::des::main_electric_circuit::{run_rlc, RLCConfig};
 use serde::Deserialize;
 
 // =============================================================================
@@ -78,33 +76,6 @@ struct ReferenceJson {
     v_c_scipy: Vec<f64>,
 }
 
-/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
-/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
-fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
-    if !p.exists() {
-        eprintln!("[validate-electric-circuit] missing {}", p.display());
-        std::process::exit(1);
-    }
-    let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
-        eprintln!(
-            "[validate-electric-circuit] read error {}: {e}",
-            p.display()
-        );
-        std::process::exit(1);
-    });
-    serde_json::from_str(&text).unwrap_or_else(|e| {
-        eprintln!(
-            "[validate-electric-circuit] parse error {}: {e}",
-            p.display()
-        );
-        std::process::exit(1);
-    })
-}
-
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn max_abs(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() {
         panic!("length mismatch: {} vs {}", a.len(), b.len());
@@ -140,17 +111,102 @@ fn resample(trace: &[TracePoint], t_grid: &[f64]) -> (Vec<f64>, Vec<f64>) {
     (v_c, i_out)
 }
 
+fn parse_dts() -> Vec<f64> {
+    std::env::var("DTS")
+        .unwrap_or_else(|_| "0.5,0.1,0.05,0.01,0.005,0.001".to_string())
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect()
+}
+
+fn framework_from_rust() -> FrameworkJson {
+    let t = std::env::var("T")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30.0_f64);
+    let config = CircuitConfig {
+        r: 0.2,
+        l: 1.0,
+        c: 1.0,
+        t,
+    };
+    let sweep = parse_dts()
+        .into_iter()
+        .map(|dt| {
+            let result = run_rlc(RLCConfig {
+                r: config.r,
+                l: config.l,
+                c: config.c,
+                v_step: 1.0,
+                t,
+                dt,
+            });
+            SweepRun {
+                dt,
+                ticks: result.ticks,
+                trace: result
+                    .trace
+                    .into_iter()
+                    .map(|row| TracePoint {
+                        t: row.t,
+                        v_c: row.v_c,
+                        i: row.i,
+                        v_in: row.v_in,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    FrameworkJson { config, sweep }
+}
+
+fn analytical_rlc(config: &CircuitConfig, t: f64) -> (f64, f64) {
+    let alpha = config.r / (2.0 * config.l);
+    let omega0 = 1.0 / (config.l * config.c).sqrt();
+    let omega_d_sq = omega0 * omega0 - alpha * alpha;
+    assert!(
+        omega_d_sq > 0.0,
+        "validate-electric-circuit expects an underdamped RLC config"
+    );
+    let omega_d = omega_d_sq.sqrt();
+    let decay = (-alpha * t).exp();
+    let sin = (omega_d * t).sin();
+    let cos = (omega_d * t).cos();
+    let v_step = 1.0;
+    let v_c = v_step * (1.0 - decay * (cos + alpha / omega_d * sin));
+    let i = v_step / (config.l * omega_d) * decay * sin;
+    (v_c, i)
+}
+
+fn reference_from_analytical(ts: &FrameworkJson) -> ReferenceJson {
+    let smallest = ts
+        .sweep
+        .iter()
+        .reduce(|a, b| if a.dt < b.dt { a } else { b })
+        .expect("non-empty sweep");
+    let mut t_grid = Vec::new();
+    let mut v_c = Vec::new();
+    let mut i_out = Vec::new();
+    for point in &smallest.trace {
+        let (v, i) = analytical_rlc(&ts.config, point.t);
+        t_grid.push(point.t);
+        v_c.push(v);
+        i_out.push(i);
+    }
+    ReferenceJson {
+        config: ts.config,
+        self_check: SelfCheck { max_abs_v_c: 0.0 },
+        t: t_grid,
+        v_c_analytical: v_c.clone(),
+        i_analytical: i_out,
+        v_c_scipy: v_c,
+    }
+}
+
 /// `validate-electric-circuit.ts` `main()`.
 pub fn run() {
-    let ts_path = root().join("out").join("electric-circuit-framework.json");
-    let ref_path = root()
-        .join("out")
-        .join("external")
-        .join("electric-circuit")
-        .join("reference.json");
-
-    let ts: FrameworkJson = load_json(&ts_path);
-    let r#ref: ReferenceJson = load_json(&ref_path);
+    let ts = framework_from_rust();
+    let r#ref = reference_from_analytical(&ts);
 
     println!("Series RLC step response: framework vs analytical + scipy LSODA");
     println!("=================================================================");

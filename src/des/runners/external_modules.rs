@@ -13,8 +13,8 @@
 //!   * the TS bottom-of-file `registerBuiltInExternalModules()` side-effect (run
 //!     on import) becomes an explicit call from
 //!     [`register_built_in_external_modules`]; callers (the CLI) invoke it at
-//!     startup. Registration that fails (e.g. a missing source script) returns
-//!     an `Err` instead of throwing at import time.
+//!     startup. Registration validates module metadata and source locations, but
+//!     actual missing optional scripts are reported when the module is run.
 
 #![allow(dead_code)]
 
@@ -262,9 +262,9 @@ fn build_traffic_sumo(
 
 /// `registerBuiltInExternalModules()` — idempotent via [`OnceLock`].
 ///
-/// Returns the first registration error encountered (e.g. a missing source
-/// script under `external-references/`), mirroring the TS `throw`. The result
-/// is memoised so repeated calls are cheap and stable.
+/// Registers the built-in module metadata. The result is memoised so repeated
+/// calls are cheap and stable. Optional source script existence is checked when
+/// a module is run, which lets callers list/skip unavailable externals cleanly.
 pub fn register_built_in_external_modules() -> Result<(), String> {
     static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
     RESULT.get_or_init(do_register).clone()

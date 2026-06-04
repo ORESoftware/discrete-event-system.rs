@@ -5,78 +5,37 @@
 //! supervised training, neural Q-learning corridor policy, and neural ODE RK4
 //! decay. Driver → [`run`].
 //!
-//! PORT NOTES — wire to real modules:
-//!   * `crate::des::runners::external_program::run_external_module` +
-//!     `crate::des::runners::external_modules::NEURAL_NETWORK_REFERENCE_ID`.
-//!     Here the external call is stubbed (`run_external_module`) so the file is
-//!     self-contained.
-//!   * Reading/parsing `out/external/neural-network/reference.json` needs
-//!     `serde_json` (absent) → `load_reference` returns `None` and the
-//!     reference-dependent checks print `SKIP`, mirroring the TS gating.
-//!   * `crate::des::general::neural_network::{FeedForwardNetwork, solve_neural_ode}`
-//!     are ported faithfully here; `run_xor_neural_net_des` /
-//!     `run_neural_q_learning_des` are stubbed.
-//!   * `crate::des::general::rl_environments::{Corridor, eval_policy}` stubbed.
+//! PORT NOTES:
+//!   * Uses the real Rust neural-network, neural Q-learning, corridor, policy
+//!     evaluation, and neural-ODE modules.
+//!   * The optional Python reference remains skipped when its JSON artifact is
+//!     unavailable; framework-side checks still exercise real Rust code.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 
-// =============================================================================
-// FeedForwardNetwork + neural ODE (faithful).
-// =============================================================================
+use crate::des::general::des_base::environment::{PureEnvironment, StepResult};
+use crate::des::general::neural_network::{
+    run_neural_q_learning_des as run_neural_q_learning_des_model,
+    run_xor_neural_net_des as run_xor_neural_net_des_model,
+    solve_neural_ode as solve_neural_ode_model, ActivationName, DenseLayerConfig,
+    FeedForwardNetwork as RealFeedForwardNetwork, NeuralODEOptions, NeuralODESolverName,
+    NeuralQLearningResult, NeuralQLearningRunParams, SupervisedNeuralNetDESResult,
+    XorNeuralNetOptions,
+};
+use crate::des::general::ode::ODETrace;
+use crate::des::general::prng::mulberry32;
+use crate::des::general::rl_environments::{
+    eval_policy as eval_policy_model, Corridor as CorridorModel, Environment, EvalPolicyOptions,
+};
 
-#[derive(Clone, Copy, Debug)]
-enum Activation {
-    Linear,
-    Relu,
-    Sigmoid,
-    Tanh,
-}
-
-impl Activation {
-    fn apply(self, x: f64) -> f64 {
-        match self {
-            Activation::Linear => x,
-            Activation::Relu => x.max(0.0),
-            Activation::Sigmoid => 1.0 / (1.0 + (-x).exp()),
-            Activation::Tanh => x.tanh(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Layer {
-    weights: Vec<Vec<f64>>,
-    biases: Vec<f64>,
-    activation: Activation,
-}
-
-#[derive(Clone, Debug)]
-struct FeedForwardNetwork {
-    layers: Vec<Layer>,
-}
-
-impl FeedForwardNetwork {
-    fn new(layers: Vec<Layer>) -> Self {
-        FeedForwardNetwork { layers }
-    }
-    fn forward(&self, input: &[f64]) -> Vec<f64> {
-        let mut x = input.to_vec();
-        for layer in &self.layers {
-            let mut out = vec![0.0; layer.weights.len()];
-            for o in 0..layer.weights.len() {
-                let mut s = layer.biases[o];
-                for i in 0..layer.weights[o].len() {
-                    s += layer.weights[o][i] * x[i];
-                }
-                out[o] = layer.activation.apply(s);
-            }
-            x = out;
-        }
-        x
-    }
-}
+type Activation = ActivationName;
+type Layer = DenseLayerConfig;
+type FeedForwardNetwork = RealFeedForwardNetwork;
+type XorResult = SupervisedNeuralNetDESResult<FeedForwardNetwork>;
+type QResult = NeuralQLearningResult;
+type OdeTrace = ODETrace;
 
 struct OdeOpts {
     y0: Vec<f64>,
@@ -86,56 +45,25 @@ struct OdeOpts {
     solver: &'static str,
 }
 
-struct OdeTrace {
-    t: Vec<f64>,
-    y: Vec<Vec<f64>>,
-}
-
-fn vec_add(a: &[f64], b: &[f64], scale: f64) -> Vec<f64> {
-    a.iter().zip(b.iter()).map(|(x, y)| x + scale * y).collect()
-}
-
 fn solve_neural_ode(net: &FeedForwardNetwork, opts: &OdeOpts) -> OdeTrace {
-    let n_steps = ((opts.t1 - opts.t0) / opts.dt).round() as usize;
-    let mut t = opts.t0;
-    let mut y = opts.y0.clone();
-    let mut ts = vec![t];
-    let mut ys = vec![y.clone()];
-    for _ in 0..n_steps {
-        let new_y = match opts.solver {
-            "rk4" => {
-                let k1 = net.forward(&y);
-                let k2 = net.forward(&vec_add(&y, &k1, opts.dt / 2.0));
-                let k3 = net.forward(&vec_add(&y, &k2, opts.dt / 2.0));
-                let k4 = net.forward(&vec_add(&y, &k3, opts.dt));
-                let mut out = y.clone();
-                for i in 0..out.len() {
-                    out[i] += opts.dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
-                }
-                out
-            }
-            _ => {
-                // Euler fallback.
-                let k1 = net.forward(&y);
-                vec_add(&y, &k1, opts.dt)
-            }
-        };
-        y = new_y;
-        t += opts.dt;
-        ts.push(t);
-        ys.push(y.clone());
-    }
-    OdeTrace { t: ts, y: ys }
-}
-
-// =============================================================================
-// Stubbed framework training kernels + RL env.
-// =============================================================================
-
-#[derive(Clone, Debug, Default)]
-struct XorResult {
-    predictions: Vec<Vec<f64>>,
-    loss_history: Vec<f64>,
+    solve_neural_ode_model(
+        net,
+        &NeuralODEOptions {
+            y0: opts.y0.clone(),
+            t0: opts.t0,
+            t1: opts.t1,
+            dt: opts.dt,
+            solver: Some(match opts.solver {
+                "rk4" => NeuralODESolverName::Rk4,
+                "euler" => NeuralODESolverName::Euler,
+                "heun" => NeuralODESolverName::Heun,
+                "rk45" => NeuralODESolverName::Rk45,
+                other => panic!("unknown neural ODE solver: {other}"),
+            }),
+            include_time: Some(false),
+            rk45: None,
+        },
+    )
 }
 
 struct XorOpts {
@@ -145,27 +73,31 @@ struct XorOpts {
     hidden_layers: Vec<usize>,
 }
 
-fn run_xor_neural_net_des(_opts: &XorOpts) -> XorResult {
-    XorResult {
-        predictions: vec![vec![0.0]; 4],
-        loss_history: vec![0.0; 200],
-    }
+fn run_xor_neural_net_des(opts: &XorOpts) -> XorResult {
+    run_xor_neural_net_des_model(XorNeuralNetOptions {
+        epochs: Some(opts.epochs),
+        learning_rate: Some(opts.learning_rate),
+        seed: Some(opts.seed as u32),
+        hidden_layers: Some(opts.hidden_layers.clone()),
+        samples_per_tick: None,
+        shuffle_each_epoch: None,
+    })
 }
 
 #[derive(Clone, Debug, Default)]
 struct Corridor {
     length: usize,
+    start: usize,
 }
 
 impl Corridor {
     fn new(length: usize) -> Self {
-        Corridor { length }
+        Corridor { length, start: 0 }
     }
-}
 
-#[derive(Clone, Debug, Default)]
-struct QResult {
-    policy: Vec<usize>,
+    fn model(&self) -> CorridorModel {
+        CorridorModel::new(self.length, self.start)
+    }
 }
 
 struct QOpts {
@@ -179,13 +111,59 @@ struct QOpts {
     seed: u64,
 }
 
-fn run_neural_q_learning_des(env: &Corridor, _opts: &QOpts) -> QResult {
-    QResult {
-        policy: vec![0; env.length],
+struct CorridorDesEnv {
+    length: usize,
+    start: usize,
+}
+
+impl PureEnvironment<f64, usize> for CorridorDesEnv {
+    fn num_states(&self) -> usize {
+        self.length
+    }
+
+    fn num_actions(&self) -> usize {
+        2
+    }
+
+    fn reset(&mut self) -> f64 {
+        self.start as f64
+    }
+
+    fn step(&mut self, state: f64, action: usize) -> StepResult<f64> {
+        let model = CorridorModel::new(self.length, self.start);
+        let outcome = model.step(state as usize, action);
+        StepResult {
+            next_state: outcome.next_state as f64,
+            reward: outcome.reward,
+            done: outcome.done,
+        }
     }
 }
 
-#[derive(Clone, Debug, Default)]
+fn run_neural_q_learning_des(env: &Corridor, opts: &QOpts) -> QResult {
+    run_neural_q_learning_des_model(
+        Box::new(CorridorDesEnv {
+            length: env.length,
+            start: env.start,
+        }),
+        NeuralQLearningRunParams {
+            num_episodes: opts.num_episodes,
+            alpha: opts.alpha,
+            gamma: opts.gamma,
+            epsilon: opts.epsilon,
+            epsilon_min: Some(opts.epsilon_min),
+            epsilon_decay: Some(opts.epsilon_decay),
+            max_steps_per_episode: Some(opts.max_steps_per_episode),
+            seed: Some(opts.seed as u32),
+            network: None,
+            hidden_layers: None,
+            hidden_activation: Some(Activation::Tanh),
+            state_encoder: None,
+        },
+    )
+}
+
+#[derive(Clone, Debug)]
 struct EvalResult {
     success_rate: f64,
 }
@@ -195,12 +173,26 @@ struct EvalOpts {
     max_steps_per_episode: usize,
 }
 
-fn eval_policy<F: Fn(usize) -> usize>(_env: &Corridor, _policy: F, _opts: &EvalOpts) -> EvalResult {
-    EvalResult { success_rate: 1.0 }
+fn eval_policy<F: Fn(usize) -> usize>(env: &Corridor, policy: F, opts: &EvalOpts) -> EvalResult {
+    let model = env.model();
+    let mut rng = mulberry32(12345);
+    let result = eval_policy_model(
+        &model,
+        |s, _rng| policy(s),
+        &mut rng,
+        EvalPolicyOptions {
+            num_episodes: opts.num_episodes,
+            max_steps_per_episode: opts.max_steps_per_episode,
+            gamma: 1.0,
+        },
+    );
+    EvalResult {
+        success_rate: result.success_rate,
+    }
 }
 
 // =============================================================================
-// External reference (stubbed).
+// Optional external reference.
 // =============================================================================
 
 #[derive(Clone, Debug, Default)]
@@ -277,24 +269,23 @@ fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
 /// `validate-neural-network.ts` `main`.
 pub fn run() {
     let mut checks: Vec<CheckRow> = Vec::new();
-    let mut check =
-        |checks: &mut Vec<CheckRow>, name: &str, passed: bool, detail: Option<String>| {
-            let tail = detail
-                .as_ref()
-                .map(|d| format!("  - {}", d))
-                .unwrap_or_default();
-            println!(
-                "  {}  {}{}",
-                if passed { "PASS" } else { "FAIL" },
-                name,
-                tail
-            );
-            checks.push(CheckRow {
-                name: name.to_string(),
-                passed,
-                detail,
-            });
-        };
+    let check = |checks: &mut Vec<CheckRow>, name: &str, passed: bool, detail: Option<String>| {
+        let tail = detail
+            .as_ref()
+            .map(|d| format!("  - {}", d))
+            .unwrap_or_default();
+        println!(
+            "  {}  {}{}",
+            if passed { "PASS" } else { "FAIL" },
+            name,
+            tail
+        );
+        checks.push(CheckRow {
+            name: name.to_string(),
+            passed,
+            detail,
+        });
+    };
 
     let root = std::env::var("REPO_ROOT")
         .map(PathBuf::from)

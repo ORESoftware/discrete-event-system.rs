@@ -4,22 +4,34 @@
 //! transformation against generic value iteration, across nine studies. The
 //! top-level driver code becomes [`run`].
 //!
-//! PORT NOTES (cross-module deps — all stubbed locally so the file compiles in
-//! isolation; wire the real kernels once `runners/mod.rs` exists):
-//!   * `crate::des::general::lp::{LpProblem, solve_lp, solve_lp_internal,
-//!     solve_lp_external}` — the LP types/solvers (here `LpProblem`, `LpResult`,
-//!     `solve_lp*`).
-//!   * `crate::des::general::lp_des::solve_lp_via_des` — DES-engine simplex.
-//!   * `crate::des::general::des_lp_bridge::{build_mdp_lp, solve_mdp_as_lp}`.
-//!   * `crate::des::mdp::value_iteration` / `crate::des::general::value_iteration`
-//!     — `value_iteration`, `MdpSpec`, `q_value`.
-//!   * No `serde`/`scipy`; the "external" solver is a placeholder that reports
-//!     `optimal`, so the scipy-unavailable branches are inert.
+//! PORT NOTES:
+//!   * Uses the real Rust LP, DES-simplex, MDP-as-LP, and value-iteration
+//!     modules. The local `LpProblem`/`MdpSpec` structs are validator adapters
+//!     that preserve the original study bodies.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
+
+use std::rc::Rc;
+
+use crate::des::general::des_lp_bridge::{
+    build_mdp_lp as build_mdp_lp_model, solve_mdp_as_lp as solve_mdp_as_lp_model, MdpAsLpOptions,
+};
+use crate::des::general::lp::{
+    solve_lp as solve_lp_model, solve_lp_internal as solve_lp_internal_model, ExternalSolver,
+    ExternalSolverOptions, InternalSimplexOptions, LPProblem as RealLpProblem, LpSolverOptions,
+    Sense as RealLpSense,
+};
+use crate::des::general::lp_des::{
+    solve_lp_via_des as solve_lp_via_des_model, DESSimplexOptions, PivotRule,
+};
+use crate::des::general::value_iteration::{
+    q_value as q_value_model, value_iteration as value_iteration_model, MDPSpec as RealMdpSpec,
+    Outcome as RealOutcome, VIOptions as RealViOptions,
+};
+use crate::des::shared::transform::Transform;
 
 // =============================================================================
-// Stubbed LP layer — PORT NOTE: crate::des::general::lp / lp_des / des_lp_bridge.
+// Validator adapter layer.
 // =============================================================================
 
 #[derive(Clone, Debug, Default)]
@@ -60,25 +72,90 @@ fn stub_lp(lp: &LpProblem, solver: &str) -> LpResult {
     }
 }
 
-fn solve_lp_internal(lp: &LpProblem, _max_iter: Option<usize>) -> LpResult {
-    stub_lp(lp, "internal")
+fn real_sense(sense: &str) -> RealLpSense {
+    match sense {
+        "min" => RealLpSense::Min,
+        _ => RealLpSense::Max,
+    }
+}
+
+fn to_real_lp(lp: &LpProblem) -> RealLpProblem {
+    RealLpProblem {
+        sense: real_sense(lp.sense),
+        c: lp.c.clone(),
+        a_ub: (!lp.a_ub.is_empty()).then(|| lp.a_ub.clone()),
+        b_ub: (!lp.b_ub.is_empty()).then(|| lp.b_ub.clone()),
+        a_eq: (!lp.a_eq.is_empty()).then(|| lp.a_eq.clone()),
+        b_eq: (!lp.b_eq.is_empty()).then(|| lp.b_eq.clone()),
+        ..Default::default()
+    }
+}
+
+fn lp_result_from_real(sol: crate::des::general::lp::LPSolution) -> LpResult {
+    LpResult {
+        status: sol.status.as_str().to_string(),
+        x: sol.x,
+        objective: sol.objective,
+        iters: sol.iters.unwrap_or(0),
+        solver: sol.solver,
+        message: sol.message.unwrap_or_default(),
+        trace: LpTrace::default(),
+    }
+}
+
+fn solve_lp_internal(lp: &LpProblem, max_iter: Option<usize>) -> LpResult {
+    let real = to_real_lp(lp);
+    lp_result_from_real(solve_lp_internal_model(
+        &real,
+        &InternalSimplexOptions {
+            max_iter,
+            ..Default::default()
+        },
+    ))
 }
 
 fn solve_lp_external(lp: &LpProblem, method: &str) -> LpResult {
-    stub_lp(lp, &format!("scipy:{}", method))
+    let real = to_real_lp(lp);
+    lp_result_from_real(
+        ExternalSolver::new(ExternalSolverOptions {
+            method: Some(method.to_string()),
+            ..Default::default()
+        })
+        .transform(real),
+    )
 }
 
-fn solve_lp_via_des(
-    lp: &LpProblem,
-    _pivot_rule: Option<&str>,
-    _max_iter: Option<usize>,
-) -> LpResult {
-    stub_lp(lp, "des-simplex")
+fn solve_lp_via_des(lp: &LpProblem, pivot_rule: Option<&str>, max_iter: Option<usize>) -> LpResult {
+    let real = to_real_lp(lp);
+    let pivot_rule = match pivot_rule {
+        Some("bland") => Some(PivotRule::Bland),
+        Some("dantzig") | None => Some(PivotRule::Dantzig),
+        _ => Some(PivotRule::Dantzig),
+    };
+    let sol = solve_lp_via_des_model(
+        &real,
+        &DESSimplexOptions {
+            pivot_rule,
+            max_iter,
+            ..Default::default()
+        },
+    );
+    LpResult {
+        status: sol.status.as_str().to_string(),
+        x: sol.x,
+        objective: sol.objective,
+        iters: sol.iters.unwrap_or(0),
+        solver: sol.solver,
+        message: sol.message.unwrap_or_default(),
+        trace: LpTrace {
+            pivot_history: vec![0; sol.trace.pivot_history.len()],
+        },
+    }
 }
 
 fn solve_lp(lp: &LpProblem) -> LpResult {
-    let choice = std::env::var("LP_SOLVER").unwrap_or_else(|_| "internal".to_string());
-    stub_lp(lp, &choice)
+    let real = to_real_lp(lp);
+    lp_result_from_real(solve_lp_model(&real, &LpSolverOptions::default()))
 }
 
 fn scipy_unavailable(r: &LpResult) -> bool {
@@ -87,10 +164,6 @@ fn scipy_unavailable(r: &LpResult) -> bool {
             || r.message.contains("numpy")
             || r.message.contains("No module named"))
 }
-
-// =============================================================================
-// Stubbed MDP layer — PORT NOTE: value_iteration / des_lp_bridge.
-// =============================================================================
 
 #[derive(Clone, Copy, Debug)]
 struct Outcome {
@@ -101,16 +174,16 @@ struct Outcome {
 
 struct MdpSpec {
     num_states: usize,
-    num_actions: Box<dyn Fn(usize) -> usize>,
-    outcomes: Box<dyn Fn(usize, usize) -> Vec<Outcome>>,
-    is_terminal: Box<dyn Fn(usize) -> bool>,
-    terminal_reward: Box<dyn Fn(usize) -> f64>,
+    num_actions: Rc<dyn Fn(usize) -> usize>,
+    outcomes: Rc<dyn Fn(usize, usize) -> Vec<Outcome>>,
+    is_terminal: Rc<dyn Fn(usize) -> bool>,
+    terminal_reward: Rc<dyn Fn(usize) -> f64>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct ViResult {
     v: Vec<f64>,
-    policy: Vec<i64>,
+    policy: Vec<i32>,
     iterations: usize,
 }
 
@@ -121,16 +194,55 @@ struct ViOptions {
     max_iter: usize,
 }
 
-fn value_iteration(spec: &MdpSpec, _opts: ViOptions) -> ViResult {
-    ViResult {
-        v: vec![0.0; spec.num_states],
-        policy: vec![0; spec.num_states],
-        iterations: 0,
+fn to_real_mdp_spec(spec: &MdpSpec) -> RealMdpSpec {
+    let num_actions = spec.num_actions.clone();
+    let outcomes = spec.outcomes.clone();
+    let is_terminal = spec.is_terminal.clone();
+    let terminal_reward = spec.terminal_reward.clone();
+    RealMdpSpec {
+        num_states: spec.num_states,
+        num_actions: Box::new(move |s| num_actions(s)),
+        outcomes: Box::new(move |s, a| {
+            outcomes(s, a)
+                .into_iter()
+                .map(|o| RealOutcome {
+                    prob: o.prob,
+                    reward: o.reward,
+                    next_state: o.next_state,
+                })
+                .collect()
+        }),
+        is_terminal: Some(Box::new(move |s| is_terminal(s))),
+        terminal_reward: Some(Box::new(move |s| terminal_reward(s))),
+        state_label: None,
+        action_label: None,
     }
 }
 
-fn q_value(_spec: &MdpSpec, _v: &[f64], _s: usize, _a: i64, _gamma: f64) -> f64 {
-    0.0
+fn value_iteration(spec: &MdpSpec, opts: ViOptions) -> ViResult {
+    let real = to_real_mdp_spec(spec);
+    let res = value_iteration_model(
+        real,
+        RealViOptions {
+            gamma: opts.gamma,
+            tol: opts.tol,
+            max_iter: opts.max_iter,
+            ..Default::default()
+        },
+    );
+    ViResult {
+        v: res.v,
+        policy: res.policy,
+        iterations: res.iterations,
+    }
+}
+
+fn q_value(spec: &MdpSpec, v: &[f64], s: usize, a: i32, gamma: f64) -> f64 {
+    if a < 0 {
+        return f64::NEG_INFINITY;
+    }
+    let real = to_real_mdp_spec(spec);
+    q_value_model(&real, v, s, a as usize, gamma)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -142,21 +254,32 @@ struct LpSubInfo {
 #[derive(Clone, Debug, Default)]
 struct MdpLpSolution {
     v: Vec<f64>,
-    policy: Vec<i64>,
+    policy: Vec<i32>,
     lp: LpSubInfo,
 }
 
 fn build_mdp_lp(_spec: &MdpSpec, _gamma: f64) -> LpProblem {
-    LpProblem::default()
+    let real = build_mdp_lp_model(&to_real_mdp_spec(_spec), _gamma, None);
+    LpProblem {
+        sense: real.sense.as_str(),
+        c: real.c,
+        a_ub: real.a_ub.unwrap_or_default(),
+        b_ub: real.b_ub.unwrap_or_default(),
+        a_eq: real.a_eq.unwrap_or_default(),
+        b_eq: real.b_eq.unwrap_or_default(),
+    }
 }
 
-fn solve_mdp_as_lp(spec: &MdpSpec, _gamma: f64) -> MdpLpSolution {
+fn solve_mdp_as_lp(spec: &MdpSpec, gamma: f64) -> MdpLpSolution {
+    let real = to_real_mdp_spec(spec);
+    let sol = solve_mdp_as_lp_model(&real, gamma, &MdpAsLpOptions::default())
+        .expect("MDP-as-LP solve failed in validate_lp");
     MdpLpSolution {
-        v: vec![0.0; spec.num_states],
-        policy: vec![0; spec.num_states],
+        v: sol.v,
+        policy: sol.policy,
         lp: LpSubInfo {
-            iters: 0,
-            solver: "stub".to_string(),
+            iters: sol.lp.iters.unwrap_or(0),
+            solver: sol.lp.solver,
         },
     }
 }
@@ -442,8 +565,8 @@ pub fn run() {
         let n = 5usize;
         let mdp = MdpSpec {
             num_states: n,
-            num_actions: Box::new(|_s| 2),
-            outcomes: Box::new(move |s, a| {
+            num_actions: Rc::new(|_s| 2),
+            outcomes: Rc::new(move |s, a| {
                 if s == n - 1 {
                     return vec![Outcome {
                         prob: 1.0,
@@ -463,8 +586,8 @@ pub fn run() {
                     next_state: target,
                 }]
             }),
-            is_terminal: Box::new(move |s| s == n - 1),
-            terminal_reward: Box::new(|_s| 0.0),
+            is_terminal: Rc::new(move |s| s == n - 1),
+            terminal_reward: Rc::new(|_s| 0.0),
         };
         let gamma = 0.9;
         let vi = value_iteration(
@@ -526,8 +649,8 @@ pub fn run() {
         let goal = grid_idx(2, 2);
         let mdp = MdpSpec {
             num_states: n,
-            num_actions: Box::new(|_s| 4),
-            outcomes: Box::new(move |s, a| {
+            num_actions: Rc::new(|_s| 4),
+            outcomes: Rc::new(move |s, a| {
                 if s == goal {
                     return vec![Outcome {
                         prob: 1.0,
@@ -562,8 +685,8 @@ pub fn run() {
                     },
                 ]
             }),
-            is_terminal: Box::new(move |s| s == goal),
-            terminal_reward: Box::new(|_s| 0.0),
+            is_terminal: Rc::new(move |s| s == goal),
+            terminal_reward: Rc::new(|_s| 0.0),
         };
         let gamma = 0.95;
         let vi = value_iteration(
@@ -596,7 +719,7 @@ pub fn run() {
             let q_vi = q_value(&mdp, &vi.v, s, vi.policy[s], gamma);
             let mut best_q = f64::NEG_INFINITY;
             for a in 0..(mdp.num_actions)(s) {
-                best_q = f64::max(best_q, q_value(&mdp, &vi.v, s, a as i64, gamma));
+                best_q = f64::max(best_q, q_value(&mdp, &vi.v, s, a as i32, gamma));
             }
             let gap = f64::max(best_q - q_lp, best_q - q_vi);
             max_policy_gap = f64::max(max_policy_gap, gap);

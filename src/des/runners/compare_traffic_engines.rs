@@ -8,11 +8,8 @@
 //!
 //!   * Reuses the real `crate::des::general::network_flow` traffic types +
 //!     `build_five_intersection_traffic_network`.
-//!   * `smart-traffic-flow` is **not ported**, so [`SmartTrafficParams`] /
-//!     [`SmartTrafficResult`] / [`run_smart_traffic_flow`] are the smallest
-//!     self-contained stand-ins (deterministic placeholder stats, empty trace ⇒
-//!     `meanAbsJerk`/`minLeaderGap` = 0). Replace with the real engine once
-//!     ported.
+//!   * The DES row is backed by the real `smart_traffic_flow` module; the
+//!     comparison params below are only the shared scenario/serialization shape.
 //!   * `spawnSync` (SUMO/netconvert/UXsim) → [`std::process::Command`]; the SUMO
 //!     and UXsim branches early-return "not found" when the binaries are absent
 //!     (the usual case in this repo). `runCommand` returns a `Result` and a
@@ -31,13 +28,18 @@ use std::process::Command;
 
 use crate::des::general::network_flow::{
     build_five_intersection_traffic_network, TrafficLane, TrafficNetwork, TrafficNodeKind,
+    TrafficParams, TrafficScheduledTrip,
 };
 use crate::des::general::prng::mulberry32;
+use crate::des::general::smart_traffic_flow::{
+    run_smart_traffic_flow as run_smart_traffic_flow_model,
+    SmartTrafficParams as SmartTrafficModelParams, SmartTrafficResult as SmartTrafficModelResult,
+};
 use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::shared::capabilities::{Clock, RandomSource, SystemClock};
 
 // =============================================================================
-// PORT NOTE: smart-traffic-flow stand-in (engine not yet ported).
+// Shared traffic comparison params.
 // =============================================================================
 
 #[derive(Clone, Debug, Default)]
@@ -60,54 +62,6 @@ pub struct SmartTrafficParams {
     pub smart_car_pool_size: f64,
     pub actor_shuffle_seed: f64,
     pub accident_risk_scale: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SmartTrafficResult {
-    pub entered: usize,
-    pub exited: usize,
-    pub dropped: usize,
-    pub final_cars_len: usize,
-    pub max_active_cars: usize,
-    pub mean_travel_time_sec: f64,
-    pub mean_speed_mps: f64,
-    pub mean_abs_jerk_mps3: f64,
-    pub min_leader_gap_m: f64,
-}
-
-/// PORT NOTE: deterministic stand-in for the real `runSmartTrafficFlow`.
-pub fn run_smart_traffic_flow(
-    _params: &SmartTrafficParams,
-    network: &TrafficNetwork,
-    scheduled_trips: &[SharedTrip],
-) -> SmartTrafficResult {
-    let entered = scheduled_trips.len();
-    let mean_len = if network.lanes.is_empty() {
-        0.0
-    } else {
-        network.lanes.iter().map(|l| l.length_m).sum::<f64>() / network.lanes.len() as f64
-    };
-    let mean_speed = if network.lanes.is_empty() {
-        1.0
-    } else {
-        (network.lanes.iter().map(|l| l.speed_limit_mps).sum::<f64>() / network.lanes.len() as f64)
-            .max(1e-6)
-    };
-    SmartTrafficResult {
-        entered,
-        exited: entered,
-        dropped: 0,
-        final_cars_len: 0,
-        max_active_cars: entered,
-        mean_travel_time_sec: if entered > 0 {
-            mean_len / mean_speed
-        } else {
-            0.0
-        },
-        mean_speed_mps: mean_speed,
-        mean_abs_jerk_mps3: 0.0,
-        min_leader_gap_m: 0.0,
-    }
 }
 
 // =============================================================================
@@ -320,25 +274,96 @@ fn generate_scheduled_trips(
     trips
 }
 
+fn smart_model_params(
+    params: &SmartTrafficParams,
+    network: &TrafficNetwork,
+    trips: &[SharedTrip],
+) -> SmartTrafficModelParams {
+    SmartTrafficModelParams {
+        base: TrafficParams {
+            builtin: None,
+            network: Some(network.clone()),
+            duration_sec: params.duration_sec,
+            dt_sec: params.dt_sec,
+            seed: params.seed,
+            max_cars: params.max_cars.max(1.0) as usize,
+            car_length_m: Some(params.car_length_m),
+            car_width_m: Some(params.car_width_m),
+            lane_width_m: Some(params.lane_width_m),
+            min_gap_m: Some(params.min_gap_m),
+            max_accel_mps2: Some(params.max_accel_mps2),
+            max_decel_mps2: Some(params.max_decel_mps2),
+            max_jerk_mps3: Some(params.max_jerk_mps3),
+            reaction_time_sec: Some(params.reaction_time_sec),
+            time_headway_sec: Some(params.time_headway_sec),
+            grid_cell_size_m: Some(params.grid_cell_size_m),
+            grid_look_ahead_m: None,
+            spawn_rate_multiplier: Some(0.0),
+            scheduled_trips: Some(
+                trips
+                    .iter()
+                    .map(|trip| TrafficScheduledTrip {
+                        depart_sec: trip.depart_sec,
+                        source_id: trip.source_id.clone(),
+                        destination_sink_id: trip.destination_sink_id.clone(),
+                    })
+                    .collect(),
+            ),
+        },
+        smart_car_pool_size: Some(params.smart_car_pool_size.max(1.0) as usize),
+        actor_shuffle_seed: Some(params.actor_shuffle_seed),
+        accident_risk_scale: Some(params.accident_risk_scale),
+        accident_probability: Some(0.0),
+        accident_accel_boost_mps2: None,
+        accident_fault_duration_sec: None,
+        distance_preference_spread: None,
+        start_preference_spread: None,
+        accident_flash_seconds: None,
+    }
+}
+
+fn smart_trace_metrics(result: &SmartTrafficModelResult) -> (f64, f64) {
+    let mut jerk_sum = 0.0;
+    let mut jerk_n = 0usize;
+    let mut min_gap = f64::INFINITY;
+    for row in &result.trace {
+        for car in &row.cars {
+            jerk_sum += car.jerk_mps3.abs();
+            jerk_n += 1;
+            if let Some(gap) = car.leader_gap_m {
+                min_gap = min_gap.min(gap);
+            }
+        }
+    }
+    let mean_abs_jerk = if jerk_n > 0 {
+        jerk_sum / jerk_n as f64
+    } else {
+        0.0
+    };
+    let min_leader_gap = if min_gap.is_finite() { min_gap } else { 0.0 };
+    (mean_abs_jerk, min_leader_gap)
+}
+
 fn run_des(
     params: &SmartTrafficParams,
     network: &TrafficNetwork,
     trips: &[SharedTrip],
 ) -> EngineStats {
-    let result = run_smart_traffic_flow(params, network, trips);
+    let result = run_smart_traffic_flow_model(smart_model_params(params, network, trips), None);
+    let (mean_abs_jerk, min_leader_gap) = smart_trace_metrics(&result);
     EngineStats {
         engine: "DES smart traffic".to_string(),
         version: Some("local".to_string()),
         generated: trips.len() as f64,
         entered: Some(result.entered as f64),
         completed: result.exited as f64,
-        active_at_end: result.final_cars_len as f64,
+        active_at_end: result.final_cars.len() as f64,
         dropped: Some(result.dropped as f64),
         max_active: Some(result.max_active_cars as f64),
         mean_travel_time_sec: round_metric(Some(result.mean_travel_time_sec)),
         mean_speed_mps: round_metric(Some(result.mean_speed_mps)),
-        mean_abs_jerk_mps3: round_metric(Some(result.mean_abs_jerk_mps3)),
-        min_headway_m: round_metric(Some(result.min_leader_gap_m)),
+        mean_abs_jerk_mps3: round_metric(Some(mean_abs_jerk)),
+        min_headway_m: round_metric(Some(min_leader_gap)),
         notes: vec![
             "uses one-foot cell stations and smart movable car runTimeStep decisions".to_string(),
         ],

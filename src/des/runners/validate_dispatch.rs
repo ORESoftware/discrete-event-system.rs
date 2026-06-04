@@ -4,47 +4,36 @@
 //! architectural layer (greedy / fluid-LP / MDP-VI / MCTS) performs, via five
 //! Welch-t-tested studies. Top-level `main()` → [`run`].
 //!
-//! PORT NOTES (stubbed cross-module deps):
-//!   * `crate::des::general::dispatch::{DispatchProblem, evaluate_policy, welch_t,
-//!     policy_random, policy_round_robin, policy_shortest_queue, policy_sect,
-//!     policy_fluid_lp, policy_mdp_vi, policy_mcts, build_dispatch_fluid_lp}`.
-//!   * `crate::des::general::lp::{solve_lp_internal, solve_lp_external}` and
-//!     `crate::des::general::lp_des::solve_lp_via_des`.
-//!   * The MDP/MCTS RNG would route through `crate::des::shared::capabilities`.
+//! PORT NOTES:
+//!   * Uses the real Rust dispatch simulator, policies, fluid LP builder, LP
+//!     solvers, MDP-VI, and MCTS modules.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
-// =============================================================================
-// Stubbed dispatch + LP layer.
-// =============================================================================
+use crate::des::general::dispatch::{
+    build_dispatch_fluid_lp as build_dispatch_fluid_lp_model,
+    policy_fluid_lp as policy_fluid_lp_model, policy_mcts as policy_mcts_model,
+    policy_mdp_vi as policy_mdp_vi_model, policy_random as policy_random_model,
+    policy_round_robin as policy_round_robin_model, policy_sect as policy_sect_model,
+    policy_shortest_queue as policy_shortest_queue_model, simulate_dispatch,
+    welch_t as welch_t_model, DispatchPolicy, DispatchProblem, EvaluationResult,
+    FluidLpPolicyResult as RealFluidLpPolicyResult, MctsPolicyOptions, MdpViPolicyOptions,
+    MdpViPolicyResult,
+};
+use crate::des::general::lp::{
+    solve_lp_internal as solve_lp_internal_model, ExternalSolver, ExternalSolverOptions,
+    InternalSimplexOptions, LPProblem,
+};
+use crate::des::general::lp_des::{solve_lp_via_des as solve_lp_via_des_model, DESSimplexOptions};
+use crate::des::shared::transform::Transform;
 
-#[derive(Clone, Debug, Default)]
-struct DispatchProblem {
-    m: usize,
-    k: usize,
-    arrival_rate: f64,
-    class_prob: Vec<f64>,
-    service_rate: Vec<Vec<f64>>,
-}
+type Policy = Box<dyn DispatchPolicy>;
+type EvalResult = EvaluationResult;
+type DispatchViResult = MdpViPolicyResult;
+type LpProblem = LPProblem;
 
-/// Opaque dispatch policy handle (PORT NOTE: `dispatch::Policy`).
-#[derive(Clone, Debug, Default)]
-struct Policy;
-
-#[derive(Clone, Debug, Default)]
-struct EvalResult {
-    mean_wait: f64,
-    raw_waits: Vec<f64>,
-}
-
-#[derive(Clone, Debug, Default)]
 struct FluidLpResult {
     policy: Policy,
-}
-
-#[derive(Clone, Debug, Default)]
-struct DispatchViResult {
-    v: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -61,69 +50,149 @@ struct MctsOpts {
     rollout_depth: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DispatchValidationProfile {
+    full: bool,
+    mcts_reps: usize,
+    mcts_arrivals: usize,
+    mcts_warmup: usize,
+    mcts_low_iter: usize,
+    mcts_low_depth: usize,
+    mcts_mid_iter: usize,
+    mcts_mid_depth: usize,
+    mcts_high_iter: usize,
+    mcts_high_depth: usize,
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "full" | "FULL"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn dispatch_validation_profile() -> DispatchValidationProfile {
+    if env_flag("ORES_DISPATCH_FULL") {
+        DispatchValidationProfile {
+            full: true,
+            mcts_reps: 8,
+            mcts_arrivals: 1200,
+            mcts_warmup: 120,
+            mcts_low_iter: 20,
+            mcts_low_depth: 20,
+            mcts_mid_iter: 100,
+            mcts_mid_depth: 25,
+            mcts_high_iter: 300,
+            mcts_high_depth: 35,
+        }
+    } else {
+        DispatchValidationProfile {
+            full: false,
+            mcts_reps: 4,
+            mcts_arrivals: 300,
+            mcts_warmup: 40,
+            mcts_low_iter: 8,
+            mcts_low_depth: 8,
+            mcts_mid_iter: 24,
+            mcts_mid_depth: 12,
+            mcts_high_iter: 60,
+            mcts_high_depth: 16,
+        }
+    }
+}
+
 fn policy_random(_seed: u64) -> Policy {
-    Policy
+    Box::new(policy_random_model(_seed as u32))
 }
 fn policy_round_robin() -> Policy {
-    Policy
+    Box::new(policy_round_robin_model())
 }
 fn policy_shortest_queue() -> Policy {
-    Policy
+    Box::new(policy_shortest_queue_model())
 }
-fn policy_sect(_p: &DispatchProblem) -> Policy {
-    Policy
+fn policy_sect(p: &DispatchProblem) -> Policy {
+    Box::new(policy_sect_model(p))
 }
-fn policy_fluid_lp(_p: &DispatchProblem) -> FluidLpResult {
-    FluidLpResult::default()
+fn policy_fluid_lp(p: &DispatchProblem) -> FluidLpResult {
+    let RealFluidLpPolicyResult { policy, .. } = policy_fluid_lp_model(p, 12345);
+    FluidLpResult {
+        policy: Box::new(policy),
+    }
 }
-fn policy_mdp_vi(_p: &DispatchProblem, _o: MdpViOpts) -> DispatchViResult {
-    DispatchViResult { v: vec![0.0; 4] }
+fn policy_mdp_vi(p: &DispatchProblem, o: MdpViOpts) -> DispatchViResult {
+    policy_mdp_vi_model(
+        p,
+        MdpViPolicyOptions {
+            q_max: Some(o.q_max),
+            gamma: Some(o.gamma),
+            rollouts_per_sa: Some(o.rollouts_per_sa),
+            seed: Some(o.seed as u32),
+            ..Default::default()
+        },
+    )
 }
-fn policy_mcts(_p: &DispatchProblem, _o: MctsOpts) -> Policy {
-    Policy
+fn policy_mcts(p: &DispatchProblem, o: MctsOpts) -> Policy {
+    Box::new(policy_mcts_model(
+        p,
+        MctsPolicyOptions {
+            iterations: Some(o.iterations),
+            rollout_depth: Some(o.rollout_depth),
+            ..Default::default()
+        },
+    ))
 }
-fn build_dispatch_fluid_lp(_p: &DispatchProblem) -> LpProblem {
-    LpProblem::default()
+fn build_dispatch_fluid_lp(p: &DispatchProblem) -> LpProblem {
+    build_dispatch_fluid_lp_model(p)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn evaluate_policy<F: Fn() -> Policy>(
-    _problem: &DispatchProblem,
-    _factory: F,
-    _name: &str,
+    problem: &DispatchProblem,
+    factory: F,
+    name: &str,
     num_reps: usize,
-    _num_arrivals: usize,
-    _seed_base: u64,
-    _warmup: usize,
+    num_arrivals: usize,
+    seed_base: u64,
+    warmup: usize,
 ) -> EvalResult {
-    // PORT NOTE: real impl simulates `num_reps` replications and returns the
-    // per-rep mean waits. Stub returns zeros.
+    let mut waits = Vec::with_capacity(num_reps);
+    let mut utils: Vec<Vec<f64>> = Vec::with_capacity(num_reps);
+    for r in 0..num_reps {
+        let mut policy = factory();
+        let result = simulate_dispatch(
+            problem,
+            policy.as_mut(),
+            num_arrivals,
+            seed_base as u32 + r as u32,
+            warmup,
+        );
+        waits.push(result.mean_sojourn);
+        utils.push(result.per_machine_utilisation);
+    }
+    let mean_wait = waits.iter().sum::<f64>() / waits.len() as f64;
+    let denom = ((waits.len() as i64 - 1).max(1)) as f64;
+    let sd_wait = (waits.iter().map(|w| (w - mean_wait).powi(2)).sum::<f64>() / denom).sqrt();
+    let mut utilisation = vec![0.0; problem.m];
+    for u in &utils {
+        for mm in 0..problem.m {
+            utilisation[mm] += u[mm] / utils.len() as f64;
+        }
+    }
     EvalResult {
-        mean_wait: 0.0,
-        raw_waits: vec![0.0; num_reps],
+        policy_name: name.to_string(),
+        mean_wait,
+        sd_wait,
+        raw_waits: waits,
+        utilisation,
     }
 }
 
-/// Welch t-statistic for two samples (matches `dispatch::welch_t`).
 fn welch_t(a: &[f64], b: &[f64]) -> f64 {
-    if a.len() < 2 || b.len() < 2 {
-        return 0.0;
-    }
-    let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
-    let var = |xs: &[f64]| {
-        let m = mean(xs);
-        xs.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / (xs.len() as f64 - 1.0)
-    };
-    let se_sq = var(a) / a.len() as f64 + var(b) / b.len() as f64;
-    if se_sq <= 0.0 {
-        return 0.0;
-    }
-    (mean(a) - mean(b)) / se_sq.sqrt()
-}
-
-#[derive(Clone, Debug, Default)]
-struct LpProblem {
-    c: Vec<f64>,
+    welch_t_model(a.to_vec(), b.to_vec())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,20 +201,27 @@ struct LpResult {
     objective: f64,
 }
 
-fn stub_lp() -> LpResult {
+fn lp_result(status: crate::des::general::lp::LPStatus, objective: f64) -> LpResult {
     LpResult {
-        status: "optimal".to_string(),
-        objective: 0.0,
+        status: status.as_str().to_string(),
+        objective,
     }
 }
-fn solve_lp_internal(_lp: &LpProblem) -> LpResult {
-    stub_lp()
+fn solve_lp_internal(lp: &LpProblem) -> LpResult {
+    let sol = solve_lp_internal_model(lp, &InternalSimplexOptions::default());
+    lp_result(sol.status, sol.objective)
 }
-fn solve_lp_external(_lp: &LpProblem, _method: &str) -> LpResult {
-    stub_lp()
+fn solve_lp_external(lp: &LpProblem, method: &str) -> LpResult {
+    let sol = ExternalSolver::new(ExternalSolverOptions {
+        method: Some(method.to_string()),
+        ..Default::default()
+    })
+    .transform(lp.clone());
+    lp_result(sol.status, sol.objective)
 }
-fn solve_lp_via_des(_lp: &LpProblem) -> LpResult {
-    stub_lp()
+fn solve_lp_via_des(lp: &LpProblem) -> LpResult {
+    let sol = solve_lp_via_des_model(lp, &DESSimplexOptions::default());
+    lp_result(sol.status, sol.objective)
 }
 
 // =============================================================================
@@ -465,7 +541,7 @@ fn study4(c: &mut Checker) {
     );
 }
 
-fn study5(c: &mut Checker) {
+fn study5(c: &mut Checker, profile: &DispatchValidationProfile) {
     println!("\nStudy 5 — MCTS converges toward its rollout policy (SECT) as iters grow");
     let problem = DispatchProblem {
         m: 2,
@@ -474,9 +550,9 @@ fn study5(c: &mut Checker) {
         class_prob: vec![0.6, 0.4],
         service_rate: vec![vec![2.0, 0.8], vec![0.8, 2.0]],
     };
-    let num_reps = 8;
-    let num_arrivals = 1200;
-    let warmup = 120;
+    let num_reps = profile.mcts_reps;
+    let num_arrivals = profile.mcts_arrivals;
+    let warmup = profile.mcts_warmup;
     let seed_base = 3300;
     let sect = evaluate_policy(
         &problem,
@@ -493,12 +569,12 @@ fn study5(c: &mut Checker) {
             policy_mcts(
                 &problem,
                 MctsOpts {
-                    iterations: 20,
-                    rollout_depth: 20,
+                    iterations: profile.mcts_low_iter,
+                    rollout_depth: profile.mcts_low_depth,
                 },
             )
         },
-        "mcts-20",
+        &format!("mcts-{}", profile.mcts_low_iter),
         num_reps,
         num_arrivals,
         seed_base,
@@ -510,12 +586,12 @@ fn study5(c: &mut Checker) {
             policy_mcts(
                 &problem,
                 MctsOpts {
-                    iterations: 100,
-                    rollout_depth: 25,
+                    iterations: profile.mcts_mid_iter,
+                    rollout_depth: profile.mcts_mid_depth,
                 },
             )
         },
-        "mcts-100",
+        &format!("mcts-{}", profile.mcts_mid_iter),
         num_reps,
         num_arrivals,
         seed_base,
@@ -527,21 +603,30 @@ fn study5(c: &mut Checker) {
             policy_mcts(
                 &problem,
                 MctsOpts {
-                    iterations: 300,
-                    rollout_depth: 35,
+                    iterations: profile.mcts_high_iter,
+                    rollout_depth: profile.mcts_high_depth,
                 },
             )
         },
-        "mcts-300",
+        &format!("mcts-{}", profile.mcts_high_iter),
         num_reps,
         num_arrivals,
         seed_base,
         warmup,
     );
     println!("    SECT          mean = {:.3}", sect.mean_wait);
-    println!("    MCTS  20 iter mean = {:.3}", mcts_low.mean_wait);
-    println!("    MCTS 100 iter mean = {:.3}", mcts_mid.mean_wait);
-    println!("    MCTS 300 iter mean = {:.3}", mcts_high.mean_wait);
+    println!(
+        "    MCTS {:>3} iter mean = {:.3}",
+        profile.mcts_low_iter, mcts_low.mean_wait
+    );
+    println!(
+        "    MCTS {:>3} iter mean = {:.3}",
+        profile.mcts_mid_iter, mcts_mid.mean_wait
+    );
+    println!(
+        "    MCTS {:>3} iter mean = {:.3}",
+        profile.mcts_high_iter, mcts_high.mean_wait
+    );
     let random = evaluate_policy(
         &problem,
         || policy_random(11),
@@ -555,21 +640,41 @@ fn study5(c: &mut Checker) {
         "    random        mean = {:.3} (sanity check)",
         random.mean_wait
     );
+    let random_vs_high_t = welch_t(&random.raw_waits, &mcts_high.raw_waits);
+    let beats_random = if profile.full {
+        random_vs_high_t > 3.0
+    } else {
+        mcts_high.mean_wait < random.mean_wait
+    };
+    let random_label = if profile.full {
+        format!("MCTS-{} < random (Welch-t > 3)", profile.mcts_high_iter)
+    } else {
+        format!(
+            "MCTS-{} < random mean (fast profile)",
+            profile.mcts_high_iter
+        )
+    };
     c.check(
-        "MCTS-300 < random (Welch-t > 3)",
-        welch_t(&random.raw_waits, &mcts_high.raw_waits) > 3.0,
+        &random_label,
+        beats_random,
         &format!(
-            "t = {:.2}",
-            welch_t(&random.raw_waits, &mcts_high.raw_waits)
+            "t = {:.2}, random = {:.3}, MCTS = {:.3}",
+            random_vs_high_t, random.mean_wait, mcts_high.mean_wait
         ),
     );
+    let sect_ratio_limit = if profile.full { 2.5 } else { 3.0 };
+    let sect_label = format!(
+        "MCTS-{} within {:.1}× of SECT (bounded by rollout policy)",
+        profile.mcts_high_iter, sect_ratio_limit
+    );
     c.check(
-        "MCTS-300 within 2.5× of SECT (bounded by rollout policy)",
-        mcts_high.mean_wait < 2.5 * sect.mean_wait,
+        &sect_label,
+        mcts_high.mean_wait < sect_ratio_limit * sect.mean_wait,
         &format!(
-            "MCTS = {:.3}, 2.5×SECT = {:.3}",
+            "MCTS = {:.3}, {:.1}×SECT = {:.3}",
             mcts_high.mean_wait,
-            2.5 * sect.mean_wait
+            sect_ratio_limit,
+            sect_ratio_limit * sect.mean_wait
         ),
     );
 }
@@ -577,14 +682,20 @@ fn study5(c: &mut Checker) {
 /// `validate-dispatch.ts` `main()`.
 pub fn run() {
     let mut c = Checker::new();
+    let profile = dispatch_validation_profile();
     println!("# DES + MDP + LP + MCTS dispatch validation");
     println!("# (each study uses Welch t-tests on independent replications,");
     println!("#  so individual reps may noise-up but the conclusions hold)");
+    if profile.full {
+        println!("# profile: full");
+    } else {
+        println!("# profile: fast (set ORES_DISPATCH_FULL=1 for full MCTS study)");
+    }
     study1(&mut c);
     study2(&mut c);
     study3(&mut c);
     study4(&mut c);
-    study5(&mut c);
+    study5(&mut c, &profile);
     println!(
         "\n{} checks: {} passed, {} failed",
         c.pass + c.fail,

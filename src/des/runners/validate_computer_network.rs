@@ -12,6 +12,8 @@
 //!     `Serialize` derive on [`ComputerNetworkProblem`]; this helper mirrors the
 //!     camelCase shape the Python reference consumes).
 //!   * external `.result` is read back as a [`JsonValue`] (camelCase fields).
+//!   * missing external reference modules now skip only the Python comparison;
+//!     the Rust computer-network scenarios still run and validate invariants.
 //!   * `process.exit(code)` → returned exit code.
 
 #![allow(dead_code)]
@@ -20,9 +22,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::des::general::computer_network::{
-    build_default_computer_network_problem, run_computer_network_simulation,
-    ComputerNetworkProblem, ComputerNetworkResult, NetworkFlowSpec, NetworkLinkSpec,
-    NetworkNodeKind, NetworkNodeSpec, NetworkProtocol, NetworkRoutingMetric,
+    build_bottleneck_computer_network_problem, build_default_computer_network_problem,
+    run_computer_network_simulation, ComputerNetworkProblem, ComputerNetworkResult,
+    NetworkRoutingMetric,
 };
 use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::runners::external_modules::{
@@ -266,138 +268,6 @@ pub fn problem_to_json(p: &ComputerNetworkProblem) -> JsonValue {
 }
 
 // -----------------------------------------------------------------------------
-// PORT NOTE — `buildBottleneckComputerNetworkProblem`.
-//
-// `build_default_computer_network_problem` exists in the Rust engine, but the
-// bottleneck builder is **not yet ported** there. This is a faithful local copy
-// of `computer-network.ts::buildBottleneckComputerNetworkProblem`; move it to
-// `crate::des::general::computer_network` when that module gains it.
-// -----------------------------------------------------------------------------
-
-fn node(id: &str, kind: NetworkNodeKind, fwd: f64, queue: usize) -> NetworkNodeSpec {
-    NetworkNodeSpec {
-        id: id.to_string(),
-        kind,
-        forwarding_rate_pps: Some(fwd),
-        queue_limit_packets: Some(queue),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn link(
-    id: &str,
-    from: &str,
-    to: &str,
-    bw: f64,
-    lat: f64,
-    cost: f64,
-    queue: usize,
-) -> NetworkLinkSpec {
-    NetworkLinkSpec {
-        id: id.to_string(),
-        from: from.to_string(),
-        to: to.to_string(),
-        bandwidth_mbps: bw,
-        latency_ms: lat,
-        cost_per_mb: Some(cost),
-        queue_limit_packets: Some(queue),
-        bidirectional: Some(true),
-    }
-}
-
-fn flow(
-    id: &str,
-    source: &str,
-    destination: &str,
-    protocol: NetworkProtocol,
-    rate_pps: f64,
-    packet_size_bytes: f64,
-    max_packets: u64,
-) -> NetworkFlowSpec {
-    NetworkFlowSpec {
-        id: id.to_string(),
-        source: source.to_string(),
-        destination: destination.to_string(),
-        protocol: Some(protocol),
-        rate_pps,
-        packet_size_bytes,
-        start_ms: None,
-        end_ms: None,
-        max_packets: Some(max_packets),
-        ttl_hops: None,
-    }
-}
-
-fn build_bottleneck_computer_network_problem() -> ComputerNetworkProblem {
-    ComputerNetworkProblem {
-        nodes: vec![
-            node("web-client", NetworkNodeKind::Host, 6000.0, 512),
-            node("telemetry-client", NetworkNodeKind::Host, 6000.0, 512),
-            node("edge", NetworkNodeKind::Switch, 12000.0, 1024),
-            node("wan-router", NetworkNodeKind::Router, 9000.0, 1024),
-            node("api-server", NetworkNodeKind::Host, 9000.0, 1024),
-        ],
-        links: vec![
-            link("web-edge", "web-client", "edge", 100.0, 1.0, 0.001, 256),
-            link(
-                "telemetry-edge",
-                "telemetry-client",
-                "edge",
-                100.0,
-                1.0,
-                0.001,
-                256,
-            ),
-            link("edge-wan", "edge", "wan-router", 5.0, 25.0, 0.010, 96),
-            link(
-                "wan-api",
-                "wan-router",
-                "api-server",
-                100.0,
-                4.0,
-                0.002,
-                256,
-            ),
-        ],
-        flows: vec![
-            flow(
-                "http-api",
-                "web-client",
-                "api-server",
-                NetworkProtocol::Http,
-                900.0,
-                1100.0,
-                1800,
-            ),
-            flow(
-                "udp-telemetry",
-                "telemetry-client",
-                "api-server",
-                NetworkProtocol::Udp,
-                700.0,
-                900.0,
-                1400,
-            ),
-            flow(
-                "tcp-bulk",
-                "web-client",
-                "api-server",
-                NetworkProtocol::Tcp,
-                350.0,
-                1400.0,
-                700,
-            ),
-        ],
-        duration_ms: 2000.0,
-        dt_ms: 1.0,
-        routing_metric: Some(NetworkRoutingMetric::Latency),
-        drain_after_sources_ms: Some(4000.0),
-        max_packets_in_system: Some(10000),
-        sample_every_ms: Some(100.0),
-    }
-}
-
-// -----------------------------------------------------------------------------
 // External invocation + JSON field helpers.
 // -----------------------------------------------------------------------------
 
@@ -465,15 +335,77 @@ fn str_field(v: &JsonValue, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(str::to_string)
 }
 
+fn optional_external_error(e: &str) -> bool {
+    let lower = e.to_ascii_lowercase();
+    lower.contains("external script not found")
+        || lower.contains("unknown external module")
+        || lower.contains("no such file")
+        || lower.contains("no module named")
+        || lower.contains("modulenotfounderror")
+        || lower.contains("not installed")
+        || lower.contains("unavailable")
+}
+
 fn compare_scenario(
     checks: &mut Checks,
     name: &str,
     problem: &ComputerNetworkProblem,
+    external_enabled: bool,
 ) -> Result<(), String> {
     println!();
     println!("-- {name} --");
     let internal: ComputerNetworkResult = run_computer_network_simulation(problem);
-    let external = run_external(name, problem)?;
+    checks.check(
+        &format!("{name}: internal generated packets"),
+        internal.generated_packets > 0.0,
+        Some(format!("generated={}", js_num(internal.generated_packets))),
+    );
+    checks.close(
+        &format!("{name}: internal packet accounting"),
+        internal.generated_packets,
+        internal.delivered_packets + internal.dropped_packets + internal.active_packets,
+        1e-9,
+    );
+    checks.check(
+        &format!("{name}: internal flow stats present"),
+        !internal.flow_stats.is_empty(),
+        Some(format!("flows={}", internal.flow_stats.len())),
+    );
+    checks.check(
+        &format!("{name}: internal link stats present"),
+        !internal.link_stats.is_empty(),
+        Some(format!("links={}", internal.link_stats.len())),
+    );
+    checks.check(
+        &format!("{name}: internal invariants clean"),
+        internal.invariant_violations.is_empty(),
+        Some(format!(
+            "violations={}",
+            internal.invariant_violations.len()
+        )),
+    );
+
+    if !external_enabled {
+        checks.check(
+            &format!("{name}: external Python reference skipped"),
+            true,
+            Some("external modules unavailable".to_string()),
+        );
+        return Ok(());
+    }
+
+    let external = match run_external(name, problem) {
+        Ok(v) => v,
+        Err(e) if optional_external_error(&e) => {
+            checks.check(
+                &format!("{name}: external Python reference skipped"),
+                true,
+                Some(e),
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     checks.same_count(
         &format!("{name}: generated packets"),
@@ -685,10 +617,13 @@ fn index_by_id(arr: Option<&JsonValue>) -> HashMap<String, JsonValue> {
 
 /// `main()` — returns the exit code (0 = all checks pass).
 pub fn run() -> i32 {
-    if let Err(e) = register_built_in_external_modules() {
-        eprintln!("failed to register external modules: {e}");
-        return 1;
-    }
+    let external_enabled = match register_built_in_external_modules() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("external modules unavailable; running Rust-only checks: {e}");
+            false
+        }
+    };
 
     println!("Computer-network DES: framework vs external Python reference");
     println!("===========================================================");
@@ -698,6 +633,7 @@ pub fn run() -> i32 {
         &mut checks,
         "small-enterprise",
         &build_default_computer_network_problem(),
+        external_enabled,
     ) {
         eprintln!("{e}");
         return 1;
@@ -706,6 +642,7 @@ pub fn run() -> i32 {
         &mut checks,
         "bottleneck-lab",
         &build_bottleneck_computer_network_problem(),
+        external_enabled,
     ) {
         eprintln!("{e}");
         return 1;

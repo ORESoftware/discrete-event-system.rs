@@ -11027,9 +11027,29 @@ fn soccer_decision_context_for(
         })
         .collect::<Vec<_>>();
     nearest_defenders.sort_by(|a, b| {
-        a.distance_yards
-            .partial_cmp(&b.distance_yards)
+        let a_relevance = if target_point.is_some() {
+            a.lane_distance_yards.min(a.distance_yards)
+        } else {
+            a.distance_yards
+        };
+        let b_relevance = if target_point.is_some() {
+            b.lane_distance_yards.min(b.distance_yards)
+        } else {
+            b.distance_yards
+        };
+        a_relevance
+            .partial_cmp(&b_relevance)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.distance_yards
+                    .partial_cmp(&b.distance_yards)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                a.player_id
+                    .partial_cmp(&b.player_id)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
     nearest_defenders.truncate(3);
 
@@ -16197,7 +16217,7 @@ impl SoccerMatch {
     }
 
     fn current_goal_credit_transition(&self, player_id: usize) -> Option<SoccerLearningTransition> {
-        let player = self.players.get(player_id)?;
+        let player = self.players.iter().find(|player| player.id == player_id)?;
         let decision = player.last_decision.as_ref()?;
         if !soccer_goal_credit_action_is_relevant(&decision.action) {
             return None;
@@ -27223,6 +27243,32 @@ mod tests {
                 .map(|entry| entry.id),
             Some(BALL_AGENT_ID)
         );
+        let ball_positions = (300..314)
+            .map(|seed| {
+                let mut seeded = SoccerMatch::default_11v11(MatchConfig {
+                    duration_seconds: 0.2,
+                    seed,
+                    ..Default::default()
+                });
+                seeded.run_time_step();
+                seeded
+                    .to_frame()
+                    .agent_schedule
+                    .iter()
+                    .position(|entry| entry.kind == AgentScheduleKind::Ball)
+                    .expect("ball scheduled")
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            ball_positions.len() > 1,
+            "ball schedule slot should vary across seeds: {ball_positions:?}"
+        );
+        assert!(
+            ball_positions
+                .iter()
+                .any(|slot| *slot + 1 != frame.agent_schedule.len()),
+            "ball should not be deterministically appended last: {ball_positions:?}"
+        );
         let scheduled_player_ids = frame
             .agent_schedule
             .iter()
@@ -31014,6 +31060,62 @@ mod tests {
         assert!(
             features[39] > 0.0,
             "defender closing feature should be present"
+        );
+    }
+
+    #[test]
+    fn decision_context_prefers_defenders_in_action_lane() {
+        let sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 15075,
+            ..Default::default()
+        });
+        let mut before = WorldSnapshot::from_match(&sim);
+        let actor = 7;
+        let off_lane_defender = 12;
+        let lane_defender = 13;
+        let actor_position = Vec2::new(40.0, 60.0);
+        let target = Vec2::new(40.0, 100.0);
+        before.players[actor].position = actor_position;
+        before.players[off_lane_defender].position = Vec2::new(48.0, 62.0);
+        before.players[lane_defender].position = Vec2::new(40.0, 74.0);
+        before.shared_positions = SharedPlayerPositionSnapshot::from_player_snapshots(
+            &before.players,
+            before.tick,
+            before.clock_seconds,
+        );
+        let after = before.clone();
+        let action_target = AgentActionTargetTrace {
+            point: Some(target),
+            player_id: Some(9),
+            grid: Some(pitch_grid_address(
+                target,
+                before.field_width,
+                before.field_length,
+            )),
+            facing: facing_bucket_from_vector(target - actor_position),
+        };
+
+        let context = soccer_decision_context_for(
+            actor,
+            Team::Home,
+            "pass",
+            Some(&action_target),
+            &before,
+            &after,
+        );
+
+        assert_eq!(
+            context
+                .nearest_defenders
+                .first()
+                .map(|defender| defender.player_id),
+            Some(lane_defender)
+        );
+        assert!(
+            context.nearest_defenders[0].lane_distance_yards < 0.2,
+            "lane defender should be first: {:?}",
+            context.nearest_defenders
         );
     }
 
@@ -35428,8 +35530,16 @@ mod tests {
             agent_schedule.first().unwrap()["id"],
             CENTRAL_BRAIN_AGENT_ID
         );
-        assert_eq!(agent_schedule.last().unwrap()["kind"], "ball");
-        assert_eq!(agent_schedule.last().unwrap()["id"], BALL_AGENT_ID);
+        assert_eq!(
+            agent_schedule
+                .iter()
+                .filter(|entry| entry["kind"] == "ball")
+                .count(),
+            1
+        );
+        assert!(agent_schedule
+            .iter()
+            .any(|entry| entry["kind"] == "ball" && entry["id"] == BALL_AGENT_ID));
         let official_offside_lines = value["frame"]["officials"]
             .as_array()
             .expect("officials array")
@@ -36174,18 +36284,6 @@ mod tests {
         })));
         let input_queue = session.lock().unwrap().input_queue();
 
-        let assign_body = r#"{"controllerSlot":0,"playerId":5}"#;
-        let assign = handle_live_soccer_request(
-            &format!(
-                "POST /api/assign HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
-                assign_body.len(),
-                assign_body
-            ),
-            &session,
-            &input_queue,
-        );
-        assert_eq!(assign.status, 200);
-
         let step_body = r#"{"ticks":2,"recordEveryTicks":1}"#;
         let step = handle_live_soccer_request(
             &format!(
@@ -36207,6 +36305,18 @@ mod tests {
             .unwrap();
         assert!(home_entries > 0);
         assert!(away_entries > 0);
+
+        let assign_body = r#"{"controllerSlot":0,"playerId":5}"#;
+        let assign = handle_live_soccer_request(
+            &format!(
+                "POST /api/assign HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                assign_body.len(),
+                assign_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(assign.status, 200);
 
         let reset = handle_live_soccer_request(
             "POST /api/reset HTTP/1.1\r\nContent-Length: 0\r\n\r\n",

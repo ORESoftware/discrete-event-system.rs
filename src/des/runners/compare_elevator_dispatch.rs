@@ -4,21 +4,14 @@
 //! elevator dispatch, printing a table + per-rate summary and writing a JSON
 //! dump. The TS top-level `main()` becomes [`run`].
 //!
-//! ## PORT NOTE — local elevator-sim stub
+//! ## PORT NOTE
 //!
-//! This driver imports `ElevatorConfig`/`buildSchedule`/`runElevator` from
-//! `../main-elevator`, which is **not yet ported** to Rust (no `main_elevator.rs`
-//! exists — only `validate_elevator.rs`, which reads pre-baked JSON). Per the
-//! migration brief this file ships the *smallest self-contained* elevator engine
-//! that reproduces the comparison's observable behaviour (coordinated dispatch
-//! lowers mean/p95 wait by claiming each hall call exactly once; uncoordinated
-//! dispatch lets multiple cars chase the same call and eat redundant service
-//! stops). It is **not** a numeric match for `main-elevator`; replace
-//! [`build_schedule`] / [`run_elevator`] with the real port when it lands.
+//! This driver imports `ElevatorConfig`/`build_schedule`/`run_elevator` from the
+//! real Rust `crate::des::main_elevator` port and keeps only the comparison
+//! sweep/reporting logic here.
 //!
-//! Other notes:
+//! Notes:
 //!   * `process.env.{SEEDS,LAMBDAS,SIM_T}` → `std::env::var` + split/parse.
-//!   * `Math.random`/seeding → `with_seed`.
 //!   * `fs`/`path` + `JSON.stringify(.., null, 2)` → `std::fs` + `JsonValue`.
 
 #![allow(dead_code)]
@@ -27,49 +20,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::des::general::prng::with_seed;
+use crate::des::main_elevator::{build_schedule, run_elevator, Aggregates, ElevatorConfig};
 use crate::des::observability::logger::JsonValue;
-use crate::des::shared::capabilities::RandomSource;
-
-/// `ElevatorConfig` minus `dispatchMode` (the TS `Omit<…, 'dispatchMode'>`).
-#[derive(Clone, Copy, Debug)]
-struct ElevatorConfig {
-    n_floors: i64,
-    n_elevators: i64,
-    capacity: i64,
-    floor_travel_time: f64,
-    service_time: f64,
-    arrival_rate: f64,
-    sim_t: f64,
-    step_size: f64,
-    seed: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DispatchMode {
-    Uncoordinated,
-    Coordinated,
-}
-
-/// Aggregated wait/total statistics (`runElevator(...).aggregates`).
-#[derive(Clone, Copy, Debug, Default)]
-struct Aggregates {
-    mean_wait: f64,
-    p95_wait: f64,
-    mean_total: f64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Passenger {
-    arrival: f64,
-    from: i64,
-    to: i64,
-    board: Option<f64>,
-    exit: Option<f64>,
-}
 
 struct TrialAggregate {
-    seed: u64,
+    seed: u32,
     lambda: f64,
     uncoord: Aggregates,
     coord: Aggregates,
@@ -102,267 +57,6 @@ fn pad_start(s: &str, width: usize) -> String {
     }
 }
 
-// =============================================================================
-// PORT NOTE: minimal stand-in elevator engine (see module docs).
-// =============================================================================
-
-/// `buildSchedule(cfg)` — Poisson hall-call arrivals over `[0, simT]`.
-fn build_schedule(cfg: &ElevatorConfig) -> Vec<Passenger> {
-    with_seed(cfg.seed as u32, |rng| {
-        let mut passengers: Vec<Passenger> = Vec::new();
-        let mut t = 0.0_f64;
-        let n = cfg.n_floors.max(2);
-        loop {
-            let u = rng.next_float().max(1e-12);
-            t += -(1.0 - u).ln() / cfg.arrival_rate.max(1e-9);
-            if t >= cfg.sim_t {
-                break;
-            }
-            let from = (rng.next_float() * n as f64).floor() as i64;
-            let mut to = (rng.next_float() * n as f64).floor() as i64;
-            if to == from {
-                to = (to + 1) % n;
-            }
-            passengers.push(Passenger {
-                arrival: t,
-                from,
-                to,
-                board: None,
-                exit: None,
-            });
-        }
-        passengers
-    })
-}
-
-struct Elevator {
-    pos: f64,
-    dwell: f64,
-    target: Option<i64>,
-    onboard: Vec<usize>,
-}
-
-/// `runElevator(cfg, schedule)` → wait/total aggregates.
-fn run_elevator(cfg: &ElevatorConfig, mode: DispatchMode, schedule: &[Passenger]) -> Aggregates {
-    let mut passengers: Vec<Passenger> = schedule.to_vec();
-    let dt = cfg.step_size.max(1e-3);
-    let mut elevators: Vec<Elevator> = (0..cfg.n_elevators.max(1))
-        .map(|_| Elevator {
-            pos: 0.0,
-            dwell: 0.0,
-            target: None,
-            onboard: Vec::new(),
-        })
-        .collect();
-    // Index of next arrival not yet released into the waiting pool.
-    let mut next_arrival = 0usize;
-    let mut waiting: Vec<usize> = Vec::new();
-    // Coordinated mode: which elevator claimed each waiting passenger.
-    let mut claimed_by: Vec<Option<usize>> = vec![None; passengers.len()];
-
-    let eps = 0.001_f64;
-    let mut t = 0.0_f64;
-    let arrival_order: Vec<usize> = {
-        let mut idx: Vec<usize> = (0..passengers.len()).collect();
-        idx.sort_by(|&a, &b| {
-            passengers[a]
-                .arrival
-                .partial_cmp(&passengers[b].arrival)
-                .unwrap()
-        });
-        idx
-    };
-
-    while t <= cfg.sim_t + dt {
-        // Release arrivals.
-        while next_arrival < arrival_order.len() {
-            let pid = arrival_order[next_arrival];
-            if passengers[pid].arrival <= t {
-                waiting.push(pid);
-                next_arrival += 1;
-            } else {
-                break;
-            }
-        }
-
-        // Coordinated dispatch: claim each unclaimed waiting call for the
-        // nearest elevator with spare capacity.
-        if mode == DispatchMode::Coordinated {
-            for &pid in &waiting {
-                if claimed_by[pid].is_some() {
-                    continue;
-                }
-                let from = passengers[pid].from as f64;
-                let mut best: Option<(usize, f64)> = None;
-                for (ei, e) in elevators.iter().enumerate() {
-                    let load = e.onboard.len() as i64
-                        + claimed_by.iter().filter(|c| **c == Some(ei)).count() as i64;
-                    if load >= cfg.capacity {
-                        continue;
-                    }
-                    let d = (e.pos - from).abs();
-                    if best.map(|(_, bd)| d < bd).unwrap_or(true) {
-                        best = Some((ei, d));
-                    }
-                }
-                if let Some((ei, _)) = best {
-                    claimed_by[pid] = Some(ei);
-                }
-            }
-        }
-
-        // Per-elevator move + service.
-        for ei in 0..elevators.len() {
-            if elevators[ei].dwell > 0.0 {
-                elevators[ei].dwell -= dt;
-                continue;
-            }
-            // Choose a target if none.
-            if elevators[ei].target.is_none() {
-                elevators[ei].target =
-                    choose_target(ei, mode, &elevators, &waiting, &claimed_by, &passengers);
-            }
-            let Some(target) = elevators[ei].target else {
-                continue;
-            };
-            // Move toward target.
-            let speed = dt / cfg.floor_travel_time.max(1e-9);
-            let diff = target as f64 - elevators[ei].pos;
-            if diff.abs() <= speed + eps {
-                elevators[ei].pos = target as f64;
-                service_stop(
-                    ei,
-                    cfg,
-                    mode,
-                    t,
-                    &mut elevators,
-                    &mut waiting,
-                    &mut claimed_by,
-                    &mut passengers,
-                );
-                elevators[ei].dwell = cfg.service_time;
-                elevators[ei].target = None;
-            } else {
-                elevators[ei].pos += speed * diff.signum();
-            }
-        }
-
-        t += dt;
-    }
-
-    aggregate(&passengers)
-}
-
-fn choose_target(
-    ei: usize,
-    mode: DispatchMode,
-    elevators: &[Elevator],
-    waiting: &[usize],
-    claimed_by: &[Option<usize>],
-    passengers: &[Passenger],
-) -> Option<i64> {
-    let pos = elevators[ei].pos;
-    let mut best: Option<(i64, f64)> = None;
-    let mut consider = |floor: i64| {
-        let d = (floor as f64 - pos).abs();
-        if best.map(|(_, bd)| d < bd).unwrap_or(true) {
-            best = Some((floor, d));
-        }
-    };
-    // Onboard destinations always count.
-    for &pid in &elevators[ei].onboard {
-        consider(passengers[pid].to);
-    }
-    // Pickups.
-    for &pid in waiting {
-        let eligible = match mode {
-            DispatchMode::Coordinated => claimed_by[pid] == Some(ei),
-            DispatchMode::Uncoordinated => true,
-        };
-        if eligible {
-            consider(passengers[pid].from);
-        }
-    }
-    best.map(|(f, _)| f)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn service_stop(
-    ei: usize,
-    cfg: &ElevatorConfig,
-    mode: DispatchMode,
-    t: f64,
-    elevators: &mut [Elevator],
-    waiting: &mut Vec<usize>,
-    claimed_by: &mut [Option<usize>],
-    passengers: &mut [Passenger],
-) {
-    let floor = elevators[ei].pos.round() as i64;
-    // Drop off onboard whose destination is this floor.
-    let mut still: Vec<usize> = Vec::new();
-    for &pid in &elevators[ei].onboard {
-        if passengers[pid].to == floor {
-            passengers[pid].exit = Some(t);
-        } else {
-            still.push(pid);
-        }
-    }
-    elevators[ei].onboard = still;
-    // Board waiting passengers at this floor (respecting capacity + claims).
-    let mut remaining: Vec<usize> = Vec::new();
-    for &pid in waiting.iter() {
-        let here = passengers[pid].from == floor;
-        let mine = match mode {
-            DispatchMode::Coordinated => claimed_by[pid] == Some(ei),
-            DispatchMode::Uncoordinated => true,
-        };
-        if here && mine && (elevators[ei].onboard.len() as i64) < cfg.capacity {
-            passengers[pid].board = Some(t);
-            elevators[ei].onboard.push(pid);
-            claimed_by[pid] = None;
-        } else {
-            remaining.push(pid);
-        }
-    }
-    *waiting = remaining;
-}
-
-fn aggregate(passengers: &[Passenger]) -> Aggregates {
-    let mut waits: Vec<f64> = Vec::new();
-    let mut totals: Vec<f64> = Vec::new();
-    for p in passengers {
-        if let Some(board) = p.board {
-            waits.push(board - p.arrival);
-        }
-        if let (Some(_), Some(exit)) = (p.board, p.exit) {
-            totals.push(exit - p.arrival);
-        }
-    }
-    Aggregates {
-        mean_wait: mean(&waits),
-        p95_wait: percentile(&waits, 0.95),
-        mean_total: mean(&totals),
-    }
-}
-
-fn mean(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        0.0
-    } else {
-        xs.iter().sum::<f64>() / xs.len() as f64
-    }
-}
-
-fn percentile(xs: &[f64], q: f64) -> f64 {
-    if xs.is_empty() {
-        return 0.0;
-    }
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let idx = ((q * (v.len() as f64 - 1.0)).round() as usize).min(v.len() - 1);
-    v[idx]
-}
-
 fn jn(v: f64) -> JsonValue {
     JsonValue::Number(v)
 }
@@ -379,7 +73,7 @@ fn agg_json(a: &Aggregates) -> JsonValue {
 pub fn run() {
     let seeds = parse_list(std::env::var("SEEDS").ok(), &[1.0, 2.0, 3.0, 4.0, 5.0])
         .into_iter()
-        .map(|x| x as u64)
+        .map(|x| x as u32)
         .collect::<Vec<_>>();
     let lambdas = parse_list(std::env::var("LAMBDAS").ok(), &[0.2, 0.4]);
     let sim_t: f64 = std::env::var("SIM_T")
@@ -424,15 +118,20 @@ pub fn run() {
                 sim_t,
                 step_size: 0.5,
                 seed,
+                dispatch_mode: String::new(),
             };
             let schedule = build_schedule(&base);
-            let u = run_elevator(&base, DispatchMode::Uncoordinated, &schedule);
-            let c = run_elevator(&base, DispatchMode::Coordinated, &schedule);
+            let mut uncoord_cfg = base.clone();
+            uncoord_cfg.dispatch_mode = "uncoordinated".to_string();
+            let mut coord_cfg = base;
+            coord_cfg.dispatch_mode = "coordinated".to_string();
+            let u = run_elevator(uncoord_cfg, schedule.clone()).aggregates;
+            let c = run_elevator(coord_cfg, schedule).aggregates;
             trials.push(TrialAggregate {
                 seed,
                 lambda,
-                uncoord: u,
-                coord: c,
+                uncoord: u.clone(),
+                coord: c.clone(),
             });
 
             let mw = format!(

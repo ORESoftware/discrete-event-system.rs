@@ -5,62 +5,39 @@
 //! reproducibility, monotone best-history and stall-limit early stop.
 //! Driver → [`run`].
 //!
-//! PORT NOTES — wire to the already-ported real modules (present):
-//!   * `crate::des::general::simulated_annealing::{run_simulated_annealing,
-//!     build_tsp_sa_problem, build_knapsack_sa_problem, temperature_at,
-//!     CoolingSchedule, SASolverOptions, SAResult}`.
-//!   * `crate::des::general::genetic_tsp::{build_pentagon_tsp, build_random_tsp,
-//!     tour_length, held_karp_exact}`.
-//!   * `crate::des::general::milp_bnb::{solve_milp, build_knapsack_milp}`.
-//! `temperature_at` is implemented faithfully (the validator tests it directly);
-//! the SA / MILP kernels are stubbed with matching signatures.
+//! PORT NOTES:
+//!   * Uses the real Rust simulated-annealing, TSP, and MILP-B&B modules.
 
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
+#![allow(dead_code)]
 
-// =============================================================================
-// Cooling schedule — ported faithfully (Study 4 tests it directly).
-// =============================================================================
+use std::rc::Rc;
 
-#[derive(Clone, Copy, Debug)]
-enum Cooling {
-    Geometric {
-        t0: f64,
-        alpha: f64,
-        tmin: Option<f64>,
-    },
-    Linear {
-        t0: f64,
-        rate: f64,
-    },
-    Logarithmic {
-        t0: f64,
-    },
+use crate::des::general::genetic_tsp::{
+    build_pentagon_tsp as build_pentagon_tsp_model, build_random_tsp as build_random_tsp_model,
+    held_karp_exact as held_karp_exact_model, tour_length as tour_length_model, HeldKarpResult,
+    TSPInstance, Tour,
+};
+use crate::des::general::milp_bnb::{
+    build_knapsack_milp as build_knapsack_milp_model, solve_milp as solve_milp_model, MILPProblem,
+    MILPSolution, MILPSolveOptions,
+};
+use crate::des::general::simulated_annealing::{
+    build_knapsack_sa_problem as build_knapsack_sa_problem_model,
+    build_tsp_sa_problem as build_tsp_sa_problem_model,
+    run_simulated_annealing as run_simulated_annealing_model,
+    temperature_at as temperature_at_model, CoolingSchedule, KnapsackInstance, KnapsackSaProblem,
+    SASolverOptions, TSPSAProblemOptions, TspSaProblem,
+};
+
+type Cooling = CoolingSchedule;
+type TspInstance = TSPInstance;
+type MilpProblem = MILPProblem;
+type MilpResult = MILPSolution;
+
+enum SaProblem {
+    Tsp(TspSaProblem),
+    Knapsack(KnapsackSaProblem),
 }
-
-fn temperature_at(s: &Cooling, k: usize) -> f64 {
-    match *s {
-        Cooling::Geometric { t0, alpha, tmin } => {
-            let t = t0 * alpha.powi(k as i32);
-            f64::max(tmin.unwrap_or(0.0), t)
-        }
-        Cooling::Linear { t0, rate } => f64::max(0.0, t0 - rate * k as f64),
-        Cooling::Logarithmic { t0 } => t0 / (1.0 + (1.0 + k as f64).ln()),
-    }
-}
-
-// =============================================================================
-// Stubbed SA / TSP / MILP kernels (mirror real signatures).
-// =============================================================================
-
-#[derive(Clone, Debug, Default)]
-struct TspInstance {
-    n: usize,
-}
-
-/// Opaque SA problem (PORT NOTE: `simulated_annealing::{TspSaProblem,
-/// KnapsackSaProblem}` implementing the `SAProblem<S>` trait).
-#[derive(Clone, Debug, Default)]
-struct SaProblem;
 
 #[derive(Clone, Debug, Default)]
 struct SaResult {
@@ -81,58 +58,85 @@ struct SaOpts {
 }
 
 fn build_tsp_sa_problem(_inst: &TspInstance) -> SaProblem {
-    SaProblem
+    SaProblem::Tsp(build_tsp_sa_problem_model(
+        _inst.clone(),
+        TSPSAProblemOptions::default(),
+    ))
 }
 
-fn build_knapsack_sa_problem(_values: &[f64], _weights: &[f64], _capacity: f64) -> SaProblem {
-    SaProblem
+fn build_knapsack_sa_problem(values: &[f64], weights: &[f64], capacity: f64) -> SaProblem {
+    SaProblem::Knapsack(build_knapsack_sa_problem_model(
+        KnapsackInstance {
+            values: values.to_vec(),
+            weights: weights.to_vec(),
+            capacity,
+        },
+        1e6,
+    ))
 }
 
-fn run_simulated_annealing(_problem: SaProblem, opts: &SaOpts) -> SaResult {
-    // PORT NOTE: real Metropolis loop with seeded RNG. Stub returns a flat,
-    // zero trajectory sized to `max_iterations` so history indexing is sound.
-    let len = opts.max_iterations.max(1);
-    SaResult {
-        best_cost: 0.0,
-        iterations: opts.max_iterations,
-        accepted_count: 0,
-        improve_count: 0,
-        best_history: vec![0.0; len],
-        final_cost: 0.0,
+fn sa_options(opts: &SaOpts) -> SASolverOptions {
+    SASolverOptions {
+        max_iterations: opts.max_iterations,
+        cooling: opts.cooling,
+        seed: Some(opts.seed as u32),
+        stall_limit: opts.stall_limit,
+        verbose: None,
+        record_trace: None,
+        trace_stride: None,
     }
 }
 
-fn build_pentagon_tsp(n: usize, _radius: f64) -> TspInstance {
-    TspInstance { n }
-}
-fn build_random_tsp(n: usize, _seed: u32) -> TspInstance {
-    TspInstance { n }
-}
-fn tour_length(_inst: &TspInstance, _tour: &[usize]) -> f64 {
-    0.0
+fn run_simulated_annealing(problem: SaProblem, opts: &SaOpts) -> SaResult {
+    match problem {
+        SaProblem::Tsp(problem) => {
+            let result = run_simulated_annealing_model::<Tour>(Rc::new(problem), sa_options(opts));
+            SaResult {
+                best_cost: result.best_cost,
+                iterations: result.iterations,
+                accepted_count: result.accepted_count,
+                improve_count: result.improve_count,
+                best_history: result.best_history,
+                final_cost: result.final_cost,
+            }
+        }
+        SaProblem::Knapsack(problem) => {
+            let result =
+                run_simulated_annealing_model::<Vec<f64>>(Rc::new(problem), sa_options(opts));
+            SaResult {
+                best_cost: result.best_cost,
+                iterations: result.iterations,
+                accepted_count: result.accepted_count,
+                improve_count: result.improve_count,
+                best_history: result.best_history,
+                final_cost: result.final_cost,
+            }
+        }
+    }
 }
 
-#[derive(Clone, Debug, Default)]
-struct HeldKarpResult {
-    length: f64,
+fn build_pentagon_tsp(n: usize, radius: f64) -> TspInstance {
+    build_pentagon_tsp_model(n, radius)
 }
-fn held_karp_exact(_inst: &TspInstance) -> HeldKarpResult {
-    HeldKarpResult { length: 0.0 }
+fn build_random_tsp(n: usize, seed: u32) -> TspInstance {
+    build_random_tsp_model(n, seed, None)
+}
+fn tour_length(inst: &TspInstance, tour: &[usize]) -> f64 {
+    tour_length_model(inst, tour)
+}
+fn held_karp_exact(inst: &TspInstance) -> HeldKarpResult {
+    held_karp_exact_model(inst)
 }
 
-#[derive(Clone, Debug, Default)]
-struct MilpProblem {
-    c: Vec<f64>,
+fn temperature_at(s: &Cooling, k: usize) -> f64 {
+    temperature_at_model(s, k)
 }
-#[derive(Clone, Debug, Default)]
-struct MilpResult {
-    z: f64,
+
+fn build_knapsack_milp(values: &[f64], weights: &[f64], capacity: f64) -> MilpProblem {
+    build_knapsack_milp_model(values.to_vec(), weights.to_vec(), capacity)
 }
-fn build_knapsack_milp(values: &[f64], _weights: &[f64], _capacity: f64) -> MilpProblem {
-    MilpProblem { c: values.to_vec() }
-}
-fn solve_milp(_milp: &MilpProblem) -> MilpResult {
-    MilpResult { z: 0.0 }
+fn solve_milp(milp: &MilpProblem) -> MilpResult {
+    solve_milp_model(milp, MILPSolveOptions::default())
 }
 
 // =============================================================================
@@ -188,7 +192,7 @@ pub fn run() {
                     cooling: Cooling::Geometric {
                         t0: 50.0,
                         alpha: 0.998,
-                        tmin: None,
+                        t_min: None,
                     },
                     seed,
                     stall_limit: None,
@@ -215,7 +219,7 @@ pub fn run() {
                         cooling: Cooling::Geometric {
                             t0: 50.0,
                             alpha: 0.9995,
-                            tmin: None,
+                            t_min: None,
                         },
                         seed: 1,
                         stall_limit: None,
@@ -255,7 +259,7 @@ pub fn run() {
                     cooling: Cooling::Geometric {
                         t0: 50.0,
                         alpha: 0.999,
-                        tmin: None,
+                        t_min: None,
                     },
                     seed: trial,
                     stall_limit: None,
@@ -280,13 +284,17 @@ pub fn run() {
         let geom = Cooling::Geometric {
             t0: 100.0,
             alpha: 0.99,
-            tmin: None,
+            t_min: None,
         };
         let lin = Cooling::Linear {
             t0: 100.0,
             rate: 1.0,
+            t_min: None,
         };
-        let log = Cooling::Logarithmic { t0: 100.0 };
+        let log = Cooling::Logarithmic {
+            t0: 100.0,
+            t_min: None,
+        };
         let (mut geo_mono, mut lin_mono, mut log_mono) = (true, true, true);
         let (mut prev_g, mut prev_l, mut prev_lg) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
         for k in 0..200 {
@@ -321,7 +329,7 @@ pub fn run() {
             &Cooling::Geometric {
                 t0: 100.0,
                 alpha: 0.5,
-                tmin: Some(0.01),
+                t_min: Some(0.01),
             },
             1000,
         );
@@ -334,7 +342,7 @@ pub fn run() {
             &Cooling::Geometric {
                 t0: 50.0,
                 alpha: 0.99,
-                tmin: None,
+                t_min: None,
             },
             0,
         );
@@ -342,6 +350,7 @@ pub fn run() {
             &Cooling::Linear {
                 t0: 50.0,
                 rate: 1.0,
+                t_min: None,
             },
             0,
         );
@@ -359,7 +368,7 @@ pub fn run() {
                 cooling: Cooling::Geometric {
                     t0: 50.0,
                     alpha: 0.99,
-                    tmin: None,
+                    t_min: None,
                 },
                 seed: 42,
                 stall_limit: None,
@@ -372,7 +381,7 @@ pub fn run() {
                 cooling: Cooling::Geometric {
                     t0: 50.0,
                     alpha: 0.99,
-                    tmin: None,
+                    t_min: None,
                 },
                 seed: 42,
                 stall_limit: None,
@@ -400,7 +409,7 @@ pub fn run() {
                 cooling: Cooling::Geometric {
                     t0: 50.0,
                     alpha: 0.99,
-                    tmin: None,
+                    t_min: None,
                 },
                 seed: 99,
                 stall_limit: None,
@@ -424,7 +433,7 @@ pub fn run() {
                 cooling: Cooling::Geometric {
                     t0: 50.0,
                     alpha: 0.999,
-                    tmin: None,
+                    t_min: None,
                 },
                 seed: 1,
                 stall_limit: None,
@@ -450,7 +459,7 @@ pub fn run() {
                 cooling: Cooling::Geometric {
                     t0: 1000.0,
                     alpha: 1.0,
-                    tmin: None,
+                    t_min: None,
                 },
                 seed: 1,
                 stall_limit: None,
@@ -463,7 +472,7 @@ pub fn run() {
                 cooling: Cooling::Geometric {
                     t0: 1e-12,
                     alpha: 1.0,
-                    tmin: None,
+                    t_min: None,
                 },
                 seed: 1,
                 stall_limit: None,
@@ -505,7 +514,7 @@ pub fn run() {
                 cooling: Cooling::Geometric {
                     t0: 0.001,
                     alpha: 1.0,
-                    tmin: None,
+                    t_min: None,
                 },
                 seed: 1,
                 stall_limit: Some(50),

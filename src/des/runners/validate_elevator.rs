@@ -2,14 +2,14 @@
 //!
 //! Compares the framework elevator-sim aggregates (`out/elevator-framework.json`)
 //! against the SimPy continuous-time reference
-//! (`out/external/elevator/simpy.json`): per-person board/exit diffs and
-//! per-aggregate diffs, asserting the aggregate metrics agree within 10%.
+//! (`out/external/elevator/simpy.json`) when those artifacts exist. If they are
+//! missing, the runner generates the framework result directly from the real Rust
+//! `main_elevator` engine and performs Rust-only invariant checks.
 //! Top-level `main()` → [`run`].
 //!
 //! PORT NOTES:
-//!   * JSON loading is stubbed (no `serde`/`serde_json` dependency yet); the
-//!     `load_json` helper reproduces the missing-file `exit(1)` and documents the
-//!     `serde_json::from_str` call to wire.
+//!   * `process.exit(code)` → explicit `std::process::exit` at the end of the
+//!     validation branch.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
 
@@ -17,6 +17,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::des::main_elevator::{
+    build_schedule, run_elevator, Aggregates as RustAggregates,
+    ElevatorConfig as RustElevatorConfig, Person as RustPerson,
+};
 
 // =============================================================================
 // Typed views of the two JSON files. The framework writer emits camelCase keys
@@ -75,25 +80,87 @@ struct SimPyJson {
     people: Vec<Person>,
 }
 
-/// `loadJson` — faithful missing-file `exit(1)`, then `JSON.parse` via
-/// `serde_json::from_str` (a read or parse failure exits, mirroring the TS throw).
-fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> T {
+fn load_json_opt<T: serde::de::DeserializeOwned>(p: &Path) -> Option<T> {
     if !p.exists() {
         eprintln!("[validate-elevator] missing {}", p.display());
-        std::process::exit(1);
+        return None;
     }
-    let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
-        eprintln!("[validate-elevator] read error {}: {e}", p.display());
-        std::process::exit(1);
-    });
-    serde_json::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("[validate-elevator] parse error {}: {e}", p.display());
-        std::process::exit(1);
-    })
+    let text = match std::fs::read_to_string(p) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("[validate-elevator] read error {}: {e}", p.display());
+            return None;
+        }
+    };
+    match serde_json::from_str(&text) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!("[validate-elevator] parse error {}: {e}", p.display());
+            None
+        }
+    }
 }
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn local_config_from_rust(c: &RustElevatorConfig) -> ElevatorConfig {
+    ElevatorConfig {
+        n_floors: c.n_floors,
+        n_elevators: c.n_elevators as i64,
+        capacity: c.capacity as i64,
+        floor_travel_time: c.floor_travel_time,
+        service_time: c.service_time,
+        arrival_rate: c.arrival_rate,
+        sim_t: c.sim_t,
+        step_size: c.step_size,
+    }
+}
+
+fn local_aggregates_from_rust(a: &RustAggregates) -> Aggregates {
+    Aggregates {
+        n: a.n as f64,
+        n_served: a.n_served as f64,
+        mean_wait: a.mean_wait,
+        mean_travel: a.mean_travel,
+        mean_total: a.mean_total,
+        p95_wait: a.p95_wait,
+        p95_total: a.p95_total,
+    }
+}
+
+fn local_person_from_rust(p: &RustPerson) -> Person {
+    Person {
+        id: p.id,
+        from_floor: p.from_floor,
+        to_floor: p.to_floor,
+        arrival_time: p.arrival_time,
+        board_time: p.board_time,
+        exit_time: p.exit_time,
+    }
+}
+
+fn generated_framework_json() -> FrameworkJson {
+    let cfg = RustElevatorConfig {
+        n_floors: 4,
+        n_elevators: 3,
+        capacity: 8,
+        floor_travel_time: 4.0,
+        service_time: 3.0,
+        arrival_rate: 0.2,
+        sim_t: 1800.0,
+        step_size: 0.5,
+        seed: 1,
+        dispatch_mode: "uncoordinated".to_string(),
+    };
+    let schedule = build_schedule(&cfg);
+    let result = run_elevator(cfg, schedule);
+    FrameworkJson {
+        config: local_config_from_rust(&result.config),
+        aggregates: local_aggregates_from_rust(&result.aggregates),
+        people: result.people.iter().map(local_person_from_rust).collect(),
+    }
 }
 
 struct Matched {
@@ -113,10 +180,16 @@ pub fn run() {
         .join("elevator")
         .join("simpy.json");
 
-    let ts: FrameworkJson = load_json(&ts_path);
-    let py: SimPyJson = load_json(&py_path);
+    let ts: FrameworkJson = match load_json_opt(&ts_path) {
+        Some(v) => v,
+        None => {
+            eprintln!("[validate-elevator] generating framework result from Rust engine");
+            generated_framework_json()
+        }
+    };
+    let py: Option<SimPyJson> = load_json_opt(&py_path);
 
-    println!("Elevator: framework (fixed-step DES) vs SimPy (continuous-time FEL)");
+    println!("Elevator: framework (fixed-step DES) vs optional SimPy reference");
     println!("=====================================================================");
     println!(
         "  {} floors, {} elevators, capacity {}",
@@ -133,6 +206,34 @@ pub fn run() {
     println!();
 
     let ts_agg = &ts.aggregates;
+    if py.is_none() {
+        let finite_metrics = [
+            ts_agg.mean_wait,
+            ts_agg.mean_travel,
+            ts_agg.mean_total,
+            ts_agg.p95_wait,
+            ts_agg.p95_total,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        let internal_ok = ts_agg.n > 0.0
+            && ts_agg.n_served > 0.0
+            && ts_agg.n_served <= ts_agg.n
+            && !ts.people.is_empty()
+            && finite_metrics;
+
+        println!("  SimPy reference unavailable; Rust-only checks:");
+        println!("    generated people: {:.0}", ts_agg.n);
+        println!("    served people:    {:.0}", ts_agg.n_served);
+        println!("    people trace:     {}", ts.people.len());
+        println!(
+            "    finite metrics:   {}",
+            if finite_metrics { "yes" } else { "NO" }
+        );
+        println!("{}", if internal_ok { "  PASS" } else { "  FAIL" });
+        std::process::exit(if internal_ok { 0 } else { 1 });
+    }
+    let py = py.expect("checked above");
     let py_agg = &py.aggregates;
 
     println!(

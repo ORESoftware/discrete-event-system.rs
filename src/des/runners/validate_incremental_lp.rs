@@ -55,14 +55,12 @@ impl IncrementalLp {
 
     fn apply_event(&mut self, ev: LpEvent) {
         let real = match ev {
-            LpEvent::AddConstraint { coefs, rhs } => {
-                RealLpEvent::AddConstraint {
-                    tick: 0.0,
-                    coefs,
-                    rhs,
-                    name: None,
-                }
-            }
+            LpEvent::AddConstraint { coefs, rhs } => RealLpEvent::AddConstraint {
+                tick: 0.0,
+                coefs,
+                rhs,
+                name: None,
+            },
             LpEvent::RemoveConstraint { index } => RealLpEvent::RemoveConstraint {
                 tick: 0.0,
                 index,
@@ -121,26 +119,6 @@ fn incremental_init(state: State) -> IncrementalLPInit {
         con_names: None,
     }
 }
-                }
-                self.state.c.push(c_new);
-            }
-            LpEvent::RemoveVariable { struct_index } => {
-                for row in self.state.a.iter_mut() {
-                    row.remove(struct_index);
-                }
-                self.state.c.remove(struct_index);
-            }
-        }
-    }
-
-    fn get_x(&self) -> Vec<f64> {
-        vec![0.0; self.state.c.len()]
-    }
-
-    fn get_z(&self) -> f64 {
-        0.0
-    }
-}
 
 // =============================================================================
 // Driver helpers.
@@ -194,14 +172,15 @@ impl Checker {
 }
 
 fn solve_static(s: &State) -> (Vec<f64>, f64, String) {
-    let lp = LpProblem {
-        sense: s.sense,
+    let lp = LPProblem {
+        sense: static_sense(s.sense),
         c: s.c.clone(),
-        a_ub: s.a.iter().cloned().collect(),
-        b_ub: s.b.clone(),
+        a_ub: Some(s.a.clone()),
+        b_ub: Some(s.b.clone()),
+        ..Default::default()
     };
-    let sol = solve_lp_internal(&lp);
-    (sol.x, sol.objective, sol.status)
+    let sol = solve_lp_internal(&lp, &InternalSimplexOptions::default());
+    (sol.x, sol.objective, sol.status.as_str().to_string())
 }
 
 fn st(sense: &'static str, c: &[f64], a: &[&[f64]], b: &[f64]) -> State {

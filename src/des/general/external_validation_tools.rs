@@ -18,6 +18,10 @@ use crate::des::general::external_bin_packing_reference::{
     solve_bin_packing_with_external_reference, ExternalBinPackingReferenceOptions,
     ExternalBinPackingReferenceSolver, ExternalBinPackingReferenceStatus,
 };
+use crate::des::general::external_cp_sat_reference::{
+    solve_cp_sat_json_with_external_reference, ExternalCpSatReferenceOptions,
+    ExternalCpSatReferenceSolver, ExternalCpSatReferenceStatus,
+};
 use crate::des::general::external_facility_location_reference::{
     solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
     ExternalFacilityLocationReferenceSolver, ExternalFacilityLocationReferenceStatus,
@@ -7918,6 +7922,94 @@ fn model_validation_asp_reference(payload: &Value, tool: &str) -> Value {
     )
 }
 
+fn model_validation_cp_sat_source(payload: &Value) -> &Value {
+    [
+        "cp_sat_model",
+        "cpSatModel",
+        "cpsat_model",
+        "cpsatModel",
+        "cp_sat",
+        "cpSat",
+        "problem",
+    ]
+    .iter()
+    .find_map(|key| {
+        payload
+            .get(*key)
+            .filter(|value| value.as_object().is_some())
+    })
+    .or_else(|| {
+        payload
+            .get("model")
+            .filter(|value| value.as_object().is_some())
+    })
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_cp_sat_json_model(payload: &Value) -> bool {
+    let source = model_validation_cp_sat_source(payload);
+    source
+        .get("variables")
+        .and_then(Value::as_array)
+        .is_some_and(|variables| {
+            !variables.is_empty()
+                && variables
+                    .iter()
+                    .all(|variable| variable.get("domain").is_some())
+        })
+        && source.get("constraints").is_some_and(Value::is_array)
+}
+
+fn model_validation_cp_sat_reference(payload: &Value, tool: &str) -> Value {
+    let tool = if tool.is_empty() { "cp-sat" } else { tool };
+    let validator = format!("builtin:cp-sat-small-for-{tool}");
+    let run = solve_cp_sat_json_with_external_reference(
+        model_validation_cp_sat_source(payload),
+        &ExternalCpSatReferenceOptions {
+            solver: ExternalCpSatReferenceSolver::RustEnumeration,
+            ..Default::default()
+        },
+    );
+    let (status, verdict) = match run.status {
+        ExternalCpSatReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalCpSatReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalCpSatReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalCpSatReferenceStatus::Exhausted
+        | ExternalCpSatReferenceStatus::Unavailable
+        | ExternalCpSatReferenceStatus::Unsupported => ("unavailable", "unknown"),
+        ExternalCpSatReferenceStatus::Invalid
+        | ExternalCpSatReferenceStatus::Failed
+        | ExternalCpSatReferenceStatus::Unknown => ("failed", "failure"),
+    };
+    let mut stdout = Vec::new();
+    if !run.assignment.is_empty() {
+        stdout.push(format!(
+            "assignment={}",
+            run.assignment
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if let Some(objective) = run.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(nodes) = run.nodes {
+        stdout.push(format!("nodes={nodes}"));
+    }
+    stdout.push(format!("backend={}", run.backend));
+    stdout.push(format!("solver={}", run.solver.as_arg()));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        run.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
 fn model_validation_payload_has_finite_domain_cp(payload: &Value) -> bool {
     payload.get("variables").is_some()
         || payload.get("domains").is_some()
@@ -13674,6 +13766,13 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "ortools-cp-sat",
         "fzn-cp-sat",
     ];
+    let cp_sat_tools = [
+        "cp-sat",
+        "cpsat",
+        "ortools-cp-sat",
+        "or-tools-cp-sat",
+        "fzn-cp-sat",
+    ];
     let smt_tools = [
         "z3",
         "cvc5",
@@ -14108,6 +14207,17 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         && model_validation_payload_has_scheduling_model(payload))
     {
         return model_validation_scheduling_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "cp-sat-validation"
+            | "cpsat-validation"
+            | "cp-sat-json-validation"
+            | "ortools-cp-sat-validation"
+    ) || (cp_sat_tools.contains(&tool.as_str())
+        && model_validation_payload_has_cp_sat_json_model(payload))
+    {
+        return model_validation_cp_sat_reference(payload, &tool);
     }
     if kind == "minizinc-validation" || minizinc_tools.contains(&tool.as_str()) {
         return model_validation_minizinc_reference(payload);
@@ -20508,6 +20618,53 @@ mod tests {
         assert_eq!(
             pycsp3["validator"].as_str(),
             Some("builtin:finite-domain-cp-for-pycsp3")
+        );
+    }
+
+    #[test]
+    fn cp_sat_json_adapters_use_rust_reference_fallbacks() {
+        let cp_sat = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "cp-sat-validation",
+                "variables": [
+                    {"name": "x", "domain": [0, 1]},
+                    {"name": "y", "domain": [0, 1]}
+                ],
+                "constraints": [
+                    {
+                        "kind": "linear",
+                        "terms": [
+                            {"var": 0, "coeff": 1},
+                            {"var": 1, "coeff": 1}
+                        ],
+                        "sense": "eq",
+                        "rhs": 1
+                    }
+                ],
+                "objective": {
+                    "sense": "min",
+                    "terms": [
+                        {"var": 0, "coeff": 1},
+                        {"var": 1, "coeff": 2}
+                    ]
+                }
+            }),
+            "ortools_cp_sat",
+        );
+        assert_eq!(cp_sat["status"].as_str(), Some("ok"));
+        assert_eq!(cp_sat["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            cp_sat["validator"].as_str(),
+            Some("builtin:cp-sat-small-for-ortools-cp-sat")
+        );
+        assert!(
+            cp_sat["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("assignment=1,0")
+                    && stdout.contains("objective=1.000")
+                    && stdout.contains("backend=rust:cp-native-enumeration")
+                    && stdout.contains("solver=rust-enumeration")
+            }),
+            "{cp_sat:?}"
         );
     }
 

@@ -211,6 +211,10 @@ const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
 const SOCCER_NEURAL_FEATURE_DIM: usize = 48;
+const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 36;
+const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 37;
+const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 40;
+const SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING: usize = 43;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
 const DEFAULT_SOCCER_NEURAL_TRAIN_EVERY_TICKS: usize = 4;
@@ -16847,7 +16851,7 @@ fn read_soccer_team_policy_artifact(path: &Path) -> Result<SoccerTeamPolicyArtif
 
 #[derive(Clone, Debug)]
 struct SoccerNeuralTrainingSample {
-    input: Vec<f64>,
+    input: [f64; SOCCER_NEURAL_FEATURE_DIM],
     target: f64,
     priority: f64,
 }
@@ -16861,7 +16865,7 @@ struct SoccerNeuralTrainingResult {
 
 enum SoccerNeuralLearningWorkerCommand {
     Train {
-        samples: Vec<SoccerNeuralTrainingSample>,
+        batches: Vec<Vec<SoccerNeuralTrainingSample>>,
         snapshot_after_train: bool,
     },
     Snapshot,
@@ -17152,10 +17156,7 @@ impl SoccerNeuralLearner {
                     for batch in samples.chunks(batch_size).take(max_batches) {
                         let loss = network.train_batch_slices(
                             batch.iter().map(|sample| {
-                                (
-                                    sample.input.as_slice(),
-                                    std::slice::from_ref(&sample.target),
-                                )
+                                (&sample.input[..], std::slice::from_ref(&sample.target))
                             }),
                             learning_rate,
                         );
@@ -17170,27 +17171,32 @@ impl SoccerNeuralLearner {
             }
             SoccerNeuralLearningBackend::Threaded => {
                 if let Some(worker) = &self.worker {
-                    let batches = samples
-                        .chunks(batch_size)
-                        .take(max_batches)
-                        .collect::<Vec<_>>();
-                    let last_batch_idx = batches.len().saturating_sub(1);
-                    for (idx, batch) in batches.into_iter().enumerate() {
-                        match worker
-                            .sender
-                            .try_send(SoccerNeuralLearningWorkerCommand::Train {
-                                samples: batch.to_vec(),
-                                snapshot_after_train: idx == last_batch_idx,
-                            }) {
-                            Ok(()) => {
-                                self.stats.pending_batches =
-                                    self.stats.pending_batches.saturating_add(1);
-                            }
-                            Err(mpsc::TrySendError::Full(_))
-                            | Err(mpsc::TrySendError::Disconnected(_)) => {
-                                self.stats.dropped_batches =
-                                    self.stats.dropped_batches.saturating_add(1);
-                            }
+                    let batches =
+                        soccer_neural_samples_into_batches(samples, batch_size, max_batches);
+                    let pending_batches = batches.len();
+                    if pending_batches == 0 {
+                        return;
+                    }
+                    let pending_limit = config.sanitized_max_pending_batches();
+                    if self.stats.pending_batches.saturating_add(pending_batches) > pending_limit {
+                        self.stats.dropped_batches =
+                            self.stats.dropped_batches.saturating_add(pending_batches);
+                        return;
+                    }
+                    match worker
+                        .sender
+                        .try_send(SoccerNeuralLearningWorkerCommand::Train {
+                            batches,
+                            snapshot_after_train: true,
+                        }) {
+                        Ok(()) => {
+                            self.stats.pending_batches =
+                                self.stats.pending_batches.saturating_add(pending_batches);
+                        }
+                        Err(mpsc::TrySendError::Full(_))
+                        | Err(mpsc::TrySendError::Disconnected(_)) => {
+                            self.stats.dropped_batches =
+                                self.stats.dropped_batches.saturating_add(pending_batches);
                         }
                     }
                 }
@@ -17203,7 +17209,6 @@ impl SoccerNeuralLearner {
 fn soccer_neural_sample_is_valid(sample: &SoccerNeuralTrainingSample) -> bool {
     sample.target.is_finite()
         && sample.priority.is_finite()
-        && sample.input.len() == SOCCER_NEURAL_FEATURE_DIM
         && sample.input.iter().all(|value| value.is_finite())
 }
 
@@ -17215,6 +17220,31 @@ fn soccer_neural_priority_order(
         .priority
         .partial_cmp(&left.priority)
         .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+fn soccer_neural_samples_into_batches(
+    samples: Vec<SoccerNeuralTrainingSample>,
+    batch_size: usize,
+    max_batches: usize,
+) -> Vec<Vec<SoccerNeuralTrainingSample>> {
+    let batch_size = batch_size.max(1);
+    let max_batches = max_batches.max(1);
+    let mut batches = Vec::new();
+    let mut batch = Vec::with_capacity(batch_size);
+    for sample in samples {
+        batch.push(sample);
+        if batch.len() >= batch_size {
+            batches.push(batch);
+            if batches.len() >= max_batches {
+                return batches;
+            }
+            batch = Vec::with_capacity(batch_size);
+        }
+    }
+    if !batch.is_empty() && batches.len() < max_batches {
+        batches.push(batch);
+    }
+    batches
 }
 
 fn spawn_soccer_neural_learning_worker(
@@ -17229,29 +17259,30 @@ fn spawn_soccer_neural_learning_worker(
         while let Ok(command) = sample_rx.recv() {
             match command {
                 SoccerNeuralLearningWorkerCommand::Train {
-                    samples,
+                    batches,
                     snapshot_after_train,
                 } => {
-                    if samples.is_empty() {
-                        continue;
+                    let mut trained_any = false;
+                    for samples in batches {
+                        if samples.is_empty() {
+                            continue;
+                        }
+                        trained_any = true;
+                        let loss = network.train_batch_slices(
+                            samples.iter().map(|sample| {
+                                (&sample.input[..], std::slice::from_ref(&sample.target))
+                            }),
+                            learning_rate,
+                        );
+                        let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Trained(
+                            SoccerNeuralTrainingResult {
+                                samples: samples.len(),
+                                loss,
+                                parameter_count: network.num_parameters(),
+                            },
+                        ));
                     }
-                    let loss = network.train_batch_slices(
-                        samples.iter().map(|sample| {
-                            (
-                                sample.input.as_slice(),
-                                std::slice::from_ref(&sample.target),
-                            )
-                        }),
-                        learning_rate,
-                    );
-                    let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Trained(
-                        SoccerNeuralTrainingResult {
-                            samples: samples.len(),
-                            loss,
-                            parameter_count: network.num_parameters(),
-                        },
-                    ));
-                    if snapshot_after_train {
+                    if snapshot_after_train && trained_any {
                         let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Snapshot(
                             soccer_neural_network_snapshot(&network),
                         ));
@@ -17449,13 +17480,15 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
     )
 }
 
-fn soccer_neural_transition_features(transition: &SoccerLearningTransition) -> Vec<f64> {
+fn soccer_neural_transition_features(
+    transition: &SoccerLearningTransition,
+) -> [f64; SOCCER_NEURAL_FEATURE_DIM] {
     let state = SoccerQStateKey::from_transition(transition);
     let (action_attack, action_defense, action_support) =
         soccer_neural_action_family_features(&transition.action);
     let context = &transition.decision_context;
     let nearest_defender = context.nearest_defenders.first();
-    let features = vec![
+    let features = [
         soccer_neural_team_feature(transition.team),
         soccer_neural_role_feature(transition.role),
         soccer_neural_phase_feature(state.phase),
@@ -35184,6 +35217,25 @@ mod tests {
     }
 
     #[test]
+    fn neural_threaded_training_batches_samples_without_extra_queue_commands() {
+        let samples = (0..7)
+            .map(|idx| SoccerNeuralTrainingSample {
+                input: [idx as f64; SOCCER_NEURAL_FEATURE_DIM],
+                target: idx as f64,
+                priority: idx as f64,
+            })
+            .collect::<Vec<_>>();
+
+        let batches = soccer_neural_samples_into_batches(samples, 3, 2);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 3);
+        assert_eq!(batches[1].len(), 3);
+        assert_eq!(batches[0][0].target, 0.0);
+        assert_eq!(batches[1][2].target, 5.0);
+    }
+
+    #[test]
     fn neural_training_samples_clip_targets_and_rank_priority() {
         let sim = SoccerMatch::default_11v11(MatchConfig {
             neural_learning: SoccerNeuralLearningConfig {
@@ -35280,16 +35332,19 @@ mod tests {
 
         assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
         assert!(
-            features[36] > 0.40,
+            features[SOCCER_NEURAL_FEATURE_TARGET_DISTANCE] > 0.40,
             "target distance feature should be present"
         );
         assert!(
-            features[37] > 0.40,
+            features[SOCCER_NEURAL_FEATURE_TARGET_FORWARD] > 0.40,
             "target forward feature should be present"
         );
-        assert!(features[40] > 0.40, "ball speed feature should be present");
         assert!(
-            features[43] > 0.0,
+            features[SOCCER_NEURAL_FEATURE_BALL_SPEED] > 0.40,
+            "ball speed feature should be present"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING] > 0.0,
             "defender closing feature should be present"
         );
     }

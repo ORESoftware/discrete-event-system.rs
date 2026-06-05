@@ -20256,6 +20256,7 @@ impl SoccerStepResponse {
     fn compact_for_live_http(mut self) -> Self {
         compact_match_frame_for_live_http(&mut self.frame);
         self.frames.clear();
+        self.learning_transitions.clear();
         self
     }
 }
@@ -24681,6 +24682,17 @@ impl SoccerMatch {
         let central_brain = self.central_brain.to_snapshot(&snapshot, &self.officials);
         let home_brain = self.team_brain_snapshot(Team::Home, &central_brain);
         let away_brain = self.team_brain_snapshot(Team::Away, &central_brain);
+        let possession_team = central_brain
+            .possession_team
+            .or(self.ball.holder.and_then(|holder| {
+                self.players
+                    .iter()
+                    .find(|player| player.id == holder)
+                    .map(|player| player.team)
+            }))
+            .or(self.ball.last_touch_team);
+        let intents =
+            playback_intents_from_agents(&self.players, possession_team, self.ball.holder);
         let mut players = snapshot.players.clone();
         for player in &mut players {
             if include_learned_policy_traces {
@@ -24726,6 +24738,7 @@ impl SoccerMatch {
             away_brain,
             home_directive: self.central_brain.home_directive.clone(),
             away_directive: self.central_brain.away_directive.clone(),
+            intents,
         }
     }
 
@@ -53192,7 +53205,10 @@ mod tests {
             value["frames"].as_array().unwrap().is_empty(),
             "live HTTP step response should avoid duplicating the current frame"
         );
-        assert_eq!(value["learningTransitions"].as_array().unwrap().len(), 44);
+        assert!(
+            value["learningTransitions"].as_array().unwrap().is_empty(),
+            "live HTTP step response should rely on learning summaries instead of shipping every transition"
+        );
         assert!(value["recentMoments"].as_array().unwrap().is_empty());
         assert_eq!(value["momentStorage"]["storedRecords"], 0);
         assert_eq!(value["learning"]["totalTransitions"], 44);
@@ -53347,9 +53363,65 @@ mod tests {
         let agent_schedule = value["frame"]["agentSchedule"]
             .as_array()
             .expect("agent schedule array");
-        assert!(value["frame"]["players"][0]["lastDecision"]
-            .get("mdpState")
-            .is_some());
+        let frame_players = value["frame"]["players"]
+            .as_array()
+            .expect("frame players array");
+        let holder_id = value["frame"]["ball"]["holder"]
+            .as_u64()
+            .expect("live holder") as usize;
+        let holder_player = frame_players
+            .iter()
+            .find(|player| player["id"].as_u64() == Some(holder_id as u64))
+            .expect("holder player");
+        assert!(holder_player["lastDecision"].get("mdpState").is_some());
+        let holder_schedule_index = agent_schedule
+            .iter()
+            .position(|entry| {
+                entry["kind"] == "player" && entry["id"].as_u64() == Some(holder_id as u64)
+            })
+            .expect("holder schedule index");
+        assert_eq!(
+            holder_player["scheduledIndex"].as_u64(),
+            Some(holder_schedule_index as u64)
+        );
+        assert_eq!(
+            holder_player["lastDecision"]["scheduledIndex"].as_u64(),
+            Some(holder_schedule_index as u64)
+        );
+        let compacted_autonomous_non_holder = frame_players
+            .iter()
+            .find(|player| {
+                player["id"].as_u64() != Some(holder_id as u64)
+                    && player["controllerSlot"].is_null()
+            })
+            .expect("autonomous non-holder player");
+        assert!(
+            compacted_autonomous_non_holder["lastDecision"].is_null(),
+            "live HTTP frame should omit full decision traces for autonomous non-holders"
+        );
+        let full_decision_count = frame_players
+            .iter()
+            .filter(|player| player["lastDecision"].is_object())
+            .count();
+        let assigned_controller_count = value["controllerAssignments"]
+            .as_array()
+            .expect("controller assignments")
+            .len();
+        assert!(
+            full_decision_count <= 1 + assigned_controller_count,
+            "live HTTP frame should keep only holder and human controller decision traces"
+        );
+        let frame_intents = value["frame"]["intents"]
+            .as_array()
+            .expect("live compact tactical intents");
+        assert!(
+            !frame_intents.is_empty(),
+            "live HTTP frame should expose compact tactical intents for UI arrows"
+        );
+        let first_intent = frame_intents.first().expect("first compact intent");
+        assert!(first_intent["playerId"].is_u64());
+        assert!(first_intent["action"].is_string());
+        assert!(first_intent["targetPoint"].is_object());
         let player0_schedule_index = agent_schedule
             .iter()
             .position(|entry| {
@@ -53358,10 +53430,6 @@ mod tests {
             .expect("player 0 schedule index");
         assert_eq!(
             value["frame"]["players"][0]["scheduledIndex"].as_u64(),
-            Some(player0_schedule_index as u64)
-        );
-        assert_eq!(
-            value["frame"]["players"][0]["lastDecision"]["scheduledIndex"].as_u64(),
             Some(player0_schedule_index as u64)
         );
         assert!(value["frame"].get("homeDirective").is_some());

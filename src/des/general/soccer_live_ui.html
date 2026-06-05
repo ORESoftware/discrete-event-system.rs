@@ -991,6 +991,31 @@ function intentPriority(player, action, frame = state?.frame) {
 }
 function liveIntentCandidates(frame = state?.frame) {
   if (!Array.isArray(frame?.players)) return [];
+  if (Array.isArray(frame?.intents) && frame.intents.length) {
+    const playersById = new Map(frame.players.map(player => [player.id, player]));
+    return frame.intents
+      .map(intent => {
+        const player = playersById.get(intent.playerId);
+        const targetPoint = intent.targetPoint;
+        if (!player || !targetPoint) return null;
+        const action = normalizeUiActionLabel(intent.action);
+        if (!INTENT_TRACE_ACTIONS.has(action)) return null;
+        return {
+          player,
+          action,
+          targetPoint,
+          targetPlayer: intent.targetPlayer ?? null,
+          urgency: clamp(Number(intent.urgency ?? 0), 0, 1),
+          flight: String(intent.flight || "").toLowerCase() === "aerial"
+            ? "aerial"
+            : String(intent.flight || "").toLowerCase() === "floor" ? "floor" : null,
+          priority: intentPriority(player, action, frame) ?? 0
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.priority - a.priority || a.player.id - b.player.id)
+      .slice(0, 8);
+  }
   return frame.players
     .map(player => {
       const decision = player?.lastDecision;

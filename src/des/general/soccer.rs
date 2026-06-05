@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::des::general::general::fisher_yates_shuffle;
-use crate::des::general::neural_network::{ActivationName, FeedForwardNetwork, RandomNetworkSpec};
+use crate::des::general::neural_network::{
+    ActivationName, DenseLayerConfig, FeedForwardNetwork, RandomNetworkSpec,
+};
 use crate::des::general::prng::{mulberry32, SeededRandom};
 use crate::des::shared::capabilities::RandomSource;
 
@@ -18786,8 +18788,12 @@ struct SoccerNeuralLearner {
 
 impl SoccerNeuralLearner {
     fn new(config: &MatchConfig) -> Self {
+        let network = build_soccer_neural_network(&config.neural_learning, config.seed);
+        Self::from_network(config, network)
+    }
+
+    fn from_network(config: &MatchConfig, network: FeedForwardNetwork) -> Self {
         let neural_config = &config.neural_learning;
-        let network = build_soccer_neural_network(neural_config, config.seed);
         let parameter_count = network.num_parameters();
         let initial_snapshot = soccer_neural_network_snapshot(&network);
         let stats = SoccerNeuralLearningStatsState {
@@ -19229,6 +19235,16 @@ fn spawn_soccer_neural_learning_worker(
     }
 }
 
+fn soccer_neural_activation_from_label(label: &str) -> Result<ActivationName, String> {
+    match label.to_ascii_lowercase().as_str() {
+        "linear" => Ok(ActivationName::Linear),
+        "sigmoid" => Ok(ActivationName::Sigmoid),
+        "tanh" => Ok(ActivationName::Tanh),
+        "relu" => Ok(ActivationName::Relu),
+        _ => Err(format!("unsupported soccer neural activation {label:?}")),
+    }
+}
+
 fn build_soccer_neural_network(
     config: &SoccerNeuralLearningConfig,
     seed: u32,
@@ -19245,6 +19261,85 @@ fn build_soccer_neural_network(
         },
         &mut rng,
     )
+}
+
+fn build_soccer_neural_network_from_snapshot(
+    snapshot: &SoccerNeuralNetworkSnapshot,
+) -> Result<FeedForwardNetwork, String> {
+    if snapshot.input_dim != SOCCER_NEURAL_FEATURE_DIM {
+        return Err(format!(
+            "soccer neural snapshot input_dim {} does not match expected {}",
+            snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM
+        ));
+    }
+    if snapshot.output_dim != 1 {
+        return Err(format!(
+            "soccer neural snapshot output_dim {} does not match expected 1",
+            snapshot.output_dim
+        ));
+    }
+    if snapshot.layers.is_empty() {
+        return Err("soccer neural snapshot must contain at least one layer".to_string());
+    }
+
+    let mut expected_input_dim = snapshot.input_dim;
+    let mut layers = Vec::with_capacity(snapshot.layers.len());
+    for (layer_index, layer) in snapshot.layers.iter().enumerate() {
+        let output_dim = layer.biases.len();
+        if output_dim == 0 {
+            return Err(format!(
+                "soccer neural snapshot layer {layer_index} has no biases"
+            ));
+        }
+        if layer.weights.len() != output_dim {
+            return Err(format!(
+                "soccer neural snapshot layer {layer_index} has {} weight rows for {} biases",
+                layer.weights.len(),
+                output_dim
+            ));
+        }
+        for (row_index, row) in layer.weights.iter().enumerate() {
+            if row.len() != expected_input_dim {
+                return Err(format!(
+                    "soccer neural snapshot layer {layer_index} row {row_index} has input dim {}, expected {}",
+                    row.len(),
+                    expected_input_dim
+                ));
+            }
+            if row.iter().any(|value| !value.is_finite()) {
+                return Err(format!(
+                    "soccer neural snapshot layer {layer_index} row {row_index} has non-finite weights"
+                ));
+            }
+        }
+        if layer.biases.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "soccer neural snapshot layer {layer_index} has non-finite biases"
+            ));
+        }
+        layers.push(DenseLayerConfig {
+            weights: layer.weights.clone(),
+            biases: layer.biases.clone(),
+            activation: soccer_neural_activation_from_label(&layer.activation)?,
+        });
+        expected_input_dim = output_dim;
+    }
+    if expected_input_dim != snapshot.output_dim {
+        return Err(format!(
+            "soccer neural snapshot final layer output dim {expected_input_dim} does not match declared {}",
+            snapshot.output_dim
+        ));
+    }
+
+    let network = FeedForwardNetwork::new(layers);
+    if snapshot.parameter_count != 0 && snapshot.parameter_count != network.num_parameters() {
+        return Err(format!(
+            "soccer neural snapshot parameter_count {} does not match decoded {}",
+            snapshot.parameter_count,
+            network.num_parameters()
+        ));
+    }
+    Ok(network)
 }
 
 fn soccer_neural_activation_label(activation: ActivationName) -> &'static str {
@@ -19685,6 +19780,27 @@ impl SoccerMatch {
     pub fn with_team_policies(mut self, team_policies: SoccerTeamQPolicies) -> Self {
         self.team_policies = Some(team_policies);
         self
+    }
+
+    pub fn with_neural_network_snapshot(
+        mut self,
+        snapshot: SoccerNeuralNetworkSnapshot,
+    ) -> Result<Self, String> {
+        self.set_neural_network_snapshot(snapshot)?;
+        Ok(self)
+    }
+
+    pub fn set_neural_network_snapshot(
+        &mut self,
+        snapshot: SoccerNeuralNetworkSnapshot,
+    ) -> Result<(), String> {
+        if !self.config.learning_enabled || !self.config.neural_learning.enabled {
+            self.neural_learner = None;
+            return Ok(());
+        }
+        let network = build_soccer_neural_network_from_snapshot(&snapshot)?;
+        self.neural_learner = Some(SoccerNeuralLearner::from_network(&self.config, network));
+        Ok(())
     }
 
     pub fn set_team_policies(&mut self, team_policies: SoccerTeamQPolicies) {
@@ -38476,6 +38592,49 @@ mod tests {
             stats.home_policy_visits + stats.away_policy_visits,
             full.home_policy_visits + full.away_policy_visits
         );
+    }
+
+    #[test]
+    fn neural_learning_resumes_from_saved_snapshot_weights() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                train_every_ticks: 1,
+                batch_size: 4,
+                max_batches_per_tick: 1,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15076,
+            ..Default::default()
+        };
+        let mut snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        snapshot.layers[0].weights[0][0] = 0.314_159;
+        snapshot.layers[0].biases[0] = -0.271_828;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(snapshot.clone())
+            .expect("resume neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][0],
+            snapshot.layers[0].weights[0][0]
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].biases[0],
+            snapshot.layers[0].biases[0]
+        );
+        assert_eq!(resumed_snapshot.parameter_count, snapshot.parameter_count);
     }
 
     #[test]

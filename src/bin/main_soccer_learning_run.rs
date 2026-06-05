@@ -18,7 +18,8 @@ use des_engine::des::general::soccer::{
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
-    soccer_learning_run_score, soccer_policy_delta_entries, SoccerLearningCompletedGame,
+    evolve_soccer_team_policies, soccer_learning_run_score, soccer_policy_delta_entries,
+    SoccerEvolutionOptions, SoccerLearningCompletedGame,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -37,6 +38,9 @@ const DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS: bool = false;
 const DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT: bool = true;
 const DEFAULT_SOCCER_WRITE_EPISODE_LOG: bool = true;
 const DEFAULT_SOCCER_PRINT_COMPLETED_GAMES: bool = false;
+const DEFAULT_SOCCER_EVOLUTION_ENABLED: bool = true;
+const DEFAULT_SOCCER_EVOLUTION_INTERVAL_GAMES: usize = 10;
+const DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES: usize = 4;
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
@@ -124,6 +128,10 @@ fn default_postgres_policy_version_interval_games(parallel_games: usize) -> usiz
 
 fn default_postgres_completed_run_batch_games(parallel_games: usize) -> usize {
     parallel_games.max(DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES)
+}
+
+fn default_evolution_interval_games(parallel_games: usize) -> usize {
+    parallel_games.max(DEFAULT_SOCCER_EVOLUTION_INTERVAL_GAMES)
 }
 
 fn default_disk_learning_artifacts_enabled(postgres_configured: bool) -> bool {
@@ -560,6 +568,7 @@ struct SoccerLearningWorkerTask {
     episode: usize,
     config: MatchConfig,
     starting_policies: Arc<SoccerTeamQPolicies>,
+    initial_neural_network: Option<Arc<SoccerNeuralNetworkSnapshot>>,
     adversarial_moment_windows: Arc<Vec<SoccerMomentWindow>>,
     print_progress: bool,
     neural_drain_timeout: Duration,
@@ -601,6 +610,7 @@ impl SoccerLearningWorkerPool {
                         task.episode,
                         task.config,
                         task.starting_policies,
+                        task.initial_neural_network,
                         task.adversarial_moment_windows,
                         task.print_progress,
                         task.neural_drain_timeout,
@@ -686,6 +696,7 @@ struct PendingPostgresPolicyVersion {
     away_options: SoccerQPolicyOptions,
     policies: SoccerTeamQPolicies,
     fitness: f64,
+    neural_network: Option<SoccerNeuralNetworkSnapshot>,
 }
 
 struct PostgresCompletedRunBatch {
@@ -1112,6 +1123,7 @@ fn run_game(
     episode: usize,
     config: MatchConfig,
     starting_policies: Arc<SoccerTeamQPolicies>,
+    initial_neural_network: Option<Arc<SoccerNeuralNetworkSnapshot>>,
     adversarial_moment_windows: Arc<Vec<SoccerMomentWindow>>,
     print_progress: bool,
     neural_drain_timeout: Duration,
@@ -1123,6 +1135,9 @@ fn run_game(
     let progress_interval = (total_ticks / 9).max(1);
     let mut sim =
         SoccerMatch::default_11v11(config).with_team_policies((*starting_policies).clone());
+    if let Some(snapshot) = initial_neural_network.as_ref() {
+        sim.set_neural_network_snapshot((**snapshot).clone())?;
+    }
     for window in adversarial_moment_windows.iter() {
         sim.remember_adversarial_moment_window(window.clone());
     }
@@ -1242,7 +1257,7 @@ fn soccer_learning_completed_game_from_completed(
         policies: game.policies.clone(),
         score,
         delta,
-        neural_network: game.neural_network.clone(),
+        neural_network: None,
         elapsed_seconds: game.elapsed_seconds,
     }
 }
@@ -1262,7 +1277,7 @@ fn flush_postgres_completed_runs(
     let policy_versions_written = pending_policy_versions.len();
     for policy_version in pending_policy_versions.iter() {
         store
-            .insert_policy_version_with_id(
+            .insert_policy_version_with_id_and_neural_network(
                 &policy_version.id,
                 experiment_id,
                 policy_version.parent_policy_version_id.as_deref(),
@@ -1275,6 +1290,7 @@ fn flush_postgres_completed_runs(
                 policy_version.away_options.clone(),
                 &policy_version.policies,
                 policy_version.fitness,
+                policy_version.neural_network.as_ref(),
             )
             .map_err(invalid_data)?;
     }
@@ -1596,6 +1612,30 @@ fn run() -> Result<(), Box<dyn Error>> {
     let pg_completed_run_async_coalesce_wait = Duration::from_millis(
         pg_completed_run_async_coalesce_wait_ms.min(u64::MAX as usize) as u64,
     );
+    let evolution_enabled = env_bool("SOCCER_EVOLUTION_ENABLED", DEFAULT_SOCCER_EVOLUTION_ENABLED)?;
+    let evolution_interval_games = env_usize(
+        "SOCCER_EVOLUTION_INTERVAL_GAMES",
+        default_evolution_interval_games(parallel_games),
+    )?
+    .max(1);
+    let evolution_elite_games =
+        env_usize("SOCCER_EVOLUTION_ELITE_GAMES", DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES)?.max(1);
+    let default_evolution_options = SoccerEvolutionOptions::default();
+    let evolution_options = SoccerEvolutionOptions {
+        mutation_rate: env_f64(
+            "SOCCER_EVOLUTION_MUTATION_RATE",
+            default_evolution_options.mutation_rate,
+        )?,
+        mutation_scale: env_f64(
+            "SOCCER_EVOLUTION_MUTATION_SCALE",
+            default_evolution_options.mutation_scale,
+        )?,
+        elite_weight_floor: env_f64(
+            "SOCCER_EVOLUTION_ELITE_WEIGHT_FLOOR",
+            default_evolution_options.elite_weight_floor,
+        )?,
+        seed: env_u32("SOCCER_EVOLUTION_SEED", default_evolution_options.seed as u32)? as u64,
+    };
     let neural_drain_timeout_ms = env_usize(
         "SOCCER_NEURAL_DRAIN_TIMEOUT_MS",
         DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS,
@@ -1721,6 +1761,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_generation = 0i32;
     let mut pg_persisted_games = 0usize;
     let mut policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
+    let mut initial_neural_network = None::<SoccerNeuralNetworkSnapshot>;
     if let Some(store) = pg_store.as_mut() {
         let experiment_slug =
             env_value("SOCCER_EXPERIMENT_SLUG").unwrap_or_else(|| "soccer-self-play".to_string());
@@ -1735,10 +1776,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .map_err(invalid_data)?
             {
                 println!(
-                    "postgres_resume_policy experiment={} policy_version={} generation={}",
-                    experiment_slug, version.id, version.generation
+                    "postgres_resume_policy experiment={} policy_version={} generation={} neural_network={}",
+                    experiment_slug,
+                    version.id,
+                    version.generation,
+                    version.neural_network.is_some()
                 );
                 policies = version.policies;
+                initial_neural_network = version.neural_network;
                 pg_base_policy_version_id = Some(version.id.clone());
                 pg_last_policy_version_id = Some(version.id);
                 pg_generation = version.generation;
@@ -1834,6 +1879,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("manifest={}", manifest_path.display());
     println!("postgres_store_configured={postgres_store_configured}");
     println!("default_disk_learning_artifacts={default_disk_learning_artifacts}");
+    println!(
+        "evolution enabled={} interval_games={} elite_games={} mutation_rate={:.4} mutation_scale={:.4} elite_weight_floor={:.4} seed={}",
+        evolution_enabled,
+        evolution_interval_games,
+        evolution_elite_games,
+        evolution_options.mutation_rate,
+        evolution_options.mutation_scale,
+        evolution_options.elite_weight_floor,
+        evolution_options.seed
+    );
+    println!(
+        "postgres_resumed_neural_network={}",
+        initial_neural_network.is_some()
+    );
     if write_episode_log_file {
         println!("episode_log={}", episode_log_path.display());
     } else {
@@ -1913,7 +1972,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut total_interceptions = 0u32;
     let mut next_episode = 0usize;
     let mut last_checkpoint_episode = 0usize;
-    let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
+    let mut latest_neural_network = initial_neural_network.clone();
     let mut pg_policy_version_buffer = Vec::new();
     let mut pg_completed_buffer = Vec::new();
     let worker_pool = SoccerLearningWorkerPool::start(parallel_games);
@@ -1924,6 +1983,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         let batch_size = parallel_games.min(games - next_episode);
         let batch_start_episode = next_episode;
         let batch_start_policies = Arc::new(policies.clone());
+        let batch_start_neural_network = latest_neural_network.clone().map(Arc::new);
         let batch_adversarial_moment_windows = Arc::new(adversarial_moment_windows.clone());
         println!(
             "starting_batch episodes={}..{} parallel_games={}",
@@ -1940,6 +2000,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 episode,
                 config: episode_config,
                 starting_policies: Arc::clone(&batch_start_policies),
+                initial_neural_network: batch_start_neural_network.as_ref().map(Arc::clone),
                 adversarial_moment_windows: Arc::clone(&batch_adversarial_moment_windows),
                 print_progress,
                 neural_drain_timeout,
@@ -1955,8 +2016,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         let merge_deltas = completed_games.len() > 1;
         let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
-        for game in completed_games {
-            if let Some(snapshot) = game.neural_network.clone() {
+        for game in completed_games.iter_mut() {
+            if let Some(snapshot) = game.neural_network.take() {
                 latest_neural_network = Some(snapshot);
             }
             let completed_learning_game =
@@ -1995,6 +2056,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         away_options: options.clone(),
                         policies: policies.clone(),
                         fitness: completed_learning_game.score.match_fitness,
+                        neural_network: latest_neural_network.clone(),
                     });
                     pg_base_policy_version_id = Some(output_policy_version_id.clone());
                     pg_last_policy_version_id = Some(output_policy_version_id.clone());
@@ -2055,13 +2117,93 @@ fn run() -> Result<(), Box<dyn Error>> {
             if let Some(episode_log) = episode_log.as_mut() {
                 write_episode_log(episode_log, &game.episode_summary)?;
             }
-            episode_summaries.push(game.episode_summary);
+            episode_summaries.push(game.episode_summary.clone());
             if let Some(episode_log) = episode_log.as_mut() {
                 if episode_log_flush_interval_games > 0
                     && episode_summaries.len() % episode_log_flush_interval_games == 0
                 {
                     episode_log.flush()?;
                 }
+            }
+        }
+
+        let completed_after_batch = episode_summaries.len();
+        let should_evolve = evolution_enabled
+            && !completed_games.is_empty()
+            && (completed_after_batch >= games
+                || completed_after_batch % evolution_interval_games == 0);
+        if should_evolve {
+            let mut ranked_parents = completed_games
+                .iter()
+                .enumerate()
+                .map(|(idx, game)| {
+                    (
+                        idx,
+                        soccer_learning_run_score(&game.episode_summary.summary).match_fitness,
+                    )
+                })
+                .collect::<Vec<_>>();
+            ranked_parents.sort_by(|left, right| {
+                right
+                    .1
+                    .partial_cmp(&left.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let elite_count = evolution_elite_games.min(ranked_parents.len()).max(1);
+            let best_fitness = ranked_parents
+                .first()
+                .map(|(_, fitness)| *fitness)
+                .unwrap_or(0.0);
+            let mut parents = Vec::with_capacity(elite_count + 1);
+            parents.push((&policies, best_fitness));
+            for (game_index, fitness) in ranked_parents.iter().take(elite_count) {
+                parents.push((&completed_games[*game_index].policies, *fitness));
+            }
+            let mut batch_evolution_options = evolution_options;
+            batch_evolution_options.seed = batch_evolution_options
+                .seed
+                .wrapping_add(completed_after_batch as u64)
+                .wrapping_add((shard_index as u64) << 32);
+            policies = evolve_soccer_team_policies(&parents, batch_evolution_options)
+                .map_err(invalid_data)?;
+            println!(
+                "policy_evolved games_completed={} elite_games={} best_fitness={:.4} mutation_rate={:.4} mutation_scale={:.4}",
+                completed_after_batch,
+                elite_count,
+                best_fitness,
+                batch_evolution_options.mutation_rate,
+                batch_evolution_options.mutation_scale
+            );
+            let _ = std::io::stdout().flush();
+
+            if pg_experiment_id.is_some() {
+                let next_generation = pg_generation.saturating_add(1);
+                let output_policy_version_id = Uuid::new_v4().to_string();
+                let version_label = format!(
+                    "{}-mutation",
+                    soccer_learning_pg_version_label(
+                    &run_id,
+                    shard_index,
+                    completed_after_batch.saturating_sub(1),
+                    )
+                );
+                pg_policy_version_buffer.push(PendingPostgresPolicyVersion {
+                    id: output_policy_version_id.clone(),
+                    parent_policy_version_id: pg_base_policy_version_id.clone(),
+                    generation: next_generation,
+                    version_label,
+                    source_kind: "mutation",
+                    status: "active",
+                    config: config.clone(),
+                    home_options: options.clone(),
+                    away_options: options.clone(),
+                    policies: policies.clone(),
+                    fitness: best_fitness,
+                    neural_network: latest_neural_network.clone(),
+                });
+                pg_base_policy_version_id = Some(output_policy_version_id.clone());
+                pg_last_policy_version_id = Some(output_policy_version_id);
+                pg_generation = next_generation;
             }
         }
 

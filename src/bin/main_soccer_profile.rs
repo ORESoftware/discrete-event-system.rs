@@ -119,7 +119,9 @@ fn main() {
             "fieldPlayerDecisionMs={:.3} fieldIntentMs={:.3} fieldOfficialMs={:.3} ",
             "fieldBallMs={:.3} playerPossessionMs={:.3} playerSupportMs={:.3} ",
             "playerDefenseMs={:.3} playerLooseMs={:.3} phaseLearningMs={:.3} ",
-            "phaseLearningPct={:.2} ",
+            "phaseLearningPct={:.2} learningDefenseMs={:.3} learningTransitionsMs={:.3} ",
+            "recentLearningMs={:.3} neuralSamplesMs={:.3} policyTrainMs={:.3} ",
+            "learningLogMs={:.3} fullGameLearningMs={:.3} ",
             "maxStepMs={:.3}"
         ),
         cfg.mode.as_str(),
@@ -149,6 +151,13 @@ fn main() {
         result.timing.field_player_loose_decision_ms,
         result.timing.learning_ms(),
         result.timing.learning_pct(),
+        result.timing.learning_defense_ms,
+        result.timing.learning_transitions_ms,
+        result.timing.recent_learning_ms,
+        result.timing.neural_samples_ms,
+        result.timing.policy_train_ms,
+        result.timing.learning_log_ms,
+        result.timing.full_game_learning_ms,
         result.timing.max_step_ms,
     );
 }

@@ -147,6 +147,9 @@ fn optional_numbers(value: Option<&Value>, name: &str) -> Result<Vec<f64>, CliEr
     let Some(value) = value else {
         return Ok(Vec::new());
     };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
     value
         .as_array()
         .ok_or_else(|| CliError(format!("{name} must be a list")))?
@@ -169,6 +172,9 @@ fn matrix(
     let Some(value) = value else {
         return Ok(Vec::new());
     };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
     let rows = value
         .as_array()
         .ok_or_else(|| CliError(format!("{name} must be a list of rows")))?;
@@ -212,6 +218,9 @@ fn optional_bounds(
     let Some(value) = value else {
         return Ok(default.map(|item| vec![item; n]));
     };
+    if value.is_null() {
+        return Ok(default.map(|item| vec![item; n]));
+    }
     let items = value
         .as_array()
         .ok_or_else(|| CliError(format!("{name} must be a list")))?;
@@ -233,6 +242,9 @@ fn bools(value: Option<&Value>, name: &str) -> Result<Vec<bool>, CliError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
     value
         .as_array()
         .ok_or_else(|| CliError(format!("{name} must be a list")))?
@@ -250,6 +262,9 @@ fn string_list(value: Option<&Value>, name: &str) -> Result<Option<Vec<String>>,
     let Some(value) = value else {
         return Ok(None);
     };
+    if value.is_null() {
+        return Ok(None);
+    }
     let items = value
         .as_array()
         .ok_or_else(|| CliError(format!("{name} must be a list")))?;
@@ -578,6 +593,29 @@ mod tests {
     }
 
     #[test]
+    fn rust_qp_cli_treats_null_optional_blocks_as_empty() {
+        let output = run(
+            vec!["qp_reference".to_string(), "--solver=fallback".to_string()],
+            r#"{
+                "Q": [[2.0, 0.5], [0.5, 2.0]],
+                "c": [-5.0, -6.0],
+                "A_ub": [[1.0, 1.0]],
+                "b_ub": [3.0],
+                "A_eq": null,
+                "b_eq": null,
+                "lb": [0.0, 0.0],
+                "ub": [4.0, 4.0],
+                "var_names": null
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(output["solver"], "rust:qp-active-set");
+        assert_eq!(output["x"].as_array().expect("x").len(), 2);
+    }
+
+    #[test]
     fn rust_miqp_cli_enumerates_integer_domain() {
         let output = run(
             vec![
@@ -599,6 +637,31 @@ mod tests {
         let output = run(
             vec!["qp_reference".to_string(), "--solver=fallback".to_string()],
             SOCP_SAMPLE,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(output["solver"], "rust:socp-pattern-search");
+        assert_eq!(output["x"].as_array().expect("x").len(), 2);
+    }
+
+    #[test]
+    fn rust_socp_cli_treats_null_optional_blocks_as_empty() {
+        let output = run(
+            vec!["qp_reference".to_string(), "--solver=fallback".to_string()],
+            r#"{
+                "c": [1.0, 0.0],
+                "A_ub": null,
+                "b_ub": null,
+                "A_eq": null,
+                "b_eq": null,
+                "lb": [-2.0, -2.0],
+                "ub": [2.0, 2.0],
+                "cones": [
+                    {"A": [[1.0, 0.0], [0.0, 1.0]], "b": [0.0, 0.0], "c": [0.0, 0.0], "d": 1.0}
+                ],
+                "var_names": null
+            }"#,
         )
         .expect("run");
 

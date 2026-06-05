@@ -286,6 +286,8 @@
         <button id="step">Step</button>
         <button id="resetMatch">New Match</button>
         <button id="exportPolicy">Export Policy</button>
+        <button id="exportPostgresPolicy">Export PG Tip</button>
+        <button id="exportPostgresPolicyJsonl">Export PG JSONL</button>
         <button id="importPolicy">Import Policy</button>
         <button id="savePolicy">Save Policy</button>
         <button id="loadPolicy">Load Policy</button>
@@ -581,6 +583,8 @@ const statusEl = document.getElementById("status");
 const runButton = document.getElementById("run");
 const resetMatchButton = document.getElementById("resetMatch");
 const exportPolicyButton = document.getElementById("exportPolicy");
+const exportPostgresPolicyButton = document.getElementById("exportPostgresPolicy");
+const exportPostgresPolicyJsonlButton = document.getElementById("exportPostgresPolicyJsonl");
 const importPolicyButton = document.getElementById("importPolicy");
 const replayMomentsButton = document.getElementById("replayMoments");
 const savePolicyButton = document.getElementById("savePolicy");
@@ -597,7 +601,7 @@ const episodes = document.getElementById("episodes");
 const policyHistory = document.getElementById("policyHistory");
 const keys = new Set();
 let state = null;
-let running = true;
+let running = false;
 let activeSlot = 0;
 let inputSeq = 0;
 let queuedInputs = [];
@@ -1076,7 +1080,11 @@ function policyStorageLabel(storage = state?.policyStorage) {
     : storage.actionProbabilitiesDerived
       ? "prob derived"
       : "prob off";
-  const pg = storage.postgresEnabled ? "PG" : "no PG";
+  const contract = storage.postgresContract || {};
+  const retention = String(contract.retentionModel || "").includes("branch-tip")
+    ? "tip"
+    : "history";
+  const pg = storage.postgresEnabled ? `PG ${retention}` : `no PG ${retention}`;
   return `${backend} ${values}/${visits} ${probabilities} ${pg}`;
 }
 function policyProbabilityLabel(summary = state?.policyProbability) {
@@ -1209,7 +1217,7 @@ function updateRunButton() {
     return;
   }
   runButton.classList.toggle("active", running);
-  runButton.textContent = running ? "Run" : "Paused";
+  runButton.textContent = running ? "Pause" : "Run";
 }
 function shortTeam(v) {
   return v === "Home" ? "H" : v === "Away" ? "A" : "-";
@@ -2784,6 +2792,50 @@ async function exportTeamPolicy() {
   URL.revokeObjectURL(url);
   statusEl.textContent = "policy exported";
 }
+async function exportPostgresTeamPolicy() {
+  const tick = Number(state?.summary?.ticks ?? state?.frame?.tick ?? 0);
+  const body = {
+    experimentSlug: "soccer/live",
+    versionLabel: `live/t${tick}`,
+    generation: tick,
+    sourceKind: "import",
+    status: "candidate"
+  };
+  const manifest = await postJson("/api/team-policy/postgres-export", body);
+  const rows = Array.isArray(manifest.entries) ? manifest.entries.length : 0;
+  const blob = new Blob([JSON.stringify(manifest, null, 2)], {type: "application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `soccer-team-policy-postgres-tip-t${tick}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  statusEl.textContent = `postgres tip exported ${rows} rows`;
+}
+async function exportPostgresTeamPolicyJsonl() {
+  const tick = Number(state?.summary?.ticks ?? state?.frame?.tick ?? 0);
+  const body = {
+    experimentSlug: "soccer/live",
+    versionLabel: `live/t${tick}`,
+    generation: tick,
+    sourceKind: "import",
+    status: "candidate"
+  };
+  const res = await fetch("/api/team-policy/postgres-export.jsonl", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+  const jsonl = await res.text();
+  const meta = JSON.parse((jsonl.split(/\n/, 1)[0] || "{}"));
+  downloadTextFile(`soccer-team-policy-postgres-tip-t${tick}.jsonl`, jsonl, "application/x-ndjson");
+  statusEl.textContent = `postgres jsonl exported ${Number(meta.entryRows ?? 0)} rows`;
+}
 async function saveTeamPolicyToDisk() {
   const response = await postJson("/api/team-policy/save", {});
   if (state) {
@@ -2843,7 +2895,7 @@ async function resetMatch(options = {}) {
   applyAssignmentsToFrame(state.controllerAssignments);
   syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
-  running = options.keepRunning ?? true;
+  running = options.keepRunning ?? false;
   const previousTicks = Number(response.previousSummary?.ticks ?? 0);
   const checkpoint = response.episodePolicyCheckpoint ? " policy saved" : "";
   statusEl.textContent = options.auto
@@ -3091,6 +3143,8 @@ protectActionButton.addEventListener("click", () => submitInputOnly(false, false
 clearanceActionButton.addEventListener("click", () => submitInputOnly(false, false, "clearance").catch(e => statusEl.textContent = e.message));
 routeOneActionButton.addEventListener("click", () => submitInputOnly(false, false, "route-one").catch(e => statusEl.textContent = e.message));
 exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));
+exportPostgresPolicyButton.addEventListener("click", () => exportPostgresTeamPolicy().catch(e => statusEl.textContent = e.message));
+exportPostgresPolicyJsonlButton.addEventListener("click", () => exportPostgresTeamPolicyJsonl().catch(e => statusEl.textContent = e.message));
 importPolicyButton.addEventListener("click", () => policyFile.click());
 replayMomentsButton.addEventListener("click", () => replayMomentPolicy().catch(e => statusEl.textContent = e.message));
 savePolicyButton.addEventListener("click", () => saveTeamPolicyToDisk().catch(e => statusEl.textContent = e.message));

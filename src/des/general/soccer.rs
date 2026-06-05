@@ -58,7 +58,7 @@ const CENTRAL_BRAIN_AGENT_ID: usize = 26;
 const PLAYER_POSITION_HISTORY_LIMIT: usize = 50;
 const BALL_POSITION_HISTORY_LIMIT: usize = 50;
 const CONTROLLER_INPUT_YIELD_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
-const CONTROLLER_INPUT_COALESCE_MS: u64 = 1;
+const CONTROLLER_INPUT_COALESCE_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
 const FIRST_TOUCH_WINDOW_TICKS: u64 = 3;
 const PITCH_FINE_GRID_COLUMNS: usize = 12;
 const PITCH_FINE_GRID_ROWS: usize = 16;
@@ -204,6 +204,19 @@ const LIVE_HTTP_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_LIVE_TEAM_POLICY_PATH: &str = "out/soccer-live/team-policy.json";
 const DEFAULT_TRACKED_TEAM_POLICY_PATH: &str = "data/soccer/policies/team-policy.snapshot.json";
 const DEFAULT_LIVE_TEAM_POLICY_HISTORY_PATH: &str = "out/soccer-live/team-policy.history.jsonl";
+const SOCCER_POLICY_POSTGRES_SCHEMA_SOURCE: &str =
+    "~/codes/ores/k8s-cluster/remote/libs/pg-defs/schema/schema.sql";
+const SOCCER_POLICY_POSTGRES_BACKEND: &str = "aws-rds-postgres";
+const SOCCER_POLICY_POSTGRES_RETENTION_MODEL: &str = "branch-tip-policy-version-plus-run-deltas";
+const SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY: bool = false;
+const SOCCER_POLICY_POSTGRES_EXPERIMENTS_TABLE: &str = "des_soccer_learning_experiments";
+const SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE: &str = "des_soccer_learning_policy_versions";
+const SOCCER_POLICY_POSTGRES_POLICY_ENTRIES_TABLE: &str = "des_soccer_learning_policy_entries";
+const SOCCER_POLICY_POSTGRES_JOBS_TABLE: &str = "des_soccer_learning_jobs";
+const SOCCER_POLICY_POSTGRES_RUNS_TABLE: &str = "des_soccer_learning_runs";
+const SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE: &str = "des_soccer_learning_run_deltas";
+const SOCCER_POLICY_POSTGRES_MERGE_EVENTS_TABLE: &str = "des_soccer_learning_merge_events";
+const SOCCER_POLICY_VALUE_MICROS_SCALE: f64 = 1_000_000.0;
 const DEFAULT_LIVE_MOMENT_WINDOWS_PATH: &str = "out/soccer-live/moment-windows.jsonl";
 const DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS: u64 = 600;
 const DEFAULT_POLICY_HISTORY_RECORD_LIMIT: usize = 24;
@@ -2512,6 +2525,18 @@ struct SoccerQSpatialIndexKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SoccerQRelaxedSpatialIndexKey {
+    level: PitchGridLevel,
+    role: PlayerRole,
+    possession_relative: i8,
+    has_ball: bool,
+    visible_ball: bool,
+    first_touch_kind: IncomingBallKind,
+    receiving_pending_pass: bool,
+    cell_id: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SoccerQTargetSpatialIndexKey {
     source: SoccerQSpatialIndexKey,
     action: String,
@@ -2653,6 +2678,7 @@ pub struct SoccerQPolicy {
     target_index_keys: Vec<SoccerQTargetKey>,
     action_exact_index: HashMap<SoccerQStateKey, Vec<usize>>,
     action_spatial_index: HashMap<SoccerQSpatialIndexKey, Vec<usize>>,
+    action_relaxed_spatial_index: HashMap<SoccerQRelaxedSpatialIndexKey, Vec<usize>>,
     target_spatial_index: HashMap<SoccerQTargetSpatialIndexKey, Vec<usize>>,
     pub options: SoccerQPolicyOptions,
 }
@@ -2674,6 +2700,7 @@ impl SoccerQPolicy {
             target_index_keys: Vec::new(),
             action_exact_index: HashMap::new(),
             action_spatial_index: HashMap::new(),
+            action_relaxed_spatial_index: HashMap::new(),
             target_spatial_index: HashMap::new(),
             options,
         }
@@ -2772,6 +2799,31 @@ impl SoccerQPolicy {
         }
     }
 
+    fn relaxed_cell_id_for_state(state: &SoccerQStateKey, level: PitchGridLevel) -> usize {
+        match level {
+            PitchGridLevel::Fine => state.player_fine_cell_id,
+            PitchGridLevel::Tactical => state.player_tactical_cell_id,
+            PitchGridLevel::Macro => state.player_macro_cell_id,
+            PitchGridLevel::WholePitch => state.player_root_cell_id,
+        }
+    }
+
+    fn relaxed_spatial_index_key_for_state(
+        state: &SoccerQStateKey,
+        level: PitchGridLevel,
+    ) -> SoccerQRelaxedSpatialIndexKey {
+        SoccerQRelaxedSpatialIndexKey {
+            level,
+            role: state.role,
+            possession_relative: state.possession_relative,
+            has_ball: state.has_ball,
+            visible_ball: state.visible_ball,
+            first_touch_kind: state.first_touch_kind,
+            receiving_pending_pass: state.receiving_pending_pass,
+            cell_id: Self::relaxed_cell_id_for_state(state, level),
+        }
+    }
+
     fn facing_query_values(facing: FacingBucket) -> &'static [FacingBucket] {
         if facing == FacingBucket::Unknown {
             &SOCCER_FACING_INDEX_VALUES
@@ -2844,6 +2896,10 @@ impl SoccerQPolicy {
         for level in PITCH_GRID_BACKOFF_LEVELS {
             self.action_spatial_index
                 .entry(Self::spatial_index_key_for_state(&key.state, level))
+                .or_default()
+                .push(key_id);
+            self.action_relaxed_spatial_index
+                .entry(Self::relaxed_spatial_index_key_for_state(&key.state, level))
                 .or_default()
                 .push(key_id);
         }
@@ -2935,14 +2991,21 @@ impl SoccerQPolicy {
         snapshot: &WorldSnapshot,
         player_id: usize,
     ) -> Option<String> {
+        let mdp_state = snapshot.mdp_state_for_player(player_id);
+        let observation = snapshot.observation_for(player_id);
+        self.best_action_for_state_observation(snapshot, player_id, &mdp_state, &observation)
+    }
+
+    fn best_action_for_state_observation(
+        &self,
+        snapshot: &WorldSnapshot,
+        player_id: usize,
+        mdp_state: &SoccerMdpState,
+        observation: &SoccerPomdpObservation,
+    ) -> Option<String> {
         let player = snapshot.players.iter().find(|p| p.id == player_id)?;
-        let state = SoccerQStateKey::from_parts(
-            &snapshot.mdp_state_for_player(player_id),
-            &snapshot.observation_for(player_id),
-            player.team,
-            player.role,
-        );
-        self.best_action_filtered_hierarchical(&state, |action| {
+        let state = SoccerQStateKey::from_parts(mdp_state, observation, player.team, player.role);
+        self.best_action_filtered_hierarchical_relaxed(&state, |action| {
             learned_action_label_is_legal(action, snapshot, player_id)
         })
     }
@@ -3247,6 +3310,7 @@ impl SoccerQPolicy {
             self.action_index_keys.clear();
             self.action_exact_index.clear();
             self.action_spatial_index.clear();
+            self.action_relaxed_spatial_index.clear();
             for (key, value, visits) in kept_actions {
                 self.insert_q_value(key.clone(), value);
                 self.visits.insert(key, visits);
@@ -3467,16 +3531,38 @@ impl SoccerQPolicy {
     where
         F: Fn(&str) -> bool,
     {
-        PITCH_GRID_BACKOFF_LEVELS
-            .iter()
-            .find_map(|level| {
-                self.best_action_filtered_at_spatial_level(state, *level, &is_legal, false)
-            })
-            .or_else(|| {
-                PITCH_GRID_BACKOFF_LEVELS.iter().find_map(|level| {
-                    self.best_action_filtered_at_spatial_level(state, *level, &is_legal, true)
-                })
-            })
+        self.best_action_filtered_hierarchical_with_relaxed(state, is_legal, false)
+    }
+
+    fn best_action_filtered_hierarchical_relaxed<F>(
+        &self,
+        state: &SoccerQStateKey,
+        is_legal: F,
+    ) -> Option<String>
+    where
+        F: Fn(&str) -> bool,
+    {
+        self.best_action_filtered_hierarchical_with_relaxed(state, is_legal, true)
+    }
+
+    fn best_action_filtered_hierarchical_with_relaxed<F>(
+        &self,
+        state: &SoccerQStateKey,
+        is_legal: F,
+        relaxed: bool,
+    ) -> Option<String>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let strict = PITCH_GRID_BACKOFF_LEVELS.iter().find_map(|level| {
+            self.best_action_filtered_at_spatial_level(state, *level, &is_legal, false)
+        });
+        if strict.is_some() || !relaxed {
+            return strict;
+        }
+        PITCH_GRID_BACKOFF_LEVELS.iter().find_map(|level| {
+            self.best_action_filtered_at_spatial_level(state, *level, &is_legal, true)
+        })
     }
 
     fn best_action_filtered_at_spatial_level<F>(
@@ -3491,7 +3577,14 @@ impl SoccerQPolicy {
     {
         let mut best: Option<(String, f64, u32)> = None;
         if relaxed {
-            for key in &self.action_index_keys {
+            let index_key = Self::relaxed_spatial_index_key_for_state(state, level);
+            let Some(keys) = self.action_relaxed_spatial_index.get(&index_key) else {
+                return None;
+            };
+            for key_id in keys {
+                let Some(key) = self.action_index_keys.get(*key_id) else {
+                    continue;
+                };
                 if !key.state.matches_relaxed_spatial_level(state, level) || !is_legal(&key.action)
                 {
                     continue;
@@ -4956,6 +5049,10 @@ impl PlayerAgent {
     }
 
     fn support_action_options(&self, snapshot: &WorldSnapshot) -> Vec<AgentActionOptionTrace> {
+        self.support_action_context(snapshot).options
+    }
+
+    fn support_action_context(&self, snapshot: &WorldSnapshot) -> SupportActionContext {
         let striker_attack = snapshot
             .striker_holder_in_opponent_half(self.team)
             .is_some();
@@ -4985,22 +5082,24 @@ impl PlayerAgent {
                 true,
             ),
         ]);
-        if snapshot
-            .check_to_ball_target_for(self.id, self.home_position)
-            .is_some()
-        {
+        let special_targets = SupportSpecialTargets {
+            check_to_ball: snapshot.check_to_ball_target_for(self.id, self.home_position),
+            in_behind: snapshot.in_behind_run_target_for(self.id),
+            wide_outlet: snapshot.wide_possession_outlet_target_for(self.id, self.home_position),
+        };
+        if special_targets.check_to_ball.is_some() {
             options.push(AgentActionOptionTrace::new("check-to-ball", 0.0, true));
         }
-        if snapshot.in_behind_run_target_for(self.id).is_some() {
+        if special_targets.in_behind.is_some() {
             options.push(AgentActionOptionTrace::new("run-in-behind", 0.0, true));
         }
-        if snapshot
-            .wide_possession_outlet_target_for(self.id, self.home_position)
-            .is_some()
-        {
+        if special_targets.wide_outlet.is_some() {
             options.push(AgentActionOptionTrace::new("wide-outlet", 0.0, true));
         }
-        options
+        SupportActionContext {
+            options,
+            special_targets,
+        }
     }
 
     fn defensive_action_options(
@@ -5285,6 +5384,25 @@ impl PlayerAgent {
     ) -> PlayerIntent {
         let mdp_state = snapshot.mdp_state_for_player(self.id);
         let observation = snapshot.observation_for(self.id);
+        self.run_time_step_with_context(
+            snapshot,
+            mdp_state,
+            observation,
+            human_input,
+            learned_plan,
+            rng,
+        )
+    }
+
+    pub fn run_time_step_with_context(
+        &mut self,
+        snapshot: &WorldSnapshot,
+        mdp_state: SoccerMdpState,
+        observation: SoccerPomdpObservation,
+        human_input: Option<&HumanInputFrame>,
+        learned_plan: Option<&SoccerLearnedPlan>,
+        rng: &mut SeededRandom,
+    ) -> PlayerIntent {
         let belief = belief_from_observation(&observation);
         let directive = snapshot.tactical_directive(self.team);
         let has_ball = observation.has_ball;
@@ -6239,7 +6357,8 @@ impl PlayerAgent {
         let mut order_names = Vec::new();
         let action_options;
         let (action, action_label) = if possession_team == Some(self.team) {
-            action_options = self.support_action_options(snapshot);
+            let support_context = self.support_action_context(snapshot);
+            action_options = support_context.options.clone();
             let support_order = weighted_fisher_yates_order(
                 action_options
                     .iter()
@@ -6258,17 +6377,16 @@ impl PlayerAgent {
                 .unwrap_or("support-shape")
                 .to_string();
             order_names.extend(support_order);
-            let support_target = match first_support_label.as_str() {
-                "check-to-ball" => snapshot
-                    .check_to_ball_target_for(self.id, self.home_position)
-                    .map(|point| SupportMovementTarget {
-                        point,
-                        action_label: "check-to-ball",
+            let support_target =
+                match first_support_label.as_str() {
+                    "check-to-ball" => support_context.special_targets.check_to_ball.map(|point| {
+                        SupportMovementTarget {
+                            point,
+                            action_label: "check-to-ball",
+                        }
                     }),
-                "run-in-behind" => {
-                    snapshot
-                        .in_behind_run_target_for(self.id)
-                        .map(|point| SupportMovementTarget {
+                    "run-in-behind" => support_context.special_targets.in_behind.map(|point| {
+                        SupportMovementTarget {
                             point: snapshot.clamp_to_role_position(
                                 self.id,
                                 point,
@@ -6276,30 +6394,35 @@ impl PlayerAgent {
                                 false,
                             ),
                             action_label: "run-in-behind",
-                        })
-                }
-                "wide-outlet" => snapshot
-                    .wide_possession_outlet_target_for(self.id, self.home_position)
-                    .map(|point| SupportMovementTarget {
-                        point,
-                        action_label: "wide-outlet",
+                        }
                     }),
-                "support-roam" => {
-                    Some(snapshot.attacking_support_movement_for(self.id, self.home_position, true))
+                    "wide-outlet" => support_context.special_targets.wide_outlet.map(|point| {
+                        SupportMovementTarget {
+                            point,
+                            action_label: "wide-outlet",
+                        }
+                    }),
+                    "support-roam" => Some(snapshot.attacking_support_movement_for_with_targets(
+                        self.id,
+                        self.home_position,
+                        true,
+                        &support_context.special_targets,
+                    )),
+                    _ => Some(snapshot.attacking_support_movement_for_with_targets(
+                        self.id,
+                        self.home_position,
+                        false,
+                        &support_context.special_targets,
+                    )),
                 }
-                _ => Some(snapshot.attacking_support_movement_for(
-                    self.id,
-                    self.home_position,
-                    false,
-                )),
-            }
-            .unwrap_or_else(|| {
-                snapshot.attacking_support_movement_for(
-                    self.id,
-                    self.home_position,
-                    first_support_label.as_str() == "support-roam",
-                )
-            });
+                .unwrap_or_else(|| {
+                    snapshot.attacking_support_movement_for_with_targets(
+                        self.id,
+                        self.home_position,
+                        first_support_label.as_str() == "support-roam",
+                        &support_context.special_targets,
+                    )
+                });
             (
                 SoccerAction::MoveTo(support_target.point),
                 support_target.action_label.to_string(),
@@ -6381,17 +6504,16 @@ impl PlayerAgent {
         } else {
             let loose_ball_target = snapshot.loose_ball_recovery_target_for(self.id);
             let my_distance = self.position.distance(loose_ball_target);
+            let my_distance_sq =
+                (self.position - loose_ball_target).dot(self.position - loose_ball_target);
             let fifty_fifty_duel = loose_ball_fifty_fifty_duel_for(snapshot, self.id);
             let closer_teammates = snapshot
                 .players
                 .iter()
                 .filter(|player| player.team == self.team && player.id != self.id)
                 .filter(|player| {
-                    snapshot
-                        .player_position(player.id)
-                        .unwrap_or(player.position)
-                        .distance(loose_ball_target)
-                        < my_distance
+                    let delta = player.position - loose_ball_target;
+                    delta.dot(delta) < my_distance_sq
                 })
                 .count();
             let goalkeeper_can_recover = self.role != PlayerRole::Goalkeeper || my_distance <= 12.0;
@@ -10201,6 +10323,19 @@ struct SupportMovementTarget {
     action_label: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SupportSpecialTargets {
+    check_to_ball: Option<Vec2>,
+    in_behind: Option<Vec2>,
+    wide_outlet: Option<Vec2>,
+}
+
+#[derive(Clone, Debug)]
+struct SupportActionContext {
+    options: Vec<AgentActionOptionTrace>,
+    special_targets: SupportSpecialTargets,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ForwardSupportContext {
     teammates_ahead: usize,
@@ -11088,35 +11223,32 @@ impl WorldSnapshot {
             .iter()
             .filter(|p| p.team == me.team && p.id != me.id)
             .collect::<Vec<_>>();
-        let visible_opponents = opponents
-            .iter()
-            .filter(|p| self.player_can_see_player(me.id, p.id))
-            .count();
-        let visible_teammates = teammates
-            .iter()
-            .filter(|p| self.player_can_see_player(me.id, p.id))
-            .count();
         let vision_range = player_vision_range(me);
-        let nearest_opponent_distance = opponents
-            .iter()
-            .filter(|p| self.player_can_see_player(me.id, p.id))
-            .map(|p| {
-                self.player_position(p.id)
-                    .unwrap_or(p.position)
-                    .distance(me_position)
-            })
-            .fold(f64::INFINITY, f64::min)
-            .min(vision_range + 12.0);
-        let nearest_teammate_distance = teammates
-            .iter()
-            .filter(|p| self.player_can_see_player(me.id, p.id))
-            .map(|p| {
-                self.player_position(p.id)
-                    .unwrap_or(p.position)
-                    .distance(me_position)
-            })
-            .fold(f64::INFINITY, f64::min)
-            .min(vision_range + 12.0);
+        let mut visible_opponents = 0usize;
+        let mut nearest_opponent_distance = f64::INFINITY;
+        for p in &opponents {
+            if !self.player_can_see_player(me.id, p.id) {
+                continue;
+            }
+            visible_opponents += 1;
+            let position = self.player_position(p.id).unwrap_or(p.position);
+            nearest_opponent_distance =
+                nearest_opponent_distance.min(position.distance(me_position));
+        }
+        nearest_opponent_distance = nearest_opponent_distance.min(vision_range + 12.0);
+
+        let mut visible_teammates = 0usize;
+        let mut nearest_teammate_distance = f64::INFINITY;
+        for p in &teammates {
+            if !self.player_can_see_player(me.id, p.id) {
+                continue;
+            }
+            visible_teammates += 1;
+            let position = self.player_position(p.id).unwrap_or(p.position);
+            nearest_teammate_distance =
+                nearest_teammate_distance.min(position.distance(me_position));
+        }
+        nearest_teammate_distance = nearest_teammate_distance.min(vision_range + 12.0);
         let (team_spacing_score, preferred_team_spacing_yards) = self
             .team_spacing_mode_for(me.team)
             .map(|mode| {
@@ -11153,38 +11285,65 @@ impl WorldSnapshot {
             .collect::<Vec<_>>();
         let visibility_elapsed = phase_started.elapsed();
         let phase_started = Instant::now();
-        let visible_pass_targets = self.ranked_visible_pass_targets(player_id, 3);
-        let visible_aerial_pass_targets = self.ranked_visible_aerial_pass_targets(player_id, 3);
+        let visible_pass_targets = if has_ball {
+            self.ranked_visible_pass_targets(player_id, 3)
+        } else {
+            Vec::new()
+        };
+        let visible_aerial_pass_targets = if has_ball {
+            self.ranked_visible_aerial_pass_targets(player_id, 3)
+        } else {
+            Vec::new()
+        };
         let forward_support_context =
             self.forward_support_context_for(player_id, &visible_pass_targets);
-        let floor_pass_lane_score =
-            floor_pass_lane_score_for_snapshot(self, me, me_position, &visible_pass_targets);
-        let best_floor_pass_quality = best_pass_target_quality_for_snapshot(
-            self,
-            me,
-            me_position,
-            &visible_pass_targets,
-            PassFlight::Floor,
-        );
-        let best_aerial_pass_quality = best_pass_target_quality_for_snapshot(
-            self,
-            me,
-            me_position,
-            &visible_aerial_pass_targets,
-            PassFlight::Aerial,
-        );
-        let aerial_pass_bypass_score = aerial_pass_bypass_score_for_snapshot(
-            self,
-            me,
-            me_position,
-            &visible_aerial_pass_targets,
-        );
-        let aerial_pass_interception_risk = aerial_pass_interception_risk_for_snapshot(
-            self,
-            me,
-            me_position,
-            &visible_aerial_pass_targets,
-        );
+        let floor_pass_lane_score = if has_ball {
+            floor_pass_lane_score_for_snapshot(self, me, me_position, &visible_pass_targets)
+        } else {
+            0.0
+        };
+        let best_floor_pass_quality = if has_ball {
+            best_pass_target_quality_for_snapshot(
+                self,
+                me,
+                me_position,
+                &visible_pass_targets,
+                PassFlight::Floor,
+            )
+        } else {
+            PassTargetQuality::default()
+        };
+        let best_aerial_pass_quality = if has_ball {
+            best_pass_target_quality_for_snapshot(
+                self,
+                me,
+                me_position,
+                &visible_aerial_pass_targets,
+                PassFlight::Aerial,
+            )
+        } else {
+            PassTargetQuality::default()
+        };
+        let aerial_pass_bypass_score = if has_ball {
+            aerial_pass_bypass_score_for_snapshot(
+                self,
+                me,
+                me_position,
+                &visible_aerial_pass_targets,
+            )
+        } else {
+            0.0
+        };
+        let aerial_pass_interception_risk = if has_ball {
+            aerial_pass_interception_risk_for_snapshot(
+                self,
+                me,
+                me_position,
+                &visible_aerial_pass_targets,
+            )
+        } else {
+            0.0
+        };
         let pass_eval_elapsed = phase_started.elapsed();
         let phase_started = Instant::now();
         let player_grid = pitch_grid_address(me_position, self.field_width, self.field_length);
@@ -11196,13 +11355,17 @@ impl WorldSnapshot {
         let perceived_time_on_ball_seconds = time_on_ball_seconds(perceived_pressure);
         let expected_shot_power = shot_power_for_skill(ability01(me.skills.shooting));
         let expected_shot_speed_yps = shot_speed_yps_from_power(expected_shot_power, &me.skills);
-        let shot_block_assessment = shot_block_assessment_for_snapshot(
-            self,
-            me_position,
-            me.team,
-            expected_shot_speed_yps,
-            false,
-        );
+        let shot_block_assessment = if has_ball {
+            shot_block_assessment_for_snapshot(
+                self,
+                me_position,
+                me.team,
+                expected_shot_speed_yps,
+                false,
+            )
+        } else {
+            None
+        };
         let shot_block_probability = shot_block_assessment
             .as_ref()
             .map(|assessment| assessment.probability)
@@ -11211,29 +11374,41 @@ impl WorldSnapshot {
             .as_ref()
             .map(|assessment| assessment.distance_to_ball)
             .unwrap_or(self.field_length);
-        let first_time_shot_block_probability = shot_block_assessment_for_snapshot(
-            self,
-            me_position,
-            me.team,
-            expected_shot_speed_yps,
-            true,
-        )
-        .map(|assessment| assessment.probability)
-        .unwrap_or(0.0);
-        let shot_curl_probability = shot_curl_probability_for_player(
-            &me.skills,
-            perceived_pressure,
-            (goal.y - me_position.y).abs(),
-            self.goal_angle_degrees(me_position, me.team),
-        );
-        let pass_curl_probability = pass_curl_probability_for_snapshot(
-            self,
-            me,
-            me_position,
-            &visible_pass_targets,
-            &visible_aerial_pass_targets,
-            perceived_pressure,
-        );
+        let first_time_shot_block_probability = if has_ball {
+            shot_block_assessment_for_snapshot(
+                self,
+                me_position,
+                me.team,
+                expected_shot_speed_yps,
+                true,
+            )
+            .map(|assessment| assessment.probability)
+            .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let shot_curl_probability = if has_ball {
+            shot_curl_probability_for_player(
+                &me.skills,
+                perceived_pressure,
+                (goal.y - me_position.y).abs(),
+                self.goal_angle_degrees(me_position, me.team),
+            )
+        } else {
+            0.0
+        };
+        let pass_curl_probability = if has_ball {
+            pass_curl_probability_for_snapshot(
+                self,
+                me,
+                me_position,
+                &visible_pass_targets,
+                &visible_aerial_pass_targets,
+                perceived_pressure,
+            )
+        } else {
+            0.0
+        };
         let nearest_defender = opponents
             .iter()
             .filter_map(|p| {
@@ -11258,9 +11433,12 @@ impl WorldSnapshot {
             + 0.5 * (1.0 - nearest_defender_fatigue_confidence);
         let perceived_fatigue_advantage =
             perceived_nearest_defender_fatigue - me.fatigue.clamp(0.0, 1.0);
-        let opposing_keeper_position = self
-            .goalkeeper_for(me.team.other())
-            .and_then(|keeper_id| self.player_position(keeper_id));
+        let opposing_keeper_position = if has_ball {
+            self.goalkeeper_for(me.team.other())
+                .and_then(|keeper_id| self.player_position(keeper_id))
+        } else {
+            None
+        };
         let incoming = me.incoming_ball.as_ref().filter(|context| {
             self.tick.saturating_sub(context.received_tick) <= FIRST_TOUCH_WINDOW_TICKS
         });
@@ -11319,25 +11497,39 @@ impl WorldSnapshot {
         } else {
             0.0
         };
-        let shot_lane_open = shot_block_probability <= 0.34;
+        let shot_lane_open = has_ball && shot_block_probability <= 0.34;
         let yards_to_goal = (goal.y - me_position.y).abs();
         let opponent_goal_angle_degrees = self.goal_angle_degrees(me_position, me.team);
-        let forward_dribble_space_yards = self.forward_dribble_space_yards(player_id);
-        let aerial_forward_runner_pass_multiplier =
-            self.aerial_forward_runner_pass_multiplier(player_id);
-        let shot_on_frame_probability = shot_on_frame_probability(
-            self.goal_width,
-            ability01(me.skills.shooting),
-            perceived_pressure,
-            yards_to_goal,
-            opponent_goal_angle_degrees,
-            shot_block_probability,
-        );
-        let shot_beat_goalkeeper_probability =
+        let forward_dribble_space_yards = if has_ball {
+            self.forward_dribble_space_yards(player_id)
+        } else {
+            0.0
+        };
+        let aerial_forward_runner_pass_multiplier = if has_ball {
+            self.aerial_forward_runner_pass_multiplier(player_id)
+        } else {
+            1.0
+        };
+        let shot_on_frame_probability = if has_ball {
+            shot_on_frame_probability(
+                self.goal_width,
+                ability01(me.skills.shooting),
+                perceived_pressure,
+                yards_to_goal,
+                opponent_goal_angle_degrees,
+                shot_block_probability,
+            )
+        } else {
+            0.0
+        };
+        let shot_beat_goalkeeper_probability = if has_ball {
             (shot_beat_goalkeeper_probability_for_snapshot(self, me, me_position)
                 * (1.0 - shot_block_probability * 0.70).clamp(0.20, 1.0)
                 + shot_curl_probability * 0.045)
-                .clamp(0.0, 1.0);
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let shot_eval_elapsed = phase_started.elapsed();
         let phase_started = Instant::now();
         let immediate_dispossession_risk = if has_ball {
@@ -13423,6 +13615,21 @@ impl WorldSnapshot {
         home: Vec2,
         roam: bool,
     ) -> SupportMovementTarget {
+        let special_targets = SupportSpecialTargets {
+            check_to_ball: self.check_to_ball_target_for(player_id, home),
+            in_behind: self.in_behind_run_target_for(player_id),
+            wide_outlet: self.wide_possession_outlet_target_for(player_id, home),
+        };
+        self.attacking_support_movement_for_with_targets(player_id, home, roam, &special_targets)
+    }
+
+    fn attacking_support_movement_for_with_targets(
+        &self,
+        player_id: usize,
+        home: Vec2,
+        roam: bool,
+        special_targets: &SupportSpecialTargets,
+    ) -> SupportMovementTarget {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return SupportMovementTarget {
                 point: home,
@@ -13430,13 +13637,13 @@ impl WorldSnapshot {
             };
         };
         if self.possession_team() == Some(me.team) && !roam {
-            if let Some(target) = self.check_to_ball_target_for(player_id, home) {
+            if let Some(target) = special_targets.check_to_ball {
                 return SupportMovementTarget {
                     point: target,
                     action_label: "check-to-ball",
                 };
             }
-            if let Some(target) = self.in_behind_run_target_for(player_id) {
+            if let Some(target) = special_targets.in_behind {
                 return SupportMovementTarget {
                     point: self.clamp_to_role_position(player_id, target, home, false),
                     action_label: "run-in-behind",
@@ -13451,7 +13658,7 @@ impl WorldSnapshot {
                 && me.role == PlayerRole::Midfielder
                 && me.preferences.offensive_mindedness >= me.preferences.defensive_mindedness;
             if !overlap_run_preferred {
-                if let Some(target) = self.wide_possession_outlet_target_for(player_id, home) {
+                if let Some(target) = special_targets.wide_outlet {
                     return SupportMovementTarget {
                         point: target,
                         action_label: "wide-outlet",
@@ -13538,7 +13745,7 @@ impl WorldSnapshot {
                     (support_space >= 6.0 || wide).then_some(candidate)
                 });
         if self.possession_team() == Some(me.team) && !roam && striker_overlap_target.is_none() {
-            if let Some(target) = self.wide_possession_outlet_target_for(player_id, home) {
+            if let Some(target) = special_targets.wide_outlet {
                 return SupportMovementTarget {
                     point: target,
                     action_label: "wide-outlet",
@@ -16487,9 +16694,7 @@ fn loose_ball_fifty_fifty_duel(snapshot: &WorldSnapshot) -> Option<(usize, usize
             .iter()
             .filter(|player| player.team == team)
             .filter_map(|player| {
-                let position = snapshot
-                    .player_position(player.id)
-                    .unwrap_or(player.position);
+                let position = player.position;
                 let velocity_toward_ball = player
                     .velocity
                     .normalized()
@@ -17151,6 +17356,8 @@ pub struct MatchFrame {
     pub away_brain: TeamBrainSnapshot,
     pub home_directive: TeamTacticalDirective,
     pub away_directive: TeamTacticalDirective,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<SoccerPlaybackIntentFrame>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -17308,6 +17515,380 @@ pub struct SoccerTeamPolicyArtifact {
     #[serde(default)]
     pub away_action_probabilities: Vec<SoccerQStateProbabilitySummary>,
     pub events: Vec<MatchEvent>,
+}
+
+impl SoccerTeamPolicyArtifact {
+    pub fn postgres_branch_tip_export(
+        &self,
+        request: SoccerPolicyPostgresBranchTipExportRequest,
+    ) -> Result<SoccerPolicyPostgresBranchTipExport, String> {
+        validate_soccer_policy_postgres_export_request(&request)?;
+        let mut entries = Vec::with_capacity(
+            self.home_entries.len()
+                + self.away_entries.len()
+                + self.home_target_entries.len()
+                + self.away_target_entries.len(),
+        );
+        append_soccer_policy_postgres_action_rows(
+            &mut entries,
+            Team::Home,
+            &self.home_entries,
+            request.source_run_id.clone(),
+        )?;
+        append_soccer_policy_postgres_action_rows(
+            &mut entries,
+            Team::Away,
+            &self.away_entries,
+            request.source_run_id.clone(),
+        )?;
+        append_soccer_policy_postgres_target_rows(
+            &mut entries,
+            Team::Home,
+            &self.home_target_entries,
+            request.source_run_id.clone(),
+        )?;
+        append_soccer_policy_postgres_target_rows(
+            &mut entries,
+            Team::Away,
+            &self.away_target_entries,
+            request.source_run_id.clone(),
+        )?;
+
+        let entry_count = self.home_entries.len() + self.away_entries.len();
+        let target_entry_count = self.home_target_entries.len() + self.away_target_entries.len();
+        let visit_count = entries
+            .iter()
+            .map(|entry| u64::from(entry.visits))
+            .sum::<u64>();
+        let options = serde_json::json!({
+            "home": self.home_options,
+            "away": self.away_options,
+        });
+        let config = serde_json::to_value(&self.config)
+            .map_err(|err| format!("serialize postgres policy config: {err}"))?;
+        let lineage = match request.parent_policy_version_id.as_ref() {
+            Some(parent) => serde_json::json!([parent]),
+            None => serde_json::json!([]),
+        };
+        let policy_dimensions = soccer_policy_postgres_dimension_summary(&entries);
+        let metrics = serde_json::json!({
+            "summary": self.summary,
+            "learning": self.learning,
+            "tacticalSummary": self.tactical_summary,
+            "adversarial": self.adversarial,
+            "homeActionProbabilityStates": self.home_action_probabilities.len(),
+            "awayActionProbabilityStates": self.away_action_probabilities.len(),
+            "policyDimensions": &policy_dimensions,
+        });
+
+        Ok(SoccerPolicyPostgresBranchTipExport {
+            artifact_schema: "SoccerTeamPolicyArtifact/v1".to_string(),
+            contract: SoccerPolicyPostgresStorageContract::default(),
+            policy_dimensions,
+            version: SoccerPolicyPostgresPolicyVersionRow {
+                experiment_slug: request.experiment_slug,
+                policy_version_id: request.policy_version_id,
+                parent_policy_version_id: request.parent_policy_version_id,
+                generation: request.generation,
+                version_label: request.version_label,
+                source_kind: request.source_kind,
+                status: request.status,
+                options,
+                config,
+                lineage,
+                metrics,
+                entry_count,
+                target_entry_count,
+                visit_count,
+                fitness_micros: request.fitness_micros,
+            },
+            entries,
+        })
+    }
+}
+
+fn validate_soccer_policy_postgres_export_request(
+    request: &SoccerPolicyPostgresBranchTipExportRequest,
+) -> Result<(), String> {
+    let slug = request.experiment_slug.trim();
+    if slug.len() < 3
+        || slug.len() > 160
+        || !slug.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '/' | '-')
+        })
+        || !slug
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        || !slug
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid soccer policy postgres experiment slug: {slug}"
+        ));
+    }
+    let label = request.version_label.trim();
+    if label.is_empty()
+        || label.len() > 160
+        || !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+    {
+        return Err(format!(
+            "invalid soccer policy postgres version label: {label}"
+        ));
+    }
+    if !matches!(
+        request.source_kind.as_str(),
+        "seed" | "merge" | "mutation" | "crossover" | "import" | "replay"
+    ) {
+        return Err(format!(
+            "invalid soccer policy postgres source kind: {}",
+            request.source_kind
+        ));
+    }
+    if !matches!(
+        request.status.as_str(),
+        "candidate" | "active" | "archived" | "rejected"
+    ) {
+        return Err(format!(
+            "invalid soccer policy postgres status: {}",
+            request.status
+        ));
+    }
+    Ok(())
+}
+
+fn append_soccer_policy_postgres_action_rows(
+    rows: &mut Vec<SoccerPolicyPostgresPolicyEntryRow>,
+    team: Team,
+    entries: &[SoccerQEntry],
+    source_run_id: Option<String>,
+) -> Result<(), String> {
+    for entry in entries {
+        rows.push(soccer_policy_postgres_row_from_action_entry(
+            team,
+            entry,
+            source_run_id.clone(),
+        )?);
+    }
+    Ok(())
+}
+
+fn append_soccer_policy_postgres_target_rows(
+    rows: &mut Vec<SoccerPolicyPostgresPolicyEntryRow>,
+    team: Team,
+    entries: &[SoccerQTargetEntry],
+    source_run_id: Option<String>,
+) -> Result<(), String> {
+    for entry in entries {
+        rows.push(soccer_policy_postgres_row_from_target_entry(
+            team,
+            entry,
+            source_run_id.clone(),
+        )?);
+    }
+    Ok(())
+}
+
+fn soccer_policy_postgres_row_from_action_entry(
+    team: Team,
+    entry: &SoccerQEntry,
+    source_run_id: Option<String>,
+) -> Result<SoccerPolicyPostgresPolicyEntryRow, String> {
+    soccer_policy_postgres_entry_row(
+        team,
+        "action",
+        &entry.state,
+        &entry.action,
+        -1,
+        -1,
+        -1,
+        -1,
+        entry.value,
+        entry.visits,
+        source_run_id,
+    )
+}
+
+fn soccer_policy_postgres_row_from_target_entry(
+    team: Team,
+    entry: &SoccerQTargetEntry,
+    source_run_id: Option<String>,
+) -> Result<SoccerPolicyPostgresPolicyEntryRow, String> {
+    soccer_policy_postgres_entry_row(
+        team,
+        "target",
+        &entry.state,
+        &entry.action,
+        soccer_policy_postgres_cell_id(entry.target_fine_cell_id)?,
+        soccer_policy_postgres_cell_id(entry.target_tactical_cell_id)?,
+        soccer_policy_postgres_cell_id(entry.target_macro_cell_id)?,
+        soccer_policy_postgres_cell_id(entry.target_root_cell_id)?,
+        entry.value,
+        entry.visits,
+        source_run_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn soccer_policy_postgres_entry_row(
+    team: Team,
+    entry_kind: &str,
+    state: &SoccerQStateKey,
+    action: &str,
+    target_fine_cell_id: i32,
+    target_tactical_cell_id: i32,
+    target_macro_cell_id: i32,
+    target_root_cell_id: i32,
+    value: f64,
+    visits: u32,
+    source_run_id: Option<String>,
+) -> Result<SoccerPolicyPostgresPolicyEntryRow, String> {
+    let state_key = soccer_policy_postgres_state_key(state)?;
+    let state_hash = soccer_policy_postgres_state_hash(&state_key)?;
+    let action = normalize_soccer_action_label(action).to_string();
+    if action.is_empty() || action.len() > 80 {
+        return Err(format!(
+            "soccer policy postgres action must be 1..=80 bytes, got {}",
+            action.len()
+        ));
+    }
+    Ok(SoccerPolicyPostgresPolicyEntryRow {
+        team: soccer_policy_postgres_team(team).to_string(),
+        entry_kind: entry_kind.to_string(),
+        state_hash,
+        state_key,
+        action,
+        target_fine_cell_id,
+        target_tactical_cell_id,
+        target_macro_cell_id,
+        target_root_cell_id,
+        value_micros: soccer_policy_value_micros(value),
+        visits,
+        source_run_id,
+    })
+}
+
+fn soccer_policy_postgres_team(team: Team) -> &'static str {
+    match team {
+        Team::Home => "home",
+        Team::Away => "away",
+    }
+}
+
+fn soccer_policy_role_storage_label(role: PlayerRole) -> &'static str {
+    match role {
+        PlayerRole::Goalkeeper => "goalkeeper",
+        PlayerRole::Defender => "defender",
+        PlayerRole::Midfielder => "midfielder",
+        PlayerRole::Forward => "forward",
+    }
+}
+
+fn normalize_soccer_policy_role_storage_label(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "goalkeeper" | "keeper" | "gk" => soccer_policy_role_storage_label(PlayerRole::Goalkeeper),
+        "defender" | "defense" | "centreback" | "centerback" | "fullback" => {
+            soccer_policy_role_storage_label(PlayerRole::Defender)
+        }
+        "midfielder" | "midfield" | "mid" => {
+            soccer_policy_role_storage_label(PlayerRole::Midfielder)
+        }
+        "forward" | "striker" | "attacker" => soccer_policy_role_storage_label(PlayerRole::Forward),
+        other => other,
+    }
+    .to_string()
+}
+
+fn soccer_policy_postgres_entry_role(entry: &SoccerPolicyPostgresPolicyEntryRow) -> String {
+    entry
+        .state_key
+        .get("role")
+        .and_then(|role| role.as_str())
+        .map(normalize_soccer_policy_role_storage_label)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn soccer_policy_postgres_dimension_summary(
+    entries: &[SoccerPolicyPostgresPolicyEntryRow],
+) -> SoccerPolicyPostgresDimensionSummary {
+    let mut by_role = BTreeMap::<String, SoccerPolicyPostgresRoleDimensionSummary>::new();
+    for role in [
+        PlayerRole::Goalkeeper,
+        PlayerRole::Defender,
+        PlayerRole::Midfielder,
+        PlayerRole::Forward,
+    ] {
+        let label = soccer_policy_role_storage_label(role).to_string();
+        by_role.insert(
+            label.clone(),
+            SoccerPolicyPostgresRoleDimensionSummary {
+                role: label,
+                ..Default::default()
+            },
+        );
+    }
+
+    let mut summary = SoccerPolicyPostgresDimensionSummary::default();
+    for entry in entries {
+        match entry.entry_kind.as_str() {
+            "action" => summary.global_action_entry_count += 1,
+            "target" => summary.global_target_entry_count += 1,
+            _ => {}
+        }
+        summary.global_total_entry_count += 1;
+        summary.global_visit_count += u64::from(entry.visits);
+
+        let role = soccer_policy_postgres_entry_role(entry);
+        let role_summary = by_role.entry(role.clone()).or_insert_with(|| {
+            SoccerPolicyPostgresRoleDimensionSummary {
+                role,
+                ..Default::default()
+            }
+        });
+        match entry.entry_kind.as_str() {
+            "action" => role_summary.action_entry_count += 1,
+            "target" => role_summary.target_entry_count += 1,
+            _ => {}
+        }
+        role_summary.total_entry_count += 1;
+        role_summary.visit_count += u64::from(entry.visits);
+    }
+    summary.role_counts = by_role.into_values().collect();
+    summary
+}
+
+fn soccer_policy_postgres_cell_id(cell_id: usize) -> Result<i32, String> {
+    i32::try_from(cell_id).map_err(|_| format!("soccer policy target cell id too large: {cell_id}"))
+}
+
+fn soccer_policy_postgres_state_key(state: &SoccerQStateKey) -> Result<serde_json::Value, String> {
+    serde_json::to_value(state).map_err(|err| format!("serialize soccer policy state key: {err}"))
+}
+
+fn soccer_policy_postgres_state_hash(state: &serde_json::Value) -> Result<String, String> {
+    let bytes = serde_json::to_vec(state)
+        .map_err(|err| format!("serialize soccer policy state hash input: {err}"))?;
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    Ok(format!("{hash:016x}"))
+}
+
+fn soccer_policy_value_micros(value: f64) -> i64 {
+    let micros = finite_metric(value) * SOCCER_POLICY_VALUE_MICROS_SCALE;
+    if micros >= i64::MAX as f64 {
+        i64::MAX
+    } else if micros <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        micros.round() as i64
+    }
 }
 
 impl SoccerTrackingDataset {
@@ -19712,6 +20293,15 @@ impl SoccerLiveStateResponse {
 
 fn compact_match_frame_for_live_http(frame: &mut MatchFrame) {
     frame.shared_positions.histories.clear();
+    frame.intents = playback_intents_from_frame(frame);
+    let holder = frame.ball.holder;
+    for player in &mut frame.players {
+        let keep_full_decision = holder == Some(player.id) || player.controller_slot.is_some();
+        if !keep_full_decision {
+            player.last_decision = None;
+            player.learned_policy = None;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -20288,6 +20878,247 @@ pub struct SoccerPolicyAutosaveStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresTables {
+    pub experiments: String,
+    pub policy_versions: String,
+    pub policy_entries: String,
+    pub jobs: String,
+    pub runs: String,
+    pub run_deltas: String,
+    pub merge_events: String,
+}
+
+impl Default for SoccerPolicyPostgresTables {
+    fn default() -> Self {
+        SoccerPolicyPostgresTables {
+            experiments: SOCCER_POLICY_POSTGRES_EXPERIMENTS_TABLE.to_string(),
+            policy_versions: SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE.to_string(),
+            policy_entries: SOCCER_POLICY_POSTGRES_POLICY_ENTRIES_TABLE.to_string(),
+            jobs: SOCCER_POLICY_POSTGRES_JOBS_TABLE.to_string(),
+            runs: SOCCER_POLICY_POSTGRES_RUNS_TABLE.to_string(),
+            run_deltas: SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE.to_string(),
+            merge_events: SOCCER_POLICY_POSTGRES_MERGE_EVENTS_TABLE.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresStorageContract {
+    pub backend: String,
+    pub schema_source: String,
+    pub retention_model: String,
+    pub stores_all_weight_history: bool,
+    pub branch_tip_table: String,
+    pub branch_tip_entries_table: String,
+    pub run_delta_table: String,
+    pub merge_events_table: String,
+    #[serde(default)]
+    pub tables: SoccerPolicyPostgresTables,
+}
+
+impl Default for SoccerPolicyPostgresStorageContract {
+    fn default() -> Self {
+        SoccerPolicyPostgresStorageContract {
+            backend: SOCCER_POLICY_POSTGRES_BACKEND.to_string(),
+            schema_source: SOCCER_POLICY_POSTGRES_SCHEMA_SOURCE.to_string(),
+            retention_model: SOCCER_POLICY_POSTGRES_RETENTION_MODEL.to_string(),
+            stores_all_weight_history: SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY,
+            branch_tip_table: SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE.to_string(),
+            branch_tip_entries_table: SOCCER_POLICY_POSTGRES_POLICY_ENTRIES_TABLE.to_string(),
+            run_delta_table: SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE.to_string(),
+            merge_events_table: SOCCER_POLICY_POSTGRES_MERGE_EVENTS_TABLE.to_string(),
+            tables: SoccerPolicyPostgresTables::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresBranchTipExportRequest {
+    pub experiment_slug: String,
+    pub version_label: String,
+    pub generation: u32,
+    pub source_kind: String,
+    pub status: String,
+    #[serde(default)]
+    pub parent_policy_version_id: Option<String>,
+    #[serde(default)]
+    pub policy_version_id: Option<String>,
+    #[serde(default)]
+    pub source_run_id: Option<String>,
+    #[serde(default)]
+    pub fitness_micros: i64,
+}
+
+impl Default for SoccerPolicyPostgresBranchTipExportRequest {
+    fn default() -> Self {
+        SoccerPolicyPostgresBranchTipExportRequest {
+            experiment_slug: "default".to_string(),
+            version_label: "live/latest".to_string(),
+            generation: 0,
+            source_kind: "import".to_string(),
+            status: "candidate".to_string(),
+            parent_policy_version_id: None,
+            policy_version_id: None,
+            source_run_id: None,
+            fitness_micros: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresPolicyVersionRow {
+    pub experiment_slug: String,
+    #[serde(default)]
+    pub policy_version_id: Option<String>,
+    #[serde(default)]
+    pub parent_policy_version_id: Option<String>,
+    pub generation: u32,
+    pub version_label: String,
+    pub source_kind: String,
+    pub status: String,
+    pub options: serde_json::Value,
+    pub config: serde_json::Value,
+    pub lineage: serde_json::Value,
+    pub metrics: serde_json::Value,
+    pub entry_count: usize,
+    pub target_entry_count: usize,
+    pub visit_count: u64,
+    pub fitness_micros: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresPolicyEntryRow {
+    pub team: String,
+    pub entry_kind: String,
+    pub state_hash: String,
+    pub state_key: serde_json::Value,
+    pub action: String,
+    pub target_fine_cell_id: i32,
+    pub target_tactical_cell_id: i32,
+    pub target_macro_cell_id: i32,
+    pub target_root_cell_id: i32,
+    pub value_micros: i64,
+    pub visits: u32,
+    #[serde(default)]
+    pub source_run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresRoleDimensionSummary {
+    pub role: String,
+    pub action_entry_count: usize,
+    pub target_entry_count: usize,
+    pub total_entry_count: usize,
+    pub visit_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresDimensionSummary {
+    pub scope_model: String,
+    pub role_source: String,
+    pub grid_sources: Vec<String>,
+    pub global_action_entry_count: usize,
+    pub global_target_entry_count: usize,
+    pub global_total_entry_count: usize,
+    pub global_visit_count: u64,
+    pub role_counts: Vec<SoccerPolicyPostgresRoleDimensionSummary>,
+}
+
+impl Default for SoccerPolicyPostgresDimensionSummary {
+    fn default() -> Self {
+        SoccerPolicyPostgresDimensionSummary {
+            scope_model: "state-key-role-and-grid".to_string(),
+            role_source: "state_key.role".to_string(),
+            grid_sources: vec![
+                "state_key.playerFineCellId".to_string(),
+                "state_key.playerTacticalCellId".to_string(),
+                "state_key.playerMacroCellId".to_string(),
+                "state_key.playerRootCellId".to_string(),
+            ],
+            global_action_entry_count: 0,
+            global_target_entry_count: 0,
+            global_total_entry_count: 0,
+            global_visit_count: 0,
+            role_counts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPolicyPostgresBranchTipExport {
+    pub artifact_schema: String,
+    pub contract: SoccerPolicyPostgresStorageContract,
+    #[serde(default)]
+    pub policy_dimensions: SoccerPolicyPostgresDimensionSummary,
+    pub version: SoccerPolicyPostgresPolicyVersionRow,
+    pub entries: Vec<SoccerPolicyPostgresPolicyEntryRow>,
+}
+
+impl SoccerPolicyPostgresBranchTipExport {
+    pub fn action_entry_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.entry_kind == "action")
+            .count()
+    }
+
+    pub fn target_entry_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.entry_kind == "target")
+            .count()
+    }
+}
+
+fn soccer_policy_postgres_export_jsonl_meta(
+    export: &SoccerPolicyPostgresBranchTipExport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "soccer-policy-postgres-export-meta",
+        "format": "jsonl",
+        "artifactSchema": &export.artifact_schema,
+        "contract": &export.contract,
+        "policyDimensions": &export.policy_dimensions,
+        "entryRows": export.entries.len(),
+        "actionEntryCount": export.action_entry_count(),
+        "targetEntryCount": export.target_entry_count(),
+        "versionLabel": &export.version.version_label,
+        "generation": export.version.generation,
+    })
+}
+
+fn soccer_policy_postgres_export_to_jsonl(
+    export: &SoccerPolicyPostgresBranchTipExport,
+) -> Result<String, serde_json::Error> {
+    let mut jsonl = String::new();
+    jsonl.push_str(&serde_json::to_string(
+        &soccer_policy_postgres_export_jsonl_meta(export),
+    )?);
+    jsonl.push('\n');
+    jsonl.push_str(&serde_json::to_string(&serde_json::json!({
+        "kind": "soccer-policy-postgres-version",
+        "version": &export.version,
+    }))?);
+    jsonl.push('\n');
+    for entry in &export.entries {
+        jsonl.push_str(&serde_json::to_string(&serde_json::json!({
+            "kind": "soccer-policy-postgres-entry",
+            "entry": entry,
+        }))?);
+        jsonl.push('\n');
+    }
+    Ok(jsonl)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerPolicyStorageStatus {
     pub backend: String,
     pub artifact_schema: String,
@@ -20301,6 +21132,8 @@ pub struct SoccerPolicyStorageStatus {
     pub postgres_enabled: bool,
     #[serde(default)]
     pub postgres_table: Option<String>,
+    #[serde(default)]
+    pub postgres_contract: SoccerPolicyPostgresStorageContract,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -23132,10 +23965,27 @@ impl SoccerMatch {
         snapshot: &WorldSnapshot,
         player_id: usize,
     ) -> Option<SoccerLearnedPlan> {
+        let mdp_state = snapshot.mdp_state_for_player(player_id);
+        let observation = snapshot.observation_for(player_id);
+        self.learned_action_for_player_with_context(snapshot, player_id, &mdp_state, &observation)
+    }
+
+    fn learned_action_for_player_with_context(
+        &self,
+        snapshot: &WorldSnapshot,
+        player_id: usize,
+        mdp_state: &SoccerMdpState,
+        observation: &SoccerPomdpObservation,
+    ) -> Option<SoccerLearnedPlan> {
         let player = snapshot.players.iter().find(|p| p.id == player_id)?;
         if let Some(team_policies) = &self.team_policies {
             let policy = team_policies.policy(player.team);
-            if let Some(action) = policy.best_action_for_snapshot(snapshot, player_id) {
+            if let Some(action) = policy.best_action_for_state_observation(
+                snapshot,
+                player_id,
+                mdp_state,
+                observation,
+            ) {
                 return Some(Self::learned_plan_for_policy(
                     policy, snapshot, player_id, action,
                 ));
@@ -23143,7 +23993,7 @@ impl SoccerMatch {
         }
         self.learned_policy.as_ref().and_then(|policy| {
             policy
-                .best_action_for_snapshot(snapshot, player_id)
+                .best_action_for_state_observation(snapshot, player_id, mdp_state, observation)
                 .map(|action| Self::learned_plan_for_policy(policy, snapshot, player_id, action))
         })
     }
@@ -23562,13 +24412,22 @@ impl SoccerMatch {
                         .filter(|frame| {
                             frame.player_id.is_none() || frame.player_id == Some(scheduled.id)
                         });
+                    let mdp_state = snapshot.mdp_state_for_player(scheduled.id);
+                    let observation = snapshot.observation_for(scheduled.id);
                     let learned_plan = if self.config.learning_enabled {
-                        self.learned_action_for_player(&snapshot, actor)
+                        self.learned_action_for_player_with_context(
+                            &snapshot,
+                            scheduled.id,
+                            &mdp_state,
+                            &observation,
+                        )
                     } else {
                         None
                     };
-                    let intent = self.players[actor].run_time_step(
+                    let intent = self.players[actor].run_time_step_with_context(
                         &snapshot,
+                        mdp_state,
+                        observation,
                         input_frame.as_ref(),
                         learned_plan.as_ref(),
                         &mut self.rng,
@@ -28558,6 +29417,7 @@ impl SoccerRealtimeSession {
             action_probabilities_derived: true,
             postgres_enabled: false,
             postgres_table: None,
+            postgres_contract: SoccerPolicyPostgresStorageContract::default(),
         }
     }
 
@@ -29251,6 +30111,54 @@ fn write_live_soccer_streaming_response(
             write_tracking_dataset_jsonl_chunked(stream, &template)?;
             Ok(true)
         }
+        ("GET", "/api/team-policy/postgres-export.jsonl")
+        | ("POST", "/api/team-policy/postgres-export.jsonl")
+        | ("GET", "/api/policy/postgres-export.jsonl")
+        | ("POST", "/api/policy/postgres-export.jsonl") => {
+            let explicit_req = if req.body.trim().is_empty() {
+                None
+            } else {
+                match parse_soccer_policy_postgres_export_request_body(req.body) {
+                    Ok(req) => Some(req),
+                    Err(e) => {
+                        let response = LiveHttpResponse::error(400, "Bad Request", &e);
+                        stream.write_all(&response.to_bytes())?;
+                        return Ok(true);
+                    }
+                }
+            };
+            let export = match session.lock() {
+                Ok(guard) => {
+                    let export_req = explicit_req.unwrap_or_else(|| {
+                        soccer_policy_postgres_export_request_for_tick(
+                            guard.match_ref().summary().ticks,
+                        )
+                    });
+                    match guard
+                        .team_policy_artifact()
+                        .postgres_branch_tip_export(export_req)
+                    {
+                        Ok(export) => export,
+                        Err(e) => {
+                            let response = LiveHttpResponse::error(400, "Bad Request", &e);
+                            stream.write_all(&response.to_bytes())?;
+                            return Ok(true);
+                        }
+                    }
+                }
+                Err(_) => {
+                    let response = LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    );
+                    stream.write_all(&response.to_bytes())?;
+                    return Ok(true);
+                }
+            };
+            write_soccer_policy_postgres_export_jsonl_chunked(stream, &export)?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -29320,6 +30228,30 @@ fn parse_live_http_request(raw: &str) -> Result<LiveHttpRequest<'_>, String> {
     let method = parts.next().ok_or_else(|| "missing method".to_string())?;
     let path = parts.next().ok_or_else(|| "missing path".to_string())?;
     Ok(LiveHttpRequest { method, path, body })
+}
+
+fn parse_soccer_policy_postgres_export_request_body(
+    body: &str,
+) -> Result<SoccerPolicyPostgresBranchTipExportRequest, String> {
+    if body.trim().is_empty() {
+        Ok(SoccerPolicyPostgresBranchTipExportRequest::default())
+    } else {
+        serde_json::from_str::<SoccerPolicyPostgresBranchTipExportRequest>(body)
+            .map_err(|e| format!("parse policy postgres export request: {e}"))
+    }
+}
+
+fn soccer_policy_postgres_export_request_for_tick(
+    tick: u64,
+) -> SoccerPolicyPostgresBranchTipExportRequest {
+    SoccerPolicyPostgresBranchTipExportRequest {
+        experiment_slug: "soccer/live".to_string(),
+        version_label: format!("live/t{tick}"),
+        generation: u32::try_from(tick).unwrap_or(u32::MAX),
+        source_kind: "import".to_string(),
+        status: "candidate".to_string(),
+        ..SoccerPolicyPostgresBranchTipExportRequest::default()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -29483,6 +30415,13 @@ fn soccer_tracking_json_to_io_error(err: serde_json::Error) -> std::io::Error {
     )
 }
 
+fn soccer_policy_postgres_json_to_io_error(err: serde_json::Error) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::InvalidData,
+        format!("serialize postgres policy jsonl: {err}"),
+    )
+}
+
 fn write_tracking_dataset_jsonl_chunked<W: Write>(
     writer: &mut W,
     tracking: &SoccerTrackingDataset,
@@ -29494,6 +30433,34 @@ fn write_tracking_dataset_jsonl_chunked<W: Write>(
     write_live_http_chunk(writer, &line)?;
     for frame in &tracking.frames {
         let mut line = serde_json::to_string(frame).map_err(soccer_tracking_json_to_io_error)?;
+        line.push('\n');
+        write_live_http_chunk(writer, &line)?;
+    }
+    finish_live_http_chunks(writer)
+}
+
+fn write_soccer_policy_postgres_export_jsonl_chunked<W: Write>(
+    writer: &mut W,
+    export: &SoccerPolicyPostgresBranchTipExport,
+) -> std::io::Result<()> {
+    write_live_http_chunked_header(writer, 200, "OK", "application/x-ndjson; charset=utf-8")?;
+    let mut line = serde_json::to_string(&soccer_policy_postgres_export_jsonl_meta(export))
+        .map_err(soccer_policy_postgres_json_to_io_error)?;
+    line.push('\n');
+    write_live_http_chunk(writer, &line)?;
+    let mut line = serde_json::to_string(&serde_json::json!({
+        "kind": "soccer-policy-postgres-version",
+        "version": &export.version,
+    }))
+    .map_err(soccer_policy_postgres_json_to_io_error)?;
+    line.push('\n');
+    write_live_http_chunk(writer, &line)?;
+    for entry in &export.entries {
+        let mut line = serde_json::to_string(&serde_json::json!({
+            "kind": "soccer-policy-postgres-entry",
+            "entry": entry,
+        }))
+        .map_err(soccer_policy_postgres_json_to_io_error)?;
         line.push('\n');
         write_live_http_chunk(writer, &line)?;
     }
@@ -29587,6 +30554,69 @@ fn handle_live_soccer_request(
                 }
             };
             LiveHttpResponse::json(&guard.team_policy_artifact())
+        }
+        ("POST", "/api/team-policy/postgres-export") | ("POST", "/api/policy/postgres-export") => {
+            let export_req = match parse_soccer_policy_postgres_export_request_body(req.body) {
+                Ok(req) => req,
+                Err(e) => return LiveHttpResponse::error(400, "Bad Request", &e),
+            };
+            let guard = match session.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    )
+                }
+            };
+            match guard
+                .team_policy_artifact()
+                .postgres_branch_tip_export(export_req)
+            {
+                Ok(export) => LiveHttpResponse::json(&export),
+                Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
+            }
+        }
+        ("GET", "/api/team-policy/postgres-export.jsonl")
+        | ("POST", "/api/team-policy/postgres-export.jsonl")
+        | ("GET", "/api/policy/postgres-export.jsonl")
+        | ("POST", "/api/policy/postgres-export.jsonl") => {
+            let explicit_req = if req.body.trim().is_empty() {
+                None
+            } else {
+                match parse_soccer_policy_postgres_export_request_body(req.body) {
+                    Ok(req) => Some(req),
+                    Err(e) => return LiveHttpResponse::error(400, "Bad Request", &e),
+                }
+            };
+            let guard = match session.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        "soccer session lock poisoned",
+                    )
+                }
+            };
+            let export_req = explicit_req.unwrap_or_else(|| {
+                soccer_policy_postgres_export_request_for_tick(guard.match_ref().summary().ticks)
+            });
+            match guard
+                .team_policy_artifact()
+                .postgres_branch_tip_export(export_req)
+            {
+                Ok(export) => match soccer_policy_postgres_export_to_jsonl(&export) {
+                    Ok(body) => LiveHttpResponse::jsonl(body),
+                    Err(e) => LiveHttpResponse::error(
+                        500,
+                        "Internal Server Error",
+                        &format!("serialize postgres policy jsonl: {e}"),
+                    ),
+                },
+                Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
+            }
         }
         ("GET", "/api/tracking-dataset") | ("GET", "/api/tracking-export") => {
             let guard = match session.lock() {
@@ -43551,6 +44581,221 @@ mod tests {
     }
 
     #[test]
+    fn team_policy_artifact_exports_postgres_branch_tip_rows() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            learning_logging_enabled: false,
+            seed: 15062,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+
+        sim.run_time_step();
+        let artifact = sim.team_policy_artifact();
+        assert!(!artifact.home_entries.is_empty());
+        assert!(!artifact.away_entries.is_empty());
+        assert!(
+            !artifact.home_target_entries.is_empty() || !artifact.away_target_entries.is_empty()
+        );
+
+        let request = SoccerPolicyPostgresBranchTipExportRequest {
+            experiment_slug: "soccer/default".to_string(),
+            version_label: "live/test-1".to_string(),
+            generation: 7,
+            source_kind: "import".to_string(),
+            status: "active".to_string(),
+            parent_policy_version_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+            policy_version_id: Some("00000000-0000-0000-0000-000000000002".to_string()),
+            source_run_id: Some("00000000-0000-0000-0000-000000000003".to_string()),
+            fitness_micros: 42,
+        };
+        let export = artifact
+            .postgres_branch_tip_export(request.clone())
+            .expect("postgres branch-tip export");
+        let repeated = artifact
+            .postgres_branch_tip_export(request)
+            .expect("repeat postgres branch-tip export");
+
+        assert_eq!(export.contract.backend, SOCCER_POLICY_POSTGRES_BACKEND);
+        assert_eq!(
+            export.contract.retention_model,
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert!(!export.contract.stores_all_weight_history);
+        assert_eq!(export.version.experiment_slug, "soccer/default");
+        assert_eq!(export.version.version_label, "live/test-1");
+        assert_eq!(export.version.generation, 7);
+        assert_eq!(export.version.source_kind, "import");
+        assert_eq!(export.version.status, "active");
+        assert_eq!(export.version.fitness_micros, 42);
+        assert_eq!(
+            export.version.entry_count,
+            artifact.home_entries.len() + artifact.away_entries.len()
+        );
+        assert_eq!(
+            export.version.target_entry_count,
+            artifact.home_target_entries.len() + artifact.away_target_entries.len()
+        );
+        assert_eq!(export.action_entry_count(), export.version.entry_count);
+        assert_eq!(
+            export.target_entry_count(),
+            export.version.target_entry_count
+        );
+        assert_eq!(
+            export.entries.len(),
+            export.version.entry_count + export.version.target_entry_count
+        );
+        assert_eq!(
+            export.version.visit_count,
+            export
+                .entries
+                .iter()
+                .map(|entry| u64::from(entry.visits))
+                .sum::<u64>()
+        );
+
+        let first = export.entries.first().expect("postgres entry");
+        assert_eq!(first.team, "home");
+        assert_eq!(first.entry_kind, "action");
+        assert_eq!(first.target_fine_cell_id, -1);
+        assert_eq!(first.target_tactical_cell_id, -1);
+        assert_eq!(first.target_macro_cell_id, -1);
+        assert_eq!(first.target_root_cell_id, -1);
+        assert_eq!(
+            first.value_micros,
+            soccer_policy_value_micros(artifact.home_entries[0].value)
+        );
+        assert!(first.state_key.is_object());
+        assert_eq!(first.state_hash.len(), 16);
+        assert!(first.state_hash.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(first.state_hash, repeated.entries[0].state_hash);
+        assert!(export.entries.iter().all(|entry| {
+            matches!(entry.team.as_str(), "home" | "away")
+                && matches!(entry.entry_kind.as_str(), "action" | "target")
+                && entry.action.len() <= 80
+                && entry.state_key.is_object()
+        }));
+        assert!(export
+            .entries
+            .iter()
+            .filter(|entry| entry.entry_kind == "target")
+            .all(|entry| entry.target_fine_cell_id >= 0
+                && entry.target_tactical_cell_id >= 0
+                && entry.target_macro_cell_id >= 0
+                && entry.target_root_cell_id >= 0));
+        assert_eq!(
+            export.version.lineage,
+            serde_json::json!(["00000000-0000-0000-0000-000000000001"])
+        );
+        assert_eq!(export.version.metrics["adversarial"], true);
+        assert_eq!(
+            export.policy_dimensions.scope_model,
+            "state-key-role-and-grid"
+        );
+        assert_eq!(export.policy_dimensions.role_source, "state_key.role");
+        assert_eq!(
+            export.policy_dimensions.global_total_entry_count,
+            export.entries.len()
+        );
+        assert_eq!(
+            export.policy_dimensions.global_action_entry_count,
+            export.version.entry_count
+        );
+        assert_eq!(
+            export.policy_dimensions.global_target_entry_count,
+            export.version.target_entry_count
+        );
+        assert_eq!(
+            export.policy_dimensions.global_visit_count,
+            export.version.visit_count
+        );
+        assert_eq!(
+            export.version.metrics["policyDimensions"]["roleSource"],
+            "state_key.role"
+        );
+        let role_total = export
+            .policy_dimensions
+            .role_counts
+            .iter()
+            .map(|role| role.total_entry_count)
+            .sum::<usize>();
+        assert_eq!(role_total, export.entries.len());
+        let goalkeeper = export
+            .policy_dimensions
+            .role_counts
+            .iter()
+            .find(|role| role.role == "goalkeeper")
+            .expect("goalkeeper role rollup");
+        assert!(goalkeeper.total_entry_count > 0);
+    }
+
+    #[test]
+    fn team_policy_postgres_branch_tip_export_jsonl_has_meta_and_entry_lines() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            learning_logging_enabled: false,
+            seed: 15063,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+
+        sim.run_time_step();
+        let export = sim
+            .team_policy_artifact()
+            .postgres_branch_tip_export(SoccerPolicyPostgresBranchTipExportRequest {
+                experiment_slug: "soccer/live".to_string(),
+                version_label: "live/t1".to_string(),
+                generation: 1,
+                source_kind: "import".to_string(),
+                status: "candidate".to_string(),
+                ..SoccerPolicyPostgresBranchTipExportRequest::default()
+            })
+            .expect("postgres branch-tip export");
+        let jsonl = soccer_policy_postgres_export_to_jsonl(&export).expect("postgres jsonl");
+        let lines = jsonl.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), export.entries.len() + 2);
+        let meta: serde_json::Value = serde_json::from_str(lines[0]).expect("jsonl meta");
+        assert_eq!(meta["kind"], "soccer-policy-postgres-export-meta");
+        assert_eq!(meta["format"], "jsonl");
+        assert_eq!(meta["artifactSchema"], "SoccerTeamPolicyArtifact/v1");
+        assert_eq!(meta["contract"]["backend"], SOCCER_POLICY_POSTGRES_BACKEND);
+        assert_eq!(meta["policyDimensions"]["roleSource"], "state_key.role");
+        assert_eq!(
+            meta["policyDimensions"]["globalTotalEntryCount"]
+                .as_u64()
+                .unwrap(),
+            export.entries.len() as u64
+        );
+        assert!(
+            meta["policyDimensions"]["roleCounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|role| role["role"] == "forward"
+                    && role["totalEntryCount"].as_u64().unwrap() > 0)
+        );
+        assert_eq!(
+            meta["contract"]["retentionModel"],
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert_eq!(
+            meta["entryRows"].as_u64().unwrap(),
+            export.entries.len() as u64
+        );
+        let version: serde_json::Value = serde_json::from_str(lines[1]).expect("jsonl version");
+        assert_eq!(version["kind"], "soccer-policy-postgres-version");
+        assert_eq!(version["version"]["experimentSlug"], "soccer/live");
+        assert_eq!(version["version"]["versionLabel"], "live/t1");
+        let first_entry: serde_json::Value =
+            serde_json::from_str(lines[2]).expect("jsonl policy entry");
+        assert_eq!(first_entry["kind"], "soccer-policy-postgres-entry");
+        assert_eq!(first_entry["entry"]["team"], "home");
+        assert_eq!(first_entry["entry"]["entryKind"], "action");
+        assert!(first_entry["entry"]["stateKey"].is_object());
+    }
+
+    #[test]
     fn tactical_summary_tracks_logged_transitions_incrementally() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.2,
@@ -51840,6 +53085,11 @@ mod tests {
         assert!(html.body.contains("function applyInputAck"));
         assert!(html.body.contains("input rejected"));
         assert!(html.body.contains("input accepted"));
+        assert!(html.body.contains("postgresContract"));
+        assert!(html.body.contains("id=\"exportPostgresPolicy\""));
+        assert!(html.body.contains("exportPostgresTeamPolicy"));
+        assert!(html.body.contains("id=\"exportPostgresPolicyJsonl\""));
+        assert!(html.body.contains("exportPostgresTeamPolicyJsonl"));
 
         let state = handle_live_soccer_request(
             "GET /api/state HTTP/1.1\r\nHost: local\r\n\r\n",
@@ -51876,6 +53126,34 @@ mod tests {
             true
         );
         assert_eq!(state_value["policyStorage"]["postgresEnabled"], false);
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["backend"],
+            SOCCER_POLICY_POSTGRES_BACKEND
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["schemaSource"],
+            SOCCER_POLICY_POSTGRES_SCHEMA_SOURCE
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["retentionModel"],
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["storesAllWeightHistory"],
+            false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["branchTipTable"],
+            SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["tables"]["policyEntries"],
+            SOCCER_POLICY_POSTGRES_POLICY_ENTRIES_TABLE
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["tables"]["runDeltas"],
+            SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE
+        );
         assert_eq!(state_value["policyProbability"]["homeStates"], 0);
         assert_eq!(state_value["policyProbability"]["awayStates"], 0);
         assert_eq!(
@@ -51956,6 +53234,115 @@ mod tests {
         assert_eq!(
             value["policyStorage"]["snapshotPath"],
             DEFAULT_TRACKED_TEAM_POLICY_PATH
+        );
+        assert_eq!(
+            value["policyStorage"]["postgresContract"]["retentionModel"],
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert_eq!(
+            value["policyStorage"]["postgresContract"]["tables"]["policyVersions"],
+            SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
+        );
+        assert_eq!(
+            value["policyStorage"]["postgresContract"]["tables"]["mergeEvents"],
+            SOCCER_POLICY_POSTGRES_MERGE_EVENTS_TABLE
+        );
+        let pg_body = serde_json::json!({
+            "experimentSlug": "soccer/live",
+            "versionLabel": "live/t2",
+            "generation": 2,
+            "sourceKind": "import",
+            "status": "candidate"
+        })
+        .to_string();
+        let pg_export = handle_live_soccer_request(
+            &format!(
+                "POST /api/team-policy/postgres-export HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                pg_body.len(),
+                pg_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(pg_export.status, 200);
+        let pg_value: serde_json::Value =
+            serde_json::from_str(&pg_export.body).expect("postgres policy export json");
+        assert_eq!(
+            pg_value["contract"]["backend"],
+            SOCCER_POLICY_POSTGRES_BACKEND
+        );
+        assert_eq!(
+            pg_value["contract"]["retentionModel"],
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert_eq!(pg_value["version"]["experimentSlug"], "soccer/live");
+        assert_eq!(pg_value["version"]["versionLabel"], "live/t2");
+        assert_eq!(pg_value["version"]["generation"], 2);
+        assert_eq!(pg_value["policyDimensions"]["roleSource"], "state_key.role");
+        assert_eq!(
+            pg_value["version"]["metrics"]["policyDimensions"]["scopeModel"],
+            "state-key-role-and-grid"
+        );
+        assert_eq!(
+            pg_value["version"]["entryCount"].as_u64().unwrap(),
+            value["learning"]["homePolicyEntries"].as_u64().unwrap()
+                + value["learning"]["awayPolicyEntries"].as_u64().unwrap()
+        );
+        assert!(pg_value["version"]["targetEntryCount"].as_u64().unwrap() > 0);
+        assert!(pg_value["version"]["visitCount"].as_u64().unwrap() > 0);
+        let pg_entries = pg_value["entries"]
+            .as_array()
+            .expect("postgres entries array");
+        assert_eq!(
+            pg_entries.len() as u64,
+            pg_value["version"]["entryCount"].as_u64().unwrap()
+                + pg_value["version"]["targetEntryCount"].as_u64().unwrap()
+        );
+        let first_pg = pg_entries.first().expect("first postgres entry");
+        assert_eq!(first_pg["team"], "home");
+        assert_eq!(first_pg["entryKind"], "action");
+        assert_eq!(first_pg["targetFineCellId"], -1);
+        assert_eq!(first_pg["stateHash"].as_str().unwrap().len(), 16);
+        assert!(first_pg["stateKey"].is_object());
+        assert!(pg_entries.iter().any(|entry| {
+            entry["entryKind"] == "target" && entry["targetFineCellId"].as_i64().unwrap() >= 0
+        }));
+        let pg_export_jsonl = handle_live_soccer_request(
+            &format!(
+                "POST /api/team-policy/postgres-export.jsonl HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                pg_body.len(),
+                pg_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(pg_export_jsonl.status, 200);
+        assert_eq!(
+            pg_export_jsonl.content_type,
+            "application/x-ndjson; charset=utf-8"
+        );
+        let pg_jsonl_lines = pg_export_jsonl.body.lines().collect::<Vec<_>>();
+        assert_eq!(pg_jsonl_lines.len(), pg_entries.len() + 2);
+        let pg_jsonl_meta: serde_json::Value =
+            serde_json::from_str(pg_jsonl_lines[0]).expect("postgres policy export jsonl meta");
+        assert_eq!(
+            pg_jsonl_meta["contract"]["retentionModel"],
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert_eq!(
+            pg_jsonl_meta["policyDimensions"]["roleSource"],
+            "state_key.role"
+        );
+        assert_eq!(
+            pg_jsonl_meta["entryRows"].as_u64().unwrap(),
+            pg_entries.len() as u64
+        );
+        let pg_jsonl_entry: serde_json::Value =
+            serde_json::from_str(pg_jsonl_lines[2]).expect("postgres policy export jsonl row");
+        assert_eq!(pg_jsonl_entry["kind"], "soccer-policy-postgres-entry");
+        assert_eq!(
+            pg_jsonl_entry["entry"]["stateHash"].as_str().unwrap().len(),
+            16
         );
         let agent_schedule = value["frame"]["agentSchedule"]
             .as_array()
@@ -52989,6 +54376,24 @@ mod tests {
         assert!(state.policy_storage.stores_action_probabilities);
         assert!(state.policy_storage.action_probabilities_derived);
         assert!(!state.policy_storage.postgres_enabled);
+        assert_eq!(
+            state.policy_storage.postgres_contract.backend,
+            SOCCER_POLICY_POSTGRES_BACKEND
+        );
+        assert_eq!(
+            state.policy_storage.postgres_contract.retention_model,
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert!(
+            !state
+                .policy_storage
+                .postgres_contract
+                .stores_all_weight_history
+        );
+        assert_eq!(
+            state.policy_storage.postgres_contract.tables.policy_entries,
+            SOCCER_POLICY_POSTGRES_POLICY_ENTRIES_TABLE
+        );
         assert!(state.policy_probability.home_states > 0);
         assert!(state.policy_probability.away_states > 0);
 

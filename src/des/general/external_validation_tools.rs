@@ -11782,10 +11782,10 @@ mod tests {
         {
             assert!(
                 !external_validation_python_modules(tool).is_empty(),
-            "{} is declared as a Python package but has no probe module",
-            tool.id
-        );
-    }
+                "{} is declared as a Python package but has no probe module",
+                tool.id
+            );
+        }
 
         let expected_pysat_backends = [
             ("kissat", "pysat.solvers:kissat"),
@@ -12141,7 +12141,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 264);
+        assert_eq!(tools.len(), 265);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -12518,6 +12518,12 @@ mod tests {
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "dbt" && tool.family == ExternalValidationFamily::OutputDataValidator
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "sqlfluff"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::NativeCli
+                && tool.input_formats.contains(&"sql")
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "apache-arrow"

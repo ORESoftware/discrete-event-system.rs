@@ -282,6 +282,7 @@
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
+      <div class="metric"><span>Intent</span><b id="actionIntent">Idle</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
@@ -370,6 +371,7 @@ const centralBrain = document.getElementById("centralBrain");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
+const actionIntent = document.getElementById("actionIntent");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
@@ -487,6 +489,17 @@ function centralBrainLabel(b) {
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   return `${players}p ${officials}o ${possession}${holder}`;
 }
+function primaryIntent(f) {
+  const intents = Array.isArray(f?.intents) ? f.intents : [];
+  if (!intents.length) return null;
+  return intents.find(i => i.playerId === f.ball?.holder) || intents[0];
+}
+function intentLabel(i) {
+  if (!i) return "Idle";
+  const action = String(i.action || "move").replace(/-/g, " ");
+  const flight = i.flight === "aerial" ? " A" : "";
+  return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}`;
+}
 function vecLen(v) {
   if (!v) return 0;
   return Math.hypot(Number(v.x || 0), Number(v.y || 0));
@@ -592,6 +605,66 @@ function drawPitch(r) {
   const boxH = r.h * 0.14;
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y, boxW, boxH);
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
+  const config = trace.config || FALLBACK_CONFIG;
+  const goalW = Number(config.goalWidthYards || 8) / Number(config.fieldWidthYards || 80) * r.w;
+  const goalX = r.x + (r.w - goalW) / 2;
+  const goalDepth = Math.min(18, Math.max(8, r.h * 0.018));
+  ctx.strokeStyle = "rgba(255,255,255,.96)";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(goalX, r.y - goalDepth, goalW, goalDepth);
+  ctx.strokeRect(goalX, r.y + r.h, goalW, goalDepth);
+}
+function drawArrow(from, to, color, width = 2, dashed = false) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 5) return;
+  const ux = dx / len;
+  const uy = dy / len;
+  const end = {x: to.x - ux * 8, y: to.y - uy * 8};
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.setLineDash(dashed ? [7, 7] : []);
+  ctx.beginPath();
+  ctx.moveTo(from.x + ux * 14, from.y + uy * 14);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(to.x, to.y);
+  ctx.lineTo(end.x - uy * 5, end.y + ux * 5);
+  ctx.lineTo(end.x + uy * 5, end.y - ux * 5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+function drawIntentTraces(f, r) {
+  const intents = Array.isArray(f?.intents) ? f.intents.slice(0, 8) : [];
+  if (!intents.length) return;
+  const playersById = new Map((f.players || []).map(p => [p.id, p]));
+  for (const intent of intents.slice().reverse()) {
+    const player = playersById.get(intent.playerId);
+    if (!player || !intent.targetPoint) continue;
+    const from = mapPoint(player.position, r);
+    const to = mapPoint(intent.targetPoint, r);
+    const isHolder = intent.playerId === f.ball?.holder;
+    const isSupport = intent.action === "space";
+    const isAerial = intent.flight === "aerial";
+    const color = isHolder
+      ? (isAerial ? "rgba(246,201,68,.92)" : "rgba(255,255,255,.86)")
+      : (intent.team === "Home" ? "rgba(137,205,255,.58)" : "rgba(255,164,164,.58)");
+    drawArrow(from, to, color, isHolder ? 3.2 : 2, isSupport);
+    if (intent.targetPlayer != null || isAerial) {
+      ctx.beginPath();
+      ctx.arc(to.x, to.y, isHolder ? 7 : 5, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isHolder ? 2.5 : 1.5;
+      ctx.stroke();
+    }
+  }
 }
 function drawPlayer(p, r) {
   const pt = mapPoint(p.position, r);
@@ -635,6 +708,7 @@ function render() {
   drawPitch(r);
   const f = currentFrame();
   if (!f) return;
+  drawIntentTraces(f, r);
   for (const o of f.officials) drawOfficial(o, r);
   for (const p of f.players) drawPlayer(p, r);
   drawBall(f.ball, r);
@@ -646,6 +720,7 @@ function render() {
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
+  actionIntent.textContent = intentLabel(primaryIntent(f));
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
   scrub.value = frameIndex;
 }

@@ -4455,6 +4455,7 @@ impl PlayerAgent {
             SoccerAction::DribbleMove { target, touch, .. } => (*target, None, Some(*touch)),
             SoccerAction::Pass {
                 target_player,
+                power,
                 flight,
                 ..
             } => {
@@ -4467,8 +4468,13 @@ impl PlayerAgent {
                         }
                     })
                     .or_else(|| snapshot.best_pass_target(self.id));
+                let speed = pass_speed_yps_from_power(*power, *flight, false, &self.skills);
                 let point = resolved_target
-                    .and_then(|id| snapshot.player_position(id))
+                    .and_then(|id| {
+                        snapshot
+                            .anticipated_pass_reception_point(self.id, id, *flight, speed)
+                            .or_else(|| snapshot.player_position(id))
+                    })
                     .unwrap_or_else(|| {
                         Vec2::new(
                             self.position.x,
@@ -14348,6 +14354,23 @@ pub struct SoccerPlaybackDirectiveFrame {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerPlaybackIntentFrame {
+    pub player_id: usize,
+    pub team: Team,
+    pub role: PlayerRole,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_point: Option<Vec2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_player: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flight: Option<PassFlight>,
+    #[serde(default)]
+    pub urgency: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerPlaybackFrame {
     pub tick: u64,
     pub clock_seconds: f64,
@@ -14360,6 +14383,101 @@ pub struct SoccerPlaybackFrame {
     pub central_brain: SoccerPlaybackCentralBrainFrame,
     pub home_directive: SoccerPlaybackDirectiveFrame,
     pub away_directive: SoccerPlaybackDirectiveFrame,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<SoccerPlaybackIntentFrame>,
+}
+
+fn playback_intent_priority(
+    player: &PlayerSnapshot,
+    action: &str,
+    possession_team: Option<Team>,
+    ball_holder: Option<usize>,
+) -> Option<f64> {
+    let holder_bonus = if ball_holder == Some(player.id) {
+        32.0
+    } else {
+        0.0
+    };
+    match action {
+        "shoot" | "first-time-shot" | "first-time-header" => Some(110.0 + holder_bonus),
+        "pass" | "aerial-pass" | "first-time-pass" => Some(104.0 + holder_bonus),
+        "clearance" | "route-one" => Some(98.0 + holder_bonus),
+        "left-cut"
+        | "right-cut"
+        | "nutmeg"
+        | "fake-left-cut-right"
+        | "fake-right-cut-left"
+        | "hold-up-flank" => Some(92.0 + holder_bonus),
+        "space" if possession_team == Some(player.team) => {
+            let role_bonus = match player.role {
+                PlayerRole::Forward => 9.0,
+                PlayerRole::Midfielder => 7.0,
+                PlayerRole::Defender => 3.0,
+                PlayerRole::Goalkeeper => 0.0,
+            };
+            Some(62.0 + role_bonus)
+        }
+        "recover" if ball_holder.is_none() => Some(58.0),
+        _ => None,
+    }
+}
+
+fn playback_pass_flight_for_action(action: &str) -> Option<PassFlight> {
+    match action {
+        "aerial-pass" => Some(PassFlight::Aerial),
+        "pass" | "first-time-pass" => Some(PassFlight::Floor),
+        _ => None,
+    }
+}
+
+fn playback_intents_from_frame(frame: &MatchFrame) -> Vec<SoccerPlaybackIntentFrame> {
+    let possession_team = frame.central_brain.possession_team.or_else(|| {
+        frame
+            .ball
+            .holder
+            .and_then(|holder| frame.players.iter().find(|player| player.id == holder))
+            .map(|player| player.team)
+    });
+    let mut candidates = frame
+        .players
+        .iter()
+        .filter_map(|player| {
+            let decision = player.last_decision.as_ref()?;
+            let action = normalize_soccer_action_label(&decision.action).to_string();
+            let priority =
+                playback_intent_priority(player, &action, possession_team, frame.ball.holder)?;
+            let action_target = decision.action_target.as_ref();
+            let target_point = action_target.and_then(|target| target.point);
+            if target_point.is_none() {
+                return None;
+            }
+            let urgency = decision.observation.decision_urgency.clamp(0.0, 1.0);
+            Some((
+                priority + urgency * 4.0,
+                player.id,
+                SoccerPlaybackIntentFrame {
+                    player_id: player.id,
+                    team: player.team,
+                    role: player.role,
+                    action: action.clone(),
+                    target_point,
+                    target_player: action_target.and_then(|target| target.player_id),
+                    flight: playback_pass_flight_for_action(&action),
+                    urgency,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    candidates
+        .into_iter()
+        .take(8)
+        .map(|(_, _, intent)| intent)
+        .collect()
 }
 
 impl From<&MatchFrame> for SoccerPlaybackFrame {
@@ -14421,6 +14539,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                 press_intensity: frame.away_directive.press_intensity,
                 risk_tolerance: frame.away_directive.risk_tolerance,
             },
+            intents: playback_intents_from_frame(frame),
         }
     }
 }
@@ -15204,6 +15323,703 @@ fn check_frame_displacement(
 
 fn vec2_is_finite(value: Vec2) -> bool {
     value.x.is_finite() && value.y.is_finite()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerAccountingSmokeViolation {
+    pub tick: u64,
+    pub subject: String,
+    pub metric: String,
+    pub expected: String,
+    pub actual: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerAccountingSmokeReport {
+    pub frames_analyzed: usize,
+    pub events_analyzed: usize,
+    pub full_time_reached: bool,
+    pub score_home_from_goal_events: u32,
+    pub score_away_from_goal_events: u32,
+    pub violation_count: usize,
+    pub violations: Vec<SoccerAccountingSmokeViolation>,
+}
+
+impl SoccerAccountingSmokeReport {
+    pub fn ok(&self) -> bool {
+        self.violations.is_empty()
+    }
+
+    fn push_violation(
+        &mut self,
+        tick: u64,
+        subject: impl Into<String>,
+        metric: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.violations.push(SoccerAccountingSmokeViolation {
+            tick,
+            subject: subject.into(),
+            metric: metric.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+            message: message.into(),
+        });
+        self.violation_count = self.violations.len();
+    }
+}
+
+pub fn soccer_simulation_accounting_smoke_report(
+    trace: &SimulationTrace,
+) -> SoccerAccountingSmokeReport {
+    let mut report = SoccerAccountingSmokeReport {
+        frames_analyzed: trace.frames.len(),
+        events_analyzed: trace.events.len(),
+        full_time_reached: trace
+            .frames
+            .last()
+            .is_some_and(|frame| frame.tick >= trace.config.total_ticks()),
+        score_home_from_goal_events: trace
+            .events
+            .iter()
+            .filter(|event| event.kind == "goal" && event.team == Some(Team::Home))
+            .count() as u32,
+        score_away_from_goal_events: trace
+            .events
+            .iter()
+            .filter(|event| event.kind == "goal" && event.team == Some(Team::Away))
+            .count() as u32,
+        ..SoccerAccountingSmokeReport::default()
+    };
+
+    soccer_accounting_check_frames(trace, &mut report);
+    soccer_accounting_check_events(trace, &mut report);
+    soccer_accounting_check_stats(trace, &mut report);
+    report.violation_count = report.violations.len();
+    report
+}
+
+fn soccer_accounting_check_frames(
+    trace: &SimulationTrace,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    let Some(last_frame) = trace.frames.last() else {
+        report.push_violation(
+            0,
+            "match",
+            "frames",
+            "at least one frame",
+            "0",
+            "accounting smoke needs frames",
+        );
+        return;
+    };
+
+    if last_frame.tick != trace.summary.ticks {
+        report.push_violation(
+            last_frame.tick,
+            "summary",
+            "ticks",
+            trace.summary.ticks.to_string(),
+            last_frame.tick.to_string(),
+            "last frame tick should match summary ticks",
+        );
+    }
+    if last_frame.score_home != trace.summary.score_home {
+        report.push_violation(
+            last_frame.tick,
+            "summary",
+            "scoreHome",
+            trace.summary.score_home.to_string(),
+            last_frame.score_home.to_string(),
+            "last frame home score should match summary",
+        );
+    }
+    if last_frame.score_away != trace.summary.score_away {
+        report.push_violation(
+            last_frame.tick,
+            "summary",
+            "scoreAway",
+            trace.summary.score_away.to_string(),
+            last_frame.score_away.to_string(),
+            "last frame away score should match summary",
+        );
+    }
+
+    let mut previous = None::<(u64, f64, u32, u32)>;
+    for frame in &trace.frames {
+        if let Some((prev_tick, prev_clock, prev_home, prev_away)) = previous {
+            if frame.tick < prev_tick {
+                report.push_violation(
+                    frame.tick,
+                    "frame",
+                    "tickOrder",
+                    format!(">= {prev_tick}"),
+                    frame.tick.to_string(),
+                    "frame ticks must be monotonic",
+                );
+            }
+            if frame.clock_seconds + 1e-9 < prev_clock {
+                report.push_violation(
+                    frame.tick,
+                    "frame",
+                    "clockOrder",
+                    format!(">= {prev_clock:.6}"),
+                    format!("{:.6}", frame.clock_seconds),
+                    "frame clocks must be monotonic",
+                );
+            }
+            if frame.score_home < prev_home || frame.score_away < prev_away {
+                report.push_violation(
+                    frame.tick,
+                    "score",
+                    "monotonic",
+                    format!("home >= {prev_home}, away >= {prev_away}"),
+                    format!("home {}, away {}", frame.score_home, frame.score_away),
+                    "scores must not decrease between frames",
+                );
+            }
+        }
+        previous = Some((
+            frame.tick,
+            frame.clock_seconds,
+            frame.score_home,
+            frame.score_away,
+        ));
+
+        soccer_accounting_check_frame_roster(frame, report);
+        soccer_accounting_check_frame_ball_accounting(frame, report);
+        soccer_accounting_check_agent_schedule(frame, report);
+    }
+}
+
+fn soccer_accounting_check_frame_roster(
+    frame: &MatchFrame,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    let mut ids = HashSet::new();
+    let mut home = 0usize;
+    let mut away = 0usize;
+    let mut home_gk = 0usize;
+    let mut away_gk = 0usize;
+    for player in &frame.players {
+        if !ids.insert(player.id) {
+            report.push_violation(
+                frame.tick,
+                "players",
+                "uniquePlayerIds",
+                "unique ids",
+                format!("duplicate {}", player.id),
+                "frame contains duplicate player ids",
+            );
+        }
+        match player.team {
+            Team::Home => {
+                home += 1;
+                if player.role == PlayerRole::Goalkeeper {
+                    home_gk += 1;
+                }
+            }
+            Team::Away => {
+                away += 1;
+                if player.role == PlayerRole::Goalkeeper {
+                    away_gk += 1;
+                }
+            }
+        }
+    }
+    if frame.players.len() != 22 || home != 11 || away != 11 {
+        report.push_violation(
+            frame.tick,
+            "players",
+            "rosterSize",
+            "22 players: 11 home, 11 away",
+            format!("total {}, home {home}, away {away}", frame.players.len()),
+            "11v11 frame roster accounting is invalid",
+        );
+    }
+    if home_gk != 1 || away_gk != 1 {
+        report.push_violation(
+            frame.tick,
+            "players",
+            "goalkeepers",
+            "one goalkeeper per team",
+            format!("home {home_gk}, away {away_gk}"),
+            "frame should have exactly one goalkeeper per team",
+        );
+    }
+}
+
+fn soccer_accounting_check_frame_ball_accounting(
+    frame: &MatchFrame,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    if frame.central_brain.ball_holder != frame.ball.holder {
+        report.push_violation(
+            frame.tick,
+            "centralBrain",
+            "ballHolderConsistency",
+            format!("{:?}", frame.ball.holder),
+            format!("{:?}", frame.central_brain.ball_holder),
+            "central brain holder should match ball state holder",
+        );
+    }
+
+    if let Some(holder) = frame.ball.holder {
+        let Some(holder_player) = frame.players.iter().find(|player| player.id == holder) else {
+            report.push_violation(
+                frame.tick,
+                "ball",
+                "holderExists",
+                "holder id in players",
+                holder.to_string(),
+                "ball holder is missing from frame players",
+            );
+            return;
+        };
+        if frame.central_brain.possession_team != Some(holder_player.team) {
+            report.push_violation(
+                frame.tick,
+                "centralBrain",
+                "possessionTeam",
+                holder_player.team.label(),
+                format!("{:?}", frame.central_brain.possession_team),
+                "possession team should match the holder team",
+            );
+        }
+        if frame.ball.last_touch_team != Some(holder_player.team) {
+            report.push_violation(
+                frame.tick,
+                "ball",
+                "lastTouchTeam",
+                holder_player.team.label(),
+                format!("{:?}", frame.ball.last_touch_team),
+                "a controlled ball should have last touch credited to the holder team",
+            );
+        }
+        if let Some(set_play) = &frame.active_set_play {
+            if set_play.team != holder_player.team {
+                report.push_violation(
+                    frame.tick,
+                    "setPlay",
+                    "restartHolderTeam",
+                    set_play.team.label(),
+                    holder_player.team.label(),
+                    "active set-play holder should be on the restart team",
+                );
+            }
+        }
+    }
+}
+
+fn soccer_accounting_check_agent_schedule(
+    frame: &MatchFrame,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    let mut seen = HashSet::new();
+    for entry in &frame.agent_schedule {
+        let key = format!("{:?}:{}", entry.kind, entry.id);
+        if !seen.insert(key.clone()) {
+            report.push_violation(
+                frame.tick,
+                "agentSchedule",
+                "uniqueAgents",
+                "unique (kind,id)",
+                key,
+                "agent schedule contains duplicate entries",
+            );
+        }
+    }
+}
+
+fn soccer_accounting_check_events(
+    trace: &SimulationTrace,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    let known_players = trace
+        .frames
+        .iter()
+        .flat_map(|frame| frame.players.iter().map(|player| player.id))
+        .collect::<HashSet<_>>();
+    let mut previous = None::<(u64, f64)>;
+    let mut by_tick = BTreeMap::<u64, Vec<&MatchEvent>>::new();
+    for event in &trace.events {
+        if event.kind.trim().is_empty() {
+            report.push_violation(
+                event.tick,
+                "event",
+                "kind",
+                "non-empty",
+                "empty",
+                "event kind must not be empty",
+            );
+        }
+        if event.tick > trace.summary.ticks {
+            report.push_violation(
+                event.tick,
+                "event",
+                "tickWithinMatch",
+                format!("<= {}", trace.summary.ticks),
+                event.tick.to_string(),
+                "event tick exceeds the match summary",
+            );
+        }
+        if !event.clock_seconds.is_finite() {
+            report.push_violation(
+                event.tick,
+                "event",
+                "clockFinite",
+                "finite",
+                format!("{:?}", event.clock_seconds),
+                "event clock must be finite",
+            );
+        }
+        if let Some((prev_tick, prev_clock)) = previous {
+            if event.tick < prev_tick
+                || (event.tick == prev_tick && event.clock_seconds + 1e-9 < prev_clock)
+            {
+                report.push_violation(
+                    event.tick,
+                    "event",
+                    "eventOrder",
+                    format!("after tick {prev_tick} clock {prev_clock:.6}"),
+                    format!("tick {} clock {:.6}", event.tick, event.clock_seconds),
+                    "events should be emitted in chronological order",
+                );
+            }
+        }
+        previous = Some((event.tick, event.clock_seconds));
+
+        if let Some(player_id) = event.player_id {
+            if !known_players.is_empty() && !known_players.contains(&player_id) {
+                report.push_violation(
+                    event.tick,
+                    "event",
+                    "playerId",
+                    "known player id",
+                    player_id.to_string(),
+                    "event references a player not present in match frames",
+                );
+            }
+        }
+        if soccer_accounting_team_required_event(&event.kind) && event.team.is_none() {
+            report.push_violation(
+                event.tick,
+                "event",
+                "team",
+                "team present",
+                "None",
+                "team-scoped event is missing a team",
+            );
+        }
+        by_tick.entry(event.tick).or_default().push(event);
+    }
+
+    for (tick, events) in by_tick {
+        soccer_accounting_check_exclusive_event_class(
+            report,
+            tick,
+            "restartEvents",
+            "at most one restart event per tick",
+            events
+                .iter()
+                .copied()
+                .filter(|event| soccer_accounting_restart_event(&event.kind)),
+        );
+        soccer_accounting_check_exclusive_event_class(
+            report,
+            tick,
+            "shotTerminalEvents",
+            "at most one terminal shot outcome per tick",
+            events
+                .iter()
+                .copied()
+                .filter(|event| soccer_accounting_shot_terminal_event(&event.kind)),
+        );
+        soccer_accounting_check_exclusive_event_class(
+            report,
+            tick,
+            "goalEvents",
+            "at most one goal event per tick",
+            events.iter().copied().filter(|event| event.kind == "goal"),
+        );
+    }
+}
+
+fn soccer_accounting_check_exclusive_event_class<'a>(
+    report: &mut SoccerAccountingSmokeReport,
+    tick: u64,
+    metric: &str,
+    expected: &str,
+    events: impl Iterator<Item = &'a MatchEvent>,
+) {
+    let labels = events
+        .map(|event| format!("{}:{:?}", event.kind, event.team))
+        .collect::<Vec<_>>();
+    if labels.len() > 1 {
+        report.push_violation(
+            tick,
+            "events",
+            metric,
+            expected,
+            labels.join(","),
+            "mutually exclusive event accounting collided in one tick",
+        );
+    }
+}
+
+fn soccer_accounting_restart_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "kickoff" | "throw-in" | "goal-kick" | "corner-kick" | "free-kick"
+    )
+}
+
+fn soccer_accounting_shot_terminal_event(kind: &str) -> bool {
+    matches!(kind, "goal" | "miss" | "save" | "shot-blocked")
+}
+
+fn soccer_accounting_team_required_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "goal"
+            | "shot"
+            | "miss"
+            | "save"
+            | "shot-blocked"
+            | "throw-in"
+            | "goal-kick"
+            | "corner-kick"
+            | "free-kick"
+            | "foul"
+            | "offside"
+            | "kickoff"
+    )
+}
+
+fn soccer_accounting_check_stats(
+    trace: &SimulationTrace,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    soccer_accounting_expect_eq(
+        report,
+        trace.summary.ticks,
+        "summary",
+        "scoreHomeGoalEvents",
+        trace.summary.score_home,
+        report.score_home_from_goal_events,
+        "home score should equal home goal events",
+    );
+    soccer_accounting_expect_eq(
+        report,
+        trace.summary.ticks,
+        "summary",
+        "scoreAwayGoalEvents",
+        trace.summary.score_away,
+        report.score_away_from_goal_events,
+        "away score should equal away goal events",
+    );
+
+    let stats = &trace.summary.stats;
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "shotsOnTargetHome",
+        stats.shots_on_target_home,
+        stats.shots_home,
+        "home shots on target cannot exceed home shots",
+    );
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "shotsOnTargetAway",
+        stats.shots_on_target_away,
+        stats.shots_away,
+        "away shots on target cannot exceed away shots",
+    );
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "passesCompletedHome",
+        stats.passes_completed_home,
+        stats.passes_attempted_home,
+        "home completed passes cannot exceed attempts",
+    );
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "passesCompletedAway",
+        stats.passes_completed_away,
+        stats.passes_attempted_away,
+        "away completed passes cannot exceed attempts",
+    );
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "savesHome",
+        stats.saves_home,
+        stats.shots_on_target_away,
+        "home saves cannot exceed away shots on target",
+    );
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "savesAway",
+        stats.saves_away,
+        stats.shots_on_target_home,
+        "away saves cannot exceed home shots on target",
+    );
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "shotBlocksHome",
+        stats.shot_blocks_home,
+        stats.shots_away,
+        "home shot blocks cannot exceed away shots",
+    );
+    soccer_accounting_expect_le(
+        report,
+        "stats",
+        "shotBlocksAway",
+        stats.shot_blocks_away,
+        stats.shots_home,
+        "away shot blocks cannot exceed home shots",
+    );
+
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "throw-in",
+        Team::Home,
+        "throwInsHome",
+        stats.throw_ins_home,
+    );
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "throw-in",
+        Team::Away,
+        "throwInsAway",
+        stats.throw_ins_away,
+    );
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "goal-kick",
+        Team::Home,
+        "goalKicksHome",
+        stats.goal_kicks_home,
+    );
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "goal-kick",
+        Team::Away,
+        "goalKicksAway",
+        stats.goal_kicks_away,
+    );
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "corner-kick",
+        Team::Home,
+        "cornerKicksHome",
+        stats.corner_kicks_home,
+    );
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "corner-kick",
+        Team::Away,
+        "cornerKicksAway",
+        stats.corner_kicks_away,
+    );
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "free-kick",
+        Team::Home,
+        "freeKicksHome",
+        stats.free_kicks_home,
+    );
+    soccer_accounting_check_event_stat_count(
+        report,
+        trace,
+        "free-kick",
+        Team::Away,
+        "freeKicksAway",
+        stats.free_kicks_away,
+    );
+}
+
+fn soccer_accounting_check_event_stat_count(
+    report: &mut SoccerAccountingSmokeReport,
+    trace: &SimulationTrace,
+    event_kind: &str,
+    team: Team,
+    metric: &str,
+    stat_value: u32,
+) {
+    let event_count = trace
+        .events
+        .iter()
+        .filter(|event| event.kind == event_kind && event.team == Some(team))
+        .count() as u32;
+    soccer_accounting_expect_eq(
+        report,
+        trace.summary.ticks,
+        "stats",
+        metric,
+        stat_value,
+        event_count,
+        format!("{metric} should match emitted {event_kind} events"),
+    );
+}
+
+fn soccer_accounting_expect_eq(
+    report: &mut SoccerAccountingSmokeReport,
+    tick: u64,
+    subject: &str,
+    metric: &str,
+    expected: u32,
+    actual: u32,
+    message: impl Into<String>,
+) {
+    if expected != actual {
+        report.push_violation(
+            tick,
+            subject,
+            metric,
+            expected.to_string(),
+            actual.to_string(),
+            message,
+        );
+    }
+}
+
+fn soccer_accounting_expect_le(
+    report: &mut SoccerAccountingSmokeReport,
+    subject: &str,
+    metric: &str,
+    actual: u32,
+    upper_bound: u32,
+    message: impl Into<String>,
+) {
+    if actual > upper_bound {
+        report.push_violation(
+            0,
+            subject,
+            metric,
+            format!("<= {upper_bound}"),
+            actual.to_string(),
+            message,
+        );
+    }
 }
 
 fn team_policy_artifact_probability_summary(
@@ -37913,6 +38729,49 @@ mod tests {
     }
 
     #[test]
+    fn pass_decision_target_records_receiver_stride_not_static_feet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        sim.players[winger].velocity = Vec2::new(1.8, 4.2);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(34.0, 82.0 + (away - 11) as f64 * 0.7);
+        }
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let speed =
+            pass_speed_yps_from_power(0.72, PassFlight::Floor, false, &sim.players[passer].skills);
+        let anticipated = snapshot
+            .anticipated_pass_reception_point(passer, winger, PassFlight::Floor, speed)
+            .expect("anticipated receiver stride");
+        let action = SoccerAction::Pass {
+            target_player: Some(winger),
+            power: 0.72,
+            flight: PassFlight::Floor,
+        };
+        let target = sim.players[passer]
+            .action_target_trace(&action, &snapshot)
+            .expect("pass action target")
+            .point
+            .expect("pass target point");
+
+        assert!(
+            target.distance(anticipated) < 1e-9,
+            "decision trace should record anticipated pass target: target={target:?}, anticipated={anticipated:?}"
+        );
+        assert!(
+            target.distance(sim.players[winger].position) > 0.5,
+            "pass target should lead the receiver, not target static feet: {target:?}"
+        );
+    }
+
+    #[test]
     fn possession_shape_pushes_back_four_up_and_staggers_midfield_pair() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 7;
@@ -41690,6 +42549,16 @@ mod tests {
     }
 
     #[test]
+    fn live_soccer_page_exposes_intent_overlay() {
+        let html = soccer_live_page_html();
+
+        assert!(html.contains("id=\"actionIntent\""));
+        assert!(html.contains("liveIntentCandidates"));
+        assert!(html.contains("drawDecisionIntentTraces"));
+        assert!(html.contains("decision?.actionTarget"));
+    }
+
+    #[test]
     fn static_soccer_frame_stream_uses_slim_playback_jsonl() {
         let trace = run_simulation(
             MatchConfig {
@@ -41722,10 +42591,30 @@ mod tests {
         assert!(!first_frame["players"][0].get("lastDecision").is_some());
         assert!(!first_frame.get("sharedPositions").is_some());
         assert!(!first_frame.get("agentSchedule").is_some());
+        let frames = jsonl
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("playback json"))
+            .collect::<Vec<_>>();
+        let intent_frame = frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .get("intents")
+                    .and_then(|intents| intents.as_array())
+                    .is_some_and(|intents| !intents.is_empty())
+            })
+            .expect("at least one playback frame should expose slim tactical intents");
+        let first_intent = intent_frame["intents"]
+            .as_array()
+            .and_then(|intents| intents.first())
+            .expect("intent entry");
+        assert!(first_intent.get("targetPoint").is_some());
+        assert!(first_intent.get("urgency").is_some());
+        let max_line_len = jsonl.lines().map(str::len).max().unwrap_or(0);
         assert!(
-            first_line.len() < 18_000,
-            "playback frame should stay mobile-sized, got {} bytes",
-            first_line.len()
+            max_line_len < 18_000,
+            "playback frames should stay mobile-sized, got {} bytes",
+            max_line_len
         );
     }
 

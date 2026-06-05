@@ -302,6 +302,7 @@
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
       <div class="metric"><span>Ball Agent</span><b id="ballAgent">waiting</b></div>
       <div class="metric"><span>Ball Action</span><b id="ballAction">waiting</b></div>
+      <div class="metric"><span>Intent</span><b id="actionIntent">Idle</b></div>
       <div class="metric"><span>Surface</span><b id="surfaceReadout">D0.028 A0.009 G0.88 S0.55</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
@@ -478,6 +479,7 @@ const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
 const ballAgent = document.getElementById("ballAgent");
 const ballAction = document.getElementById("ballAction");
+const actionIntent = document.getElementById("actionIntent");
 const surfaceReadout = document.getElementById("surfaceReadout");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
@@ -609,6 +611,24 @@ const SEMANTIC_BALL_ACTIONS = new Set([
   "goal",
   "save",
   "shot-blocked"
+]);
+const INTENT_TRACE_ACTIONS = new Set([
+  "shoot",
+  "first-time-shot",
+  "first-time-header",
+  "pass",
+  "aerial-pass",
+  "first-time-pass",
+  "clearance",
+  "route-one",
+  "left-cut",
+  "right-cut",
+  "nutmeg",
+  "fake-left-cut-right",
+  "fake-right-cut-left",
+  "hold-up-flank",
+  "space",
+  "recover"
 ]);
 const CONTROLLER_KEYMAPS = [
   {
@@ -852,6 +872,66 @@ function semanticBallActionLabel() {
   const team = shortTeam(record.team);
   const reward = Number.isFinite(record.reward) ? ` R${signed(record.reward)}` : "";
   return `${record.action}${player} ${team} t${record.tick}${reward}`;
+}
+function livePossessionTeam(frame = state?.frame) {
+  const central = frame?.centralBrain?.possessionTeam;
+  if (central) return central;
+  const holder = frame?.ball?.holder;
+  return frame?.players?.find(player => player.id === holder)?.team || null;
+}
+function intentPriority(player, action, frame = state?.frame) {
+  const holder = frame?.ball?.holder;
+  const possession = livePossessionTeam(frame);
+  const holderBonus = holder === player.id ? 32 : 0;
+  if (["shoot", "first-time-shot", "first-time-header"].includes(action)) return 110 + holderBonus;
+  if (["pass", "aerial-pass", "first-time-pass"].includes(action)) return 104 + holderBonus;
+  if (["clearance", "route-one"].includes(action)) return 98 + holderBonus;
+  if (["left-cut", "right-cut", "nutmeg", "fake-left-cut-right", "fake-right-cut-left", "hold-up-flank"].includes(action)) return 92 + holderBonus;
+  if (action === "space" && possession === player.team) {
+    const roleBonus = player.role === "Forward" ? 9 : player.role === "Midfielder" ? 7 : player.role === "Defender" ? 3 : 0;
+    return 62 + roleBonus;
+  }
+  if (action === "recover" && holder == null) return 58;
+  return null;
+}
+function liveIntentCandidates(frame = state?.frame) {
+  if (!Array.isArray(frame?.players)) return [];
+  return frame.players
+    .map(player => {
+      const decision = player?.lastDecision;
+      const target = decision?.actionTarget;
+      const targetPoint = target?.point;
+      if (!decision || !targetPoint) return null;
+      const action = normalizeUiActionLabel(decision.action);
+      if (!INTENT_TRACE_ACTIONS.has(action)) return null;
+      const priority = intentPriority(player, action, frame);
+      if (priority == null) return null;
+      const urgency = clamp(Number(decision?.observation?.decisionUrgency ?? 0), 0, 1);
+      const flight = action === "aerial-pass" ? "aerial" : ["pass", "first-time-pass"].includes(action) ? "floor" : null;
+      return {
+        player,
+        action,
+        targetPoint,
+        targetPlayer: target.playerId,
+        urgency,
+        flight,
+        priority: priority + urgency * 4
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.priority - a.priority || a.player.id - b.player.id)
+    .slice(0, 8);
+}
+function primaryLiveIntent(frame = state?.frame) {
+  const candidates = liveIntentCandidates(frame);
+  if (!candidates.length) return null;
+  return candidates.find(candidate => candidate.player.id === frame?.ball?.holder) || candidates[0];
+}
+function liveIntentLabel(intent = primaryLiveIntent()) {
+  if (!intent) return "Idle";
+  const action = String(intent.action || "move").replace(/-/g, " ");
+  const flight = intent.flight === "aerial" ? " A" : "";
+  return `${intent.player.id} ${action}${flight} U${Number(intent.urgency ?? 0).toFixed(2)}`;
 }
 function controllerThreadLabel(threads = state?.controllerThreads || []) {
   if (!Array.isArray(threads) || !threads.length) return "0 native";
@@ -1712,6 +1792,57 @@ function drawMovementTrails(r) {
   const selected = controlledPlayer();
   if (selected) drawTrail(selected.positionHistory, r, "rgba(246,201,68,.86)", 3);
 }
+function drawIntentArrow(from, to, color, width = 2, dashed = false) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 5) return;
+  const ux = dx / len;
+  const uy = dy / len;
+  const end = {x: to.x - ux * 8, y: to.y - uy * 8};
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.setLineDash(dashed ? [7, 7] : []);
+  ctx.beginPath();
+  ctx.moveTo(from.x + ux * 14, from.y + uy * 14);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(to.x, to.y);
+  ctx.lineTo(end.x - uy * 5, end.y + ux * 5);
+  ctx.lineTo(end.x + uy * 5, end.y - ux * 5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+function drawDecisionIntentTraces(r) {
+  const frame = state?.frame;
+  const candidates = liveIntentCandidates(frame);
+  if (!candidates.length) return;
+  for (const intent of candidates.slice().reverse()) {
+    const player = intent.player;
+    const from = mapPoint(player.position, r);
+    const to = mapPoint(intent.targetPoint, r);
+    const isHolder = player.id === frame?.ball?.holder;
+    const isSupport = intent.action === "space";
+    const isAerial = intent.flight === "aerial";
+    const color = isHolder
+      ? (isAerial ? "rgba(246,201,68,.92)" : "rgba(255,255,255,.86)")
+      : (player.team === "Home" ? "rgba(137,205,255,.58)" : "rgba(255,164,164,.58)");
+    drawIntentArrow(from, to, color, isHolder ? 3.2 : 2, isSupport);
+    if (intent.targetPlayer != null || isAerial) {
+      ctx.beginPath();
+      ctx.arc(to.x, to.y, isHolder ? 7 : 5, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isHolder ? 2.5 : 1.5;
+      ctx.stroke();
+    }
+  }
+}
 function drawFacingIndicator(p, pt, r) {
   const facing = norm(fieldDirToCanvas(playerFacing(p), r));
   if (facing.x === 0 && facing.y === 0) return;
@@ -1802,6 +1933,7 @@ function render() {
   drawAssistantOffsideLines(r);
   drawMovementTrails(r);
   drawSelectedVision(controlledPlayer(), r);
+  drawDecisionIntentTraces(r);
   for (const o of f.officials) drawOfficial(o, r);
   for (const p of f.players) drawPlayer(p, r);
   drawBall(f.ball, r);
@@ -1817,6 +1949,7 @@ function render() {
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
   ballAgent.textContent = ballAgentLabel(f.ball);
   ballAction.textContent = semanticBallActionLabel();
+  actionIntent.textContent = liveIntentLabel(primaryLiveIntent(f));
   surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;

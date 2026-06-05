@@ -18,8 +18,9 @@ use des_engine::des::general::soccer::{
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
-    evolve_soccer_team_policies, soccer_learning_run_score, soccer_policy_delta_entries,
-    SoccerEvolutionOptions, SoccerLearningCompletedGame,
+    evolve_soccer_tactical_learning_weights, evolve_soccer_team_policies,
+    soccer_learning_run_score, soccer_policy_delta_entries, SoccerEvolutionOptions,
+    SoccerLearningCompletedGame,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -2311,6 +2312,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             for (game_index, fitness) in ranked_parents.iter().take(elite_count) {
                 parents.push((&completed_games[*game_index].policies, *fitness));
             }
+            let tactical_parents = ranked_parents
+                .iter()
+                .take(elite_count)
+                .map(|(game_index, fitness)| {
+                    (
+                        &completed_games[*game_index].artifact.tactical_summary,
+                        *fitness,
+                    )
+                })
+                .collect::<Vec<_>>();
             let mut batch_evolution_options = evolution_options;
             batch_evolution_options.seed = batch_evolution_options
                 .seed
@@ -2318,6 +2329,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .wrapping_add((shard_index as u64) << 32);
             policies = evolve_soccer_team_policies(&parents, batch_evolution_options)
                 .map_err(invalid_data)?;
+            let previous_tactical_learning = tactical_learning.clone();
+            tactical_learning = evolve_soccer_tactical_learning_weights(
+                &tactical_learning,
+                &tactical_parents,
+                batch_evolution_options,
+            );
+            validate_tactical_learning_weights(&tactical_learning)?;
+            config.tactical_learning = tactical_learning.clone();
             println!(
                 "policy_evolved games_completed={} elite_games={} best_fitness={:.4} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4}",
                 completed_after_batch,
@@ -2328,6 +2347,16 @@ fn run() -> Result<(), Box<dyn Error>> {
                 batch_evolution_options.crossover_rate,
                 batch_evolution_options.exploration_rate,
                 batch_evolution_options.exploration_scale
+            );
+            println!(
+                "tactical_weights_evolved games_completed={} attack_width_delta={:.3}->{:.3} attack_flank_lane={:.3}->{:.3} defense_contract_delta={:.3}->{:.3}",
+                completed_after_batch,
+                previous_tactical_learning.attack_width_delta_weight,
+                tactical_learning.attack_width_delta_weight,
+                previous_tactical_learning.attack_flank_lane_weight,
+                tactical_learning.attack_flank_lane_weight,
+                previous_tactical_learning.defense_contract_delta_weight,
+                tactical_learning.defense_contract_delta_weight
             );
             let _ = std::io::stdout().flush();
 

@@ -16,7 +16,7 @@ use crate::des::general::soccer::{
     MatchConfig, MatchSummary, SoccerMatch, SoccerNeuralNetworkSnapshot, SoccerQEntry,
     SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey, SoccerQTargetEntry,
     SoccerSelfPlayEpisodeSummary, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary,
-    SoccerTeamQPolicies, Team,
+    SoccerTacticalLearningWeights, SoccerTeamQPolicies, Team,
 };
 
 pub const SOCCER_LEARNING_FIXED_SCALE: i64 = 1_000_000;
@@ -452,6 +452,144 @@ pub fn evolve_soccer_team_policies(
         action_accumulators,
         target_accumulators,
     )
+}
+
+pub fn evolve_soccer_tactical_learning_weights(
+    base: &SoccerTacticalLearningWeights,
+    parents: &[(&SoccerTacticalLearningSummary, f64)],
+    options: SoccerEvolutionOptions,
+) -> SoccerTacticalLearningWeights {
+    if parents.is_empty() {
+        return base.clone();
+    }
+    let mut weighted_summary = SoccerTacticalLearningSummary::default();
+    let mut total_weight = 0.0;
+    for (summary, fitness) in parents {
+        let weight = fitness.max(options.elite_weight_floor).max(0.0);
+        if weight <= 0.0 {
+            continue;
+        }
+        total_weight += weight;
+        weighted_summary.mean_attack_width_score += summary.mean_attack_width_score * weight;
+        weighted_summary.mean_attack_flank_lane_score +=
+            summary.mean_attack_flank_lane_score * weight;
+        weighted_summary.mean_attack_spacing_score += summary.mean_attack_spacing_score * weight;
+        weighted_summary.mean_defense_contract_score +=
+            summary.mean_defense_contract_score * weight;
+        weighted_summary.mean_defense_spacing_score += summary.mean_defense_spacing_score * weight;
+        weighted_summary.mean_defense_ball_gap_score +=
+            summary.mean_defense_ball_gap_score * weight;
+        weighted_summary.mean_defense_role_press_score +=
+            summary.mean_defense_role_press_score * weight;
+    }
+    if total_weight <= 0.0 {
+        return base.clone();
+    }
+    weighted_summary.mean_attack_width_score /= total_weight;
+    weighted_summary.mean_attack_flank_lane_score /= total_weight;
+    weighted_summary.mean_attack_spacing_score /= total_weight;
+    weighted_summary.mean_defense_contract_score /= total_weight;
+    weighted_summary.mean_defense_spacing_score /= total_weight;
+    weighted_summary.mean_defense_ball_gap_score /= total_weight;
+    weighted_summary.mean_defense_role_press_score /= total_weight;
+
+    let mut rng = DeterministicRng::new(options.seed ^ 0x5eed_f00d_cafe_babe);
+    let mut evolved = base.clone();
+    let mutation_scale = options.mutation_scale.max(0.0) * 0.22;
+    let exploration_rate = options.exploration_rate.clamp(0.0, 1.0);
+    let exploration_scale = options.exploration_scale.max(0.0) * 0.18;
+
+    let attack_width_gap = (1.0 - weighted_summary.mean_attack_width_score).clamp(0.0, 1.0);
+    let attack_flank_gap = (1.0 - weighted_summary.mean_attack_flank_lane_score).clamp(0.0, 1.0);
+    let attack_spacing_gap = (1.0 - weighted_summary.mean_attack_spacing_score).clamp(0.0, 1.0);
+    let defense_contract_gap = (1.0 - weighted_summary.mean_defense_contract_score).clamp(0.0, 1.0);
+    let defense_spacing_gap = (1.0 - weighted_summary.mean_defense_spacing_score).clamp(0.0, 1.0);
+    let defense_ball_gap = (1.0 - weighted_summary.mean_defense_ball_gap_score).clamp(0.0, 1.0);
+    let press_gap = (1.0 - weighted_summary.mean_defense_role_press_score).clamp(0.0, 1.0);
+
+    evolve_weight(
+        &mut evolved.attack_spacing_delta_weight,
+        attack_spacing_gap * 0.050,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        1.8,
+    );
+    evolve_weight(
+        &mut evolved.attack_width_delta_weight,
+        attack_width_gap * 0.070,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        2.2,
+    );
+    evolve_weight(
+        &mut evolved.attack_flank_lane_weight,
+        attack_flank_gap * 0.085,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        2.2,
+    );
+    evolve_weight(
+        &mut evolved.defense_contract_delta_weight,
+        defense_contract_gap * 0.080,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        2.4,
+    );
+    evolve_weight(
+        &mut evolved.defense_compactness_score_weight,
+        defense_contract_gap * 0.052,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        2.0,
+    );
+    evolve_weight(
+        &mut evolved.defense_spacing_delta_weight,
+        defense_spacing_gap * 0.040,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        1.8,
+    );
+    evolve_weight(
+        &mut evolved.defense_ball_depth_score_weight,
+        defense_ball_gap * 0.050,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        2.0,
+    );
+    evolve_weight(
+        &mut evolved.defender_midfielder_press_weight,
+        press_gap * 0.034,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        1.6,
+    );
+    evolve_weight(
+        &mut evolved.midfielder_press_weight,
+        press_gap * 0.030,
+        mutation_scale,
+        exploration_rate,
+        exploration_scale,
+        &mut rng,
+        1.6,
+    );
+
+    evolved
 }
 
 pub fn run_soccer_learning_game(
@@ -1053,6 +1191,30 @@ fn explore_accumulators(
     }
 }
 
+fn evolve_weight(
+    weight: &mut f64,
+    directed_delta: f64,
+    mutation_scale: f64,
+    exploration_rate: f64,
+    exploration_scale: f64,
+    rng: &mut DeterministicRng,
+    max_value: f64,
+) {
+    let mutation = if mutation_scale > 0.0 {
+        (rng.next_f64() * 2.0 - 1.0) * mutation_scale
+    } else {
+        0.0
+    };
+    let exploration = if exploration_scale > 0.0 && rng.next_f64() < exploration_rate {
+        (rng.next_f64() * 2.0 - 1.0) * exploration_scale
+    } else {
+        0.0
+    };
+    *weight = (*weight + directed_delta + mutation + exploration)
+        .max(0.0)
+        .min(max_value.max(0.0));
+}
+
 fn mutate_accumulators(
     accumulators: &mut BTreeMap<PolicyEntryKey, MergeAccumulator>,
     rng: &mut DeterministicRng,
@@ -1331,6 +1493,37 @@ mod tests {
             (value - -4.0).abs() < 1e-9 || (value - 4.0).abs() < 1e-9,
             "crossover should inherit a parent value, got {value}"
         );
+    }
+
+    #[test]
+    fn tactical_weight_evolution_pushes_flank_and_contract_search() {
+        let base = SoccerTacticalLearningWeights::default();
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.20,
+            mean_attack_flank_lane_score: 0.18,
+            mean_attack_spacing_score: 0.35,
+            mean_defense_contract_score: 0.22,
+            mean_defense_spacing_score: 0.44,
+            mean_defense_ball_gap_score: 0.50,
+            mean_defense_role_press_score: 0.40,
+            ..Default::default()
+        };
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.0,
+            mutation_scale: 0.0,
+            crossover_rate: 0.0,
+            exploration_rate: 0.0,
+            exploration_scale: 0.0,
+            elite_weight_floor: 0.0,
+            seed: 29,
+        };
+
+        let evolved = evolve_soccer_tactical_learning_weights(&base, &[(&summary, 1.0)], options);
+
+        assert!(evolved.attack_width_delta_weight > base.attack_width_delta_weight);
+        assert!(evolved.attack_flank_lane_weight > base.attack_flank_lane_weight);
+        assert!(evolved.defense_contract_delta_weight > base.defense_contract_delta_weight);
+        assert!(evolved.defense_compactness_score_weight > base.defense_compactness_score_weight);
     }
 
     #[test]

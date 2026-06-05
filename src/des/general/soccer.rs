@@ -116,6 +116,7 @@ const GOAL_CONTEXT_CREDIT_MAX_AGE_TICKS: u64 = 600;
 const GOAL_CONTEXT_CREDIT_MIN_SCORE: f64 = 0.05;
 const SHOT_ON_TARGET_REWARD_POINTS: f64 = 50.0;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
+const LOW_PRESSURE_FORCED_PASS_PENALTY_POINTS: f64 = 1.75;
 const DEFENSIVE_CLEAR_AND_HOLD_FIRST_SECONDS: f64 = 5.0;
 const DEFENSIVE_CLEAR_AND_HOLD_SECOND_SECONDS: f64 = 10.0;
 const DEFENSIVE_CLEAR_AND_HOLD_FIRST_REWARD_POINTS: f64 = 10.0;
@@ -184,6 +185,9 @@ const MIDFIELDER_PRESS_FOCUS_IDEAL_YARDS: f64 = 5.0;
 const FORWARD_TOP_SPEED_MULTIPLIER: f64 = 1.10;
 const STRIKER_ONSIDE_BUFFER_YARDS: f64 = 1.25;
 const CENTER_REF_BALL_CLEARANCE_YARDS: f64 = 7.0;
+const CENTER_REF_PLAYER_CENTROID_WEIGHT: f64 = 0.46;
+const CENTER_REF_LIVE_PLAY_CENTROID_WEIGHT: f64 = 0.34;
+const CENTER_REF_BALL_POSITION_WEIGHT: f64 = 0.20;
 const ASSISTANT_REF_BALL_CLEARANCE_YARDS: f64 = 4.0;
 const ASSISTANT_REF_TOUCHLINE_OFFSET_YARDS: f64 = 0.5;
 const LIVE_HTTP_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -4787,6 +4791,22 @@ impl PlayerAgent {
                 snapshot,
                 observation,
             ),
+            _ if observation.has_ball => dribble_move_kind_for_action_label(action).map(|kind| {
+                let touch = snapshot.deterministic_dribble_touch_decision_for(self.id, kind);
+                (
+                    SoccerAction::DribbleMove {
+                        target: snapshot.dribble_move_target_for_touch(
+                            self.id,
+                            self.home_position,
+                            kind,
+                            touch,
+                        ),
+                        kind,
+                        touch,
+                    },
+                    kind.label().to_string(),
+                )
+            }),
             _ => None,
         }
     }
@@ -7756,10 +7776,7 @@ impl OfficialAgent {
         let previous_acceleration = self.acceleration;
         let offside_line = assistant_offside_line_snapshot(snapshot, self.kind);
         let base_target = match self.kind {
-            OfficialKind::CenterReferee => Vec2::new(
-                snapshot.field_width * 0.5,
-                snapshot.ball.position.y * 0.72 + snapshot.field_length * 0.14,
-            ),
+            OfficialKind::CenterReferee => center_referee_play_centroid_target(snapshot),
             OfficialKind::AssistantRefereeNear => Vec2::new(
                 assistant_ref_touchline_x(self.kind, snapshot.field_width),
                 assistant_ref_half_y(
@@ -7843,6 +7860,61 @@ fn official_position_bounds(
             assistant_ref_half_y(kind, position.y, field_length),
         ),
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CenterOfPlayCentroids {
+    player_centroid: Vec2,
+    live_play_centroid: Vec2,
+    center_of_play: Vec2,
+}
+
+fn center_of_play_centroids(snapshot: &WorldSnapshot) -> CenterOfPlayCentroids {
+    if snapshot.players.is_empty() {
+        let center = Vec2::new(snapshot.field_width * 0.5, snapshot.field_length * 0.5);
+        return CenterOfPlayCentroids {
+            player_centroid: center,
+            live_play_centroid: center,
+            center_of_play: center,
+        };
+    }
+
+    let mut player_sum = Vec2::zero();
+    let mut live_play_sum = Vec2::zero();
+    let mut live_play_weight = 0.0;
+    for player in &snapshot.players {
+        player_sum += player.position;
+        let distance_to_ball = player.position.distance(snapshot.ball.position);
+        let near_ball_weight = (1.0 - distance_to_ball / 42.0).clamp(0.0, 1.0);
+        let holder_bonus = if snapshot.ball.holder == Some(player.id) {
+            1.15
+        } else {
+            0.0
+        };
+        let weight = 0.28 + near_ball_weight * 1.72 + holder_bonus;
+        live_play_sum += player.position * weight;
+        live_play_weight += weight;
+    }
+
+    let player_centroid = player_sum / snapshot.players.len() as f64;
+    let live_play_centroid = if live_play_weight > 0.0 {
+        live_play_sum / live_play_weight
+    } else {
+        player_centroid
+    };
+    let center_of_play = (player_centroid * CENTER_REF_PLAYER_CENTROID_WEIGHT
+        + live_play_centroid * CENTER_REF_LIVE_PLAY_CENTROID_WEIGHT
+        + snapshot.ball.position * CENTER_REF_BALL_POSITION_WEIGHT)
+        .clamp_to_pitch(snapshot.field_width, snapshot.field_length);
+    CenterOfPlayCentroids {
+        player_centroid,
+        live_play_centroid,
+        center_of_play,
+    }
+}
+
+fn center_referee_play_centroid_target(snapshot: &WorldSnapshot) -> Vec2 {
+    center_of_play_centroids(snapshot).center_of_play
 }
 
 fn official_clearance_target(
@@ -9282,12 +9354,16 @@ impl CentralBrain {
             })
             .collect::<Vec<_>>();
         let tracked_officials = tracked_official_awareness.len();
+        let center_of_play = center_of_play_centroids(snapshot);
         CentralBrainSnapshot {
             phase: self.phase,
             possession_team: self.possession_team.or_else(|| snapshot.possession_team()),
             ball_position: snapshot.ball.position,
             ball_velocity: snapshot.ball.velocity,
             ball_holder: snapshot.ball.holder,
+            player_centroid: center_of_play.player_centroid,
+            live_play_centroid: center_of_play.live_play_centroid,
+            center_of_play: center_of_play.center_of_play,
             pressure_line_home: self.pressure_line_home,
             pressure_line_away: self.pressure_line_away,
             tracked_players: snapshot
@@ -13849,6 +13925,9 @@ fn soccer_goal_credit_action_is_relevant(action: &str) -> bool {
             | "aerial-pass"
             | "first-time-pass"
             | "dribble"
+            | "carry-forward"
+            | "carry-out"
+            | "protect-ball"
             | "side-step"
             | "left-cut"
             | "right-cut"
@@ -13970,6 +14049,10 @@ fn soccer_goal_credit_transition_score(
                 + dense_signal
         }
         "dribble"
+        | "carry-forward"
+        | "carry-out"
+        | "protect-ball"
+        | "hold-up-flank"
         | "side-step"
         | "left-cut"
         | "right-cut"
@@ -14217,11 +14300,6 @@ fn dense_soccer_transition_reward(
             }
         }
         if matches!(action, "pass" | "aerial-pass" | "first-time-pass") {
-            if ball_forward > 1.25 {
-                reward += ball_forward.clamp(0.0, 24.0) * 0.075;
-            } else if ball_forward.abs() <= 1.25 && before_obs.perceived_pressure < 0.30 {
-                reward -= 0.22;
-            }
             let decision_context = soccer_decision_context_for(
                 player.id,
                 player.team,
@@ -14230,6 +14308,21 @@ fn dense_soccer_transition_reward(
                 before,
                 after,
             );
+            reward -= low_pressure_forced_pass_penalty_points(
+                before_obs,
+                &decision_context,
+                if action == "aerial-pass" {
+                    PassFlight::Aerial
+                } else {
+                    PassFlight::Floor
+                },
+                after_possession == Some(player.team),
+            );
+            if ball_forward > 1.25 {
+                reward += ball_forward.clamp(0.0, 24.0) * 0.075;
+            } else if ball_forward.abs() <= 1.25 && before_obs.perceived_pressure < 0.30 {
+                reward -= 0.22;
+            }
             reward += pass_into_stride_fit_for_context(&decision_context, player.team) * 0.16;
         }
         reward += intentional_long_ball_release_reward(
@@ -14246,6 +14339,9 @@ fn dense_soccer_transition_reward(
             action,
             "dribble"
                 | "side-step"
+                | "carry-forward"
+                | "carry-out"
+                | "protect-ball"
                 | "left-cut"
                 | "right-cut"
                 | "nutmeg"
@@ -15348,6 +15444,12 @@ pub struct CentralBrainSnapshot {
     pub ball_position: Vec2,
     pub ball_velocity: Vec2,
     pub ball_holder: Option<usize>,
+    #[serde(default)]
+    pub player_centroid: Vec2,
+    #[serde(default)]
+    pub live_play_centroid: Vec2,
+    #[serde(default)]
+    pub center_of_play: Vec2,
     pub pressure_line_home: f64,
     pub pressure_line_away: f64,
     pub tracked_players: Vec<CentralBrainPlayerAwareness>,
@@ -30935,6 +31037,40 @@ fn low_pressure_patient_carry_preferred(observation: &SoccerPomdpObservation) ->
         && observation.forward_dribble_space_yards >= 2.0
 }
 
+fn low_pressure_forced_pass_penalty_points(
+    observation: &SoccerPomdpObservation,
+    context: &SoccerDecisionContext,
+    flight: PassFlight,
+    retained_possession: bool,
+) -> f64 {
+    if !low_pressure_patient_carry_preferred(observation) {
+        return 0.0;
+    }
+    let quality = pass_quality_for_patience(observation, flight);
+    let poor_pass = (1.0 - quality).clamp(0.0, 1.0);
+    if poor_pass <= 0.0 {
+        return 0.0;
+    }
+
+    let patience = low_pressure_patience_factor(observation);
+    let carry_space = (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0);
+    let direction_cost = if context.target_forward_yards < -1.25 {
+        0.58
+    } else if context.target_forward_yards <= 1.25 {
+        0.30
+    } else {
+        0.0
+    };
+    let outcome_cost = if retained_possession { 0.36 } else { 1.0 };
+
+    (LOW_PRESSURE_FORCED_PASS_PENALTY_POINTS
+        * patience
+        * poor_pass
+        * (0.55 + carry_space * 0.45)
+        * (outcome_cost + direction_cost))
+        .clamp(0.0, 2.65)
+}
+
 fn close_clear_shot_attempt_probability(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
@@ -35228,6 +35364,79 @@ mod tests {
     }
 
     #[test]
+    fn center_referee_tracks_center_of_play_mass() {
+        let sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let mut snapshot = WorldSnapshot::from_match(&sim);
+        for (idx, player) in snapshot.players.iter_mut().enumerate() {
+            let lane = (idx % 5) as f64;
+            player.position = Vec2::new(21.0 + lane * 3.0, 74.0 + (idx / 5) as f64 * 4.0);
+        }
+        snapshot.ball.position = Vec2::new(24.0, 86.0);
+        snapshot.ball.holder = Some(8);
+
+        let target = center_referee_play_centroid_target(&snapshot);
+        assert!(
+            target.x < snapshot.field_width * 0.5 - 7.0,
+            "center ref target should follow the player mass laterally: {target:?}"
+        );
+        assert!(
+            target.y > snapshot.field_length * 0.5 + 10.0,
+            "center ref target should follow the player mass vertically: {target:?}"
+        );
+        assert!(
+            target.distance(snapshot.ball.position) < 16.0,
+            "center ref should stay near the live play centroid before clearance: {target:?}"
+        );
+
+        let start = Vec2::new(snapshot.field_width * 0.5, snapshot.field_length * 0.5);
+        let mut center_ref = OfficialAgent::new(99, OfficialKind::CenterReferee, start);
+        let mut rng = SeededRandom::new(301);
+        let initial_distance = center_ref.position.distance(target);
+        for _ in 0..24 {
+            center_ref.run_time_step(&snapshot, &mut rng);
+        }
+
+        assert!(
+            center_ref.position.distance(target) < initial_distance,
+            "center ref should move toward center-of-play target"
+        );
+        assert!(
+            center_ref.position.x < start.x,
+            "center ref should move laterally toward the player mass"
+        );
+    }
+
+    #[test]
+    fn central_brain_snapshot_exposes_center_of_play_centroids() {
+        let sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let mut snapshot = WorldSnapshot::from_match(&sim);
+        for (idx, player) in snapshot.players.iter_mut().enumerate() {
+            let lane = (idx % 4) as f64;
+            player.position = Vec2::new(18.0 + lane * 4.0, 76.0 + (idx / 4) as f64 * 3.0);
+        }
+        snapshot.ball.position = Vec2::new(23.0, 88.0);
+        snapshot.ball.holder = Some(8);
+
+        let centroids = center_of_play_centroids(&snapshot);
+        let brain = CentralBrain::default();
+        let brain_snapshot = brain.to_snapshot(&snapshot, &sim.officials);
+
+        assert_eq!(brain_snapshot.player_centroid, centroids.player_centroid);
+        assert_eq!(
+            brain_snapshot.live_play_centroid,
+            centroids.live_play_centroid
+        );
+        assert_eq!(brain_snapshot.center_of_play, centroids.center_of_play);
+        assert!(
+            brain_snapshot.center_of_play.x < snapshot.field_width * 0.5 - 7.0,
+            "central brain center-of-play should track lateral mass: {:?}",
+            brain_snapshot.center_of_play
+        );
+        assert_eq!(brain_snapshot.tracked_players.len(), 22);
+        assert_eq!(brain_snapshot.tracked_official_awareness.len(), 3);
+    }
+
+    #[test]
     fn loose_ball_control_ignores_officials() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         for player in &mut sim.players {
@@ -36066,6 +36275,64 @@ mod tests {
             action_target.facing,
             facing_bucket_from_vector(traced_point - passer_position)
         );
+    }
+
+    #[test]
+    fn human_input_can_choose_carry_and_protect_dribbles() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 1,
+            seed: 79,
+            ..Default::default()
+        });
+        let holder = 8;
+        let defender = 12;
+        park_players_except(&mut sim, &[holder, defender]);
+        sim.players[holder].controller_slot = Some(0);
+        sim.players[holder].position = Vec2::new(40.0, 70.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].skills.dribbling = 7.8;
+        sim.players[holder].skills.first_touch = 7.6;
+        sim.players[holder].skills.acceleration = 7.2;
+        sim.players[defender].position = Vec2::new(41.0, 70.5);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        for (raw_action, expected_kind) in [
+            ("carry_forward", DribbleMoveKind::CarryForward),
+            ("protect_ball", DribbleMoveKind::ProtectBall),
+        ] {
+            let mut player = sim.players[holder].clone();
+            let mut rng = mulberry32(29_000);
+            let input = HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(holder),
+                seq: 1,
+                axis: Vec2::zero(),
+                sprint: false,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: Some(raw_action.to_string()),
+                target_player: None,
+            };
+            let intent = player.run_time_step(&snapshot, Some(&input), None, &mut rng);
+            match intent.action {
+                SoccerAction::DribbleMove { kind, .. } => assert_eq!(kind, expected_kind),
+                other => panic!("expected explicit human dribble move, got {other:?}"),
+            }
+            assert_eq!(
+                player
+                    .last_decision
+                    .as_ref()
+                    .expect("human dribble decision")
+                    .action,
+                expected_kind.label()
+            );
+        }
     }
 
     #[test]
@@ -44835,6 +45102,121 @@ mod tests {
     }
 
     #[test]
+    fn low_pressure_poor_pass_receives_learning_penalty_vs_carry() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2262,
+            ..Default::default()
+        });
+        let passer = 6;
+        let receiver = 9;
+        let marker = 12;
+        park_players_except(&mut sim, &[passer, receiver, marker]);
+        sim.players[passer].position = Vec2::new(40.0, 64.0);
+        sim.players[passer].home_position = sim.players[passer].position;
+        sim.players[passer].velocity = Vec2::new(0.0, 1.6);
+        sim.players[passer].skills.dribbling = 7.4;
+        sim.players[receiver].position = Vec2::new(54.0, 82.0);
+        sim.players[receiver].velocity = Vec2::new(0.0, 1.0);
+        sim.players[marker].position = Vec2::new(57.0, 82.5);
+        sim.players[marker].velocity = Vec2::zero();
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let before = WorldSnapshot::from_match(&sim);
+        let observation = before.observation_for(passer);
+        assert!(low_pressure_patient_carry_preferred(&observation));
+
+        let poor_lateral_target = Vec2::new(55.0, 64.2);
+        let mut poor_pass_after = before.clone();
+        poor_pass_after.ball.holder = None;
+        poor_pass_after.ball.position = poor_lateral_target;
+        let mut poor_pass_decision = test_decision_trace(&before, passer, "pass");
+        poor_pass_decision.action_target = Some(AgentActionTargetTrace {
+            point: Some(poor_lateral_target),
+            player_id: None,
+            grid: Some(pitch_grid_address(
+                poor_lateral_target,
+                before.field_width,
+                before.field_length,
+            )),
+            facing: facing_bucket_from_vector(poor_lateral_target - sim.players[passer].position),
+            dribble_touch: None,
+        });
+        let pass_context = soccer_decision_context_for(
+            passer,
+            Team::Home,
+            "pass",
+            poor_pass_decision.action_target.as_ref(),
+            &before,
+            &poor_pass_after,
+        );
+        let penalty = low_pressure_forced_pass_penalty_points(
+            &observation,
+            &pass_context,
+            PassFlight::Floor,
+            false,
+        );
+        assert!(
+            penalty > 0.20,
+            "forced low-quality pass should carry a learning penalty: {penalty}"
+        );
+        let poor_pass_reward = soccer_transition_reward(
+            &sim.players[passer],
+            &poor_pass_decision,
+            &before,
+            &poor_pass_after,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+
+        let carry_target = Vec2::new(40.0, 67.2);
+        let mut carry_after = before.clone();
+        carry_after.ball.holder = Some(passer);
+        carry_after.ball.position = carry_target;
+        if let Some(player) = carry_after
+            .players
+            .iter_mut()
+            .find(|player| player.id == passer)
+        {
+            player.position = carry_target;
+        }
+        let mut carry_decision = test_decision_trace(&before, passer, "carry-forward");
+        carry_decision.action_target = Some(AgentActionTargetTrace {
+            point: Some(carry_target),
+            player_id: None,
+            grid: Some(pitch_grid_address(
+                carry_target,
+                before.field_width,
+                before.field_length,
+            )),
+            facing: facing_bucket_from_vector(carry_target - sim.players[passer].position),
+            dribble_touch: None,
+        });
+        let carry_reward = soccer_transition_reward(
+            &sim.players[passer],
+            &carry_decision,
+            &before,
+            &carry_after,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+
+        assert!(
+            carry_reward > poor_pass_reward + 0.35,
+            "carry should beat forced poor pass: carry={carry_reward} pass={poor_pass_reward}"
+        );
+    }
+
+    #[test]
     fn pressured_holder_can_protect_ball_with_body_shield() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -45088,6 +45470,13 @@ mod tests {
             .unwrap()
             .iter()
             .any(|official| official["kind"] == "CenterReferee"));
+        assert!(value["frame"]["centralBrain"]
+            .get("playerCentroid")
+            .is_some());
+        assert!(value["frame"]["centralBrain"]
+            .get("livePlayCentroid")
+            .is_some());
+        assert!(value["frame"]["centralBrain"].get("centerOfPlay").is_some());
         let agent_schedule = value["frame"]["agentSchedule"]
             .as_array()
             .expect("agent schedule array");

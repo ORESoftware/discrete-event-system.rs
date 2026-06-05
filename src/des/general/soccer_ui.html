@@ -305,6 +305,8 @@
         <button id="capture">Capture</button>
         <button id="pass">Pass</button>
         <button id="shoot">Shoot</button>
+        <button id="carryAction">Carry</button>
+        <button id="protectAction">Protect</button>
       </div>
       <div class="legend">
         <span><i class="swatch" style="background:var(--home)"></i>Home</span>
@@ -388,6 +390,8 @@ const events = document.getElementById("events");
 const slots = document.getElementById("slots");
 const passTarget = document.getElementById("passTarget");
 const passFlight = document.getElementById("passFlight");
+const carryActionButton = document.getElementById("carryAction");
+const protectActionButton = document.getElementById("protectAction");
 const loadingOverlay = document.getElementById("loadingOverlay");
 const loadingBar = document.getElementById("loadingBar");
 const loadingStatus = document.getElementById("loadingStatus");
@@ -444,6 +448,8 @@ function setControlsEnabled(enabled) {
   document.getElementById("capture").disabled = !enabled;
   document.getElementById("pass").disabled = !enabled;
   document.getElementById("shoot").disabled = !enabled;
+  carryActionButton.disabled = !enabled;
+  protectActionButton.disabled = !enabled;
   scrub.disabled = !enabled;
   passTarget.disabled = !enabled;
   passFlight.disabled = !enabled;
@@ -502,7 +508,9 @@ function centralBrainLabel(b) {
   const officials = Number(b.trackedOfficials ?? 0);
   const possession = b.possessionTeam || "Loose";
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
-  return `${players}p ${officials}o ${possession}${holder}`;
+  const center = b.centerOfPlay;
+  const centerText = center ? ` C${Number(center.x ?? 0).toFixed(0)},${Number(center.y ?? 0).toFixed(0)}` : "";
+  return `${players}p ${officials}o ${possession}${holder}${centerText}`;
 }
 function primaryIntent(f) {
   const intents = Array.isArray(f?.intents) ? f.intents : [];
@@ -851,7 +859,7 @@ function pushActionInput(forceShoot = false) {
     || selectedPlayerCanShoot();
   return pushInput(!shoot, shoot);
 }
-function pushInput(pass = false, shoot = false) {
+function pushInput(pass = false, shoot = false, action = null) {
   const playerId = selectedPlayer(activeSlot);
   if (playerId == null) return false;
   const axis = {x: 0, y: 0};
@@ -868,6 +876,7 @@ function pushInput(pass = false, shoot = false) {
     pass,
     passFlight: pass ? passFlight.value : "floor",
     shoot,
+    action,
     targetPlayer: pass ? selectedPassTarget() : null
   });
   return true;
@@ -1026,6 +1035,8 @@ document.getElementById("next").addEventListener("click", () => {
 document.getElementById("capture").addEventListener("click", () => pushInput(false, false));
 document.getElementById("pass").addEventListener("click", () => pushInput(true, false));
 document.getElementById("shoot").addEventListener("click", () => pushInput(false, true));
+carryActionButton.addEventListener("click", () => pushInput(false, false, "carry-forward"));
+protectActionButton.addEventListener("click", () => pushInput(false, false, "protect-ball"));
 window.addEventListener("keydown", e => {
   keys.add(e.code);
   if (MOVE_KEY_CODES.has(e.code) || SPRINT_KEY_CODES.has(e.code)) {

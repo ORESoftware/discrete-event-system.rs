@@ -107,6 +107,7 @@ pub mod external_cp_sat_reference;
 pub mod external_facility_location_reference;
 pub mod external_gams_solver_probe;
 pub mod external_graph_coloring_reference;
+pub mod external_hexaly_probe;
 pub mod external_knapsack_reference;
 pub mod external_linear_cli;
 pub mod external_max_flow_reference;

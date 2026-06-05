@@ -103,7 +103,15 @@ fn external_model_validation_result_from_run(run: ExternalValidationRun) -> Opti
         .and_then(Value::as_str)
         .unwrap_or(external_tool);
     let message = if run.message.trim().is_empty() {
-        format!("external validation CLI completed via {command}")
+        if verdict == "optimal" {
+            output
+                .get("objective_text")
+                .and_then(Value::as_str)
+                .map(|objective| format!("optimum={objective}"))
+                .unwrap_or_else(|| format!("external validation CLI completed via {command}"))
+        } else {
+            format!("external validation CLI completed via {command}")
+        }
     } else {
         run.message.clone()
     };
@@ -1066,6 +1074,24 @@ mod tests {
             output["external_validation"]["kind"],
             "external-validation-text-cli-run"
         );
+    }
+
+    #[test]
+    fn explicit_external_wcnf_cli_normalizes_maxsat_optimum() {
+        let output = maybe_run_external_model_validation_text_cli_with_command(
+            "maxhs",
+            ExternalValidationTextFormat::DimacsWcnf,
+            "o 2\ns OPTIMUM FOUND\n",
+            Some(PathBuf::from("/bin/cat")),
+            false,
+        )
+        .expect("external maxsat adapter output");
+
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["verdict"], "optimal");
+        assert_eq!(output["message"], "optimum=2");
+        assert_eq!(output["validator"], "external:maxhs");
+        assert_eq!(output["external_validation"]["objective_text"], "2");
     }
 
     #[test]

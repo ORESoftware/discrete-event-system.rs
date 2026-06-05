@@ -12,11 +12,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
 DISTANCE_SCALE = 1_000_000
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "tsp_reference"
+    explicit = os.environ.get("TSP_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if os.path.exists(local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
 
 
 def euclidean_distance(a: dict, b: dict) -> float:
@@ -99,77 +117,6 @@ def result(
     }
 
 
-def reconstruct(parent: list[int], mask: int, end: int, n: int) -> list[int]:
-    tour: list[int] = []
-    cur = end
-    while cur >= 0:
-        tour.append(cur)
-        prev = parent[mask * n + cur]
-        mask ^= 1 << cur
-        cur = prev
-    tour.reverse()
-    return tour
-
-
-def exact_tsp(problem: dict) -> dict:
-    matrix = problem["distanceMatrix"]
-    n = len(matrix)
-    if n > 16:
-        return result(
-            "unsupported",
-            "python:held-karp-tsp",
-            message=f"Held-Karp TSP only practical for n <= 16, got {n}",
-        )
-
-    big_n = 1 << n
-    dp = [math.inf for _ in range(big_n * n)]
-    parent = [-1 for _ in range(big_n * n)]
-    dp[1 * n + 0] = 0.0
-    for mask in range(1, big_n):
-        if (mask & 1) == 0:
-            continue
-        for i in range(n):
-            if (mask & (1 << i)) == 0:
-                continue
-            cur = dp[mask * n + i]
-            if not math.isfinite(cur):
-                continue
-            for j in range(n):
-                if mask & (1 << j):
-                    continue
-                new_mask = mask | (1 << j)
-                candidate = cur + matrix[i][j]
-                idx = new_mask * n + j
-                if candidate < dp[idx] - 1e-12:
-                    dp[idx] = candidate
-                    parent[idx] = i
-
-    full = big_n - 1
-    best_end = -1
-    best_objective = math.inf
-    best_tour: list[int] = []
-    for end in range(1, n):
-        candidate = dp[full * n + end] + matrix[end][0]
-        if not math.isfinite(candidate):
-            continue
-        candidate_tour = reconstruct(parent, full, end, n)
-        if candidate < best_objective - 1e-12 or (
-            abs(candidate - best_objective) <= 1e-12 and candidate_tour < best_tour
-        ):
-            best_end = end
-            best_objective = candidate
-            best_tour = candidate_tour
-    if best_end < 0:
-        return result("infeasible", "python:held-karp-tsp", message="no Hamiltonian cycle")
-    return result(
-        "optimal",
-        "python:held-karp-tsp",
-        tour=best_tour,
-        objective=best_objective,
-        message="exact Held-Karp dynamic program",
-    )
-
-
 def ortools_tsp(problem: dict) -> dict:
     try:
         from ortools.constraint_solver import pywrapcp, routing_enums_pb2  # type: ignore
@@ -214,36 +161,20 @@ def ortools_tsp(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-held-karp", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-held-karp", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_tsp(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "infeasible", "unsupported") else 1
-
         routing = ortools_tsp(problem)
-        if args.solver == "ortools":
-            output = dict(routing)
-            output["referenceStatus"] = exact.get("status")
-            output["referenceObjective"] = exact.get("objective")
-            print(json.dumps(output))
-            return 0 if output["status"] in ("optimal", "infeasible", "unavailable") else 1
-
-        output = dict(exact)
-        output["solver"] = (
-            "ortools:routing-tsp+python:held-karp"
-            if routing.get("status") != "unavailable"
-            else "python:held-karp-tsp"
-        )
-        output["ortoolsStatus"] = routing.get("status")
-        output["ortoolsTour"] = routing.get("tour", [])
-        output["ortoolsObjective"] = routing.get("objective")
-        output["ortoolsMessage"] = routing.get("message", "")
-        print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "infeasible", "unsupported") else 1
+        print(json.dumps(routing))
+        return 0 if routing["status"] in ("optimal", "infeasible", "unavailable") else 1
     except Exception as exc:
         print(
             json.dumps(

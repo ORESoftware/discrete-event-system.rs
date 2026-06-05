@@ -53,7 +53,20 @@ on_exit() {
 trap on_exit EXIT
 
 echo "source_rev=$(git rev-parse --short HEAD 2>/dev/null || echo archive-no-git)"
-echo "soccer smoke config run_id=${SOCCER_RUN_ID:-unset} games=${SOCCER_GAMES:-unset} parallel=${SOCCER_PARALLEL_GAMES:-unset} halves=${SOCCER_HALVES:-unset} half_minutes=${SOCCER_HALF_MINUTES:-unset} dt=${SOCCER_DT_SECONDS:-unset} experiment=${SOCCER_EXPERIMENT_SLUG:-unset} final_artifacts=${SOCCER_WRITE_FINAL_ARTIFACTS:-unset} checkpoint_artifacts=${SOCCER_WRITE_CHECKPOINT_ARTIFACTS:-unset}"
+echo "soccer smoke config run_id=${SOCCER_RUN_ID:-unset} games=${SOCCER_GAMES:-unset} parallel=${SOCCER_PARALLEL_GAMES:-unset} halves=${SOCCER_HALVES:-unset} half_minutes=${SOCCER_HALF_MINUTES:-unset} dt=${SOCCER_DT_SECONDS:-unset} experiment=${SOCCER_EXPERIMENT_SLUG:-unset} final_artifacts=${SOCCER_WRITE_FINAL_ARTIFACTS:-unset} final_policy_artifact=${SOCCER_WRITE_FINAL_POLICY_ARTIFACT:-unset} checkpoint_artifacts=${SOCCER_WRITE_CHECKPOINT_ARTIFACTS:-unset} episode_log=${SOCCER_WRITE_EPISODE_LOG:-unset} evolution=${SOCCER_EVOLUTION_ENABLED:-unset} evolution_interval=${SOCCER_EVOLUTION_INTERVAL_GAMES:-unset} pg_policy_interval=${SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES:-unset}"
+
+if [ "${SOCCER_REQUIRE_POSTGRES:-true}" = "true" ] && [ -z "${SOCCER_DATABASE_URL:-}" ]; then
+  echo "SOCCER_DATABASE_URL is required for k8s soccer learning smoke"
+  exit 64
+fi
+
+if [ "${SOCCER_REQUIRE_POSTGRES:-true}" = "true" ]; then
+  export SOCCER_WRITE_GAME_ARTIFACTS="${SOCCER_WRITE_GAME_ARTIFACTS:-false}"
+  export SOCCER_WRITE_FINAL_ARTIFACTS="${SOCCER_WRITE_FINAL_ARTIFACTS:-false}"
+  export SOCCER_WRITE_FINAL_POLICY_ARTIFACT="${SOCCER_WRITE_FINAL_POLICY_ARTIFACT:-false}"
+  export SOCCER_WRITE_CHECKPOINT_ARTIFACTS="${SOCCER_WRITE_CHECKPOINT_ARTIFACTS:-false}"
+  export SOCCER_WRITE_EPISODE_LOG="${SOCCER_WRITE_EPISODE_LOG:-false}"
+fi
 
 mark running cargo-run
 set +e

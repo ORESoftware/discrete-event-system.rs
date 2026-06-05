@@ -11,18 +11,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
-EPS = 1e-9
-MAX_EXACT_SETS = 32
-MAX_EXACT_ELEMENTS = 128
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
 
 
-def popcount(mask: int) -> int:
-    return bin(mask).count("1")
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "set_cover_reference"
+    explicit = os.environ.get("SET_COVER_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if os.path.exists(local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -101,134 +112,6 @@ def result(
     }
 
 
-def masks(problem: dict) -> tuple[list[int], int]:
-    element_index = {element: index for index, element in enumerate(problem["universe"])}
-    set_masks = []
-    for set_ in problem["sets"]:
-        mask = 0
-        for element in set_["elements"]:
-            mask |= 1 << element_index[element]
-        set_masks.append(mask)
-    return set_masks, (1 << len(problem["universe"])) - 1
-
-
-def greedy_set_cover(problem: dict) -> dict:
-    set_masks, full_mask = masks(problem)
-    covered = 0
-    selected: list[int] = []
-    while covered != full_mask:
-        best = None
-        best_ratio = math.inf
-        best_new = 0
-        for index, set_ in enumerate(problem["sets"]):
-            if index in selected:
-                continue
-            new_bits = popcount(set_masks[index] & ~covered)
-            if new_bits == 0:
-                continue
-            ratio = set_["cost"] / new_bits
-            if ratio < best_ratio - EPS or (
-                abs(ratio - best_ratio) <= EPS
-                and (new_bits > best_new or (new_bits == best_new and (best is None or index < best)))
-            ):
-                best = index
-                best_ratio = ratio
-                best_new = new_bits
-        if best is None:
-            return result(
-                "infeasible",
-                "python:greedy-set-cover",
-                problem,
-                None,
-                "greedy could not cover remaining elements",
-            )
-        selected.append(best)
-        covered |= set_masks[best]
-    return result(
-        "feasible",
-        "python:greedy-set-cover",
-        problem,
-        selected,
-        "greedy weighted set cover",
-    )
-
-
-def exact_set_cover(problem: dict) -> dict:
-    if len(problem["sets"]) > MAX_EXACT_SETS or len(problem["universe"]) > MAX_EXACT_ELEMENTS:
-        return result(
-            "unsupported",
-            "python:exact-set-cover",
-            problem,
-            None,
-            f"exact set-cover only practical for <= {MAX_EXACT_SETS} sets and <= {MAX_EXACT_ELEMENTS} elements, got {len(problem['sets'])} sets and {len(problem['universe'])} elements",
-        )
-
-    greedy = greedy_set_cover(problem)
-    if greedy["status"] == "infeasible":
-        return dict(greedy, solver="python:exact-set-cover")
-    best_indices = list(greedy["selectedSetIndices"])
-    best_cost = float(greedy["objective"])
-    set_masks, full_mask = masks(problem)
-    covering_sets: list[list[int]] = [[] for _ in problem["universe"]]
-    for set_index, mask in enumerate(set_masks):
-        for element_index in range(len(problem["universe"])):
-            if mask & (1 << element_index):
-                covering_sets[element_index].append(set_index)
-    if any(not candidates for candidates in covering_sets):
-        return result(
-            "infeasible",
-            "python:exact-set-cover",
-            problem,
-            None,
-            "at least one universe element is uncovered by all sets",
-        )
-
-    current: list[int] = []
-
-    def search(covered: int, current_cost: float) -> None:
-        nonlocal best_indices, best_cost
-        if current_cost >= best_cost - EPS:
-            return
-        if covered == full_mask:
-            candidate = sorted(current)
-            incumbent = sorted(best_indices)
-            if current_cost < best_cost - EPS or (
-                abs(current_cost - best_cost) <= EPS and candidate < incumbent
-            ):
-                best_indices = candidate
-                best_cost = current_cost
-            return
-
-        uncovered = full_mask & ~covered
-        chosen_candidates: Optional[list[int]] = None
-        for element_index, candidates in enumerate(covering_sets):
-            if not (uncovered & (1 << element_index)):
-                continue
-            available = [
-                set_index
-                for set_index in candidates
-                if set_index not in current and (set_masks[set_index] & ~covered)
-            ]
-            if chosen_candidates is None or len(available) < len(chosen_candidates):
-                chosen_candidates = available
-        if not chosen_candidates:
-            return
-        chosen_candidates.sort(key=lambda index: (problem["sets"][index]["cost"], index))
-        for set_index in chosen_candidates:
-            current.append(set_index)
-            search(covered | set_masks[set_index], current_cost + problem["sets"][set_index]["cost"])
-            current.pop()
-
-    search(0, 0.0)
-    return result(
-        "optimal",
-        "python:exact-set-cover",
-        problem,
-        best_indices,
-        "exact branch-and-bound",
-    )
-
-
 def choose_scale(values: list[float]) -> Optional[int]:
     for scale in SCALES:
         if all(abs(round(value * scale) - value * scale) <= 1e-6 for value in values):
@@ -301,36 +184,20 @@ def ortools_set_cover(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_set_cover(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
-
         ortools = ortools_set_cover(problem)
-        if args.solver == "ortools":
-            print(json.dumps(ortools))
-            return 0 if ortools["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
-
-        output = dict(exact)
-        output["solver"] = (
-            "ortools:cp-sat-set-cover+python:exact-set-cover"
-            if ortools.get("status") != "unavailable"
-            else "python:exact-set-cover"
-        )
-        output["ortoolsStatus"] = ortools.get("status")
-        output["ortoolsSelectedSetIndices"] = ortools.get("selectedSetIndices", [])
-        output["ortoolsSelectedSets"] = ortools.get("selectedSets", [])
-        output["ortoolsObjective"] = ortools.get("objective")
-        output["ortoolsCoveredElements"] = ortools.get("coveredElements", [])
-        output["ortoolsMessage"] = ortools.get("message")
-        output["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
-        print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
+        print(json.dumps(ortools))
+        return 0 if ortools["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
     except Exception as exc:
         print(
             json.dumps(

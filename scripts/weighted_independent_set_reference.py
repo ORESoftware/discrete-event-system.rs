@@ -11,13 +11,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
-EPS = 1e-9
-MAX_EXACT_VERTICES = 64
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "weighted_independent_set_reference"
+    explicit = os.environ.get("WEIGHTED_INDEPENDENT_SET_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if os.path.exists(local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -64,45 +80,6 @@ def normalize(raw: dict) -> dict:
     return {"vertices": vertices, "edges": edges}
 
 
-def adjacency(problem: dict) -> list[list[bool]]:
-    n = len(problem["vertices"])
-    matrix = [[False for _ in range(n)] for _ in range(n)]
-    for ai, bi in problem["edges"]:
-        matrix[ai][bi] = True
-        matrix[bi][ai] = True
-    return matrix
-
-
-def sorted_vertices(problem: dict) -> list[dict]:
-    return sorted(
-        problem["vertices"],
-        key=lambda vertex: (-float(vertex["weight"]), str(vertex["id"])),
-    )
-
-
-def compatible(adj: list[list[bool]], vertex: int, selected: list[int]) -> bool:
-    return all(not adj[vertex][other] for other in selected)
-
-
-def candidate_better(
-    problem: dict,
-    weight: float,
-    indices: list[int],
-    best_weight: float,
-    best_indices: list[int],
-) -> bool:
-    if weight > best_weight + EPS:
-        return True
-    if abs(weight - best_weight) <= EPS and len(indices) < len(best_indices):
-        return True
-    if abs(weight - best_weight) <= EPS and len(indices) == len(best_indices):
-        by_index = {vertex["index"]: vertex for vertex in problem["vertices"]}
-        lhs = sorted(by_index[index]["id"] for index in indices)
-        rhs = sorted(by_index[index]["id"] for index in best_indices)
-        return lhs < rhs
-    return False
-
-
 def output(
     status: str,
     solver: str,
@@ -125,75 +102,6 @@ def output(
         "upperBound": upper_bound,
         "message": message,
     }
-
-
-def greedy_independent_set(problem: dict) -> dict:
-    adj = adjacency(problem)
-    selected = []
-    for vertex in sorted_vertices(problem):
-        index = int(vertex["index"])
-        if compatible(adj, index, selected):
-            selected.append(index)
-    return output(
-        "feasible",
-        "python:greedy-weighted-independent-set",
-        problem,
-        selected,
-        None,
-        "greedy descending-weight independent set",
-    )
-
-
-def exact_independent_set(problem: dict) -> dict:
-    n = len(problem["vertices"])
-    if n > MAX_EXACT_VERTICES:
-        return output(
-            "unsupported",
-            "python:exact-weighted-independent-set",
-            problem,
-            [],
-            None,
-            f"exact weighted independent set only practical for <= {MAX_EXACT_VERTICES} vertices, got {n}",
-        )
-
-    adj = adjacency(problem)
-    order = sorted_vertices(problem)
-    suffix_weight = [0.0 for _ in range(len(order) + 1)]
-    for index in range(len(order) - 1, -1, -1):
-        suffix_weight[index] = suffix_weight[index + 1] + float(order[index]["weight"])
-
-    incumbent = greedy_independent_set(problem)
-    best_indices = list(incumbent["selectedVertexIndices"])
-    best_weight = float(incumbent["totalWeight"])
-    current: list[int] = []
-
-    def search(pos: int, current_weight: float) -> None:
-        nonlocal best_indices, best_weight
-        if pos == len(order):
-            if candidate_better(problem, current_weight, current, best_weight, best_indices):
-                best_indices = list(current)
-                best_weight = current_weight
-            return
-        if current_weight + suffix_weight[pos] + EPS < best_weight:
-            return
-
-        vertex = order[pos]
-        vertex_index = int(vertex["index"])
-        if compatible(adj, vertex_index, current):
-            current.append(vertex_index)
-            search(pos + 1, current_weight + float(vertex["weight"]))
-            current.pop()
-        search(pos + 1, current_weight)
-
-    search(0, 0.0)
-    return output(
-        "optimal",
-        "python:exact-weighted-independent-set",
-        problem,
-        best_indices,
-        suffix_weight[0],
-        "exact branch-and-bound weighted independent set",
-    )
 
 
 def choose_scale(values: list[float]) -> Optional[int]:
@@ -257,36 +165,20 @@ def ortools_independent_set(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-branch-and-bound", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-branch-and-bound", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_independent_set(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "feasible", "unsupported") else 1
-
         ortools = ortools_independent_set(problem)
-        if args.solver == "ortools":
-            print(json.dumps(ortools))
-            return 0 if ortools["status"] in ("optimal", "feasible", "unavailable", "unsupported") else 1
-
-        result = dict(exact)
-        result["solver"] = (
-            "ortools:cp-sat-weighted-independent-set+python:exact-weighted-independent-set"
-            if ortools.get("status") != "unavailable"
-            else "python:exact-weighted-independent-set"
-        )
-        result["ortoolsStatus"] = ortools.get("status")
-        result["ortoolsSelectedVertexIndices"] = ortools.get("selectedVertexIndices", [])
-        result["ortoolsSelectedVertexIds"] = ortools.get("selectedVertexIds", [])
-        result["ortoolsTotalWeight"] = ortools.get("totalWeight")
-        result["ortoolsObjective"] = ortools.get("objective")
-        result["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
-        result["ortoolsMessage"] = ortools.get("message")
-        print(json.dumps(result))
-        return 0 if result["status"] in ("optimal", "feasible", "unsupported") else 1
+        print(json.dumps(ortools))
+        return 0 if ortools["status"] in ("optimal", "feasible", "unavailable", "unsupported") else 1
     except Exception as exc:
         print(
             json.dumps(

@@ -1619,6 +1619,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let moment_replay_passes = env_usize("SOCCER_MOMENT_REPLAY_PASSES", 1)?;
     let moment_replay_reward_scale = env_f64("SOCCER_MOMENT_REPLAY_REWARD_SCALE", 1.0)?;
     let postgres_store_configured = soccer_learning_database_url_env_configured();
+    let postgres_required = env_bool("SOCCER_REQUIRE_POSTGRES", false)?;
+    if postgres_required && !postgres_store_configured {
+        return Err(
+            invalid_data("SOCCER_REQUIRE_POSTGRES=true requires SOCCER_DATABASE_URL").into(),
+        );
+    }
     let default_disk_learning_artifacts =
         default_disk_learning_artifacts_enabled(postgres_store_configured);
     let write_game_artifacts = env_bool(
@@ -1967,6 +1973,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("learned_params={}", learned_params_path.display());
     println!("manifest={}", manifest_path.display());
     println!("postgres_store_configured={postgres_store_configured}");
+    println!("postgres_required={postgres_required}");
     println!("default_disk_learning_artifacts={default_disk_learning_artifacts}");
     println!(
         "evolution enabled={} interval_games={} elite_games={} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} elite_weight_floor={:.4} seed={}",

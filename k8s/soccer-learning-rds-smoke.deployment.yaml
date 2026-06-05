@@ -21,7 +21,7 @@ spec:
         app.kubernetes.io/name: dd-soccer-learning-rds-smoke
         app.kubernetes.io/part-of: des-soccer-learning
     spec:
-      automountServiceAccountToken: false
+      automountServiceAccountToken: true
       restartPolicy: Always
       terminationGracePeriodSeconds: 20
       containers:
@@ -50,13 +50,13 @@ spec:
             - name: SOCCER_RUN_ID
               value: codex-k8s-pg-smoke-20260604
             - name: SOCCER_EXPERIMENT_SLUG
-              value: soccer-self-play
+              value: soccer-self-play-k8s-smoke
             - name: SOCCER_EXPERIMENT_NAME
-              value: Soccer self-play
+              value: Soccer self-play k8s smoke
             - name: SOCCER_GAMES
-              value: "3"
+              value: "25"
             - name: SOCCER_PARALLEL_GAMES
-              value: "3"
+              value: "5"
             - name: SOCCER_HALVES
               value: "2"
             - name: SOCCER_HALF_MINUTES
@@ -69,29 +69,51 @@ spec:
               value: "5"
             - name: SOCCER_LEARNING_INTERVAL_TICKS
               value: "4"
+            - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
+              value: "5"
+            - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
+              value: "5"
+            - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
+              value: "4"
+            - name: SOCCER_EVOLUTION_ENABLED
+              value: "true"
+            - name: SOCCER_EVOLUTION_INTERVAL_GAMES
+              value: "5"
+            - name: SOCCER_EVOLUTION_ELITE_GAMES
+              value: "4"
             - name: SOCCER_CHECKPOINT_INTERVAL_GAMES
-              value: "3"
+              value: "0"
             - name: SOCCER_GAME_ARTIFACT_MODE
               value: summary
             - name: SOCCER_WRITE_GAME_ARTIFACTS
               value: "false"
+            - name: SOCCER_WRITE_FINAL_ARTIFACTS
+              value: "false"
+            - name: SOCCER_WRITE_FINAL_POLICY_ARTIFACT
+              value: "false"
+            - name: SOCCER_WRITE_CHECKPOINT_ARTIFACTS
+              value: "false"
+            - name: SOCCER_WRITE_EPISODE_LOG
+              value: "false"
+            - name: SOCCER_REQUIRE_POSTGRES
+              value: "true"
             - name: SOCCER_RUN_DIR
               value: /tmp/soccer-learning
             - name: SOCCER_ARTIFACT_PATH
-              value: /tmp/soccer-learning/artifact.json
+              value: /dev/null
             - name: SOCCER_CHECKPOINT_ARTIFACT_PATH
-              value: /tmp/soccer-learning/checkpoint.json
+              value: /dev/null
             - name: SOCCER_EPISODE_LOG_PATH
-              value: /tmp/soccer-learning/episodes.jsonl
+              value: /dev/null
             - name: SOCCER_LEARNED_PARAMS_PATH
-              value: /tmp/soccer-learning/learned-params.json
+              value: /dev/null
           resources:
             requests:
-              cpu: 500m
-              memory: 512Mi
-            limits:
-              cpu: "2"
+              cpu: 1500m
               memory: 2Gi
+            limits:
+              cpu: "5"
+              memory: 8Gi
           volumeMounts:
             - name: tmp
               mountPath: /tmp

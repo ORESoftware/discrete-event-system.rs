@@ -32286,6 +32286,38 @@ mod tests {
     }
 
     #[test]
+    fn simulation_runner_reaches_full_ten_minute_default_duration_with_sparse_frames() {
+        let trace = run_simulation(
+            MatchConfig {
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..SoccerNeuralLearningConfig::default()
+                },
+                ..MatchConfig::default()
+            },
+            1_000,
+        );
+
+        assert_eq!(trace.config.dt_seconds, 0.1);
+        assert_eq!(trace.config.effective_duration_seconds(), 600.0);
+        assert_eq!(trace.config.total_ticks(), 6_000);
+        assert_eq!(trace.summary.ticks, 6_000);
+        assert!((trace.summary.simulated_seconds - 600.0).abs() < 1e-6);
+        assert_eq!(
+            trace
+                .frames
+                .iter()
+                .map(|frame| frame.tick)
+                .collect::<Vec<_>>(),
+            vec![0, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000]
+        );
+        assert!(soccer_simulation_physics_smoke_report(&trace).full_time_reached);
+        assert!(soccer_simulation_accounting_smoke_report(&trace).full_time_reached);
+    }
+
+    #[test]
     fn two_half_match_uses_configured_half_duration() {
         let config = MatchConfig {
             dt_seconds: 1.0,

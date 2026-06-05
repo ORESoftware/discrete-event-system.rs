@@ -9390,6 +9390,55 @@ impl WorldSnapshot {
             })
     }
 
+    pub fn set_player_position(&mut self, player_id: usize, position: Vec2) {
+        let player_index = self.players.iter().position(|player| player.id == player_id);
+        let mut sample = player_index
+            .map(|index| {
+                let player = &self.players[index];
+                PlayerPositionSample {
+                    player_id,
+                    tick: self.tick,
+                    clock_seconds: self.clock_seconds,
+                    position,
+                    velocity: player.velocity,
+                    acceleration: player.acceleration,
+                    jerk: player.jerk,
+                }
+            })
+            .or_else(|| self.shared_positions.latest_for(player_id).cloned())
+            .unwrap_or(PlayerPositionSample {
+                player_id,
+                tick: self.tick,
+                clock_seconds: self.clock_seconds,
+                position,
+                velocity: Vec2::zero(),
+                acceleration: Vec2::zero(),
+                jerk: Vec2::zero(),
+            });
+        sample.position = position;
+
+        if let Some(index) = player_index {
+            self.players[index].position = position;
+        }
+        if let Some(latest) = self
+            .shared_positions
+            .latest
+            .iter_mut()
+            .find(|latest| latest.player_id == player_id)
+        {
+            *latest = sample.clone();
+        } else {
+            self.shared_positions.latest.push(sample.clone());
+        }
+
+        let history = self.shared_positions.histories.entry(player_id).or_default();
+        if let Some(last) = history.last_mut() {
+            *last = sample;
+        } else {
+            history.push(sample);
+        }
+    }
+
     pub fn player_velocity(&self, player_id: usize) -> Option<Vec2> {
         self.shared_positions
             .latest_for(player_id)

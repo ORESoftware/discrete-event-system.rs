@@ -253,44 +253,52 @@ fn external_methods_for_case(
             ("xpress", Some("xpress:default".to_string())),
         ]
     } else if program.has_discrete_features() {
-        vec![
-            ("scipy-highs", None),
-            ("highs-cli", Some("highs-cli:default".to_string())),
-            ("cbc-cli", Some("cbc-cli:default".to_string())),
-            ("ortools", Some(ortools_method.to_string())),
-            ("glpk", Some("glpk:default".to_string())),
-            ("glpk-cli", Some("glpk-cli:default".to_string())),
-            ("scip-cli", Some("scip-cli:default".to_string())),
-            ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-            ("gurobi", Some("gurobi:default".to_string())),
-            ("cplex", Some("cplex:default".to_string())),
-            ("xpress", Some("xpress:default".to_string())),
-            ("lindo-cli", Some("lindo-cli".to_string())),
-        ]
+        mixed_integer_linear_methods(ortools_method)
     } else {
-        vec![
-            ("scipy-highs", None),
-            ("highs-cli", Some("highs-cli:default".to_string())),
-            ("cbc-cli", Some("cbc-cli:default".to_string())),
-            ("clp-cli", Some("clp-cli".to_string())),
-            ("soplex-cli", Some("soplex-cli".to_string())),
-            ("qsopt-ex-cli", Some("qsopt-ex-cli".to_string())),
-            ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-            ("ortools", Some(ortools_method.to_string())),
-            ("ortools-pdlp", Some("ortools:PDLP".to_string())),
-            ("glpk", Some("glpk:default".to_string())),
-            ("glpk-cli", Some("glpk-cli:default".to_string())),
-            ("scip-cli", Some("scip-cli:default".to_string())),
-            ("gurobi", Some("gurobi:default".to_string())),
-            ("cplex", Some("cplex:default".to_string())),
-            ("xpress", Some("xpress:default".to_string())),
-            ("lindo-cli", Some("lindo-cli".to_string())),
-        ]
+        continuous_linear_methods(ortools_method)
     };
     if program.has_discrete_features() && !mixed_integer_nonlinear && !direct_mixed_integer_qp {
         external_methods.push(("ortools-cp-sat", Some("ortools:CP-SAT".to_string())));
+        external_methods.push(("scipy-highs", None));
     }
     external_methods
+}
+
+fn mixed_integer_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<String>)> {
+    vec![
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
+        ("ortools", Some(ortools_method.to_string())),
+        ("glpk", Some("glpk:default".to_string())),
+        ("glpk-cli", Some("glpk-cli:default".to_string())),
+        ("scip-cli", Some("scip-cli:default".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
+        ("gurobi", Some("gurobi:default".to_string())),
+        ("cplex", Some("cplex:default".to_string())),
+        ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
+    ]
+}
+
+fn continuous_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<String>)> {
+    vec![
+        ("highs-cli", Some("highs-cli:default".to_string())),
+        ("cbc-cli", Some("cbc-cli:default".to_string())),
+        ("clp-cli", Some("clp-cli".to_string())),
+        ("soplex-cli", Some("soplex-cli".to_string())),
+        ("qsopt-ex-cli", Some("qsopt-ex-cli".to_string())),
+        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
+        ("ortools", Some(ortools_method.to_string())),
+        ("ortools-pdlp", Some("ortools:PDLP".to_string())),
+        ("glpk", Some("glpk:default".to_string())),
+        ("glpk-cli", Some("glpk-cli:default".to_string())),
+        ("scip-cli", Some("scip-cli:default".to_string())),
+        ("gurobi", Some("gurobi:default".to_string())),
+        ("cplex", Some("cplex:default".to_string())),
+        ("xpress", Some("xpress:default".to_string())),
+        ("lindo-cli", Some("lindo-cli".to_string())),
+        ("scipy-highs", None),
+    ]
 }
 
 #[derive(Clone, Copy)]
@@ -505,7 +513,6 @@ fn run_mip_start_case() -> Result<bool, String> {
     let program = build_mip_start_case();
     let start = vec![0.0, 1.0, 1.0];
     let methods = vec![
-        ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
@@ -518,6 +525,7 @@ fn run_mip_start_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
+        ("scipy-highs", None),
     ];
 
     let mut ok = true;
@@ -556,7 +564,6 @@ fn run_external_mip_options_case() -> Result<bool, String> {
     let program = build_mip_start_case();
     let node_limit = 3usize;
     let methods = vec![
-        ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
@@ -569,6 +576,7 @@ fn run_external_mip_options_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
+        ("scipy-highs", None),
     ];
 
     let mut ok = true;
@@ -615,7 +623,6 @@ fn run_conflict_case() -> Result<bool, String> {
     let name = "linear-conflict";
     let program = build_conflict_case();
     let methods = vec![
-        ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("lp-solve-cli", Some("lp-solve-cli".to_string())),
@@ -628,6 +635,7 @@ fn run_conflict_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
+        ("scipy-highs", None),
     ];
     let conflict_opts = MathProgramConflictOptions::default();
 
@@ -674,7 +682,6 @@ fn run_assumption_core_case() -> Result<bool, String> {
         MathProgram::not_lit(assume_noise),
     ];
     let methods = vec![
-        ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
@@ -687,6 +694,7 @@ fn run_assumption_core_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
+        ("scipy-highs", None),
     ];
     let core_opts = MathProgramAssumptionCoreOptions::default();
 
@@ -719,7 +727,6 @@ fn run_feas_relax_case() -> Result<bool, String> {
     let name = "feasibility-relaxation";
     let program = build_feas_relax_case();
     let methods = vec![
-        ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("clp-cli", Some("clp-cli".to_string())),
@@ -734,6 +741,7 @@ fn run_feas_relax_case() -> Result<bool, String> {
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
+        ("scipy-highs", None),
     ];
     let relax_opts = MathProgramFeasRelaxOptions {
         linear_penalty: 10.0,
@@ -778,7 +786,6 @@ fn run_solution_pool_case() -> Result<bool, String> {
     let name = "solution-pool";
     let program = build_solution_pool_case();
     let methods = vec![
-        ("scipy-highs", None),
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
         ("ortools", Some("ortools:SCIP".to_string())),
@@ -791,6 +798,7 @@ fn run_solution_pool_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
+        ("scipy-highs", None),
     ];
     let pool_opts = MathProgramSolutionPoolOptions {
         max_solutions: 3,
@@ -2356,10 +2364,44 @@ mod tests {
     fn continuous_lp_matrix_includes_ortools_pdlp() {
         let lp = super::build_lp_case();
         let methods = super::external_methods_for_case("lp-row-senses", &lp);
+        assert_eq!(methods.first().map(|(label, _)| *label), Some("highs-cli"));
         assert!(methods
             .iter()
             .any(|(label, method)| *label == "ortools-pdlp"
                 && method.as_deref() == Some("ortools:PDLP")));
+        assert_eq!(methods.last().map(|(label, _)| *label), Some("scipy-highs"));
+    }
+
+    #[test]
+    fn linear_external_matrices_keep_scipy_as_compatibility_oracle() {
+        let mip = super::build_binary_mip_case();
+        let mip_methods = super::external_methods_for_case("binary-mip", &mip);
+        assert_eq!(
+            mip_methods.first().map(|(label, _)| *label),
+            Some("highs-cli")
+        );
+        assert!(mip_methods
+            .iter()
+            .any(|(label, _)| *label == "ortools-cp-sat"));
+        let scipy_position = mip_methods
+            .iter()
+            .position(|(label, _)| *label == "scipy-highs")
+            .expect("scipy compatibility oracle");
+        let cp_sat_position = mip_methods
+            .iter()
+            .position(|(label, _)| *label == "ortools-cp-sat")
+            .expect("cp-sat oracle");
+        assert!(scipy_position > cp_sat_position);
+
+        let lp_methods = super::continuous_linear_methods("ortools:GLOP");
+        assert_eq!(
+            lp_methods.first().map(|(label, _)| *label),
+            Some("highs-cli")
+        );
+        assert_eq!(
+            lp_methods.last().map(|(label, _)| *label),
+            Some("scipy-highs")
+        );
     }
 
     #[test]

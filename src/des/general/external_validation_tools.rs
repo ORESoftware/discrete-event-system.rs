@@ -15989,8 +15989,12 @@ fn wait_for_external_validation_output(
 const EVENT_SIMULATION_ENGINES: &[&str] = &[
     "simpy",
     "salabim",
+    "ciw",
+    "simulus",
     "simmer",
     "jaamsim",
+    "desmo-j",
+    "simsharp",
     "anylogic",
     "simio",
     "simul8",
@@ -16046,6 +16050,87 @@ const DISTRIBUTED_SIMULATION_ENGINES: &[&str] =
 
 const PROCESS_SIMULATION_ENGINES: &[&str] =
     &["neqsim", "dwsim", "cape-open", "copasi", "tellurium"];
+
+fn normalized_simulation_engine_id(engine_id: &str) -> String {
+    engine_id.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn canonical_simulation_engine_id(engine_id: &str) -> String {
+    let normalized = normalized_simulation_engine_id(engine_id);
+    let canonical = match normalized.as_str() {
+        "simpy-adapter" => "simpy",
+        "salabim-adapter" => "salabim",
+        "ciw-adapter" => "ciw",
+        "simulus-adapter" => "simulus",
+        "simmer-adapter" | "rscript" => "simmer",
+        "desmoj" | "desmoj-adapter" => "desmo-j",
+        "simsharp-adapter" => "simsharp",
+        "waf" => "ns3",
+        "opp-run" | "opp_run" | "omnet++" => "omnetpp",
+        "sumo-gui" => "sumo",
+        "fmpy" | "fmucheck" | "fmu-adapter" | "fmi" | "fmu" => "fmi-fmu",
+        "omc" => "openmodelica",
+        "matlab" | "simulink-adapter" => "simulink",
+        "ptolemy" | "vergil" | "ptolemy-adapter" => "ptolemy-ii",
+        "gem5.opt" => "gem5",
+        "opendsscmd" | "dss" => "opendss",
+        "pandapower-adapter" => "pandapower",
+        "copasise" => "copasi",
+        "tellurium-adapter" => "tellurium",
+        "gz" => "gazebo",
+        "mujoco-adapter" => "mujoco",
+        "drake-adapter" => "drake",
+        "pybullet-adapter" => "pybullet",
+        "carlaue4" | "carlaue4.sh" => "carla",
+        "isaacsim" => "isaac-sim",
+        "airsim-adapter" => "airsim",
+        "mesa-adapter" => "mesa",
+        "agentpy-adapter" => "agentpy",
+        "repast-adapter" | "repast-simphony" => "repast",
+        "mason-adapter" => "mason",
+        "netlogo-headless" | "netlogo-headless.sh" => "netlogo",
+        "simgrid-mc" | "teshsuite" => "simgrid",
+        "cloudsim-adapter" => "cloudsim",
+        "neqsim-adapter" => "neqsim",
+        "dwsim-adapter" => "dwsim",
+        "capeopen-adapter" | "cape-open-adapter" => "cape-open",
+        "plant-simulation-adapter" | "plantsim-adapter" => "plant-simulation",
+        "extendsim-adapter" => "extendsim",
+        "gpss-adapter" | "gpss-world-adapter" => "gpss-world",
+        "anylogic-adapter" => "anylogic",
+        "simio-adapter" => "simio",
+        "simul8-adapter" => "simul8",
+        "arena-adapter" => "arena",
+        "flexsim-adapter" => "flexsim",
+        _ => normalized.as_str(),
+    };
+    canonical.to_string()
+}
+
+fn simulation_engine_in_family(engine_id: &str, family: &[&str]) -> bool {
+    let canonical = canonical_simulation_engine_id(engine_id);
+    family.contains(&canonical.as_str())
+}
+
+fn default_simulation_model_format_for_engine(engine_id: &str) -> &'static str {
+    if simulation_engine_in_family(engine_id, EVENT_SIMULATION_ENGINES) {
+        "json-event-network"
+    } else if simulation_engine_in_family(engine_id, MOBILITY_SIMULATION_ENGINES) {
+        "json-mobility-network"
+    } else if simulation_engine_in_family(engine_id, ENERGY_SIMULATION_ENGINES) {
+        "json-energy-balance"
+    } else if simulation_engine_in_family(engine_id, PHYSICS_SIMULATION_ENGINES) {
+        "json-physics-trajectory"
+    } else if simulation_engine_in_family(engine_id, AGENT_SIMULATION_ENGINES) {
+        "json-agent-based"
+    } else if simulation_engine_in_family(engine_id, DISTRIBUTED_SIMULATION_ENGINES) {
+        "json-distributed-system"
+    } else if simulation_engine_in_family(engine_id, PROCESS_SIMULATION_ENGINES) {
+        "json-process-flow"
+    } else {
+        "json-event-network"
+    }
+}
 
 #[derive(Clone, Debug)]
 struct RustSimulationJob {
@@ -17161,7 +17246,7 @@ fn run_event_simulation_validation_with_rust_reference(
     engine_id: String,
     started: Instant,
 ) -> ExternalSimulationValidationReferenceRun {
-    let engine = engine_id.to_ascii_lowercase();
+    let engine = canonical_simulation_engine_id(&engine_id);
     let default_model = json!({});
     let model = payload.get("model").unwrap_or(&default_model);
     let (jobs, trace, metrics) = match simulate_event_network_with_rust(model) {
@@ -17223,7 +17308,7 @@ fn run_mobility_simulation_validation_with_rust_reference(
     engine_id: String,
     started: Instant,
 ) -> ExternalSimulationValidationReferenceRun {
-    let engine = engine_id.to_ascii_lowercase();
+    let engine = canonical_simulation_engine_id(&engine_id);
     let default_model = json!({});
     let model = payload.get("model").unwrap_or(&default_model);
     let (vehicles, trace, metrics) = match simulate_mobility_network_with_rust(model) {
@@ -17285,7 +17370,7 @@ fn run_energy_simulation_validation_with_rust_reference(
     engine_id: String,
     started: Instant,
 ) -> ExternalSimulationValidationReferenceRun {
-    let engine = engine_id.to_ascii_lowercase();
+    let engine = canonical_simulation_engine_id(&engine_id);
     let default_model = json!({});
     let default_scenario = json!({});
     let model = payload.get("model").unwrap_or(&default_model);
@@ -17349,7 +17434,7 @@ fn run_physics_simulation_validation_with_rust_reference(
     engine_id: String,
     started: Instant,
 ) -> ExternalSimulationValidationReferenceRun {
-    let engine = engine_id.to_ascii_lowercase();
+    let engine = canonical_simulation_engine_id(&engine_id);
     let default_model = json!({});
     let default_scenario = json!({});
     let model = payload.get("model").unwrap_or(&default_model);
@@ -17413,7 +17498,7 @@ fn run_agent_simulation_validation_with_rust_reference(
     engine_id: String,
     started: Instant,
 ) -> ExternalSimulationValidationReferenceRun {
-    let engine = engine_id.to_ascii_lowercase();
+    let engine = canonical_simulation_engine_id(&engine_id);
     let default_model = json!({});
     let default_scenario = json!({});
     let model = payload.get("model").unwrap_or(&default_model);
@@ -17479,7 +17564,7 @@ fn run_distributed_simulation_validation_with_rust_reference(
     engine_id: String,
     started: Instant,
 ) -> ExternalSimulationValidationReferenceRun {
-    let engine = engine_id.to_ascii_lowercase();
+    let engine = canonical_simulation_engine_id(&engine_id);
     let default_model = json!({});
     let model = payload.get("model").unwrap_or(&default_model);
     let (trace, metrics) = match simulate_distributed_system_with_rust(model) {
@@ -17540,7 +17625,7 @@ fn run_process_simulation_validation_with_rust_reference(
     engine_id: String,
     started: Instant,
 ) -> ExternalSimulationValidationReferenceRun {
-    let engine = engine_id.to_ascii_lowercase();
+    let engine = canonical_simulation_engine_id(&engine_id);
     let default_model = json!({});
     let model = payload.get("model").unwrap_or(&default_model);
     let (trace, metrics) = match simulate_process_flow_with_rust(model) {
@@ -17623,7 +17708,7 @@ pub fn run_simulation_validation_json_with_external_reference(
     let model_format = payload
         .get("model_format")
         .and_then(Value::as_str)
-        .unwrap_or("json-event-network");
+        .unwrap_or_else(|| default_simulation_model_format_for_engine(&engine_id));
     if model_format == "json-event-network" {
         return run_event_simulation_validation_with_rust_reference(payload, engine_id, started);
     } else if model_format == "json-mobility-network" {
@@ -23523,6 +23608,209 @@ mod tests {
             process_run.metrics.get("mass_balance_error").copied(),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn simulation_validation_aliases_use_rust_reference_families() {
+        let event_model = json!({
+            "servers": 2,
+            "arrival_times": [0.0, 0.25, 0.5],
+            "service_times": [0.5, 0.5, 0.5]
+        });
+        for (engine, canonical) in [
+            ("ciw-adapter", "ciw"),
+            ("simulus-adapter", "simulus"),
+            ("desmoj-adapter", "desmo-j"),
+            ("simsharp-adapter", "simsharp"),
+            ("plantsim-adapter", "plant-simulation"),
+        ] {
+            let payload = json!({
+                "kind": "simulation-validation",
+                "engine": engine,
+                "model_format": "json-event-network",
+                "model": event_model,
+                "expected_trace_properties": ["departures_after_arrivals"]
+            });
+            let run = run_simulation_validation_json_with_external_reference(
+                &payload,
+                &ExternalSimulationValidationReferenceOptions::default(),
+            );
+            assert_eq!(run.status, ExternalSimulationValidationStatus::Ok);
+            assert_eq!(run.verdict, ExternalSimulationValidationVerdict::Valid);
+            assert!(
+                run.simulator
+                    .starts_with(&format!("rust:single-station-des-for-{canonical}")),
+                "{engine} used simulator {}",
+                run.simulator
+            );
+        }
+
+        let energy_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "fmpy",
+            "model_format": "json-energy-balance",
+            "model": {"initial_temp": 20.0, "setpoint": 21.0, "heat_capacity": 10.0},
+            "scenario": {"horizon": 1.0, "step": 1.0}
+        });
+        let energy_run = run_simulation_validation_json_with_external_reference(
+            &energy_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(energy_run.status, ExternalSimulationValidationStatus::Ok);
+        assert!(energy_run
+            .simulator
+            .starts_with("rust:energy-balance-for-fmi-fmu"));
+
+        for (engine, canonical) in [
+            ("mujoco-adapter", "mujoco"),
+            ("drake-adapter", "drake"),
+            ("pybullet-adapter", "pybullet"),
+        ] {
+            let payload = json!({
+                "kind": "simulation-validation",
+                "engine": engine,
+                "model_format": "json-physics-trajectory",
+                "model": {"initial_position": 0.0, "initial_velocity": 1.0, "acceleration": 0.0},
+                "scenario": {"dt": 0.5, "steps": 2}
+            });
+            let run = run_simulation_validation_json_with_external_reference(
+                &payload,
+                &ExternalSimulationValidationReferenceOptions::default(),
+            );
+            assert_eq!(run.status, ExternalSimulationValidationStatus::Ok);
+            assert!(
+                run.simulator
+                    .starts_with(&format!("rust:physics-trajectory-for-{canonical}")),
+                "{engine} used simulator {}",
+                run.simulator
+            );
+        }
+
+        for (engine, canonical) in [
+            ("agentpy-adapter", "agentpy"),
+            ("repast-adapter", "repast"),
+            ("mason-adapter", "mason"),
+        ] {
+            let payload = json!({
+                "kind": "simulation-validation",
+                "engine": engine,
+                "model_format": "json-agent-based",
+                "model": {"agents": [{"state": "a"}, {"state": "b"}], "interactions": [{"source": 0, "target": 1}]},
+                "scenario": {"steps": 1}
+            });
+            let run = run_simulation_validation_json_with_external_reference(
+                &payload,
+                &ExternalSimulationValidationReferenceOptions::default(),
+            );
+            assert_eq!(run.status, ExternalSimulationValidationStatus::Ok);
+            assert!(
+                run.simulator
+                    .starts_with(&format!("rust:agent-based-for-{canonical}")),
+                "{engine} used simulator {}",
+                run.simulator
+            );
+        }
+
+        let distributed_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "cloudsim-adapter",
+            "model_format": "json-distributed-system",
+            "model": {"hosts": [{"capacity": 4}], "links": [{"bandwidth": 10}], "tasks": [{"work": 2}]}
+        });
+        let distributed_run = run_simulation_validation_json_with_external_reference(
+            &distributed_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(
+            distributed_run.status,
+            ExternalSimulationValidationStatus::Ok
+        );
+        assert!(distributed_run
+            .simulator
+            .starts_with("rust:distributed-system-for-cloudsim"));
+
+        for (engine, canonical) in [
+            ("dwsim-adapter", "dwsim"),
+            ("capeopen-adapter", "cape-open"),
+            ("tellurium-adapter", "tellurium"),
+        ] {
+            let payload = json!({
+                "kind": "simulation-validation",
+                "engine": engine,
+                "model_format": "json-process-flow",
+                "model": {
+                    "units": [{"name": "unit"}],
+                    "streams": [
+                        {"from": "source", "to": "unit", "flow": 3.0},
+                        {"from": "unit", "to": "sink", "flow": 3.0}
+                    ]
+                }
+            });
+            let run = run_simulation_validation_json_with_external_reference(
+                &payload,
+                &ExternalSimulationValidationReferenceOptions::default(),
+            );
+            assert_eq!(run.status, ExternalSimulationValidationStatus::Ok);
+            assert!(
+                run.simulator
+                    .starts_with(&format!("rust:process-flow-for-{canonical}")),
+                "{engine} used simulator {}",
+                run.simulator
+            );
+        }
+    }
+
+    #[test]
+    fn simulation_validation_infers_rust_model_format_from_engine_alias() {
+        let physics_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "mujoco-adapter",
+            "model": {"initial_position": 0.0, "initial_velocity": 0.0, "acceleration": 1.0},
+            "scenario": {"dt": 0.25, "steps": 2}
+        });
+        let physics_run = run_simulation_validation_json_with_external_reference(
+            &physics_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(physics_run.status, ExternalSimulationValidationStatus::Ok);
+        assert!(physics_run
+            .simulator
+            .starts_with("rust:physics-trajectory-for-mujoco"));
+
+        let agent_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "agentpy-adapter",
+            "model": {"agents": [{"state": "a"}]},
+            "scenario": {"steps": 1}
+        });
+        let agent_run = run_simulation_validation_json_with_external_reference(
+            &agent_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(agent_run.status, ExternalSimulationValidationStatus::Ok);
+        assert!(agent_run
+            .simulator
+            .starts_with("rust:agent-based-for-agentpy"));
+
+        let process_payload = json!({
+            "kind": "simulation-validation",
+            "engine": "capeopen-adapter",
+            "model": {
+                "units": [{"name": "unit"}],
+                "streams": [
+                    {"from": "source", "to": "unit", "flow": 1.0},
+                    {"from": "unit", "to": "sink", "flow": 1.0}
+                ]
+            }
+        });
+        let process_run = run_simulation_validation_json_with_external_reference(
+            &process_payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+        assert_eq!(process_run.status, ExternalSimulationValidationStatus::Ok);
+        assert!(process_run
+            .simulator
+            .starts_with("rust:process-flow-for-cape-open"));
     }
 
     #[test]

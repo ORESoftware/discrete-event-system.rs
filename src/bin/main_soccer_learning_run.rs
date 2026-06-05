@@ -31,6 +31,7 @@ const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE: usize = 4;
 const DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES: usize = 8;
+const DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS: usize = 2;
 const DEFAULT_SOCCER_MAX_AUTO_PARALLEL_GAMES: usize = 10;
 const DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS: bool = false;
 const DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT: bool = true;
@@ -229,6 +230,11 @@ fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Er
             "SOCCER_NEURAL_TARGET_CLIP",
             "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
             default.target_clip,
+        )?,
+        snapshot_every_batches: env_usize_alias(
+            "SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES",
+            "SOCCER_NEURAL_LEARNING_SNAPSHOT_EVERY_BATCHES",
+            default.snapshot_every_batches,
         )?,
     })
 }
@@ -716,7 +722,7 @@ struct AsyncPostgresCompletedRunWriter {
 }
 
 impl AsyncPostgresCompletedRunWriter {
-    fn start(queue_batches: usize, coalesce_batches: usize) -> Self {
+    fn start(queue_batches: usize, coalesce_batches: usize, coalesce_wait: Duration) -> Self {
         let (sender, receiver) =
             mpsc::sync_channel::<PostgresCompletedRunBatch>(queue_batches.max(1));
         let (result_sender, result_receiver) = mpsc::channel::<PostgresCompletedRunWriteResult>();
@@ -759,6 +765,7 @@ impl AsyncPostgresCompletedRunWriter {
                     },
                 };
                 let mut queue_batches = 1usize;
+                let coalesce_started = Instant::now();
                 while queue_batches < coalesce_batches {
                     match receiver.try_recv() {
                         Ok(next_batch) => {
@@ -770,7 +777,28 @@ impl AsyncPostgresCompletedRunWriter {
                                 break;
                             }
                         }
-                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Empty) => {
+                            if coalesce_wait.is_zero() {
+                                break;
+                            }
+                            let elapsed = coalesce_started.elapsed();
+                            if elapsed >= coalesce_wait {
+                                break;
+                            }
+                            match receiver.recv_timeout(coalesce_wait.saturating_sub(elapsed)) {
+                                Ok(next_batch) => {
+                                    if batch.can_absorb(&next_batch) {
+                                        batch.absorb(next_batch);
+                                        queue_batches = queue_batches.saturating_add(1);
+                                    } else {
+                                        deferred_batch = Some(next_batch);
+                                        break;
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout)
+                                | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
@@ -1551,6 +1579,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES,
     )?
     .max(1);
+    let pg_completed_run_async_coalesce_wait_ms = env_usize(
+        "SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS",
+        DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS,
+    )?;
+    let pg_completed_run_async_coalesce_wait = Duration::from_millis(
+        pg_completed_run_async_coalesce_wait_ms.min(u64::MAX as usize) as u64,
+    );
     let neural_drain_timeout_ms = env_usize(
         "SOCCER_NEURAL_DRAIN_TIMEOUT_MS",
         DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS,
@@ -1715,6 +1750,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some(AsyncPostgresCompletedRunWriter::start(
             pg_completed_run_async_queue_batches,
             pg_completed_run_async_coalesce_batches,
+            pg_completed_run_async_coalesce_wait,
         ))
     } else {
         None
@@ -1746,7 +1782,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
+        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
         run_id,
         games,
         parallel_games,
@@ -1770,6 +1806,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         pg_completed_writer.is_some(),
         pg_completed_run_async_queue_batches,
         pg_completed_run_async_coalesce_batches,
+        pg_completed_run_async_coalesce_wait_ms,
         neural_drain_timeout_ms,
         game_artifact_mode,
         checkpoint_interval_games,
@@ -1828,7 +1865,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         tactical_learning.defense_compactness_score_weight,
     );
     println!(
-        "neural_learning enabled={} backend={} learning_rate={:.5} batch_size={} train_every_ticks={} max_batches_per_tick={} hidden_units={} target_scale={:.3} max_pending_batches={} replay_capacity={} replay_samples_per_tick={} target_clip={:.3}",
+        "neural_learning enabled={} backend={} learning_rate={:.5} batch_size={} train_every_ticks={} max_batches_per_tick={} hidden_units={} target_scale={:.3} max_pending_batches={} replay_capacity={} replay_samples_per_tick={} target_clip={:.3} snapshot_every_batches={}",
         neural_learning.enabled,
         neural_backend_label(neural_learning.backend),
         neural_learning.learning_rate,
@@ -1841,6 +1878,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         neural_learning.replay_capacity,
         neural_learning.replay_samples_per_tick,
         neural_learning.target_clip,
+        neural_learning.snapshot_every_batches,
     );
     println!(
         "adversarial_embedding enabled={} memory_limit={} preloaded_windows={}",
@@ -2350,6 +2388,11 @@ mod tests {
     #[test]
     fn default_postgres_async_writer_coalesces_io_batches() {
         assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES, 8);
+    }
+
+    #[test]
+    fn default_postgres_async_writer_waits_briefly_to_coalesce_io() {
+        assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS, 2);
     }
 
     #[test]

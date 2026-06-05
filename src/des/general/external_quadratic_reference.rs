@@ -2018,6 +2018,60 @@ mod tests {
     }
 
     #[test]
+    fn gams_mosek_qp_model_text_uses_qcp_objective_and_solution_puts() {
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.5], vec![0.5, 2.0]],
+            c: vec![-5.0, -6.0],
+            a_ub: Some(vec![vec![1.0, 1.0]]),
+            b_ub: Some(vec![3.0]),
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(4.0), Some(4.0)]),
+            ..Default::default()
+        };
+
+        let model_text = super::gams_mosek_qp_model_text(
+            &qp,
+            std::path::Path::new("/tmp/des-rs-gams-mosek-qp-test.sol"),
+        )
+        .expect("GAMS/MOSEK QP model text");
+
+        assert!(model_text.contains("Solve m using QCP minimizing objvar;"));
+        assert!(model_text.contains(
+            "obj.. objvar =e= sqr(x1) + 0.25*x1*x2 + 0.25*x2*x1 + sqr(x2) - 5*x1 - 6*x2;"
+        ));
+        assert!(model_text.contains("ub1.. x1 + x2 =l= 3;"));
+        assert!(model_text.contains("x1.lo = 0;"));
+        assert!(model_text.contains("x2.up = 4;"));
+        assert!(model_text.contains("put 'objective ', objvar.l:24:16 /;"));
+        assert!(model_text.contains("put 'x2 ', x2.l:24:16 /;"));
+    }
+
+    #[test]
+    fn gams_mosek_qp_solution_parser_reads_status_objective_and_values() {
+        let parsed = super::parse_gams_mosek_qp_solution(
+            "\
+modelstat 1
+solvestat 1
+objective     -11.041666657481
+x1       1.166666665232
+x2       1.833333329519
+",
+            2,
+        )
+        .expect("GAMS/MOSEK QP solution parse");
+
+        assert_eq!(parsed.modelstat, 1);
+        assert_eq!(parsed.solvestat, 1);
+        assert_eq!(
+            super::gams_mosek_qp_status(parsed.modelstat, parsed.solvestat),
+            ExternalQuadraticReferenceStatus::Optimal
+        );
+        assert!((parsed.objective + 11.041666657481).abs() < 1e-12);
+        assert!((parsed.x[0] - 1.166666665232).abs() < 1e-12);
+        assert!((parsed.x[1] - 1.833333329519).abs() < 1e-12);
+    }
+
+    #[test]
     fn solver_args_cover_python_bridge_names() {
         assert_eq!(ExternalQuadraticReferenceSolver::all().len(), 17);
         assert_eq!(

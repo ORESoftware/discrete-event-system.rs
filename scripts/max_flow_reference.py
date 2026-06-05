@@ -65,6 +65,14 @@ def external_rust_fallback_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
+def external_rust_first_enabled() -> bool:
+    values = (
+        os.environ.get("MAX_FLOW_REFERENCE_RUST_FIRST", ""),
+        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
+    )
+    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
+
+
 def normalize(raw: dict) -> dict:
     num_nodes = int(raw.get("numNodes", raw.get("num_nodes", 0)))
     source = int(raw.get("source", -1))
@@ -225,6 +233,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     if args.solver in RUST_REFERENCE_SOLVERS:
+        exec_rust_reference(args.solver)
+    if external_rust_first_enabled() and args.solver == "ortools":
+        os.environ["MAX_FLOW_REFERENCE_EXTERNAL_FALLBACK"] = "rust"
         exec_rust_reference(args.solver)
     if (
         external_rust_fallback_enabled()

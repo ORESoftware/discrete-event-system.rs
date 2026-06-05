@@ -161,3 +161,97 @@ Bottom line: vector search/correlation is now a very natural fit for the repo
 because the moment-window infrastructure already exists. The main work is data
 quality: distinguish clean strategy from luck, collect negatives, persist moment
 rows in Postgres, and keep a memory-resident worker index for live use.
+
+## Pre-Goal Vector Extraction Policy
+
+Best capture rule: when a goal is scored, rewind the last 15 real match seconds
+and extract 15 evenly spaced vectors, one per second. Each vector should encode
+the full tactical state at that second: all players' position, velocity, and
+acceleration, plus the ball position, velocity, acceleration, possession, phase,
+and goal-oriented bucket metadata.
+
+Those 15 vectors become the timeline context for the goal. The system should
+then find the smaller set of key decision moments inside that timeline, usually
+the 1-5 passes/actions before the goal:
+
+- the possession-winning or build-up action that created the opportunity
+- the first progressive pass or carry
+- the pass before the assist, if any
+- the assist/pass/cutback/dribble that directly created the chance
+- the shot or final touch
+
+The important correlation is between vectors and actions. Store each sampled
+vector with the player decisions that happened near that second, including
+actor, target player, target point, action label, tactical reward, and eventual
+goal delta. Over many simulations, similar vectors should reveal which actions
+usually move the team toward a goal from that kind of state.
+
+At runtime, a live vector/window can retrieve similar pre-goal vectors and
+aggregate the actions that followed them. The answer should become practical
+team instructions:
+
+- where the ball carrier should pass, carry, shoot, or hold
+- where the likely receiver should run
+- where supporting attackers should move to open the lane
+- which defender or lane must be moved before the shot
+- which 1-3 actions have the strongest historical lift from this state
+
+This keeps the system grounded. The 15-vector timeline captures shape and
+momentum, while the decision markers identify what actually caused the goal.
+The goal is not merely to remember that a goal happened, but to learn the
+sequence of movements and choices that made the goal likely.
+
+## Snapshot-To-Opportunity Correlation
+
+Yes, the same vector-memory idea can correlate a live snapshot or short window
+with a goal-scoring opportunity. The useful product is not "this state equals a
+goal"; it is "states like this have produced high-value chances, and the next
+1-3 moves that worked were these."
+
+Attacking query shape:
+
+- Build the current local moment vector from player position, velocity,
+  acceleration, ball position/velocity/acceleration, and recent action markers.
+- Canonicalize toward the opponent's goal and use the current ball bucket,
+  phase, lane, yards-to-goal bin, and action context to narrow candidates.
+- Retrieve similar clean strategic moments plus similar near-miss/failed moments.
+- Aggregate the next action markers from the best neighbors: pass target, pass
+  lane, dribble direction, carry into space, shot, cutback, recycle, or hold.
+- Rank the top 1-3 moves by similarity, historical outcome, clean-strategy
+  score, negative-example lift, pressure, lane openness, and whether the same
+  action is currently legal/available.
+- Return an explanation with the hint, such as "cutback to weak-side runner" or
+  "carry central to open shot lane", not just a vector id.
+
+This should work best in the end-game/final-third phase:
+
+- Fewer actions matter immediately.
+- Distance and angle to goal dominate more of the value function.
+- Ball-location buckets are more discriminative.
+- Rewards arrive quickly, so labels are less noisy.
+- Set plays, box entries, cutbacks, through balls, and shot windows repeat often
+  enough to form useful patterns.
+
+Middle-game retrieval is harder because the configuration space explodes. There
+are far more valid player layouts, more long-horizon consequences, and many
+strategically reasonable moves that do not produce a goal soon. For midfield and
+build-up phases, use coarser tactical features: overloads, width, spacing,
+pressing shape, passing triangles, line-breaking lanes, and expected-threat
+gain. Treat vector search there as tactical memory, not direct goal advice.
+
+Defensive mirror:
+
+- Query from the opponent's attacking perspective to detect "dangerous pattern
+  forming" states.
+- Retrieve similar moments that led to goals or high-quality chances against the
+  defending team.
+- Recommend disruption moves: pressure ball, close the passing lane, mark the
+  likely receiver, track the cutback runner, block the shot lane, delay, or drop
+  the defensive line.
+- Rank defensive moves by how often similar interventions turned clean positives
+  into failed attacks or low-quality chances.
+
+Important caveat: correlation is not causation. The system needs negative and
+counterfactual examples to avoid copying lucky goals or overfitting to patterns
+that merely happened before goals. Store both successful and failed versions of
+similar states, then rank moves by lift over comparable alternatives.

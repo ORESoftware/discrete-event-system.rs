@@ -12,8 +12,8 @@ use std::fmt::Write as _;
 use uuid::Uuid;
 
 use crate::des::general::soccer::{
-    MatchConfig, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey,
-    SoccerQTargetEntry, SoccerSetPlayTrainingArtifact, SoccerTeamQPolicies, Team,
+    MatchConfig, SoccerNeuralNetworkSnapshot, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions,
+    SoccerQStateKey, SoccerQTargetEntry, SoccerSetPlayTrainingArtifact, SoccerTeamQPolicies, Team,
 };
 use crate::des::soccer_learning::{
     soccer_learning_from_micros, soccer_learning_to_micros, soccer_team_label,
@@ -25,6 +25,7 @@ pub struct SoccerLearningPgPolicyVersion {
     pub id: String,
     pub generation: i32,
     pub policies: SoccerTeamQPolicies,
+    pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +73,29 @@ fn postgres_insert_sql_buffer(prefix: &str, rows: usize, parameters_per_row: usi
     );
     sql.push_str(prefix);
     sql
+}
+
+fn soccer_policy_version_metrics(
+    fitness: f64,
+    neural_network: Option<&SoccerNeuralNetworkSnapshot>,
+) -> Result<Value, String> {
+    let mut metrics = json!({ "fitness": fitness });
+    if let Some(neural_network) = neural_network {
+        metrics["neuralNetwork"] = serde_json::to_value(neural_network)
+            .map_err(|err| format!("serialize soccer neural network snapshot: {err}"))?;
+    }
+    Ok(metrics)
+}
+
+fn soccer_policy_version_neural_network_from_metrics(
+    metrics: &Value,
+) -> Result<Option<SoccerNeuralNetworkSnapshot>, String> {
+    let Some(neural_network) = metrics.get("neuralNetwork") else {
+        return Ok(None);
+    };
+    serde_json::from_value(neural_network.clone())
+        .map(Some)
+        .map_err(|err| format!("decode soccer neural network snapshot: {err}"))
 }
 
 pub struct SoccerLearningPgStore {
@@ -152,7 +176,7 @@ impl SoccerLearningPgStore {
             .client
             .query_opt(
                 r#"
-                select id::text, generation
+                select id::text, generation, metrics
                 from des_soccer_learning_policy_versions
                 where experiment_id = $1::text::uuid and status = 'active'
                 order by generation desc, updated_at desc
@@ -166,11 +190,14 @@ impl SoccerLearningPgStore {
         };
         let id: String = row.get(0);
         let generation: i32 = row.get(1);
+        let metrics: Value = row.get(2);
+        let neural_network = soccer_policy_version_neural_network_from_metrics(&metrics)?;
         let policies = self.load_policy_entries(&id, home_options, away_options)?;
         Ok(Some(SoccerLearningPgPolicyVersion {
             id,
             generation,
             policies,
+            neural_network,
         }))
     }
 
@@ -221,6 +248,72 @@ impl SoccerLearningPgStore {
         policies: &SoccerTeamQPolicies,
         fitness: f64,
     ) -> Result<(), String> {
+        self.insert_policy_version_with_id_inner(
+            policy_version_id,
+            experiment_id,
+            parent_policy_version_id,
+            generation,
+            version_label,
+            source_kind,
+            status,
+            config,
+            home_options,
+            away_options,
+            policies,
+            fitness,
+            None,
+        )
+    }
+
+    pub fn insert_policy_version_with_id_and_neural_network(
+        &mut self,
+        policy_version_id: &str,
+        experiment_id: &str,
+        parent_policy_version_id: Option<&str>,
+        generation: i32,
+        version_label: &str,
+        source_kind: &str,
+        status: &str,
+        config: &MatchConfig,
+        home_options: SoccerQPolicyOptions,
+        away_options: SoccerQPolicyOptions,
+        policies: &SoccerTeamQPolicies,
+        fitness: f64,
+        neural_network: Option<&SoccerNeuralNetworkSnapshot>,
+    ) -> Result<(), String> {
+        self.insert_policy_version_with_id_inner(
+            policy_version_id,
+            experiment_id,
+            parent_policy_version_id,
+            generation,
+            version_label,
+            source_kind,
+            status,
+            config,
+            home_options,
+            away_options,
+            policies,
+            fitness,
+            neural_network,
+        )
+    }
+
+    fn insert_policy_version_with_id_inner(
+        &mut self,
+        policy_version_id: &str,
+        experiment_id: &str,
+        parent_policy_version_id: Option<&str>,
+        generation: i32,
+        version_label: &str,
+        source_kind: &str,
+        status: &str,
+        config: &MatchConfig,
+        home_options: SoccerQPolicyOptions,
+        away_options: SoccerQPolicyOptions,
+        policies: &SoccerTeamQPolicies,
+        fitness: f64,
+        neural_network: Option<&SoccerNeuralNetworkSnapshot>,
+    ) -> Result<(), String> {
         let config_json =
             serde_json::to_value(config).map_err(|err| format!("serialize match config: {err}"))?;
         let options_json = json!({
@@ -230,7 +323,7 @@ impl SoccerLearningPgStore {
         let lineage = parent_policy_version_id
             .map(|id| json!([id]))
             .unwrap_or_else(|| json!([]));
-        let metrics = json!({ "fitness": fitness });
+        let metrics = soccer_policy_version_metrics(fitness, neural_network)?;
         let entry_count =
             checked_i32(policies.home.entries().len() + policies.away.entries().len());
         let target_entry_count = checked_i32(
@@ -1930,6 +2023,20 @@ fn checked_i64(value: impl TryInto<u64>) -> i64 {
 mod tests {
     use super::*;
 
+    fn tiny_neural_snapshot() -> SoccerNeuralNetworkSnapshot {
+        SoccerNeuralNetworkSnapshot {
+            input_dim: 2,
+            output_dim: 1,
+            parameter_count: 4,
+            l2_norm: 0.5,
+            layers: vec![crate::des::general::soccer::SoccerNeuralLayerSnapshot {
+                activation: "linear".to_string(),
+                weights: vec![vec![0.25, -0.25]],
+                biases: vec![0.125],
+            }],
+        }
+    }
+
     #[test]
     fn soccer_learning_pg_sslmode_parses_query_param() {
         assert_eq!(
@@ -1959,6 +2066,20 @@ mod tests {
         assert!(soccer_learning_pg_should_verify_certificates(
             "postgres://u:p@host/db?sslmode=VERIFY-FULL"
         ));
+    }
+
+    #[test]
+    fn policy_version_metrics_round_trip_neural_snapshot() {
+        let snapshot = tiny_neural_snapshot();
+        let metrics = soccer_policy_version_metrics(1.25, Some(&snapshot)).expect("metrics");
+        assert_eq!(metrics["fitness"], json!(1.25));
+
+        let decoded =
+            soccer_policy_version_neural_network_from_metrics(&metrics).expect("decode snapshot");
+        let decoded = decoded.expect("snapshot present");
+        assert_eq!(decoded.parameter_count, snapshot.parameter_count);
+        assert_eq!(decoded.layers[0].weights, snapshot.layers[0].weights);
+        assert_eq!(decoded.layers[0].biases, snapshot.layers[0].biases);
     }
 
     #[test]

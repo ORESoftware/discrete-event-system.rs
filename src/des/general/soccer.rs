@@ -4114,8 +4114,8 @@ fn untargeted_long_ball_altitude_yards(
         return 0.0;
     }
     let carry_speed = flight.launch_speed_yps.max(current_speed_yps);
-    let apex = (3.8 + flight.distance_yards.max(0.0) * 0.075 + carry_speed * 0.045)
-        .clamp(4.5, 14.0);
+    let apex =
+        (3.8 + flight.distance_yards.max(0.0) * 0.075 + carry_speed * 0.045).clamp(4.5, 14.0);
     (std::f64::consts::PI * progress).sin().max(0.0) * apex
 }
 
@@ -32010,8 +32010,8 @@ fn nearest_ball_controller_for(
                 if p.team == long_ball_team {
                     pass_reception_score_bonus += ability01(p.skills.first_touch) * 0.12;
                 } else {
-                    let defensive_duel_bonus =
-                        ability01(p.skills.defending) * 0.18 + ability01(p.skills.aggression) * 0.12;
+                    let defensive_duel_bonus = ability01(p.skills.defending) * 0.18
+                        + ability01(p.skills.aggression) * 0.12;
                     if airborne {
                         aerial_score_bonus += defensive_duel_bonus;
                     } else {
@@ -41527,8 +41527,11 @@ mod tests {
         );
         let near_landing = flight.origin + (flight.target - flight.origin) * 0.99;
         assert!(
-            untargeted_long_ball_altitude_yards(&flight, near_landing, flight.launch_speed_yps * 0.7)
-                < 0.6
+            untargeted_long_ball_altitude_yards(
+                &flight,
+                near_landing,
+                flight.launch_speed_yps * 0.7
+            ) < 0.6
         );
 
         sim.integrate_ball();

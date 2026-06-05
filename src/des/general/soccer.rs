@@ -4961,9 +4961,9 @@ impl PlayerAgent {
             .is_some();
         let attacking_midfielder = self.role == PlayerRole::Midfielder
             && self.preferences.offensive_mindedness >= self.preferences.defensive_mindedness;
+        let current_x = self.position.x.clamp(0.0, snapshot.field_width);
         let wide_midfielder = attacking_midfielder
-            && (self.home_position.x < snapshot.field_width * 0.30
-                || self.home_position.x > snapshot.field_width * 0.70);
+            && (current_x < snapshot.field_width * 0.30 || current_x > snapshot.field_width * 0.70);
         let roam_weight = if striker_attack && wide_midfielder {
             0.46
         } else if striker_attack && attacking_midfielder {
@@ -6490,7 +6490,8 @@ impl PlayerAgent {
                             })
                         })
                     })
-                    .or_else(|| visible_targets.first().copied());
+                    .or_else(|| visible_targets.first().copied())
+                    .or_else(|| snapshot.best_pass_target(self.id));
                 target.map(|target| {
                     (
                         SoccerAction::Pass {
@@ -8371,8 +8372,9 @@ impl BallAgent {
         let loose_long_ball_team = self.untargeted_long_ball_team(context.pending_pass.as_ref());
         let same_tick_long_ball_launcher =
             self.untargeted_long_ball_launch_exclusion(context.tick, context.pending_pass.as_ref());
-        if let Some((holder, holder_team)) = nearest_ball_controller_for(
+        if let Some((holder, holder_team, control_position)) = nearest_ball_controller_for_segment(
             context.tick,
+            previous_position,
             self.position,
             self.velocity,
             context.players,
@@ -8383,6 +8385,8 @@ impl BallAgent {
             rng,
         ) {
             self.holder = Some(holder);
+            self.position =
+                control_position.clamp_to_pitch(context.field_width, context.field_length);
             self.last_touch_team = Some(holder_team);
             self.curl_acceleration = Vec2::zero();
             self.untargeted_long_ball_launcher = None;
@@ -9758,8 +9762,20 @@ pub struct SoccerSetPlayTrainingRequest {
     pub duration_seconds: f64,
     #[serde(default)]
     pub options: Option<SoccerQPolicyOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_neural_network: Option<SoccerNeuralNetworkSnapshot>,
     #[serde(default)]
     pub vector_hint: Option<SoccerSetPlayVectorHint>,
+}
+
+pub enum SoccerSetPlayTrainingEvent<'a> {
+    StartingEpisode {
+        episode: usize,
+        config: &'a mut MatchConfig,
+        policies: &'a mut SoccerTeamQPolicies,
+        neural_network: &'a mut Option<SoccerNeuralNetworkSnapshot>,
+        reset_neural_learner: &'a mut bool,
+    },
 }
 
 impl Default for SoccerSetPlayTrainingRequest {
@@ -9773,6 +9789,7 @@ impl Default for SoccerSetPlayTrainingRequest {
             spot: None,
             duration_seconds: default_set_play_training_duration_seconds(),
             options: None,
+            initial_neural_network: None,
             vector_hint: None,
         }
     }
@@ -11724,6 +11741,7 @@ impl WorldSnapshot {
         } else {
             0.0
         };
+        let preferred_in_behind_target = self.long_ball_in_behind_target(me.id);
         let mut ranked = self
             .players
             .iter()
@@ -11751,13 +11769,16 @@ impl WorldSnapshot {
                         nominal_speed,
                     )
                     .unwrap_or(position);
-                let forward = (anticipated_position.y - me_position.y) * me.team.attack_dir();
+                let pass_point = self
+                    .projected_in_behind_pass_point(me.id, p.id)
+                    .unwrap_or(anticipated_position);
+                let forward = (pass_point.y - me_position.y) * me.team.attack_dir();
                 if me.role == PlayerRole::Goalkeeper
                     && forward < -1.25
                     && !goalkeeper_backward_emergency_release_allowed(
                         me.team,
                         me_position,
-                        anticipated_position,
+                        pass_point,
                         self.field_width,
                         keeper_pressure,
                     )
@@ -11769,7 +11790,7 @@ impl WorldSnapshot {
                 }
                 ((!visible_only || self.player_can_see_player(me.id, p.id))
                     && self.pending_offside_for_pass(me.id, p.id).is_none())
-                .then_some((p, position, anticipated_position))
+                .then_some((p, position, pass_point))
             })
             .map(|(p, position, pass_point)| {
                 let forward = (pass_point.y - me_position.y) * me.team.attack_dir();
@@ -11809,8 +11830,21 @@ impl WorldSnapshot {
                     * (3.4 + directive.risk_tolerance * 1.8);
                 let in_behind_bonus = self
                     .projected_in_behind_pass_point(me.id, p.id)
-                    .map(|pass_point| 2.4 + self.space_score_at(pass_point, me.team) * 0.045)
+                    .map(|pass_point| {
+                        let role_fit = match p.role {
+                            PlayerRole::Forward => 1.35,
+                            PlayerRole::Midfielder => 0.55,
+                            PlayerRole::Defender => -0.70,
+                            PlayerRole::Goalkeeper => -3.0,
+                        };
+                        3.2 + role_fit + self.space_score_at(pass_point, me.team) * 0.060
+                    })
                     .unwrap_or(0.0);
+                let preferred_in_behind_bonus = if preferred_in_behind_target == Some(p.id) {
+                    7.2
+                } else {
+                    0.0
+                };
                 let pass_quality = pass_target_quality_for_snapshot(
                     self,
                     me,
@@ -11850,6 +11884,7 @@ impl WorldSnapshot {
                     + wide_outlet_bonus
                     + finishing_window_bonus
                     + in_behind_bonus
+                    + preferred_in_behind_bonus
                     + pass_quality.expected_completion * 0.85
                     + pass_quality.receiver_openness * 0.38
                     + pass_quality.stride_fit * 0.46
@@ -13407,8 +13442,15 @@ impl WorldSnapshot {
                     action_label: "run-in-behind",
                 };
             }
-            let striker_has_ball = self.striker_holder_in_opponent_half(me.team).is_some();
-            if !striker_has_ball {
+            let striker_attack = self.striker_holder_in_opponent_half(me.team).is_some();
+            let current = self.player_position(me.id).unwrap_or(me.position);
+            let current_wide =
+                current.x < self.field_width * 0.30 || current.x > self.field_width * 0.70;
+            let overlap_run_preferred = striker_attack
+                && current_wide
+                && me.role == PlayerRole::Midfielder
+                && me.preferences.offensive_mindedness >= me.preferences.defensive_mindedness;
+            if !overlap_run_preferred {
                 if let Some(target) = self.wide_possession_outlet_target_for(player_id, home) {
                     return SupportMovementTarget {
                         point: target,
@@ -13472,10 +13514,13 @@ impl WorldSnapshot {
                         return None;
                     }
                     let mid_x = self.field_width * 0.5;
-                    let wide = home.x < self.field_width * 0.30 || home.x > self.field_width * 0.70;
-                    let lane_sign = if home.x < mid_x {
+                    let current = self.player_position(me.id).unwrap_or(me.position);
+                    let current_x = current.x.clamp(0.0, self.field_width);
+                    let wide =
+                        current_x < self.field_width * 0.30 || current_x > self.field_width * 0.70;
+                    let lane_sign = if current_x < mid_x {
                         -1.0
-                    } else if home.x > mid_x {
+                    } else if current_x > mid_x {
                         1.0
                     } else if striker_pos.x < mid_x {
                         1.0
@@ -19558,6 +19603,8 @@ pub struct SoccerSelfPlayTrainingRequest {
     pub seed: Option<u32>,
     pub options: Option<SoccerQPolicyOptions>,
     pub tactical_learning: Option<SoccerTacticalLearningWeights>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_learned_params: Option<SoccerSelfPlayLearnedParams>,
     pub artifact_path: Option<String>,
     pub learned_params_path: Option<String>,
     #[serde(default = "default_import_trained_policy")]
@@ -23171,7 +23218,13 @@ impl SoccerMatch {
             let candidates = if normalized_action == "aerial-pass" {
                 snapshot.ranked_visible_aerial_pass_targets(player_id, 11)
             } else {
-                snapshot.ranked_visible_pass_targets(player_id, 11)
+                let mut candidates = snapshot.ranked_visible_pass_targets(player_id, 11);
+                if candidates.is_empty() {
+                    if let Some(target) = snapshot.best_pass_target(player_id) {
+                        candidates.push(target);
+                    }
+                }
+                candidates
             };
             plan.target_player = policy.best_target_player_for_snapshot(
                 snapshot,
@@ -28628,18 +28681,46 @@ impl SoccerRealtimeSession {
         if let Some(seed) = request.seed {
             config.seed = seed;
         }
+        let initial_policies = request
+            .initial_learned_params
+            .as_ref()
+            .map(SoccerTeamQPolicies::from_learned_params)
+            .transpose()?;
         if let Some(tactical_learning) = request.tactical_learning {
             tactical_learning.validate()?;
             config.tactical_learning = tactical_learning;
+        } else if let Some(initial_learned_params) = request.initial_learned_params.as_ref() {
+            initial_learned_params.tactical_learning.validate()?;
+            config.tactical_learning = initial_learned_params.tactical_learning.clone();
         }
         config.tactical_learning.validate()?;
         config.learning_enabled = true;
         config.learning_logging_enabled = false;
         config.max_human_players = 0;
 
-        let options = request.options.unwrap_or_default();
+        let options = request
+            .options
+            .clone()
+            .or_else(|| {
+                request
+                    .initial_learned_params
+                    .as_ref()
+                    .map(|params| params.options.clone())
+            })
+            .unwrap_or_default();
         validate_soccer_q_policy_options(&options)?;
-        let artifact = train_soccer_team_policies_from_self_play(config, request.episodes, options);
+        let artifact = if let Some(initial_policies) = initial_policies {
+            train_soccer_team_policies_from_self_play_with_initial_policies_and_progress(
+                config,
+                request.episodes,
+                options,
+                initial_policies,
+                |_| {},
+                |_, _, _, _| {},
+            )
+        } else {
+            train_soccer_team_policies_from_self_play(config, request.episodes, options)
+        };
         let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
         let default_learned_params_path = request
             .artifact_path
@@ -30413,8 +30494,30 @@ pub fn train_soccer_set_play_restarts(
 
 pub fn train_soccer_set_play_restarts_with_initial_policies(
     request: SoccerSetPlayTrainingRequest,
-    mut policies: SoccerTeamQPolicies,
+    policies: SoccerTeamQPolicies,
 ) -> Result<SoccerSetPlayTrainingArtifact, String> {
+    train_soccer_set_play_restarts_with_events(request, policies, |_| Ok(()))
+}
+
+pub fn train_soccer_set_play_restarts_with_events<F>(
+    request: SoccerSetPlayTrainingRequest,
+    policies: SoccerTeamQPolicies,
+    on_event: F,
+) -> Result<SoccerSetPlayTrainingArtifact, String>
+where
+    F: for<'a> FnMut(SoccerSetPlayTrainingEvent<'a>) -> Result<(), String>,
+{
+    train_soccer_set_play_restarts_with_events_inner(request, policies, on_event)
+}
+
+fn train_soccer_set_play_restarts_with_events_inner<F>(
+    request: SoccerSetPlayTrainingRequest,
+    mut policies: SoccerTeamQPolicies,
+    mut on_event: F,
+) -> Result<SoccerSetPlayTrainingArtifact, String>
+where
+    F: for<'a> FnMut(SoccerSetPlayTrainingEvent<'a>) -> Result<(), String>,
+{
     if request.episodes == 0 {
         return Err("set-play training episodes must be at least 1".to_string());
     }
@@ -30461,12 +30564,28 @@ pub fn train_soccer_set_play_restarts_with_initial_policies(
     );
 
     let mut neural_learner: Option<SoccerNeuralLearner> = None;
+    let mut initial_neural_network = request.initial_neural_network.clone();
     let mut episode_summaries = Vec::with_capacity(request.episodes);
     let mut goals = 0usize;
     let base_seed = config.seed;
     let mut final_learning = None;
 
     for episode in 0..request.episodes {
+        let mut reset_neural_learner = false;
+        on_event(SoccerSetPlayTrainingEvent::StartingEpisode {
+            episode,
+            config: &mut config,
+            policies: &mut policies,
+            neural_network: &mut initial_neural_network,
+            reset_neural_learner: &mut reset_neural_learner,
+        })?;
+        config.tactical_learning.validate()?;
+        policies.home.options = options.clone();
+        policies.away.options = options.clone();
+        if reset_neural_learner {
+            neural_learner = None;
+        }
+
         let restart = restarts[episode % restarts.len()];
         let episode_seed = base_seed.wrapping_add(episode as u32);
         let before_policy_visits = policies.home.visit_count() + policies.away.visit_count();
@@ -30476,6 +30595,8 @@ pub fn train_soccer_set_play_restarts_with_initial_policies(
         if sim.config.learning_enabled && sim.config.neural_learning.enabled {
             if let Some(learner) = neural_learner.take() {
                 sim.neural_learner = Some(learner);
+            } else if let Some(snapshot) = initial_neural_network.take() {
+                sim.set_neural_network_snapshot(snapshot)?;
             }
         } else {
             sim.neural_learner = None;
@@ -35975,7 +36096,36 @@ fn nearest_ball_controller_for(
     ball_altitude_yards: f64,
     rng: &mut SeededRandom,
 ) -> Option<(usize, Team)> {
+    nearest_ball_controller_for_segment(
+        current_tick,
+        ball_pos,
+        ball_pos,
+        ball_velocity,
+        players,
+        pending_pass,
+        loose_long_ball_team,
+        same_tick_long_ball_launcher,
+        ball_altitude_yards,
+        rng,
+    )
+    .map(|(id, team, _)| (id, team))
+}
+
+fn nearest_ball_controller_for_segment(
+    current_tick: u64,
+    previous_ball_pos: Vec2,
+    ball_pos: Vec2,
+    ball_velocity: Vec2,
+    players: &[PlayerAgent],
+    pending_pass: Option<&PendingPass>,
+    loose_long_ball_team: Option<Team>,
+    same_tick_long_ball_launcher: Option<usize>,
+    ball_altitude_yards: f64,
+    rng: &mut SeededRandom,
+) -> Option<(usize, Team, Vec2)> {
     let ball_speed = ball_velocity.len();
+    let ball_segment = ball_pos - previous_ball_pos;
+    let ball_segment_len = ball_segment.len();
     let mut candidates = Vec::new();
     for p in players {
         if same_tick_long_ball_launcher == Some(p.id) {
@@ -35986,6 +36136,13 @@ fn nearest_ball_controller_for(
                 continue;
             }
         }
+        let control_point = if ball_segment_len > 1e-6 {
+            previous_ball_pos
+                + ball_segment * segment_projection_factor(previous_ball_pos, ball_pos, p.position)
+        } else {
+            ball_pos
+        };
+        let mut player_control_position = p.position;
         let mut control_radius = PLAYER_CONTROL_RADIUS_YARDS
             + ability01(p.skills.first_touch) * 0.48
             + (1.0 - (ball_speed / 18.0).clamp(0.0, 1.0)) * 0.24;
@@ -35993,14 +36150,33 @@ fn nearest_ball_controller_for(
         let mut pass_reception_score_bonus = 0.0;
         if let Some(pass) = pending_pass {
             let is_target = pass.target == Some(p.id);
-            let progress = pass_progress_along_path(pass, ball_pos);
+            let progress = pass_progress_along_path(pass, control_point);
+            let openness = pass.receiver_openness.clamp(0.0, 1.0);
+            if is_target {
+                if let Some(receiver_position) = pass.receiver_position_at_launch {
+                    let route = pass.intended_target - receiver_position;
+                    let route_len = route.len();
+                    if route_len > 1e-6 {
+                        let travel_time =
+                            (pass.distance_yards / pass.launch_speed_yps.max(1.0)).clamp(0.12, 3.2);
+                        let route_availability = ((openness - 0.25) / 0.75).clamp(0.0, 1.0);
+                        let route_speed = player_top_speed_yps(p.role, &p.skills)
+                            * fatigue_speed_factor(p.skills.stamina, p.fatigue)
+                            * if pass.flight.is_aerial() { 0.78 } else { 0.72 }
+                            * route_availability;
+                        let reachable =
+                            (route_speed * travel_time * progress).clamp(0.0, route_len);
+                        player_control_position =
+                            receiver_position + route.normalized() * reachable;
+                    }
+                }
+            }
             let same_tick_launch = current_tick <= pass.launch_tick && progress < 0.12;
             if same_tick_launch && p.team == pass.team && !is_target {
                 control_radius *= 0.35;
             }
-            let openness = pass.receiver_openness.clamp(0.0, 1.0);
             if is_target {
-                control_radius *= 0.86 + openness * 0.24;
+                control_radius *= 0.48 + openness * 0.62;
                 pass_reception_score_bonus += -0.18 + openness * 0.50 + pass.passer_skill * 0.16;
             } else if p.team == pass.team {
                 pass_reception_score_bonus -= 0.08;
@@ -36010,8 +36186,8 @@ fn nearest_ball_controller_for(
                 pass_reception_score_bonus += marked_pressure * 0.48;
             }
             if pass.flight.is_aerial() {
-                let landing_distance = ball_pos.distance(pass.intended_target);
-                let interception_multiplier = aerial_interception_multiplier(pass, ball_pos);
+                let landing_distance = control_point.distance(pass.intended_target);
+                let interception_multiplier = aerial_interception_multiplier(pass, control_point);
                 if !is_target && landing_distance > 7.5 {
                     control_radius *= if p.team == pass.team { 0.70 } else { 0.55 };
                 }
@@ -36026,7 +36202,7 @@ fn nearest_ball_controller_for(
                 }
             }
             if p.team != pass.team {
-                let facing_multiplier = player_facing_ball_control_multiplier(p, ball_pos);
+                let facing_multiplier = player_facing_ball_control_multiplier(p, control_point);
                 control_radius *= facing_multiplier;
                 pass_reception_score_bonus *= facing_multiplier;
                 aerial_score_bonus *= facing_multiplier;
@@ -36053,18 +36229,18 @@ fn nearest_ball_controller_for(
                     } else {
                         pass_reception_score_bonus += defensive_duel_bonus * 0.72;
                     }
-                    let facing_multiplier = player_facing_ball_control_multiplier(p, ball_pos);
+                    let facing_multiplier = player_facing_ball_control_multiplier(p, control_point);
                     control_radius *= facing_multiplier;
                     aerial_score_bonus *= facing_multiplier;
                     pass_reception_score_bonus *= facing_multiplier;
                 }
             }
         }
-        let dist = p.position.distance(ball_pos);
+        let dist = player_control_position.distance(control_point);
         if dist > control_radius {
             continue;
         }
-        let to_ball = (ball_pos - p.position).normalized();
+        let to_ball = (control_point - player_control_position).normalized();
         let closing_speed = dot(p.velocity - ball_velocity, to_ball).clamp(-8.0, 8.0);
         let score = -dist * 1.45
             + ability01(p.skills.first_touch) * 0.72
@@ -36072,9 +36248,9 @@ fn nearest_ball_controller_for(
             + closing_speed * 0.055
             + pass_reception_score_bonus
             + aerial_score_bonus;
-        candidates.push((p.id, p.team, score));
+        candidates.push((p.id, p.team, score, control_point));
     }
-    sample_control_candidate(&candidates, rng)
+    sample_control_candidate_with_point(&candidates, rng)
 }
 
 fn triangular_sample(rng: &mut SeededRandom) -> f64 {
@@ -36120,6 +36296,45 @@ fn deterministic_separation_normal(a_id: usize, b_id: usize) -> Vec2 {
     let seed = ((a_id as u64 + 1) * 1_103_515_245) ^ ((b_id as u64 + 7) * 12_345);
     let angle = (seed % 6283) as f64 / 1000.0;
     Vec2::new(angle.cos(), angle.sin()).normalized()
+}
+
+fn sample_control_candidate_with_point(
+    candidates: &[(usize, Team, f64, Vec2)],
+    rng: &mut SeededRandom,
+) -> Option<(usize, Team, Vec2)> {
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        let (id, team, _, point) = candidates[0];
+        return Some((id, team, point));
+    }
+
+    let max_score = candidates
+        .iter()
+        .map(|(_, _, score, _)| *score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let temperature = 0.48;
+    let weights = candidates
+        .iter()
+        .map(|(_, _, score, _)| ((*score - max_score) / temperature).exp())
+        .collect::<Vec<_>>();
+    let total = weights.iter().sum::<f64>();
+    if total <= 1e-12 || !total.is_finite() {
+        let (id, team, _, point) = candidates[0];
+        return Some((id, team, point));
+    }
+
+    let mut draw = rng.next_float() * total;
+    for ((id, team, _, point), weight) in candidates.iter().zip(weights.iter()) {
+        draw -= *weight;
+        if draw <= 0.0 {
+            return Some((*id, *team, *point));
+        }
+    }
+    candidates
+        .last()
+        .map(|(id, team, _, point)| (*id, *team, *point))
 }
 
 fn sample_control_candidate(
@@ -36197,7 +36412,11 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
         "shoot" => {
             observation.has_ball && shot_decision_is_qualified_for_role(&observation, player.role)
         }
-        "pass" => observation.has_ball && snapshot.best_visible_pass_target(player_id).is_some(),
+        "pass" => {
+            observation.has_ball
+                && (snapshot.best_visible_pass_target(player_id).is_some()
+                    || snapshot.best_pass_target(player_id).is_some())
+        }
         "aerial-pass" => {
             observation.has_ball && snapshot.best_aerial_pass_target(player_id).is_some()
         }
@@ -38724,7 +38943,7 @@ mod tests {
             ..Default::default()
         });
         let player_id = 5;
-        sim.players[player_id].position = Vec2::new(40.0, 101.0);
+        sim.players[player_id].position = Vec2::new(40.0, 90.0);
         sim.players[player_id].velocity = Vec2::new(0.0, 5.0);
         sim.players[player_id].skills.decision_noise = 1.0;
         sim.players[6].position = Vec2::new(46.0, 102.0);
@@ -41402,6 +41621,65 @@ mod tests {
         assert!(artifact.learning.neural_learning_samples > 0);
         assert!(artifact.goal_rate.is_finite());
         assert!(artifact.goal_rate_delta.is_finite());
+    }
+
+    #[test]
+    fn set_play_restart_training_event_refreshes_policy_before_episode() {
+        let options = SoccerQPolicyOptions::default();
+        let mut config = default_set_play_training_config();
+        config.dt_seconds = 0.2;
+        config.seed = 27_031;
+        config.neural_learning.enabled = false;
+
+        let template = soccer_tracking_template_dataset(&config);
+        let dataset = template.to_learning_dataset().expect("template dataset");
+        let state = SoccerQStateKey::from_transition(
+            dataset
+                .transitions
+                .first()
+                .expect("template transition for sentinel policy"),
+        );
+        let mut refreshed = SoccerTeamQPolicies::new(options.clone());
+        refreshed
+            .home
+            .set_action_value(state, "refresh-sentinel", 9.0);
+
+        let mut starting_episodes = Vec::new();
+        let artifact = train_soccer_set_play_restarts_with_events(
+            SoccerSetPlayTrainingRequest {
+                config,
+                episodes: 1,
+                duration_seconds: 0.2,
+                options: Some(options.clone()),
+                ..SoccerSetPlayTrainingRequest::default()
+            },
+            SoccerTeamQPolicies::new(options),
+            |event| {
+                let SoccerSetPlayTrainingEvent::StartingEpisode {
+                    episode,
+                    config,
+                    policies,
+                    reset_neural_learner,
+                    ..
+                } = event;
+                starting_episodes.push(episode);
+                config.tactical_learning.attack_flank_lane_weight = 0.88;
+                *policies = refreshed.clone();
+                *reset_neural_learner = true;
+                Ok(())
+            },
+        )
+        .expect("set-play restart training with refresh hook");
+
+        assert_eq!(starting_episodes, vec![0]);
+        assert!(
+            artifact
+                .home_entries
+                .iter()
+                .any(|entry| entry.action == "refresh-sentinel"),
+            "refreshed policy should seed the episode policy"
+        );
+        assert!((artifact.config.tactical_learning.attack_flank_lane_weight - 0.88).abs() < 1e-9);
     }
 
     #[test]
@@ -44512,6 +44790,64 @@ mod tests {
             SoccerTeamQPolicies::from_learned_params(&params).expect("restore learned params");
         assert!(!restored.home.q_values.is_empty());
         assert!(!restored.away.q_values.is_empty());
+    }
+
+    #[test]
+    fn self_play_training_request_uses_initial_learned_params() {
+        let seed_artifact = train_soccer_team_policies_from_self_play(
+            MatchConfig {
+                duration_seconds: 0.2,
+                seed: 1534,
+                ..Default::default()
+            },
+            1,
+            SoccerQPolicyOptions {
+                alpha: 0.17,
+                gamma: 0.91,
+            },
+        );
+        let mut seed_params = SoccerSelfPlayLearnedParams::from_training_artifact(&seed_artifact);
+        seed_params.tactical_learning.attack_flank_lane_weight = 0.73;
+        seed_params.tactical_learning.defense_contract_delta_weight = 0.84;
+
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 1535,
+            ..Default::default()
+        });
+        let response = session
+            .train_self_play_team_policy(SoccerSelfPlayTrainingRequest {
+                episodes: 1,
+                minutes: Some(0.2 / 60.0),
+                period_count: None,
+                period_break_recovery_seconds: None,
+                dt_seconds: None,
+                learning_interval_ticks: None,
+                seed: Some(1536),
+                options: None,
+                tactical_learning: None,
+                initial_learned_params: Some(seed_params.clone()),
+                artifact_path: None,
+                learned_params_path: None,
+                import_into_session: false,
+            })
+            .expect("self-play training response");
+
+        assert_eq!(response.artifact.options.alpha, seed_params.options.alpha);
+        assert_eq!(
+            response.artifact.tactical_learning.attack_flank_lane_weight,
+            0.73
+        );
+        assert_eq!(
+            response
+                .artifact
+                .config
+                .tactical_learning
+                .defense_contract_delta_weight,
+            0.84
+        );
+        assert!(response.artifact.home_entries.len() >= seed_params.home_entries.len());
+        assert!(response.artifact.away_entries.len() >= seed_params.away_entries.len());
     }
 
     #[test]

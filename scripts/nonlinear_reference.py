@@ -8,9 +8,9 @@ Input JSON chooses one model family:
   {"kind": "global_benchmark", "objective": "sphere", "dimension": 3,
    "lower": -5, "upper": 5}
 
-The bridge prefers SciPy when installed, can use NLopt when requested and
-available, and keeps deterministic small-model fallbacks so validation can
-still run on lean machines.
+The bridge delegates default and built-in fallback solves to the Rust
+reference binary, while keeping Python ecosystem adapters for optional SciPy
+and NLopt checks.
 """
 
 from __future__ import annotations
@@ -18,8 +18,79 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import subprocess
 import sys
 from typing import Callable, Optional, Sequence
+
+RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust", "rust-fallback", "rust-reference")
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "nonlinear_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_optimization_tools.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def rust_reference_command() -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "nonlinear_reference"
+    explicit = os.environ.get("NONLINEAR_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit]
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary]
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def rust_reference(raw: dict, solver: str = "auto", max_iterations: int = 200) -> dict:
+    command = rust_reference_command()
+    cwd = None
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.dirname(script_dir)
+    completed = subprocess.run(
+        [
+            *command,
+            "--solver",
+            solver,
+            "--max-iterations",
+            str(max_iterations),
+        ],
+        input=json.dumps(raw),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        check=False,
+    )
+    try:
+        parsed = json.loads(completed.stdout)
+    except Exception as exc:
+        return {
+            "status": "numerical-error",
+            "solver": "rust:nonlinear-reference",
+            "x": [],
+            "objective": None,
+            "gradientNorm": None,
+            "residualNorm": None,
+            "iterations": None,
+            "evaluations": None,
+            "message": f"failed to parse Rust nonlinear output: {exc}; stderr={completed.stderr.strip()}",
+        }
+    if completed.returncode != 0 and not parsed.get("message"):
+        parsed["message"] = completed.stderr.strip()
+    return parsed
 
 
 def rosenbrock(x: Sequence[float]) -> float:
@@ -70,24 +141,6 @@ def result(
         "residualNorm": None if residual_norm is None else float(residual_norm),
         "iterations": iterations,
         "evaluations": evaluations,
-        "message": message,
-    }
-
-
-def pareto_result(
-    status: str,
-    solver: str,
-    pareto_front: Optional[Sequence[dict]] = None,
-    candidate_count: Optional[int] = None,
-    hypervolume: Optional[float] = None,
-    message: str = "",
-) -> dict:
-    return {
-        "status": status,
-        "solver": solver,
-        "paretoFront": [] if pareto_front is None else list(pareto_front),
-        "candidateCount": candidate_count,
-        "hypervolume": None if hypervolume is None else float(hypervolume),
         "message": message,
     }
 
@@ -183,16 +236,7 @@ def solve_rosenbrock(raw: dict, solver: str, max_iterations: int) -> dict:
             return nlopt
     if solver in ("scipy", "nlopt"):
         return result("unavailable", solver, message=f"{solver} is not installed")
-    x0 = [float(v) for v in raw.get("x0", [-1.2, 1.0])]
-    x = [1.0] * len(x0)
-    return result(
-        "optimal",
-        "fallback:known-rosenbrock-minimum",
-        x=x,
-        objective=0.0,
-        gradient_norm=0.0,
-        message="analytic Rosenbrock minimizer",
-    )
+    return result("unavailable", solver, message=f"unknown or unavailable solver: {solver}")
 
 
 def default_points() -> list[dict]:
@@ -230,16 +274,6 @@ def least_squares_stats(params: Sequence[float], points: Sequence[dict]) -> tupl
     return sum(v * v for v in r), norm2(r), norm2(gradient)
 
 
-def solve2(a: Sequence[Sequence[float]], b: Sequence[float]) -> Optional[list[float]]:
-    det = a[0][0] * a[1][1] - a[0][1] * a[1][0]
-    if abs(det) <= 1e-14:
-        return None
-    return [
-        (b[0] * a[1][1] - a[0][1] * b[1]) / det,
-        (a[0][0] * b[1] - b[0] * a[1][0]) / det,
-    ]
-
-
 def solve_least_squares_scipy(raw: dict, max_iterations: int) -> Optional[dict]:
     optimize, np, exc = load_scipy()
     if optimize is None:
@@ -270,42 +304,6 @@ def solve_least_squares_scipy(raw: dict, max_iterations: int) -> Optional[dict]:
         residual_norm=residual_norm,
         evaluations=getattr(sol, "nfev", None),
         message=str(sol.message),
-    )
-
-
-def solve_least_squares_fallback(raw: dict, max_iterations: int) -> dict:
-    points = raw.get("points") or default_points()
-    params = [float(v) for v in raw.get("initial", [1.0, -0.2])]
-    iterations = 0
-    for iteration in range(max_iterations):
-        iterations = iteration
-        r = residuals(params, points)
-        j = jacobian(params, points)
-        a = [[1e-10, 0.0], [0.0, 1e-10]]
-        b = [0.0, 0.0]
-        for row, ri in zip(j, r):
-            b[0] -= row[0] * ri
-            b[1] -= row[1] * ri
-            a[0][0] += row[0] * row[0]
-            a[0][1] += row[0] * row[1]
-            a[1][0] += row[1] * row[0]
-            a[1][1] += row[1] * row[1]
-        step = solve2(a, b)
-        if step is None:
-            break
-        params = [params[0] + step[0], params[1] + step[1]]
-        if norm2(step) <= 1e-10:
-            break
-    sse, residual_norm, gradient_norm = least_squares_stats(params, points)
-    return result(
-        "optimal" if gradient_norm <= 1e-6 else "feasible",
-        "fallback:gauss-newton",
-        x=params,
-        objective=sse,
-        gradient_norm=gradient_norm,
-        residual_norm=residual_norm,
-        iterations=iterations,
-        message="dependency-free damped normal-equation reference",
     )
 
 
@@ -364,7 +362,7 @@ def solve_least_squares(raw: dict, solver: str, max_iterations: int) -> dict:
         return result("unavailable", "scipy", message="SciPy is not installed")
     if solver == "nlopt":
         return result("unavailable", "nlopt", message="NLopt is not installed")
-    return solve_least_squares_fallback(raw, max_iterations)
+    return result("unavailable", solver, message=f"unknown or unavailable solver: {solver}")
 
 
 def benchmark_function(name: str) -> Callable[[Sequence[float]], float]:
@@ -456,10 +454,6 @@ def solve_global_nlopt(raw: dict, max_iterations: int) -> Optional[dict]:
 
 
 def solve_global(raw: dict, solver: str, max_iterations: int) -> dict:
-    name = str(raw.get("objective", "sphere"))
-    dimension = int(raw.get("dimension", 3))
-    lower = float(raw.get("lower", -5.0))
-    upper = float(raw.get("upper", 5.0))
     if solver in ("auto", "scipy"):
         scipy = solve_global_scipy(raw, max_iterations)
         if scipy is not None:
@@ -472,164 +466,33 @@ def solve_global(raw: dict, solver: str, max_iterations: int) -> dict:
         return result("unavailable", "scipy", message="SciPy is not installed")
     if solver == "nlopt":
         return result("unavailable", "nlopt", message="NLopt is not installed")
-    fun = benchmark_function(name)
-    x = known_global_solution(name, dimension, lower, upper)
-    if x is None:
-        x = [(lower + upper) / 2.0] * dimension
-        return result(
-            "feasible",
-            "fallback:bounded-center",
-            x=x,
-            objective=fun(x),
-            message="no known analytic optimum inside bounds",
-        )
-    return result(
-        "optimal",
-        f"fallback:known-{name}-minimum",
-        x=x,
-        objective=fun(x),
-        message="analytic benchmark minimizer",
-    )
-
-
-def mulberry32(seed: int):
-    state = seed & 0xFFFFFFFF
-
-    def next_float() -> float:
-        nonlocal state
-        state = (state + 0x6D2B79F5) & 0xFFFFFFFF
-        t = state
-        t = ((t ^ (t >> 15)) * (t | 1)) & 0xFFFFFFFF
-        t ^= (t + (((t ^ (t >> 7)) * (t | 61)) & 0xFFFFFFFF)) & 0xFFFFFFFF
-        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296.0
-
-    return next_float
-
-
-def default_assets() -> list[dict]:
-    return [
-        {"name": "cash", "expectedReturn": 0.02, "risk": 0.01},
-        {"name": "bonds", "expectedReturn": 0.045, "risk": 0.06},
-        {"name": "equity", "expectedReturn": 0.09, "risk": 0.18},
-        {"name": "growth", "expectedReturn": 0.13, "risk": 0.30},
-    ]
-
-
-def asset_expected_return(asset: dict) -> float:
-    return float(asset.get("expectedReturn", asset.get("expected_return", 0.0)))
-
-
-def random_simplex(n: int, next_float: Callable[[], float]) -> list[float]:
-    draws = [-math.log(max(1e-12, next_float())) for _ in range(n)]
-    total = sum(draws)
-    return [v / total for v in draws]
-
-
-def portfolio_point(assets: Sequence[dict], weights: Sequence[float]) -> dict:
-    expected_return = 0.0
-    variance = 0.0
-    for asset, weight in zip(assets, weights):
-        expected_return += weight * asset_expected_return(asset)
-        variance += (weight * float(asset["risk"])) ** 2
-    return {
-        "weights": [float(v) for v in weights],
-        "expectedReturn": float(expected_return),
-        "risk": float(math.sqrt(variance)),
-    }
-
-
-def dominates_objectives(a: Sequence[float], b: Sequence[float]) -> bool:
-    strictly_better = False
-    for ai, bi in zip(a, b):
-        if ai > bi + 1e-12:
-            return False
-        if ai < bi - 1e-12:
-            strictly_better = True
-    return strictly_better
-
-
-def same_objectives(a: Sequence[float], b: Sequence[float]) -> bool:
-    return len(a) == len(b) and all(abs(ai - bi) <= 1e-12 for ai, bi in zip(a, b))
-
-
-def portfolio_objectives(point: dict) -> list[float]:
-    return [float(point["risk"]), -float(point["expectedReturn"])]
-
-
-def portfolio_hypervolume(front: Sequence[dict]) -> float:
-    if not front:
-        return 0.0
-    max_risk = max(float(p["risk"]) for p in front) * 1.1
-    min_return = min(float(p["expectedReturn"]) for p in front) * 0.9
-    hv = 0.0
-    prev_risk = 0.0
-    for point in front:
-        risk = float(point["risk"])
-        expected_return = float(point["expectedReturn"])
-        hv += max(0.0, risk - prev_risk) * max(0.0, expected_return - min_return)
-        prev_risk = risk
-    last = front[-1]
-    hv += max(0.0, max_risk - prev_risk) * max(0.0, float(last["expectedReturn"]) - min_return)
-    return hv
-
-
-def solve_pareto_portfolio(raw: dict) -> dict:
-    assets = raw.get("assets") or default_assets()
-    samples = int(raw.get("samples", 240))
-    seed = int(raw.get("seed", 19))
-    if not assets:
-        return pareto_result("numerical-error", "python:pareto-portfolio-reference", message="assets must be non-empty")
-    if samples < 1:
-        return pareto_result("numerical-error", "python:pareto-portfolio-reference", message="samples must be positive")
-    next_float = mulberry32(seed)
-    candidates: list[dict] = []
-    for _ in range(samples):
-        candidates.append(portfolio_point(assets, random_simplex(len(assets), next_float)))
-    for i in range(len(assets)):
-        weights = [0.0] * len(assets)
-        weights[i] = 1.0
-        candidates.append(portfolio_point(assets, weights))
-
-    archive: list[dict] = []
-    for point in candidates:
-        obj = portfolio_objectives(point)
-        skip = False
-        for row in archive:
-            row_obj = portfolio_objectives(row)
-            if same_objectives(row_obj, obj) or dominates_objectives(row_obj, obj):
-                skip = True
-                break
-        if skip:
-            continue
-        archive = [row for row in archive if not dominates_objectives(obj, portfolio_objectives(row))]
-        archive.append(point)
-    archive.sort(key=lambda p: (float(p["risk"]), float(p["expectedReturn"])))
-    return pareto_result(
-        "optimal",
-        "python:pareto-portfolio-reference",
-        pareto_front=archive,
-        candidate_count=len(candidates),
-        hypervolume=portfolio_hypervolume(archive),
-        message="same-sample nondominated Pareto archive reference",
-    )
+    return result("unavailable", solver, message=f"unknown or unavailable solver: {solver}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", default="auto", choices=["auto", "scipy", "nlopt", "fallback"])
+    parser.add_argument(
+        "--solver",
+        default="auto",
+        choices=["auto", "scipy", "nlopt", "fallback", "rust", "rust-fallback", "rust-reference"],
+    )
     parser.add_argument("--max-iterations", type=int, default=200)
     args = parser.parse_args()
     try:
         raw = json.load(sys.stdin)
+        if args.solver in RUST_REFERENCE_SOLVERS:
+            out = rust_reference(raw, args.solver, args.max_iterations)
+            print(json.dumps(out))
+            return 0
         kind = str(raw.get("kind", "rosenbrock"))
-        if kind == "rosenbrock":
+        if kind == "pareto_portfolio":
+            out = rust_reference(raw, "fallback", args.max_iterations)
+        elif kind == "rosenbrock":
             out = solve_rosenbrock(raw, args.solver, args.max_iterations)
         elif kind == "least_squares":
             out = solve_least_squares(raw, args.solver, args.max_iterations)
         elif kind == "global_benchmark":
             out = solve_global(raw, args.solver, args.max_iterations)
-        elif kind == "pareto_portfolio":
-            out = solve_pareto_portfolio(raw)
         else:
             out = result("unsupported", "nonlinear-reference", message=f"unknown kind: {kind}")
     except Exception as exc:

@@ -2,9 +2,10 @@
 //!
 //! The native Rust fallback accepts the crate's compact CP-SAT JSON model and
 //! enumerates small finite-domain validation models without a Python dependency.
-//! `scripts/cp_sat_reference.py` remains available for OR-Tools CP-SAT and
-//! explicit legacy Python enumeration checks. Broader CP ecosystems such as Choco, JaCoP,
-//! CPMpy, Conjure, clingo, SAT4J, and Open-WBO use the
+//! `scripts/cp_sat_reference.py` remains available for OR-Tools CP-SAT, while
+//! the legacy `python-enumeration` solver id is retained as a compatibility
+//! alias for native Rust exact enumeration. Broader CP ecosystems such as Choco,
+//! JaCoP, CPMpy, Conjure, clingo, SAT4J, and Open-WBO use the
 //! `optimization_ecosystem_reference.py` smoke-model contract instead; this
 //! module exposes both paths without pretending they share one model format.
 
@@ -109,7 +110,9 @@ impl ExternalCpSatReferenceSolver {
             ExternalCpSatReferenceSolver::Auto => "Auto",
             ExternalCpSatReferenceSolver::OrToolsCpSat => "Google OR-Tools CP-SAT",
             ExternalCpSatReferenceSolver::RustEnumeration => "Rust exact CP enumeration",
-            ExternalCpSatReferenceSolver::PythonEnumeration => "Legacy Python exact CP enumeration",
+            ExternalCpSatReferenceSolver::PythonEnumeration => {
+                "Rust exact CP enumeration (legacy Python alias)"
+            }
             ExternalCpSatReferenceSolver::ChocoSolver => "Choco Solver",
             ExternalCpSatReferenceSolver::JaCoP => "JaCoP",
             ExternalCpSatReferenceSolver::IbmCpOptimizer => "IBM ILOG CP Optimizer",
@@ -215,7 +218,7 @@ impl ExternalCpSatReferenceSolver {
                 "Native Rust exact enumeration for small finite-domain CP-SAT JSON models."
             }
             ExternalCpSatReferenceSolver::PythonEnumeration => {
-                "Explicit legacy Python exact enumeration bridge through scripts/cp_sat_reference.py."
+                "Compatibility alias for native Rust exact enumeration; no Python subprocess is used for direct CP-SAT JSON solves."
             }
             _ => {
                 "Ecosystem smoke bridge through scripts/optimization_ecosystem_reference.py; uses the ecosystem CP-assignment contract rather than the CP-SAT JSON model."
@@ -2156,7 +2159,11 @@ pub fn solve_cp_sat_json_with_external_reference(
     options: &ExternalCpSatReferenceOptions,
 ) -> ExternalCpSatReferenceRun {
     let started = Instant::now();
-    if options.solver == ExternalCpSatReferenceSolver::RustEnumeration {
+    if matches!(
+        options.solver,
+        ExternalCpSatReferenceSolver::RustEnumeration
+            | ExternalCpSatReferenceSolver::PythonEnumeration
+    ) {
         return solve_cp_sat_json_with_rust_enumeration(model, options, started);
     }
     if options.solver == ExternalCpSatReferenceSolver::Auto {
@@ -2190,6 +2197,7 @@ pub fn solve_cp_sat_json_with_external_reference(
     if let Some(working_dir) = script_working_dir(&script) {
         command.current_dir(working_dir);
     }
+    command.env("CP_SAT_REFERENCE_DISABLE_RUST_EXEC", "1");
     command.arg(script).arg("--solver").arg(solver_arg);
     if let Some(limit) = options.enumerate_solutions {
         command
@@ -2611,6 +2619,23 @@ mod tests {
     }
 
     #[test]
+    fn python_enumeration_alias_stays_native_rust() {
+        let run = solve_cp_sat_json_with_external_reference(
+            &tiny_cp_sat_model(),
+            &ExternalCpSatReferenceOptions {
+                solver: ExternalCpSatReferenceSolver::PythonEnumeration,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
+        assert_eq!(run.solver, ExternalCpSatReferenceSolver::PythonEnumeration);
+        assert_eq!(run.assignment, vec![1, 0]);
+        assert_eq!(run.objective, Some(1.0));
+        assert_eq!(run.backend, "rust:cp-native-enumeration");
+    }
+
+    #[test]
     fn cp_sat_rust_enumeration_handles_bool_and_all_different() {
         let model = json!({
             "variables": [
@@ -2701,7 +2726,7 @@ mod tests {
         assert_eq!(run.status, ExternalCpSatReferenceStatus::Optimal);
         assert_eq!(run.objective, Some(9.0));
         assert_eq!(run.assignment, vec![1, 0, 2]);
-        assert_eq!(run.backend, "builtin:constraint-programming");
+        assert_eq!(run.backend, "builtin-rust:constraint-programming");
     }
 
     #[test]

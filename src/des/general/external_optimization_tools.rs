@@ -1559,6 +1559,31 @@ pub fn run_external_optimization_ecosystem_reference(
     run_external_optimization_adapter(input, &options)
 }
 
+pub fn run_external_optimization_ecosystem_reference_with_rust_builtin(
+    input: &Value,
+    tool: ExternalOptimizationTool,
+) -> ExternalOptimizationAdapterRun {
+    if let Some(run) = run_native_external_optimization_ecosystem_reference(input, tool) {
+        return run;
+    }
+    ExternalOptimizationAdapterRun {
+        tool,
+        status: ExternalOptimizationAdapterStatus::Unavailable,
+        output: Some(json!({
+            "kind": "optimization-ecosystem-reference-result",
+            "tool": tool.as_str(),
+            "family": "unknown",
+            "status": "unsupported",
+            "objective": null,
+            "x": null,
+            "message": "no Rust builtin ecosystem reference for this tool/payload",
+            "backend": "builtin-rust:unavailable",
+        })),
+        elapsed_ms: 0.0,
+        message: "no Rust builtin ecosystem reference for this tool/payload".to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct NativeExternalOptimizationEcosystemResult {
     status: &'static str,

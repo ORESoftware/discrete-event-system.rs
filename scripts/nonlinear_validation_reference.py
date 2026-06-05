@@ -3,17 +3,18 @@
 
 The bridge keeps heavyweight nonlinear solvers optional. It accepts a compact
 JSON expression model over variables named x0, x1, ... or by the names supplied
-in the variable list, prefers SciPy SLSQP when available, and falls back to a
-deterministic grid-plus-pattern search for bounded smoke models.
+in the variable list, prefers SciPy SLSQP when available, and delegates fallback
+bounded grid-plus-pattern search to the Rust reference binary.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
-import itertools
 import json
 import math
+import os
+import subprocess
 import sys
 from typing import Any, Callable
 
@@ -32,7 +33,6 @@ ALLOWED_FUNCS: dict[str, Callable[..., float]] = {
 }
 
 SCIPY_BRIDGE_SOLVERS = (
-    "auto",
     "scipy",
     "ipopt",
     "bonmin",
@@ -64,6 +64,69 @@ def result(
         "message": message,
         "iterations": iterations,
     }
+
+
+def rust_reference_command() -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "nonlinear_validation_reference"
+    explicit = os.environ.get("NONLINEAR_VALIDATION_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit]
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary]
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "nonlinear_validation_reference.rs"),
+        os.path.join(
+            repo_root,
+            "src",
+            "des",
+            "general",
+            "external_nonlinear_validation_reference.rs",
+        ),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def rust_fallback_reference(payload: dict[str, Any], solver: str = "fallback") -> dict[str, Any]:
+    command = rust_reference_command()
+    cwd = None
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.dirname(script_dir)
+    completed = subprocess.run(
+        [*command, "--solver", solver],
+        input=json.dumps(payload),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        check=False,
+    )
+    try:
+        parsed = json.loads(completed.stdout)
+    except Exception as exc:
+        return result(
+            "failed",
+            "rust:nonlinear-validation-reference",
+            [],
+            None,
+            f"failed to parse Rust nonlinear validation output: {exc}; stderr={completed.stderr.strip()}",
+        )
+    if completed.returncode != 0 and not parsed.get("message"):
+        parsed["message"] = completed.stderr.strip()
+    return parsed
 
 
 class SafeExpression:
@@ -202,95 +265,6 @@ def feasible(model: dict[str, Any], x: list[float], tol: float = 1e-6) -> bool:
     return constraint_violation(model, x) <= tol
 
 
-def clamp(model: dict[str, Any], x: list[float]) -> list[float]:
-    return [
-        min(max(value, lower), upper)
-        for value, lower, upper in zip(x, model["lb"], model["ub"])
-    ]
-
-
-def candidate_grid(model: dict[str, Any]) -> list[list[float]]:
-    values = []
-    for lower, upper, start in zip(model["lb"], model["ub"], model["x0"]):
-        mid = 0.5 * (lower + upper)
-        vals = sorted({lower, upper, mid, start})
-        if upper - lower > 0.0:
-            vals.extend([lower + (upper - lower) / 3.0, lower + 2.0 * (upper - lower) / 3.0])
-        values.append(sorted(set(vals)))
-    total = math.prod(len(v) for v in values)
-    if total > 50_000:
-        values = [[lower, 0.5 * (lower + upper), upper] for lower, upper in zip(model["lb"], model["ub"])]
-    return [[float(value) for value in candidate] for candidate in itertools.product(*values)]
-
-
-def penalized_value(model: dict[str, Any], x: list[float]) -> float:
-    return objective_value(model, x) + 1_000_000.0 * constraint_violation(model, x)
-
-
-def pattern_search(model: dict[str, Any], start: list[float], max_iterations: int = 20_000) -> tuple[list[float], int]:
-    x = clamp(model, start)
-    spans = [upper - lower for lower, upper in zip(model["lb"], model["ub"])]
-    step = max(max(spans, default=1.0) * 0.25, 1.0)
-    n = len(x)
-    iterations = 0
-    best = x
-    best_value = penalized_value(model, best)
-    while iterations < max_iterations and step > 1e-8:
-        iterations += 1
-        improved = False
-        trial_best = best
-        trial_value = best_value
-        for idx in range(n):
-            for sign in (-1.0, 1.0):
-                candidate = best[:]
-                candidate[idx] += sign * step
-                candidate = clamp(model, candidate)
-                value = penalized_value(model, candidate)
-                if value < trial_value - 1e-10:
-                    trial_best = candidate
-                    trial_value = value
-                    improved = True
-        if improved:
-            best = trial_best
-            best_value = trial_value
-        else:
-            step *= 0.5
-    return best, iterations
-
-
-def fallback_reference(payload: dict[str, Any]) -> dict[str, Any]:
-    model = normalize(payload)
-    best = None
-    best_score = math.inf
-    iterations = 0
-    for candidate in candidate_grid(model):
-        refined, used = pattern_search(model, candidate, max_iterations=2_000)
-        iterations += used
-        score = penalized_value(model, refined)
-        if score < best_score:
-            best = refined
-            best_score = score
-    if best is None:
-        return result("infeasible", "builtin:nlp-pattern-search", [], None, "no candidate generated", iterations)
-    if not feasible(model, best):
-        return result(
-            "infeasible",
-            "builtin:nlp-pattern-search",
-            best,
-            public_objective(model, best),
-            f"best constraint violation {constraint_violation(model, best):.3e}",
-            iterations,
-        )
-    return result(
-        "optimal",
-        "builtin:nlp-pattern-search",
-        best,
-        public_objective(model, best),
-        "bounded grid plus coordinate-pattern fallback",
-        iterations,
-    )
-
-
 def scipy_reference(payload: dict[str, Any], solver_label: str) -> dict[str, Any] | None:
     try:
         import numpy as np  # type: ignore
@@ -331,7 +305,7 @@ def scipy_reference(payload: dict[str, Any], solver_label: str) -> dict[str, Any
     x = [float(value) for value in res.x] if getattr(res, "x", None) is not None else []
     if res.success and feasible(model, x):
         return result("optimal", solver_label, x, public_objective(model, x), str(res.message), int(res.nit))
-    fallback = fallback_reference(payload)
+    fallback = rust_fallback_reference(payload)
     if fallback["status"] == "optimal":
         fallback["solver"] = f"{solver_label}+fallback"
         fallback["message"] = f"{res.message}; fallback recovered feasible solution"
@@ -359,23 +333,21 @@ def package_reference(payload: dict[str, Any], package: str) -> dict[str, Any] |
 
 def dispatch(payload: dict[str, Any], requested: str) -> dict[str, Any]:
     solver = requested.strip().lower().replace("_", "-")
+    if solver == "auto":
+        return rust_fallback_reference(payload, solver)
     if solver in SCIPY_BRIDGE_SOLVERS:
         scipy = scipy_reference(payload, "scipy:SLSQP" if solver in ("auto", "scipy") else f"{solver}:scipy-bridge")
         if scipy is not None:
             return scipy
         if solver != "auto":
-            fallback = fallback_reference(payload)
-            fallback["solver"] = f"builtin:nlp-pattern-search-for-{solver}"
-            return fallback
+            return rust_fallback_reference(payload, solver)
     if solver in PACKAGE_BRIDGE_SOLVERS:
         package = "nlopt" if solver in ("nlopt", "nlopt-cli") else solver
         package_result = package_reference(payload, package)
         if package_result is not None:
             return package_result
-        fallback = fallback_reference(payload)
-        fallback["solver"] = f"builtin:nlp-pattern-search-for-{solver}"
-        return fallback
-    return fallback_reference(payload)
+        return rust_fallback_reference(payload, solver)
+    return rust_fallback_reference(payload)
 
 
 def main() -> int:

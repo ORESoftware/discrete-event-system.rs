@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Reference bridge for small minimum-spanning-tree instances.
 
-The deterministic oracle is Kruskal's algorithm. When OR-Tools is installed,
-the same undirected graph is also sent to CP-SAT using binary selected-edge
-variables and integer flow variables that force root connectivity.
+The deterministic Kruskal oracle lives in Rust. This Python bridge remains as
+thin adapter glue for explicit OR-Tools CP-SAT checks using binary
+selected-edge variables and integer flow variables that force root
+connectivity.
 """
 
 from __future__ import annotations
@@ -11,11 +12,50 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
 OBJECTIVE_SCALE = 1_000_000
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "minimum_spanning_tree_reference"
+    explicit = os.environ.get("MINIMUM_SPANNING_TREE_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "minimum_spanning_tree_reference.rs"),
+        os.path.join(
+            repo_root,
+            "src",
+            "des",
+            "general",
+            "external_minimum_spanning_tree_reference.rs",
+        ),
+        os.path.join(repo_root, "src", "des", "general", "minimum_spanning_tree.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -56,29 +96,6 @@ def normalize(raw: dict) -> dict:
     return {"vertices": vertices, "edges": edges}
 
 
-class DisjointSet:
-    def __init__(self, size: int) -> None:
-        self.parent = list(range(size))
-        self.rank = [0 for _ in range(size)]
-
-    def find(self, value: int) -> int:
-        if self.parent[value] != value:
-            self.parent[value] = self.find(self.parent[value])
-        return self.parent[value]
-
-    def union(self, a: int, b: int) -> bool:
-        ra = self.find(a)
-        rb = self.find(b)
-        if ra == rb:
-            return False
-        if self.rank[ra] < self.rank[rb]:
-            ra, rb = rb, ra
-        self.parent[rb] = ra
-        if self.rank[ra] == self.rank[rb]:
-            self.rank[ra] += 1
-        return True
-
-
 def output(
     status: str,
     solver: str,
@@ -102,25 +119,6 @@ def output(
         "totalWeight": total,
         "message": message,
     }
-
-
-def exact_mst(problem: dict) -> dict:
-    n = len(problem["vertices"])
-    if n == 1:
-        return output("optimal", "python:kruskal-mst", problem, [], "single-vertex MST")
-    dsu = DisjointSet(n)
-    selected = []
-    order = list(range(len(problem["edges"])))
-    order.sort(key=lambda idx: (problem["edges"][idx]["weight"], problem["edges"][idx]["id"]))
-    for edge_idx in order:
-        edge = problem["edges"][edge_idx]
-        if dsu.union(edge["from"], edge["to"]):
-            selected.append(edge_idx)
-            if len(selected) + 1 == n:
-                break
-    if len(selected) + 1 != n:
-        return output("infeasible", "python:kruskal-mst", problem, None, "graph is disconnected")
-    return output("optimal", "python:kruskal-mst", problem, selected, "Kruskal minimum spanning tree")
 
 
 def ortools_mst(problem: dict) -> dict:
@@ -196,36 +194,20 @@ def ortools_mst(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-kruskal", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-kruskal", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_mst(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "infeasible") else 1
-
-        ortools = ortools_mst(problem)
-        if args.solver == "ortools":
-            print(json.dumps(ortools))
-            return 0 if ortools["status"] in ("optimal", "feasible", "infeasible", "unavailable") else 1
-
-        result = dict(exact)
-        result["solver"] = (
-            "ortools:cp-sat-mst+python:kruskal-mst"
-            if ortools.get("status") != "unavailable"
-            else "python:kruskal-mst"
-        )
-        result["ortoolsStatus"] = ortools.get("status")
-        result["ortoolsSelectedEdgeIndices"] = ortools.get("selectedEdgeIndices", [])
-        result["ortoolsSelectedEdgeIds"] = ortools.get("selectedEdgeIds", [])
-        result["ortoolsObjective"] = ortools.get("objective")
-        result["ortoolsTotalWeight"] = ortools.get("totalWeight")
-        result["ortoolsMessage"] = ortools.get("message")
-        result["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
-        print(json.dumps(result))
-        return 0 if result["status"] in ("optimal", "infeasible") else 1
+        output = ortools_mst(problem)
+        print(json.dumps(output))
+        return 0 if output["status"] in ("optimal", "feasible", "infeasible", "unavailable") else 1
     except Exception as exc:
         print(
             json.dumps(

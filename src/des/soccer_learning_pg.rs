@@ -25,6 +25,7 @@ use crate::des::soccer_learning::{
 pub struct SoccerLearningPgPolicyVersion {
     pub id: String,
     pub generation: i32,
+    pub updated_at_micros: i64,
     pub policies: SoccerTeamQPolicies,
     pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
     pub tactical_learning: Option<SoccerTacticalLearningWeights>,
@@ -34,6 +35,7 @@ pub struct SoccerLearningPgPolicyVersion {
 pub struct SoccerLearningPgPolicyMetadata {
     pub id: String,
     pub generation: i32,
+    pub updated_at_micros: i64,
     pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
     pub tactical_learning: Option<SoccerTacticalLearningWeights>,
 }
@@ -290,6 +292,7 @@ impl SoccerLearningPgStore {
         Ok(Some(SoccerLearningPgPolicyVersion {
             id: metadata.id,
             generation: metadata.generation,
+            updated_at_micros: metadata.updated_at_micros,
             policies,
             neural_network: metadata.neural_network,
             tactical_learning: metadata.tactical_learning,
@@ -304,10 +307,15 @@ impl SoccerLearningPgStore {
             .client
             .query_opt(
                 r#"
-                select id::text, generation, metrics, config
+                select
+                  id::text,
+                  generation,
+                  metrics,
+                  config,
+                  coalesce((extract(epoch from updated_at) * 1000000)::bigint, 0)
                 from des_soccer_learning_policy_versions
                 where experiment_id = $1::text::uuid and status = 'active'
-                order by generation desc, updated_at desc
+                order by generation desc, updated_at desc, id desc
                 limit 1
                 "#,
                 &[&experiment_id],
@@ -320,12 +328,14 @@ impl SoccerLearningPgStore {
         let generation: i32 = row.get(1);
         let metrics: Value = row.get(2);
         let config: Value = row.get(3);
+        let updated_at_micros: i64 = row.get(4);
         let neural_network = soccer_policy_version_neural_network_from_metrics(&metrics)?;
         let tactical_learning =
             soccer_policy_version_tactical_learning_from_values(&config, &metrics)?;
         Ok(Some(SoccerLearningPgPolicyMetadata {
             id,
             generation,
+            updated_at_micros,
             neural_network,
             tactical_learning,
         }))

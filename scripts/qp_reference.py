@@ -9,9 +9,9 @@ Input JSON:
     "lb": [0, null], "ub": [1, null]
   }
 
-The bridge prefers HiGHS through highspy for plain convex QPs, then
-scipy.optimize.minimize when SciPy is installed, and falls back to
-dependency-free active-set enumeration for small dense QPs.
+The bridge delegates default and built-in fallback solves to the Rust
+reference binary, while keeping Python ecosystem adapters for optional
+external solvers such as HiGHS, SciPy, OSQP, and CVXPY.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import itertools
 import json
 import math
 import os
+import subprocess
 import sys
 from typing import List, Optional, Sequence, Tuple
 
@@ -38,6 +39,22 @@ CVXPY_SOLVER_ALIASES = {
 
 CVXPY_REFERENCE_SOLVERS = ("cvxpy", "scs", "clarabel", "ecos", "mosek", "copt")
 REGISTERED_CONIC_REFERENCE_SOLVERS = ("qpoases", "proxqp", "cosmo", "sdpa", "csdp")
+RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust", "rust-internal", "rust-fallback")
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "qp_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_optimization_tools.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_quadratic_reference.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
 
 
 @contextlib.contextmanager
@@ -55,6 +72,55 @@ def redirect_process_stdout_to_stderr():
         sys.stderr.flush()
         os.dup2(saved_stdout_fd, stdout_fd)
         os.close(saved_stdout_fd)
+
+
+def rust_reference_command() -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "qp_reference"
+    explicit = os.environ.get("QP_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit]
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary]
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def rust_reference(qp: dict, solver: str = "auto", max_enumerations: int = 1_000_000) -> dict:
+    command = rust_reference_command()
+    cwd = None
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.dirname(script_dir)
+    completed = subprocess.run(
+        [
+            *command,
+            "--solver",
+            solver,
+            "--max-enumerations",
+            str(max_enumerations),
+        ],
+        input=json.dumps(qp),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        check=False,
+    )
+    try:
+        parsed = json.loads(completed.stdout)
+    except Exception as exc:
+        return {
+            "status": "numerical-error",
+            "solver": "rust:quadratic-reference",
+            "x": [],
+            "objective": None,
+            "message": f"failed to parse Rust quadratic output: {exc}; stderr={completed.stderr.strip()}",
+        }
+    if completed.returncode != 0 and not parsed.get("message"):
+        parsed["message"] = completed.stderr.strip()
+    return parsed
 
 
 def dot(a: Sequence[float], b: Sequence[float]) -> float:
@@ -112,19 +178,6 @@ def normalize(qp: dict) -> dict:
     return out
 
 
-def active_items(qp: dict) -> List[Tuple[str, int]]:
-    items: List[Tuple[str, int]] = []
-    for i in range(len(qp["A_ub"])):
-        items.append(("ineq", i))
-    for i, v in enumerate(qp["lb"]):
-        if v is not None:
-            items.append(("lb", i))
-    for i, v in enumerate(qp["ub"]):
-        if v is not None:
-            items.append(("ub", i))
-    return items
-
-
 def active_row(qp: dict, item: Tuple[str, int]) -> Tuple[List[float], float]:
     kind, i = item
     n = len(qp["c"])
@@ -135,21 +188,6 @@ def active_row(qp: dict, item: Tuple[str, int]) -> Tuple[List[float], float]:
     if kind == "lb":
         return row, qp["lb"][i]
     return row, qp["ub"][i]
-
-
-def feasible(qp: dict, x: Sequence[float], tol: float = 1e-7) -> bool:
-    for i, value in enumerate(x):
-        if qp["lb"][i] is not None and value < qp["lb"][i] - tol:
-            return False
-        if qp["ub"][i] is not None and value > qp["ub"][i] + tol:
-            return False
-    for row, rhs in zip(qp["A_ub"], qp["b_ub"]):
-        if dot(row, x) > rhs + tol:
-            return False
-    for row, rhs in zip(qp["A_eq"], qp["b_eq"]):
-        if abs(dot(row, x) - rhs) > tol:
-            return False
-    return True
 
 
 def recover_qp_certificate(qp_raw: dict, x: Sequence[float], tol: float = 1e-8) -> dict:
@@ -259,119 +297,6 @@ def with_qp_certificate(result: dict, qp_raw: dict) -> dict:
     return result
 
 
-def integer_domains(
-    model: dict,
-    integer_vars: Sequence[bool],
-    label: str = "mixed-integer model",
-) -> list[tuple[int, int]]:
-    domains = []
-    for idx, is_integer in enumerate(integer_vars):
-        if not is_integer:
-            continue
-        lower = model["lb"][idx]
-        upper = model["ub"][idx]
-        if lower is None or upper is None:
-            raise ValueError(f"{label} integer variable {idx} needs finite bounds")
-        lo = math.ceil(float(lower))
-        hi = math.floor(float(upper))
-        if lo > hi:
-            raise ValueError(f"{label} integer variable {idx} has no integer value in its bounds")
-        domains.append((lo, hi))
-    return domains
-
-
-def fixed_integer_qp(qp: dict, fixed: Sequence[tuple[int, int]]) -> dict:
-    sub = {
-        "Q": [row[:] for row in qp["Q"]],
-        "c": qp["c"][:],
-        "A_ub": [row[:] for row in qp["A_ub"]],
-        "b_ub": qp["b_ub"][:],
-        "A_eq": [row[:] for row in qp["A_eq"]],
-        "b_eq": qp["b_eq"][:],
-        "lb": qp["lb"][:],
-        "ub": qp["ub"][:],
-    }
-    n = len(qp["c"])
-    for var, value in fixed:
-        row = [0.0] * n
-        row[var] = 1.0
-        sub["A_eq"].append(row)
-        sub["b_eq"].append(float(value))
-    return sub
-
-
-def solve_miqp_reference(raw: dict, solver: str, max_enumerations: int = 1_000_000) -> dict:
-    qp = normalize(raw)
-    integer_vars = [bool(v) for v in raw.get("integer_vars", [])]
-    if len(integer_vars) != len(qp["c"]):
-        return {
-            "status": "numerical-error",
-            "solver": "python:miqp-enumeration",
-            "x": [],
-            "objective": None,
-            "message": "integer_vars length mismatch",
-        }
-    try:
-        domains = integer_domains(qp, integer_vars, "MIQP")
-    except ValueError as exc:
-        return {
-            "status": "numerical-error",
-            "solver": "python:miqp-enumeration",
-            "x": [],
-            "objective": None,
-            "message": str(exc),
-        }
-    integer_indices = [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
-    if not integer_indices:
-        result = highs_qp_reference(raw) if solver in ("auto", "highs", "highspy", "highs-qp") else None
-        if result is None:
-            result = scipy_reference(raw) if solver in ("auto", "scipy", "scipy-slsqp") else None
-        return result or enumerate_active_sets(raw)
-
-    best = None
-    best_obj = math.inf
-    enumerated = 0
-    for values in itertools.product(*(range(lo, hi + 1) for lo, hi in domains)):
-        enumerated += 1
-        if enumerated > max_enumerations:
-            return {
-                "status": "numerical-error",
-                "solver": "python:miqp-enumeration",
-                "x": [] if best is None else best,
-                "objective": None if best is None else best_obj,
-                "enumerated": enumerated,
-                "message": "MIQP enumeration limit reached",
-            }
-        sub = fixed_integer_qp(qp, list(zip(integer_indices, values)))
-        result = highs_qp_reference(sub) if solver in ("auto", "highs", "highspy", "highs-qp") else None
-        if result is None:
-            result = scipy_reference(sub) if solver in ("auto", "scipy", "scipy-slsqp") else None
-        if result is None or result.get("status") != "optimal":
-            result = enumerate_active_sets(sub)
-        if result.get("status") != "optimal":
-            continue
-        obj = float(result["objective"])
-        if obj < best_obj - 1e-8:
-            best_obj = obj
-            best = [float(v) for v in result["x"]]
-    if best is None:
-        return {
-            "status": "infeasible",
-            "solver": "python:miqp-enumeration",
-            "x": [],
-            "objective": None,
-            "enumerated": enumerated,
-        }
-    return {
-        "status": "optimal",
-        "solver": "python:miqp-enumeration",
-        "x": best,
-        "objective": best_obj,
-        "enumerated": enumerated,
-        "message": "bounded MIQP enumeration over integer variables",
-    }
-
-
 def normalize_socp(raw: dict) -> dict:
     c = [float(v) for v in raw["c"]]
     n = len(c)
@@ -449,68 +374,6 @@ def socp_initial_point(p: dict, tol: float = 1e-7) -> Optional[List[float]]:
         if socp_feasible(p, x, tol):
             return x
     return None
-
-
-def socp_pattern_reference(raw: dict) -> dict:
-    p = normalize_socp(raw)
-    x = socp_initial_point(p)
-    if x is None:
-        return {"status": "infeasible", "solver": "python:socp-pattern-search", "x": [], "objective": None, "iterations": 0}
-    dirs = []
-    n = len(p["c"])
-    for i in range(n):
-        plus = [0.0] * n
-        plus[i] = 1.0
-        dirs.append(plus)
-        minus = [0.0] * n
-        minus[i] = -1.0
-        dirs.append(minus)
-    norm = math.sqrt(sum(v * v for v in p["c"]))
-    if norm > 1e-12:
-        dirs.append([-v / norm for v in p["c"]])
-    spans = [
-        ub - lb
-        for lb, ub in zip(p["lb"], p["ub"])
-        if lb is not None and ub is not None and ub > lb
-    ]
-    step = max(1.0, 0.5 * max(spans)) if spans else 1.0
-    best = x
-    best_obj = socp_objective(p, best)
-    iterations = 0
-    tol = 1e-7
-    while iterations < 20_000 and step > tol:
-        iterations += 1
-        improved = False
-        trial_best = best
-        trial_obj = best_obj
-        for direction in dirs:
-            cand = [xi + step * di for xi, di in zip(best, direction)]
-            for i, (lb, ub) in enumerate(zip(p["lb"], p["ub"])):
-                if lb is not None:
-                    cand[i] = max(cand[i], lb)
-                if ub is not None:
-                    cand[i] = min(cand[i], ub)
-            if not socp_feasible(p, cand, tol):
-                continue
-            obj = socp_objective(p, cand)
-            if obj < trial_obj - tol:
-                trial_best = cand
-                trial_obj = obj
-                improved = True
-        if improved:
-            best = trial_best
-            best_obj = trial_obj
-        else:
-            step *= 0.5
-    status = "optimal" if step <= tol else "numerical-error"
-    return {
-        "status": status,
-        "solver": "python:socp-pattern-search",
-        "x": best,
-        "objective": best_obj,
-        "iterations": iterations,
-        "message": "dependency-free SOCP pattern-search fallback",
-    }
 
 
 def normalize_qcp(raw: dict) -> dict:
@@ -592,131 +455,6 @@ def qcp_initial_point(p: dict, tol: float = 1e-7) -> Optional[List[float]]:
         if qcp_feasible(p, x, tol):
             return x
     return None
-
-
-def qcp_gradient(p: dict, x: Sequence[float]) -> List[float]:
-    qx = mat_vec(p["Q"], x)
-    return [qi + ci for qi, ci in zip(qx, p["c"])]
-
-
-def qcp_pattern_reference(raw: dict) -> dict:
-    p = normalize_qcp(raw)
-    x = qcp_initial_point(p)
-    if x is None:
-        return {"status": "infeasible", "solver": "python:qcp-pattern-search", "x": [], "objective": None, "iterations": 0}
-    spans = [
-        ub - lb
-        for lb, ub in zip(p["lb"], p["ub"])
-        if lb is not None and ub is not None and ub > lb
-    ]
-    step = max(1.0, 0.5 * max(spans)) if spans else 1.0
-    best = x
-    best_obj = qcp_objective(p, best)
-    iterations = 0
-    tol = 1e-7
-    n = len(p["c"])
-    while iterations < 20_000 and step > tol:
-        iterations += 1
-        dirs = []
-        for i in range(n):
-            plus = [0.0] * n
-            plus[i] = 1.0
-            dirs.append(plus)
-            minus = [0.0] * n
-            minus[i] = -1.0
-            dirs.append(minus)
-        grad = qcp_gradient(p, best)
-        norm = math.sqrt(sum(v * v for v in grad))
-        if norm > 1e-12:
-            dirs.append([-v / norm for v in grad])
-
-        improved = False
-        trial_best = best
-        trial_obj = best_obj
-        for direction in dirs:
-            cand = [xi + step * di for xi, di in zip(best, direction)]
-            for i, (lb, ub) in enumerate(zip(p["lb"], p["ub"])):
-                if lb is not None:
-                    cand[i] = max(cand[i], lb)
-                if ub is not None:
-                    cand[i] = min(cand[i], ub)
-            if not qcp_feasible(p, cand, tol):
-                continue
-            obj = qcp_objective(p, cand)
-            if obj < trial_obj - tol:
-                trial_best = cand
-                trial_obj = obj
-                improved = True
-        if improved:
-            best = trial_best
-            best_obj = trial_obj
-        else:
-            step *= 0.5
-    status = "optimal" if step <= tol else "numerical-error"
-    return {
-        "status": status,
-        "solver": "python:qcp-pattern-search",
-        "x": best,
-        "objective": best_obj,
-        "iterations": iterations,
-        "message": "dependency-free QCP pattern-search fallback",
-    }
-
-
-def solve_kkt(qp: dict, active: Sequence[Tuple[str, int]]) -> Optional[List[float]]:
-    n = len(qp["c"])
-    eq_rows = [row[:] for row in qp["A_eq"]]
-    eq_rhs = qp["b_eq"][:]
-    for item in active:
-        row, rhs = active_row(qp, item)
-        eq_rows.append(row)
-        eq_rhs.append(rhs)
-    m = len(eq_rows)
-    dim = n + m
-    kkt = [[0.0] * dim for _ in range(dim)]
-    rhs = [0.0] * dim
-    for i in range(n):
-        for j in range(n):
-            kkt[i][j] = qp["Q"][i][j]
-        rhs[i] = -qp["c"][i]
-    for r, row in enumerate(eq_rows):
-        for j in range(n):
-            kkt[j][n + r] = row[j]
-            kkt[n + r][j] = row[j]
-        rhs[n + r] = eq_rhs[r]
-    sol = solve_square(kkt, rhs)
-    if sol is None:
-        return None
-    return sol[:n]
-
-
-def enumerate_active_sets(qp: dict) -> dict:
-    qp = normalize(qp)
-    items = active_items(qp)
-    n = len(qp["c"])
-    best_x = None
-    best_obj = math.inf
-    iterations = 0
-    for r in range(min(n, len(items)) + 1):
-        for active in itertools.combinations(items, r):
-            iterations += 1
-            x = solve_kkt(qp, active)
-            if x is None or not feasible(qp, x):
-                continue
-            obj = objective(qp, x)
-            if obj < best_obj - 1e-8:
-                best_obj = obj
-                best_x = x
-    if best_x is None:
-        return {"status": "infeasible", "solver": "python:qp-active-set", "x": [], "objective": None, "iterations": iterations}
-    return with_qp_certificate({
-        "status": "optimal",
-        "solver": "python:qp-active-set",
-        "x": best_x,
-        "objective": best_obj,
-        "iterations": iterations,
-        "message": "dependency-free active-set enumeration fallback",
-    }, qp)
 
 
 def highs_qp_reference(qp_raw: dict) -> Optional[dict]:
@@ -1263,21 +1001,21 @@ def registered_qp_reference(qp_raw: dict, requested_solver: str) -> dict:
     cvxpy = cvxpy_reference(qp_raw, requested_solver)
     if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
         return cvxpy
-    return relabel_registered_fallback(enumerate_active_sets(qp_raw), requested_solver, "qp-active-set")
+    return relabel_registered_fallback(rust_reference(qp_raw, "fallback"), requested_solver, "qp-active-set")
 
 
 def registered_socp_reference(raw: dict, requested_solver: str) -> dict:
     cvxpy = cvxpy_socp_reference(raw, requested_solver)
     if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
         return cvxpy
-    return relabel_registered_fallback(socp_pattern_reference(raw), requested_solver, "socp-pattern-search")
+    return relabel_registered_fallback(rust_reference(raw, "fallback"), requested_solver, "socp-pattern-search")
 
 
 def registered_qcp_reference(raw: dict, requested_solver: str) -> dict:
     cvxpy = cvxpy_qcp_reference(raw, requested_solver)
     if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
         return cvxpy
-    return relabel_registered_fallback(qcp_pattern_reference(raw), requested_solver, "qcp-pattern-search")
+    return relabel_registered_fallback(rust_reference(raw, "fallback"), requested_solver, "qcp-pattern-search")
 
 
 def scipy_iterations(result) -> int:
@@ -1314,7 +1052,7 @@ def continuous_socp_reference(raw: dict, solver: str) -> dict:
     if result is None and solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
         result = registered_socp_reference(raw, solver)
     if result is None:
-        result = socp_pattern_reference(raw)
+        result = rust_reference(raw, "fallback")
     return result
 
 
@@ -1341,200 +1079,8 @@ def continuous_qcp_reference(raw: dict, solver: str) -> dict:
     if result is None and solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
         result = registered_qcp_reference(raw, solver)
     if result is None:
-        result = qcp_pattern_reference(raw)
+        result = rust_reference(raw, "fallback")
     return result
-
-
-def fixed_integer_socp(socp: dict, fixed: Sequence[tuple[int, int]]) -> dict:
-    sub = {
-        "c": socp["c"][:],
-        "A_ub": [row[:] for row in socp["A_ub"]],
-        "b_ub": socp["b_ub"][:],
-        "A_eq": [row[:] for row in socp["A_eq"]],
-        "b_eq": socp["b_eq"][:],
-        "lb": socp["lb"][:],
-        "ub": socp["ub"][:],
-        "cones": [
-            {
-                "A": [row[:] for row in cone["A"]],
-                "b": cone["b"][:],
-                "c": cone["c"][:],
-                "d": cone["d"],
-                "name": cone.get("name"),
-            }
-            for cone in socp["cones"]
-        ],
-    }
-    n = len(socp["c"])
-    for var, value in fixed:
-        sub["lb"][var] = float(value)
-        sub["ub"][var] = float(value)
-        row = [0.0] * n
-        row[var] = 1.0
-        sub["A_eq"].append(row)
-        sub["b_eq"].append(float(value))
-    return sub
-
-
-def fixed_integer_qcp(qcp: dict, fixed: Sequence[tuple[int, int]]) -> dict:
-    sub = {
-        "Q": [row[:] for row in qcp["Q"]],
-        "c": qcp["c"][:],
-        "A_ub": [row[:] for row in qcp["A_ub"]],
-        "b_ub": qcp["b_ub"][:],
-        "A_eq": [row[:] for row in qcp["A_eq"]],
-        "b_eq": qcp["b_eq"][:],
-        "lb": qcp["lb"][:],
-        "ub": qcp["ub"][:],
-        "quadratic_constraints": [
-            {
-                "Q": [row[:] for row in constraint["Q"]],
-                "c": constraint["c"][:],
-                "rhs": constraint["rhs"],
-                "name": constraint.get("name"),
-            }
-            for constraint in qcp["quadratic_constraints"]
-        ],
-    }
-    n = len(qcp["c"])
-    for var, value in fixed:
-        sub["lb"][var] = float(value)
-        sub["ub"][var] = float(value)
-        row = [0.0] * n
-        row[var] = 1.0
-        sub["A_eq"].append(row)
-        sub["b_eq"].append(float(value))
-    return sub
-
-
-def solve_misocp_reference(raw: dict, solver: str, max_enumerations: int = 1_000_000) -> dict:
-    socp = normalize_socp(raw)
-    integer_vars = [bool(v) for v in raw.get("integer_vars", [])]
-    if len(integer_vars) != len(socp["c"]):
-        return {
-            "status": "numerical-error",
-            "solver": "python:misocp-enumeration",
-            "x": [],
-            "objective": None,
-            "message": "integer_vars length mismatch",
-        }
-    try:
-        domains = integer_domains(socp, integer_vars, "MISOCP")
-    except ValueError as exc:
-        return {
-            "status": "numerical-error",
-            "solver": "python:misocp-enumeration",
-            "x": [],
-            "objective": None,
-            "message": str(exc),
-        }
-    integer_indices = [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
-    if not integer_indices:
-        return continuous_socp_reference(raw, solver)
-
-    best = None
-    best_obj = math.inf
-    enumerated = 0
-    for values in itertools.product(*(range(lo, hi + 1) for lo, hi in domains)):
-        enumerated += 1
-        if enumerated > max_enumerations:
-            return {
-                "status": "numerical-error",
-                "solver": "python:misocp-enumeration",
-                "x": [] if best is None else best,
-                "objective": None if best is None else best_obj,
-                "enumerated": enumerated,
-                "message": "MISOCP enumeration limit reached",
-            }
-        sub = fixed_integer_socp(socp, list(zip(integer_indices, values)))
-        result = continuous_socp_reference(sub, solver)
-        if result.get("status") != "optimal":
-            continue
-        obj = float(result["objective"])
-        if obj < best_obj - 1e-8:
-            best_obj = obj
-            best = [float(v) for v in result["x"]]
-    if best is None:
-        return {
-            "status": "infeasible",
-            "solver": "python:misocp-enumeration",
-            "x": [],
-            "objective": None,
-            "enumerated": enumerated,
-        }
-    return {
-        "status": "optimal",
-        "solver": "python:misocp-enumeration",
-        "x": best,
-        "objective": best_obj,
-        "enumerated": enumerated,
-        "message": "bounded MISOCP enumeration over integer variables",
-    }
-
-
-def solve_miqcp_reference(raw: dict, solver: str, max_enumerations: int = 1_000_000) -> dict:
-    qcp = normalize_qcp(raw)
-    integer_vars = [bool(v) for v in raw.get("integer_vars", [])]
-    if len(integer_vars) != len(qcp["c"]):
-        return {
-            "status": "numerical-error",
-            "solver": "python:miqcp-enumeration",
-            "x": [],
-            "objective": None,
-            "message": "integer_vars length mismatch",
-        }
-    try:
-        domains = integer_domains(qcp, integer_vars, "MIQCP")
-    except ValueError as exc:
-        return {
-            "status": "numerical-error",
-            "solver": "python:miqcp-enumeration",
-            "x": [],
-            "objective": None,
-            "message": str(exc),
-        }
-    integer_indices = [idx for idx, is_integer in enumerate(integer_vars) if is_integer]
-    if not integer_indices:
-        return continuous_qcp_reference(raw, solver)
-
-    best = None
-    best_obj = math.inf
-    enumerated = 0
-    for values in itertools.product(*(range(lo, hi + 1) for lo, hi in domains)):
-        enumerated += 1
-        if enumerated > max_enumerations:
-            return {
-                "status": "numerical-error",
-                "solver": "python:miqcp-enumeration",
-                "x": [] if best is None else best,
-                "objective": None if best is None else best_obj,
-                "enumerated": enumerated,
-                "message": "MIQCP enumeration limit reached",
-            }
-        sub = fixed_integer_qcp(qcp, list(zip(integer_indices, values)))
-        result = continuous_qcp_reference(sub, solver)
-        if result.get("status") != "optimal":
-            continue
-        obj = float(result["objective"])
-        if obj < best_obj - 1e-8:
-            best_obj = obj
-            best = [float(v) for v in result["x"]]
-    if best is None:
-        return {
-            "status": "infeasible",
-            "solver": "python:miqcp-enumeration",
-            "x": [],
-            "objective": None,
-            "enumerated": enumerated,
-        }
-    return {
-        "status": "optimal",
-        "solver": "python:miqcp-enumeration",
-        "x": best,
-        "objective": best_obj,
-        "enumerated": enumerated,
-        "message": "bounded MIQCP enumeration over integer variables",
-    }
 
 
 def main() -> int:
@@ -1543,17 +1089,21 @@ def main() -> int:
     parser.add_argument("--max-enumerations", type=int, default=1_000_000)
     args = parser.parse_args()
     qp = json.load(sys.stdin)
+    if args.solver in RUST_REFERENCE_SOLVERS:
+        result = rust_reference(qp, args.solver, args.max_enumerations)
+        print(json.dumps(result))
+        return 0 if result.get("status") != "unavailable" else 2
     result = None
     if qp.get("integer_vars") and qp.get("cones"):
-        result = solve_misocp_reference(qp, args.solver, args.max_enumerations)
+        result = rust_reference(qp, "fallback", args.max_enumerations)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
     if qp.get("integer_vars") and (qp.get("quadratic_constraints") or qp.get("q_constraints")):
-        result = solve_miqcp_reference(qp, args.solver, args.max_enumerations)
+        result = rust_reference(qp, "fallback", args.max_enumerations)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
     if qp.get("integer_vars"):
-        result = solve_miqp_reference(qp, args.solver, args.max_enumerations)
+        result = rust_reference(qp, "fallback", args.max_enumerations)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
     if qp.get("cones"):
@@ -1583,7 +1133,7 @@ def main() -> int:
     if result is None and args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
         result = registered_qp_reference(qp, args.solver)
     if result is None:
-        result = enumerate_active_sets(qp)
+        result = rust_reference(qp, "fallback", args.max_enumerations)
     print(json.dumps(result))
     return 0 if result.get("status") != "unavailable" else 2
 

@@ -13,7 +13,18 @@ use std::io::{self, BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use des_engine::des::general::soccer::{
+    MatchConfig, SoccerQPolicyOptions, SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact,
+    SoccerTacticalLearningSummary, SoccerTacticalLearningWeights, SoccerTeamQPolicies,
+    SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION,
+};
+use des_engine::des::soccer_learning::{
+    soccer_learning_run_score, soccer_policy_version_insert_status_after_active_head,
+    SOCCER_POLICY_STATUS_ACTIVE,
+};
+use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 #[derive(Debug)]
 struct Args {
@@ -28,6 +39,32 @@ struct Args {
     auth_header_name: String,
     auth_env_name: Option<String>,
     auth_value: Option<String>,
+}
+
+#[derive(Debug)]
+struct ExtractedServerResponse {
+    episodes: usize,
+    home_entries: usize,
+    away_entries: usize,
+    artifact: SoccerSelfPlayTrainingArtifact,
+    learned_params: SoccerSelfPlayLearnedParams,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PostgresResumeMetadata {
+    experiment_id: String,
+    policy_version_id: String,
+    generation: i32,
+}
+
+#[derive(Debug)]
+struct PostgresImportSummary {
+    experiment_id: String,
+    policy_version_id: String,
+    parent_policy_version_id: Option<String>,
+    generation: i32,
+    status: &'static str,
+    fitness: f64,
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -236,6 +273,146 @@ fn validate_payload_settings(
     Ok(())
 }
 
+fn postgres_resume_enabled() -> Result<bool, Box<dyn Error>> {
+    if env_value("SOCCER_SERVER_RESUME_POSTGRES_POLICY").is_some() {
+        env_bool("SOCCER_SERVER_RESUME_POSTGRES_POLICY", true)
+    } else {
+        env_bool("SOCCER_RESUME_POSTGRES_POLICY", true)
+    }
+}
+
+fn postgres_import_enabled() -> Result<bool, Box<dyn Error>> {
+    if env_value("SOCCER_SERVER_IMPORT_POSTGRES_POLICY").is_some() {
+        env_bool("SOCCER_SERVER_IMPORT_POSTGRES_POLICY", true)
+    } else if env_value("SOCCER_IMPORT_POSTGRES_POLICY").is_some() {
+        env_bool("SOCCER_IMPORT_POSTGRES_POLICY", true)
+    } else {
+        postgres_resume_enabled()
+    }
+}
+
+fn postgres_resume_metadata_from_payload(payload: &Value) -> Option<PostgresResumeMetadata> {
+    let resume = payload.get("postgresResume")?;
+    let experiment_id = resume.get("experimentId")?.as_str()?.trim();
+    let policy_version_id = resume.get("policyVersionId")?.as_str()?.trim();
+    if experiment_id.is_empty() || policy_version_id.is_empty() {
+        return None;
+    }
+    let generation = resume
+        .get("generation")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(0);
+    Some(PostgresResumeMetadata {
+        experiment_id: experiment_id.to_string(),
+        policy_version_id: policy_version_id.to_string(),
+        generation,
+    })
+}
+
+fn postgres_import_version_label(run_id: &str, episodes: usize) -> String {
+    let suffix = format!("-server-e{episodes:06}");
+    let max_prefix_len = 160usize.saturating_sub(suffix.len());
+    let mut prefix = run_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '/' | '-'))
+        .take(max_prefix_len)
+        .collect::<String>();
+    if prefix.is_empty() {
+        prefix.push_str("server");
+    }
+    format!("{prefix}{suffix}")
+}
+
+fn server_response_fitness(artifact: &SoccerSelfPlayTrainingArtifact) -> f64 {
+    if artifact.episodes.is_empty() {
+        return 0.0;
+    }
+    let total = artifact
+        .episodes
+        .iter()
+        .map(|episode| soccer_learning_run_score(&episode.summary).match_fitness)
+        .sum::<f64>();
+    let fitness = total / artifact.episodes.len() as f64;
+    if fitness.is_finite() {
+        fitness
+    } else {
+        0.0
+    }
+}
+
+fn payload_match_config(
+    minutes: f64,
+    period_count: usize,
+    period_break_recovery_seconds: f64,
+    dt_seconds: f64,
+    learning_interval_ticks: usize,
+    seed: u32,
+    tactical_learning: SoccerTacticalLearningWeights,
+) -> MatchConfig {
+    MatchConfig {
+        duration_seconds: minutes * 60.0,
+        period_count,
+        period_break_recovery_seconds,
+        dt_seconds,
+        learning_interval_ticks,
+        seed,
+        learning_enabled: true,
+        learning_logging_enabled: false,
+        max_human_players: 0,
+        tactical_learning,
+        ..MatchConfig::default()
+    }
+}
+
+fn postgres_initial_learned_params(
+    config: &MatchConfig,
+    options: &SoccerQPolicyOptions,
+) -> Result<Option<(String, String, i32, SoccerSelfPlayLearnedParams)>, Box<dyn Error>> {
+    if !postgres_resume_enabled()? {
+        return Ok(None);
+    }
+    let Some(mut store) = SoccerLearningPgStore::connect_from_env()? else {
+        return Ok(None);
+    };
+    let slug =
+        env_value("SOCCER_EXPERIMENT_SLUG").unwrap_or_else(|| "soccer-self-play".to_string());
+    let display_name =
+        env_value("SOCCER_EXPERIMENT_NAME").unwrap_or_else(|| "Soccer self-play".to_string());
+    let experiment_id = store.ensure_experiment(&slug, &display_name, config)?;
+    let Some(version) =
+        store.load_latest_active_policy(&experiment_id, options.clone(), options.clone())?
+    else {
+        return Ok(None);
+    };
+    let tactical_learning = version
+        .tactical_learning
+        .clone()
+        .unwrap_or_else(|| config.tactical_learning.clone());
+    let params = SoccerSelfPlayLearnedParams {
+        version: SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION,
+        config: MatchConfig {
+            tactical_learning: tactical_learning.clone(),
+            ..config.clone()
+        },
+        options: options.clone(),
+        tactical_learning,
+        tactical_summary: SoccerTacticalLearningSummary::default(),
+        episodes: 0,
+        home_entries: version.policies.home.entries(),
+        home_target_entries: version.policies.home.target_entries(),
+        away_entries: version.policies.away.entries(),
+        away_target_entries: version.policies.away.target_entries(),
+        neural_network: version.neural_network,
+    };
+    Ok(Some((
+        experiment_id,
+        version.id,
+        version.generation,
+        params,
+    )))
+}
+
 fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
     let episodes = env_usize("SOCCER_GAMES", 100)?;
     let minutes = env_f64("SOCCER_MINUTES", 90.0)?;
@@ -327,8 +504,34 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
         gamma,
         &tactical_weights,
     )?;
+    let options = SoccerQPolicyOptions { alpha, gamma };
+    let tactical_learning = SoccerTacticalLearningWeights {
+        attack_spacing_delta_weight,
+        attack_spacing_score_weight,
+        attack_width_delta_weight,
+        attack_width_score_weight,
+        attack_flank_lane_weight,
+        defense_spacing_delta_weight,
+        defense_spacing_score_weight,
+        defense_contract_delta_weight,
+        defense_compactness_score_weight,
+        defense_ball_depth_score_weight,
+        defense_endline_soft_penalty_weight,
+        defense_endline_hard_penalty_weight,
+        defender_midfielder_press_weight,
+        midfielder_press_weight,
+    };
+    let config = payload_match_config(
+        minutes,
+        period_count,
+        period_break_recovery_seconds,
+        dt_seconds,
+        learning_interval_ticks,
+        seed,
+        tactical_learning.clone(),
+    );
     let import_into_session = env_bool("SOCCER_IMPORT_INTO_SESSION", true)?;
-    Ok(json!({
+    let mut payload = json!({
         "episodes": episodes,
         "minutes": minutes,
         "periodCount": period_count,
@@ -359,7 +562,19 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
         "artifactPath": &args.server_artifact_path,
         "learnedParamsPath": &args.server_learned_params_path,
         "importIntoSession": import_into_session,
-    }))
+    });
+    if let Some((experiment_id, policy_version_id, generation, params)) =
+        postgres_initial_learned_params(&config, &options)?
+    {
+        payload["tacticalLearning"] = serde_json::to_value(&params.tactical_learning)?;
+        payload["initialLearnedParams"] = serde_json::to_value(params)?;
+        payload["postgresResume"] = json!({
+            "experimentId": experiment_id,
+            "policyVersionId": policy_version_id,
+            "generation": generation,
+        });
+    }
+    Ok(payload)
 }
 
 fn ensure_parent(path: &Path) -> Result<(), Box<dyn Error>> {
@@ -496,7 +711,7 @@ fn write_episode_log(path: &Path, episodes: &[Value]) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-fn extract_response(args: &Args) -> Result<(usize, usize, usize), Box<dyn Error>> {
+fn extract_response(args: &Args) -> Result<ExtractedServerResponse, Box<dyn Error>> {
     let raw = fs::read_to_string(&args.response_path)?;
     let response: Value = serde_json::from_str(&raw)?;
     if response.get("ok").and_then(Value::as_bool) == Some(false) {
@@ -514,27 +729,124 @@ fn extract_response(args: &Args) -> Result<(usize, usize, usize), Box<dyn Error>
         .get("learnedParams")
         .filter(|value| value.is_object())
         .ok_or_else(|| invalid_data("server response did not include learnedParams"))?;
+    let artifact_model = serde_json::from_value::<SoccerSelfPlayTrainingArtifact>(artifact.clone())
+        .map_err(|err| invalid_data(format!("decode server artifact: {err}")))?;
+    let learned_params_model =
+        serde_json::from_value::<SoccerSelfPlayLearnedParams>(learned_params.clone())
+            .map_err(|err| invalid_data(format!("decode server learnedParams: {err}")))?;
 
     write_json_pretty(&args.artifact_path, artifact)?;
     write_json_pretty(&args.learned_params_path, learned_params)?;
 
-    let episodes = artifact
+    let episode_values = artifact
         .get("episodes")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    write_episode_log(&args.episode_log_path, episodes)?;
+    write_episode_log(&args.episode_log_path, episode_values)?;
 
-    let home_entries = artifact
-        .get("homeEntries")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let away_entries = artifact
-        .get("awayEntries")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+    Ok(ExtractedServerResponse {
+        episodes: artifact_model.episodes.len(),
+        home_entries: artifact_model.home_entries.len(),
+        away_entries: artifact_model.away_entries.len(),
+        artifact: artifact_model,
+        learned_params: learned_params_model,
+    })
+}
 
-    Ok((episodes.len(), home_entries, away_entries))
+fn import_server_response_to_postgres(
+    payload: &Value,
+    response: &ExtractedServerResponse,
+) -> Result<Option<PostgresImportSummary>, Box<dyn Error>> {
+    if !postgres_import_enabled()? {
+        return Ok(None);
+    }
+    let Some(mut store) = SoccerLearningPgStore::connect_from_env()? else {
+        return Ok(None);
+    };
+    let resume = postgres_resume_metadata_from_payload(payload);
+    let (experiment_id, parent_policy_version_id, parent_generation) = if let Some(resume) = resume
+    {
+        (
+            resume.experiment_id,
+            Some(resume.policy_version_id),
+            resume.generation,
+        )
+    } else {
+        let slug =
+            env_value("SOCCER_EXPERIMENT_SLUG").unwrap_or_else(|| "soccer-self-play".to_string());
+        let display_name =
+            env_value("SOCCER_EXPERIMENT_NAME").unwrap_or_else(|| "Soccer self-play".to_string());
+        let experiment_id =
+            store.ensure_experiment(&slug, &display_name, &response.learned_params.config)?;
+        let latest = store.load_latest_active_policy_metadata(&experiment_id)?;
+        let parent_policy_version_id = latest.as_ref().map(|metadata| metadata.id.clone());
+        let parent_generation = latest.as_ref().map_or(0, |metadata| metadata.generation);
+        (experiment_id, parent_policy_version_id, parent_generation)
+    };
+
+    let policies = SoccerTeamQPolicies::from_learned_params(&response.learned_params)
+        .map_err(|err| invalid_data(format!("restore server learned params policy: {err}")))?;
+    let generation = parent_generation.saturating_add(1);
+    let latest_active_metadata = store.load_latest_active_policy_metadata(&experiment_id)?;
+    let insert_status = soccer_policy_version_insert_status_after_active_head(
+        SOCCER_POLICY_STATUS_ACTIVE,
+        parent_policy_version_id.as_deref(),
+        generation,
+        latest_active_metadata
+            .as_ref()
+            .map(|metadata| metadata.id.as_str()),
+        latest_active_metadata
+            .as_ref()
+            .map(|metadata| metadata.generation),
+    );
+    let mut config = response.learned_params.config.clone();
+    config.tactical_learning = response.learned_params.tactical_learning.clone();
+    let run_id = env_value("SOCCER_RUN_ID").unwrap_or_else(|| "server-response".to_string());
+    let version_label = postgres_import_version_label(&run_id, response.episodes);
+    let policy_version_id = Uuid::new_v4().to_string();
+    let fitness = server_response_fitness(&response.artifact);
+
+    if insert_status != SOCCER_POLICY_STATUS_ACTIVE {
+        println!(
+            "postgres_server_policy_marked_stale policy_version={} parent_policy_version={} generation={} latest_active={} latest_generation={}",
+            policy_version_id,
+            parent_policy_version_id.as_deref().unwrap_or("none"),
+            generation,
+            latest_active_metadata
+                .as_ref()
+                .map(|metadata| metadata.id.as_str())
+                .unwrap_or("none"),
+            latest_active_metadata
+                .as_ref()
+                .map(|metadata| metadata.generation.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        );
+    }
+    store.insert_policy_version_with_id_and_neural_network(
+        &policy_version_id,
+        &experiment_id,
+        parent_policy_version_id.as_deref(),
+        generation,
+        &version_label,
+        "import",
+        insert_status,
+        &config,
+        response.learned_params.options.clone(),
+        response.learned_params.options.clone(),
+        &policies,
+        fitness,
+        response.learned_params.neural_network.as_ref(),
+    )?;
+
+    Ok(Some(PostgresImportSummary {
+        experiment_id,
+        policy_version_id,
+        parent_policy_version_id,
+        generation,
+        status: insert_status,
+        fitness,
+    }))
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -542,15 +854,27 @@ fn run() -> Result<(), Box<dyn Error>> {
     let payload = build_payload(&args)?;
     write_payload(&args.payload_path, &payload)?;
     run_curl(&args)?;
-    let (episodes, home_entries, away_entries) = extract_response(&args)?;
+    let response = extract_response(&args)?;
+    let postgres_import = import_server_response_to_postgres(&payload, &response)?;
 
     println!("server_response={}", args.response_path.display());
     println!("artifact={}", args.artifact_path.display());
     println!("learned_params={}", args.learned_params_path.display());
     println!("episode_log={}", args.episode_log_path.display());
-    println!("episodes={episodes}");
-    println!("home_entries={home_entries}");
-    println!("away_entries={away_entries}");
+    println!("episodes={}", response.episodes);
+    println!("home_entries={}", response.home_entries);
+    println!("away_entries={}", response.away_entries);
+    if let Some(import) = postgres_import {
+        println!(
+            "postgres_imported_server_policy experiment={} policy_version={} parent_policy_version={} generation={} status={} fitness={:.4}",
+            import.experiment_id,
+            import.policy_version_id,
+            import.parent_policy_version_id.as_deref().unwrap_or("none"),
+            import.generation,
+            import.status,
+            import.fitness
+        );
+    }
     Ok(())
 }
 
@@ -558,5 +882,87 @@ fn main() {
     if let Err(err) = run() {
         eprintln!("main_soccer_learning_server: {err}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use des_engine::des::general::soccer::{MatchSummary, SoccerSelfPlayEpisodeSummary};
+
+    fn episode_summary(
+        episode: usize,
+        score_home: u32,
+        score_away: u32,
+    ) -> SoccerSelfPlayEpisodeSummary {
+        SoccerSelfPlayEpisodeSummary {
+            episode,
+            seed: 9000 + episode as u64,
+            summary: MatchSummary {
+                score_home,
+                score_away,
+                ticks: 10,
+                simulated_seconds: 1.0,
+                stats: Default::default(),
+            },
+            transitions: 0,
+            home_policy_entries: 0,
+            home_policy_target_entries: 0,
+            away_policy_entries: 0,
+            away_policy_target_entries: 0,
+        }
+    }
+
+    #[test]
+    fn postgres_resume_metadata_reads_payload() {
+        let payload = json!({
+            "postgresResume": {
+                "experimentId": "exp-1",
+                "policyVersionId": "policy-7",
+                "generation": 12
+            }
+        });
+
+        assert_eq!(
+            postgres_resume_metadata_from_payload(&payload),
+            Some(PostgresResumeMetadata {
+                experiment_id: "exp-1".to_string(),
+                policy_version_id: "policy-7".to_string(),
+                generation: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn postgres_import_version_label_is_bounded_and_sanitized() {
+        let label = postgres_import_version_label(&"bad run !".repeat(40), 123);
+
+        assert!(label.len() <= 160);
+        assert!(label.ends_with("-server-e000123"));
+        assert!(!label.contains(' '));
+        assert!(!label.contains('!'));
+    }
+
+    #[test]
+    fn server_response_fitness_averages_episode_scores() {
+        let artifact = SoccerSelfPlayTrainingArtifact {
+            config: MatchConfig::default(),
+            options: SoccerQPolicyOptions::default(),
+            tactical_learning: SoccerTacticalLearningWeights::default(),
+            tactical_summary: SoccerTacticalLearningSummary::default(),
+            episodes: vec![episode_summary(0, 2, 0), episode_summary(1, 0, 1)],
+            home_entries: Vec::new(),
+            home_target_entries: Vec::new(),
+            away_entries: Vec::new(),
+            away_target_entries: Vec::new(),
+        };
+        let expected = artifact
+            .episodes
+            .iter()
+            .map(|episode| soccer_learning_run_score(&episode.summary).match_fitness)
+            .sum::<f64>()
+            / artifact.episodes.len() as f64;
+
+        assert!((server_response_fitness(&artifact) - expected).abs() < 1e-12);
     }
 }

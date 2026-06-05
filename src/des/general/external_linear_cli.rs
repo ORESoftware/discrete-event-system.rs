@@ -11343,6 +11343,66 @@ mod tests {
     }
 
     #[test]
+    fn multi_objective_uses_native_highs_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP multi-objective HiGHS solve: highs command not installed");
+            return;
+        };
+        let base = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 0.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let p = MultiObjectiveIPMIPProblem {
+            base,
+            objectives: vec![
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![1.0, 1.0],
+                    name: Some("cardinality".to_string()),
+                },
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![3.0, 1.0],
+                    name: Some("preference".to_string()),
+                },
+            ],
+        };
+
+        let solution = solve_multi_objective_ipmip_with_external_cli(
+            &p,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-multi-objective".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.x, vec![1.0, 0.0]);
+        assert_eq!(solution.objective_values, Some(vec![1.0, 3.0]));
+        assert_eq!(solution.objective, Some(3.0));
+        assert_eq!(solution.message, "sequential lexicographic optimization");
+    }
+
+    #[test]
     fn external_status_round_trips_bridge_spelling() {
         for status in [
             ExternalLinearCliStatus::Optimal,

@@ -213,11 +213,11 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 48;
-const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 36;
-const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 37;
-const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 40;
-const SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING: usize = 43;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 50;
+const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
+const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
+const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
+const SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING: usize = 45;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
 const DEFAULT_SOCCER_NEURAL_TRAIN_EVERY_TICKS: usize = 4;
@@ -999,6 +999,10 @@ pub struct SoccerPomdpObservation {
     pub best_pass_receiver_openness: f64,
     #[serde(default)]
     pub best_aerial_pass_receiver_openness: f64,
+    #[serde(default)]
+    pub best_pass_stride_fit: f64,
+    #[serde(default)]
+    pub best_aerial_pass_stride_fit: f64,
     #[serde(default)]
     pub expected_pass_completion: f64,
     #[serde(default)]
@@ -1836,6 +1840,10 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub best_aerial_pass_receiver_openness_bin: u8,
     #[serde(default)]
+    pub best_pass_stride_fit_bin: u8,
+    #[serde(default)]
+    pub best_aerial_pass_stride_fit_bin: u8,
+    #[serde(default)]
     pub expected_pass_completion_bin: u8,
     #[serde(default)]
     pub expected_aerial_pass_completion_bin: u8,
@@ -2030,6 +2038,14 @@ impl SoccerQStateKey {
                 observation.best_aerial_pass_receiver_openness,
                 &[0.20, 0.40, 0.62, 0.82],
             ),
+            best_pass_stride_fit_bin: distance_bucket(
+                observation.best_pass_stride_fit,
+                &[0.20, 0.40, 0.62, 0.82],
+            ),
+            best_aerial_pass_stride_fit_bin: distance_bucket(
+                observation.best_aerial_pass_stride_fit,
+                &[0.20, 0.40, 0.62, 0.82],
+            ),
             expected_pass_completion_bin: distance_bucket(
                 observation.expected_pass_completion,
                 &[0.35, 0.55, 0.72, 0.86],
@@ -2219,6 +2235,8 @@ impl SoccerQStateKey {
             && self.best_pass_receiver_openness_bin == other.best_pass_receiver_openness_bin
             && self.best_aerial_pass_receiver_openness_bin
                 == other.best_aerial_pass_receiver_openness_bin
+            && self.best_pass_stride_fit_bin == other.best_pass_stride_fit_bin
+            && self.best_aerial_pass_stride_fit_bin == other.best_aerial_pass_stride_fit_bin
             && self.expected_pass_completion_bin == other.expected_pass_completion_bin
             && self.expected_aerial_pass_completion_bin == other.expected_aerial_pass_completion_bin
             && self.aerial_pass_bypass_score_bin == other.aerial_pass_bypass_score_bin
@@ -9655,6 +9673,8 @@ impl WorldSnapshot {
                 floor_pass_lane_score: 0.0,
                 best_pass_receiver_openness: 0.0,
                 best_aerial_pass_receiver_openness: 0.0,
+                best_pass_stride_fit: 0.0,
+                best_aerial_pass_stride_fit: 0.0,
                 expected_pass_completion: 0.0,
                 expected_aerial_pass_completion: 0.0,
                 aerial_pass_bypass_score: 0.0,
@@ -10084,6 +10104,8 @@ impl WorldSnapshot {
             floor_pass_lane_score,
             best_pass_receiver_openness: best_floor_pass_quality.receiver_openness,
             best_aerial_pass_receiver_openness: best_aerial_pass_quality.receiver_openness,
+            best_pass_stride_fit: best_floor_pass_quality.stride_fit,
+            best_aerial_pass_stride_fit: best_aerial_pass_quality.stride_fit,
             expected_pass_completion: best_floor_pass_quality.expected_completion,
             expected_aerial_pass_completion: best_aerial_pass_quality.expected_completion,
             aerial_pass_bypass_score,
@@ -19152,6 +19174,8 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.visible_aerial_pass_options_bin, 5.0),
         soccer_neural_bin(state.expected_pass_completion_bin, 5.0),
         soccer_neural_bin(state.expected_aerial_pass_completion_bin, 5.0),
+        soccer_neural_bin(state.best_pass_stride_fit_bin, 5.0),
+        soccer_neural_bin(state.best_aerial_pass_stride_fit_bin, 5.0),
         soccer_neural_bin(state.shot_on_frame_probability_bin, 5.0),
         soccer_neural_bin(state.shot_beat_goalkeeper_probability_bin, 5.0),
         soccer_neural_bin(state.shot_block_probability_bin, 5.0),
@@ -41307,6 +41331,31 @@ mod tests {
         assert_eq!(
             snapshot.ranked_visible_pass_targets(passer, 1),
             vec![runner]
+        );
+        let observation = snapshot.observation_for(passer);
+        assert!(
+            observation.best_pass_stride_fit > static_quality.stride_fit + 0.12,
+            "POMDP observation should expose the passer's best anticipation fit: observation={:.3}, static={:.3}",
+            observation.best_pass_stride_fit,
+            static_quality.stride_fit
+        );
+
+        let state = snapshot.mdp_state_for_player(passer);
+        let stride_key =
+            SoccerQStateKey::from_parts(&state, &observation, Team::Home, PlayerRole::Midfielder);
+        let mut static_observation = observation.clone();
+        static_observation.best_pass_stride_fit = static_quality.stride_fit;
+        let static_key = SoccerQStateKey::from_parts(
+            &state,
+            &static_observation,
+            Team::Home,
+            PlayerRole::Midfielder,
+        );
+        assert!(
+            stride_key.best_pass_stride_fit_bin > static_key.best_pass_stride_fit_bin,
+            "Q-state should bin pass anticipation separately from completion: stride={}, static={}",
+            stride_key.best_pass_stride_fit_bin,
+            static_key.best_pass_stride_fit_bin
         );
     }
 

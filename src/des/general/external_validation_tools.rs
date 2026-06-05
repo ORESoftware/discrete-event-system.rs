@@ -2118,12 +2118,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "MOSEK",
         env_key: "MOSEK",
         family: ExternalValidationFamily::NonlinearGlobalSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["mosek"],
         capabilities: NONLINEAR_CAPS,
         input_formats: &["mps", "ptf", "opf", "task", "json"],
-        notes: "Commercial conic, quadratic, and nonlinear optimization solver",
+        notes: "Commercial conic, quadratic, and nonlinear optimization solver via CLI or Python API",
     },
     ExternalValidationToolSpec {
         id: "baron",
@@ -2142,12 +2142,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "COPT",
         env_key: "COPT",
         family: ExternalValidationFamily::NonlinearGlobalSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["copt_cmd", "copt"],
         capabilities: NONLINEAR_CAPS,
         input_formats: &["mps", "lp", "json"],
-        notes: "Commercial LP/QP/QCP/MIP solver CLI for independent checks",
+        notes: "Commercial LP/QP/QCP/MIP solver via CLI or Python API for independent checks",
     },
     ExternalValidationToolSpec {
         id: "nlopt",
@@ -3307,12 +3307,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "SQLFluff",
         env_key: "SQLFLUFF",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["sqlfluff", "sql-lint", "sql-validator"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: SQL_OUTPUT_FORMATS,
-        notes: "SQL linting and structural query validation adapter for relational model outputs",
+        notes: "SQL linting and structural query validation adapter via CLI or Python package",
     },
     ExternalValidationToolSpec {
         id: "whylogs",
@@ -12696,6 +12696,8 @@ fn external_validation_python_modules(
         "docplex" => &["docplex"],
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ortools"],
         "scipy-optimize" => &["scipy.optimize", "scipy"],
+        "mosek" => &["mosek"],
+        "copt" => &["coptpy"],
         "nlopt" => &["nlopt"],
         "kissat" => &["pysat.solvers:kissat"],
         "cadical" => &["pysat.solvers:cadical153"],
@@ -12735,6 +12737,7 @@ fn external_validation_python_modules(
         "evidently" => &["evidently"],
         "deepchecks" => &["deepchecks"],
         "frictionless" => &["frictionless"],
+        "sqlfluff" => &["sqlfluff"],
         "apache-arrow" => &["pyarrow"],
         "tensorflow-data-validation" => &["tensorflow_data_validation"],
         _ => &[],
@@ -13112,6 +13115,19 @@ mod tests {
             assert!(
                 external_validation_python_modules(tool).contains(&backend),
                 "{tool_id} should probe its concrete PySAT backend"
+            );
+        }
+
+        for (tool_id, module) in [("mosek", "mosek"), ("copt", "coptpy")] {
+            let tool = find_external_validation_tool(tool_id).unwrap();
+            assert_eq!(tool.runtime, ExternalValidationRuntime::Python);
+            assert_eq!(
+                tool.artifact_kind,
+                ExternalValidationArtifactKind::PythonPackage
+            );
+            assert!(
+                external_validation_python_modules(tool).contains(&module),
+                "{tool_id} should probe its Python API package"
             );
         }
     }
@@ -13775,6 +13791,16 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "nlopt" && tool.input_formats.contains(&"json") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "mosek"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "copt"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "highs-rust" && tool.input_formats.contains(&"mps") }));
@@ -14073,7 +14099,8 @@ mod tests {
         assert!(tools.iter().any(|tool| {
             tool.id == "sqlfluff"
                 && tool.family == ExternalValidationFamily::OutputDataValidator
-                && tool.runtime == ExternalValidationRuntime::NativeCli
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
                 && tool.input_formats.contains(&"sql")
         }));
         assert!(tools.iter().any(|tool| {
@@ -14224,6 +14251,21 @@ mod tests {
             "ORES_NLOPT_PYTHON"
         );
         assert!(external_validation_python_modules(nlopt).contains(&"nlopt"));
+        let mosek = find_external_validation_tool("mosek").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(mosek)[0],
+            "ORES_MOSEK_PYTHON"
+        );
+        assert!(external_validation_artifact_env_names(mosek)
+            .contains(&"MOSEKLM_LICENSE_FILE".to_string()));
+        assert!(external_validation_python_modules(mosek).contains(&"mosek"));
+        let copt = find_external_validation_tool("copt").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(copt)[0],
+            "ORES_COPT_PYTHON"
+        );
+        assert!(external_validation_artifact_env_names(copt).contains(&"COPT_HOME".to_string()));
+        assert!(external_validation_python_modules(copt).contains(&"coptpy"));
         let highs_rust = find_external_validation_tool("highs_rust").unwrap();
         assert!(external_validation_command_dir_env_names(highs_rust)
             .contains(&"HIGHS_HOME".to_string()));

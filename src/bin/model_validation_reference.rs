@@ -3,10 +3,15 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use des_engine::des::general::external_validation_tools::run_model_validation_json_with_rust_reference;
+use des_engine::des::general::external_validation_tools::{
+    run_external_validation_text_cli, run_model_validation_json_with_rust_reference,
+    ExternalValidationRun, ExternalValidationRunStatus, ExternalValidationTextCliOptions,
+    ExternalValidationTextFormat,
+};
 
 #[derive(Debug)]
 struct CliError(String);
@@ -65,6 +70,94 @@ fn payload_text(payload: &Value, keys: &[&str]) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
+}
+
+fn explicit_external_tool_requested(tool: &str) -> bool {
+    !matches!(
+        tool,
+        "auto" | "rust" | "rust-builtin" | "builtin" | "native"
+    )
+}
+
+fn external_model_validation_result_from_run(run: ExternalValidationRun) -> Option<Value> {
+    let status = match run.status {
+        ExternalValidationRunStatus::Ok => "ok",
+        ExternalValidationRunStatus::Failed | ExternalValidationRunStatus::InvalidOutput => {
+            "failed"
+        }
+        ExternalValidationRunStatus::Unavailable => return None,
+    };
+    let output = run.output.clone().unwrap_or_else(|| json!({}));
+    let verdict = output
+        .get("verdict")
+        .and_then(Value::as_str)
+        .unwrap_or(if status == "ok" { "unknown" } else { "failure" });
+    let stdout = output.get("stdout").and_then(Value::as_str).unwrap_or("");
+    let stderr = output.get("stderr").and_then(Value::as_str).unwrap_or("");
+    let external_tool = output
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or(&run.tool_id);
+    let command = output
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or(external_tool);
+    let message = if run.message.trim().is_empty() {
+        format!("external validation CLI completed via {command}")
+    } else {
+        run.message.clone()
+    };
+    let mut value = result(
+        status,
+        verdict,
+        &format!("external:{external_tool}"),
+        message,
+        stdout,
+        stderr,
+    );
+    if let Some(object) = value.as_object_mut() {
+        object.insert("external_validation".to_string(), output);
+        object.insert("elapsed_ms".to_string(), json!(run.elapsed_ms));
+    }
+    Some(value)
+}
+
+fn maybe_run_external_model_validation_text_cli_with_command(
+    tool: &str,
+    input_format: ExternalValidationTextFormat,
+    input_text: &str,
+    command_path: Option<PathBuf>,
+    use_default_args: bool,
+) -> Option<Value> {
+    if !explicit_external_tool_requested(tool) {
+        return None;
+    }
+    let run = run_external_validation_text_cli(
+        input_text,
+        &ExternalValidationTextCliOptions {
+            tool_id: tool.to_string(),
+            input_format,
+            command_path,
+            working_dir: None,
+            extra_args: Vec::new(),
+            use_default_args,
+        },
+    );
+    external_model_validation_result_from_run(run)
+}
+
+fn maybe_run_external_model_validation_text_cli(
+    tool: &str,
+    input_format: ExternalValidationTextFormat,
+    input_text: &str,
+) -> Option<Value> {
+    maybe_run_external_model_validation_text_cli_with_command(
+        tool,
+        input_format,
+        input_text,
+        None,
+        true,
+    )
 }
 
 fn parse_dimacs_cnf(text: &str) -> Result<(usize, Vec<Vec<i64>>), String> {
@@ -700,6 +793,13 @@ fn dispatch(payload: &Value, tool_override: Option<&str>) -> Value {
                 "",
             );
         }
+        if let Some(output) = maybe_run_external_model_validation_text_cli(
+            &tool,
+            ExternalValidationTextFormat::MiniZinc,
+            &model,
+        ) {
+            return output;
+        }
         return builtin_minizinc(&model);
     }
     if kind == "smtlib-validation"
@@ -728,6 +828,13 @@ fn dispatch(payload: &Value, tool_override: Option<&str>) -> Value {
                 "",
             );
         }
+        if let Some(output) = maybe_run_external_model_validation_text_cli(
+            &tool,
+            ExternalValidationTextFormat::SmtLib2,
+            &text,
+        ) {
+            return output;
+        }
         return builtin_smtlib(&text);
     }
     if kind == "wcnf-validation"
@@ -749,6 +856,13 @@ fn dispatch(payload: &Value, tool_override: Option<&str>) -> Value {
                 "",
             );
         }
+        if let Some(output) = maybe_run_external_model_validation_text_cli(
+            &tool,
+            ExternalValidationTextFormat::DimacsWcnf,
+            &text,
+        ) {
+            return output;
+        }
         return brute_force_wcnf(&text);
     }
     if kind == "opb-validation" || kind == "pseudo-boolean-validation" || tool == "roundingsat" {
@@ -762,6 +876,13 @@ fn dispatch(payload: &Value, tool_override: Option<&str>) -> Value {
                 "",
                 "",
             );
+        }
+        if let Some(output) = maybe_run_external_model_validation_text_cli(
+            &tool,
+            ExternalValidationTextFormat::DimacsCnf,
+            &text,
+        ) {
+            return output;
         }
         return brute_force_opb(&text);
     }
@@ -782,6 +903,13 @@ fn dispatch(payload: &Value, tool_override: Option<&str>) -> Value {
                 "",
                 "",
             );
+        }
+        if let Some(output) = maybe_run_external_model_validation_text_cli(
+            &tool,
+            ExternalValidationTextFormat::DimacsCnf,
+            &text,
+        ) {
+            return output;
         }
         return brute_force_dimacs(&text);
     }
@@ -917,6 +1045,40 @@ mod tests {
         assert_eq!(output["status"], "ok");
         assert_eq!(output["verdict"], "sat");
         assert_eq!(output["validator"], "rust:dimacs-small-cnf");
+    }
+
+    #[test]
+    fn explicit_external_text_cli_uses_configured_command() {
+        let output = maybe_run_external_model_validation_text_cli_with_command(
+            "z3",
+            ExternalValidationTextFormat::SmtLib2,
+            "sat\n",
+            Some(PathBuf::from("/bin/cat")),
+            false,
+        )
+        .expect("external z3 adapter output");
+
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["verdict"], "sat");
+        assert_eq!(output["validator"], "external:z3");
+        assert_eq!(output["stdout"], "sat\n");
+        assert_eq!(
+            output["external_validation"]["kind"],
+            "external-validation-text-cli-run"
+        );
+    }
+
+    #[test]
+    fn rust_tool_alias_skips_external_cli_adapter() {
+        let output = maybe_run_external_model_validation_text_cli_with_command(
+            "rust",
+            ExternalValidationTextFormat::SmtLib2,
+            "sat\n",
+            Some(PathBuf::from("/bin/cat")),
+            false,
+        );
+
+        assert!(output.is_none());
     }
 
     #[test]

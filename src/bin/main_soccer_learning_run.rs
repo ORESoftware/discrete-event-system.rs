@@ -18,12 +18,13 @@ use des_engine::des::general::soccer::{
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
-    evolve_soccer_tactical_learning_weights, evolve_soccer_team_policies,
+    evolve_soccer_tactical_learning_weights_from_genomes, evolve_soccer_team_policies,
     soccer_learning_run_score, soccer_policy_delta_entries,
     soccer_policy_version_insert_status_after_active_head, soccer_postgres_policy_refresh_decision,
     soccer_should_flush_postgres_policy_versions_for_new_sim,
     soccer_should_refresh_postgres_for_new_sim, SoccerEvolutionOptions,
-    SoccerLearningCompletedGame, SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
+    SoccerLearningCompletedGame, SoccerPostgresPolicyRefreshCheck,
+    SoccerTacticalLearningGenomeParent, SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -710,6 +711,7 @@ struct CompletedGame {
     starting_policies: Arc<SoccerTeamQPolicies>,
     starting_policy_version_id: Option<String>,
     starting_policy_generation: i32,
+    starting_tactical_learning: SoccerTacticalLearningWeights,
     policies: SoccerTeamQPolicies,
     neural_network: Option<SoccerNeuralNetworkSnapshot>,
     elapsed_seconds: f64,
@@ -1326,6 +1328,7 @@ fn run_game(
     let started = Instant::now();
     let total_ticks = config.total_ticks();
     let episode_seed = config.seed as u64;
+    let starting_tactical_learning = config.tactical_learning.clone();
     let progress_interval = (total_ticks / 9).max(1);
     let mut sim =
         SoccerMatch::default_11v11(config).with_team_policies((*starting_policies).clone());
@@ -1381,10 +1384,30 @@ fn run_game(
         starting_policies,
         starting_policy_version_id,
         starting_policy_generation,
+        starting_tactical_learning,
         policies,
         neural_network,
         elapsed_seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+fn tactical_genome_parents_from_completed_games<'a>(
+    completed_games: &'a [CompletedGame],
+    ranked_parents: &[(usize, f64)],
+    elite_count: usize,
+) -> Vec<SoccerTacticalLearningGenomeParent<'a>> {
+    ranked_parents
+        .iter()
+        .take(elite_count)
+        .map(|(game_index, fitness)| {
+            let game = &completed_games[*game_index];
+            SoccerTacticalLearningGenomeParent {
+                summary: &game.artifact.tactical_summary,
+                weights: &game.starting_tactical_learning,
+                fitness: *fitness,
+            }
+        })
+        .collect()
 }
 
 fn merge_policy_delta(dst: &mut SoccerQPolicy, before: &SoccerQPolicy, after: &SoccerQPolicy) {
@@ -2550,16 +2573,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             for (game_index, fitness) in ranked_parents.iter().take(elite_count) {
                 parents.push((&completed_games[*game_index].policies, *fitness));
             }
-            let tactical_parents = ranked_parents
-                .iter()
-                .take(elite_count)
-                .map(|(game_index, fitness)| {
-                    (
-                        &completed_games[*game_index].artifact.tactical_summary,
-                        *fitness,
-                    )
-                })
-                .collect::<Vec<_>>();
+            let tactical_parents = tactical_genome_parents_from_completed_games(
+                &completed_games,
+                &ranked_parents,
+                elite_count,
+            );
             let mut batch_evolution_options = evolution_options;
             batch_evolution_options.seed = batch_evolution_options
                 .seed
@@ -2568,7 +2586,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             policies = evolve_soccer_team_policies(&parents, batch_evolution_options)
                 .map_err(invalid_data)?;
             let previous_tactical_learning = tactical_learning.clone();
-            tactical_learning = evolve_soccer_tactical_learning_weights(
+            tactical_learning = evolve_soccer_tactical_learning_weights_from_genomes(
                 &tactical_learning,
                 &tactical_parents,
                 batch_evolution_options,
@@ -2995,6 +3013,59 @@ mod tests {
         }
     }
 
+    fn completed_game_with_starting_tactical_learning(
+        episode: usize,
+        starting_tactical_learning: SoccerTacticalLearningWeights,
+        tactical_summary: SoccerTacticalLearningSummary,
+    ) -> CompletedGame {
+        let policies = test_policy_with_action(1.0 + episode as f64, 2 + episode as u32);
+        let starting_policies = Arc::new(policies.clone());
+        let summary = des_engine::des::general::soccer::MatchSummary {
+            score_home: 1,
+            score_away: 0,
+            ticks: 10,
+            simulated_seconds: 1.0,
+            stats: Default::default(),
+        };
+        let artifact = SoccerTeamPolicyArtifact {
+            config: MatchConfig::default(),
+            summary: summary.clone(),
+            learning: des_engine::des::general::soccer::SoccerLearningSnapshot::default(),
+            tactical_summary,
+            adversarial: false,
+            home_options: Some(SoccerQPolicyOptions::default()),
+            away_options: Some(SoccerQPolicyOptions::default()),
+            home_entries: policies.home.entries(),
+            home_target_entries: policies.home.target_entries(),
+            home_action_probabilities: Vec::new(),
+            away_entries: policies.away.entries(),
+            away_target_entries: policies.away.target_entries(),
+            away_action_probabilities: Vec::new(),
+            events: Vec::new(),
+        };
+
+        CompletedGame {
+            episode_summary: SoccerSelfPlayEpisodeSummary {
+                episode,
+                seed: 1 + episode as u64,
+                summary,
+                transitions: 0,
+                home_policy_entries: 1,
+                home_policy_target_entries: 0,
+                away_policy_entries: 0,
+                away_policy_target_entries: 0,
+            },
+            artifact,
+            starting_policies,
+            starting_policy_version_id: None,
+            starting_policy_generation: 0,
+            starting_tactical_learning,
+            policies,
+            neural_network: None,
+            elapsed_seconds: 0.0,
+        }
+    }
+
     #[test]
     fn completed_game_delta_uses_its_own_starting_policy_snapshot() {
         let starting_policies = Arc::new(test_policy_with_action(1.0, 2));
@@ -3037,6 +3108,7 @@ mod tests {
             starting_policies,
             starting_policy_version_id: Some("pg-v3".to_string()),
             starting_policy_generation: 3,
+            starting_tactical_learning: SoccerTacticalLearningWeights::default(),
             policies,
             neural_network: None,
             elapsed_seconds: 0.0,
@@ -3048,6 +3120,41 @@ mod tests {
         assert_eq!(completed.delta.entries[0].visit_delta, 3);
         assert_eq!(completed.delta.entries[0].before_value, 1.0);
         assert_eq!(completed.delta.entries[0].after_value, 3.0);
+    }
+
+    #[test]
+    fn tactical_genome_parents_use_each_games_starting_weights() {
+        let mut flank_weights = SoccerTacticalLearningWeights::default();
+        flank_weights.attack_flank_lane_weight = 1.75;
+        let mut contract_weights = SoccerTacticalLearningWeights::default();
+        contract_weights.defense_contract_delta_weight = 0.55;
+        let games = vec![
+            completed_game_with_starting_tactical_learning(
+                0,
+                flank_weights.clone(),
+                SoccerTacticalLearningSummary::default(),
+            ),
+            completed_game_with_starting_tactical_learning(
+                1,
+                contract_weights.clone(),
+                SoccerTacticalLearningSummary::default(),
+            ),
+        ];
+        let ranked = vec![(1, 4.0), (0, 3.0)];
+
+        let parents = tactical_genome_parents_from_completed_games(&games, &ranked, 2);
+
+        assert_eq!(parents.len(), 2);
+        assert_eq!(
+            parents[0].weights.defense_contract_delta_weight,
+            contract_weights.defense_contract_delta_weight
+        );
+        assert_eq!(
+            parents[1].weights.attack_flank_lane_weight,
+            flank_weights.attack_flank_lane_weight
+        );
+        assert_eq!(parents[0].fitness, 4.0);
+        assert_eq!(parents[1].fitness, 3.0);
     }
 
     #[test]

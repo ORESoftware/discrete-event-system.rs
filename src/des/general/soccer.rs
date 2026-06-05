@@ -17481,6 +17481,14 @@ pub struct TeamBrainSnapshot {
     pub ball_last_action: Option<String>,
     pub tracked_team_players: usize,
     pub controlled_human_players: usize,
+    #[serde(default)]
+    pub team_centroid: Vec2,
+    #[serde(default)]
+    pub team_average_velocity: Vec2,
+    #[serde(default)]
+    pub team_spread_yards: f64,
+    #[serde(default)]
+    pub players_near_ball: usize,
     pub directive: TeamTacticalDirective,
     pub policy_action_entries: usize,
     pub policy_target_entries: usize,
@@ -17510,6 +17518,10 @@ fn default_team_brain_snapshot(team: Team) -> TeamBrainSnapshot {
         ball_last_action: None,
         tracked_team_players: 0,
         controlled_human_players: 0,
+        team_centroid: Vec2::zero(),
+        team_average_velocity: Vec2::zero(),
+        team_spread_yards: 0.0,
+        players_near_ball: 0,
         policy_action_entries: 0,
         policy_target_entries: 0,
         attacking_numbers_advantage: directive.attacking_numbers_advantage,
@@ -17548,6 +17560,38 @@ fn team_brain_mode_for(
         Some(_) => TeamBrainMode::Defend,
         None => TeamBrainMode::Transition,
     }
+}
+
+fn team_brain_shape_from_awareness(
+    players: &[CentralBrainPlayerAwareness],
+    team: Team,
+    ball_position: Vec2,
+) -> (Vec2, Vec2, f64, usize) {
+    let mut count = 0_usize;
+    let mut position_sum = Vec2::zero();
+    let mut velocity_sum = Vec2::zero();
+    let mut players_near_ball = 0_usize;
+    for player in players.iter().filter(|player| player.team == team) {
+        count += 1;
+        position_sum += player.position;
+        velocity_sum += player.velocity;
+        if player.position.distance(ball_position) <= 18.0 {
+            players_near_ball += 1;
+        }
+    }
+    if count == 0 {
+        return (Vec2::zero(), Vec2::zero(), 0.0, 0);
+    }
+    let count_f = count as f64;
+    let centroid = position_sum / count_f;
+    let average_velocity = velocity_sum / count_f;
+    let spread = players
+        .iter()
+        .filter(|player| player.team == team)
+        .map(|player| player.position.distance(centroid))
+        .sum::<f64>()
+        / count_f;
+    (centroid, average_velocity, spread, players_near_ball)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25546,6 +25590,12 @@ impl SoccerMatch {
             .iter()
             .filter(|player| player.team == team && player.controller_slot.is_some())
             .count();
+        let (team_centroid, team_average_velocity, team_spread_yards, players_near_ball) =
+            team_brain_shape_from_awareness(
+                &central_brain.tracked_players,
+                team,
+                central_brain.ball_position,
+            );
         TeamBrainSnapshot {
             team,
             mode: team_brain_mode_for(
@@ -25565,6 +25615,10 @@ impl SoccerMatch {
             ball_last_action: central_brain.ball_last_action.clone(),
             tracked_team_players,
             controlled_human_players,
+            team_centroid,
+            team_average_velocity,
+            team_spread_yards,
+            players_near_ball,
             policy_action_entries,
             policy_target_entries,
             attacking_numbers_advantage: directive.attacking_numbers_advantage,
@@ -40982,6 +41036,51 @@ mod tests {
         assert!(frame.home_brain.in_possession);
         assert_eq!(frame.home_brain.tracked_team_players, 11);
         assert_eq!(frame.home_brain.ball_holder, Some(9));
+        let expected_home_centroid = frame
+            .central_brain
+            .tracked_players
+            .iter()
+            .filter(|player| player.team == Team::Home)
+            .map(|player| player.position)
+            .fold(Vec2::zero(), |acc, position| acc + position)
+            / 11.0;
+        let expected_home_average_velocity = frame
+            .central_brain
+            .tracked_players
+            .iter()
+            .filter(|player| player.team == Team::Home)
+            .map(|player| player.velocity)
+            .fold(Vec2::zero(), |acc, velocity| acc + velocity)
+            / 11.0;
+        let expected_home_spread = frame
+            .central_brain
+            .tracked_players
+            .iter()
+            .filter(|player| player.team == Team::Home)
+            .map(|player| player.position.distance(expected_home_centroid))
+            .sum::<f64>()
+            / 11.0;
+        let expected_home_near_ball = frame
+            .central_brain
+            .tracked_players
+            .iter()
+            .filter(|player| {
+                player.team == Team::Home
+                    && player.position.distance(frame.central_brain.ball_position) <= 18.0
+            })
+            .count();
+        assert!(frame
+            .home_brain
+            .team_centroid
+            .distance(expected_home_centroid)
+            < 1e-9);
+        assert!(frame
+            .home_brain
+            .team_average_velocity
+            .distance(expected_home_average_velocity)
+            < 1e-9);
+        assert!((frame.home_brain.team_spread_yards - expected_home_spread).abs() < 1e-9);
+        assert_eq!(frame.home_brain.players_near_ball, expected_home_near_ball);
         assert_eq!(
             frame.home_brain.defensive_cover_target,
             frame.home_directive.defensive_cover_target
@@ -40990,6 +41089,8 @@ mod tests {
         assert_eq!(frame.away_brain.mode, TeamBrainMode::Defend);
         assert!(!frame.away_brain.in_possession);
         assert_eq!(frame.away_brain.tracked_team_players, 11);
+        assert!(frame.away_brain.team_spread_yards.is_finite());
+        assert!(frame.away_brain.players_near_ball <= 11);
         let striker = frame
             .central_brain
             .tracked_players
@@ -55232,6 +55333,8 @@ mod tests {
         assert!(html.body.contains("exportPostgresTeamPolicy"));
         assert!(html.body.contains("id=\"exportPostgresPolicyJsonl\""));
         assert!(html.body.contains("exportPostgresTeamPolicyJsonl"));
+        assert!(html.body.contains("brain.teamCentroid"));
+        assert!(html.body.contains("playersNearBall"));
         assert!(html.body.contains("id=\"liveHttp\""));
         assert!(html.body.contains("function liveHttpLabel"));
         assert!(html.body.contains("id=\"runtimeTiming\""));

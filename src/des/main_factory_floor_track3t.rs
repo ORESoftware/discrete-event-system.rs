@@ -6,21 +6,42 @@
 //! Delegates to `crate::des::general::factory_floor_track3t`. `process.env.*` →
 //! `std::env::var`.
 //!
-//! PORT NOTE: the HTML animation uses `FrameRecorder` +
-//! `animation/scenes/warehouse-track3t-scene`, which is NOT yet ported
-//! (`animation::scenes` has no `warehouse_track3t_scene`). The rendering step is
-//! stubbed. The full `JSON.stringify(result, null, 2)` artifact write IS ported
-//! here via `serde_json::to_string_pretty` over the `WarehouseComparisonResult`
-//! tree (which derives `Serialize` with `rename_all = "camelCase"`).
+//! The full `JSON.stringify(result, null, 2)` artifact write is ported here via
+//! `serde_json::to_string_pretty`, and the warehouse Track3t scene is rendered
+//! through the shared first-class model helper so the catalogue simulation writes
+//! `out/factory-floor-track3t.html` as well as the JSON result.
 
 #![allow(dead_code)]
+
+use std::path::Path;
 
 use crate::des::general::factory_floor_track3t::{
     run_warehouse_comparison, summarize_warehouse_comparison, track3t_archive_grounding,
     WarehouseSimulationOptions,
 };
+use crate::des::model::track3t_warehouse::{
+    write_track3t_outputs, Track3tRenderOptions, DEFAULT_FPS, DEFAULT_FRAMES_PER_TRACE_STEP,
+};
 
 fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_i64(key: &str, default: i64) -> i64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_i64_opt(key: &str) -> Option<i64> {
+    std::env::var(key).ok().and_then(|v| v.parse().ok())
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -84,8 +105,31 @@ pub fn run() {
     .expect("write factory-floor-track3t.json");
     println!("# wrote {json_path}");
 
-    // PORT NOTE: animation frames/html omitted (warehouse-track3t scene not ported).
     if animate {
-        println!("# (animation frames/html not rendered — warehouse-track3t scene not ported)");
+        let frames_path = Path::new("out")
+            .join("factory-floor-track3t.frames.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let html_path = Path::new("out")
+            .join("factory-floor-track3t.html")
+            .to_string_lossy()
+            .into_owned();
+        let frames_per_trace_step =
+            env_i64("MOTION_FRAMES_PER_STEP", DEFAULT_FRAMES_PER_TRACE_STEP);
+        let animation_frames = env_i64_opt("ANIM_FRAMES");
+        let fps = env_f64("FPS", DEFAULT_FPS);
+        let recorded = write_track3t_outputs(
+            &result,
+            Track3tRenderOptions {
+                frames_path: frames_path.clone(),
+                html_path: html_path.clone(),
+                frames_per_trace_step,
+                animation_frames,
+                fps,
+            },
+        )
+        .expect("write factory-floor-track3t animation");
+        println!("# wrote {frames_path} ({recorded} frames)");
+        println!("# wrote {html_path}");
     }
 }

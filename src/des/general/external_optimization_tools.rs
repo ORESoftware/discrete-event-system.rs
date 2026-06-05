@@ -7,6 +7,7 @@
 //! libraries, and generated executables out of version control.
 
 use super::external_gams_solver_probe::{probe_external_gams_solver, ExternalGamsSolver};
+use super::external_hexaly_probe::probe_external_hexaly_command;
 use super::external_linear_cli::{
     probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
     solve_lower_bounded_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliKind,
@@ -3537,6 +3538,37 @@ pub fn probe_external_optimization_tool(
         .or_else(|| find_first_command_in_install_dirs(opts.tool))
         .or_else(|| find_first_command(opts.tool.adapter_command_aliases()));
     if let Some(command) = command {
+        if opts.tool == ExternalOptimizationTool::Hexaly {
+            let probe = probe_external_hexaly_command(&command, 10_000);
+            if probe.ready {
+                return ExternalOptimizationProbe {
+                    tool: opts.tool,
+                    status: ExternalOptimizationProbeStatus::Ready,
+                    command: Some(command),
+                    message: probe.message,
+                };
+            }
+            let explicitly_configured = saw_configured_command
+                || opts.command_path.is_some()
+                || first_configured_env_value(&external_optimization_command_dir_env_names(
+                    opts.tool,
+                ))
+                .is_some();
+            return ExternalOptimizationProbe {
+                tool: opts.tool,
+                status: if explicitly_configured {
+                    ExternalOptimizationProbeStatus::RuntimeMissing
+                } else {
+                    ExternalOptimizationProbeStatus::NotConfigured
+                },
+                command: Some(command),
+                message: format!(
+                    "{} command was found but the local HXM smoke solve did not succeed: {}",
+                    opts.tool.display_name(),
+                    probe.message
+                ),
+            };
+        }
         return ExternalOptimizationProbe {
             tool: opts.tool,
             status: ExternalOptimizationProbeStatus::Ready,

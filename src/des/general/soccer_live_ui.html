@@ -1413,7 +1413,8 @@ function agentPomdpLabel(d) {
   const options = Number(o.visiblePassOptions ?? 0);
   const passQ = Number(o.expectedPassCompletion ?? 0);
   const goalWindow = Number(o.goalAttackWindowScore ?? 0);
-  return `${ball} ${scheduleText} ${controlText} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} ${lane}`;
+  const teamShape = `TC${Number(o.teamCentroidToBallYards ?? 0).toFixed(0)} W${Number(o.teamSpreadYards ?? 0).toFixed(0)} NB${Number(o.teamPlayersNearBall ?? 0)} FV${Number(o.teamForwardVelocityYps ?? 0).toFixed(1)}`;
+  return `${ball} ${scheduleText} ${controlText} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} ${teamShape} ${lane}`;
 }
 function agentBeliefLabel(d) {
   const b = d?.belief;
@@ -1682,6 +1683,7 @@ function decisionTelemetryItems(d) {
     {label: "Goal", value: `${Number(o.yardsToGoal ?? 0).toFixed(1)}y ${Number(o.opponentGoalAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Dribble", value: `${Number(o.forwardDribbleSpaceYards ?? 0).toFixed(1)}y`, score: Number(o.forwardDribbleSpaceYards ?? 0), min: 0, max: 24},
+    {label: "Shape", value: `TC${Number(o.teamCentroidToBallYards ?? 0).toFixed(0)} W${Number(o.teamSpreadYards ?? 0).toFixed(0)} NB${Number(o.teamPlayersNearBall ?? 0)} FV${Number(o.teamForwardVelocityYps ?? 0).toFixed(1)}`, score: Number(o.teamPlayersNearBall ?? 0), min: 0, max: 5},
     {label: "Passes", value: `${Number(o.visiblePassOptions ?? 0)}F ${Number(o.visibleAerialPassOptions ?? 0)}A`},
     {label: "PassQ", value: `C${Number(o.expectedPassCompletion ?? 0).toFixed(2)} O${Number(o.bestPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedPassCompletion ?? 0), min: 0, max: 1},
     {label: "AirQ", value: `C${Number(o.expectedAerialPassCompletion ?? 0).toFixed(2)} O${Number(o.bestAerialPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedAerialPassCompletion ?? 0), min: 0, max: 1},

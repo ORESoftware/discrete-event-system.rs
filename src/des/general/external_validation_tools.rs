@@ -33,6 +33,7 @@ use crate::des::general::external_graph_coloring_reference::{
     solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
     ExternalGraphColoringReferenceSolver, ExternalGraphColoringReferenceStatus,
 };
+use crate::des::general::external_hexaly_probe::probe_external_hexaly_command;
 use crate::des::general::external_knapsack_reference::{
     solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
     ExternalKnapsackReferenceSolver, ExternalKnapsackReferenceStatus,
@@ -3702,6 +3703,7 @@ impl ExternalValidationTextFormat {
 pub enum ExternalValidationTextVerdict {
     Sat,
     Unsat,
+    Optimal,
     Unknown,
     Valid,
     Invalid,
@@ -3714,6 +3716,7 @@ impl ExternalValidationTextVerdict {
         match self {
             ExternalValidationTextVerdict::Sat => "sat",
             ExternalValidationTextVerdict::Unsat => "unsat",
+            ExternalValidationTextVerdict::Optimal => "optimal",
             ExternalValidationTextVerdict::Unknown => "unknown",
             ExternalValidationTextVerdict::Valid => "valid",
             ExternalValidationTextVerdict::Invalid => "invalid",
@@ -3726,6 +3729,7 @@ impl ExternalValidationTextVerdict {
         match value.trim().to_ascii_lowercase().as_str() {
             "sat" | "satisfiable" => Some(ExternalValidationTextVerdict::Sat),
             "unsat" | "unsatisfiable" => Some(ExternalValidationTextVerdict::Unsat),
+            "optimal" | "optimum" | "optimum found" => Some(ExternalValidationTextVerdict::Optimal),
             "unknown" => Some(ExternalValidationTextVerdict::Unknown),
             "valid" => Some(ExternalValidationTextVerdict::Valid),
             "invalid" => Some(ExternalValidationTextVerdict::Invalid),
@@ -18085,6 +18089,35 @@ pub fn infer_external_validation_text_verdict(
     stderr: &str,
     exit_success: bool,
 ) -> ExternalValidationTextVerdict {
+    let combined = format!("{stdout}\n{stderr}");
+    if input_format == ExternalValidationTextFormat::DimacsWcnf {
+        let lower = combined.to_ascii_lowercase();
+        if !exit_success {
+            return ExternalValidationTextVerdict::Failure;
+        }
+        if lower
+            .lines()
+            .map(str::trim)
+            .any(|line| matches!(line, "s optimum found" | "s optimal" | "s opt"))
+        {
+            return ExternalValidationTextVerdict::Optimal;
+        }
+        if lower
+            .lines()
+            .map(str::trim)
+            .any(|line| matches!(line, "s unsatisfiable" | "s unsat"))
+        {
+            return ExternalValidationTextVerdict::Unsat;
+        }
+        if lower
+            .lines()
+            .map(str::trim)
+            .any(|line| matches!(line, "s unknown" | "unknown"))
+        {
+            return ExternalValidationTextVerdict::Unknown;
+        }
+    }
+
     let first_token = stdout
         .lines()
         .map(str::trim)
@@ -18108,7 +18141,7 @@ pub fn infer_external_validation_text_verdict(
         };
     }
 
-    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    let combined = combined.to_ascii_lowercase();
     if !exit_success {
         return ExternalValidationTextVerdict::Failure;
     }
@@ -18136,6 +18169,25 @@ pub fn infer_external_validation_text_verdict(
         return ExternalValidationTextVerdict::Valid;
     }
     ExternalValidationTextVerdict::Success
+}
+
+fn external_validation_maxsat_objective_text(
+    input_format: ExternalValidationTextFormat,
+    stdout: &str,
+) -> Option<String> {
+    if input_format != ExternalValidationTextFormat::DimacsWcnf {
+        return None;
+    }
+    stdout.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        if !parts
+            .next()
+            .is_some_and(|marker| marker.eq_ignore_ascii_case("o"))
+        {
+            return None;
+        }
+        parts.next().map(str::to_string)
+    })
 }
 
 pub fn external_validation_text_cli_command(
@@ -18256,12 +18308,18 @@ pub fn run_external_validation_text_cli(
         &stderr,
         output.status.success(),
     );
+    let objective_text = external_validation_maxsat_objective_text(opts.input_format, &stdout);
+    let objective = objective_text
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok());
     let payload = json!({
         "kind": "external-validation-text-cli-run",
         "tool": tool.id,
         "format": opts.input_format.as_str(),
         "command": command.to_string_lossy(),
         "args": args,
+        "objective": objective,
+        "objective_text": objective_text,
         "exit_success": output.status.success(),
         "exit_code": output.status.code(),
         "verdict": verdict.as_str(),
@@ -18415,6 +18473,10 @@ pub fn run_external_validation_file_cli(
         &stderr,
         output.status.success(),
     );
+    let objective_text = external_validation_maxsat_objective_text(opts.input_format, &stdout);
+    let objective = objective_text
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok());
     let payload = json!({
         "kind": "external-validation-file-cli-run",
         "tool": tool.id,
@@ -18423,6 +18485,8 @@ pub fn run_external_validation_file_cli(
         "args": args,
         "input_path": input_path.to_string_lossy(),
         "temp_file_removed": remove_result.is_ok(),
+        "objective": objective,
+        "objective_text": objective_text,
         "exit_success": output.status.success(),
         "exit_code": output.status.code(),
         "verdict": verdict.as_str(),
@@ -18669,6 +18733,10 @@ pub fn run_external_validation_artifact_cli(
         &stderr,
         output.status.success(),
     );
+    let objective_text = external_validation_maxsat_objective_text(opts.input_format, &stdout);
+    let objective = objective_text
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok());
     let artifact_payload: Vec<Value> = artifact_paths
         .iter()
         .map(|(key, path)| {
@@ -18687,6 +18755,8 @@ pub fn run_external_validation_artifact_cli(
         "artifact_paths": artifact_payload,
         "temp_dir": temp_dir.to_string_lossy(),
         "temp_dir_removed": cleanup_ok,
+        "objective": objective,
+        "objective_text": objective_text,
         "exit_success": output.status.success(),
         "exit_code": output.status.code(),
         "verdict": verdict.as_str(),
@@ -19244,6 +19314,33 @@ pub fn probe_external_validation_tool(
         .or_else(|| find_first_command_in_install_dirs(tool))
         .or_else(|| find_first_command(tool.command_aliases))
     {
+        if tool.id == "hexaly" {
+            let probe = probe_external_hexaly_command(&command, 10_000);
+            if probe.ready {
+                return ExternalValidationProbe {
+                    tool_id: tool.id.to_string(),
+                    status: ExternalValidationProbeStatus::Ready,
+                    command: Some(command),
+                    message: probe.message,
+                };
+            }
+            let explicitly_configured = saw_configured_command
+                || first_configured_env_value(&external_validation_command_dir_env_names(tool))
+                    .is_some();
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: if explicitly_configured {
+                    ExternalValidationProbeStatus::ArtifactMissing
+                } else {
+                    ExternalValidationProbeStatus::NotConfigured
+                },
+                command: Some(command),
+                message: format!(
+                    "{} command was found but the local HXM smoke solve did not succeed: {}",
+                    tool.display_name, probe.message
+                ),
+            };
+        }
         return ExternalValidationProbe {
             tool_id: tool.id.to_string(),
             status: ExternalValidationProbeStatus::Ready,
@@ -19302,6 +19399,34 @@ pub fn probe_external_validation_tool(
                 ),
             };
         }
+    }
+
+    if tool.id == "neos"
+        && first_configured_env_value(&external_validation_artifact_env_names(tool)).is_some()
+    {
+        if let Some(gams_command) =
+            find_external_validation_tool("gams").and_then(external_validation_adapter_command)
+        {
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::Ready,
+                command: Some(gams_command.clone()),
+                message: format!(
+                    "{} email configuration is available and GAMS/Kestrel client is configured at {}",
+                    tool.display_name,
+                    gams_command.display()
+                ),
+            };
+        }
+        return ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::RuntimeMissing,
+            command: None,
+            message: format!(
+                "{} email is configured, but no local NEOS adapter or GAMS/Kestrel client was found",
+                tool.display_name
+            ),
+        };
     }
 
     let artifact = first_configured_env_value(&external_validation_artifact_env_names(tool));
@@ -24024,6 +24149,30 @@ mod tests {
             ),
             ExternalValidationTextVerdict::Unsat
         );
+        assert_eq!(
+            infer_external_validation_text_verdict(
+                ExternalValidationTextFormat::DimacsWcnf,
+                "c solver log\no 2\ns OPTIMUM FOUND\n",
+                "",
+                true
+            ),
+            ExternalValidationTextVerdict::Optimal
+        );
+        let maxsat_run = run_external_validation_text_cli(
+            "c solver log\no 2\ns OPTIMUM FOUND\n",
+            &ExternalValidationTextCliOptions {
+                tool_id: "maxhs".to_string(),
+                input_format: ExternalValidationTextFormat::DimacsWcnf,
+                command_path: Some(PathBuf::from("/bin/cat")),
+                working_dir: None,
+                extra_args: Vec::new(),
+                use_default_args: false,
+            },
+        );
+        assert_eq!(maxsat_run.status, ExternalValidationRunStatus::Ok);
+        let maxsat_payload = maxsat_run.output.expect("maxsat text cli payload");
+        assert_eq!(maxsat_payload["verdict"], "optimal");
+        assert_eq!(maxsat_payload["objective_text"], "2");
         assert_eq!(
             infer_external_validation_text_verdict(
                 ExternalValidationTextFormat::TlaPlus,

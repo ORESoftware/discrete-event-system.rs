@@ -437,6 +437,8 @@
         </select>
         <button id="pass">Pass</button>
         <button id="shoot">Shoot</button>
+        <button id="carryAction">Carry</button>
+        <button id="protectAction">Protect</button>
         <button id="clearanceAction">Clear</button>
         <button id="routeOneAction">Route 1</button>
       </div>
@@ -554,6 +556,8 @@ const slots = document.getElementById("slots");
 const slotPick = document.getElementById("slotPick");
 const targetPick = document.getElementById("targetPick");
 const passFlight = document.getElementById("passFlight");
+const carryActionButton = document.getElementById("carryAction");
+const protectActionButton = document.getElementById("protectAction");
 const clearanceActionButton = document.getElementById("clearanceAction");
 const routeOneActionButton = document.getElementById("routeOneAction");
 const surfacePreset = document.getElementById("surfacePreset");
@@ -609,6 +613,9 @@ const SEMANTIC_BALL_ACTIONS = new Set([
   "first-time-shot",
   "first-time-header",
   "control-touch",
+  "carry-forward",
+  "carry-out",
+  "protect-ball",
   "kickoff",
   "throw-in",
   "goal-kick",
@@ -628,6 +635,9 @@ const INTENT_TRACE_ACTIONS = new Set([
   "first-time-pass",
   "clearance",
   "route-one",
+  "carry-forward",
+  "carry-out",
+  "protect-ball",
   "left-cut",
   "right-cut",
   "nutmeg",
@@ -736,7 +746,9 @@ function centralBrainLabel(b) {
     : Number(b.trackedOfficials ?? 0);
   const possession = b.possessionTeam || "Loose";
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
-  return `${players}p ${officials}o ${possession}${holder}`;
+  const center = b.centerOfPlay;
+  const centerText = center ? ` C${Number(center.x ?? 0).toFixed(0)},${Number(center.y ?? 0).toFixed(0)}` : "";
+  return `${players}p ${officials}o ${possession}${holder}${centerText}`;
 }
 function agentScheduleGlyph(entry) {
   if (!entry) return "?";
@@ -828,6 +840,9 @@ function normalizeUiActionLabel(action) {
     .replace(/[\s_]+/g, "-");
   if (compact === "route1" || compact === "route-1" || compact === "long-ball" || compact === "longball") return "route-one";
   if (compact === "hoof" || compact === "hoofed-clearance") return "clearance";
+  if (compact === "carry" || compact === "dribble-forward") return "carry-forward";
+  if (compact === "carryout" || compact === "dribble-out") return "carry-out";
+  if (compact === "protect" || compact === "shield" || compact === "shield-ball") return "protect-ball";
   if (compact === "pass1" || compact === "pass2" || compact === "pass3") return "pass";
   if (compact === "aerial-pass1" || compact === "aerial-pass2" || compact === "aerial-pass3") return "aerial-pass";
   return compact;
@@ -907,7 +922,7 @@ function intentPriority(player, action, frame = state?.frame) {
   if (["shoot", "first-time-shot", "first-time-header"].includes(action)) return 110 + holderBonus;
   if (["pass", "aerial-pass", "first-time-pass"].includes(action)) return 104 + holderBonus;
   if (["clearance", "route-one"].includes(action)) return 98 + holderBonus;
-  if (["left-cut", "right-cut", "nutmeg", "fake-left-cut-right", "fake-right-cut-left", "hold-up-flank"].includes(action)) return 92 + holderBonus;
+  if (["carry-forward", "carry-out", "protect-ball", "left-cut", "right-cut", "nutmeg", "fake-left-cut-right", "fake-right-cut-left", "hold-up-flank"].includes(action)) return 92 + holderBonus;
   if (action === "space" && possession === player.team) {
     const roleBonus = player.role === "Forward" ? 9 : player.role === "Midfielder" ? 7 : player.role === "Defender" ? 3 : 0;
     return 62 + roleBonus;
@@ -2810,6 +2825,8 @@ resetMatchButton.addEventListener("click", () => resetMatch().catch(e => statusE
 document.getElementById("step").addEventListener("click", () => stepOnce({manual: true}).catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
+carryActionButton.addEventListener("click", () => submitInputOnly(false, false, "carry-forward").catch(e => statusEl.textContent = e.message));
+protectActionButton.addEventListener("click", () => submitInputOnly(false, false, "protect-ball").catch(e => statusEl.textContent = e.message));
 clearanceActionButton.addEventListener("click", () => submitInputOnly(false, false, "clearance").catch(e => statusEl.textContent = e.message));
 routeOneActionButton.addEventListener("click", () => submitInputOnly(false, false, "route-one").catch(e => statusEl.textContent = e.message));
 exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));

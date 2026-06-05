@@ -111,8 +111,11 @@ pub enum ExternalOptimizationTool {
     GoodLp,
     LpModeler,
     RustLinprog,
+    MiniLp,
     Argmin,
     Nlopt,
+    OsqpRust,
+    ClarabelRust,
     GurobiRust,
     CplexRust,
     IpoptRust,
@@ -212,8 +215,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => "good-lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
+            ExternalOptimizationTool::MiniLp => "minilp",
             ExternalOptimizationTool::Argmin => "argmin",
             ExternalOptimizationTool::Nlopt => "nlopt",
+            ExternalOptimizationTool::OsqpRust => "osqp-rust",
+            ExternalOptimizationTool::ClarabelRust => "clarabel-rust",
             ExternalOptimizationTool::GurobiRust => "gurobi-rust",
             ExternalOptimizationTool::CplexRust => "cplex-rust",
             ExternalOptimizationTool::IpoptRust => "ipopt-rust",
@@ -313,8 +319,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => "good_lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
+            ExternalOptimizationTool::MiniLp => "minilp",
             ExternalOptimizationTool::Argmin => "argmin",
             ExternalOptimizationTool::Nlopt => "NLopt Rust bindings",
+            ExternalOptimizationTool::OsqpRust => "OSQP Rust bindings",
+            ExternalOptimizationTool::ClarabelRust => "Clarabel Rust crate",
             ExternalOptimizationTool::GurobiRust => "Gurobi Rust bindings",
             ExternalOptimizationTool::CplexRust => "CPLEX Rust bindings",
             ExternalOptimizationTool::IpoptRust => "Ipopt Rust bindings",
@@ -414,8 +423,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog
+            | ExternalOptimizationTool::MiniLp
             | ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::Nlopt
+            | ExternalOptimizationTool::OsqpRust
+            | ExternalOptimizationTool::ClarabelRust
             | ExternalOptimizationTool::GurobiRust
             | ExternalOptimizationTool::CplexRust
             | ExternalOptimizationTool::IpoptRust
@@ -480,7 +492,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::LindoCli
             | ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
-            | ExternalOptimizationTool::RustLinprog => ExternalOptimizationFamily::LinearMip,
+            | ExternalOptimizationTool::RustLinprog
+            | ExternalOptimizationTool::MiniLp => ExternalOptimizationFamily::LinearMip,
             ExternalOptimizationTool::Cvxpy
             | ExternalOptimizationTool::Cvxopt
             | ExternalOptimizationTool::MosekPython
@@ -494,7 +507,11 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Proxqp
             | ExternalOptimizationTool::Cosmo
             | ExternalOptimizationTool::Sdpa
-            | ExternalOptimizationTool::Csdp => ExternalOptimizationFamily::ConvexOptimization,
+            | ExternalOptimizationTool::Csdp
+            | ExternalOptimizationTool::OsqpRust
+            | ExternalOptimizationTool::ClarabelRust => {
+                ExternalOptimizationFamily::ConvexOptimization
+            }
             ExternalOptimizationTool::Z3
             | ExternalOptimizationTool::Cvc5
             | ExternalOptimizationTool::Yices
@@ -544,6 +561,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::OrToolsPython
             | ExternalOptimizationTool::OrToolsCpSat
             | ExternalOptimizationTool::RustLinprog
+            | ExternalOptimizationTool::MiniLp
             | ExternalOptimizationTool::HighsRust
             | ExternalOptimizationTool::ScipRust
             | ExternalOptimizationTool::CbcRust
@@ -603,6 +621,8 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Casadi => ExternalOptimizationExactness::ModelingLayer,
             ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::Nlopt
+            | ExternalOptimizationTool::OsqpRust
+            | ExternalOptimizationTool::ClarabelRust
             | ExternalOptimizationTool::GurobiRust
             | ExternalOptimizationTool::CplexRust
             | ExternalOptimizationTool::IpoptRust
@@ -808,8 +828,13 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::RustLinprog => {
                 &["ores-rust-linprog-adapter", "rust-linprog-adapter"]
             }
+            ExternalOptimizationTool::MiniLp => &["ores-minilp-adapter", "minilp-adapter"],
             ExternalOptimizationTool::Argmin => &["ores-argmin-adapter", "argmin-adapter"],
             ExternalOptimizationTool::Nlopt => &["ores-nlopt-adapter", "nlopt-adapter"],
+            ExternalOptimizationTool::OsqpRust => &["ores-osqp-rust-adapter", "osqp-rust-adapter"],
+            ExternalOptimizationTool::ClarabelRust => {
+                &["ores-clarabel-rust-adapter", "clarabel-rust-adapter"]
+            }
             ExternalOptimizationTool::GurobiRust => {
                 &["ores-gurobi-rust-adapter", "gurobi-rust-adapter"]
             }
@@ -832,8 +857,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => &["good_lp"],
             ExternalOptimizationTool::LpModeler => &["lp-modeler"],
             ExternalOptimizationTool::RustLinprog => &["rust-linprog", "linprog"],
+            ExternalOptimizationTool::MiniLp => &["minilp"],
             ExternalOptimizationTool::Argmin => &["argmin"],
             ExternalOptimizationTool::Nlopt => &["nlopt", "nlopt-rs", "nlopt-sys"],
+            ExternalOptimizationTool::OsqpRust => &["osqp", "osqp-sys"],
+            ExternalOptimizationTool::ClarabelRust => &["clarabel"],
             ExternalOptimizationTool::GurobiRust => &["grb", "gurobi"],
             ExternalOptimizationTool::CplexRust => &["cplex-rs", "cplex-rs-sys", "cplex_sys"],
             ExternalOptimizationTool::IpoptRust => &["ipopt", "ipopt-sys"],
@@ -1145,11 +1173,18 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::LpModeler => "Rust LP modeling DSL",
             ExternalOptimizationTool::RustLinprog => "Rust-first lightweight linear programming",
+            ExternalOptimizationTool::MiniLp => "Rust-first lightweight LP solver crate",
             ExternalOptimizationTool::Argmin => {
                 "Rust nonlinear optimization algorithms for gradient and derivative-free runs"
             }
             ExternalOptimizationTool::Nlopt => {
                 "Rust bindings to NLopt nonlinear optimization algorithms"
+            }
+            ExternalOptimizationTool::OsqpRust => {
+                "Rust bindings to OSQP for local quadratic-program checks"
+            }
+            ExternalOptimizationTool::ClarabelRust => {
+                "Rust-native Clarabel crate for conic and quadratic optimization checks"
             }
             ExternalOptimizationTool::GurobiRust => {
                 "Rust bindings to Gurobi Optimizer using local, non-vendored solver libraries"
@@ -1346,8 +1381,11 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::GoodLp,
         ExternalOptimizationTool::LpModeler,
         ExternalOptimizationTool::RustLinprog,
+        ExternalOptimizationTool::MiniLp,
         ExternalOptimizationTool::Argmin,
         ExternalOptimizationTool::Nlopt,
+        ExternalOptimizationTool::OsqpRust,
+        ExternalOptimizationTool::ClarabelRust,
         ExternalOptimizationTool::GurobiRust,
         ExternalOptimizationTool::CplexRust,
         ExternalOptimizationTool::IpoptRust,
@@ -1700,7 +1738,9 @@ fn native_external_optimization_ecosystem_family(
         | ExternalOptimizationTool::Proxqp
         | ExternalOptimizationTool::Cosmo
         | ExternalOptimizationTool::Sdpa
-        | ExternalOptimizationTool::Csdp => Some("convex-optimization"),
+        | ExternalOptimizationTool::Csdp
+        | ExternalOptimizationTool::OsqpRust
+        | ExternalOptimizationTool::ClarabelRust => Some("convex-optimization"),
         ExternalOptimizationTool::PyScipOpt
         | ExternalOptimizationTool::GurobiPy
         | ExternalOptimizationTool::CplexPython
@@ -1746,6 +1786,7 @@ fn native_external_optimization_ecosystem_family(
         | ExternalOptimizationTool::GoodLp
         | ExternalOptimizationTool::LpModeler
         | ExternalOptimizationTool::RustLinprog
+        | ExternalOptimizationTool::MiniLp
         | ExternalOptimizationTool::HighsRust
         | ExternalOptimizationTool::ScipRust
         | ExternalOptimizationTool::CbcRust => {
@@ -3244,6 +3285,14 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
         ExternalOptimizationTool::Nlopt => {
             names.push("NLOPT_DIR".to_string());
         }
+        ExternalOptimizationTool::OsqpRust => {
+            names.push("OSQP_RS_CARGO_MANIFEST".to_string());
+            names.push("OSQP_DIR".to_string());
+            names.push("OSQP_HOME".to_string());
+        }
+        ExternalOptimizationTool::ClarabelRust => {
+            names.push("CLARABEL_RS_CARGO_MANIFEST".to_string());
+        }
         ExternalOptimizationTool::GurobiRust => {
             names.push("GUROBI_RUST_CARGO_MANIFEST".to_string());
             names.push("GUROBI_HOME".to_string());
@@ -3395,6 +3444,7 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
             &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
         }
         ExternalOptimizationTool::Nlopt => &["NLOPT_DIR", "NLOPT_HOME"],
+        ExternalOptimizationTool::OsqpRust => &["OSQP_DIR", "OSQP_HOME"],
         ExternalOptimizationTool::GurobiRust => &["GUROBI_HOME"],
         ExternalOptimizationTool::CplexRust => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
         ExternalOptimizationTool::IpoptRust => &["IPOPT_DIR", "IPOPT_HOME"],
@@ -4291,7 +4341,7 @@ mod tests {
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
         let specs = external_optimization_tool_specs();
-        assert_eq!(external_optimization_tools().len(), 96);
+        assert_eq!(external_optimization_tools().len(), 99);
         assert_eq!(
             specs
                 .iter()
@@ -4304,8 +4354,35 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Rust)
                 .count(),
-            11
+            14
         );
+        let minilp = specs
+            .iter()
+            .find(|spec| spec.tool == ExternalOptimizationTool::MiniLp)
+            .expect("minilp spec");
+        assert_eq!(minilp.language, ExternalOptimizationLanguage::Rust);
+        assert_eq!(minilp.family, ExternalOptimizationFamily::LinearMip);
+        assert!(minilp.cargo_crates.contains(&"minilp"));
+        let osqp_rust = specs
+            .iter()
+            .find(|spec| spec.tool == ExternalOptimizationTool::OsqpRust)
+            .expect("osqp-rust spec");
+        assert_eq!(osqp_rust.language, ExternalOptimizationLanguage::Rust);
+        assert_eq!(
+            osqp_rust.family,
+            ExternalOptimizationFamily::ConvexOptimization
+        );
+        assert!(osqp_rust.cargo_crates.contains(&"osqp"));
+        let clarabel_rust = specs
+            .iter()
+            .find(|spec| spec.tool == ExternalOptimizationTool::ClarabelRust)
+            .expect("clarabel-rust spec");
+        assert_eq!(clarabel_rust.language, ExternalOptimizationLanguage::Rust);
+        assert_eq!(
+            clarabel_rust.family,
+            ExternalOptimizationFamily::ConvexOptimization
+        );
+        assert!(clarabel_rust.cargo_crates.contains(&"clarabel"));
         assert_eq!(
             specs
                 .iter()
@@ -4630,6 +4707,20 @@ mod tests {
             .contains(&"CPLEX_RUST_CARGO_MANIFEST".to_string()));
         assert!(artifact_env_names(ExternalOptimizationTool::IpoptRust)
             .contains(&"IPOPT_RUST_CARGO_MANIFEST".to_string()));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::MiniLp)[0],
+            "ORES_MINILP_CRATE"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::OsqpRust)
+            .contains(&"OSQP_RS_CARGO_MANIFEST".to_string()));
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::OsqpRust)
+                .contains(&"OSQP_HOME".to_string())
+        );
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::ClarabelRust)[0],
+            "ORES_CLARABEL_RUST_CRATE"
+        );
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Pyomo)[0],
             "ORES_PYOMO_PYTHON"

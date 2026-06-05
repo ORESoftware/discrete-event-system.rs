@@ -539,6 +539,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Rust-first lightweight LP adapter for validation-scale simplex cross-checks",
     },
     ExternalValidationToolSpec {
+        id: "minilp",
+        display_name: "MiniLp",
+        env_key: "MINILP",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-minilp-adapter", "minilp-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: ALGEBRAIC_MODEL_FORMATS,
+        notes: "Rust-first lightweight LP solver crate adapter for local model-validation cross-checks",
+    },
+    ExternalValidationToolSpec {
         id: "argmin",
         display_name: "argmin",
         env_key: "ARGMIN",
@@ -561,6 +573,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: NONLINEAR_CAPS,
         input_formats: NLP_FORMATS,
         notes: "Rust bindings to NLopt nonlinear algorithms for local nonlinear model cross-checks",
+    },
+    ExternalValidationToolSpec {
+        id: "osqp-rust",
+        display_name: "OSQP Rust bindings",
+        env_key: "OSQP_RUST",
+        family: ExternalValidationFamily::ConvexConicSolver,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-osqp-rust-adapter", "osqp-rust-adapter"],
+        capabilities: CONVEX_CONIC_CAPS,
+        input_formats: CONIC_FORMATS,
+        notes: "Rust OSQP binding adapter for convex quadratic-program validation without Python package probes",
+    },
+    ExternalValidationToolSpec {
+        id: "clarabel-rust",
+        display_name: "Clarabel Rust crate",
+        env_key: "CLARABEL_RUST",
+        family: ExternalValidationFamily::ConvexConicSolver,
+        runtime: ExternalValidationRuntime::Rust,
+        artifact_kind: ExternalValidationArtifactKind::RustCrate,
+        command_aliases: &["ores-clarabel-rust-adapter", "clarabel-rust-adapter"],
+        capabilities: CONVEX_CONIC_CAPS,
+        input_formats: CONIC_FORMATS,
+        notes: "Rust-native Clarabel crate adapter for conic and quadratic validation checks",
     },
     ExternalValidationToolSpec {
         id: "gurobi-rust",
@@ -18861,8 +18897,15 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "good-lp" => names.push("GOOD_LP_CRATE".to_string()),
         "lp-modeler" => names.push("LP_MODELER_CRATE".to_string()),
         "rust-linprog" => names.push("RUST_LINPROG_CRATE".to_string()),
+        "minilp" => names.push("MINILP_CARGO_MANIFEST".to_string()),
         "argmin" => names.push("ARGMIN_CRATE".to_string()),
         "nlopt-rs" => names.push("NLOPT_DIR".to_string()),
+        "osqp-rust" => {
+            names.push("OSQP_RS_CARGO_MANIFEST".to_string());
+            names.push("OSQP_DIR".to_string());
+            names.push("OSQP_HOME".to_string());
+        }
+        "clarabel-rust" => names.push("CLARABEL_RS_CARGO_MANIFEST".to_string()),
         "gurobi-rust" => {
             names.push("GUROBI_RUST_CARGO_MANIFEST".to_string());
             names.push("GUROBI_HOME".to_string());
@@ -19002,6 +19045,7 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "moea-framework" => &["MOEA_FRAMEWORK_HOME", "MOEA_HOME"],
         "ecj" => &["ECJ_HOME", "ECJ_DIR"],
         "nlopt-rs" => &["NLOPT_DIR", "NLOPT_HOME"],
+        "osqp-rust" => &["OSQP_DIR", "OSQP_HOME"],
         "gurobi-rust" => &["GUROBI_HOME"],
         "cplex-rust" => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
         "ipopt-rust" => &["IPOPT_DIR", "IPOPT_HOME"],
@@ -22228,7 +22272,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 265);
+        assert_eq!(tools.len(), 268);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -22283,11 +22327,31 @@ mod tests {
             tool.id == "rust-linprog" && tool.runtime == ExternalValidationRuntime::Rust
         }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "minilp"
+                && tool.runtime == ExternalValidationRuntime::Rust
+                && tool.artifact_kind == ExternalValidationArtifactKind::RustCrate
+                && tool.input_formats.contains(&"lp")
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "argmin" && tool.family == ExternalValidationFamily::NonlinearGlobalSolver
         }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "nlopt-rs" && tool.input_formats.contains(&"nl") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "osqp-rust"
+                && tool.runtime == ExternalValidationRuntime::Rust
+                && tool.family == ExternalValidationFamily::ConvexConicSolver
+                && tool.artifact_kind == ExternalValidationArtifactKind::RustCrate
+                && tool.command_aliases.contains(&"osqp-rust-adapter")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "clarabel-rust"
+                && tool.runtime == ExternalValidationRuntime::Rust
+                && tool.family == ExternalValidationFamily::ConvexConicSolver
+                && tool.artifact_kind == ExternalValidationArtifactKind::RustCrate
+                && tool.input_formats.contains(&"cone")
+        }));
         assert!(tools.iter().any(|tool| {
             tool.id == "gurobi-rust"
                 && tool.runtime == ExternalValidationRuntime::Rust
@@ -22797,10 +22861,27 @@ mod tests {
             external_validation_artifact_env_names(argmin)[0],
             "ORES_ARGMIN_CRATE"
         );
+        let minilp = find_external_validation_tool("minilp").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(minilp)[0],
+            "ORES_MINILP_CRATE"
+        );
         let nlopt_rs = find_external_validation_tool("nlopt_rs").unwrap();
         assert_eq!(nlopt_rs.id, "nlopt-rs");
         assert!(
             external_validation_command_dir_env_names(nlopt_rs).contains(&"NLOPT_HOME".to_string())
+        );
+        let osqp_rust = find_external_validation_tool("osqp_rust").unwrap();
+        assert_eq!(osqp_rust.id, "osqp-rust");
+        assert!(external_validation_artifact_env_names(osqp_rust)
+            .contains(&"OSQP_RS_CARGO_MANIFEST".to_string()));
+        assert!(
+            external_validation_command_dir_env_names(osqp_rust).contains(&"OSQP_HOME".to_string())
+        );
+        let clarabel_rust = find_external_validation_tool("clarabel_rust").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(clarabel_rust)[0],
+            "ORES_CLARABEL_RUST_CRATE"
         );
         let gurobi_rust = find_external_validation_tool("gurobi_rust").unwrap();
         assert_eq!(

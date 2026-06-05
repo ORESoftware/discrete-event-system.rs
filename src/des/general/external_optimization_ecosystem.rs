@@ -127,8 +127,11 @@ pub enum ExternalOptimizationTool {
     GoodLp,
     LpModeler,
     RustLinprog,
+    MiniLp,
     Argmin,
     NloptRs,
+    OsqpRust,
+    ClarabelRust,
     GurobiRust,
     CplexRust,
     IpoptRust,
@@ -228,8 +231,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp,
             ExternalOptimizationTool::LpModeler,
             ExternalOptimizationTool::RustLinprog,
+            ExternalOptimizationTool::MiniLp,
             ExternalOptimizationTool::Argmin,
             ExternalOptimizationTool::NloptRs,
+            ExternalOptimizationTool::OsqpRust,
+            ExternalOptimizationTool::ClarabelRust,
             ExternalOptimizationTool::GurobiRust,
             ExternalOptimizationTool::CplexRust,
             ExternalOptimizationTool::IpoptRust,
@@ -329,8 +335,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => "good-lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
+            ExternalOptimizationTool::MiniLp => "minilp",
             ExternalOptimizationTool::Argmin => "argmin",
             ExternalOptimizationTool::NloptRs => "nlopt-rs",
+            ExternalOptimizationTool::OsqpRust => "osqp-rust",
+            ExternalOptimizationTool::ClarabelRust => "clarabel-rust",
             ExternalOptimizationTool::GurobiRust => "gurobi-rust",
             ExternalOptimizationTool::CplexRust => "cplex-rust",
             ExternalOptimizationTool::IpoptRust => "ipopt-rust",
@@ -430,8 +439,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => "good_lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
+            ExternalOptimizationTool::MiniLp => "minilp",
             ExternalOptimizationTool::Argmin => "argmin",
             ExternalOptimizationTool::NloptRs => "nlopt-rs",
+            ExternalOptimizationTool::OsqpRust => "OSQP Rust bindings",
+            ExternalOptimizationTool::ClarabelRust => "Clarabel Rust crate",
             ExternalOptimizationTool::GurobiRust => "Gurobi Rust bindings",
             ExternalOptimizationTool::CplexRust => "CPLEX Rust bindings",
             ExternalOptimizationTool::IpoptRust => "Ipopt Rust bindings",
@@ -531,8 +543,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog
+            | ExternalOptimizationTool::MiniLp
             | ExternalOptimizationTool::Argmin
             | ExternalOptimizationTool::NloptRs
+            | ExternalOptimizationTool::OsqpRust
+            | ExternalOptimizationTool::ClarabelRust
             | ExternalOptimizationTool::GurobiRust
             | ExternalOptimizationTool::CplexRust
             | ExternalOptimizationTool::IpoptRust
@@ -632,8 +647,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => "GOOD_LP_CARGO_MANIFEST",
             ExternalOptimizationTool::LpModeler => "LP_MODELER_CARGO_MANIFEST",
             ExternalOptimizationTool::RustLinprog => "RUST_LINPROG_CARGO_MANIFEST",
+            ExternalOptimizationTool::MiniLp => "MINILP_CARGO_MANIFEST",
             ExternalOptimizationTool::Argmin => "ARGMIN_CARGO_MANIFEST",
             ExternalOptimizationTool::NloptRs => "NLOPT_RS_CARGO_MANIFEST",
+            ExternalOptimizationTool::OsqpRust => "OSQP_RS_CARGO_MANIFEST",
+            ExternalOptimizationTool::ClarabelRust => "CLARABEL_RS_CARGO_MANIFEST",
             ExternalOptimizationTool::GurobiRust => "GUROBI_RUST_CARGO_MANIFEST",
             ExternalOptimizationTool::CplexRust => "CPLEX_RUST_CARGO_MANIFEST",
             ExternalOptimizationTool::IpoptRust => "IPOPT_RUST_CARGO_MANIFEST",
@@ -735,8 +753,13 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => &["GOOD_LP_CARGO_MANIFEST"],
             ExternalOptimizationTool::LpModeler => &["LP_MODELER_CARGO_MANIFEST"],
             ExternalOptimizationTool::RustLinprog => &["RUST_LINPROG_CARGO_MANIFEST"],
+            ExternalOptimizationTool::MiniLp => &["MINILP_CARGO_MANIFEST"],
             ExternalOptimizationTool::Argmin => &["ARGMIN_CARGO_MANIFEST"],
             ExternalOptimizationTool::NloptRs => &["NLOPT_RS_CARGO_MANIFEST"],
+            ExternalOptimizationTool::OsqpRust => {
+                &["OSQP_RS_CARGO_MANIFEST", "OSQP_DIR", "OSQP_HOME"]
+            }
+            ExternalOptimizationTool::ClarabelRust => &["CLARABEL_RS_CARGO_MANIFEST"],
             ExternalOptimizationTool::GurobiRust => &[
                 "GUROBI_RUST_CARGO_MANIFEST",
                 "GUROBI_HOME",
@@ -882,6 +905,7 @@ impl ExternalOptimizationTool {
                 &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
             }
             ExternalOptimizationTool::NloptRs => &["NLOPT_DIR", "NLOPT_HOME"],
+            ExternalOptimizationTool::OsqpRust => &["OSQP_DIR", "OSQP_HOME"],
             ExternalOptimizationTool::GurobiRust => &["GUROBI_HOME"],
             ExternalOptimizationTool::CplexRust => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
             ExternalOptimizationTool::IpoptRust => &["IPOPT_DIR", "IPOPT_HOME"],
@@ -1017,8 +1041,11 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::GoodLp => &["good_lp"],
             ExternalOptimizationTool::LpModeler => &["lp-modeler", "lp_modeler"],
             ExternalOptimizationTool::RustLinprog => &["rust-linprog", "linprog"],
+            ExternalOptimizationTool::MiniLp => &["minilp"],
             ExternalOptimizationTool::Argmin => &["argmin"],
             ExternalOptimizationTool::NloptRs => &["nlopt", "nlopt-sys"],
+            ExternalOptimizationTool::OsqpRust => &["osqp", "osqp-sys"],
+            ExternalOptimizationTool::ClarabelRust => &["clarabel"],
             ExternalOptimizationTool::GurobiRust => &["grb", "gurobi"],
             ExternalOptimizationTool::CplexRust => &["cplex-rs", "cplex-rs-sys", "cplex_sys"],
             ExternalOptimizationTool::IpoptRust => &["ipopt", "ipopt-sys"],
@@ -1900,7 +1927,7 @@ mod tests {
 
     #[test]
     fn ecosystem_tool_metadata_covers_supported_languages() {
-        assert_eq!(ExternalOptimizationTool::all().len(), 96);
+        assert_eq!(ExternalOptimizationTool::all().len(), 99);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
@@ -1959,6 +1986,14 @@ mod tests {
         );
         assert_eq!(
             ExternalOptimizationTool::GoodLp.ecosystem(),
+            ExternalOptimizationEcosystem::Rust
+        );
+        assert_eq!(
+            ExternalOptimizationTool::OsqpRust.ecosystem(),
+            ExternalOptimizationEcosystem::Rust
+        );
+        assert_eq!(
+            ExternalOptimizationTool::ClarabelRust.ecosystem(),
             ExternalOptimizationEcosystem::Rust
         );
         assert_eq!(
@@ -2162,6 +2197,18 @@ mod tests {
         assert!(ExternalOptimizationTool::HighsRust
             .rust_dependency_names()
             .contains(&"highs-sys"));
+        assert!(ExternalOptimizationTool::MiniLp
+            .rust_dependency_names()
+            .contains(&"minilp"));
+        assert!(ExternalOptimizationTool::OsqpRust
+            .rust_dependency_names()
+            .contains(&"osqp"));
+        assert!(ExternalOptimizationTool::OsqpRust
+            .install_dir_env_vars()
+            .contains(&"OSQP_HOME"));
+        assert!(ExternalOptimizationTool::ClarabelRust
+            .rust_dependency_names()
+            .contains(&"clarabel"));
         assert!(ExternalOptimizationTool::GurobiRust
             .rust_dependency_names()
             .contains(&"grb"));
@@ -2235,6 +2282,9 @@ mod tests {
             cplex_sys = "0.1"
             grb = "3"
             ipopt-sys = "0.6"
+            minilp = "0.2"
+            osqp = "1"
+            clarabel-wrapper = { package = "clarabel", version = "0.10" }
         "#;
         assert!(cargo_manifest_mentions_dependency(raw, "good_lp"));
         assert!(cargo_manifest_mentions_dependency(raw, "highs"));
@@ -2242,6 +2292,9 @@ mod tests {
         assert!(cargo_manifest_mentions_dependency(raw, "cplex_sys"));
         assert!(cargo_manifest_mentions_dependency(raw, "grb"));
         assert!(cargo_manifest_mentions_dependency(raw, "ipopt-sys"));
+        assert!(cargo_manifest_mentions_dependency(raw, "minilp"));
+        assert!(cargo_manifest_mentions_dependency(raw, "osqp"));
+        assert!(cargo_manifest_mentions_dependency(raw, "clarabel"));
         assert!(!cargo_manifest_mentions_dependency(raw, "argmin"));
     }
 

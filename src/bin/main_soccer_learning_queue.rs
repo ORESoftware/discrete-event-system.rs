@@ -85,6 +85,7 @@ struct PendingPostgresPolicyVersion {
 struct PostgresCompletedRunBatch {
     experiment_id: String,
     runner_id: String,
+    policy_version_batches: usize,
     pending_policy_versions: Vec<PendingPostgresPolicyVersion>,
     pending_runs: Vec<PendingPostgresCompletedRun>,
 }
@@ -95,6 +96,9 @@ impl PostgresCompletedRunBatch {
     }
 
     fn absorb(&mut self, mut other: Self) {
+        self.policy_version_batches = self
+            .policy_version_batches
+            .saturating_add(other.policy_version_batches);
         self.pending_policy_versions
             .append(&mut other.pending_policy_versions);
         self.pending_runs.append(&mut other.pending_runs);
@@ -103,6 +107,7 @@ impl PostgresCompletedRunBatch {
 
 struct PostgresCompletedRunWriteResult {
     queue_batches: usize,
+    policy_version_batches: usize,
     result: Result<usize, String>,
 }
 
@@ -111,6 +116,7 @@ struct AsyncPostgresCompletedRunWriter {
     receiver: mpsc::Receiver<PostgresCompletedRunWriteResult>,
     handle: Option<thread::JoinHandle<()>>,
     pending_batches: usize,
+    pending_policy_version_batches: usize,
 }
 
 fn env_value(name: &str) -> Option<String> {
@@ -675,6 +681,7 @@ impl AsyncPostgresCompletedRunWriter {
                     while receiver.recv().is_ok() {
                         let _ = result_sender.send(PostgresCompletedRunWriteResult {
                             queue_batches: 1,
+                            policy_version_batches: 0,
                             result: Err(
                                 "postgres completed-run writer could not find a database URL"
                                     .to_string(),
@@ -687,6 +694,7 @@ impl AsyncPostgresCompletedRunWriter {
                     while receiver.recv().is_ok() {
                         let _ = result_sender.send(PostgresCompletedRunWriteResult {
                             queue_batches: 1,
+                            policy_version_batches: 0,
                             result: Err(format!(
                                 "postgres completed-run writer connect failed: {error}"
                             )),
@@ -752,6 +760,7 @@ impl AsyncPostgresCompletedRunWriter {
                 );
                 let _ = result_sender.send(PostgresCompletedRunWriteResult {
                     queue_batches,
+                    policy_version_batches: batch.policy_version_batches,
                     result,
                 });
             }
@@ -762,7 +771,21 @@ impl AsyncPostgresCompletedRunWriter {
             receiver: result_receiver,
             handle: Some(handle),
             pending_batches: 0,
+            pending_policy_version_batches: 0,
         }
+    }
+
+    fn record_write_result(
+        &mut self,
+        write_result: PostgresCompletedRunWriteResult,
+    ) -> Result<usize, String> {
+        self.pending_batches = self
+            .pending_batches
+            .saturating_sub(write_result.queue_batches);
+        self.pending_policy_version_batches = self
+            .pending_policy_version_batches
+            .saturating_sub(write_result.policy_version_batches);
+        write_result.result
     }
 
     fn drain_finished(&mut self) -> Result<usize, String> {
@@ -770,10 +793,7 @@ impl AsyncPostgresCompletedRunWriter {
         loop {
             match self.receiver.try_recv() {
                 Ok(write_result) => {
-                    self.pending_batches = self
-                        .pending_batches
-                        .saturating_sub(write_result.queue_batches);
-                    persisted = persisted.saturating_add(write_result.result?);
+                    persisted = persisted.saturating_add(self.record_write_result(write_result)?);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -784,6 +804,23 @@ impl AsyncPostgresCompletedRunWriter {
                         );
                     }
                     break;
+                }
+            }
+        }
+        Ok(persisted)
+    }
+
+    fn drain_policy_versions_finished(&mut self) -> Result<usize, String> {
+        let mut persisted = self.drain_finished()?;
+        while self.pending_policy_version_batches > 0 {
+            match self.receiver.recv() {
+                Ok(write_result) => {
+                    persisted = persisted.saturating_add(self.record_write_result(write_result)?);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "postgres completed-run writer channel closed before policy versions were durable: {error}"
+                    ));
                 }
             }
         }
@@ -804,9 +841,11 @@ impl AsyncPostgresCompletedRunWriter {
         let Some(sender) = &self.sender else {
             return Err("postgres completed-run writer is closed".to_string());
         };
+        let policy_version_batches = usize::from(!pending_policy_versions.is_empty());
         let batch = PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            policy_version_batches,
             pending_policy_versions: std::mem::take(pending_policy_versions),
             pending_runs: std::mem::take(pending_runs),
         };
@@ -814,6 +853,9 @@ impl AsyncPostgresCompletedRunWriter {
             .send(batch)
             .map_err(|err| format!("queue postgres completed-run batch: {err}"))?;
         self.pending_batches = self.pending_batches.saturating_add(1);
+        self.pending_policy_version_batches = self
+            .pending_policy_version_batches
+            .saturating_add(policy_version_batches);
         Ok(persisted)
     }
 
@@ -824,19 +866,14 @@ impl AsyncPostgresCompletedRunWriter {
 
         while self.pending_batches > 0 {
             match self.receiver.recv() {
-                Ok(write_result) => {
-                    self.pending_batches = self
-                        .pending_batches
-                        .saturating_sub(write_result.queue_batches);
-                    match write_result.result {
-                        Ok(count) => persisted = persisted.saturating_add(count),
-                        Err(error) => {
-                            if first_error.is_none() {
-                                first_error = Some(error);
-                            }
+                Ok(write_result) => match self.record_write_result(write_result) {
+                    Ok(count) => persisted = persisted.saturating_add(count),
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
                         }
                     }
-                }
+                },
                 Err(error) => {
                     if first_error.is_none() {
                         first_error = Some(format!(
@@ -1306,7 +1343,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     neural_network,
                 } => {
                     if pg_refresh_for_new_sims {
-                        let pending_async_pg_batches =
+                        let mut pending_async_pg_batches =
                             if let Some(writer) = pg_completed_writer.as_mut() {
                                 pg_persisted_games += writer.drain_finished()?;
                                 writer.pending_batches
@@ -1327,6 +1364,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                                     &run_id,
                                     &mut pg_policy_version_buffer,
                                 )?;
+                            }
+                            if pg_flush_policy_versions_before_new_sim {
+                                if let Some(writer) = pg_completed_writer.as_mut() {
+                                    pg_persisted_games += writer.drain_policy_versions_finished()?;
+                                    pending_async_pg_batches = writer.pending_batches;
+                                }
                             }
                             if let Some(metadata) =
                                 store.load_latest_active_policy_metadata(experiment_id)?
@@ -1724,6 +1767,7 @@ mod tests {
         PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            policy_version_batches: 0,
             pending_policy_versions: Vec::new(),
             pending_runs: Vec::new(),
         }
@@ -1814,5 +1858,17 @@ mod tests {
         batch.absorb(empty_pg_batch("experiment-a", "runner-a"));
         assert!(batch.pending_policy_versions.is_empty());
         assert!(batch.pending_runs.is_empty());
+    }
+
+    #[test]
+    fn queue_postgres_batches_track_policy_version_sources() {
+        let mut batch = empty_pg_batch("experiment-a", "runner-a");
+        let mut other = empty_pg_batch("experiment-a", "runner-a");
+        batch.policy_version_batches = 1;
+        other.policy_version_batches = 1;
+
+        batch.absorb(other);
+
+        assert_eq!(batch.policy_version_batches, 2);
     }
 }

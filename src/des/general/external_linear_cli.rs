@@ -1413,7 +1413,7 @@ pub fn solve_lower_bounded_ipmip_with_external_cli(
     problem: &LowerBoundedIPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
-    if should_use_rust_linearized_source_cli(opts) {
+    if should_use_rust_lower_bounded_source_cli(opts) {
         let source_lb = problem.lb.clone();
         let (linearized, objective_offset) = linearize_lower_bounds_problem(problem);
         return solve_linearized_ipmip_with_external_cli(
@@ -1617,8 +1617,12 @@ fn should_use_rust_linearized_source_cli(opts: &ExternalLinearCliOptions) -> boo
         && opts.mip_start.is_none()
 }
 
+fn should_use_rust_lower_bounded_source_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.script_path.is_none()
+}
+
 fn should_use_rust_multi_objective_cli(opts: &ExternalLinearCliOptions) -> bool {
-    opts.python.is_none() && opts.script_path.is_none()
+    opts.script_path.is_none()
 }
 
 fn solve_multi_objective_ipmip_with_rust_external_cli(
@@ -1735,11 +1739,22 @@ fn solve_linearized_ipmip_with_external_cli(
     objective_offset: f64,
     original_var_count: usize,
 ) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
     let mut solve_opts = opts.clone();
     if let Some(objective_limit) = solve_opts.objective_limit.as_mut() {
         if objective_offset.is_finite() {
             *objective_limit -= objective_offset;
         }
+    }
+    if let Err(message) =
+        shift_linearized_external_mip_start(&mut solve_opts, source_lb, linearized.c.len())
+    {
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            format!("{}:cli", opts.solver.as_str()),
+            message,
+            elapsed_ms(t0),
+        );
     }
     let solution = solve_ipmip_with_external_cli(linearized, &solve_opts);
     postprocess_linearized_external_solution(
@@ -1785,6 +1800,36 @@ fn postprocess_linearized_external_solution(
         }
     }
     solution
+}
+
+fn shift_linearized_external_mip_start(
+    opts: &mut ExternalLinearCliOptions,
+    source_lb: &[f64],
+    linearized_var_count: usize,
+) -> Result<(), String> {
+    let Some(start) = opts.mip_start.as_mut() else {
+        return Ok(());
+    };
+    if !source_lb.is_empty() {
+        if start.len() != source_lb.len() {
+            return Err(format!(
+                "mip_start length {} does not match lower-bound vector length {}",
+                start.len(),
+                source_lb.len()
+            ));
+        }
+        for (value, lower) in start.iter_mut().zip(source_lb.iter()) {
+            *value -= *lower;
+        }
+    }
+    if start.len() != linearized_var_count {
+        return Err(format!(
+            "linearized mip_start length {} does not match linearized variable count {}",
+            start.len(),
+            linearized_var_count
+        ));
+    }
+    Ok(())
 }
 
 fn shift_external_solution_x(x: &mut [f64], source_lb: &[f64], original_var_count: usize) {
@@ -2236,13 +2281,13 @@ fn should_use_native_highs_cli(
     if opts.solver != ExternalLinearCliSolver::Highs
         || opts.script_path.is_some()
         || opts.solution_pool_size.is_some()
-        || opts.solution_limit.is_some()
         || opts.cuts.is_some()
         || opts.heuristics.is_some()
         || opts.branch_rule.is_some()
         || opts.branch_priorities.is_some()
         || opts.node_selection.is_some()
-        || (kind == ExternalLinearCliKind::Lp && opts.mip_start.is_some())
+        || (kind == ExternalLinearCliKind::Lp
+            && (opts.solution_limit.is_some() || opts.mip_start.is_some()))
     {
         return false;
     }
@@ -6988,7 +7033,9 @@ fn solve_native_highs_cli_model(
             })
             .flatten(),
         best_bound: quality.best_bound,
-        solution_limit: None,
+        solution_limit: (kind == ExternalLinearCliKind::Mip)
+            .then(|| opts.solution_limit.map(|limit| limit.max(1)))
+            .flatten(),
         solution_pool_size: None,
         solutions: None,
         exhausted: None,
@@ -7416,6 +7463,12 @@ fn native_highs_options_text(
             .filter(|limit| *limit > 0)
         {
             lines.push(format!("mip_max_nodes = {max_nodes}"));
+        }
+        if let Some(solution_limit) = opts.solution_limit {
+            lines.push(format!(
+                "mip_max_improving_sols = {}",
+                solution_limit.max(1)
+            ));
         }
         if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
             lines.push(format!("mip_rel_gap = {relative_gap:.17}"));
@@ -10860,8 +10913,9 @@ mod tests {
         multi_objective_ipmip_problem_to_cli_json, normalized_node_limit, normalized_random_seed,
         normalized_relative_gap, normalized_threads, pwl_ipmip_problem_to_cli_json,
         quadratic_objective_ipmip_problem_to_cli_json, semi_ipmip_problem_to_cli_json,
-        solve_ipmip_with_external_cli, solve_lp_with_external_cli, solver_command_env_var,
-        sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json,
+        solve_ipmip_with_external_cli, solve_lower_bounded_ipmip_with_external_cli,
+        solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
+        solver_command_env_var, sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json,
         ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliLicenseClass,
         ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat,
         ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
@@ -11003,6 +11057,19 @@ mod tests {
             "machine_premium_bonus"
         );
         assert_eq!(quadratic["lb"][2], 1.0);
+    }
+
+    #[test]
+    fn linearized_mip_start_shifts_lower_bounded_source_values() {
+        let mut opts = ExternalLinearCliOptions {
+            mip_start: Some(vec![3.0, 5.0]),
+            ..Default::default()
+        };
+
+        super::shift_linearized_external_mip_start(&mut opts, &[3.0, 0.0], 2)
+            .expect("shift mip start");
+
+        assert_eq!(opts.mip_start, Some(vec![0.0, 5.0]));
     }
 
     #[test]
@@ -11375,6 +11442,32 @@ Row     infeasibilities      0            0            0
         );
         assert_eq!(accepted, Some(true));
         assert_eq!(objective, Some(3.0));
+    }
+
+    #[test]
+    fn native_highs_solution_limit_uses_native_mip_options() {
+        let opts = ExternalLinearCliOptions {
+            solver: ExternalLinearCliSolver::Highs,
+            solution_limit: Some(3),
+            python: Some("/definitely/not-a-python-for-highs-solution-limit".to_string()),
+            ..Default::default()
+        };
+
+        assert!(super::should_use_native_highs_cli(
+            ExternalLinearCliKind::Mip,
+            &opts
+        ));
+        assert!(!super::should_use_native_highs_cli(
+            ExternalLinearCliKind::Lp,
+            &opts
+        ));
+        let options_text = super::native_highs_options_text(
+            ExternalLinearCliKind::Mip,
+            &opts,
+            &PathBuf::from("highs.log"),
+        )
+        .expect("HiGHS options text");
+        assert!(options_text.contains("mip_max_improving_sols = 3"));
     }
 
     #[test]
@@ -12159,6 +12252,74 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(solution
             .objective
             .is_some_and(|objective| (objective - 1.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn lower_bounded_mip_start_uses_native_highs_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP lower-bounded HiGHS MIP-start solve: highs command not installed");
+            return;
+        };
+        let mut problem = build_lower_bounded_production_ip();
+        problem.base.integer_vars = vec![true, true];
+        let solution = solve_lower_bounded_ipmip_with_external_cli(
+            &problem,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-lower-bounded-mip-start".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                mip_start: Some(vec![3.0, 5.0]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            solution.status,
+            ExternalLinearCliStatus::Optimal,
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.x, vec![3.0, 5.0]);
+        assert!(solution
+            .objective
+            .is_some_and(|objective| (objective - 13.0).abs() <= 1.0e-8));
+        assert!(solution
+            .mip_start_objective
+            .is_some_and(|objective| (objective - 13.0).abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_highs_solution_limit_succeeds_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP direct HiGHS solution-limit solve: highs command not installed");
+            return;
+        };
+        let solution = solve_ipmip_with_external_cli(
+            &super::external_linear_cli_smoke_mip(),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(command),
+                python: Some("/definitely/not-a-python-for-highs-solution-limit".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                solution_limit: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                solution.status,
+                ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+            ),
+            "{}",
+            solution.message
+        );
+        assert_eq!(solution.solver, "highs:cli");
+        assert_eq!(solution.solution_limit, Some(1));
+        assert_eq!(solution.x.len(), 1);
+        assert!(solution.objective.is_some());
     }
 
     #[test]

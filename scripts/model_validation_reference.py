@@ -90,8 +90,11 @@ def rust_first_requested(tool: str | None) -> bool:
     normalized = normalize_tool_id(tool)
     if normalized in {"rust", "rust-reference", "rust-fallback", "fallback"}:
         return True
-    value = os.environ.get("MODEL_VALIDATION_REFERENCE_RUST_FIRST", "")
-    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
+    values = (
+        os.environ.get("MODEL_VALIDATION_REFERENCE_RUST_FIRST", ""),
+        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
+    )
+    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
 
 
 def command_from_env(tool: str) -> str | None:

@@ -65,6 +65,14 @@ def external_rust_fallback_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
+def external_rust_first_enabled() -> bool:
+    values = (
+        os.environ.get("CP_SAT_REFERENCE_RUST_FIRST", ""),
+        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
+    )
+    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
+
+
 def objective_value(model: dict, assignment: Sequence[int]) -> Optional[int]:
     obj = model.get("objective")
     if not obj:
@@ -556,6 +564,9 @@ def main() -> int:
             or args.enumerate_solutions is not None
             or args.assumption_core
         ):
+            exec_rust_reference(args)
+        if external_rust_first_enabled() and args.solver in ("ortools", "ortools-cp-sat"):
+            args.solver = "rust-enumeration"
             exec_rust_reference(args)
         if (
             external_rust_fallback_enabled()

@@ -71,6 +71,14 @@ def external_rust_fallback_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
+def external_rust_first_enabled() -> bool:
+    values = (
+        os.environ.get("SCHEDULING_REFERENCE_RUST_FIRST", ""),
+        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
+    )
+    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
+
+
 def rust_reference(raw: dict, kind: str) -> dict:
     command = rust_reference_command() + ["--solver", "rust-exact", "--kind", kind]
     cwd = None
@@ -396,6 +404,9 @@ def main() -> int:
     parser.add_argument("--kind", choices=["auto", "job-shop", "flow-shop"], default="auto")
     args = parser.parse_args()
     if args.solver in RUST_REFERENCE_SOLVERS:
+        exec_rust_reference(args.solver, args.kind)
+    if external_rust_first_enabled() and args.solver == "ortools":
+        os.environ["SCHEDULING_REFERENCE_EXTERNAL_FALLBACK"] = "rust"
         exec_rust_reference(args.solver, args.kind)
     if (
         external_rust_fallback_enabled()

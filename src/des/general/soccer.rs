@@ -3856,6 +3856,11 @@ fn normalize_soccer_action_label(action: &str) -> &str {
         "hold-up" | "holdup" | "hold_up" | "hold-up-dribble" | "hold-up-flank-dribble" => {
             "hold-up-flank"
         }
+        "carry" | "carry_forward" | "carry-forward-dribble" | "dribble-forward" => {
+            "carry-forward"
+        }
+        "carryout" | "carry_out" | "carry-out-dribble" | "dribble-out" => "carry-out",
+        "protect" | "shield" | "shield-ball" | "body-shield" | "protect_ball" => "protect-ball",
         "leftcut" | "left_cut" | "left-cut-dribble" | "cut-left" => "left-cut",
         "rightcut" | "right_cut" | "right-cut-dribble" | "cut-right" => "right-cut",
         "nut-meg" | "nut_meg" | "meg" => "nutmeg",
@@ -3872,6 +3877,9 @@ fn normalize_soccer_action_label(action: &str) -> &str {
 fn dribble_move_kind_for_action_label(action: &str) -> Option<DribbleMoveKind> {
     match normalize_soccer_action_label(action) {
         "left-cut" | "side-step" | "dribble" | "hold-up-flank" => Some(DribbleMoveKind::LeftCut),
+        "carry-forward" => Some(DribbleMoveKind::CarryForward),
+        "carry-out" => Some(DribbleMoveKind::CarryOut),
+        "protect-ball" => Some(DribbleMoveKind::ProtectBall),
         "right-cut" => Some(DribbleMoveKind::RightCut),
         "nutmeg" => Some(DribbleMoveKind::Nutmeg),
         "fake-left-cut-right" => Some(DribbleMoveKind::FakeLeftCutRight),
@@ -3923,6 +3931,14 @@ fn deterministic_dribble_move_kind(tick: u64, player_id: usize) -> DribbleMoveKi
     }
 }
 
+fn patient_carry_dribble_kind(tick: u64, player_id: usize) -> DribbleMoveKind {
+    if deterministic_unit_draw(tick, player_id, 41) < 0.72 {
+        DribbleMoveKind::CarryForward
+    } else {
+        DribbleMoveKind::CarryOut
+    }
+}
+
 fn dribble_touch_bucket_components(bucket: u8) -> (f64, f64) {
     let angle = (bucket % DRIBBLE_TOUCH_ANGLE_BUCKETS) as f64 * DRIBBLE_TOUCH_BUCKET_DEGREES;
     let radians = angle.to_radians();
@@ -3939,6 +3955,34 @@ fn dribble_touch_angle_weight(kind: DribbleMoveKind, bucket: u8) -> f64 {
         DRIBBLE_LATERAL_ANGLE_WEIGHT
     };
     let kind_weight = match dribble_final_cut_kind(kind) {
+        DribbleMoveKind::CarryForward => {
+            if forward > 0.58 {
+                3.20
+            } else if forward > 0.20 {
+                1.55
+            } else {
+                0.18
+            }
+        }
+        DribbleMoveKind::CarryOut => {
+            let diagonal = lateral.abs() * forward.max(0.0);
+            if forward > 0.20 {
+                0.80 + diagonal * 2.40 + lateral.abs() * 0.42
+            } else if lateral.abs() > 0.55 {
+                0.72
+            } else {
+                0.18
+            }
+        }
+        DribbleMoveKind::ProtectBall => {
+            if forward < -0.20 {
+                1.55
+            } else if lateral.abs() > 0.35 {
+                1.18
+            } else {
+                0.50
+            }
+        }
         DribbleMoveKind::LeftCut => {
             if lateral < -0.20 {
                 2.20
@@ -4238,6 +4282,11 @@ impl PlayerAgent {
             .max(striker_shot_bonus);
         let fatigue_dribble = fatigue_dribble_multiplier(observation);
         let shot_creation_carry = shot_creation_carry_multiplier(observation);
+        let patience_factor = low_pressure_patience_factor(observation);
+        let floor_pass_quality = pass_quality_for_patience(observation, PassFlight::Floor);
+        let poor_floor_pass = (1.0 - floor_pass_quality).clamp(0.0, 1.0);
+        let forward_space_fit = (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0);
+        let patient_carry_multiplier = low_pressure_patient_carry_multiplier(observation);
         let striker_carry_boost = if self.role == PlayerRole::Forward && pass_target_count == 0 {
             1.48
         } else if self.role == PlayerRole::Forward {
@@ -4251,9 +4300,32 @@ impl PlayerAgent {
             * (0.70 + (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0) * 0.58)
             * fatigue_dribble
             * shot_creation_carry
+            * patient_carry_multiplier
             * striker_carry_boost
             * (1.0 + offensive_urgency * 0.30 + pressure_urgency * 0.20))
-            .clamp(0.02, 1.08);
+            .clamp(0.02, 1.32);
+        let carry_forward_legal = observation.forward_dribble_space_yards >= 1.2
+            && !must_shoot_near_goal(observation, self.role);
+        let carry_forward_score = (dribble_score
+            * (0.34 + patience_factor * 0.62 + poor_floor_pass * 0.36 + forward_space_fit * 0.34)
+            * (1.0 - pressure * 0.24).clamp(0.70, 1.0))
+        .clamp(0.01, 1.16);
+        let carry_out_legal = observation.forward_dribble_space_yards >= 0.8
+            && !must_shoot_near_goal(observation, self.role);
+        let carry_out_score = (dribble_score
+            * (0.20
+                + patience_factor * 0.42
+                + poor_floor_pass * 0.30
+                + (1.0 - observation.best_pass_receiver_openness.clamp(0.0, 1.0)) * 0.20))
+            .clamp(0.01, 0.92);
+        let protect_ball_legal =
+            observation.nearest_opponent_distance <= 5.2 || pressure_urgency.max(pressure) >= 0.24;
+        let protect_ball_score = (dribble_score
+            * (0.12
+                + pressure_urgency.max(pressure) * 0.76
+                + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.44
+                + (1.0 - observation.perceived_time_on_ball_seconds / 2.8).clamp(0.0, 1.0) * 0.24))
+            .clamp(0.01, 0.88);
         let side_step_legal =
             observation.nearest_opponent_distance <= 4.6 && pressure_urgency.max(pressure) >= 0.28;
         let side_step_score = (dribble_score
@@ -4275,6 +4347,13 @@ impl PlayerAgent {
         let mut options = vec![
             AgentActionOptionTrace::new("shoot", shot_score, shot_legal),
             AgentActionOptionTrace::new("dribble", dribble_score, true),
+            AgentActionOptionTrace::new(
+                "carry-forward",
+                carry_forward_score,
+                carry_forward_legal,
+            ),
+            AgentActionOptionTrace::new("carry-out", carry_out_score, carry_out_legal),
+            AgentActionOptionTrace::new("protect-ball", protect_ball_score, protect_ball_legal),
             AgentActionOptionTrace::new("side-step", side_step_score, side_step_legal),
             AgentActionOptionTrace::new("fake-left-cut-right", feint_score, feint_legal),
             AgentActionOptionTrace::new("fake-right-cut-left", feint_score, feint_legal),
@@ -4329,8 +4408,11 @@ impl PlayerAgent {
             route_one_score,
             route_one_legal,
         ));
-        let near_goal_pass_multiplier =
-            near_goal_pass_release_multiplier(observation, self.role);
+        let near_goal_pass_multiplier = near_goal_pass_release_multiplier(observation, self.role);
+        let floor_pass_patience_multiplier =
+            low_pressure_pass_release_multiplier(observation, PassFlight::Floor);
+        let aerial_pass_patience_multiplier =
+            low_pressure_pass_release_multiplier(observation, PassFlight::Aerial);
         for rank in 0..pass_target_count.min(3) {
             let rank_weight = match rank {
                 0 => 1.00,
@@ -4351,6 +4433,7 @@ impl PlayerAgent {
                 * completion_bonus
                 * (1.0 + observation.pass_curl_probability * 0.055)
                 * near_goal_pass_multiplier
+                * floor_pass_patience_multiplier
                 * rank_weight)
                 .clamp(0.004, 0.97);
             options.push(AgentActionOptionTrace::new(
@@ -4389,6 +4472,7 @@ impl PlayerAgent {
                 * aerial_completion_bonus
                 * (1.0 + observation.pass_curl_probability * 0.075)
                 * near_goal_pass_multiplier
+                * aerial_pass_patience_multiplier
                 * rank_weight)
                 .clamp(0.004, 0.74);
             options.push(AgentActionOptionTrace::new(
@@ -5198,6 +5282,18 @@ impl PlayerAgent {
                     action_option_score(&action_options, "dribble"),
                 ),
                 (
+                    "carry-forward".to_string(),
+                    action_option_score(&action_options, "carry-forward"),
+                ),
+                (
+                    "carry-out".to_string(),
+                    action_option_score(&action_options, "carry-out"),
+                ),
+                (
+                    "protect-ball".to_string(),
+                    action_option_score(&action_options, "protect-ball"),
+                ),
+                (
                     "side-step".to_string(),
                     action_option_score(&action_options, "side-step"),
                 ),
@@ -5258,6 +5354,36 @@ impl PlayerAgent {
                             < time_window_probability(dribble_chance, snapshot.dt_seconds)
                         {
                             let kind = choose_dribble_move_kind(rng);
+                            let touch =
+                                snapshot.choose_dribble_touch_decision_for(self.id, kind, rng);
+                            let target = snapshot.dribble_move_target_for_touch(
+                                self.id,
+                                self.home_position,
+                                kind,
+                                touch,
+                            );
+                            chosen = Some((
+                                SoccerAction::DribbleMove {
+                                    target,
+                                    kind,
+                                    touch,
+                                },
+                                kind.label().to_string(),
+                            ));
+                            break;
+                        }
+                    }
+                    "carry-forward" | "carry-out" | "protect-ball" => {
+                        let kind = match op.as_str() {
+                            "carry-forward" => DribbleMoveKind::CarryForward,
+                            "carry-out" => DribbleMoveKind::CarryOut,
+                            _ => DribbleMoveKind::ProtectBall,
+                        };
+                        order_names.push(kind.label().to_string());
+                        let carry_chance = action_option_score(&action_options, kind.label());
+                        if rng.next_float()
+                            < time_window_probability(carry_chance, snapshot.dt_seconds)
+                        {
                             let touch =
                                 snapshot.choose_dribble_touch_decision_for(self.id, kind, rng);
                             let target = snapshot.dribble_move_target_for_touch(
@@ -5341,10 +5467,13 @@ impl PlayerAgent {
                                 < time_window_probability(hold_up_chance, snapshot.dt_seconds)
                             {
                                 let kind = snapshot.side_step_dribble_kind_for(self.id);
-                                let bucket = match dribble_final_cut_kind(kind) {
-                                    DribbleMoveKind::LeftCut => 9,
-                                    DribbleMoveKind::RightCut => 3,
-                                    DribbleMoveKind::Nutmeg => 0,
+                        let bucket = match dribble_final_cut_kind(kind) {
+                            DribbleMoveKind::CarryForward
+                            | DribbleMoveKind::CarryOut
+                            | DribbleMoveKind::ProtectBall => 0,
+                            DribbleMoveKind::LeftCut => 9,
+                            DribbleMoveKind::RightCut => 3,
+                            DribbleMoveKind::Nutmeg => 0,
                                     DribbleMoveKind::FakeLeftCutRight
                                     | DribbleMoveKind::FakeRightCutLeft => 0,
                                 };
@@ -5415,22 +5544,7 @@ impl PlayerAgent {
                             continue;
                         }
                         order_names.push(format!("pass{}", rank + 1));
-                        let rank_weight = match rank {
-                            0 => 1.00,
-                            1 => 0.74,
-                            _ => 0.56,
-                        };
-                        let pass_chance = (self.preferences.pass_bias
-                            * directive.pass_priority
-                            * (0.70 + passing_skill * 0.42)
-                            * (1.0
-                                + (1.35 - observation.perceived_time_on_ball_seconds)
-                                    .max(0.0)
-                                    .min(1.0)
-                                    * 0.22)
-                            * (1.0 + observation.pass_curl_probability * 0.055)
-                            * rank_weight)
-                            .clamp(0.04, 0.97);
+                        let pass_chance = action_option_score(&action_options, pass_label);
                         if rng.next_float()
                             < time_window_probability(pass_chance, snapshot.dt_seconds)
                         {
@@ -5457,25 +5571,9 @@ impl PlayerAgent {
                             continue;
                         }
                         order_names.push(format!("aerial-pass{}", rank + 1));
-                        let rank_weight = match rank {
-                            0 => 0.82,
-                            1 => 0.62,
-                            _ => 0.48,
-                        };
                         let crossing =
                             ability01(self.skills.crossing_left.max(self.skills.crossing_right));
-                        let bypass_boost =
-                            (1.0 + observation.aerial_pass_bypass_score * 0.28).clamp(1.0, 1.28);
-                        let risk_penalty = (1.0 - observation.aerial_pass_interception_risk * 0.36)
-                            .clamp(0.60, 1.0);
-                        let pass_chance = (self.preferences.pass_bias
-                            * directive.pass_priority
-                            * (0.46 + passing_skill * 0.28 + crossing * 0.22)
-                            * bypass_boost
-                            * risk_penalty
-                            * (1.0 + observation.pass_curl_probability * 0.075)
-                            * rank_weight)
-                            .clamp(0.02, 0.76);
+                        let pass_chance = action_option_score(&action_options, pass_label);
                         if rng.next_float()
                             < time_window_probability(pass_chance, snapshot.dt_seconds)
                         {
@@ -5498,9 +5596,22 @@ impl PlayerAgent {
             let (action, action_label) = chosen.unwrap_or_else(|| {
                 let carry_to_create = shot_creation_carry_multiplier(&observation) > 1.28
                     && observation.forward_dribble_space_yards > 2.2;
-                if let Some(target) = hold_up_flank_target {
+                let patient_carry = low_pressure_patient_carry_preferred(&observation);
+                if must_shoot_near_goal(&observation, self.role)
+                    || striker_shot_window_is_qualified(&observation, self.role)
+                {
+                    (
+                        SoccerAction::Shoot {
+                            power: shot_power_for_skill(shooting_skill),
+                        },
+                        "shoot".to_string(),
+                    )
+                } else if let Some(target) = hold_up_flank_target {
                     let kind = snapshot.side_step_dribble_kind_for(self.id);
                     let bucket = match dribble_final_cut_kind(kind) {
+                        DribbleMoveKind::CarryForward
+                        | DribbleMoveKind::CarryOut
+                        | DribbleMoveKind::ProtectBall => 0,
                         DribbleMoveKind::LeftCut => 9,
                         DribbleMoveKind::RightCut => 3,
                         DribbleMoveKind::Nutmeg => 0,
@@ -5514,8 +5625,12 @@ impl PlayerAgent {
                         },
                         "hold-up-flank".to_string(),
                     )
-                } else if carry_to_create || pass_targets.is_empty() {
-                    let kind = deterministic_dribble_move_kind(snapshot.tick, self.id);
+                } else if patient_carry || carry_to_create || pass_targets.is_empty() {
+                    let kind = if patient_carry {
+                        patient_carry_dribble_kind(snapshot.tick, self.id)
+                    } else {
+                        deterministic_dribble_move_kind(snapshot.tick, self.id)
+                    };
                     let touch = snapshot.deterministic_dribble_touch_decision_for(self.id, kind);
                     (
                         SoccerAction::DribbleMove {
@@ -5904,6 +6019,9 @@ impl PlayerAgent {
                     .or_else(|| snapshot.striker_hold_up_flank_target_for(self.id))?;
                 let kind = snapshot.side_step_dribble_kind_for(self.id);
                 let bucket = match dribble_final_cut_kind(kind) {
+                    DribbleMoveKind::CarryForward
+                    | DribbleMoveKind::CarryOut
+                    | DribbleMoveKind::ProtectBall => 0,
                     DribbleMoveKind::LeftCut => 9,
                     DribbleMoveKind::RightCut => 3,
                     DribbleMoveKind::Nutmeg => 0,
@@ -5919,6 +6037,9 @@ impl PlayerAgent {
                 ))
             }
             "dribble"
+            | "carry-forward"
+            | "carry-out"
+            | "protect-ball"
             | "left-cut"
             | "right-cut"
             | "nutmeg"
@@ -5927,6 +6048,9 @@ impl PlayerAgent {
                 if observation.has_ball =>
             {
                 let kind = match label {
+                    "carry-forward" => DribbleMoveKind::CarryForward,
+                    "carry-out" => DribbleMoveKind::CarryOut,
+                    "protect-ball" => DribbleMoveKind::ProtectBall,
                     "left-cut" => DribbleMoveKind::LeftCut,
                     "right-cut" => DribbleMoveKind::RightCut,
                     "nutmeg" => DribbleMoveKind::Nutmeg,
@@ -6052,6 +6176,9 @@ pub enum SoccerAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DribbleMoveKind {
+    CarryForward,
+    CarryOut,
+    ProtectBall,
     LeftCut,
     RightCut,
     Nutmeg,
@@ -6096,6 +6223,9 @@ impl DribbleTouchDecision {
 impl DribbleMoveKind {
     fn label(self) -> &'static str {
         match self {
+            DribbleMoveKind::CarryForward => "carry-forward",
+            DribbleMoveKind::CarryOut => "carry-out",
+            DribbleMoveKind::ProtectBall => "protect-ball",
             DribbleMoveKind::LeftCut => "left-cut",
             DribbleMoveKind::RightCut => "right-cut",
             DribbleMoveKind::Nutmeg => "nutmeg",
@@ -6110,6 +6240,10 @@ impl DribbleMoveKind {
 
     fn beat_reward_points(self) -> f64 {
         match self {
+            DribbleMoveKind::CarryForward | DribbleMoveKind::CarryOut => {
+                DRIBBLE_BEAT_REWARD_POINTS * 0.72
+            }
+            DribbleMoveKind::ProtectBall => DRIBBLE_BEAT_REWARD_POINTS * 0.32,
             DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => DRIBBLE_BEAT_REWARD_POINTS,
             DribbleMoveKind::Nutmeg => NUTMEG_BEAT_REWARD_POINTS,
             DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft => {
@@ -30604,6 +30738,65 @@ fn near_goal_pass_release_multiplier(
     }
 }
 
+fn low_pressure_patience_factor(observation: &SoccerPomdpObservation) -> f64 {
+    let urgency = observation
+        .perceived_pressure
+        .max(observation.pressure_urgency)
+        .max(observation.immediate_dispossession_risk * 0.55)
+        .clamp(0.0, 1.0);
+    ((0.42 - urgency) / 0.42).clamp(0.0, 1.0)
+}
+
+fn pass_quality_for_patience(observation: &SoccerPomdpObservation, flight: PassFlight) -> f64 {
+    match flight {
+        PassFlight::Floor => (observation.expected_pass_completion.clamp(0.0, 1.0) * 0.50
+            + observation.best_pass_receiver_openness.clamp(0.0, 1.0) * 0.32
+            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.18)
+            .clamp(0.0, 1.0),
+        PassFlight::Aerial => (observation
+            .expected_aerial_pass_completion
+            .clamp(0.0, 1.0)
+            * 0.46
+            + observation
+                .best_aerial_pass_receiver_openness
+                .clamp(0.0, 1.0)
+                * 0.24
+            + observation.aerial_pass_bypass_score.clamp(0.0, 1.0) * 0.20
+            + (1.0 - observation.aerial_pass_interception_risk.clamp(0.0, 1.0)) * 0.10)
+            .clamp(0.0, 1.0),
+    }
+}
+
+fn low_pressure_pass_release_multiplier(
+    observation: &SoccerPomdpObservation,
+    flight: PassFlight,
+) -> f64 {
+    let patience = low_pressure_patience_factor(observation);
+    if patience <= 0.0 {
+        return 1.0;
+    }
+    let quality = pass_quality_for_patience(observation, flight);
+    let poor_pass = (1.0 - quality).clamp(0.0, 1.0);
+    (1.0 - patience * poor_pass * 0.78).clamp(0.22, 1.0)
+}
+
+fn low_pressure_patient_carry_multiplier(observation: &SoccerPomdpObservation) -> f64 {
+    let patience = low_pressure_patience_factor(observation);
+    if patience <= 0.0 {
+        return 1.0;
+    }
+    let poor_floor_pass = (1.0 - pass_quality_for_patience(observation, PassFlight::Floor))
+        .clamp(0.0, 1.0);
+    let carry_space = (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0);
+    (1.0 + patience * poor_floor_pass * (0.58 + carry_space * 0.78)).clamp(1.0, 1.85)
+}
+
+fn low_pressure_patient_carry_preferred(observation: &SoccerPomdpObservation) -> bool {
+    low_pressure_patience_factor(observation) >= 0.45
+        && pass_quality_for_patience(observation, PassFlight::Floor) <= 0.58
+        && observation.forward_dribble_space_yards >= 2.0
+}
+
 fn close_clear_shot_attempt_probability(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
@@ -32504,7 +32697,12 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
                 && snapshot.best_visible_pass_target(player_id).is_some()
         }
         "control-touch" => observation.has_ball && observation.first_touch_available,
-        "dribble" => observation.has_ball,
+        "dribble" | "carry-forward" | "carry-out" => observation.has_ball,
+        "protect-ball" => {
+            observation.has_ball
+                && (observation.nearest_opponent_distance <= 5.2
+                    || observation.perceived_pressure >= 0.24)
+        }
         "hold-up-flank" => {
             observation.has_ball
                 && player.role == PlayerRole::Forward
@@ -43772,6 +43970,36 @@ mod tests {
     }
 
     #[test]
+    fn shot_crossing_just_inside_configured_goalmouth_counts() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.2,
+            duration_seconds: 0.2,
+            seed: 166,
+            ..Default::default()
+        });
+        if let Some(keeper_id) = sim.goalkeeper_for(Team::Away) {
+            sim.players[keeper_id].role = PlayerRole::Defender;
+        }
+        assert!((sim.config.goal_width_yards - DEFAULT_GOAL_WIDTH_YARDS).abs() < 1e-9);
+        let goal_center_x = sim.config.field_width_yards * 0.5;
+        let inside_post_x = goal_center_x + sim.config.goal_width_yards * 0.5 - 0.05;
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(inside_post_x, sim.config.field_length_yards - 1.0);
+        sim.ball.velocity = Vec2::new(0.0, 24.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.pending_shot = Some(PendingShot {
+            team: Team::Home,
+            shooter: 9,
+            origin: sim.ball.position,
+        });
+
+        sim.integrate_ball();
+
+        assert_eq!(sim.score_home, 1);
+        assert_eq!(sim.stats.shots_on_target_home, 1);
+    }
+
+    #[test]
     fn tackle_resolution_is_probabilistic_between_dribbling_and_defense() {
         let mut tackle_wins = 0;
         let mut dribble_survives = 0;
@@ -44325,6 +44553,94 @@ mod tests {
             open_key.best_pass_receiver_openness_bin > marked_key.best_pass_receiver_openness_bin
         );
         assert!(open_key.expected_pass_completion_bin > marked_key.expected_pass_completion_bin);
+    }
+
+    #[test]
+    fn low_pressure_marked_receiver_favors_carry_over_forced_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2261,
+            ..Default::default()
+        });
+        let passer = 6;
+        let receiver = 9;
+        let marker = 12;
+        park_players_except(&mut sim, &[passer, receiver, marker]);
+        sim.players[passer].position = Vec2::new(40.0, 64.0);
+        sim.players[passer].home_position = sim.players[passer].position;
+        sim.players[passer].velocity = Vec2::new(0.0, 1.6);
+        sim.players[passer].skills.dribbling = 7.4;
+        sim.players[passer].skills.passing_completion_rate = 7.0;
+        sim.players[passer].skills.decision_noise = 0.0;
+        sim.players[passer].preferences.dribble_bias = 0.76;
+        sim.players[passer].preferences.pass_bias = 1.0;
+        sim.players[receiver].position = Vec2::new(54.0, 82.0);
+        sim.players[receiver].velocity = Vec2::new(0.0, 1.0);
+        sim.players[marker].position = Vec2::new(57.0, 82.5);
+        sim.players[marker].velocity = Vec2::zero();
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(passer);
+        assert!(
+            observation.perceived_pressure < 0.18,
+            "holder should have time: pressure={}",
+            observation.perceived_pressure
+        );
+        assert!(
+            observation.visible_pass_options >= 1,
+            "test should expose a visible pass target"
+        );
+        assert!(
+            low_pressure_patient_carry_preferred(&observation),
+            "marked receiver should make patience carry preferred: completion={} openness={} lane={} space={}",
+            observation.expected_pass_completion,
+            observation.best_pass_receiver_openness,
+            observation.floor_pass_lane_score,
+            observation.forward_dribble_space_yards
+        );
+
+        let pass_targets = snapshot.ranked_visible_pass_targets(passer, 3);
+        let options = sim.players[passer].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            pass_targets.len(),
+            0,
+            false,
+            snapshot.dt_seconds,
+        );
+        let dribble_score = action_option_score(&options, "dribble");
+        let pass_score = action_option_score(&options, "pass1");
+        assert!(
+            dribble_score > pass_score * 1.6,
+            "patient carry should outrank forced pass: dribble={dribble_score} pass={pass_score}"
+        );
+
+        let mut dribble_count = 0;
+        let mut pass_count = 0;
+        let trials = 80;
+        for seed in 0..trials {
+            let mut player = sim.players[passer].clone();
+            let mut rng = mulberry32(26_000 + seed);
+            let intent = player.run_time_step(&snapshot, None, None, &mut rng);
+            match intent.action {
+                SoccerAction::DribbleMove { .. } => dribble_count += 1,
+                SoccerAction::Pass { .. } => pass_count += 1,
+                _ => {}
+            }
+        }
+
+        assert!(
+            dribble_count >= 45,
+            "low-pressure bad-pass context should carry often, got {dribble_count}/{trials}"
+        );
+        assert!(
+            pass_count <= 12,
+            "forced passes should be rare when holder has time, got {pass_count}/{trials}"
+        );
     }
 
     #[test]
@@ -45958,6 +46274,91 @@ mod tests {
                 intent.action
             );
         }
+    }
+
+    #[test]
+    fn teammate_inside_twenty_five_suppresses_backward_pass_outlet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2226,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let backward_target = 9;
+        let keeper = 11;
+        let pressure_defender = 13;
+        park_players_except(
+            &mut sim,
+            &[attacker, backward_target, keeper, pressure_defender],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 96.5);
+        sim.players[attacker].velocity = Vec2::new(0.0, -1.0);
+        sim.players[attacker].skills.shooting = 7.6;
+        sim.players[attacker].skills.right_foot_shot_power = 7.8;
+        sim.players[attacker].skills.left_foot_shot_power = 7.2;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.72;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.80;
+        sim.players[backward_target].position = Vec2::new(39.5, 84.0);
+        sim.players[backward_target].velocity = Vec2::new(0.0, 1.0);
+        sim.players[keeper].position = Vec2::new(38.5, 116.0);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.players[pressure_defender].position = Vec2::new(47.0, 96.0);
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(must_shoot_near_goal(
+            &observation,
+            sim.players[attacker].role
+        ));
+        let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+        assert!(
+            pass_targets.contains(&backward_target),
+            "test should include the backward outlet, got {pass_targets:?}"
+        );
+        let options = sim.players[attacker].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            pass_targets.len(),
+            0,
+            false,
+            snapshot.dt_seconds,
+        );
+        let shoot_score = action_option_score(&options, "shoot");
+        let pass_score = action_option_score(&options, "pass1");
+        assert!(
+            shoot_score > pass_score * 6.0,
+            "shoot score {shoot_score} should swamp backward pass score {pass_score}"
+        );
+
+        let mut shoot_count = 0;
+        let mut pass_count = 0;
+        let trials = 80;
+        for seed in 0..trials {
+            let mut player = sim.players[attacker].clone();
+            let mut rng = mulberry32(24_000 + seed);
+            let intent = player.run_time_step(&snapshot, None, None, &mut rng);
+            match intent.action {
+                SoccerAction::Shoot { .. } => shoot_count += 1,
+                SoccerAction::Pass { .. } => pass_count += 1,
+                _ => {}
+            }
+        }
+
+        assert!(
+            shoot_count >= 72,
+            "near-goal teammate should shoot instead of recycling, got {shoot_count}/{trials}"
+        );
+        assert!(
+            pass_count <= 1,
+            "backward outlet should be rare in the shooting window, got {pass_count}/{trials}"
+        );
     }
 
     #[test]

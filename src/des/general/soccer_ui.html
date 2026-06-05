@@ -393,6 +393,9 @@ const loadingBar = document.getElementById("loadingBar");
 const loadingStatus = document.getElementById("loadingStatus");
 const loadingBytes = document.getElementById("loadingBytes");
 const keys = new Set();
+const MOVE_KEY_CODES = new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD"]);
+const SPRINT_KEY_CODES = new Set(["ShiftLeft","ShiftRight"]);
+const HUMAN_ACTION_KEY_CODES = new Set(["Enter","Space"]);
 let frameIndex = 0;
 let playing = false;
 let lastTs = 0;
@@ -421,12 +424,18 @@ function loadedFrameRate() {
   const seconds = Math.max(.25, (performance.now() - loadStartedAt) / 1000);
   return trace.frames.length / seconds;
 }
+function expectedFrameCount() {
+  const ticks = Number(trace.summary?.ticks || 0);
+  return Math.max(ticks, trace.frames.length, 0);
+}
+function bufferedSeconds() {
+  return trace.frames.length * Number(trace.config.dtSeconds || 0.1);
+}
 function canStartPlayback() {
   if (trace.frames.length < 2) return false;
   if (traceFramesComplete) return true;
   const fps = 10 * Number(speed.value || 1);
-  const bufferedSeconds = trace.frames.length * Number(trace.config.dtSeconds || 0.1);
-  return bufferedSeconds >= 3 && loadedFrameRate() > fps * 1.25;
+  return bufferedSeconds() >= 3 && loadedFrameRate() > fps * 1.25;
 }
 function setControlsEnabled(enabled) {
   play.disabled = !enabled;
@@ -454,12 +463,18 @@ function updatePlaybackAvailability() {
   }
 }
 function updateLoadingProgress(loadedBytes = 0, totalBytes = 0, message = "Loading match data") {
-  const percent = totalBytes > 0 ? Math.min(100, loadedBytes / totalBytes * 100) : 0;
-  loadingBar.style.width = totalBytes > 0 ? `${percent.toFixed(1)}%` : "18%";
-  loadingStatus.textContent = `${message}; ${trace.frames.length} frames buffered`;
+  const expectedFrames = expectedFrameCount();
+  const framePercent = expectedFrames > 0 ? Math.min(100, trace.frames.length / expectedFrames * 100) : 0;
+  const bytePercent = totalBytes > 0 ? Math.min(100, loadedBytes / totalBytes * 100) : 0;
+  const percent = totalBytes > 0 ? bytePercent : framePercent;
+  loadingBar.style.width = `${Math.max(percent, trace.frames.length ? 4 : 1).toFixed(1)}%`;
+  const ready = canStartPlayback() && !traceFramesComplete ? "Playback ready" : message;
+  const rate = loadedFrameRate();
+  loadingStatus.textContent = `${ready}; ${trace.frames.length}/${expectedFrames || "?"} frames; ${bufferedSeconds().toFixed(1)}s buffered; ${rate.toFixed(1)} fps incoming`;
+  const frameProgress = expectedFrames > 0 ? `${trace.frames.length} / ${expectedFrames} frames` : `${trace.frames.length} frames`;
   loadingBytes.textContent = totalBytes > 0
-    ? `${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)}`
-    : `${formatBytes(loadedBytes)}`;
+    ? `${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)}; ${frameProgress}`
+    : `${formatBytes(loadedBytes)} streamed; ${frameProgress}`;
   updatePlaybackAvailability();
 }
 function hideLoadingOverlay() {
@@ -692,6 +707,15 @@ function drawOfficial(o, r) {
   ctx.strokeStyle = "#fff";
   ctx.lineWidth = 1;
   ctx.stroke();
+  const motion = norm(fieldDirToCanvas(o.velocity || {x: 0, y: 0}, r));
+  if (motion.x || motion.y) {
+    ctx.beginPath();
+    ctx.moveTo(pt.x, pt.y);
+    ctx.lineTo(pt.x + motion.x * 13, pt.y + motion.y * 13);
+    ctx.strokeStyle = "rgba(255,255,255,.72)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
 }
 function drawBall(ball, r) {
   const pt = mapPoint(ball.position, r);
@@ -764,6 +788,26 @@ function selectedPlayer(slot) {
 }
 function selectedPassTarget() {
   return passTarget.value === "" ? null : Number(passTarget.value);
+}
+function selectedPlayerSnapshot() {
+  const frame = currentFrame();
+  const playerId = selectedPlayer(activeSlot);
+  return frame && playerId != null ? frame.players.find(p => p.id === playerId) || null : null;
+}
+function selectedPlayerCanShoot() {
+  const frame = currentFrame();
+  const p = selectedPlayerSnapshot();
+  if (!frame || !p || frame.ball?.holder !== p.id) return false;
+  const config = trace.config || FALLBACK_CONFIG;
+  const goalY = p.team === "Home" ? Number(config.fieldLengthYards || 120) : 0;
+  return Math.abs(goalY - Number(p.position?.y || 0)) <= 20;
+}
+function pushActionInput(forceShoot = false) {
+  const shoot = forceShoot
+    || keys.has("ShiftLeft")
+    || keys.has("ShiftRight")
+    || selectedPlayerCanShoot();
+  pushInput(!shoot, shoot);
 }
 function pushInput(pass = false, shoot = false) {
   const axis = {x: 0, y: 0};
@@ -935,14 +979,20 @@ document.getElementById("pass").addEventListener("click", () => pushInput(true, 
 document.getElementById("shoot").addEventListener("click", () => pushInput(false, true));
 window.addEventListener("keydown", e => {
   keys.add(e.code);
-  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","ShiftLeft","ShiftRight"].includes(e.code)) {
+  if (MOVE_KEY_CODES.has(e.code) || SPRINT_KEY_CODES.has(e.code)) {
     e.preventDefault();
     pushInput(false, false);
+  } else if (HUMAN_ACTION_KEY_CODES.has(e.code)) {
+    e.preventDefault();
+    if (!e.repeat) pushActionInput(e.code === "Space");
   }
 });
 window.addEventListener("keyup", e => {
   keys.delete(e.code);
-  pushInput(false, false);
+  if (MOVE_KEY_CODES.has(e.code) || SPRINT_KEY_CODES.has(e.code)) {
+    e.preventDefault();
+    pushInput(false, false);
+  }
 });
 setControlsEnabled(false);
 updateMetrics();

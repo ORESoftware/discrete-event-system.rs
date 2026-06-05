@@ -9026,13 +9026,14 @@ impl Driver {
             "required_elements": ["objective"]
         });
         for tool in ["jing", "saxon"] {
+            let expected_validator = format!("builtin:schematron-structural-for-{tool}");
             let xml_rule_run =
                 run_output_validation_json_with_rust_reference(&xml_rule_payload, tool);
             self.check(
                 format!("External validation {tool} XML rule bridge registered-tool payload"),
                 xml_rule_run["status"].as_str() == Some("ok")
                     && xml_rule_run["verdict"].as_str() == Some("valid")
-                    && xml_rule_run["validator"].as_str() == Some("builtin:schematron-structural"),
+                    && xml_rule_run["validator"].as_str() == Some(expected_validator.as_str()),
                 format!(
                     "status={} verdict={} validator={}",
                     xml_rule_run["status"].as_str().unwrap_or(""),

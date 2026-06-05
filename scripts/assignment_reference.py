@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Reference bridge for small linear-sum assignment instances.
 
-The deterministic oracle is an exact dynamic program over row assignments.
-When OR-Tools is installed and the costs can be safely integer-scaled, the
-same input is also sent to OR-Tools SimpleLinearSumAssignment. SciPy's
-linear_sum_assignment is used as another open-source reference when present.
+The deterministic exact DP oracle lives in Rust. This Python bridge remains as
+adapter glue for explicit OR-Tools SimpleLinearSumAssignment and SciPy
+linear_sum_assignment checks when those packages are installed.
 """
 
 from __future__ import annotations
@@ -12,12 +11,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
-from functools import lru_cache
 from typing import Optional
 
 
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "assignment_reference"
+    explicit = os.environ.get("ASSIGNMENT_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if os.path.exists(local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
 
 
 def normalize(raw: dict) -> list[list[float]]:
@@ -52,41 +68,6 @@ def result(
         "objective": None if objective is None else float(objective),
         "message": message,
     }
-
-
-def exact_assignment(cost: list[list[float]]) -> dict:
-    rows = len(cost)
-    cols = len(cost[0])
-
-    @lru_cache(maxsize=None)
-    def solve(row: int, used_mask: int) -> tuple[float, tuple[int, ...]]:
-        if row == rows:
-            return 0.0, ()
-        best_cost = math.inf
-        best_assignment: tuple[int, ...] = ()
-        for col in range(cols):
-            if used_mask & (1 << col):
-                continue
-            tail_cost, tail_assignment = solve(row + 1, used_mask | (1 << col))
-            candidate = cost[row][col] + tail_cost
-            candidate_assignment = (col,) + tail_assignment
-            if candidate < best_cost - 1e-12 or (
-                abs(candidate - best_cost) <= 1e-12 and candidate_assignment < best_assignment
-            ):
-                best_cost = candidate
-                best_assignment = candidate_assignment
-        return best_cost, best_assignment
-
-    objective, assignment_tuple = solve(0, 0)
-    if not math.isfinite(objective):
-        return result("infeasible", "python:assignment-dp", message="no assignment")
-    return result(
-        "optimal",
-        "python:assignment-dp",
-        assignment=list(assignment_tuple),
-        objective=objective,
-        message="exact assignment dynamic program",
-    )
 
 
 def choose_scale(values: list[float]) -> Optional[int]:
@@ -162,47 +143,27 @@ def scipy_assignment(cost: list[list[float]]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "scipy", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "scipy", "fallback", "rust-dp", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-dp", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         cost = normalize(json.load(sys.stdin))
-        exact = exact_assignment(cost)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "infeasible") else 1
-
-        ortools = ortools_assignment(cost)
-        scipy = scipy_assignment(cost)
         if args.solver == "ortools":
-            output = dict(ortools)
-            output["referenceStatus"] = exact.get("status")
-            output["referenceObjective"] = exact.get("objective")
+            output = ortools_assignment(cost)
             print(json.dumps(output))
             return 0 if output["status"] in ("optimal", "infeasible", "unsupported", "unavailable") else 1
         if args.solver == "scipy":
-            output = dict(scipy)
-            output["referenceStatus"] = exact.get("status")
-            output["referenceObjective"] = exact.get("objective")
+            output = scipy_assignment(cost)
             print(json.dumps(output))
             return 0 if output["status"] in ("optimal", "infeasible", "unavailable") else 1
 
-        output = dict(exact)
-        output["solver"] = (
-            "ortools:simple-linear-sum-assignment+python:assignment-dp"
-            if ortools.get("status") != "unavailable"
-            else "python:assignment-dp"
-        )
-        output["ortoolsStatus"] = ortools.get("status")
-        output["ortoolsAssignment"] = ortools.get("assignment", [])
-        output["ortoolsObjective"] = ortools.get("objective")
-        output["ortoolsMessage"] = ortools.get("message", "")
-        output["scipyStatus"] = scipy.get("status")
-        output["scipyAssignment"] = scipy.get("assignment", [])
-        output["scipyObjective"] = scipy.get("objective")
-        output["scipyMessage"] = scipy.get("message", "")
-        print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "infeasible") else 1
+        raise ValueError(f"unsupported solver {args.solver}")
     except Exception as exc:
         print(
             json.dumps(

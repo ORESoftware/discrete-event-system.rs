@@ -132,11 +132,11 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   header { padding: 18px 22px; background: #0f172a; color: #f8fafc; }
   header h1 { margin: 0; font-size: 19px; font-weight: 650; }
   header p { margin: 4px 0 0; color: #94a3b8; font-size: 13px; }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 18px 22px 60px; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 22px 60px; }
   .panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
   .panel h2 { margin: 0 0 10px; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #64748b; }
-  .stage { width: 100%; min-height: 120px; display: flex; align-items: center; justify-content: center; }
-  .stage-svg { width: 100%; max-height: 460px; background: #fff; }
+  .stage { width: 100%; min-height: 120px; display: flex; align-items: stretch; justify-content: center; }
+  .stage-svg { width: 100%; height: auto; background: #fff; }
   .chart-svg { width: 100%; height: auto; }
   .caption { margin-top: 8px; text-align: center; color: #475569; font-size: 13px; min-height: 18px; }
   .transport { display: grid; grid-template-columns: repeat(4, max-content) 30ch minmax(220px, 1fr); align-items: center; gap: 10px; }

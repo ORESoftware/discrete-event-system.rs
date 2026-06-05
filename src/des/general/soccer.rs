@@ -14398,7 +14398,11 @@ fn playback_intent_priority(
         "shoot" | "first-time-shot" | "first-time-header" => Some(110.0 + holder_bonus),
         "pass" | "aerial-pass" | "first-time-pass" => Some(104.0 + holder_bonus),
         "clearance" | "route-one" => Some(98.0 + holder_bonus),
-        "left-cut" | "right-cut" | "nutmeg" | "fake-left-cut-right" | "fake-right-cut-left"
+        "left-cut"
+        | "right-cut"
+        | "nutmeg"
+        | "fake-left-cut-right"
+        | "fake-right-cut-left"
         | "hold-up-flank" => Some(92.0 + holder_bonus),
         "space" if possession_team == Some(player.team) => {
             let role_bonus = match player.role {
@@ -37973,6 +37977,49 @@ mod tests {
     }
 
     #[test]
+    fn pass_decision_target_records_receiver_stride_not_static_feet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        sim.players[winger].velocity = Vec2::new(1.8, 4.2);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(34.0, 82.0 + (away - 11) as f64 * 0.7);
+        }
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let speed =
+            pass_speed_yps_from_power(0.72, PassFlight::Floor, false, &sim.players[passer].skills);
+        let anticipated = snapshot
+            .anticipated_pass_reception_point(passer, winger, PassFlight::Floor, speed)
+            .expect("anticipated receiver stride");
+        let action = SoccerAction::Pass {
+            target_player: Some(winger),
+            power: 0.72,
+            flight: PassFlight::Floor,
+        };
+        let target = sim.players[passer]
+            .action_target_trace(&action, &snapshot)
+            .expect("pass action target")
+            .point
+            .expect("pass target point");
+
+        assert!(
+            target.distance(anticipated) < 1e-9,
+            "decision trace should record anticipated pass target: target={target:?}, anticipated={anticipated:?}"
+        );
+        assert!(
+            target.distance(sim.players[winger].position) > 0.5,
+            "pass target should lead the receiver, not target static feet: {target:?}"
+        );
+    }
+
+    #[test]
     fn possession_shape_pushes_back_four_up_and_staggers_midfield_pair() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 7;
@@ -41782,10 +41829,30 @@ mod tests {
         assert!(!first_frame["players"][0].get("lastDecision").is_some());
         assert!(!first_frame.get("sharedPositions").is_some());
         assert!(!first_frame.get("agentSchedule").is_some());
+        let frames = jsonl
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("playback json"))
+            .collect::<Vec<_>>();
+        let intent_frame = frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .get("intents")
+                    .and_then(|intents| intents.as_array())
+                    .is_some_and(|intents| !intents.is_empty())
+            })
+            .expect("at least one playback frame should expose slim tactical intents");
+        let first_intent = intent_frame["intents"]
+            .as_array()
+            .and_then(|intents| intents.first())
+            .expect("intent entry");
+        assert!(first_intent.get("targetPoint").is_some());
+        assert!(first_intent.get("urgency").is_some());
+        let max_line_len = jsonl.lines().map(str::len).max().unwrap_or(0);
         assert!(
-            first_line.len() < 18_000,
-            "playback frame should stay mobile-sized, got {} bytes",
-            first_line.len()
+            max_line_len < 18_000,
+            "playback frames should stay mobile-sized, got {} bytes",
+            max_line_len
         );
     }
 

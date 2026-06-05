@@ -4088,6 +4088,35 @@ fn loose_long_ball_altitude_yards(speed_yps: f64) -> f64 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UntargetedLongBallFlight {
+    origin: Vec2,
+    target: Vec2,
+    launch_speed_yps: f64,
+    distance_yards: f64,
+}
+
+fn untargeted_long_ball_altitude_yards(
+    flight: &UntargetedLongBallFlight,
+    ball_position: Vec2,
+    current_speed_yps: f64,
+) -> f64 {
+    let path = flight.target - flight.origin;
+    let denom = path.x * path.x + path.y * path.y;
+    if denom <= 1e-9 || current_speed_yps < 4.0 {
+        return 0.0;
+    }
+    let progress = dot(ball_position - flight.origin, path) / denom;
+    if progress <= 0.0 || progress >= 1.0 {
+        return 0.0;
+    }
+    let carry_speed = flight.launch_speed_yps.max(current_speed_yps);
+    let apex = (3.8 + flight.distance_yards.max(0.0) * 0.075 + carry_speed * 0.045)
+        .clamp(4.5, 14.0);
+    (std::f64::consts::PI * progress).sin().max(0.0) * apex
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerAgent {
@@ -6884,6 +6913,8 @@ pub struct BallAgent {
     pub last_decision: Option<BallDecisionTrace>,
     #[serde(default)]
     untargeted_long_ball_launcher: Option<(usize, u64)>,
+    #[serde(default)]
+    untargeted_long_ball_flight: Option<UntargetedLongBallFlight>,
 }
 
 impl BallAgent {
@@ -6910,6 +6941,7 @@ impl BallAgent {
             last_touch_team: state.last_touch_team,
             last_decision: None,
             untargeted_long_ball_launcher: None,
+            untargeted_long_ball_flight: None,
         }
     }
 
@@ -7022,6 +7054,7 @@ impl BallAgent {
                 }
             }
             self.untargeted_long_ball_launcher = None;
+            self.untargeted_long_ball_flight = None;
             return BallStepOutcome::None;
         }
 
@@ -7041,7 +7074,12 @@ impl BallAgent {
             .untargeted_long_ball_team(context.pending_pass.as_ref())
             .is_some()
         {
-            loose_long_ball_altitude_yards(self.velocity.len())
+            self.untargeted_long_ball_flight
+                .as_ref()
+                .map(|flight| {
+                    untargeted_long_ball_altitude_yards(flight, self.position, self.velocity.len())
+                })
+                .unwrap_or_else(|| loose_long_ball_altitude_yards(self.velocity.len()))
         } else {
             0.0
         };
@@ -7055,6 +7093,7 @@ impl BallAgent {
             self.curl_acceleration = Vec2::zero();
             self.altitude_yards = 0.0;
             self.untargeted_long_ball_launcher = None;
+            self.untargeted_long_ball_flight = None;
         }
 
         if let Some(shot) = context.pending_shot.as_ref() {
@@ -7140,6 +7179,8 @@ impl BallAgent {
                     self.velocity = velocity;
                     self.curl_acceleration = Vec2::zero();
                     self.altitude_yards = 0.0;
+                    self.untargeted_long_ball_flight = None;
+                    self.untargeted_long_ball_launcher = None;
                     self.holder = None;
                     self.last_touch_team = Some(assessment.defending_team);
                     self.record_decision(context.tick, "shot-blocked", context.scheduled_index);
@@ -7181,6 +7222,8 @@ impl BallAgent {
                 self.velocity = Vec2::zero();
                 self.curl_acceleration = Vec2::zero();
                 self.altitude_yards = 0.0;
+                self.untargeted_long_ball_flight = None;
+                self.untargeted_long_ball_launcher = None;
                 self.holder = None;
                 self.last_touch_team = Some(awarded_team);
                 self.record_decision(context.tick, "throw-in", context.scheduled_index);
@@ -7251,6 +7294,8 @@ impl BallAgent {
                             self.velocity = Vec2::zero();
                             self.curl_acceleration = Vec2::zero();
                             self.altitude_yards = 0.0;
+                            self.untargeted_long_ball_flight = None;
+                            self.untargeted_long_ball_launcher = None;
                             self.last_touch_team = Some(defending_team);
                             self.record_decision(context.tick, "save", context.scheduled_index);
                             return BallStepOutcome::Save {
@@ -7310,6 +7355,8 @@ impl BallAgent {
             self.velocity = Vec2::zero();
             self.curl_acceleration = Vec2::zero();
             self.altitude_yards = 0.0;
+            self.untargeted_long_ball_flight = None;
+            self.untargeted_long_ball_launcher = None;
             self.holder = None;
             self.last_touch_team = Some(awarded_team);
             let action = match kind {
@@ -24431,6 +24478,12 @@ impl SoccerMatch {
         self.ball.altitude_yards = 0.05;
         self.ball.last_touch_team = Some(player_team);
         self.ball.untargeted_long_ball_launcher = Some((player_id, self.tick));
+        self.ball.untargeted_long_ball_flight = Some(UntargetedLongBallFlight {
+            origin: player_pos,
+            target,
+            launch_speed_yps: speed,
+            distance_yards: player_pos.distance(target),
+        });
         self.players[player_id].incoming_ball = None;
         self.pending_pass = None;
         self.pending_shot = None;

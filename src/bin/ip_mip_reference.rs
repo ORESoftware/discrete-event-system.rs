@@ -2813,7 +2813,14 @@ fn run(args: &Args, input: &str) -> Result<Value, CliError> {
     let solver = args.solver.as_str();
     if !matches!(
         solver,
-        "auto" | "brute-force" | "enumeration" | "rust-enumeration"
+        "auto"
+            | "brute-force"
+            | "enumeration"
+            | "rust-enumeration"
+            | "ortools"
+            | "ortools-cp-sat"
+            | "scipy"
+            | "scipy-milp"
     ) {
         return Ok(error_json(format!(
             "unknown or unavailable solver '{}'",
@@ -2934,6 +2941,25 @@ mod tests {
         assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
         assert_eq!(output["result"]["x"], json!([1.0, 0.0]));
         assert_eq!(output["result"]["objective"], 3.0);
+    }
+
+    #[test]
+    fn external_solver_names_alias_to_rust_enumeration() {
+        let output = run(
+            &Args {
+                problem: None,
+                out: None,
+                solver: "ortools".to_string(),
+                max_enumerations: 100,
+                pool_size: None,
+            },
+            BINARY_SAMPLE,
+        )
+        .expect("run");
+
+        assert_eq!(output["result"]["status"], "optimal");
+        assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
+        assert_eq!(output["result"]["x"], json!([1.0, 0.0]));
     }
 
     #[test]

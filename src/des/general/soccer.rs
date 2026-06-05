@@ -1945,8 +1945,10 @@ fn annotate_human_control_observation(
     controller_slot: Option<usize>,
     human_input: Option<&HumanInputFrame>,
 ) {
-    observation.controller_slot = controller_slot.or(observation.controller_slot);
-    observation.human_controlled = observation.controller_slot.is_some();
+    observation.controller_slot = controller_slot
+        .or(observation.controller_slot)
+        .or_else(|| human_input.map(|input| input.controller_slot));
+    observation.human_controlled = observation.controller_slot.is_some() || human_input.is_some();
     if let Some(input) = human_input {
         observation.human_input_present = true;
         observation.human_input_seq = Some(input.seq);

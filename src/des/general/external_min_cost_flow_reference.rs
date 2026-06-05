@@ -1,13 +1,11 @@
 //! Rust-facing bridge for external/reference min-cost-flow solvers.
 //!
 //! The native Rust reference computes a deterministic successive-shortest-path
-//! check without Python startup. The checked-in Python bridge
-//! (`scripts/min_cost_flow_reference.py`) remains available for OR-Tools
-//! SimpleMinCostFlow on an integer-scaled, lower-bound-normalized copy of the
-//! same input.
+//! check without Python startup. Explicit OR-Tools SimpleMinCostFlow validation
+//! is launched from Rust with a tiny Python adapter over an integer-scaled,
+//! lower-bound-normalized copy of the same input.
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -185,6 +183,96 @@ fn status_from_min_cost_flow_status(
 }
 
 const RUST_MIN_COST_FLOW_EPS: f64 = 1e-9;
+const ORTOOLS_INTEGER_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_MIN_COST_FLOW_SOLVER: &str = "ortools:simple-min-cost-flow";
+
+const ORTOOLS_MIN_COST_FLOW_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:simple-min-cost-flow"
+
+
+def result(status, objective=None, flows=None, node_balance=None, message=""):
+    return {
+        "status": status,
+        "solver": SOLVER,
+        "objective": objective,
+        "flows": [] if flows is None else flows,
+        "nodeBalance": [] if node_balance is None else node_balance,
+        "iterations": None,
+        "message": message,
+    }
+
+
+try:
+    from ortools.graph.python import min_cost_flow
+except Exception as exc:
+    print(json.dumps(result(
+        "unavailable",
+        message=f"OR-Tools SimpleMinCostFlow unavailable: {exc}",
+    )))
+    sys.exit(0)
+
+
+def status_name(status):
+    return str(status).split(".")[-1].lower()
+
+
+try:
+    problem = json.load(sys.stdin)
+    flow_scale = float(problem["flowScale"])
+    cost_scale = float(problem["costScale"])
+    solver = min_cost_flow.SimpleMinCostFlow()
+    for arc in problem["arcs"]:
+        solver.add_arc_with_capacity_and_unit_cost(
+            int(arc["from"]),
+            int(arc["to"]),
+            int(arc["scaledCapacity"]),
+            int(arc["scaledCost"]),
+        )
+    for node, supply in enumerate(problem["scaledSupplies"]):
+        solver.set_node_supply(node, int(supply))
+
+    status = solver.solve()
+    mapped = status_name(status)
+    if status != solver.OPTIMAL:
+        print(json.dumps(result(
+            mapped,
+            message=f"OR-Tools SimpleMinCostFlow status {mapped}",
+        )))
+        sys.exit(0)
+
+    flows = []
+    for index, arc in enumerate(problem["arcs"]):
+        flow = float(arc["lowerBound"]) + solver.flow(index) / flow_scale
+        flows.append({
+            "from": int(arc["from"]),
+            "to": int(arc["to"]),
+            "lowerBound": float(arc["lowerBound"]),
+            "capacity": float(arc["capacity"]),
+            "cost": float(arc["cost"]),
+            "flow": flow,
+            "name": arc.get("name"),
+        })
+    node_balance = [0.0 for _ in range(int(problem["numNodes"]))]
+    for arc, flow in zip(problem["arcs"], flows):
+        node_balance[int(arc["from"])] += flow["flow"]
+        node_balance[int(arc["to"])] -= flow["flow"]
+    objective = float(problem["baseCost"]) + solver.optimal_cost() / (
+        flow_scale * cost_scale
+    )
+    print(json.dumps(result(
+        "optimal",
+        objective=objective,
+        flows=flows,
+        node_balance=node_balance,
+        message="OR-Tools SimpleMinCostFlow",
+    )))
+except Exception as exc:
+    print(json.dumps(result("error", message=str(exc))))
+    sys.exit(1)
+"#;
 
 fn validate_rust_min_cost_flow_problem(problem: &MinCostFlowProblem) -> Result<(), String> {
     if problem.num_nodes == 0 {
@@ -305,51 +393,88 @@ fn solve_min_cost_flow_with_rust_reference(
     }
 }
 
-fn unavailable(
+fn ortools_empty_solution(
+    status: ExternalMinCostFlowReferenceStatus,
     message: impl Into<String>,
     elapsed_ms: f64,
 ) -> ExternalMinCostFlowReferenceSolution {
-    ExternalMinCostFlowReferenceSolution {
-        status: ExternalMinCostFlowReferenceStatus::Unavailable,
-        solver: "external-min-cost-flow-reference".to_string(),
-        objective: None,
-        flows: Vec::new(),
-        node_balance: Vec::new(),
-        iterations: None,
-        ortools_status: None,
-        ortools_objective: None,
-        ortools_flows: Vec::new(),
-        ortools_node_balance: Vec::new(),
-        message: message.into(),
-        elapsed_ms,
+    rust_min_cost_flow_empty_solution(status, ORTOOLS_MIN_COST_FLOW_SOLVER, message, elapsed_ms)
+}
+
+fn scaled_ortools_value(value: f64, scale: i64) -> Option<i64> {
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled.abs() > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (rounded - scaled).abs() <= 1e-6 {
+        Some(rounded as i64)
+    } else {
+        None
     }
 }
 
-fn numerical_error(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalMinCostFlowReferenceSolution {
-    ExternalMinCostFlowReferenceSolution {
-        status: ExternalMinCostFlowReferenceStatus::NumericalError,
-        solver: "external-min-cost-flow-reference".to_string(),
-        objective: None,
-        flows: Vec::new(),
-        node_balance: Vec::new(),
-        iterations: None,
-        ortools_status: None,
-        ortools_objective: None,
-        ortools_flows: Vec::new(),
-        ortools_node_balance: Vec::new(),
-        message: message.into(),
-        elapsed_ms,
-    }
+fn choose_ortools_flow_scale(problem: &MinCostFlowProblem) -> Option<i64> {
+    ORTOOLS_INTEGER_SCALES.into_iter().find(|scale| {
+        problem
+            .supplies
+            .iter()
+            .all(|value| scaled_ortools_value(*value, *scale).is_some())
+            && problem.arcs.iter().all(|arc| {
+                scaled_ortools_value(arc.lower_bound, *scale).is_some()
+                    && scaled_ortools_value(arc.capacity, *scale).is_some()
+                    && scaled_ortools_value(arc.capacity - arc.lower_bound, *scale).is_some()
+            })
+    })
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("min_cost_flow_reference.py")
+fn choose_ortools_cost_scale(problem: &MinCostFlowProblem) -> Option<i64> {
+    ORTOOLS_INTEGER_SCALES.into_iter().find(|scale| {
+        problem
+            .arcs
+            .iter()
+            .all(|arc| scaled_ortools_value(arc.cost, *scale).is_some())
+    })
+}
+
+fn ortools_min_cost_flow_payload(
+    problem: &MinCostFlowProblem,
+    flow_scale: i64,
+    cost_scale: i64,
+) -> Value {
+    let mut adjusted_supply = problem.supplies.clone();
+    let mut base_cost = 0.0;
+    for arc in &problem.arcs {
+        adjusted_supply[arc.from] -= arc.lower_bound;
+        adjusted_supply[arc.to] += arc.lower_bound;
+        base_cost += arc.lower_bound * arc.cost;
+    }
+    json!({
+        "numNodes": problem.num_nodes,
+        "flowScale": flow_scale,
+        "costScale": cost_scale,
+        "baseCost": base_cost,
+        "scaledSupplies": adjusted_supply.iter().map(|supply| {
+            scaled_ortools_value(*supply, flow_scale)
+                .expect("flow scale chosen for adjusted supplies")
+        }).collect::<Vec<_>>(),
+        "arcs": problem.arcs.iter().map(|arc| {
+            json!({
+                "from": arc.from,
+                "to": arc.to,
+                "lowerBound": arc.lower_bound,
+                "capacity": arc.capacity,
+                "cost": arc.cost,
+                "scaledCapacity": scaled_ortools_value(
+                    arc.capacity - arc.lower_bound,
+                    flow_scale,
+                ).expect("flow scale chosen for residual arc capacity"),
+                "scaledCost": scaled_ortools_value(arc.cost, cost_scale)
+                    .expect("cost scale chosen for arc cost"),
+                "name": &arc.name,
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn min_cost_flow_reference_timeout_ms() -> u64 {
@@ -379,26 +504,48 @@ fn wait_for_min_cost_flow_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll min_cost_flow_reference.py: {err}")),
+            Err(err) => {
+                return Err(format!(
+                    "failed to poll OR-Tools min-cost-flow adapter: {err}"
+                ))
+            }
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for min_cost_flow_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools min-cost-flow adapter: {err}"))
 }
 
-fn run_min_cost_flow_reference_json(
-    payload: Value,
-    opts: &ExternalMinCostFlowReferenceOptions,
+fn run_ortools_min_cost_flow_reference(
+    problem: &MinCostFlowProblem,
 ) -> ExternalMinCostFlowReferenceSolution {
     let started = Instant::now();
+    if let Err(message) = validate_rust_min_cost_flow_problem(problem) {
+        return ortools_empty_solution(
+            ExternalMinCostFlowReferenceStatus::NumericalError,
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let Some(flow_scale) = choose_ortools_flow_scale(problem) else {
+        return ortools_empty_solution(
+            ExternalMinCostFlowReferenceStatus::Unsupported,
+            "OR-Tools SimpleMinCostFlow requires integer-scalable supplies/capacities/costs",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let Some(cost_scale) = choose_ortools_cost_scale(problem) else {
+        return ortools_empty_solution(
+            ExternalMinCostFlowReferenceStatus::Unsupported,
+            "OR-Tools SimpleMinCostFlow requires integer-scalable supplies/capacities/costs",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let payload = ortools_min_cost_flow_payload(problem, flow_scale, cost_scale);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_MIN_COST_FLOW_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -407,16 +554,18 @@ fn run_min_cost_flow_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return unavailable(
-                format!("failed to start min_cost_flow_reference.py with {python}: {err}"),
+            return ortools_empty_solution(
+                ExternalMinCostFlowReferenceStatus::Unavailable,
+                format!("failed to start OR-Tools min-cost-flow adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write min_cost_flow_reference.py stdin: {err}"),
+            return ortools_empty_solution(
+                ExternalMinCostFlowReferenceStatus::NumericalError,
+                format!("failed to write OR-Tools min-cost-flow adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -424,15 +573,21 @@ fn run_min_cost_flow_reference_json(
     let timeout_ms = min_cost_flow_reference_timeout_ms();
     let (output, timed_out) = match wait_for_min_cost_flow_reference_output(child, timeout_ms) {
         Ok(output) => output,
-        Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
+        Err(err) => {
+            return ortools_empty_solution(
+                ExternalMinCostFlowReferenceStatus::NumericalError,
+                err,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("min_cost_flow_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools min-cost-flow adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; min_cost_flow_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools min-cost-flow adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -470,10 +625,10 @@ fn run_min_cost_flow_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
+        Err(err) => ortools_empty_solution(
+            ExternalMinCostFlowReferenceStatus::NumericalError,
             format!(
-                "failed to parse min_cost_flow_reference.py output: {err}; stderr={}",
-                stderr
+                "failed to parse OR-Tools min-cost-flow adapter output: {err}; stderr={stderr}"
             ),
             elapsed_ms,
         ),
@@ -493,21 +648,7 @@ pub fn solve_min_cost_flow_with_external_reference(
         );
     }
 
-    run_min_cost_flow_reference_json(
-        json!({
-            "num_nodes": problem.num_nodes,
-            "supplies": &problem.supplies,
-            "arcs": problem.arcs.iter().map(|arc| json!({
-                "from": arc.from,
-                "to": arc.to,
-                "lower_bound": arc.lower_bound,
-                "capacity": arc.capacity,
-                "cost": arc.cost,
-                "name": &arc.name,
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_min_cost_flow_reference(problem)
 }
 
 #[cfg(test)]
@@ -668,7 +809,68 @@ mod tests {
     }
 
     #[test]
-    fn min_cost_flow_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_values_without_python() {
+        let _lock = MIN_COST_FLOW_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("MIN_COST_FLOW_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = MinCostFlowProblem {
+            num_nodes: 2,
+            supplies: vec![1.0 / 3.0, -1.0 / 3.0],
+            arcs: vec![MinCostFlowArc {
+                from: 0,
+                to: 1,
+                lower_bound: 0.0,
+                capacity: 1.0 / 3.0,
+                cost: 1.0,
+                name: None,
+            }],
+        };
+
+        let solution = solve_min_cost_flow_with_external_reference(
+            &problem,
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinCostFlowReferenceStatus::Unsupported
+        );
+        assert_eq!(solution.solver, "ortools:simple-min-cost-flow");
+        assert!(solution
+            .message
+            .contains("requires integer-scalable supplies/capacities/costs"));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = MIN_COST_FLOW_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("MIN_COST_FLOW_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+
+        let solution = solve_min_cost_flow_with_external_reference(
+            &transportation_problem(),
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinCostFlowReferenceStatus::Unavailable
+        );
+        assert_eq!(solution.solver, "ortools:simple-min-cost-flow");
+        assert!(solution.message.contains("OR-Tools min-cost-flow adapter"));
+        assert!(!solution.message.contains("min_cost_flow_reference.py"));
+    }
+
+    #[test]
+    fn min_cost_flow_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())

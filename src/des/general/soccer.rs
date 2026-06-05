@@ -4538,12 +4538,22 @@ impl PlayerAgent {
                         }
                     })
                     .or_else(|| snapshot.best_pass_target(self.id));
-                let speed = pass_speed_yps_from_power(*power, *flight, false, &self.skills);
+                let passer_position = snapshot.player_position(self.id).unwrap_or(self.position);
                 let point = resolved_target
                     .and_then(|id| {
+                        let target_position = snapshot.player_position(id)?;
+                        let is_cross = pass_would_be_cross(
+                            passer_position,
+                            target_position,
+                            self.team,
+                            snapshot.field_width,
+                            snapshot.field_length,
+                        );
+                        let speed =
+                            pass_speed_yps_from_power(*power, *flight, is_cross, &self.skills);
                         snapshot
                             .anticipated_pass_reception_point(self.id, id, *flight, speed)
-                            .or_else(|| snapshot.player_position(id))
+                            .or(Some(target_position))
                     })
                     .unwrap_or_else(|| {
                         Vec2::new(
@@ -10410,13 +10420,29 @@ impl WorldSnapshot {
             .filter(|p| p.team == me.team && p.id != me.id)
             .filter_map(|p| {
                 let position = self.player_position(p.id).unwrap_or(p.position);
-                let forward = (position.y - me_position.y) * me.team.attack_dir();
+                let initial_is_cross = pass_would_be_cross(
+                    me_position,
+                    position,
+                    me.team,
+                    self.field_width,
+                    self.field_length,
+                );
+                let nominal_speed = pass_speed_yps_from_power(
+                    0.68,
+                    PassFlight::Floor,
+                    initial_is_cross,
+                    &me.skills,
+                );
+                let anticipated_position = self
+                    .anticipated_pass_reception_point(me.id, p.id, PassFlight::Floor, nominal_speed)
+                    .unwrap_or(position);
+                let forward = (anticipated_position.y - me_position.y) * me.team.attack_dir();
                 if me.role == PlayerRole::Goalkeeper
                     && forward < -1.25
                     && !goalkeeper_backward_emergency_release_allowed(
                         me.team,
                         me_position,
-                        position,
+                        anticipated_position,
                         self.field_width,
                         keeper_pressure,
                     )
@@ -10427,13 +10453,13 @@ impl WorldSnapshot {
                     return None;
                 }
                 ((!visible_only || self.player_can_see_player(me.id, p.id))
-                    && self.clear_line(me_position, position, me.team.other(), 2.5)
+                    && self.clear_line(me_position, anticipated_position, me.team.other(), 2.5)
                     && self.pending_offside_for_pass(me.id, p.id).is_none())
-                .then_some((p, position))
+                .then_some((p, position, anticipated_position))
             })
             .map(|p| {
-                let (p, position) = p;
-                let forward = (position.y - me_position.y) * me.team.attack_dir();
+                let (p, position, pass_point) = p;
+                let forward = (pass_point.y - me_position.y) * me.team.attack_dir();
                 let dist = me_position.distance(position);
                 let support_fit = (dist - directive.support_depth_yards).abs();
                 let confidence = self
@@ -10465,13 +10491,13 @@ impl WorldSnapshot {
                     position,
                     PassFlight::Floor,
                 );
-                let finishing_window_bonus = self.shooting_window_score_at(p, position)
+                let finishing_window_bonus = self.shooting_window_score_at(p, pass_point)
                     * (5.4 + directive.risk_tolerance * 2.4);
                 let keeper_distribution_bonus = if me.role == PlayerRole::Goalkeeper {
                     goalkeeper_distribution_score(
                         me.team,
                         me_position,
-                        position,
+                        pass_point,
                         self.field_width,
                         keeper_pressure,
                     )
@@ -10485,7 +10511,8 @@ impl WorldSnapshot {
                     + role_bonus
                     + pass_quality.expected_completion * 1.55
                     + pass_quality.receiver_openness * 0.62
-                    + pass_quality.stride_fit * 0.74
+                    + pass_quality.stride_fit * 1.18
+                    + (p.velocity.y * me.team.attack_dir()).max(0.0).min(5.5) * 0.12
                     + finishing_window_bonus
                     + keeper_distribution_bonus;
                 let score = score - blind_backward_penalty - lateral_penalty;
@@ -10519,13 +10546,34 @@ impl WorldSnapshot {
             .filter(|p| p.team == me.team && p.id != me.id)
             .filter_map(|p| {
                 let position = self.player_position(p.id).unwrap_or(p.position);
-                let forward = (position.y - me_position.y) * me.team.attack_dir();
+                let initial_is_cross = pass_would_be_cross(
+                    me_position,
+                    position,
+                    me.team,
+                    self.field_width,
+                    self.field_length,
+                );
+                let nominal_speed = pass_speed_yps_from_power(
+                    0.68,
+                    PassFlight::Aerial,
+                    initial_is_cross,
+                    &me.skills,
+                );
+                let anticipated_position = self
+                    .anticipated_pass_reception_point(
+                        me.id,
+                        p.id,
+                        PassFlight::Aerial,
+                        nominal_speed,
+                    )
+                    .unwrap_or(position);
+                let forward = (anticipated_position.y - me_position.y) * me.team.attack_dir();
                 if me.role == PlayerRole::Goalkeeper
                     && forward < -1.25
                     && !goalkeeper_backward_emergency_release_allowed(
                         me.team,
                         me_position,
-                        position,
+                        anticipated_position,
                         self.field_width,
                         keeper_pressure,
                     )
@@ -10537,17 +10585,17 @@ impl WorldSnapshot {
                 }
                 ((!visible_only || self.player_can_see_player(me.id, p.id))
                     && self.pending_offside_for_pass(me.id, p.id).is_none())
-                .then_some((p, position))
+                .then_some((p, position, anticipated_position))
             })
-            .map(|(p, position)| {
-                let forward = (position.y - me_position.y) * me.team.attack_dir();
-                let dist = me_position.distance(position);
+            .map(|(p, position, pass_point)| {
+                let forward = (pass_point.y - me_position.y) * me.team.attack_dir();
+                let dist = me_position.distance(pass_point);
                 let confidence = self
                     .player_position_confidence_for_point(me.id, position)
                     .unwrap_or(0.0);
                 let is_cross = pass_would_be_cross(
                     me_position,
-                    position,
+                    pass_point,
                     me.team,
                     self.field_width,
                     self.field_length,
@@ -10563,16 +10611,17 @@ impl WorldSnapshot {
                 let cross_bonus = if is_cross { 1.3 } else { 0.0 };
                 let wide_outlet_bonus = if self.is_wide_midfielder(p) {
                     let center_x = self.field_width * 0.5;
-                    let width = ((position.x - center_x).abs() / center_x.max(1.0)).clamp(0.0, 1.0);
+                    let width =
+                        ((pass_point.x - center_x).abs() / center_x.max(1.0)).clamp(0.0, 1.0);
                     let openness =
-                        pass_receiver_openness_for_snapshots(&self.players, me.team, position);
-                    let forward_support = (position.y - me_position.y) * me.team.attack_dir();
+                        pass_receiver_openness_for_snapshots(&self.players, me.team, pass_point);
+                    let forward_support = (pass_point.y - me_position.y) * me.team.attack_dir();
                     (width * 1.25 + openness * 2.4 + forward_support.clamp(0.0, 24.0) * 0.035)
                         .clamp(0.0, 4.2)
                 } else {
                     0.0
                 };
-                let finishing_window_bonus = self.shooting_window_score_at(p, position)
+                let finishing_window_bonus = self.shooting_window_score_at(p, pass_point)
                     * (3.4 + directive.risk_tolerance * 1.8);
                 let in_behind_bonus = self
                     .projected_in_behind_pass_point(me.id, p.id)
@@ -10608,7 +10657,7 @@ impl WorldSnapshot {
                     0.0
                 };
                 let score = forward * (0.16 + directive.risk_tolerance * 0.24)
-                    + self.space_score_at(position, me.team) * 0.65
+                    + self.space_score_at(pass_point, me.team) * 0.65
                     - dist * 0.018
                     + confidence * 0.42
                     + aerial_target_bonus
@@ -14714,6 +14763,8 @@ pub struct SoccerPlaybackPlayerFrame {
     pub position: Vec2,
     pub velocity: Vec2,
     #[serde(default)]
+    pub movement_gait: MovementGait,
+    #[serde(default)]
     pub receive_facing: FacingBucket,
     #[serde(default)]
     pub action_facing: FacingBucket,
@@ -14824,7 +14875,7 @@ fn playback_intent_priority(
 
 fn playback_pass_flight_for_action(action: &str) -> Option<PassFlight> {
     match action {
-        "aerial-pass" => Some(PassFlight::Aerial),
+        "aerial-pass" | "clearance" | "route-one" => Some(PassFlight::Aerial),
         "pass" | "first-time-pass" => Some(PassFlight::Floor),
         _ => None,
     }
@@ -14904,6 +14955,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     shirt: player.shirt,
                     position: player.position,
                     velocity: player.velocity,
+                    movement_gait: player.movement_gait,
                     receive_facing: player.receive_facing,
                     action_facing: player.action_facing,
                     controller_slot: player.controller_slot,
@@ -22471,30 +22523,33 @@ impl SoccerMatch {
                                 )
                         });
                     let pressure = pressure_from_observation(&observation);
-                    let is_cross = pass_would_be_cross(
+                    let initial_is_cross = pass_would_be_cross(
                         player_pos,
                         target,
                         player_team,
                         self.config.field_width_yards,
                         self.config.field_length_yards,
                     );
-                    let pass_skill =
-                        pass_execution_skill(&self.players[player_id].skills, flight, is_cross);
-                    let raw_speed = pass_speed_yps_from_power(
+                    let initial_pass_skill = pass_execution_skill(
+                        &self.players[player_id].skills,
+                        flight,
+                        initial_is_cross,
+                    );
+                    let initial_raw_speed = pass_speed_yps_from_power(
                         power,
                         flight,
-                        is_cross,
+                        initial_is_cross,
                         &self.players[player_id].skills,
                     );
                     let receiver_openness_at_player =
                         pass_receiver_openness_for_agents(&self.players, player_team, target);
                     let initial_speed = modulated_pass_speed_yps(
-                        raw_speed,
+                        initial_raw_speed,
                         player_pos,
                         target,
                         flight,
-                        is_cross,
-                        pass_skill,
+                        initial_is_cross,
+                        initial_pass_skill,
                         receiver_openness_at_player,
                         &mut self.rng,
                     );
@@ -22512,6 +22567,21 @@ impl SoccerMatch {
                             self.config.field_width_yards,
                             self.config.field_length_yards,
                         );
+                    let is_cross = pass_would_be_cross(
+                        player_pos,
+                        led_target,
+                        player_team,
+                        self.config.field_width_yards,
+                        self.config.field_length_yards,
+                    );
+                    let pass_skill =
+                        pass_execution_skill(&self.players[player_id].skills, flight, is_cross);
+                    let raw_speed = pass_speed_yps_from_power(
+                        power,
+                        flight,
+                        is_cross,
+                        &self.players[player_id].skills,
+                    );
                     let receiver_openness =
                         pass_receiver_openness_for_agents(&self.players, player_team, led_target);
                     let speed = modulated_pass_speed_yps(
@@ -30795,24 +30865,54 @@ fn pass_target_quality_for_snapshot(
     target_position: Vec2,
     flight: PassFlight,
 ) -> PassTargetQuality {
-    let distance = passer_position.distance(target_position);
-    let is_cross = pass_would_be_cross(
+    let initial_is_cross = pass_would_be_cross(
         passer_position,
         target_position,
         passer.team,
         snapshot.field_width,
         snapshot.field_length,
     );
-    let pass_skill = pass_execution_skill(&passer.skills, flight, is_cross);
-    let receiver_openness =
-        pass_receiver_openness_for_snapshots(&snapshot.players, passer.team, target_position);
-    let nominal_speed = pass_speed_yps_from_power(0.68, flight, is_cross, &passer.skills);
+    let initial_nominal_speed =
+        pass_speed_yps_from_power(0.68, flight, initial_is_cross, &passer.skills);
     let target_velocity = snapshot
         .player_velocity(target.id)
         .unwrap_or(target.velocity);
-    let anticipated_target = snapshot
-        .anticipated_pass_reception_point(passer.id, target.id, flight, nominal_speed)
+    let initial_anticipated_target = snapshot
+        .anticipated_pass_reception_point(passer.id, target.id, flight, initial_nominal_speed)
         .unwrap_or(target_position);
+    let is_cross = pass_would_be_cross(
+        passer_position,
+        initial_anticipated_target,
+        passer.team,
+        snapshot.field_width,
+        snapshot.field_length,
+    );
+    let pass_skill = pass_execution_skill(&passer.skills, flight, is_cross);
+    let nominal_speed = pass_speed_yps_from_power(0.68, flight, is_cross, &passer.skills);
+    let anticipated_target = if (nominal_speed - initial_nominal_speed).abs() > 0.5 {
+        snapshot
+            .anticipated_pass_reception_point(passer.id, target.id, flight, nominal_speed)
+            .unwrap_or(initial_anticipated_target)
+    } else {
+        initial_anticipated_target
+    };
+    let distance = passer_position.distance(anticipated_target);
+    let current_receiver_openness =
+        pass_receiver_openness_for_snapshots(&snapshot.players, passer.team, target_position);
+    let anticipated_receiver_openness =
+        pass_receiver_openness_for_snapshots(&snapshot.players, passer.team, anticipated_target);
+    let target_forward = (anticipated_target.y - passer_position.y) * passer.team.attack_dir();
+    let anticipation_weight = if target_forward > 2.0 {
+        0.38 + pass_skill * 0.34
+    } else if target_forward >= -1.25 {
+        0.28 + pass_skill * 0.20
+    } else {
+        0.12 + pass_skill * 0.10
+    }
+    .clamp(0.12, 0.74);
+    let receiver_openness = (current_receiver_openness * (1.0 - anticipation_weight)
+        + anticipated_receiver_openness * anticipation_weight)
+        .clamp(0.0, 1.0);
     let stride_fit = pass_into_stride_fit(
         passer_position,
         target_position,
@@ -30833,7 +30933,7 @@ fn pass_target_quality_for_snapshot(
                 snapshot
                     .player_position(player.id)
                     .unwrap_or(player.position)
-                    .distance(target_position)
+                    .distance(anticipated_target)
             })
             .fold(f64::INFINITY, f64::min);
         (0.42
@@ -30842,12 +30942,16 @@ fn pass_target_quality_for_snapshot(
             + aerial_duel_skill_from_snapshot(target) * 0.16)
             .clamp(0.20, 0.88)
     } else {
-        let lane_open =
-            if snapshot.clear_line(passer_position, target_position, passer.team.other(), 2.5) {
-                1.0
-            } else {
-                0.24
-            };
+        let lane_open = if snapshot.clear_line(
+            passer_position,
+            anticipated_target,
+            passer.team.other(),
+            2.5,
+        ) {
+            1.0
+        } else {
+            0.24
+        };
         (lane_open * 0.58 + receiver_openness * 0.28 + position_confidence * 0.14).clamp(0.10, 1.0)
     };
     let distance_fit = if flight.is_aerial() {
@@ -42089,7 +42193,6 @@ mod tests {
             snapshot.player_position(static_outlet).unwrap(),
             PassFlight::Floor,
         );
-
         assert!(
             runner_quality.stride_fit > static_quality.stride_fit + 0.12,
             "runner stride fit should beat static outlet: runner={runner_quality:?}, static={static_quality:?}"
@@ -42122,6 +42225,75 @@ mod tests {
             "Q-state should bin pass anticipation separately from completion: stride={}, static={}",
             stride_key.best_pass_stride_fit_bin,
             static_key.best_pass_stride_fit_bin
+        );
+    }
+
+    #[test]
+    fn pass_target_quality_uses_future_reception_space_not_only_current_feet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let runner = 9;
+        let marker = 12;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 48.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        park_players_except(&mut sim, &[passer, runner, marker]);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[passer].velocity = Vec2::new(0.0, 2.5);
+        sim.players[passer].skills.passing = 8.2;
+        sim.players[passer].skills.passing_completion_rate = 8.6;
+        sim.players[passer].skills.vision = 8.4;
+        sim.players[runner].position = Vec2::new(44.0, 62.0);
+        sim.players[runner].velocity = Vec2::new(0.7, 4.2);
+        sim.players[marker].position = Vec2::new(48.0, 62.0);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let passer_snapshot = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == passer)
+            .expect("passer");
+        let runner_snapshot = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == runner)
+            .expect("runner");
+        let passer_position = snapshot.player_position(passer).expect("passer position");
+        let runner_position = snapshot.player_position(runner).expect("runner position");
+        let speed =
+            pass_speed_yps_from_power(0.68, PassFlight::Floor, false, &passer_snapshot.skills);
+        let anticipated_target = snapshot
+            .anticipated_pass_reception_point(passer, runner, PassFlight::Floor, speed)
+            .expect("anticipated target");
+        let current_openness =
+            pass_receiver_openness_for_snapshots(&snapshot.players, Team::Home, runner_position);
+        let future_openness =
+            pass_receiver_openness_for_snapshots(&snapshot.players, Team::Home, anticipated_target);
+        let quality = pass_target_quality_for_snapshot(
+            &snapshot,
+            passer_snapshot,
+            passer_position,
+            runner_snapshot,
+            runner_position,
+            PassFlight::Floor,
+        );
+
+        assert!(
+            anticipated_target.y > runner_position.y + 5.0,
+            "passer should anticipate the runner's upfield reception point: {anticipated_target:?}"
+        );
+        assert!(
+            future_openness > current_openness + 0.55,
+            "future reception point should be much more open than marked feet: future={future_openness}, current={current_openness}"
+        );
+        assert!(
+            quality.receiver_openness > current_openness + 0.28,
+            "pass quality should blend in future-space openness: quality={quality:?}, current={current_openness}"
+        );
+        assert_eq!(
+            snapshot.ranked_visible_pass_targets(passer, 1),
+            vec![runner],
+            "runner into future space should remain the top visible floor-pass target"
         );
     }
 
@@ -45587,6 +45759,10 @@ mod tests {
         assert!(html.contains("bufferedSeconds"));
         assert!(html.contains("fps incoming"));
         assert!(html.contains("Playback ready"));
+        assert!(html.contains("ballAltitudeYards"));
+        assert!(html.contains("altitudeYards"));
+        assert!(html.contains("drawGaitCue"));
+        assert!(html.contains("movementGait"));
         assert!(html.contains("HUMAN_ACTION_KEY_CODES"));
         assert!(html.contains("selectedPlayerCanShoot"));
         assert!(html.contains("pushActionInput"));
@@ -45617,6 +45793,11 @@ mod tests {
         assert!(html.contains("controllerKeymapLabel"));
         assert!(html.contains("keymap.textContent"));
         assert!(html.contains("Move ${keyName(map.up)}"));
+        assert!(html.contains("ballAltitudeYards"));
+        assert!(html.contains("altitudeYards"));
+        assert!(html.contains("drawGaitCue"));
+        assert!(html.contains("movementGait"));
+        assert!(html.contains("[\"aerial-pass\", \"clearance\", \"route-one\"].includes(action)"));
     }
 
     #[test]
@@ -45646,7 +45827,9 @@ mod tests {
         );
         assert!(first_frame["players"][0].get("position").is_some());
         assert!(first_frame["players"][0].get("shirt").is_some());
+        assert!(first_frame["players"][0].get("movementGait").is_some());
         assert!(first_frame["ball"].get("velocity").is_some());
+        assert!(first_frame["ball"].get("altitudeYards").is_some());
         assert!(first_frame["officials"][0].get("velocity").is_some());
         assert!(first_frame["officials"][0].get("acceleration").is_some());
         assert!(first_frame["officials"][0].get("jerk").is_some());
@@ -45700,6 +45883,27 @@ mod tests {
             "playback frames should stay mobile-sized, got {} bytes",
             max_line_len
         );
+    }
+
+    #[test]
+    fn playback_intents_mark_route_one_and_clearance_as_aerial_long_balls() {
+        assert_eq!(
+            playback_pass_flight_for_action("aerial-pass"),
+            Some(PassFlight::Aerial)
+        );
+        assert_eq!(
+            playback_pass_flight_for_action("route-one"),
+            Some(PassFlight::Aerial)
+        );
+        assert_eq!(
+            playback_pass_flight_for_action("clearance"),
+            Some(PassFlight::Aerial)
+        );
+        assert_eq!(
+            playback_pass_flight_for_action("pass"),
+            Some(PassFlight::Floor)
+        );
+        assert_eq!(playback_pass_flight_for_action("shoot"), None);
     }
 
     fn sample_tracking_tackle_dataset() -> SoccerTrackingDataset {

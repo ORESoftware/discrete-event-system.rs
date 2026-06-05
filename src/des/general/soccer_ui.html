@@ -681,9 +681,40 @@ function drawIntentTraces(f, r) {
     }
   }
 }
+function gaitCueStrength(gait) {
+  const key = String(gait || "stand").toLowerCase();
+  if (key.includes("sprint")) return 1.0;
+  if (key.includes("run")) return 0.78;
+  if (key.includes("skip")) return 0.58;
+  if (key.includes("jog")) return 0.45;
+  if (key.includes("side")) return 0.38;
+  if (key.includes("walk")) return 0.25;
+  return 0.0;
+}
+function drawGaitCue(p, pt, r) {
+  const cue = gaitCueStrength(p.movementGait);
+  if (cue <= 0.0) return;
+  const speed = vecLen(p.velocity || {x: 0, y: 0});
+  const motion = norm(fieldDirToCanvas(p.velocity || {x: 0, y: 0}, r));
+  const radius = 13.5 + cue * 4.5;
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(246,201,68,${0.12 + cue * 0.34})`;
+  ctx.lineWidth = 1 + cue * 1.6;
+  ctx.stroke();
+  if (motion.x || motion.y) {
+    ctx.beginPath();
+    ctx.moveTo(pt.x + motion.x * 12, pt.y + motion.y * 12);
+    ctx.lineTo(pt.x + motion.x * (18 + speed * 0.65), pt.y + motion.y * (18 + speed * 0.65));
+    ctx.strokeStyle = `rgba(255,255,255,${0.22 + cue * 0.42})`;
+    ctx.lineWidth = 1.2 + cue * 1.4;
+    ctx.stroke();
+  }
+}
 function drawPlayer(p, r) {
   const pt = mapPoint(p.position, r);
   const color = p.team === "Home" ? "#1f6feb" : "#d64545";
+  drawGaitCue(p, pt, r);
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, 12, 0, Math.PI * 2);
   ctx.fillStyle = color;

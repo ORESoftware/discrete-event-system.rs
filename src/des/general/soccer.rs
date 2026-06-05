@@ -4656,7 +4656,7 @@ impl PlayerAgent {
         } else {
             0.10
         };
-        let mut options = vec![
+        let mut options = normalize_action_options(vec![
             AgentActionOptionTrace::new(
                 "support-shape",
                 (1.0 - roam_weight) * self.preferences.open_space_bias,
@@ -4667,23 +4667,23 @@ impl PlayerAgent {
                 roam_weight * self.preferences.open_space_bias,
                 true,
             ),
-        ];
+        ]);
         if snapshot
             .check_to_ball_target_for(self.id, self.home_position)
             .is_some()
         {
-            options.push(AgentActionOptionTrace::new("check-to-ball", 0.96, true));
+            options.push(AgentActionOptionTrace::new("check-to-ball", 0.0, true));
         }
         if snapshot.in_behind_run_target_for(self.id).is_some() {
-            options.push(AgentActionOptionTrace::new("run-in-behind", 0.88, true));
+            options.push(AgentActionOptionTrace::new("run-in-behind", 0.0, true));
         }
         if snapshot
             .wide_possession_outlet_target_for(self.id, self.home_position)
             .is_some()
         {
-            options.push(AgentActionOptionTrace::new("wide-outlet", 0.84, true));
+            options.push(AgentActionOptionTrace::new("wide-outlet", 0.0, true));
         }
-        normalize_action_options(options)
+        options
     }
 
     fn defensive_action_options(
@@ -5919,28 +5919,28 @@ impl PlayerAgent {
                         point,
                         action_label: "check-to-ball",
                     }),
-                "run-in-behind" => snapshot.in_behind_run_target_for(self.id).map(|point| {
-                    SupportMovementTarget {
-                        point: snapshot.clamp_to_role_position(
-                            self.id,
-                            point,
-                            self.home_position,
-                            false,
-                        ),
-                        action_label: "run-in-behind",
-                    }
-                }),
+                "run-in-behind" => {
+                    snapshot
+                        .in_behind_run_target_for(self.id)
+                        .map(|point| SupportMovementTarget {
+                            point: snapshot.clamp_to_role_position(
+                                self.id,
+                                point,
+                                self.home_position,
+                                false,
+                            ),
+                            action_label: "run-in-behind",
+                        })
+                }
                 "wide-outlet" => snapshot
                     .wide_possession_outlet_target_for(self.id, self.home_position)
                     .map(|point| SupportMovementTarget {
                         point,
                         action_label: "wide-outlet",
                     }),
-                "support-roam" => Some(snapshot.attacking_support_movement_for(
-                    self.id,
-                    self.home_position,
-                    true,
-                )),
+                "support-roam" => {
+                    Some(snapshot.attacking_support_movement_for(self.id, self.home_position, true))
+                }
                 _ => Some(snapshot.attacking_support_movement_for(
                     self.id,
                     self.home_position,
@@ -6357,9 +6357,8 @@ impl PlayerAgent {
             "check-to-ball" if !observation.has_ball => snapshot
                 .check_to_ball_target_for(self.id, self.home_position)
                 .map(|target| (SoccerAction::MoveTo(target), "check-to-ball".to_string())),
-            "run-in-behind" if !observation.has_ball => snapshot
-                .in_behind_run_target_for(self.id)
-                .map(|target| {
+            "run-in-behind" if !observation.has_ball => {
+                snapshot.in_behind_run_target_for(self.id).map(|target| {
                     (
                         SoccerAction::MoveTo(snapshot.clamp_to_role_position(
                             self.id,
@@ -6369,16 +6368,13 @@ impl PlayerAgent {
                         )),
                         "run-in-behind".to_string(),
                     )
-                }),
+                })
+            }
             "wide-outlet" if !observation.has_ball => snapshot
                 .wide_possession_outlet_target_for(self.id, self.home_position)
                 .map(|target| (SoccerAction::MoveTo(target), "wide-outlet".to_string())),
-            "shot-creation-run"
-            | "overlap-run"
-            | "support-push-up"
-            | "support-screen"
-            | "support-shape"
-            | "support-roam"
+            "shot-creation-run" | "overlap-run" | "support-push-up" | "support-screen"
+            | "support-shape" | "support-roam"
                 if !observation.has_ball =>
             {
                 let roam = label == "support-roam";
@@ -12665,20 +12661,11 @@ impl WorldSnapshot {
                 )
             }
         } else if defensive_midfield_screen {
-            (
-                open * 0.28 + shape * 0.55 + home * 0.17,
-                "support-screen",
-            )
+            (open * 0.28 + shape * 0.55 + home * 0.17, "support-screen")
         } else if own_half_possession && me.role != PlayerRole::Goalkeeper {
-            (
-                open * 0.64 + shape * 0.26 + home * 0.10,
-                "support-push-up",
-            )
+            (open * 0.64 + shape * 0.26 + home * 0.10, "support-push-up")
         } else {
-            (
-                open * 0.55 + shape * 0.30 + home * 0.15,
-                "support-shape",
-            )
+            (open * 0.55 + shape * 0.30 + home * 0.15, "support-shape")
         };
         SupportMovementTarget {
             point: self.clamp_to_role_position(player_id, target, home, false),
@@ -14846,7 +14833,8 @@ fn dense_soccer_transition_reward(
             reward += spacing_delta.2.clamp(-1.0, 1.0) * 0.20 * weight;
             reward += spacing_delta.1.clamp(-1.0, 1.0) * 0.045 * weight;
         }
-        if is_attacking_support_action_label(action) && !matches!(player.role, PlayerRole::Goalkeeper)
+        if is_attacking_support_action_label(action)
+            && !matches!(player.role, PlayerRole::Goalkeeper)
         {
             let lateral = (after_pos.x - before_pos.x).abs();
             if lateral > 2.5 {
@@ -15682,7 +15670,10 @@ fn playback_intent_priority(
         | "fake-left-cut-right"
         | "fake-right-cut-left"
         | "hold-up-flank" => Some(92.0 + holder_bonus),
-        action if is_attacking_support_action_label(action) && possession_team == Some(player.team) => {
+        action
+            if is_attacking_support_action_label(action)
+                && possession_team == Some(player.team) =>
+        {
             let role_bonus = match player.role {
                 PlayerRole::Forward => 9.0,
                 PlayerRole::Midfielder => 7.0,
@@ -20379,10 +20370,8 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
             | "clearance"
     );
     let defense = matches!(action, "tackle" | "defend" | "defend-shape" | "defend-roam");
-    let support = matches!(
-        action,
-        "recover" | "control-touch" | "set-play-run"
-    ) || is_attacking_support_action_label(action);
+    let support = matches!(action, "recover" | "control-touch" | "set-play-run")
+        || is_attacking_support_action_label(action);
     (
         soccer_neural_bool(attack),
         soccer_neural_bool(defense),
@@ -44009,6 +43998,165 @@ mod tests {
             target.distance(sim.ball.position) < current.distance(sim.ball.position),
             "checking movement should get closer to the ball"
         );
+    }
+
+    #[test]
+    fn learned_support_policy_can_choose_check_to_ball() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        let receiver = 9;
+        let marker = 12;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[receiver].position = Vec2::new(31.0, 70.0);
+        sim.players[marker].position = Vec2::new(32.1, 70.0);
+        for id in 11..22 {
+            if id != marker {
+                sim.players[id].position = Vec2::new(70.0, 98.0);
+            }
+        }
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(receiver);
+        let options = sim.players[receiver].support_action_options(&snapshot);
+        assert!(
+            options.iter().any(|option| option.label == "check-to-ball"),
+            "marked receiver should expose check-to-ball option: {options:?}"
+        );
+        assert!(learned_action_label_is_legal(
+            "check_to_ball",
+            &snapshot,
+            receiver
+        ));
+
+        let plan = SoccerLearnedPlan {
+            action: "check_to_ball".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let (action, label) = sim.players[receiver]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("check-to-ball learned action");
+        assert_eq!(label, "check-to-ball");
+        match action {
+            SoccerAction::MoveTo(target) => {
+                assert!(
+                    target.distance(sim.ball.position)
+                        < sim.players[receiver].position.distance(sim.ball.position)
+                );
+            }
+            other => panic!("expected check-to-ball movement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn learned_support_policy_can_choose_wide_outlet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(35.0, 88.0 + (away - 11) as f64 * 0.5);
+        }
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(winger);
+        let options = sim.players[winger].support_action_options(&snapshot);
+        assert!(
+            options.iter().any(|option| option.label == "wide-outlet"),
+            "wide midfielder should expose wide-outlet option: {options:?}"
+        );
+        assert!(learned_action_label_is_legal(
+            "wide_outlet",
+            &snapshot,
+            winger
+        ));
+
+        let plan = SoccerLearnedPlan {
+            action: "wide_outlet".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let (action, label) = sim.players[winger]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("wide-outlet learned action");
+        assert_eq!(label, "wide-outlet");
+        match action {
+            SoccerAction::MoveTo(target) => {
+                assert!(
+                    target.x > sim.players[winger].position.x,
+                    "right winger should move toward touchline: {target:?}"
+                );
+                assert!(
+                    (target.y - sim.players[winger].position.y) * Team::Home.attack_dir() > 0.0,
+                    "wide outlet should still move upfield: {target:?}"
+                );
+            }
+            other => panic!("expected wide-outlet movement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn learned_support_policy_can_choose_in_behind_run() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let runner = 9;
+        sim.tick = 11;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 62.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[runner].position = Vec2::new(42.0, 74.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(40.0, 94.0 + (away - 11) as f64 * 0.3);
+        }
+        sim.players[11].position = Vec2::new(40.0, 118.0);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert!(
+            snapshot.in_behind_run_target_for(runner).is_some(),
+            "test setup should expose in-behind target"
+        );
+        let observation = snapshot.observation_for(runner);
+        let options = sim.players[runner].support_action_options(&snapshot);
+        assert!(
+            options.iter().any(|option| option.label == "run-in-behind"),
+            "runner should expose run-in-behind option: {options:?}"
+        );
+        assert!(learned_action_label_is_legal(
+            "run_in_behind",
+            &snapshot,
+            runner
+        ));
+
+        let plan = SoccerLearnedPlan {
+            action: "run_in_behind".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let (action, label) = sim.players[runner]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("run-in-behind learned action");
+        assert_eq!(label, "run-in-behind");
+        match action {
+            SoccerAction::MoveTo(target) => {
+                assert!(
+                    target.y > sim.players[runner].position.y + 8.0,
+                    "in-behind runner should break beyond the line: {target:?}"
+                );
+                assert!(
+                    !snapshot.position_would_be_offside(Team::Home, sim.players[runner].position),
+                    "runner starts onside before the pass"
+                );
+            }
+            other => panic!("expected run-in-behind movement, got {other:?}"),
+        }
     }
 
     #[test]

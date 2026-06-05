@@ -25,8 +25,11 @@ def rust_first_requested(method: str) -> bool:
     normalized = normalize_method(method)
     if normalized in (*RUST_REFERENCE_METHODS, "auto", "rust-reference"):
         return True
-    value = os.environ.get("LP_SOLVE_REFERENCE_RUST_FIRST", "")
-    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
+    values = (
+        os.environ.get("LP_SOLVE_REFERENCE_RUST_FIRST", ""),
+        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
+    )
+    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
 
 
 def status_payload(status: str, solver: str, message: str = "") -> dict:

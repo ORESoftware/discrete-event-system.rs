@@ -126,6 +126,13 @@ def python_bridge_available(solver: str) -> bool:
 
 
 def python_bridge_disabled() -> bool:
+    for name in (
+        "NONLINEAR_VALIDATION_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ):
+        value = os.environ.get(name)
+        if value and value.strip().lower() not in ("0", "false", "off", "disabled"):
+            return True
     value = os.environ.get("NONLINEAR_VALIDATION_REFERENCE_PYTHON_BRIDGE", "auto")
     return value.strip().lower() in ("0", "false", "off", "disabled", "rust")
 

@@ -84,6 +84,14 @@ def external_rust_fallback_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
+def external_rust_first_enabled() -> bool:
+    values = (
+        os.environ.get("IP_MIP_REFERENCE_RUST_FIRST", ""),
+        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
+    )
+    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
+
+
 def external_solver_package_available(solver: str) -> bool:
     if solver in ORTOOLS_SOLVERS:
         return package_available("ortools")
@@ -1633,6 +1641,9 @@ def main() -> int:
     args = parser.parse_args()
     args.solver = args.solver.strip().lower().replace("_", "-")
     if args.solver in RUST_REFERENCE_SOLVERS:
+        exec_rust_reference(args)
+    if external_rust_first_enabled() and args.solver in ORTOOLS_SOLVERS + SCIPY_SOLVERS:
+        args.solver = "rust-enumeration"
         exec_rust_reference(args)
     if (
         external_rust_fallback_enabled()

@@ -177,7 +177,7 @@ pub fn probe_external_gams_solver(
     }
 }
 
-fn find_gams_command() -> Option<PathBuf> {
+pub fn find_external_gams_command() -> Option<PathBuf> {
     find_command_from_env(&["ORES_GAMS_CMD", "GAMS_CMD"])
         .or_else(|| find_gams_in_dirs(&["ORES_GAMS_DIR", "GAMS_HOME", "GAMS_DIR", "GAMSDIR"]))
         .or_else(|| find_command_in_path("gams"))
@@ -244,7 +244,10 @@ fn command_file_exists(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
-fn wait_for_gams_probe_output(mut child: Child, timeout_ms: u64) -> Result<(Output, bool), String> {
+pub fn wait_for_external_gams_output(
+    mut child: Child,
+    timeout_ms: u64,
+) -> Result<(Output, bool), String> {
     let started = SystemTime::now();
     let timeout = Duration::from_millis(timeout_ms);
     let mut timed_out = false;
@@ -268,7 +271,10 @@ fn wait_for_gams_probe_output(mut child: Child, timeout_ms: u64) -> Result<(Outp
         .map_err(|err| format!("failed to wait for GAMS probe: {err}"))
 }
 
-fn gams_listing_confirms_solver(solver: ExternalGamsSolver, listing: &str) -> bool {
+pub fn external_gams_listing_confirms_solver(
+    solver: ExternalGamsSolver,
+    listing: &str,
+) -> bool {
     let upper = listing.to_ascii_uppercase();
     let (_, solver_option) = solver.option_pair();
     let solver_selected = upper

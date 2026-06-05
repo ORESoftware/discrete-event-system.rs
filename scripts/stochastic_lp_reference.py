@@ -140,6 +140,14 @@ def exec_rust_reference(solver: str) -> None:
     os.execvp(command[0], [*command, "--solver", solver])
 
 
+def external_rust_first_enabled() -> bool:
+    values = (
+        os.environ.get("STOCHASTIC_LP_REFERENCE_RUST_FIRST", ""),
+        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
+    )
+    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
+
+
 def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     if not os.path.exists(binary_path):
         return False
@@ -271,6 +279,8 @@ def main() -> int:
 
     if args.solver not in ("scipy", "scipy-highs", "highs"):
         exec_rust_reference(args.solver)
+    if external_rust_first_enabled():
+        exec_rust_reference("rust-monolithic")
 
     try:
         raw = json.load(sys.stdin)

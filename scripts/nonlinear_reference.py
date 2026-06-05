@@ -26,6 +26,14 @@ from typing import Callable, Optional, Sequence
 RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust", "rust-fallback", "rust-reference")
 
 
+def external_rust_first_enabled() -> bool:
+    for name in ("NONLINEAR_REFERENCE_RUST_FIRST", "ORES_EXTERNAL_REFERENCE_RUST_FIRST"):
+        value = os.environ.get(name)
+        if value and value.strip().lower() not in ("0", "false", "off", "disabled"):
+            return True
+    return False
+
+
 def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     if not os.path.exists(binary_path):
         return False
@@ -33,6 +41,7 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     source_paths = [
         os.path.join(repo_root, "src", "bin", "nonlinear_reference.rs"),
         os.path.join(repo_root, "src", "des", "general", "external_optimization_tools.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_nonlinear_reference.rs"),
     ]
     return all(
         not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
@@ -459,6 +468,9 @@ def main() -> int:
     parser.add_argument("--max-iterations", type=int, default=200)
     args = parser.parse_args()
     if args.solver in RUST_REFERENCE_SOLVERS:
+        exec_rust_reference(args.solver, args.max_iterations)
+    if external_rust_first_enabled() and args.solver in ("scipy", "nlopt"):
+        os.environ["NONLINEAR_REFERENCE_REGISTERED_FALLBACK"] = "rust"
         exec_rust_reference(args.solver, args.max_iterations)
 
     try:

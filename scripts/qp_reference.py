@@ -97,6 +97,10 @@ def package_available(module: str) -> bool:
 
 
 def python_bridge_disabled() -> bool:
+    for name in ("QP_REFERENCE_RUST_FIRST", "ORES_EXTERNAL_REFERENCE_RUST_FIRST"):
+        value = os.environ.get(name)
+        if value and value.strip().lower() not in ("0", "false", "off", "disabled"):
+            return True
     value = os.environ.get("QP_REFERENCE_PYTHON_BRIDGE", "auto")
     return value.strip().lower() in ("0", "false", "off", "disabled", "rust")
 
@@ -1129,6 +1133,11 @@ def main() -> int:
     if args.solver in RUST_REFERENCE_SOLVERS:
         exec_rust_reference(raw_stdin, args.solver, args.max_enumerations)
     qp = json.loads(raw_stdin)
+    if python_bridge_disabled():
+        if args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
+            os.environ["QP_REFERENCE_REGISTERED_FALLBACK"] = "rust"
+            exec_rust_reference(raw_stdin, args.solver, args.max_enumerations)
+        exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
     if (
         args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS
         and not qp.get("integer_vars")

@@ -20,13 +20,14 @@ use des_engine::des::general::soccer::{
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
-    evolve_soccer_tactical_learning_weights, evolve_soccer_team_policies,
+    evolve_soccer_tactical_learning_weights_from_genomes, evolve_soccer_team_policies,
     run_soccer_learning_queue_with_events, soccer_policy_version_insert_status_after_active_head,
     soccer_postgres_policy_refresh_decision, soccer_self_play_artifact_from_queue_report,
     soccer_should_flush_postgres_policy_versions_for_new_sim,
     soccer_should_refresh_postgres_for_new_sim, SoccerEvolutionOptions,
     SoccerLearningCompletedGame, SoccerLearningQueueEvent, SoccerLearningQueueRunnerConfig,
-    SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
+    SoccerPostgresPolicyRefreshCheck, SoccerTacticalLearningGenomeParent,
+    SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -49,6 +50,7 @@ const DEFAULT_SOCCER_QUEUE_EVOLUTION_ELITE_GAMES: usize = 4;
 #[derive(Clone, Debug)]
 struct TacticalEvolutionSample {
     summary: SoccerTacticalLearningSummary,
+    weights: SoccerTacticalLearningWeights,
     fitness: f64,
 }
 
@@ -85,6 +87,7 @@ struct PendingPostgresPolicyVersion {
 struct PostgresCompletedRunBatch {
     experiment_id: String,
     runner_id: String,
+    policy_version_batches: usize,
     pending_policy_versions: Vec<PendingPostgresPolicyVersion>,
     pending_runs: Vec<PendingPostgresCompletedRun>,
 }
@@ -95,6 +98,9 @@ impl PostgresCompletedRunBatch {
     }
 
     fn absorb(&mut self, mut other: Self) {
+        self.policy_version_batches = self
+            .policy_version_batches
+            .saturating_add(other.policy_version_batches);
         self.pending_policy_versions
             .append(&mut other.pending_policy_versions);
         self.pending_runs.append(&mut other.pending_runs);
@@ -103,6 +109,7 @@ impl PostgresCompletedRunBatch {
 
 struct PostgresCompletedRunWriteResult {
     queue_batches: usize,
+    policy_version_batches: usize,
     result: Result<usize, String>,
 }
 
@@ -111,6 +118,7 @@ struct AsyncPostgresCompletedRunWriter {
     receiver: mpsc::Receiver<PostgresCompletedRunWriteResult>,
     handle: Option<thread::JoinHandle<()>>,
     pending_batches: usize,
+    pending_policy_version_batches: usize,
 }
 
 fn env_value(name: &str) -> Option<String> {
@@ -675,6 +683,7 @@ impl AsyncPostgresCompletedRunWriter {
                     while receiver.recv().is_ok() {
                         let _ = result_sender.send(PostgresCompletedRunWriteResult {
                             queue_batches: 1,
+                            policy_version_batches: 0,
                             result: Err(
                                 "postgres completed-run writer could not find a database URL"
                                     .to_string(),
@@ -687,6 +696,7 @@ impl AsyncPostgresCompletedRunWriter {
                     while receiver.recv().is_ok() {
                         let _ = result_sender.send(PostgresCompletedRunWriteResult {
                             queue_batches: 1,
+                            policy_version_batches: 0,
                             result: Err(format!(
                                 "postgres completed-run writer connect failed: {error}"
                             )),
@@ -752,6 +762,7 @@ impl AsyncPostgresCompletedRunWriter {
                 );
                 let _ = result_sender.send(PostgresCompletedRunWriteResult {
                     queue_batches,
+                    policy_version_batches: batch.policy_version_batches,
                     result,
                 });
             }
@@ -762,7 +773,21 @@ impl AsyncPostgresCompletedRunWriter {
             receiver: result_receiver,
             handle: Some(handle),
             pending_batches: 0,
+            pending_policy_version_batches: 0,
         }
+    }
+
+    fn record_write_result(
+        &mut self,
+        write_result: PostgresCompletedRunWriteResult,
+    ) -> Result<usize, String> {
+        self.pending_batches = self
+            .pending_batches
+            .saturating_sub(write_result.queue_batches);
+        self.pending_policy_version_batches = self
+            .pending_policy_version_batches
+            .saturating_sub(write_result.policy_version_batches);
+        write_result.result
     }
 
     fn drain_finished(&mut self) -> Result<usize, String> {
@@ -770,10 +795,7 @@ impl AsyncPostgresCompletedRunWriter {
         loop {
             match self.receiver.try_recv() {
                 Ok(write_result) => {
-                    self.pending_batches = self
-                        .pending_batches
-                        .saturating_sub(write_result.queue_batches);
-                    persisted = persisted.saturating_add(write_result.result?);
+                    persisted = persisted.saturating_add(self.record_write_result(write_result)?);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -784,6 +806,23 @@ impl AsyncPostgresCompletedRunWriter {
                         );
                     }
                     break;
+                }
+            }
+        }
+        Ok(persisted)
+    }
+
+    fn drain_policy_versions_finished(&mut self) -> Result<usize, String> {
+        let mut persisted = self.drain_finished()?;
+        while self.pending_policy_version_batches > 0 {
+            match self.receiver.recv() {
+                Ok(write_result) => {
+                    persisted = persisted.saturating_add(self.record_write_result(write_result)?);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "postgres completed-run writer channel closed before policy versions were durable: {error}"
+                    ));
                 }
             }
         }
@@ -804,9 +843,11 @@ impl AsyncPostgresCompletedRunWriter {
         let Some(sender) = &self.sender else {
             return Err("postgres completed-run writer is closed".to_string());
         };
+        let policy_version_batches = usize::from(!pending_policy_versions.is_empty());
         let batch = PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            policy_version_batches,
             pending_policy_versions: std::mem::take(pending_policy_versions),
             pending_runs: std::mem::take(pending_runs),
         };
@@ -814,6 +855,9 @@ impl AsyncPostgresCompletedRunWriter {
             .send(batch)
             .map_err(|err| format!("queue postgres completed-run batch: {err}"))?;
         self.pending_batches = self.pending_batches.saturating_add(1);
+        self.pending_policy_version_batches = self
+            .pending_policy_version_batches
+            .saturating_add(policy_version_batches);
         Ok(persisted)
     }
 
@@ -824,19 +868,14 @@ impl AsyncPostgresCompletedRunWriter {
 
         while self.pending_batches > 0 {
             match self.receiver.recv() {
-                Ok(write_result) => {
-                    self.pending_batches = self
-                        .pending_batches
-                        .saturating_sub(write_result.queue_batches);
-                    match write_result.result {
-                        Ok(count) => persisted = persisted.saturating_add(count),
-                        Err(error) => {
-                            if first_error.is_none() {
-                                first_error = Some(error);
-                            }
+                Ok(write_result) => match self.record_write_result(write_result) {
+                    Ok(count) => persisted = persisted.saturating_add(count),
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
                         }
                     }
-                }
+                },
                 Err(error) => {
                     if first_error.is_none() {
                         first_error = Some(format!(
@@ -1172,6 +1211,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_policy_version_buffer = Vec::<PendingPostgresPolicyVersion>::new();
     let mut pg_completed_buffer = Vec::<PendingPostgresCompletedRun>::new();
     let mut pg_episode_starting_policy_versions = HashMap::<usize, (Option<String>, i32)>::new();
+    let mut episode_starting_tactical_weights =
+        HashMap::<usize, SoccerTacticalLearningWeights>::new();
     let mut pg_persisted_games = 0usize;
 
     let mut initial_policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
@@ -1306,7 +1347,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     neural_network,
                 } => {
                     if pg_refresh_for_new_sims {
-                        let pending_async_pg_batches =
+                        let mut pending_async_pg_batches =
                             if let Some(writer) = pg_completed_writer.as_mut() {
                                 pg_persisted_games += writer.drain_finished()?;
                                 writer.pending_batches
@@ -1327,6 +1368,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                                     &run_id,
                                     &mut pg_policy_version_buffer,
                                 )?;
+                            }
+                            if pg_flush_policy_versions_before_new_sim {
+                                if let Some(writer) = pg_completed_writer.as_mut() {
+                                    pg_persisted_games += writer.drain_policy_versions_finished()?;
+                                    pending_async_pg_batches = writer.pending_batches;
+                                }
                             }
                             if let Some(metadata) =
                                 store.load_latest_active_policy_metadata(experiment_id)?
@@ -1403,6 +1450,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                         match_config.tactical_learning = tactical_learning.clone();
                         active_config = match_config.clone();
                     }
+                    episode_starting_tactical_weights
+                        .insert(next_episode, match_config.tactical_learning.clone());
                     if pg_experiment_id.is_some() {
                         pg_episode_starting_policy_versions.insert(
                             next_episode,
@@ -1417,8 +1466,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                 } => {
                     queue_completed_games_seen = queue_completed_games_seen.saturating_add(1);
                     let game_fitness = game.score.match_fitness;
+                    let game_tactical_weights = episode_starting_tactical_weights
+                        .remove(&game.episode)
+                        .unwrap_or_else(|| active_config.tactical_learning.clone());
                     tactical_evolution_samples.push_back(TacticalEvolutionSample {
                         summary: game.tactical_summary.clone(),
+                        weights: game_tactical_weights,
                         fitness: game_fitness,
                     });
                     policy_evolution_samples.push_back(PolicyEvolutionSample {
@@ -1515,7 +1568,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 .iter()
                                 .take(elite_count)
                                 .map(|(sample_index, fitness)| {
-                                    (&tactical_evolution_samples[*sample_index].summary, *fitness)
+                                    let sample = &tactical_evolution_samples[*sample_index];
+                                    SoccerTacticalLearningGenomeParent {
+                                        summary: &sample.summary,
+                                        weights: &sample.weights,
+                                        fitness: *fitness,
+                                    }
                                 })
                                 .collect::<Vec<_>>();
                             let mut queue_evolution_options = evolution_options;
@@ -1524,7 +1582,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 .wrapping_add(queue_completed_games_seen as u64)
                                 .wrapping_add((game.episode as u64) << 32);
                             let previous_tactical_learning = tactical_learning.clone();
-                            tactical_learning = evolve_soccer_tactical_learning_weights(
+                            tactical_learning = evolve_soccer_tactical_learning_weights_from_genomes(
                                 &tactical_learning,
                                 &tactical_parents,
                                 queue_evolution_options,
@@ -1724,6 +1782,7 @@ mod tests {
         PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            policy_version_batches: 0,
             pending_policy_versions: Vec::new(),
             pending_runs: Vec::new(),
         }
@@ -1814,5 +1873,17 @@ mod tests {
         batch.absorb(empty_pg_batch("experiment-a", "runner-a"));
         assert!(batch.pending_policy_versions.is_empty());
         assert!(batch.pending_runs.is_empty());
+    }
+
+    #[test]
+    fn queue_postgres_batches_track_policy_version_sources() {
+        let mut batch = empty_pg_batch("experiment-a", "runner-a");
+        let mut other = empty_pg_batch("experiment-a", "runner-a");
+        batch.policy_version_batches = 1;
+        other.policy_version_batches = 1;
+
+        batch.absorb(other);
+
+        assert_eq!(batch.policy_version_batches, 2);
     }
 }

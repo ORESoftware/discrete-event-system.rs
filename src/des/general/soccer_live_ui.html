@@ -900,10 +900,11 @@ function learningLabel(l) {
 }
 function ballAgentLabel(ball = state?.frame?.ball) {
   const decision = ball?.lastDecision;
-  if (!decision) return "waiting";
+  const schedule = scheduleSlotLabel(ball?.scheduledIndex ?? decision?.scheduledIndex);
+  if (!decision) return schedule ? `waiting${schedule}` : "waiting";
   const holder = decision.holder ?? ball?.holder;
   const holderSuffix = holder == null ? "" : ` #${holder}`;
-  return `${decision.action} t${decision.tick}${holderSuffix}`;
+  return `${decision.action}${schedule} t${decision.tick}${holderSuffix}`;
 }
 function normalizeUiActionLabel(action) {
   const compact = String(action || "")
@@ -1300,10 +1301,15 @@ function gaitLabel(v) {
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .toLowerCase();
 }
+function scheduleSlotLabel(value) {
+  if (value == null) return "";
+  const slot = Number(value);
+  return Number.isFinite(slot) ? ` S${slot}` : "";
+}
 function agentDecisionLabel(d) {
   if (!d) return "Waiting";
   const order = Array.isArray(d.operationOrder) && d.operationOrder.length ? ` ${d.operationOrder.join(">")}` : "";
-  const schedule = Number.isFinite(Number(d.scheduledIndex)) ? ` S${Number(d.scheduledIndex)}` : "";
+  const schedule = scheduleSlotLabel(d.scheduledIndex);
   return `${d.action || "-"}${schedule}${order}`;
 }
 function agentOptionsLabel(d) {

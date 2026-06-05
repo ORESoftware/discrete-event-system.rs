@@ -737,6 +737,13 @@ impl MovementGait {
         }
     }
 
+    fn is_backward(self) -> bool {
+        matches!(
+            self,
+            MovementGait::BackWalk | MovementGait::BackJog | MovementGait::BackSkip
+        )
+    }
+
     fn fatigue_delta(self, stamina: f64, dt_seconds: f64) -> f64 {
         let cardio = ability01(stamina);
         let dt = dt_seconds.max(0.0);
@@ -8425,6 +8432,8 @@ pub struct BallState {
     pub holder: Option<usize>,
     pub last_touch_team: Option<Team>,
     #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    #[serde(default)]
     pub last_decision: Option<BallDecisionTrace>,
 }
 
@@ -8512,6 +8521,7 @@ impl BallAgent {
             altitude_yards: self.altitude_yards,
             holder: self.holder,
             last_touch_team: self.last_touch_team,
+            scheduled_index: None,
             last_decision: self.last_decision.clone(),
         }
     }
@@ -19594,16 +19604,26 @@ fn soccer_accounting_check_agent_schedule(
         }
     }
 
+    let scheduled_index = frame
+        .agent_schedule
+        .iter()
+        .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+    if frame.ball.scheduled_index != scheduled_index {
+        report.push_violation(
+            frame.tick,
+            "agentSchedule",
+            "ballScheduledIndex",
+            format!("{scheduled_index:?}"),
+            format!("{:?}", frame.ball.scheduled_index),
+            "ball state should expose the ball agent schedule index",
+        );
+    }
     if let Some(decision) = frame.ball.last_decision.as_ref() {
-        let scheduled_index = frame
-            .agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
         if decision.scheduled_index != scheduled_index {
             report.push_violation(
                 frame.tick,
                 "agentSchedule",
-                "ballScheduledIndex",
+                "ballDecisionScheduledIndex",
                 format!("{scheduled_index:?}"),
                 format!("{:?}", decision.scheduled_index),
                 "ball decision trace should expose the ball agent schedule index",
@@ -23601,6 +23621,7 @@ impl SoccerMatch {
                     altitude_yards: 0.0,
                     holder: kickoff,
                     last_touch_team: Some(Team::Home),
+                    scheduled_index: None,
                     last_decision: None,
                 },
             ),
@@ -25367,10 +25388,17 @@ impl SoccerMatch {
                 offside_line: assistant_offside_line_snapshot(&snapshot, o.kind),
             })
             .collect();
+        let ball_scheduled_index = self
+            .last_agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        let mut ball = self.ball.to_state();
+        ball.scheduled_index = ball_scheduled_index;
+
         MatchFrame {
             tick: self.tick,
             clock_seconds: self.clock_seconds,
-            ball: self.ball.to_state(),
+            ball,
             ball_history: snapshot.ball_history,
             players,
             shared_positions: snapshot.shared_positions,
@@ -27213,7 +27241,11 @@ impl SoccerMatch {
                 * strength_to_weight_factor,
             dt,
         );
-        let movement_facing = facing_bucket_from_vector(p.velocity);
+        let movement_facing = if gait.is_backward() {
+            default_team_facing(p.team)
+        } else {
+            facing_bucket_from_vector(p.velocity)
+        };
         if movement_facing != FacingBucket::Unknown {
             p.action_facing = movement_facing;
         }
@@ -35008,6 +35040,7 @@ fn tracking_frame_to_world_snapshot(
             altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
             holder: frame.ball_holder,
             last_touch_team,
+            scheduled_index: None,
             last_decision: frame
                 .ball_action
                 .as_deref()
@@ -39901,6 +39934,7 @@ mod tests {
             .expect("ball scheduled");
         let decision = frame.ball.last_decision.expect("ball decision trace");
 
+        assert_eq!(frame.ball.scheduled_index, Some(ball_schedule_index));
         assert_eq!(decision.scheduled_index, Some(ball_schedule_index));
         assert_eq!(decision.tick, 0);
         assert!(!decision.action.is_empty());
@@ -41261,6 +41295,25 @@ mod tests {
         sim.players[0].velocity = Vec2::zero();
         sim.move_player_towards(0, Vec2::new(40.0, 55.0), false);
         assert_eq!(sim.players[0].movement_gait, MovementGait::BackJog);
+        assert_eq!(
+            sim.players[0].action_facing,
+            FacingBucket::South,
+            "home player should backpedal toward own goal while still facing play"
+        );
+
+        let away_player = 11;
+        sim.players[away_player].position = Vec2::new(40.0, 60.0);
+        sim.players[away_player].velocity = Vec2::zero();
+        sim.move_player_towards(away_player, Vec2::new(40.0, 65.0), false);
+        assert_eq!(
+            sim.players[away_player].movement_gait,
+            MovementGait::BackJog
+        );
+        assert_eq!(
+            sim.players[away_player].action_facing,
+            FacingBucket::North,
+            "away player should backpedal toward own goal while still facing play"
+        );
     }
 
     #[test]
@@ -54903,6 +54956,8 @@ mod tests {
         assert_eq!(html.status, 200);
         assert!(html.body.contains("id=\"ballAction\""));
         assert!(html.body.contains("semanticBallActionLabel"));
+        assert!(html.body.contains("function scheduleSlotLabel"));
+        assert!(html.body.contains("scheduleSlotLabel(ball?.scheduledIndex"));
         assert!(html.body.contains("drawGoalPosts"));
         assert!(html.body.contains("id=\"clearanceAction\""));
         assert!(html.body.contains("id=\"routeOneAction\""));
@@ -55417,6 +55472,10 @@ mod tests {
             .as_str()
             .unwrap()
             .is_empty());
+        assert_eq!(
+            value["frame"]["ball"]["scheduledIndex"].as_u64(),
+            Some(ball_schedule_index as u64)
+        );
         assert_eq!(
             value["frame"]["ball"]["lastDecision"]["scheduledIndex"].as_u64(),
             Some(ball_schedule_index as u64)
@@ -58326,8 +58385,9 @@ mod tests {
         assert!(html.contains("controllerKeymapLabel"));
         assert!(html.contains("keymap.textContent"));
         assert!(html.contains("Move ${keyName(map.up)}"));
-        assert!(html.contains("Number(d.scheduledIndex)"));
-        assert!(html.contains("` S${Number(d.scheduledIndex)}`"));
+        assert!(html.contains("function scheduleSlotLabel"));
+        assert!(html.contains("scheduleSlotLabel(d.scheduledIndex)"));
+        assert!(html.contains("scheduleSlotLabel(ball?.scheduledIndex"));
         assert!(html.contains("ballAltitudeYards"));
         assert!(html.contains("altitudeYards"));
         assert!(html.contains("b.ballAcceleration"));

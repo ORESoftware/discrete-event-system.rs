@@ -532,9 +532,13 @@ fn solve_qp_with_gams_mosek_reference(
     let command = find_external_gams_command()?;
     let started = Instant::now();
     let stem = gams_mosek_qp_temp_stem();
-    let model_path = std::env::temp_dir().join(format!("{stem}.gms"));
-    let listing_path = std::env::temp_dir().join(format!("{stem}.lst"));
-    let solution_path = std::env::temp_dir().join(format!("{stem}.sol"));
+    let temp_dir = gams_mosek_qp_temp_dir();
+    let model_file_name = format!("{stem}.gms");
+    let listing_file_name = format!("{stem}.lst");
+    let solution_file_name = format!("{stem}.sol");
+    let model_path = temp_dir.join(&model_file_name);
+    let listing_path = temp_dir.join(&listing_file_name);
+    let solution_path = temp_dir.join(&solution_file_name);
     let cleanup_paths = [
         model_path.clone(),
         listing_path.clone(),
@@ -544,7 +548,7 @@ fn solve_qp_with_gams_mosek_reference(
     let model_text = match gams_mosek_qp_model_text(problem, &solution_path) {
         Ok(model_text) => model_text,
         Err(message) => {
-            cleanup_quadratic_reference_files(&cleanup_paths);
+            cleanup_quadratic_reference_artifacts(&cleanup_paths, &temp_dir);
             return Some(gams_mosek_qp_empty_solution(
                 ExternalQuadraticReferenceStatus::NumericalError,
                 message,
@@ -553,7 +557,7 @@ fn solve_qp_with_gams_mosek_reference(
         }
     };
     if let Err(err) = fs::write(&model_path, model_text) {
-        cleanup_quadratic_reference_files(&cleanup_paths);
+        cleanup_quadratic_reference_artifacts(&cleanup_paths, &temp_dir);
         return Some(gams_mosek_qp_empty_solution(
             ExternalQuadraticReferenceStatus::NumericalError,
             format!("failed to write GAMS/MOSEK QP model: {err}"),
@@ -568,15 +572,13 @@ fn solve_qp_with_gams_mosek_reference(
         .arg("lo=0")
         .arg(format!("o={}", listing_path.display()))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(parent) = command.parent() {
-        process.current_dir(parent);
-    }
+        .stderr(Stdio::piped())
+        .current_dir(&temp_dir);
 
     let child = match process.spawn() {
         Ok(child) => child,
         Err(err) => {
-            cleanup_quadratic_reference_files(&cleanup_paths);
+            cleanup_quadratic_reference_artifacts(&cleanup_paths, &temp_dir);
             return Some(gams_mosek_qp_empty_solution(
                 ExternalQuadraticReferenceStatus::Unavailable,
                 format!("failed to start GAMS/MOSEK QP solve: {err}"),
@@ -588,7 +590,7 @@ fn solve_qp_with_gams_mosek_reference(
     let (output, timed_out) = match wait_for_external_gams_output(child, timeout_ms) {
         Ok(output) => output,
         Err(message) => {
-            cleanup_quadratic_reference_files(&cleanup_paths);
+            cleanup_quadratic_reference_artifacts(&cleanup_paths, &temp_dir);
             return Some(gams_mosek_qp_empty_solution(
                 ExternalQuadraticReferenceStatus::NumericalError,
                 message,
@@ -599,12 +601,25 @@ fn solve_qp_with_gams_mosek_reference(
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let listing = fs::read_to_string(&listing_path).unwrap_or_default();
     let solution_text = fs::read_to_string(&solution_path);
-    cleanup_quadratic_reference_files(&cleanup_paths);
+    let keep_files = keep_quadratic_reference_files();
+    if !keep_files {
+        cleanup_quadratic_reference_artifacts(&cleanup_paths, &temp_dir);
+    }
+    let kept_files_detail = if keep_files {
+        format!(
+            "; kept files: {}, {}, {}",
+            model_path.display(),
+            listing_path.display(),
+            solution_path.display()
+        )
+    } else {
+        String::new()
+    };
 
     if timed_out {
         return Some(gams_mosek_qp_empty_solution(
             ExternalQuadraticReferenceStatus::NumericalError,
-            format!("GAMS/MOSEK QP solve timed out after {timeout_ms}ms"),
+            format!("GAMS/MOSEK QP solve timed out after {timeout_ms}ms{kept_files_detail}"),
             elapsed_ms,
         ));
     }
@@ -614,8 +629,9 @@ fn solve_qp_with_gams_mosek_reference(
         return Some(gams_mosek_qp_empty_solution(
             ExternalQuadraticReferenceStatus::NumericalError,
             format!(
-                "GAMS/MOSEK QP solve failed: {}",
-                first_non_empty_quadratic_detail(&[&listing, &stderr, &stdout])
+                "GAMS/MOSEK QP solve failed: {}{}",
+                first_non_empty_quadratic_detail(&[&listing, &stderr, &stdout]),
+                kept_files_detail
             ),
             elapsed_ms,
         ));
@@ -623,7 +639,7 @@ fn solve_qp_with_gams_mosek_reference(
     if !external_gams_listing_confirms_solver(ExternalGamsSolver::Mosek, &listing) {
         return Some(gams_mosek_qp_empty_solution(
             ExternalQuadraticReferenceStatus::NumericalError,
-            "GAMS QCP listing did not confirm MOSEK optimal completion",
+            format!("GAMS QCP listing did not confirm MOSEK optimal completion{kept_files_detail}"),
             elapsed_ms,
         ));
     }
@@ -634,7 +650,7 @@ fn solve_qp_with_gams_mosek_reference(
             Err(message) => {
                 return Some(gams_mosek_qp_empty_solution(
                     ExternalQuadraticReferenceStatus::NumericalError,
-                    message,
+                    format!("{message}{kept_files_detail}"),
                     elapsed_ms,
                 ))
             }
@@ -642,7 +658,7 @@ fn solve_qp_with_gams_mosek_reference(
         Err(err) => {
             return Some(gams_mosek_qp_empty_solution(
                 ExternalQuadraticReferenceStatus::NumericalError,
-                format!("failed to read GAMS/MOSEK QP solution file: {err}"),
+                format!("failed to read GAMS/MOSEK QP solution file: {err}{kept_files_detail}"),
                 elapsed_ms,
             ))
         }
@@ -787,7 +803,7 @@ fn gams_mosek_qp_model_text(
     text.push_str("Model m /all/;\n");
     text.push_str("Solve m using QCP minimizing objvar;\n");
     text.push_str(&format!(
-        "File sol /'{}/';\n",
+        "File sol /'{}'/;\n",
         gams_single_quoted_path(solution_path)
     ));
     text.push_str("put sol;\n");
@@ -1033,17 +1049,47 @@ fn gams_mosek_qp_temp_stem() -> String {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos();
-    format!("des-rs-gams-mosek-qp-{}-{suffix}", std::process::id())
+        .as_nanos()
+        % 1_000_000_000;
+    format!("desqp-{}-{suffix:x}", std::process::id())
 }
 
-fn cleanup_quadratic_reference_files(paths: &[PathBuf]) {
+fn gams_mosek_qp_temp_dir() -> PathBuf {
+    let private_tmp = PathBuf::from("/private/tmp");
+    if fs::metadata(&private_tmp).is_ok_and(|metadata| metadata.is_dir()) {
+        private_tmp
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+fn cleanup_quadratic_reference_artifacts(paths: &[PathBuf], _temp_dir: &Path) {
     for path in paths {
         let _ = fs::remove_file(path);
     }
 }
 
+fn keep_quadratic_reference_files() -> bool {
+    std::env::var("ORES_KEEP_GAMS_QP_FILES")
+        .or_else(|_| std::env::var("QP_REFERENCE_KEEP_GAMS_FILES"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn first_non_empty_quadratic_detail(texts: &[&str]) -> String {
+    if let Some(line) = texts
+        .iter()
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .find(|line| line.contains("****") || line.to_ascii_uppercase().contains("ERROR"))
+    {
+        return line.chars().take(240).collect();
+    }
     texts
         .iter()
         .flat_map(|text| text.lines())
@@ -1825,7 +1871,8 @@ pub fn solve_qp_with_external_reference(
         );
     }
 
-    let solution = run_quadratic_reference_json(quadratic_program_to_reference_json(problem), opts);
+    let mut solution =
+        run_quadratic_reference_json(quadratic_program_to_reference_json(problem), opts);
     if opts.solver == ExternalQuadraticReferenceSolver::Mosek
         && !matches!(
             solution.status,
@@ -1837,6 +1884,11 @@ pub fn solve_qp_with_external_reference(
         if let Some(gams_solution) = solve_qp_with_gams_mosek_reference(problem) {
             if gams_solution.status == ExternalQuadraticReferenceStatus::Optimal {
                 return gams_solution;
+            }
+            if !gams_solution.message.is_empty() {
+                solution
+                    .message
+                    .push_str(&format!("; GAMS/MOSEK fallback: {}", gams_solution.message));
             }
         }
     }
@@ -2042,6 +2094,7 @@ mod tests {
         assert!(model_text.contains("ub1.. x1 + x2 =l= 3;"));
         assert!(model_text.contains("x1.lo = 0;"));
         assert!(model_text.contains("x2.up = 4;"));
+        assert!(model_text.contains("File sol /'/tmp/des-rs-gams-mosek-qp-test.sol'/;"));
         assert!(model_text.contains("put 'objective ', objvar.l:24:16 /;"));
         assert!(model_text.contains("put 'x2 ', x2.l:24:16 /;"));
     }

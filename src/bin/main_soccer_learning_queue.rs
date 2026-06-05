@@ -19,8 +19,8 @@ use des_engine::des::general::soccer::{
     SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
-    run_soccer_learning_queue_with_observer, soccer_self_play_artifact_from_queue_report,
-    SoccerLearningCompletedGame, SoccerLearningQueueRunnerConfig,
+    run_soccer_learning_queue_with_events, soccer_self_play_artifact_from_queue_report,
+    SoccerLearningCompletedGame, SoccerLearningQueueEvent, SoccerLearningQueueRunnerConfig,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -919,7 +919,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("resume_artifact={path}");
     }
 
-    let report = run_soccer_learning_queue_with_observer(
+    let report = run_soccer_learning_queue_with_events(
         SoccerLearningQueueRunnerConfig {
             games,
             parallel_games,
@@ -936,67 +936,128 @@ fn run() -> Result<(), Box<dyn Error>> {
             min_policy_visits: env_u32("SOCCER_MIN_POLICY_VISITS", 0)?,
         },
         initial_policies,
-        |game, merged_policies| {
-            let Some(experiment_id) = pg_experiment_id.as_deref() else {
-                return Ok(());
-            };
-            pg_completed_games_seen = pg_completed_games_seen.saturating_add(1);
-            let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
-            let should_write_policy_version = pg_policy_version_interval_games <= 1
-                || pg_completed_games_seen >= games
-                || pg_completed_games_seen % pg_policy_version_interval_games == 0;
-            let output_policy_version_id = if should_write_policy_version {
-                let next_generation = pg_generation.saturating_add(1);
-                let version_label = format!("{}-episode-{:06}", run_id, game.episode + 1);
-                let output_policy_version_id = Uuid::new_v4().to_string();
-                pg_policy_version_buffer.push(PendingPostgresPolicyVersion {
-                    id: output_policy_version_id.clone(),
-                    parent_policy_version_id: pg_batch_base_policy_version_id.clone(),
-                    generation: next_generation,
-                    version_label,
-                    source_kind: "merge",
-                    status: "active",
-                    config: config.clone(),
-                    home_options: options.clone(),
-                    away_options: options.clone(),
-                    policies: merged_policies.clone(),
-                    fitness: game.score.match_fitness,
-                    neural_network: game.neural_network.clone(),
-                });
-                pg_base_policy_version_id = Some(output_policy_version_id.clone());
-                pg_last_policy_version_id = Some(output_policy_version_id.clone());
-                pg_generation = next_generation;
-                Some(output_policy_version_id)
-            } else {
-                pg_last_policy_version_id.clone()
-            };
-            pg_completed_buffer.push(PendingPostgresCompletedRun {
-                completed_game: game.clone(),
-                base_policy_version_id: pg_batch_base_policy_version_id,
-                output_policy_version_id,
-                generation: pg_generation,
-            });
-            if pg_completed_buffer.len() >= pg_completed_run_batch_games {
-                pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
-                    writer.enqueue(
-                        experiment_id,
-                        &run_id,
-                        &mut pg_policy_version_buffer,
-                        &mut pg_completed_buffer,
-                    )?
-                } else if let Some(store) = pg_store.as_mut() {
-                    flush_postgres_completed_runs(
-                        store,
-                        experiment_id,
-                        &run_id,
-                        &mut pg_policy_version_buffer,
-                        &mut pg_completed_buffer,
-                    )?
-                } else {
-                    0
-                };
+        |event| {
+            match event {
+                SoccerLearningQueueEvent::StartingBatch {
+                    next_episode,
+                    policies: starting_policies,
+                    neural_network,
+                } => {
+                    if resume_artifact.is_none() {
+                        let pending_async_pg_batches =
+                            if let Some(writer) = pg_completed_writer.as_mut() {
+                                pg_persisted_games += writer.drain_finished()?;
+                                writer.pending_batches
+                            } else {
+                                0
+                            };
+                        if pg_policy_version_buffer.is_empty() && pending_async_pg_batches == 0 {
+                            if let (Some(experiment_id), Some(store)) =
+                                (pg_experiment_id.as_deref(), pg_store.as_mut())
+                            {
+                                if let Some(version) = store.load_latest_active_policy(
+                                    experiment_id,
+                                    options.clone(),
+                                    options.clone(),
+                                )? {
+                                    let same_policy_version = pg_base_policy_version_id.as_deref()
+                                        == Some(version.id.as_str());
+                                    let should_refresh = pg_base_policy_version_id.is_none()
+                                        || version.generation > pg_generation
+                                        || (version.generation == pg_generation
+                                            && !same_policy_version)
+                                        || (same_policy_version
+                                            && neural_network.is_none()
+                                            && version.neural_network.is_some());
+                                    if should_refresh {
+                                        println!(
+                                            "postgres_refresh_policy_for_queue next_episode={} policy_version={} previous_policy_version={} generation={} neural_network={}",
+                                            next_episode + 1,
+                                            version.id,
+                                            pg_base_policy_version_id
+                                                .as_deref()
+                                                .unwrap_or("none"),
+                                            version.generation,
+                                            version.neural_network.is_some()
+                                        );
+                                        *starting_policies = version.policies;
+                                        *neural_network = version.neural_network;
+                                        pg_base_policy_version_id = Some(version.id.clone());
+                                        pg_last_policy_version_id = Some(version.id);
+                                        pg_generation = version.generation;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                SoccerLearningQueueEvent::CompletedGame {
+                    game,
+                    merged_policies,
+                } => {
+                    let Some(experiment_id) = pg_experiment_id.as_deref() else {
+                        return Ok(());
+                    };
+                    pg_completed_games_seen = pg_completed_games_seen.saturating_add(1);
+                    let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
+                    let should_write_policy_version = pg_policy_version_interval_games <= 1
+                        || pg_completed_games_seen >= games
+                        || pg_completed_games_seen % pg_policy_version_interval_games == 0;
+                    let output_policy_version_id = if should_write_policy_version {
+                        let next_generation = pg_generation.saturating_add(1);
+                        let version_label = format!("{}-episode-{:06}", run_id, game.episode + 1);
+                        let output_policy_version_id = Uuid::new_v4().to_string();
+                        pg_policy_version_buffer.push(PendingPostgresPolicyVersion {
+                            id: output_policy_version_id.clone(),
+                            parent_policy_version_id: pg_batch_base_policy_version_id.clone(),
+                            generation: next_generation,
+                            version_label,
+                            source_kind: "merge",
+                            status: "active",
+                            config: config.clone(),
+                            home_options: options.clone(),
+                            away_options: options.clone(),
+                            policies: merged_policies.clone(),
+                            fitness: game.score.match_fitness,
+                            neural_network: game.neural_network.clone(),
+                        });
+                        pg_base_policy_version_id = Some(output_policy_version_id.clone());
+                        pg_last_policy_version_id = Some(output_policy_version_id.clone());
+                        pg_generation = next_generation;
+                        Some(output_policy_version_id)
+                    } else {
+                        pg_last_policy_version_id.clone()
+                    };
+                    pg_completed_buffer.push(PendingPostgresCompletedRun {
+                        completed_game: game.clone(),
+                        base_policy_version_id: pg_batch_base_policy_version_id,
+                        output_policy_version_id,
+                        generation: pg_generation,
+                    });
+                    if pg_completed_buffer.len() >= pg_completed_run_batch_games {
+                        pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
+                            writer.enqueue(
+                                experiment_id,
+                                &run_id,
+                                &mut pg_policy_version_buffer,
+                                &mut pg_completed_buffer,
+                            )?
+                        } else if let Some(store) = pg_store.as_mut() {
+                            flush_postgres_completed_runs(
+                                store,
+                                experiment_id,
+                                &run_id,
+                                &mut pg_policy_version_buffer,
+                                &mut pg_completed_buffer,
+                            )?
+                        } else {
+                            0
+                        };
+                    }
+                    Ok(())
+                }
             }
-            Ok(())
         },
     )
     .map_err(invalid_data)?;

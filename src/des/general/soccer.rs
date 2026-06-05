@@ -30488,7 +30488,23 @@ fn shot_decision_is_qualified_for_role(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
 ) -> bool {
-    shot_decision_is_qualified(observation) || striker_shot_window_is_qualified(observation, role)
+    shot_decision_is_qualified(observation)
+        || teammate_near_goal_shot_is_qualified(observation, role)
+        || striker_shot_window_is_qualified(observation, role)
+}
+
+fn teammate_near_goal_shot_is_qualified(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> bool {
+    if role == PlayerRole::Goalkeeper || !observation.shot_lane_open {
+        return false;
+    }
+    let block_risk = observation.shot_block_probability.clamp(0.0, 1.0);
+    observation.yards_to_goal <= TEAMMATE_MUST_SHOOT_YARDS
+        && block_risk <= STRIKER_SHOT_MAX_BLOCK_PROBABILITY
+        && observation.shot_on_frame_probability >= STRIKER_SHOT_MIN_ON_FRAME_PROBABILITY
+        && observation.shot_beat_goalkeeper_probability >= STRIKER_SHOT_MIN_KEEPER_BEAT_PROBABILITY
 }
 
 fn striker_shot_window_is_qualified(
@@ -30506,9 +30522,11 @@ fn striker_shot_window_is_qualified(
 }
 
 fn striker_must_shoot(observation: &SoccerPomdpObservation, role: PlayerRole) -> bool {
-    role == PlayerRole::Forward
-        && observation.yards_to_goal <= STRIKER_MUST_SHOOT_YARDS
-        && striker_shot_window_is_qualified(observation, role)
+    must_shoot_near_goal(observation, role)
+}
+
+fn must_shoot_near_goal(observation: &SoccerPomdpObservation, role: PlayerRole) -> bool {
+    teammate_near_goal_shot_is_qualified(observation, role)
 }
 
 fn striker_legal_shot_attempt_bonus(observation: &SoccerPomdpObservation, role: PlayerRole) -> f64 {

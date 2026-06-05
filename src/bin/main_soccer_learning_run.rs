@@ -1986,6 +1986,48 @@ fn run() -> Result<(), Box<dyn Error>> {
         write_game_artifacts && game_artifact_mode.as_str() == "full";
 
     while next_episode < games {
+        if resume_artifact.is_none() {
+            let pending_async_pg_batches = if let Some(writer) = pg_completed_writer.as_mut() {
+                pg_persisted_games += writer.drain_finished().map_err(invalid_data)?;
+                writer.pending_batches
+            } else {
+                0
+            };
+            if pg_policy_version_buffer.is_empty() && pending_async_pg_batches == 0 {
+                if let (Some(experiment_id), Some(store)) =
+                    (pg_experiment_id.as_deref(), pg_store.as_mut())
+                {
+                    if let Some(version) = store
+                        .load_latest_active_policy(experiment_id, options.clone(), options.clone())
+                        .map_err(invalid_data)?
+                    {
+                        let same_policy_version =
+                            pg_base_policy_version_id.as_deref() == Some(version.id.as_str());
+                        let should_refresh = pg_base_policy_version_id.is_none()
+                            || version.generation > pg_generation
+                            || (version.generation == pg_generation && !same_policy_version)
+                            || (same_policy_version
+                                && latest_neural_network.is_none()
+                                && version.neural_network.is_some());
+                        if should_refresh {
+                            println!(
+                                "postgres_refresh_policy_for_batch next_episode={} policy_version={} previous_policy_version={} generation={} neural_network={}",
+                                next_episode + 1,
+                                version.id,
+                                pg_base_policy_version_id.as_deref().unwrap_or("none"),
+                                version.generation,
+                                version.neural_network.is_some()
+                            );
+                            policies = version.policies;
+                            latest_neural_network = version.neural_network;
+                            pg_base_policy_version_id = Some(version.id.clone());
+                            pg_last_policy_version_id = Some(version.id);
+                            pg_generation = version.generation;
+                        }
+                    }
+                }
+            }
+        }
         let batch_size = parallel_games.min(games - next_episode);
         let batch_start_episode = next_episode;
         let batch_start_policies = Arc::new(policies.clone());

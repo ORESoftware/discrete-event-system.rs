@@ -25,8 +25,11 @@ import tempfile
 import xml.etree.ElementTree as ET
 from typing import Optional, Sequence
 
-from ip_mip_reference import expand_source_features
-from lp_solve import dot, normalize_lp
+try:
+    from ip_mip_reference import expand_source_features
+except ImportError:
+    def expand_source_features(p: dict) -> dict:
+        return p
 
 
 def rust_reference_disabled() -> bool:
@@ -205,6 +208,65 @@ def finite(value: Optional[float]) -> Optional[float]:
         return None
     value = float(value)
     return value if math.isfinite(value) else None
+
+
+def dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(float(x) * float(y) for x, y in zip(a, b))
+
+
+def normalize_lp(
+    lp: dict,
+) -> tuple[
+    str,
+    list[float],
+    list[list[float]],
+    list[float],
+    list[list[float]],
+    list[float],
+    list[Optional[float]],
+    list[Optional[float]],
+]:
+    c = [float(v) for v in lp.get("c", [])]
+    n = len(c)
+    sense = lp.get("sense", "max")
+    a_ub = [list(map(float, row)) for row in lp.get("A_ub", lp.get("a_ub", [])) or []]
+    b_ub = [float(v) for v in (lp.get("b_ub", []) or [])]
+    a_eq = [list(map(float, row)) for row in lp.get("A_eq", lp.get("a_eq", [])) or []]
+    b_eq = [float(v) for v in (lp.get("b_eq", []) or [])]
+    for idx, row_bound in enumerate(lp.get("linear_constraints", []) or []):
+        row = [float(v) for v in row_bound["coefs"]]
+        if len(row) != n:
+            raise ValueError(f"linear constraint {idx} row length mismatch")
+        lower_raw = row_bound.get("lower")
+        upper_raw = row_bound.get("upper")
+        lower = None if lower_raw is None else float(lower_raw)
+        upper = None if upper_raw is None else float(upper_raw)
+        if lower is None and upper is None:
+            raise ValueError(f"linear constraint {idx} needs lower or upper bound")
+        if lower is not None and upper is not None and lower > upper + 1e-9:
+            raise ValueError(f"linear constraint {idx} lower exceeds upper")
+        if lower is not None and upper is not None and abs(lower - upper) <= 1e-9:
+            a_eq.append(row)
+            b_eq.append(upper)
+            continue
+        if upper is not None:
+            a_ub.append(row[:])
+            b_ub.append(upper)
+        if lower is not None:
+            a_ub.append([-v for v in row])
+            b_ub.append(-lower)
+    lb = lp.get("lb")
+    ub = lp.get("ub")
+    lbs = [0.0] * n if lb is None else [None if v is None else float(v) for v in lb]
+    ubs = [None] * n if ub is None else [None if v is None else float(v) for v in ub]
+    if len(lbs) != n or len(ubs) != n:
+        raise ValueError("bound vector length mismatch")
+    if len(a_ub) != len(b_ub) or len(a_eq) != len(b_eq):
+        raise ValueError("constraint matrix/vector length mismatch")
+    for row in a_ub + a_eq:
+        if len(row) != n:
+            raise ValueError("constraint row length mismatch")
+    return sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs
 
 
 def normalized_node_limit(value: Optional[int]) -> Optional[int]:

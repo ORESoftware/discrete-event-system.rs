@@ -268,6 +268,7 @@
         <button id="play">Play</button>
         <button id="prev">-1</button>
         <button id="next">+1</button>
+        <button id="runNewSim">Run New Sim</button>
         <select id="speed">
           <option value="0.5">0.5x</option>
           <option value="1" selected>1x</option>
@@ -325,6 +326,7 @@
 <script>
 const TRACE_META_URL = "__SOCCER_TRACE_META_URL__";
 const TRACE_FRAMES_URL = "__SOCCER_TRACE_FRAMES_URL__";
+const RUN_NEW_SIM_URL = "../simulations/main_soccer/run?exact=1";
 const FALLBACK_CONFIG = {
   fieldWidthYards: 80,
   fieldLengthYards: 120,
@@ -389,6 +391,7 @@ const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const scrub = document.getElementById("scrub");
 const play = document.getElementById("play");
+const runNewSimButton = document.getElementById("runNewSim");
 const speed = document.getElementById("speed");
 const events = document.getElementById("events");
 const slots = document.getElementById("slots");
@@ -414,6 +417,8 @@ let activeSlot = 0;
 let traceFramesComplete = false;
 let uiReady = false;
 let loadStartedAt = performance.now();
+let traceLoadController = null;
+let runningNewSimulation = false;
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
@@ -425,6 +430,11 @@ function formatBytes(bytes) {
   if (value < 1024) return `${value.toFixed(0)} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+function cacheBustUrl(url) {
+  const absolute = new URL(url, window.location.href);
+  absolute.searchParams.set("v", String(Date.now()));
+  return absolute.toString();
 }
 function currentFrame() {
   if (!trace.frames.length) return null;
@@ -460,9 +470,28 @@ function setControlsEnabled(enabled) {
   passTarget.disabled = !enabled;
   passFlight.disabled = !enabled;
 }
+function resetTraceState() {
+  playing = false;
+  frameIndex = 0;
+  lastTs = 0;
+  activeSlot = 0;
+  traceFramesComplete = false;
+  uiReady = false;
+  trace.config = {...FALLBACK_CONFIG};
+  trace.summary = {ticks: 0, stats: emptyStats()};
+  trace.frames = [];
+  trace.events = [];
+  slots.innerHTML = "";
+  passTarget.innerHTML = "";
+  scrub.value = 0;
+  scrub.max = 0;
+  keys.clear();
+  updateMetrics();
+}
 function updatePlaybackAvailability() {
   const enabled = canStartPlayback();
   setControlsEnabled(enabled);
+  runNewSimButton.disabled = runningNewSimulation;
   if (enabled && !traceFramesComplete) {
     loadingOverlay.classList.add("playable");
   } else {
@@ -1081,8 +1110,12 @@ function appendFrameLine(line) {
   if (!playing && frameIndex >= trace.frames.length - 2) render();
 }
 
-async function loadTraceMeta() {
-  const response = await fetch(TRACE_META_URL, {headers: {"Accept": "application/json"}});
+async function loadTraceMeta(signal) {
+  const response = await fetch(cacheBustUrl(TRACE_META_URL), {
+    headers: {"Accept": "application/json"},
+    cache: "no-store",
+    signal
+  });
   if (!response.ok) throw new Error(`metadata ${response.status}`);
   const meta = await response.json();
   trace.config = meta.config || trace.config || {...FALLBACK_CONFIG};
@@ -1092,9 +1125,11 @@ async function loadTraceMeta() {
   updateMetrics();
 }
 
-async function loadTraceFrames() {
-  const response = await fetch(TRACE_FRAMES_URL, {
-    headers: {"Accept": "application/x-ndjson,text/plain,application/jsonl"}
+async function loadTraceFrames(signal) {
+  const response = await fetch(cacheBustUrl(TRACE_FRAMES_URL), {
+    headers: {"Accept": "application/x-ndjson,text/plain,application/jsonl"},
+    cache: "no-store",
+    signal
   });
   if (!response.ok) throw new Error(`frames ${response.status}`);
   const totalBytes = Number(response.headers.get("content-length") || 0);
@@ -1134,21 +1169,62 @@ async function loadTraceFrames() {
   updatePlaybackAvailability();
 }
 
-async function bootstrapTrace() {
+async function bootstrapTrace(options = {}) {
+  if (traceLoadController) traceLoadController.abort();
+  const controller = new AbortController();
+  traceLoadController = controller;
+  if (options.reset) resetTraceState();
+  loadingOverlay.classList.remove("hidden", "playable");
   setControlsEnabled(false);
-  updateLoadingProgress(0, 0, "Loading metadata");
+  updateLoadingProgress(0, 0, options.message || "Loading metadata");
   render();
   try {
-    await loadTraceMeta();
+    await loadTraceMeta(controller.signal);
     updateLoadingProgress(0, 0, "Connecting to frame stream");
-    await loadTraceFrames();
+    await loadTraceFrames(controller.signal);
   } catch (err) {
+    if (err.name === "AbortError") return;
     playing = false;
     loadingBar.style.width = "100%";
     loadingStatus.textContent = `Load failed: ${err.message}`;
     loadingBytes.textContent = "Retry after redeploying the split trace artifacts";
     play.textContent = "Load failed";
     setControlsEnabled(false);
+  } finally {
+    if (traceLoadController === controller) traceLoadController = null;
+  }
+}
+
+async function runNewSimulation() {
+  if (runningNewSimulation) return;
+  runningNewSimulation = true;
+  runNewSimButton.disabled = true;
+  runNewSimButton.textContent = "Running";
+  if (traceLoadController) traceLoadController.abort();
+  playing = false;
+  loadingOverlay.classList.remove("hidden", "playable");
+  setControlsEnabled(false);
+  updateLoadingProgress(0, 0, "Running main_soccer");
+  play.textContent = "Running";
+  try {
+    const response = await fetch(cacheBustUrl(RUN_NEW_SIM_URL), {
+      headers: {"Accept": "application/json"},
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error(`run ${response.status}`);
+    const payload = await response.json();
+    if (!payload.ok) throw new Error(payload.error || "simulation failed");
+    runNewSimButton.textContent = "Loading";
+    await bootstrapTrace({reset: true, message: "Loading new match"});
+  } catch (err) {
+    loadingBar.style.width = "100%";
+    loadingStatus.textContent = `Run failed: ${err.message}`;
+    loadingBytes.textContent = "main_soccer did not produce a fresh split trace";
+    play.textContent = "Run failed";
+  } finally {
+    runningNewSimulation = false;
+    runNewSimButton.textContent = "Run New Sim";
+    updatePlaybackAvailability();
   }
 }
 
@@ -1158,6 +1234,7 @@ play.addEventListener("click", () => {
   playing = !playing;
   play.textContent = playing ? "Pause" : "Play";
 });
+runNewSimButton.addEventListener("click", runNewSimulation);
 document.getElementById("prev").addEventListener("click", () => {
   frameIndex = Math.max(0, frameIndex - 1);
   rebuildPassTargets();

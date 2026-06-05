@@ -7,9 +7,12 @@
 //! libraries, and generated executables out of version control.
 
 use super::external_linear_cli::{
-    probe_external_linear_cli_solver, ExternalLinearCliKind, ExternalLinearCliOptions,
-    ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
+    probe_external_linear_cli_solver, solve_ipmip_with_external_cli, solve_lp_with_external_cli,
+    solve_lower_bounded_ipmip_with_external_cli, ExternalLinearCliKind, ExternalLinearCliOptions,
+    ExternalLinearCliProbeStatus, ExternalLinearCliSolver, ExternalLinearCliStatus,
 };
+use super::ip_mip_des::{IPMIPProblem, LowerBoundedIPMIPProblem};
+use super::lp::{LPProblem, Sense};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
@@ -1617,6 +1620,23 @@ impl NativeExternalOptimizationEcosystemResult {
     fn with_extra(mut self, key: impl Into<String>, value: Value) -> Self {
         self.extra.push((key.into(), value));
         self
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ExternalOptimizationLinearCliProblem {
+    LinearProgram(LPProblem),
+    Plain(IPMIPProblem),
+    LowerBounded(LowerBoundedIPMIPProblem),
+}
+
+impl ExternalOptimizationLinearCliProblem {
+    fn family(&self) -> &'static str {
+        match self {
+            ExternalOptimizationLinearCliProblem::LinearProgram(_) => "linear-lp",
+            ExternalOptimizationLinearCliProblem::Plain(_)
+            | ExternalOptimizationLinearCliProblem::LowerBounded(_) => "linear-mip",
+        }
     }
 }
 
@@ -3551,6 +3571,11 @@ pub fn run_external_optimization_adapter(
     input: &Value,
     opts: &ExternalOptimizationAdapterOptions,
 ) -> ExternalOptimizationAdapterRun {
+    if opts.extra_args.is_empty() {
+        if let Some(solver) = opts.tool.linear_cli_solver() {
+            return run_external_optimization_linear_cli_adapter(input, opts, solver);
+        }
+    }
     let Some(command) = external_optimization_adapter_command_with_options(opts) else {
         return ExternalOptimizationAdapterRun {
             tool: opts.tool,
@@ -4104,6 +4129,185 @@ fn probe_external_optimization_linear_cli_tool(
     }
 }
 
+fn run_external_optimization_linear_cli_adapter(
+    input: &Value,
+    opts: &ExternalOptimizationAdapterOptions,
+    solver: ExternalLinearCliSolver,
+) -> ExternalOptimizationAdapterRun {
+    let problem = match external_optimization_linear_cli_problem_from_payload(input) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return ExternalOptimizationAdapterRun {
+                tool: opts.tool,
+                status: ExternalOptimizationAdapterStatus::Failed,
+                output: Some(json!({
+                    "kind": "optimization-ecosystem-reference-result",
+                    "tool": opts.tool.as_str(),
+                    "family": "linear-mip",
+                    "status": "unsupported",
+                    "objective": null,
+                    "x": null,
+                    "message": message,
+                    "backend": "external-linear-cli:unsupported",
+                })),
+                elapsed_ms: 0.0,
+                message,
+            };
+        }
+    };
+    let mut cli_opts = ExternalLinearCliOptions {
+        solver,
+        command_path: opts.command_path.clone(),
+        time_limit_secs: opts.time_limit_secs,
+        ..Default::default()
+    };
+    if cli_opts.time_limit_secs.is_none() {
+        cli_opts.time_limit_secs = Some(5.0);
+    }
+    let family = problem.family();
+    let solution = match &problem {
+        ExternalOptimizationLinearCliProblem::LinearProgram(problem) => {
+            solve_lp_with_external_cli(problem, &cli_opts)
+        }
+        ExternalOptimizationLinearCliProblem::Plain(problem) => {
+            solve_ipmip_with_external_cli(problem, &cli_opts)
+        }
+        ExternalOptimizationLinearCliProblem::LowerBounded(problem) => {
+            solve_lower_bounded_ipmip_with_external_cli(problem, &cli_opts)
+        }
+    };
+    let status = solution.status.as_str();
+    let adapter_status = match solution.status {
+        ExternalLinearCliStatus::Optimal
+        | ExternalLinearCliStatus::Feasible
+        | ExternalLinearCliStatus::Infeasible
+        | ExternalLinearCliStatus::Unbounded => ExternalOptimizationAdapterStatus::Ok,
+        ExternalLinearCliStatus::Unavailable => ExternalOptimizationAdapterStatus::Unavailable,
+        ExternalLinearCliStatus::NumericalError | ExternalLinearCliStatus::Unknown => {
+            ExternalOptimizationAdapterStatus::Failed
+        }
+    };
+    let output = json!({
+        "kind": "optimization-ecosystem-reference-result",
+        "tool": opts.tool.as_str(),
+        "family": family,
+        "status": status,
+        "objective": solution.objective,
+        "x": solution.x,
+        "message": solution.message,
+        "backend": solution.solver,
+        "bestBound": solution.best_bound,
+        "mipGap": solution.mip_gap,
+        "nodesExplored": solution.nodes_explored,
+    });
+    ExternalOptimizationAdapterRun {
+        tool: opts.tool,
+        status: adapter_status,
+        output: Some(output),
+        elapsed_ms: solution.elapsed_ms,
+        message: solution.message,
+    }
+}
+
+fn external_optimization_linear_cli_problem_from_payload(
+    payload: &Value,
+) -> Result<ExternalOptimizationLinearCliProblem, String> {
+    let objective = native_value_array_as_f64(payload.get("objective"))
+        .ok_or_else(|| "missing objective vector".to_string())?;
+    if objective.is_empty() {
+        return Err("missing objective vector".to_string());
+    }
+    let sense = match payload
+        .get("sense")
+        .and_then(Value::as_str)
+        .unwrap_or("min")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "max" | "maximize" => Sense::Max,
+        _ => Sense::Min,
+    };
+    let domains = payload.get("domains").and_then(Value::as_array);
+    let mut lb = Vec::with_capacity(objective.len());
+    let mut ub = Vec::with_capacity(objective.len());
+    let mut has_lower_bounds = false;
+    for index in 0..objective.len() {
+        let raw = domains.and_then(|domains| domains.get(index));
+        let (lower, upper) = raw
+            .and_then(Value::as_array)
+            .map(|items| {
+                (
+                    native_value_as_f64(items.first(), 0.0).round() as i64,
+                    native_value_as_f64(items.get(1), 1.0).round() as i64,
+                )
+            })
+            .unwrap_or((0, 1));
+        if upper < lower {
+            return Err("empty domain".to_string());
+        }
+        has_lower_bounds |= lower != 0;
+        lb.push(lower as f64);
+        ub.push(upper as f64);
+    }
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    for row in payload
+        .get("constraints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let coefs = native_value_array_as_f64(row.get("coefs"))
+            .ok_or_else(|| "constraint coefficient length mismatch".to_string())?;
+        if coefs.len() != objective.len() {
+            return Err("constraint coefficient length mismatch".to_string());
+        }
+        let rhs = native_value_as_f64(row.get("rhs"), 0.0);
+        match row
+            .get("sense")
+            .and_then(Value::as_str)
+            .unwrap_or("<=")
+            .trim()
+        {
+            "<=" | "le" | "lte" => {
+                a.push(coefs);
+                b.push(rhs);
+            }
+            ">=" | "ge" | "gte" => {
+                a.push(coefs.iter().map(|value| -*value).collect());
+                b.push(-rhs);
+            }
+            "=" | "==" | "eq" => {
+                a.push(coefs.clone());
+                b.push(rhs);
+                a.push(coefs.iter().map(|value| -*value).collect());
+                b.push(-rhs);
+            }
+            other => return Err(format!("unsupported constraint sense {other}")),
+        }
+    }
+    let base = IPMIPProblem {
+        sense,
+        c: objective,
+        a,
+        b,
+        integer_vars: vec![true; ub.len()],
+        ub: Some(ub),
+        var_names: None,
+        con_names: None,
+        lazy_constraints: None,
+        variable_nodes: None,
+        constraint_nodes: None,
+    };
+    if has_lower_bounds {
+        Ok(ExternalOptimizationLinearCliProblem::LowerBounded(
+            LowerBoundedIPMIPProblem { base, lb },
+        ))
+    } else {
+        Ok(ExternalOptimizationLinearCliProblem::Plain(base))
+    }
+}
+
 fn python_can_import(python: &Path, module: &str) -> bool {
     let Ok(child) = Command::new(python)
         .arg("-c")
@@ -4345,16 +4549,18 @@ mod tests {
         external_optimization_python_import_probe_value_enabled, python_import_probe_code,
         python_probe_command_from_env, wait_for_external_optimization_adapter_output,
     };
+    use crate::des::general::external_linear_cli::external_linear_cli_command;
     use crate::des::general::external_optimization_tools::{
         adapter_env_names, artifact_env_names, external_optimization_command_dir_env_names,
         external_optimization_comparison_report_to_json,
         external_optimization_ecosystem_reference_options,
         external_optimization_normalized_result_from_value, external_optimization_tool_specs,
         external_optimization_tools, find_command_in_install_dir,
-        run_external_optimization_comparison, run_external_optimization_ecosystem_reference,
-        ExternalLinearCliSolver, ExternalOptimizationAdapterInvocation,
-        ExternalOptimizationAdapterOptions, ExternalOptimizationAdapterStatus,
-        ExternalOptimizationExactness, ExternalOptimizationFamily, ExternalOptimizationLanguage,
+        run_external_optimization_adapter, run_external_optimization_comparison,
+        run_external_optimization_ecosystem_reference, ExternalLinearCliSolver,
+        ExternalOptimizationAdapterInvocation, ExternalOptimizationAdapterOptions,
+        ExternalOptimizationAdapterStatus, ExternalOptimizationExactness,
+        ExternalOptimizationFamily, ExternalOptimizationLanguage,
         ExternalOptimizationNormalizedResult, ExternalOptimizationProbeStatus,
         ExternalOptimizationTool,
     };
@@ -5305,6 +5511,72 @@ mod tests {
             assert_eq!(normalized.objective, Some(3.0));
             assert_eq!(normalized.solution, Some(vec![1.0, 0.0]));
         }
+    }
+
+    #[test]
+    fn direct_linear_cli_adapter_uses_external_solver_without_python_bridge() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!("SKIP direct optimization HiGHS adapter solve: highs command not installed");
+            return;
+        };
+        let linear_payload = json!({
+            "kind": "ecosystem-linear-binary",
+            "sense": "max",
+            "objective": [3, 2],
+            "constraints": [{"coefs": [1, 1], "sense": "<=", "rhs": 1}],
+            "domains": [[0, 1], [0, 1]]
+        });
+        let run = run_external_optimization_adapter(
+            &linear_payload,
+            &ExternalOptimizationAdapterOptions {
+                tool: ExternalOptimizationTool::HighsCli,
+                command_path: Some(command),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+        let output = run.output.as_ref().expect("adapter output");
+        assert_eq!(output["backend"], "highs:cli");
+        let normalized = external_optimization_normalized_result_from_value(output);
+        assert_eq!(normalized.status.as_deref(), Some("optimal"));
+        assert_eq!(normalized.objective, Some(3.0));
+        assert_eq!(normalized.solution, Some(vec![1.0, 0.0]));
+    }
+
+    #[test]
+    fn direct_linear_cli_adapter_handles_lower_bounded_domains_in_rust() {
+        let Some(command) = external_linear_cli_command(ExternalLinearCliSolver::Highs) else {
+            eprintln!(
+                "SKIP direct optimization HiGHS lower-bounded adapter solve: highs command not installed"
+            );
+            return;
+        };
+        let linear_payload = json!({
+            "kind": "ecosystem-linear-integer",
+            "sense": "max",
+            "objective": [1, 2],
+            "constraints": [{"coefs": [1, 1], "sense": "<=", "rhs": 5}],
+            "domains": [[2, 4], [1, 3]]
+        });
+        let run = run_external_optimization_adapter(
+            &linear_payload,
+            &ExternalOptimizationAdapterOptions {
+                tool: ExternalOptimizationTool::HighsCli,
+                command_path: Some(command),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+        let output = run.output.as_ref().expect("adapter output");
+        assert_eq!(output["backend"], "highs:cli");
+        let normalized = external_optimization_normalized_result_from_value(output);
+        assert_eq!(normalized.status.as_deref(), Some("optimal"));
+        assert_eq!(normalized.objective, Some(8.0));
+        assert_eq!(normalized.solution, Some(vec![2.0, 3.0]));
     }
 
     #[test]

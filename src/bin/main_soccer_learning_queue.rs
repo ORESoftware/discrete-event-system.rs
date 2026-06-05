@@ -10,7 +10,7 @@ use std::io::{BufWriter, Error as IoError, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
     MatchConfig, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig, SoccerQPolicyOptions,
@@ -29,9 +29,10 @@ use uuid::Uuid;
 
 const DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
-const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE: usize = 4;
-const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES: usize = 8;
-const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 0;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE: usize = 16;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES: usize = 16;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS: usize = 2;
+const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 10;
 
 #[derive(Clone, Debug)]
 struct PendingPostgresCompletedRun {
@@ -419,7 +420,7 @@ fn flush_postgres_completed_runs(
 }
 
 impl AsyncPostgresCompletedRunWriter {
-    fn start(queue_batches: usize, coalesce_batches: usize) -> Self {
+    fn start(queue_batches: usize, coalesce_batches: usize, coalesce_wait: Duration) -> Self {
         let (sender, receiver) =
             mpsc::sync_channel::<PostgresCompletedRunBatch>(queue_batches.max(1));
         let (result_sender, result_receiver) = mpsc::channel::<PostgresCompletedRunWriteResult>();
@@ -462,6 +463,7 @@ impl AsyncPostgresCompletedRunWriter {
                     },
                 };
                 let mut queue_batches = 1usize;
+                let coalesce_started = Instant::now();
                 while queue_batches < coalesce_batches {
                     match receiver.try_recv() {
                         Ok(next_batch) => {
@@ -473,7 +475,28 @@ impl AsyncPostgresCompletedRunWriter {
                                 break;
                             }
                         }
-                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Empty) => {
+                            if coalesce_wait.is_zero() {
+                                break;
+                            }
+                            let elapsed = coalesce_started.elapsed();
+                            if elapsed >= coalesce_wait {
+                                break;
+                            }
+                            match receiver.recv_timeout(coalesce_wait.saturating_sub(elapsed)) {
+                                Ok(next_batch) => {
+                                    if batch.can_absorb(&next_batch) {
+                                        batch.absorb(next_batch);
+                                        queue_batches = queue_batches.saturating_add(1);
+                                    } else {
+                                        deferred_batch = Some(next_batch);
+                                        break;
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
@@ -745,10 +768,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         "SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES",
         DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES,
     )?;
+    let pg_completed_run_async_coalesce_wait_ms = env_usize_alias(
+        "SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS",
+        "SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS",
+        DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS,
+    )?;
     let pg_policy_version_interval_games = pg_policy_version_interval_games.max(1);
     let pg_completed_run_batch_games = pg_completed_run_batch_games.max(1);
     let pg_completed_run_async_queue_batches = pg_completed_run_async_queue_batches.max(1);
     let pg_completed_run_async_coalesce_batches = pg_completed_run_async_coalesce_batches.max(1);
+    let pg_completed_run_async_coalesce_wait = Duration::from_millis(
+        pg_completed_run_async_coalesce_wait_ms.min(u64::MAX as usize) as u64,
+    );
     let options = SoccerQPolicyOptions {
         alpha: env_f64("SOCCER_ALPHA", 0.20)?,
         gamma: env_f64("SOCCER_GAMMA", 0.96)?,
@@ -845,13 +876,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some(AsyncPostgresCompletedRunWriter::start(
             pg_completed_run_async_queue_batches,
             pg_completed_run_async_coalesce_batches,
+            pg_completed_run_async_coalesce_wait,
         ))
     } else {
         None
     };
 
     println!(
-        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_drain_timeout_ms={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={}",
+        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_drain_timeout_ms={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={}",
         run_id,
         games,
         parallel_games,
@@ -867,6 +899,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         pg_completed_writer.is_some(),
         pg_completed_run_async_queue_batches,
         pg_completed_run_async_coalesce_batches,
+        pg_completed_run_async_coalesce_wait_ms,
     );
     if let Some(path) = &resume_artifact {
         println!("resume_artifact={path}");
@@ -1040,17 +1073,22 @@ mod tests {
 
     #[test]
     fn default_queue_neural_drain_timeout_keeps_worker_wait_bounded() {
-        assert_eq!(DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS, 0);
+        assert_eq!(DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS, 10);
     }
 
     #[test]
     fn default_queue_postgres_async_writer_stays_bounded() {
-        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE, 4);
+        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE, 16);
     }
 
     #[test]
     fn default_queue_postgres_async_writer_coalesces_io_batches() {
-        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES, 8);
+        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES, 16);
+    }
+
+    #[test]
+    fn default_queue_postgres_async_writer_waits_briefly_to_coalesce_io() {
+        assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS, 2);
     }
 
     #[test]

@@ -7532,11 +7532,19 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
             )
         }
         "whylogs"
+        | "whylogs-adapter"
+        | "great-expectations"
+        | "gx"
         | "evidently"
+        | "evidently-adapter"
         | "deepchecks"
+        | "deepchecks-adapter"
         | "tensorflow-data-validation"
+        | "tfdv-adapter"
         | "soda-core"
+        | "soda"
         | "deequ"
+        | "deequ-adapter"
             if kind == "profile-validation"
                 || kind == "data-profile-validation"
                 || kind == "drift-validation"
@@ -7570,16 +7578,26 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         }
         "frictionless"
         | "pandera"
+        | "pandera-adapter"
         | "dbt"
         | "whylogs"
+        | "whylogs-adapter"
         | "great-expectations"
+        | "gx"
         | "soda-core"
+        | "soda"
         | "evidently"
+        | "evidently-adapter"
         | "deepchecks"
+        | "deepchecks-adapter"
         | "parquet-tools"
         | "apache-arrow"
+        | "arrow-adapter"
+        | "pyarrow-adapter"
         | "deequ"
+        | "deequ-adapter"
         | "tensorflow-data-validation"
+        | "tfdv-adapter"
         | "openrefine"
         | "openrefine-adapter"
         | "refine"
@@ -7590,7 +7608,7 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
                 &format!("builtin:table-schema-subset-for-{tool}"),
             )
         }
-        "protobuf" | "protobuf-conformance" | "protoc" => {
+        "protobuf" | "protobuf-conformance" | "conformance-test-runner" | "protoc" => {
             output_validation_protobuf_reference(payload)
         }
         "avro" | "avro-tools" | "apache-avro" => output_validation_avro_reference(payload),
@@ -20484,6 +20502,35 @@ mod tests {
             table["validator"].as_str(),
             Some("builtin:table-schema-subset-for-apache-arrow")
         );
+
+        for (alias, expected_validator) in [
+            (
+                "arrow-adapter",
+                "builtin:table-schema-subset-for-arrow-adapter",
+            ),
+            (
+                "pyarrow-adapter",
+                "builtin:table-schema-subset-for-pyarrow-adapter",
+            ),
+        ] {
+            let run = run_output_validation_json_with_rust_reference(
+                &json!({
+                    "schema": {
+                        "columns": {"episode": {"type": "integer", "required": true}},
+                        "minRows": 1
+                    },
+                    "rows": [{"episode": 1}]
+                }),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+        }
     }
 
     #[test]
@@ -20557,6 +20604,84 @@ mod tests {
             table["validator"].as_str(),
             Some("builtin:table-schema-subset-for-deepchecks")
         );
+
+        for (alias, expected_validator) in [
+            (
+                "whylogs-adapter",
+                "builtin:data-profile-structural-for-whylogs-adapter",
+            ),
+            (
+                "great-expectations",
+                "builtin:data-profile-structural-for-great-expectations",
+            ),
+            ("gx", "builtin:data-profile-structural-for-gx"),
+            (
+                "evidently-adapter",
+                "builtin:data-profile-structural-for-evidently-adapter",
+            ),
+            (
+                "deepchecks-adapter",
+                "builtin:data-profile-structural-for-deepchecks-adapter",
+            ),
+            ("soda", "builtin:data-profile-structural-for-soda"),
+            (
+                "deequ-adapter",
+                "builtin:data-profile-structural-for-deequ-adapter",
+            ),
+            (
+                "tfdv-adapter",
+                "builtin:data-profile-structural-for-tfdv-adapter",
+            ),
+        ] {
+            let run = run_output_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "profile-validation",
+                    "profile": {
+                        "row_count": 8,
+                        "features": {
+                            "score": {"type": "number", "count": 8, "missing": 0, "min": 0.0, "max": 3.0, "mean": 1.5}
+                        }
+                    },
+                    "constraints": [
+                        {"feature": "score", "metric": "mean", "comparison": "<=", "target": 2.0}
+                    ]
+                }),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+        }
+
+        for (alias, expected_validator) in [
+            (
+                "pandera-adapter",
+                "builtin:table-schema-subset-for-pandera-adapter",
+            ),
+            ("gx", "builtin:table-schema-subset-for-gx"),
+        ] {
+            let run = run_output_validation_json_with_rust_reference(
+                &json!({
+                    "schema": {
+                        "columns": {"score": {"type": "number", "required": true}},
+                        "minRows": 1
+                    },
+                    "rows": [{"score": 4.0}]
+                }),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+        }
     }
 
     #[test]
@@ -20668,6 +20793,25 @@ mod tests {
         assert_eq!(
             csv["validator"].as_str(),
             Some("builtin:table-schema-subset")
+        );
+
+        let protobuf = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "fields": {
+                        "episode": {"type": "int32", "required": true},
+                        "score": {"type": "double"}
+                    }
+                },
+                "message": {"episode": 1, "score": 3.5}
+            }),
+            "conformance-test-runner",
+        );
+        assert_eq!(protobuf["status"].as_str(), Some("ok"));
+        assert_eq!(protobuf["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            protobuf["validator"].as_str(),
+            Some("builtin:protobuf-conformance-subset")
         );
     }
 

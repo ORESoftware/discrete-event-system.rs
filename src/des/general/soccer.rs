@@ -13,7 +13,10 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Condvar, Mutex, RwLock,
+};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -17618,8 +17621,26 @@ impl SoccerNeuralLearningStatsState {
 }
 
 struct SoccerNeuralLearningWorker {
-    sender: mpsc::SyncSender<SoccerNeuralLearningWorkerCommand>,
+    sender: Option<mpsc::SyncSender<SoccerNeuralLearningWorkerCommand>>,
     receiver: mpsc::Receiver<SoccerNeuralLearningWorkerResult>,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl SoccerNeuralLearningWorker {
+    fn cancel_and_join(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.sender.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for SoccerNeuralLearningWorker {
+    fn drop(&mut self) {
+        self.cancel_and_join();
+    }
 }
 
 struct SoccerNeuralLearner {
@@ -17702,7 +17723,12 @@ impl SoccerNeuralLearner {
             }
             SoccerNeuralLearningBackend::Threaded => {
                 self.drain_results();
-                let Some(sender) = self.worker.as_ref().map(|worker| worker.sender.clone()) else {
+                let Some(sender) = self
+                    .worker
+                    .as_ref()
+                    .and_then(|worker| worker.sender.as_ref())
+                    .cloned()
+                else {
                     return;
                 };
                 if sender
@@ -17892,12 +17918,13 @@ impl SoccerNeuralLearner {
                             self.stats.dropped_batches.saturating_add(pending_batches);
                         return;
                     }
-                    match worker
-                        .sender
-                        .try_send(SoccerNeuralLearningWorkerCommand::Train {
-                            batches,
-                            snapshot_after_train: true,
-                        }) {
+                    let Some(sender) = worker.sender.as_ref() else {
+                        return;
+                    };
+                    match sender.try_send(SoccerNeuralLearningWorkerCommand::Train {
+                        batches,
+                        snapshot_after_train: true,
+                    }) {
                         Ok(()) => {
                             self.stats.pending_batches =
                                 self.stats.pending_batches.saturating_add(pending_batches);
@@ -17964,8 +17991,13 @@ fn spawn_soccer_neural_learning_worker(
     let (sample_tx, sample_rx) =
         mpsc::sync_channel::<SoccerNeuralLearningWorkerCommand>(max_pending_batches.max(1));
     let (result_tx, result_rx) = mpsc::channel::<SoccerNeuralLearningWorkerResult>();
-    thread::spawn(move || {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&cancel);
+    let handle = thread::spawn(move || {
         while let Ok(command) = sample_rx.recv() {
+            if worker_cancel.load(Ordering::Relaxed) {
+                break;
+            }
             match command {
                 SoccerNeuralLearningWorkerCommand::Train {
                     batches,
@@ -17977,6 +18009,9 @@ fn spawn_soccer_neural_learning_worker(
                     let mut trained_samples = 0usize;
                     let mut loss_sum = 0.0;
                     for samples in batches {
+                        if worker_cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
                         if samples.is_empty() {
                             continue;
                         }
@@ -17995,7 +18030,9 @@ fn spawn_soccer_neural_learning_worker(
                             failed_batches = failed_batches.saturating_add(1);
                         }
                     }
-                    if trained_batches > 0 || failed_batches > 0 {
+                    if !worker_cancel.load(Ordering::Relaxed)
+                        && (trained_batches > 0 || failed_batches > 0)
+                    {
                         let loss = if trained_batches > 0 {
                             loss_sum / trained_batches as f64
                         } else {
@@ -18011,13 +18048,19 @@ fn spawn_soccer_neural_learning_worker(
                             },
                         ));
                     }
-                    if snapshot_after_train && processed_any {
+                    if snapshot_after_train
+                        && processed_any
+                        && !worker_cancel.load(Ordering::Relaxed)
+                    {
                         let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Snapshot(
                             soccer_neural_network_snapshot(&network),
                         ));
                     }
                 }
                 SoccerNeuralLearningWorkerCommand::Snapshot => {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Snapshot(
                         soccer_neural_network_snapshot(&network),
                     ));
@@ -18026,8 +18069,10 @@ fn spawn_soccer_neural_learning_worker(
         }
     });
     SoccerNeuralLearningWorker {
-        sender: sample_tx,
+        sender: Some(sample_tx),
         receiver: result_rx,
+        cancel,
+        handle: Some(handle),
     }
 }
 
@@ -35986,6 +36031,46 @@ mod tests {
         assert_eq!(stats.parameter_count, 42);
         assert_eq!(stats.last_loss, Some(0.25));
         assert_eq!(stats.average_loss(), Some(0.25));
+    }
+
+    #[test]
+    fn neural_threaded_worker_cancel_join_closes_training_channel() {
+        let config = SoccerNeuralLearningConfig {
+            enabled: true,
+            backend: SoccerNeuralLearningBackend::Threaded,
+            batch_size: 1,
+            max_batches_per_tick: 4,
+            max_pending_batches: 4,
+            hidden_units: 4,
+            ..SoccerNeuralLearningConfig::default()
+        };
+        let samples = (0..8)
+            .map(|idx| SoccerNeuralTrainingSample {
+                input: [idx as f64; SOCCER_NEURAL_FEATURE_DIM],
+                target: idx as f64,
+                priority: idx as f64,
+            })
+            .collect::<Vec<_>>();
+        let batches = soccer_neural_samples_into_batches(samples, 1, 4);
+        let mut worker = spawn_soccer_neural_learning_worker(
+            build_soccer_neural_network(&config, 9183),
+            config.sanitized_learning_rate(),
+            config.sanitized_max_pending_batches(),
+        );
+
+        worker
+            .sender
+            .as_ref()
+            .expect("worker sender")
+            .try_send(SoccerNeuralLearningWorkerCommand::Train {
+                batches,
+                snapshot_after_train: true,
+            })
+            .expect("queue training");
+        worker.cancel_and_join();
+
+        assert!(worker.sender.is_none());
+        assert!(worker.handle.is_none());
     }
 
     #[test]

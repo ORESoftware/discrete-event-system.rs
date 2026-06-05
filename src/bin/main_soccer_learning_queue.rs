@@ -1863,6 +1863,56 @@ mod tests {
     }
 
     #[test]
+    fn queue_tactical_samples_carry_episode_starting_weight_genomes() {
+        let base = SoccerTacticalLearningWeights::default();
+        let mut pg_weights = base.clone();
+        pg_weights.attack_flank_lane_weight = 1.30;
+        pg_weights.attack_width_delta_weight = 1.05;
+        pg_weights.defense_contract_delta_weight = 1.40;
+        pg_weights.defense_compactness_score_weight = 0.95;
+        let mut episode_weights = HashMap::new();
+        episode_weights.insert(3, pg_weights.clone());
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.15,
+            mean_attack_flank_lane_score: 0.12,
+            mean_attack_spacing_score: 0.30,
+            mean_defense_contract_score: 0.16,
+            mean_defense_spacing_score: 0.35,
+            mean_defense_ball_gap_score: 0.45,
+            mean_defense_role_press_score: 0.38,
+            ..Default::default()
+        };
+        let sample = TacticalEvolutionSample {
+            summary,
+            weights: episode_weights.remove(&3).unwrap_or_else(|| base.clone()),
+            fitness: 9.0,
+        };
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.0,
+            mutation_scale: 0.0,
+            crossover_rate: 1.0,
+            exploration_rate: 0.0,
+            exploration_scale: 0.0,
+            elite_weight_floor: 0.0,
+            population_size: 4,
+            seed: 41,
+        };
+
+        let evolved = evolve_soccer_tactical_learning_weights_from_genomes(
+            &base,
+            &[SoccerTacticalLearningGenomeParent {
+                summary: &sample.summary,
+                weights: &sample.weights,
+                fitness: sample.fitness,
+            }],
+            options,
+        );
+
+        assert!(evolved.attack_flank_lane_weight >= pg_weights.attack_flank_lane_weight);
+        assert!(evolved.defense_contract_delta_weight >= pg_weights.defense_contract_delta_weight);
+    }
+
+    #[test]
     fn queue_postgres_batches_only_coalesce_for_same_run() {
         let mut batch = empty_pg_batch("experiment-a", "runner-a");
 

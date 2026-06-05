@@ -239,6 +239,9 @@ const SOCCER_PHYSICS_PITCH_MARGIN_YARDS: f64 = 20.0;
 const SOCCER_PHYSICS_FRAME_EPSILON_YARDS: f64 = 0.75;
 const GOAL_URGENCY_MAX_YARDS: f64 = 30.0;
 const GOAL_URGENCY_KEEPER_CROWD_YARDS: f64 = 6.0;
+const SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD: f64 = 0.10;
+const WIDE_OUTLET_TOUCHLINE_BUFFER_YARDS: f64 = 4.5;
+const WIDE_OUTLET_MIN_FORWARD_YARDS: f64 = 2.0;
 
 fn default_ball_drag_per_tick() -> f64 {
     DEFAULT_BALL_DRAG_PER_TICK
@@ -10262,6 +10265,17 @@ impl WorldSnapshot {
                     1.8
                 };
                 let cross_bonus = if is_cross { 1.3 } else { 0.0 };
+                let wide_outlet_bonus = if self.is_wide_midfielder(p) {
+                    let center_x = self.field_width * 0.5;
+                    let width = ((position.x - center_x).abs() / center_x.max(1.0)).clamp(0.0, 1.0);
+                    let openness =
+                        pass_receiver_openness_for_snapshots(&self.players, me.team, position);
+                    let forward_support = (position.y - me_position.y) * me.team.attack_dir();
+                    (width * 1.25 + openness * 2.4 + forward_support.clamp(0.0, 24.0) * 0.035)
+                        .clamp(0.0, 4.2)
+                } else {
+                    0.0
+                };
                 let finishing_window_bonus = self.shooting_window_score_at(p, position)
                     * (3.4 + directive.risk_tolerance * 1.8);
                 let in_behind_bonus = self
@@ -10304,6 +10318,7 @@ impl WorldSnapshot {
                     + aerial_target_bonus
                     + lane_bonus
                     + cross_bonus
+                    + wide_outlet_bonus
                     + finishing_window_bonus
                     + in_behind_bonus
                     + pass_quality.expected_completion * 0.85
@@ -10751,6 +10766,84 @@ impl WorldSnapshot {
                 || player.home_position.x > self.field_width * 0.72)
     }
 
+    fn is_wide_midfielder(&self, player: &PlayerSnapshot) -> bool {
+        player.role == PlayerRole::Midfielder
+            && (player.home_position.x < self.field_width * 0.30
+                || player.home_position.x > self.field_width * 0.70)
+    }
+
+    fn support_target_with_min_upfield_slope(
+        &self,
+        current: Vec2,
+        target: Vec2,
+        team: Team,
+    ) -> Vec2 {
+        let lateral = (target.x - current.x).abs();
+        if lateral <= 1e-6 {
+            return target.clamp_to_pitch(self.field_width, self.field_length);
+        }
+        let min_forward = lateral * SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD;
+        let forward = (target.y - current.y) * team.attack_dir();
+        if forward >= min_forward {
+            return target.clamp_to_pitch(self.field_width, self.field_length);
+        }
+        Vec2::new(target.x, current.y + team.attack_dir() * min_forward)
+            .clamp_to_pitch(self.field_width, self.field_length)
+    }
+
+    fn wide_possession_outlet_target_for(&self, player_id: usize, home: Vec2) -> Option<Vec2> {
+        let me = self.players.iter().find(|p| p.id == player_id)?;
+        if self.possession_team() != Some(me.team)
+            || self.ball.holder == Some(player_id)
+            || !self.is_wide_midfielder(me)
+        {
+            return None;
+        }
+        let current = self.player_position(me.id).unwrap_or(me.position);
+        let center_x = self.field_width * 0.5;
+        let touchline_x = if home.x <= center_x {
+            WIDE_OUTLET_TOUCHLINE_BUFFER_YARDS
+        } else {
+            self.field_width - WIDE_OUTLET_TOUCHLINE_BUFFER_YARDS
+        };
+        let lateral = (touchline_x - current.x).abs();
+        let min_forward =
+            (lateral * SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD).max(WIDE_OUTLET_MIN_FORWARD_YARDS);
+        let direct = Vec2::new(touchline_x, current.y + me.team.attack_dir() * min_forward);
+        let advanced = Vec2::new(
+            touchline_x,
+            self.ball.position.y + me.team.attack_dir() * (8.0 + min_forward * 0.35),
+        );
+        let candidates = [
+            self.support_target_with_min_upfield_slope(current, direct, me.team),
+            self.support_target_with_min_upfield_slope(current, advanced, me.team),
+        ];
+        candidates
+            .into_iter()
+            .filter(|candidate| !self.position_would_be_offside(me.team, *candidate))
+            .map(|candidate| {
+                let openness =
+                    pass_receiver_openness_for_snapshots(&self.players, me.team, candidate);
+                let width = ((candidate.x - center_x).abs() / center_x.max(1.0)).clamp(0.0, 1.0);
+                let lane_bonus =
+                    if self.clear_line(self.ball.position, candidate, me.team.other(), 2.0) {
+                        1.0
+                    } else {
+                        -0.8
+                    };
+                let forward = (candidate.y - current.y) * me.team.attack_dir();
+                let score = self.space_score_at(candidate, me.team)
+                    + openness * 3.0
+                    + width * 2.0
+                    + forward.clamp(0.0, 18.0) * 0.08
+                    + lane_bonus
+                    - candidate.distance(home) * 0.025;
+                (candidate, score)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(candidate, _)| self.clamp_to_role_position(player_id, candidate, home, false))
+    }
+
     fn center_back_screen_y(&self, team: Team) -> Option<f64> {
         let mut total = 0.0;
         let mut count = 0usize;
@@ -10817,13 +10910,32 @@ impl WorldSnapshot {
         let mut best_score = f64::NEG_INFINITY;
         for dx in [-22.0, -13.0, -6.0, 0.0, 6.0, 13.0, 22.0] {
             for dy in [-8.0, 0.0, 7.0, 14.0, 22.0, 30.0] {
-                let p = Vec2::new(
+                let raw_p = Vec2::new(
                     base.x + dx * width_scale,
                     base.y + dy * depth_scale * me.team.attack_dir(),
                 )
                 .clamp_to_pitch(self.field_width, self.field_length);
+                let p = if possession
+                    && self.ball.holder != Some(player_id)
+                    && me.role != PlayerRole::Goalkeeper
+                {
+                    self.support_target_with_min_upfield_slope(me_position, raw_p, me.team)
+                } else {
+                    raw_p
+                };
                 let forward = (p.y - me_position.y) * me.team.attack_dir();
                 let forward_from_ball = (p.y - self.ball.position.y) * me.team.attack_dir();
+                let lateral = (p.x - me_position.x).abs();
+                let diagonal_support_bonus = if possession && lateral > 3.0 {
+                    let required_forward = lateral * SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD;
+                    if forward >= required_forward {
+                        0.55 + (forward / required_forward.max(1.0)).clamp(0.0, 2.0) * 0.18
+                    } else {
+                        -1.4
+                    }
+                } else {
+                    0.0
+                };
                 let lane_bonus = if self.clear_line(self.ball.position, p, me.team.other(), 2.0) {
                     1.8
                 } else {
@@ -10851,6 +10963,7 @@ impl WorldSnapshot {
                     - (forward_from_ball - role_depth).abs() * 0.035
                     - p.distance(home) * 0.010
                     + lane_bonus
+                    + diagonal_support_bonus
                     + spacing_bonus
                     - offside_penalty;
                 if score > best_score {
@@ -11153,6 +11266,46 @@ impl WorldSnapshot {
         )
     }
 
+    fn anticipated_pass_reception_point(
+        &self,
+        passer_id: usize,
+        target_id: usize,
+        flight: PassFlight,
+        speed_yps: f64,
+    ) -> Option<Vec2> {
+        let passer = self.players.iter().find(|p| p.id == passer_id)?;
+        let target = self.players.iter().find(|p| p.id == target_id)?;
+        if passer.team != target.team {
+            return None;
+        }
+        let passer_position = self.player_position(passer.id).unwrap_or(passer.position);
+        let target_position = self.player_position(target.id).unwrap_or(target.position);
+        let support_target = self.positional_open_space_for(target.id, target.home_position, false);
+        let pass_distance = passer_position.distance(target_position);
+        let flight_time = (pass_distance / speed_yps.max(1.0)).clamp(0.18, 2.6);
+        let receiver_speed = player_top_speed_yps(target.role, &target.skills)
+            * if flight.is_aerial() { 0.78 } else { 0.62 };
+        let max_run = receiver_speed * flight_time;
+        let support_delta = support_target - target_position;
+        let led_support = if support_delta.len() <= max_run {
+            support_target
+        } else {
+            target_position + support_delta.normalized() * max_run
+        };
+        let movement_led = target_position + target.velocity * flight_time * 0.72;
+        let openness =
+            pass_receiver_openness_for_snapshots(&self.players, passer.team, led_support);
+        let support_weight = if self.is_wide_midfielder(target) && openness > 0.58 {
+            0.70
+        } else if openness > 0.45 {
+            0.58
+        } else {
+            0.42
+        };
+        let blended = led_support * support_weight + movement_led * (1.0 - support_weight);
+        Some(blended.clamp_to_pitch(self.field_width, self.field_length))
+    }
+
     fn shot_creation_score_for(
         &self,
         player_id: usize,
@@ -11279,6 +11432,9 @@ impl WorldSnapshot {
             }
             if let Some(target) = self.in_behind_run_target_for(player_id) {
                 return self.clamp_to_role_position(player_id, target, home, false);
+            }
+            if let Some(target) = self.wide_possession_outlet_target_for(player_id, home) {
+                return target;
             }
         }
         let open = self.open_space_for(player_id, home);
@@ -13421,6 +13577,36 @@ fn dense_soccer_transition_reward(
             let weight = before.possession_spacing_weight(player.team);
             reward += spacing_delta.2.clamp(-1.0, 1.0) * 0.20 * weight;
             reward += spacing_delta.1.clamp(-1.0, 1.0) * 0.045 * weight;
+        }
+        if matches!(action, "space" | "support-shape" | "support-roam")
+            && !matches!(player.role, PlayerRole::Goalkeeper)
+        {
+            let lateral = (after_pos.x - before_pos.x).abs();
+            if lateral > 2.5 {
+                let required_forward = lateral * SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD;
+                let forward_ratio = (player_forward / required_forward.max(0.8)).clamp(-1.0, 2.0);
+                if player_forward >= required_forward {
+                    reward += 0.12 + forward_ratio * 0.08;
+                } else {
+                    reward -= 0.10 + (required_forward - player_forward).clamp(0.0, 5.0) * 0.035;
+                }
+            } else if player_forward > 0.35 {
+                reward += 0.06;
+            }
+            if player.role == PlayerRole::Midfielder
+                && (player.home_position.x < before.field_width * 0.30
+                    || player.home_position.x > before.field_width * 0.70)
+            {
+                let before_width =
+                    (before_pos.x - before.field_width * 0.5).abs() / (before.field_width * 0.5);
+                let after_width =
+                    (after_pos.x - after.field_width * 0.5).abs() / (after.field_width * 0.5);
+                reward += (after_width - before_width).clamp(-0.4, 0.4) * 0.42;
+                reward += after
+                    .space_score_at(after_pos, player.team)
+                    .clamp(0.0, 18.0)
+                    * 0.006;
+            }
         }
         reward += tactical_shape_reward(
             player,
@@ -20077,9 +20263,19 @@ impl SoccerMatch {
                     let target_velocity = target_id
                         .and_then(|id| snapshot.player_velocity(id))
                         .unwrap_or_else(Vec2::zero);
+                    let anticipated_target = target_id
+                        .and_then(|id| {
+                            snapshot.anticipated_pass_reception_point(
+                                player_id,
+                                id,
+                                flight,
+                                initial_speed,
+                            )
+                        })
+                        .unwrap_or(target);
                     let led_target = led_pass_target_for_receiver(
                         player_pos,
-                        target,
+                        anticipated_target,
                         target_velocity,
                         initial_speed,
                         pass_skill,
@@ -28626,13 +28822,18 @@ fn pass_speed_yps_from_power(
         passing * 0.68 + ability01(skills.passing) * 0.20 + strength * 0.12
     }
     .clamp(0.0, 1.0);
-    let floor = if flight.is_aerial() || is_cross {
-        8.0
+    let floor = if flight.is_aerial() {
+        14.0
+    } else if is_cross {
+        10.0
     } else {
         3.0
     };
-    let mph = floor + power.clamp(0.0, 1.0) * (26.0 - floor) + skill_power * 4.0;
-    mph_to_yps(mph.clamp(3.0, 30.0))
+    let ceiling = if flight.is_aerial() { 42.0 } else { 30.0 };
+    let aerial_power_bonus = if flight.is_aerial() { 5.0 } else { 0.0 };
+    let mph =
+        floor + power.clamp(0.0, 1.0) * (ceiling - floor) + skill_power * 4.0 + aerial_power_bonus;
+    mph_to_yps(mph.clamp(3.0, ceiling + 4.0))
 }
 
 fn modulated_pass_speed_yps(
@@ -28648,24 +28849,44 @@ fn modulated_pass_speed_yps(
     let distance = from.distance(target).max(0.1);
     let openness = receiver_openness.clamp(0.0, 1.0);
     let pressure = 1.0 - openness;
-    let base_time = if flight.is_aerial() || is_cross {
-        (0.72 + distance / 29.0).clamp(0.88, 2.90)
+    let base_time = if flight.is_aerial() {
+        (0.52 + distance / 38.0).clamp(0.72, 2.35)
+    } else if is_cross {
+        (0.68 + distance / 31.0).clamp(0.82, 2.65)
     } else {
         (0.58 + distance / 31.0).clamp(0.72, 2.55)
     };
     let timed_time = base_time * (1.0 + openness * 0.08 - pressure * 0.10);
-    let desired_speed = (distance / timed_time.max(0.35)).clamp(mph_to_yps(7.0), mph_to_yps(44.0));
+    let desired_speed = (distance / timed_time.max(0.35)).clamp(
+        if flight.is_aerial() {
+            mph_to_yps(16.0)
+        } else {
+            mph_to_yps(7.0)
+        },
+        if flight.is_aerial() {
+            mph_to_yps(56.0)
+        } else {
+            mph_to_yps(44.0)
+        },
+    );
     let skill = passing_skill.clamp(0.0, 1.0);
     let fit = (0.30 + skill * 0.55 + openness * 0.10).clamp(0.28, 0.94);
     let noise = triangular_sample(rng) * ((1.0 - skill) * 0.12 + pressure * 0.035);
-    let cap = if flight.is_aerial() || is_cross {
-        mph_to_yps(46.0)
+    let cap = if flight.is_aerial() {
+        mph_to_yps(58.0)
+    } else if is_cross {
+        mph_to_yps(48.0)
     } else {
         mph_to_yps(42.0)
     };
     let speed =
         (raw_speed_yps + (desired_speed - raw_speed_yps) * fit) * (1.0 + noise).clamp(0.78, 1.24);
-    speed.clamp(mph_to_yps(4.0), cap)
+    let aerial_carry_floor = if flight.is_aerial() {
+        mph_to_yps((18.0 + (distance / 4.0).clamp(0.0, 18.0)).min(36.0))
+    } else {
+        mph_to_yps(4.0)
+    };
+    speed.clamp(aerial_carry_floor, cap)
 }
 
 fn shot_curl_probability_for_player(
@@ -31515,10 +31736,18 @@ mod tests {
         );
         assert_eq!(
             classify_movement_gait(Team::Home, Vec2::new(0.0, -5.0), false),
-            MovementGait::BackSkip
+            MovementGait::BackJog
         );
         assert_eq!(
             classify_movement_gait(Team::Away, Vec2::new(0.0, 5.0), false),
+            MovementGait::BackJog
+        );
+        assert_eq!(
+            classify_movement_gait(Team::Home, Vec2::new(0.0, -8.0), false),
+            MovementGait::BackSkip
+        );
+        assert_eq!(
+            classify_movement_gait(Team::Away, Vec2::new(0.0, 8.0), true),
             MovementGait::BackSkip
         );
         assert_eq!(
@@ -31540,6 +31769,10 @@ mod tests {
         assert!(
             MovementGait::Skip.speed_multiplier() > MovementGait::Jog.speed_multiplier() * 1.29
         );
+        assert!(
+            MovementGait::BackSkip.speed_multiplier()
+                > MovementGait::BackJog.speed_multiplier() * 1.28
+        );
         assert!(MovementGait::Run.speed_multiplier() > MovementGait::Skip.speed_multiplier());
         assert!(MovementGait::Sprint.speed_multiplier() > MovementGait::Run.speed_multiplier());
 
@@ -31557,7 +31790,7 @@ mod tests {
         sim.players[0].position = Vec2::new(40.0, 60.0);
         sim.players[0].velocity = Vec2::zero();
         sim.move_player_towards(0, Vec2::new(40.0, 55.0), false);
-        assert_eq!(sim.players[0].movement_gait, MovementGait::BackSkip);
+        assert_eq!(sim.players[0].movement_gait, MovementGait::BackJog);
     }
 
     #[test]
@@ -33851,6 +34084,87 @@ mod tests {
     }
 
     #[test]
+    fn pomdp_observation_separates_goal_and_pressure_urgency() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14112,
+            ..Default::default()
+        });
+        let striker = 9;
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(74.0, 18.0 + (away - 11) as f64);
+        }
+        sim.players[striker].position = Vec2::new(40.0, 94.0);
+        sim.players[striker].velocity = Vec2::new(0.0, 2.4);
+        sim.players[striker].action_facing = FacingBucket::South;
+        sim.ball.holder = Some(striker);
+        sim.ball.position = sim.players[striker].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let striker_obs = snapshot.observation_for(striker);
+        assert!(striker_obs.perceived_pressure < 0.20);
+        assert!(striker_obs.offensive_urgency > 0.28);
+        assert!(striker_obs.decision_urgency >= striker_obs.offensive_urgency - f64::EPSILON);
+        assert!(striker_obs.defensive_urgency < 0.05);
+        let striker_state = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(striker),
+            &striker_obs,
+            Team::Home,
+            sim.players[striker].role,
+        );
+        assert!(striker_state.offensive_urgency_bin > striker_state.pressure_urgency_bin);
+
+        let defender = 4;
+        sim.players[defender].position = Vec2::new(38.0, 22.0);
+        sim.players[defender].velocity = Vec2::new(0.0, 0.2);
+        sim.players[11].position = Vec2::new(38.6, 22.3);
+        sim.ball.holder = Some(defender);
+        sim.ball.position = sim.players[defender].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let defender_obs = snapshot.observation_for(defender);
+        assert!(defender_obs.perceived_pressure > 0.55);
+        assert!(defender_obs.pressure_urgency > 0.55);
+        assert!(defender_obs.defensive_urgency > 0.45);
+        assert!(defender_obs.decision_urgency >= defender_obs.pressure_urgency - f64::EPSILON);
+        let options = sim.players[defender].possession_action_options(
+            &defender_obs,
+            &snapshot.tactical_directive(Team::Home),
+            0,
+            0,
+            false,
+            snapshot.dt_seconds,
+        );
+        assert!(action_option_score(&options, "clearance") > 0.0);
+        assert!(action_option_score(&options, "route-one") > 0.0);
+        assert!(action_option_score(&options, "fake-left-cut-right") > 0.0);
+        assert!(action_option_score(&options, "fake-right-cut-left") > 0.0);
+
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: defender,
+            team: Team::Home,
+            role: sim.players[defender].role,
+            state: snapshot.mdp_state_for_player(defender),
+            observation: defender_obs.clone(),
+            belief: belief_from_observation(&defender_obs),
+            action: "clearance".to_string(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(defender),
+            next_observation: defender_obs,
+            done: false,
+        };
+        assert_eq!(
+            soccer_neural_transition_features(&transition).len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+    }
+
+    #[test]
     fn shot_decision_gate_requires_quality_or_near_goal_pressure_bailout() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -33867,6 +34181,7 @@ mod tests {
         let mut observation = snapshot.observation_for(attacker);
         observation.shot_lane_open = true;
         observation.yards_to_goal = 9.0;
+        observation.offensive_urgency = 0.0;
         observation.immediate_dispossession_risk = 0.20;
         observation.shot_on_frame_probability = SHOT_ON_FRAME_MIN_PROBABILITY - 0.01;
         observation.shot_beat_goalkeeper_probability = SHOT_KEEPER_BEAT_MIN_PROBABILITY + 0.20;
@@ -33876,6 +34191,14 @@ mod tests {
         observation.shot_beat_goalkeeper_probability = SHOT_KEEPER_BEAT_MIN_PROBABILITY - 0.01;
         assert!(!shot_decision_is_qualified(&observation));
 
+        observation.offensive_urgency = 0.72;
+        observation.shot_on_frame_probability = 0.19;
+        observation.shot_beat_goalkeeper_probability = 0.13;
+        observation.shot_block_probability = 0.50;
+        assert!(shot_decision_is_qualified(&observation));
+        observation.offensive_urgency = 0.0;
+
+        observation.shot_on_frame_probability = SHOT_ON_FRAME_MIN_PROBABILITY + 0.01;
         observation.shot_beat_goalkeeper_probability = SHOT_KEEPER_BEAT_MIN_PROBABILITY + 0.01;
         assert!(shot_decision_is_qualified(&observation));
 
@@ -34838,16 +35161,16 @@ mod tests {
 
         assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
         assert!(
-            features[32] > 0.40,
+            features[36] > 0.40,
             "target distance feature should be present"
         );
         assert!(
-            features[33] > 0.40,
+            features[37] > 0.40,
             "target forward feature should be present"
         );
-        assert!(features[36] > 0.40, "ball speed feature should be present");
+        assert!(features[40] > 0.40, "ball speed feature should be present");
         assert!(
-            features[39] > 0.0,
+            features[43] > 0.0,
             "defender closing feature should be present"
         );
     }
@@ -37445,6 +37768,96 @@ mod tests {
     }
 
     #[test]
+    fn wide_midfielder_support_opens_touchline_with_upfield_slope() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(35.0, 88.0 + (away - 11) as f64 * 0.5);
+        }
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let current = sim.players[winger].position;
+        let target =
+            snapshot.positional_open_space_for(winger, sim.players[winger].home_position, false);
+        let lateral = (target.x - current.x).abs();
+        let forward = (target.y - current.y) * Team::Home.attack_dir();
+
+        assert!(
+            target.x > current.x,
+            "right midfielder should open toward the touchline: {target:?}"
+        );
+        assert!(
+            forward >= lateral * SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD - 1e-6,
+            "wide support should be diagonal/upfield, forward={forward}, lateral={lateral}, target={target:?}"
+        );
+        assert!(
+            snapshot.nearest_opponent_distance_at(Team::Home, target) > 12.0,
+            "wide outlet should prefer low-pressure space: {target:?}"
+        );
+    }
+
+    #[test]
+    fn aerial_passes_are_harder_and_lead_open_wide_outlets() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        for home in 0..11 {
+            if home != passer && home != winger {
+                sim.players[home].position = Vec2::new(28.0 + home as f64, 40.0);
+            }
+        }
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(38.0, 76.0 + (away - 11) as f64);
+        }
+        sim.players[12].position = Vec2::new(31.0, 40.5);
+        sim.players[13].position = Vec2::new(33.0, 41.0);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let floor_speed =
+            pass_speed_yps_from_power(0.72, PassFlight::Floor, false, &sim.players[passer].skills);
+        let aerial_speed =
+            pass_speed_yps_from_power(0.72, PassFlight::Aerial, false, &sim.players[passer].skills);
+        assert!(
+            aerial_speed > floor_speed * 1.35,
+            "aerial passes should be struck materially harder: floor={floor_speed}, aerial={aerial_speed}"
+        );
+
+        let anticipated = snapshot
+            .anticipated_pass_reception_point(passer, winger, PassFlight::Aerial, aerial_speed)
+            .expect("anticipated wide outlet");
+        let current = sim.players[winger].position;
+        let lateral = (anticipated.x - current.x).abs();
+        let forward = (anticipated.y - current.y) * Team::Home.attack_dir();
+        assert!(
+            anticipated.x > current.x,
+            "pass should lead winger wider: {anticipated:?}"
+        );
+        assert!(
+            forward >= lateral * SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD - 1e-6,
+            "pass should lead into stride with upfield slope: {anticipated:?}"
+        );
+
+        let targets = snapshot.ranked_visible_aerial_pass_targets(passer, 3);
+        assert!(
+            targets.contains(&winger),
+            "open wide outlet should be an aerial pass candidate: {targets:?}"
+        );
+    }
+
+    #[test]
     fn possession_shape_pushes_back_four_up_and_staggers_midfield_pair() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 7;
@@ -37817,6 +38230,10 @@ mod tests {
 
         let mut calm_observation = observation.clone();
         calm_observation.perceived_pressure = 0.05;
+        calm_observation.pressure_urgency = 0.05;
+        calm_observation.decision_urgency = calm_observation
+            .offensive_urgency
+            .max(calm_observation.defensive_urgency);
         let calm_options = sim.players[defender].possession_action_options(
             &calm_observation,
             directive,

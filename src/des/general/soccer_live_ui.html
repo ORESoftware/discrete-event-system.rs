@@ -291,9 +291,12 @@
         <button id="loadPolicy">Load Policy</button>
         <input id="policyFile" class="hidden-file" type="file" accept="application/json,.json">
         <button id="exportTracking">Export Tracking</button>
+        <button id="exportTrackingJsonl">Export JSONL</button>
         <button id="importTracking">Import Tracking</button>
+        <label for="allowTrackingPhysicsWarnings"><input id="allowTrackingPhysicsWarnings" type="checkbox">Allow Physics Warnings</label>
         <button id="sampleTracking">Sample Tracking</button>
-        <input id="trackingFile" class="hidden-file" type="file" accept=".json,.csv,text/csv,application/json">
+        <button id="sampleTrackingJsonl">Sample JSONL</button>
+        <input id="trackingFile" class="hidden-file" type="file" accept=".json,.jsonl,.ndjson,.csv,text/csv,application/json,application/x-ndjson">
         <button id="replayMoments">Train Moments</button>
         <select id="slotPick"></select>
         <select id="targetPick"></select>
@@ -307,6 +310,7 @@
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
+      <div class="metric"><span>Ball Hist</span><b id="ballKinematics">H0 V0.0 A0.0 J0.0</b></div>
       <div class="metric"><span>Ball Agent</span><b id="ballAgent">waiting</b></div>
       <div class="metric"><span>Ball Action</span><b id="ballAction">waiting</b></div>
       <div class="metric"><span>Intent</span><b id="actionIntent">Idle</b></div>
@@ -445,6 +449,7 @@
       <div class="section">Agent State</div>
       <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
       <div class="metric"><span>Motion</span><b id="agentMotion">-</b></div>
+      <div class="metric"><span>Kinematics</span><b id="agentKinematics">-</b></div>
       <div class="metric"><span>Energy</span><b id="agentEnergy">-</b></div>
       <div class="metric"><span>Skills</span><b id="agentSkills">-</b></div>
       <div class="metric"><span>Decision</span><b id="agentDecision">-</b></div>
@@ -486,6 +491,7 @@ const sharedPositions = document.getElementById("sharedPositions");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
+const ballKinematics = document.getElementById("ballKinematics");
 const ballAgent = document.getElementById("ballAgent");
 const ballAction = document.getElementById("ballAction");
 const actionIntent = document.getElementById("actionIntent");
@@ -539,6 +545,7 @@ const loadPolicySnapshotButton = document.getElementById("loadPolicySnapshot");
 const refreshPolicyHistoryButton = document.getElementById("refreshPolicyHistory");
 const agentSelected = document.getElementById("agentSelected");
 const agentMotion = document.getElementById("agentMotion");
+const agentKinematics = document.getElementById("agentKinematics");
 const agentEnergy = document.getElementById("agentEnergy");
 const agentSkills = document.getElementById("agentSkills");
 const agentDecision = document.getElementById("agentDecision");
@@ -580,8 +587,11 @@ const savePolicyButton = document.getElementById("savePolicy");
 const loadPolicyButton = document.getElementById("loadPolicy");
 const policyFile = document.getElementById("policyFile");
 const exportTrackingButton = document.getElementById("exportTracking");
+const exportTrackingJsonlButton = document.getElementById("exportTrackingJsonl");
 const importTrackingButton = document.getElementById("importTracking");
+const allowTrackingPhysicsWarnings = document.getElementById("allowTrackingPhysicsWarnings");
 const sampleTrackingButton = document.getElementById("sampleTracking");
+const sampleTrackingJsonlButton = document.getElementById("sampleTrackingJsonl");
 const trackingFile = document.getElementById("trackingFile");
 const episodes = document.getElementById("episodes");
 const policyHistory = document.getElementById("policyHistory");
@@ -689,6 +699,21 @@ const CONTROLLER_CODES = new Set(CONTROLLER_KEYMAPS.flatMap(map => [
   map.sprint,
   map.action,
 ]));
+const GAMEPAD_BUTTONS = {
+  action: 0,
+  pass: 1,
+  carry: 2,
+  protect: 3,
+  clearance: 4,
+  sprint: 5,
+  routeOne: 6,
+  dpadUp: 12,
+  dpadDown: 13,
+  dpadLeft: 14,
+  dpadRight: 15,
+};
+const GAMEPAD_STICK_DEADZONE = 0.18;
+const gamepadButtonLatch = new Map();
 function keyName(code) {
   return String(code || "")
     .replace(/^Arrow/, "")
@@ -738,6 +763,29 @@ function directiveLabel(d) {
   const numbersUp = advantage > 0 ? ` N+${advantage}/${overload.toFixed(2)}` : "";
   return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)} ${cover}${numbersUp}`;
 }
+function teamBrainModeLabel(mode) {
+  const v = String(mode || "").toLowerCase();
+  if (v === "attack") return "Atk";
+  if (v === "buildup" || v === "build-up" || v === "buildUp") return "Build";
+  if (v === "defend") return "Def";
+  if (v === "kickoff") return "KO";
+  return "Tran";
+}
+function teamBrainLabel(brain, fallbackDirective) {
+  if (!brain) return directiveLabel(fallbackDirective);
+  const d = brain.directive || fallbackDirective || {};
+  const target = Number(brain.defensiveCoverTarget ?? d.defensiveCoverTarget ?? 0);
+  const actual = Number(brain.defensiveCoverActual ?? d.defensiveCoverActual ?? 0);
+  const cover = target >= 4 ? `C${actual}/4+` : `C${actual}/${target}`;
+  const actions = Number(brain.policyActionEntries ?? 0);
+  const targets = Number(brain.policyTargetEntries ?? 0);
+  const advantage = Number(brain.attackingNumbersAdvantage ?? d.attackingNumbersAdvantage ?? 0);
+  const overload = Number(brain.attackingOverloadScore ?? d.attackingOverloadScore ?? 0);
+  const numbersUp = advantage > 0 ? ` N+${advantage}/${overload.toFixed(2)}` : "";
+  const humans = Number(brain.controlledHumanPlayers ?? 0);
+  const humanText = humans > 0 ? ` H${humans}` : "";
+  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)} ${cover} Q${actions}/${targets}${numbersUp}${humanText}`;
+}
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
@@ -748,7 +796,11 @@ function centralBrainLabel(b) {
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   const center = b.centerOfPlay;
   const centerText = center ? ` C${Number(center.x ?? 0).toFixed(0)},${Number(center.y ?? 0).toFixed(0)}` : "";
-  return `${players}p ${officials}o ${possession}${holder}${centerText}`;
+  const ballSpeed = vecLen(b.ballVelocity || {x: 0, y: 0});
+  const ballAccel = vecLen(b.ballAcceleration || {x: 0, y: 0});
+  const ballZ = Number(b.ballAltitudeYards ?? 0);
+  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)} z${ballZ.toFixed(1)}`;
+  return `${players}p ${officials}o ${possession}${holder}${centerText}${ballText}`;
 }
 function agentScheduleGlyph(entry) {
   if (!entry) return "?";
@@ -1167,7 +1219,8 @@ function gaitLabel(v) {
 function agentDecisionLabel(d) {
   if (!d) return "Waiting";
   const order = Array.isArray(d.operationOrder) && d.operationOrder.length ? ` ${d.operationOrder.join(">")}` : "";
-  return `${d.action || "-"}${order}`;
+  const schedule = Number.isFinite(Number(d.scheduledIndex)) ? ` S${Number(d.scheduledIndex)}` : "";
+  return `${d.action || "-"}${schedule}${order}`;
 }
 function agentOptionsLabel(d) {
   const options = Array.isArray(d?.actionOptions) ? d.actionOptions : [];
@@ -1222,7 +1275,8 @@ function agentPomdpLabel(d) {
   const ball = o.visibleBall ? "see" : "blind";
   const options = Number(o.visiblePassOptions ?? 0);
   const passQ = Number(o.expectedPassCompletion ?? 0);
-  return `${ball} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} ${lane}`;
+  const goalWindow = Number(o.goalAttackWindowScore ?? 0);
+  return `${ball} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} ${lane}`;
 }
 function agentBeliefLabel(d) {
   const b = d?.belief;
@@ -1231,6 +1285,53 @@ function agentBeliefLabel(d) {
 }
 function agentMotionLabel(p) {
   return `${vecLen(p.velocity).toFixed(1)}y/s ${vecLen(p.acceleration).toFixed(1)}y/s2`;
+}
+function finiteVec2(v) {
+  const point = v?.position || v;
+  return {
+    x: Number(point?.x ?? 0),
+    y: Number(point?.y ?? 0),
+  };
+}
+function vecSub(a, b) {
+  return {x: Number(a?.x ?? 0) - Number(b?.x ?? 0), y: Number(a?.y ?? 0) - Number(b?.y ?? 0)};
+}
+function vecScale(v, scale) {
+  return {x: Number(v?.x ?? 0) * scale, y: Number(v?.y ?? 0) * scale};
+}
+function historyKinematicsFromPositions(history, dtSeconds) {
+  const samples = Array.isArray(history) ? history.map(finiteVec2) : [];
+  const dt = Math.max(1e-6, Number(dtSeconds || state?.config?.dtSeconds || 0.1));
+  const last = samples.length - 1;
+  const velocity = samples.length >= 2 ? vecScale(vecSub(samples[last], samples[last - 1]), 1 / dt) : null;
+  if (samples.length < 3) return {samples: samples.length, velocity, acceleration: null, jerk: null};
+  const v0 = vecScale(vecSub(samples[last - 1], samples[last - 2]), 1 / dt);
+  const v1 = velocity;
+  const acceleration = vecScale(vecSub(v1, v0), 1 / dt);
+  if (samples.length < 4) return {samples: samples.length, velocity, acceleration, jerk: null};
+  const vMinus = vecScale(vecSub(samples[last - 2], samples[last - 3]), 1 / dt);
+  const a0 = vecScale(vecSub(v0, vMinus), 1 / dt);
+  const jerk = vecScale(vecSub(acceleration, a0), 1 / dt);
+  return {samples: samples.length, velocity, acceleration, jerk};
+}
+function playerHistoryKinematicsLabel(p, dtSeconds = state?.config?.dtSeconds) {
+  const k = historyKinematicsFromPositions(p?.positionHistory, dtSeconds);
+  const velocity = k.velocity || p?.velocity || {x: 0, y: 0};
+  const acceleration = k.acceleration || p?.acceleration || {x: 0, y: 0};
+  const jerk = k.jerk || p?.jerk || {x: 0, y: 0};
+  return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
+}
+function ballHistorySamplesForFrame(f) {
+  if (Array.isArray(f?.ballHistory) && f.ballHistory.length) return f.ballHistory;
+  return f?.ball?.position ? [f.ball.position] : [];
+}
+function ballHistoryKinematicsLabel(f, dtSeconds = state?.config?.dtSeconds) {
+  const k = historyKinematicsFromPositions(ballHistorySamplesForFrame(f), dtSeconds);
+  const ball = f?.ball || {};
+  const velocity = k.velocity || ball.velocity || {x: 0, y: 0};
+  const acceleration = k.acceleration || ball.acceleration || {x: 0, y: 0};
+  const jerk = k.jerk || {x: 0, y: 0};
+  return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
 }
 function scoreValue(source, ...keys) {
   for (const key of keys) {
@@ -1352,11 +1453,13 @@ function agentEnergyLabel(p) {
 }
 function agentSkillLabel(p) {
   const s = p.skills || {};
-  return `Sp${scoreText(s, "topSpeed", "topSpeedYps")} Ac${scoreText(s, "acceleration", "accelerationYps2")} Sh${scoreText(s, "shooting")} Pa${scoreText(s, "passingCompletionRate", "passing")} Dr${scoreText(s, "dribbling")} Df${scoreText(s, "defending")}`;
+  const weight = Number(s.weightPounds ?? s.weightLbs ?? 0);
+  const weightLabel = weight > 0 ? ` Wt${weight.toFixed(0)}` : "";
+  return `Sp${scoreText(s, "topSpeed", "topSpeedYps")} Ac${scoreText(s, "acceleration", "accelerationYps2")} Sh${scoreText(s, "shooting")} Pa${scoreText(s, "passingCompletionRate", "passing")} Dr${scoreText(s, "dribbling")} Df${scoreText(s, "defending")}${weightLabel}`;
 }
 function skillTelemetryItems(p) {
   const s = p.skills || {};
-  return [
+  const items = [
     ["Speed", "topSpeed", "topSpeedYps"],
     ["Accel", "acceleration", "accelerationYps2"],
     ["Strength", "strength"],
@@ -1376,6 +1479,17 @@ function skillTelemetryItems(p) {
     const score = scoreValue(s, ...keys);
     return {label, value: score.toFixed(1), score};
   });
+  const weight = Number(s.weightPounds ?? s.weightLbs ?? 0);
+  if (weight > 0) {
+    items.splice(4, 0, {
+      label: "Weight",
+      value: `${weight.toFixed(0)} lb`,
+      score: weight,
+      min: 135,
+      max: 225,
+    });
+  }
+  return items;
 }
 function decisionTelemetryItems(d) {
   if (!d) return [];
@@ -1404,6 +1518,7 @@ function updateAgentStatePanel() {
   if (!p) {
     agentSelected.textContent = "Autonomous";
     agentMotion.textContent = "-";
+    agentKinematics.textContent = "-";
     agentEnergy.textContent = "-";
     agentSkills.textContent = "-";
     agentDecision.textContent = "-";
@@ -1422,6 +1537,7 @@ function updateAgentStatePanel() {
   const d = p.lastDecision;
   agentSelected.textContent = `${p.team} ${p.shirt} ${p.name} / ${gaitLabel(p.movementGait)}`;
   agentMotion.textContent = agentMotionLabel(p);
+  agentKinematics.textContent = playerHistoryKinematicsLabel(p);
   agentEnergy.textContent = agentEnergyLabel(p);
   agentSkills.textContent = agentSkillLabel(p);
   agentDecision.textContent = agentDecisionLabel(d);
@@ -2021,9 +2137,10 @@ function render() {
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
   agentOrder.textContent = agentScheduleLabel(f.agentSchedule);
   sharedPositions.textContent = sharedPositionLabel(f);
-  homeBrain.textContent = directiveLabel(f.homeDirective);
-  awayBrain.textContent = directiveLabel(f.awayDirective);
+  homeBrain.textContent = teamBrainLabel(f.homeBrain, f.homeDirective);
+  awayBrain.textContent = teamBrainLabel(f.awayBrain, f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2 z${ballAltitudeYards(f.ball).toFixed(1)}y`;
+  ballKinematics.textContent = ballHistoryKinematicsLabel(f);
   ballAgent.textContent = ballAgentLabel(f.ball);
   ballAction.textContent = semanticBallActionLabel();
   actionIntent.textContent = liveIntentLabel(primaryLiveIntent(f));
@@ -2346,6 +2463,41 @@ function axisFromKeys(map = CONTROLLER_KEYMAPS[activeSlot] || CONTROLLER_KEYMAPS
   if (keys.has(map.down)) axis.y -= 1;
   return axis;
 }
+function gamepadButtonPressed(gamepad, buttonIndex) {
+  const button = gamepad?.buttons?.[buttonIndex];
+  return Boolean(button?.pressed || Number(button?.value || 0) > 0.50);
+}
+function gamepadPressedThisPulse(slot, gamepad, buttonIndex) {
+  const key = `${slot}:${Number(gamepad?.index ?? slot)}:${buttonIndex}`;
+  const pressed = gamepadButtonPressed(gamepad, buttonIndex);
+  const wasPressed = gamepadButtonLatch.get(key) === true;
+  gamepadButtonLatch.set(key, pressed);
+  return pressed && !wasPressed;
+}
+function gamepadAxisValue(value) {
+  const v = Number(value || 0);
+  return Math.abs(v) < GAMEPAD_STICK_DEADZONE ? 0 : clamp(v, -1, 1);
+}
+function axisFromGamepad(gamepad) {
+  const axis = {
+    x: gamepadAxisValue(gamepad?.axes?.[0]),
+    y: -gamepadAxisValue(gamepad?.axes?.[1]),
+  };
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadLeft)) axis.x -= 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadRight)) axis.x += 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadUp)) axis.y += 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadDown)) axis.y -= 1;
+  const length = Math.hypot(axis.x, axis.y);
+  return length > 1 ? {x: axis.x / length, y: axis.y / length} : axis;
+}
+function connectedGamepads() {
+  if (typeof navigator === "undefined" || typeof navigator.getGamepads !== "function") return [];
+  return Array.from(navigator.getGamepads()).filter(Boolean);
+}
+function gamepadForSlot(slot) {
+  const pads = connectedGamepads();
+  return pads.find(pad => Number(pad.index) === slot) || pads[slot] || null;
+}
 function selectedPlayerId(slot = Number(slotPick.value || 0)) {
   if (!state) return null;
   const assignment = state.controllerAssignments.find(a => a.controllerSlot === slot);
@@ -2374,23 +2526,25 @@ function setPassTarget(playerId) {
   render();
   return true;
 }
-function queueInput(pass = false, shoot = false, slot = Number(slotPick.value || 0), action = null) {
+function queueInput(pass = false, shoot = false, slot = Number(slotPick.value || 0), action = null, overrides = {}) {
   const playerId = selectedPlayerId(slot);
   if (playerId == null) return false;
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   const normalizedAction = action == null ? null : normalizeUiActionLabel(action);
   const actionIsPass = normalizedAction === "pass" || normalizedAction === "aerial-pass";
+  const axis = overrides.axis || axisFromKeys(map);
+  const sprint = overrides.sprint ?? keys.has(map.sprint);
   queuedInputs.push({
     controllerSlot: slot,
     playerId,
     seq: ++inputSeq,
-    axis: axisFromKeys(map),
-    sprint: keys.has(map.sprint),
+    axis,
+    sprint,
     pass: pass || actionIsPass,
     passFlight: normalizedAction === "aerial-pass" ? "aerial" : pass ? passFlight.value : "floor",
     shoot: shoot || normalizedAction === "shoot",
     action: normalizedAction,
-    targetPlayer: (pass || actionIsPass) ? passTargetForSlot(slot) : null
+    targetPlayer: (pass || actionIsPass) ? (overrides.targetPlayer ?? passTargetForSlot(slot)) : null
   });
   return true;
 }
@@ -2418,6 +2572,40 @@ function queueMotionInputsForPressedControllers() {
   }
   return queued;
 }
+function gamepadActionForSlot(slot, gamepad) {
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.carry)) return "carry-forward";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.protect)) return "protect-ball";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.clearance)) return "clearance";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.routeOne)) return "route-one";
+  return null;
+}
+function queueGamepadInputs() {
+  let queued = 0;
+  for (let slot = 0; slot < humanSlotCount(); slot++) {
+    const gamepad = gamepadForSlot(slot);
+    if (!gamepad || selectedPlayerId(slot) == null) continue;
+    const axis = axisFromGamepad(gamepad);
+    const sprint = gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.sprint);
+    const actionPressed = gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.action);
+    const passPressed = gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.pass);
+    const explicitAction = gamepadActionForSlot(slot, gamepad);
+    const p = playerForSlot(slot);
+    const isHolder = state?.frame?.ball?.holder === p?.id;
+    const shoot = actionPressed && (sprint || (isHolder && playerCanShoot(p)));
+    const pass = passPressed || (actionPressed && !shoot);
+    if (
+      axis.x !== 0
+      || axis.y !== 0
+      || sprint
+      || pass
+      || shoot
+      || explicitAction != null
+    ) {
+      if (queueInput(pass, shoot, slot, explicitAction, {axis, sprint})) queued++;
+    }
+  }
+  return queued;
+}
 function controllerSlotForCode(code) {
   return CONTROLLER_KEYMAPS.findIndex(map =>
     code === map.left
@@ -2440,6 +2628,24 @@ async function postJson(path, body) {
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+function plural(value, singular, pluralLabel = `${singular}s`) {
+  return Number(value) === 1 ? singular : pluralLabel;
+}
+function applyInputAck(ack, requestedCount = 0) {
+  if (!ack) return;
+  const accepted = Number(ack.acceptedInputs ?? 0);
+  const requested = Number(requestedCount || 0);
+  const queued = Boolean(ack.queued);
+  const queueDepth = Number(ack.queuedHumanInputs ?? state?.queuedHumanInputs ?? 0);
+  if (state && Number.isFinite(queueDepth)) state.queuedHumanInputs = queueDepth;
+  if (accepted <= 0 && requested > 0) {
+    statusEl.textContent = `input rejected ${requested} ${plural(requested, "frame")}`;
+  } else if (accepted > 0) {
+    const suffix = queued ? ` Q${queueDepth}` : "";
+    statusEl.textContent = `${accepted}/${Math.max(requested, accepted)} input accepted${suffix}`;
+  }
+  inputQueue.textContent = queuedHumanInputsLabel();
 }
 async function refreshPolicyHistory(path, options = {}) {
   const body = {limit: 12};
@@ -2645,6 +2851,17 @@ async function resetMatch(options = {}) {
   }
   render();
 }
+function downloadTextFile(filename, content, type) {
+  const blob = new Blob([content], {type});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 async function exportTrackingDataset() {
   const res = await fetch("/api/tracking-dataset");
   if (!res.ok) throw new Error(await res.text());
@@ -2664,6 +2881,15 @@ async function exportTrackingDataset() {
   URL.revokeObjectURL(url);
   statusEl.textContent = `tracking exported ${dataset.frames?.length ?? 0} frames`;
 }
+async function exportTrackingJsonlDataset() {
+  const res = await fetch("/api/tracking-dataset.jsonl");
+  if (!res.ok) throw new Error(await res.text());
+  const jsonl = await res.text();
+  const meta = JSON.parse((jsonl.split(/\n/, 1)[0] || "{}"));
+  const tick = Number(state?.summary?.ticks ?? 0);
+  downloadTextFile(`soccer-tracking-t${tick}.jsonl`, jsonl, "application/x-ndjson");
+  statusEl.textContent = `tracking jsonl exported ${Number(meta.frames ?? 0)} frames`;
+}
 async function exportTrackingTemplate() {
   const res = await fetch("/api/tracking-template");
   if (!res.ok) throw new Error(await res.text());
@@ -2678,6 +2904,14 @@ async function exportTrackingTemplate() {
   a.remove();
   URL.revokeObjectURL(url);
   statusEl.textContent = `tracking template ${dataset.frames?.length ?? 0} frames`;
+}
+async function exportTrackingJsonlTemplate() {
+  const res = await fetch("/api/tracking-template.jsonl");
+  if (!res.ok) throw new Error(await res.text());
+  const jsonl = await res.text();
+  const meta = JSON.parse((jsonl.split(/\n/, 1)[0] || "{}"));
+  downloadTextFile("soccer-tracking-template.jsonl", jsonl, "application/x-ndjson");
+  statusEl.textContent = `tracking template jsonl ${Number(meta.frames ?? 0)} frames`;
 }
 async function importTeamPolicyFile(file) {
   const text = await file.text();
@@ -2694,14 +2928,27 @@ async function importTeamPolicyFile(file) {
   statusEl.textContent = `policy imported H${hActions}/${hTargets} A${aActions}/${aTargets}`;
   render();
 }
+function trackingPhysicsSmokeLabel(physicsSmoke) {
+  if (!physicsSmoke) return "physics unchecked";
+  const frames = Number(physicsSmoke.framesAnalyzed ?? 0);
+  const warnings = Number(physicsSmoke.violationCount ?? 0);
+  const maxBall = Number(physicsSmoke.maxBallFrameSpeedYps ?? physicsSmoke.maxBallSpeedYps ?? 0);
+  const maxPlayer = Number(physicsSmoke.maxPlayerFrameSpeedYps ?? physicsSmoke.maxPlayerSpeedYps ?? 0);
+  const speedLabel = `B${maxBall.toFixed(1)} P${maxPlayer.toFixed(1)}`;
+  if (warnings > 0) return `physics ${warnings} warnings ${speedLabel}`;
+  return `physics ok ${frames} frames ${speedLabel}`;
+}
 async function importTrackingFile(file) {
   const content = await file.text();
   const name = file.name || "tracking-upload";
   const lower = name.toLowerCase();
-  const format = lower.endsWith(".json") ? "json" : "csv";
+  const format = lower.endsWith(".jsonl") || lower.endsWith(".ndjson")
+    ? "jsonl"
+    : (lower.endsWith(".json") ? "json" : "csv");
   const response = await postJson("/api/tracking-policy", {
     source: name,
     format,
+    allowPhysicsWarnings: !!allowTrackingPhysicsWarnings?.checked,
     content
   });
   if (state) {
@@ -2712,7 +2959,11 @@ async function importTrackingFile(file) {
   const aActions = Number(response.importedAwayEntries ?? response.learning?.awayPolicyEntries ?? 0);
   const hTargets = Number(response.importedHomeTargetEntries ?? response.learning?.homePolicyTargetEntries ?? 0);
   const aTargets = Number(response.importedAwayTargetEntries ?? response.learning?.awayPolicyTargetEntries ?? 0);
-  statusEl.textContent = `tracking trained ${response.importedTransitions} transitions H${hActions}/${hTargets} A${aActions}/${aTargets}`;
+  const physics = trackingPhysicsSmokeLabel(response.physicsSmoke);
+  const reason = response.rejectionReason ? `; ${response.rejectionReason}` : "";
+  statusEl.textContent = response.trainingSkipped
+    ? `tracking rejected H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}${reason}`
+    : `tracking trained ${response.importedTransitions} transitions H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}`;
   render();
 }
 async function loadState() {
@@ -2746,6 +2997,7 @@ async function stepOnce(options = {}) {
       return;
     }
     queueMotionInputsForPressedControllers();
+    queueGamepadInputs();
     const inputs = queuedInputs.splice(0, queuedInputs.length);
     const beforeAssignments = assignmentKey(state.controllerAssignments);
     const previousPolicyHistory = state.policyHistory || null;
@@ -2756,6 +3008,7 @@ async function stepOnce(options = {}) {
       recordEveryTicks: Math.max(1, ticksThisPulse),
       inputs
     });
+    applyInputAck(response, inputs.length);
     state = {
       config: state.config,
       frame: response.frame,
@@ -2806,7 +3059,9 @@ async function submitInputOnly(pass = false, shoot = false, action = null) {
     return;
   }
   const inputs = queuedInputs.splice(0, queuedInputs.length);
-  await postJson("/api/input", inputs);
+  const ack = await postJson("/api/input", inputs);
+  applyInputAck(ack, inputs.length);
+  render();
 }
 runButton.addEventListener("click", () => {
   if (state?.done) {
@@ -2837,7 +3092,9 @@ loadPolicyButton.addEventListener("click", () => loadTeamPolicyFromDisk().catch(
 savePolicySnapshotButton.addEventListener("click", () => saveTeamPolicySnapshot().catch(e => statusEl.textContent = e.message));
 loadPolicySnapshotButton.addEventListener("click", () => loadTeamPolicySnapshot().catch(e => statusEl.textContent = e.message));
 exportTrackingButton.addEventListener("click", () => exportTrackingDataset().catch(e => statusEl.textContent = e.message));
+exportTrackingJsonlButton.addEventListener("click", () => exportTrackingJsonlDataset().catch(e => statusEl.textContent = e.message));
 sampleTrackingButton.addEventListener("click", () => exportTrackingTemplate().catch(e => statusEl.textContent = e.message));
+sampleTrackingJsonlButton.addEventListener("click", () => exportTrackingJsonlTemplate().catch(e => statusEl.textContent = e.message));
 policyFile.addEventListener("change", () => {
   const file = policyFile.files && policyFile.files[0];
   if (!file) return;

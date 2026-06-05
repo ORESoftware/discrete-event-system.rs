@@ -97,6 +97,7 @@ const SHOT_BLOCK_DIRECT_PROBABILITY: f64 = 0.80;
 const SHOT_BLOCK_LANE_RADIUS_YARDS: f64 = 3.25;
 const SHOT_BLOCK_DECISION_MAX_PROBABILITY: f64 = 0.58;
 const SHOT_BLOCK_BAILOUT_MAX_PROBABILITY: f64 = 0.86;
+const GOAL_APPROACH_CARRY_YARDS: f64 = 45.0;
 const SHOT_BLOCK_QUICK_RELEASE_MULTIPLIER: f64 = 0.68;
 const SHOT_SCREEN_IDEAL_MIN_YARDS: f64 = 1.0;
 const SHOT_SCREEN_IDEAL_MAX_YARDS: f64 = 3.0;
@@ -5323,7 +5324,11 @@ impl PlayerAgent {
                         && rng.next_float()
                             >= time_window_probability(learned_shot_chance, snapshot.dt_seconds)
                     {
-                        let kind = deterministic_dribble_move_kind(snapshot.tick, self.id);
+                        let kind = if goal_approach_carry_preferred(&observation, self.role) {
+                            DribbleMoveKind::CarryForward
+                        } else {
+                            deterministic_dribble_move_kind(snapshot.tick, self.id)
+                        };
                         let touch =
                             snapshot.deterministic_dribble_touch_decision_for(self.id, kind);
                         let defer_action = SoccerAction::DribbleMove {
@@ -5473,7 +5478,11 @@ impl PlayerAgent {
                         if rng.next_float()
                             < time_window_probability(dribble_chance, snapshot.dt_seconds)
                         {
-                            let kind = choose_dribble_move_kind(rng);
+                            let kind = if goal_approach_carry_preferred(&observation, self.role) {
+                                DribbleMoveKind::CarryForward
+                            } else {
+                                choose_dribble_move_kind(rng)
+                            };
                             let touch =
                                 snapshot.choose_dribble_touch_decision_for(self.id, kind, rng);
                             let target = snapshot.dribble_move_target_for_touch(
@@ -5744,7 +5753,9 @@ impl PlayerAgent {
                         "hold-up-flank".to_string(),
                     )
                 } else if patient_carry || carry_to_create || pass_targets.is_empty() {
-                    let kind = if patient_carry {
+                    let kind = if goal_approach_carry_preferred(&observation, self.role) {
+                        DribbleMoveKind::CarryForward
+                    } else if patient_carry {
                         patient_carry_dribble_kind(snapshot.tick, self.id)
                     } else {
                         deterministic_dribble_move_kind(snapshot.tick, self.id)
@@ -11918,6 +11929,30 @@ impl WorldSnapshot {
         distance.clamp(DRIBBLE_MIN_TOUCH_YARDS, cap)
     }
 
+    fn carry_forward_direction_for(&self, player: &PlayerSnapshot, current: Vec2) -> Vec2 {
+        let straight = Vec2::new(0.0, player.team.attack_dir());
+        let goal = Vec2::new(
+            self.field_width * 0.5,
+            player.team.goal_y(self.field_length),
+        );
+        let yards_to_goal = (goal.y - current.y).abs();
+        if yards_to_goal > GOAL_APPROACH_CARRY_YARDS {
+            return straight;
+        }
+        let to_goal = (goal - current).normalized();
+        if to_goal.len() <= 1e-9 || to_goal.dot(straight) <= 0.12 {
+            return straight;
+        }
+        let approach_fit = ((GOAL_APPROACH_CARRY_YARDS - yards_to_goal)
+            / (GOAL_APPROACH_CARRY_YARDS - TEAMMATE_MUST_SHOOT_YARDS).max(1.0))
+        .clamp(0.0, 1.0);
+        let lateral_fit = ((current.x - self.field_width * 0.5).abs()
+            / (self.field_width * 0.5).max(1.0))
+        .clamp(0.0, 1.0);
+        let goal_blend = (approach_fit * 0.62 + lateral_fit * 0.34).clamp(0.0, 0.86);
+        (straight * (1.0 - goal_blend) + to_goal * goal_blend).normalized()
+    }
+
     pub fn dribble_move_target_for_touch(
         &self,
         player_id: usize,
@@ -11931,7 +11966,7 @@ impl WorldSnapshot {
         let current = self.player_position(me.id).unwrap_or(me.position);
         let nearest_defender = self.nearest_opponent_at(me.team, current);
         let direction = match kind {
-            DribbleMoveKind::CarryForward => Vec2::new(0.0, me.team.attack_dir()),
+            DribbleMoveKind::CarryForward => self.carry_forward_direction_for(me, current),
             DribbleMoveKind::CarryOutLeft | DribbleMoveKind::CarryOutRight => {
                 let outward_x = match kind {
                     DribbleMoveKind::CarryOutLeft => -1.0,
@@ -11963,7 +11998,79 @@ impl WorldSnapshot {
             target = self.shot_creation_space_for(player_id, home);
         }
 
+        if let Some(goalmouth_target) =
+            self.goalmouth_carry_target_for_touch(player_id, current, target, kind, touch)
+        {
+            target = goalmouth_target;
+        }
+
         target.clamp_to_pitch(self.field_width, self.field_length)
+    }
+
+    fn goalmouth_carry_target_for_touch(
+        &self,
+        player_id: usize,
+        current: Vec2,
+        base_target: Vec2,
+        kind: DribbleMoveKind,
+        touch: DribbleTouchDecision,
+    ) -> Option<Vec2> {
+        let me = self.players.iter().find(|p| p.id == player_id)?;
+        if me.role == PlayerRole::Goalkeeper || kind == DribbleMoveKind::ProtectBall {
+            return None;
+        }
+        let attack_dir = me.team.attack_dir();
+        if (current.y - self.field_length * 0.5) * attack_dir < 0.0 {
+            return None;
+        }
+        let goal_y = me.team.goal_y(self.field_length);
+        let yards_to_goal = (goal_y - current.y).abs();
+        let activation_yards = match me.role {
+            PlayerRole::Forward => STRIKER_SHOT_WINDOW_YARDS + 6.0,
+            PlayerRole::Midfielder => TEAMMATE_MUST_SHOOT_YARDS + 8.0,
+            PlayerRole::Defender => TEAMMATE_MUST_SHOOT_YARDS + 4.0,
+            PlayerRole::Goalkeeper => return None,
+        };
+        if yards_to_goal > activation_yards {
+            return None;
+        }
+
+        let goal = Vec2::new(self.field_width * 0.5, goal_y);
+        let to_goal = goal - current;
+        if to_goal.len() <= 1e-9 {
+            return None;
+        }
+        let staging_buffer = if yards_to_goal <= TEAMMATE_MUST_SHOOT_YARDS {
+            5.0
+        } else {
+            7.0
+        };
+        let step_yards = touch
+            .distance_yards
+            .clamp(1.15, DRIBBLE_MAX_TOUCH_YARDS)
+            .min((yards_to_goal - staging_buffer).max(1.6));
+        let goal_step = current + to_goal.normalized() * step_yards;
+        let final_kind = dribble_final_cut_kind(kind);
+        let goal_blend = match final_kind {
+            DribbleMoveKind::CarryForward | DribbleMoveKind::Nutmeg => 0.86,
+            DribbleMoveKind::CarryOutLeft | DribbleMoveKind::CarryOutRight => 0.72,
+            DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => 0.64,
+            DribbleMoveKind::ProtectBall => return None,
+            DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft => 0.64,
+        };
+        let mut target = goal_step * goal_blend + base_target * (1.0 - goal_blend);
+        if yards_to_goal <= STRIKER_SHOT_WINDOW_YARDS {
+            target.x = target.x * 0.78 + self.field_width * 0.5 * 0.22;
+        }
+
+        let endline_buffer = 4.5;
+        let goalmouth_y = goal_y - attack_dir * endline_buffer;
+        if attack_dir > 0.0 {
+            target.y = target.y.min(goalmouth_y).max(current.y + 0.55);
+        } else {
+            target.y = target.y.max(goalmouth_y).min(current.y - 0.55);
+        }
+        Some(target.clamp_to_pitch(self.field_width, self.field_length))
     }
 
     pub fn side_step_dribble_target_for(&self, player_id: usize, home: Vec2) -> Vec2 {
@@ -47056,6 +47163,72 @@ mod tests {
         assert!(
             pass_count <= 1,
             "backward outlet should be rare in the shooting window, got {pass_count}/{trials}"
+        );
+    }
+
+    #[test]
+    fn near_box_carry_bends_toward_goal_instead_of_endline() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2228,
+            ..Default::default()
+        });
+        let attacker = 9;
+        let blocker = 13;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, blocker, keeper]);
+        sim.players[attacker].position = Vec2::new(70.0, 92.0);
+        sim.players[attacker].home_position = sim.players[attacker].position;
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+        sim.players[attacker].skills.dribbling = 9.2;
+        sim.players[attacker].skills.acceleration = 9.0;
+        sim.players[attacker].skills.shooting = 5.0;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[blocker].position = Vec2::new(55.0, 106.0);
+        sim.players[blocker].skills.defending = 8.0;
+        sim.players[keeper].position = Vec2::new(40.0, 116.0);
+        sim.players[keeper].skills.goalkeeping = 6.0;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(observation.yards_to_goal <= STRIKER_SHOT_WINDOW_YARDS);
+        assert!(!shot_decision_is_qualified_for_role(
+            &observation,
+            sim.players[attacker].role
+        ));
+
+        let mut player = sim.players[attacker].clone();
+        let plan = SoccerLearnedPlan {
+            action: "carry-forward".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let intent = player.run_time_step(&snapshot, None, Some(&plan), &mut mulberry32(22_280));
+        let SoccerAction::DribbleMove { target, .. } = intent.action else {
+            panic!("blocked near-box carry should stay on the dribble plan, got {intent:?}");
+        };
+        let current = sim.players[attacker].position;
+        let goal = Vec2::new(
+            sim.config.field_width_yards * 0.5,
+            Team::Home.goal_y(sim.config.field_length_yards),
+        );
+        let straight_endline_target = Vec2::new(current.x, target.y);
+
+        assert!(
+            target.x < current.x - 2.0,
+            "near-box carry should move toward goal center, current={current:?} target={target:?}"
+        );
+        assert!(
+            target.y > current.y && target.y <= goal.y - 4.0,
+            "near-box carry should advance without running to the endline, current={current:?} target={target:?}"
+        );
+        assert!(
+            target.distance(goal) < straight_endline_target.distance(goal),
+            "goal-facing carry should improve shooting geometry versus straight endline carry: target={target:?}"
         );
     }
 

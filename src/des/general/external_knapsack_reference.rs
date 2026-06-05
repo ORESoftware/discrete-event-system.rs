@@ -1,12 +1,12 @@
 //! Rust-facing bridge for external/reference 0/1 knapsack solvers.
 //!
 //! The native Rust reference computes an independent exact branch-and-bound
-//! check without Python startup. The Python bridge (`scripts/knapsack_reference.py`)
-//! remains available for OR-Tools CP-SAT.
+//! check without Python startup. Explicit OR-Tools CP-SAT validation is launched
+//! from Rust with a tiny Python adapter over an integer-scaled copy of the same
+//! input.
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -158,6 +158,101 @@ struct RustKnapsackSearchItem {
 
 const RUST_KNAPSACK_EPS: f64 = 1e-9;
 const RUST_KNAPSACK_MAX_EXACT_ITEMS: usize = 64;
+const ORTOOLS_INTEGER_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_KNAPSACK_SOLVER: &str = "ortools:cp-sat-knapsack";
+
+const ORTOOLS_KNAPSACK_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:cp-sat-knapsack"
+
+
+def solution(status, problem, selected_indices=None, upper_bound=None, message=""):
+    indices = [] if selected_indices is None else sorted(int(index) for index in selected_indices)
+    items_by_index = {int(item["index"]): item for item in problem["items"]}
+    selected_ids = [items_by_index[index]["id"] for index in indices]
+    total_weight = sum(float(items_by_index[index]["weight"]) for index in indices)
+    total_value = sum(float(items_by_index[index]["value"]) for index in indices)
+    output = {
+        "status": status,
+        "solver": SOLVER,
+        "selectedItemIndices": indices,
+        "selectedItemIds": selected_ids,
+        "totalWeight": total_weight,
+        "totalValue": total_value,
+        "objective": total_value,
+        "upperBound": upper_bound,
+        "message": message,
+    }
+    if upper_bound is not None:
+        output["objectiveBound"] = upper_bound
+    return output
+
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    fallback_problem = {
+        "items": [],
+    }
+    print(json.dumps(solution("unavailable", fallback_problem, None, None, str(exc))))
+    sys.exit(0)
+
+
+try:
+    problem = json.load(sys.stdin)
+    model = cp_model.CpModel()
+    x = [
+        model.NewBoolVar(f"x_{item['id']}")
+        for item in problem["items"]
+    ]
+    model.Add(sum(
+        int(item["scaledWeight"]) * x[index]
+        for index, item in enumerate(problem["items"])
+    ) <= int(problem["scaledCapacity"]))
+    model.Maximize(sum(
+        int(item["scaledValue"]) * x[index]
+        for index, item in enumerate(problem["items"])
+    ))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(json.dumps(solution(
+            "infeasible" if status_name == "infeasible" else status_name,
+            problem,
+            None,
+            None,
+            f"OR-Tools CP-SAT status {status_name}",
+        )))
+        sys.exit(0)
+    selected = [
+        index for index, var in enumerate(x) if solver.Value(var)
+    ]
+    print(json.dumps(solution(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        problem,
+        selected,
+        solver.BestObjectiveBound() / float(problem["valueScale"]),
+        f"OR-Tools CP-SAT status {status_name}",
+    )))
+except Exception as exc:
+    print(json.dumps({
+        "status": "error",
+        "solver": SOLVER,
+        "selectedItemIndices": [],
+        "selectedItemIds": [],
+        "totalWeight": 0.0,
+        "totalValue": 0.0,
+        "objective": None,
+        "upperBound": None,
+        "message": str(exc),
+    }))
+    sys.exit(1)
+"#;
 
 fn status_from_str(status: &str) -> ExternalKnapsackReferenceStatus {
     match status {
@@ -482,58 +577,68 @@ fn solve_knapsack_with_rust_reference(
     )
 }
 
-fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalKnapsackReferenceSolution {
-    ExternalKnapsackReferenceSolution {
-        status: ExternalKnapsackReferenceStatus::Unavailable,
-        solver: "external-knapsack-reference".to_string(),
-        selected_item_indices: Vec::new(),
-        selected_item_ids: Vec::new(),
-        total_weight: None,
-        total_value: None,
-        objective: None,
-        upper_bound: None,
-        ortools_status: None,
-        ortools_selected_item_indices: Vec::new(),
-        ortools_selected_item_ids: Vec::new(),
-        ortools_total_weight: None,
-        ortools_total_value: None,
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn numerical_error(
+fn ortools_empty_solution(
+    status: ExternalKnapsackReferenceStatus,
     message: impl Into<String>,
     elapsed_ms: f64,
 ) -> ExternalKnapsackReferenceSolution {
-    ExternalKnapsackReferenceSolution {
-        status: ExternalKnapsackReferenceStatus::NumericalError,
-        solver: "external-knapsack-reference".to_string(),
-        selected_item_indices: Vec::new(),
-        selected_item_ids: Vec::new(),
-        total_weight: None,
-        total_value: None,
-        objective: None,
-        upper_bound: None,
-        ortools_status: None,
-        ortools_selected_item_indices: Vec::new(),
-        ortools_selected_item_ids: Vec::new(),
-        ortools_total_weight: None,
-        ortools_total_value: None,
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
+    rust_knapsack_empty_solution(status, ORTOOLS_KNAPSACK_SOLVER, message, elapsed_ms)
+}
+
+fn scaled_ortools_value(value: f64, scale: i64) -> Option<i64> {
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled < 0.0 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (rounded - scaled).abs() <= 1e-6 {
+        Some(rounded as i64)
+    } else {
+        None
     }
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("knapsack_reference.py")
+fn choose_ortools_weight_scale(problem: &KnapsackProblem) -> Option<i64> {
+    ORTOOLS_INTEGER_SCALES.into_iter().find(|scale| {
+        scaled_ortools_value(problem.capacity, *scale).is_some()
+            && problem
+                .items
+                .iter()
+                .all(|item| scaled_ortools_value(item.weight, *scale).is_some())
+    })
+}
+
+fn choose_ortools_value_scale(problem: &KnapsackProblem) -> Option<i64> {
+    ORTOOLS_INTEGER_SCALES.into_iter().find(|scale| {
+        problem
+            .items
+            .iter()
+            .all(|item| scaled_ortools_value(item.value, *scale).is_some())
+    })
+}
+
+fn ortools_knapsack_payload(
+    problem: &KnapsackProblem,
+    weight_scale: i64,
+    value_scale: i64,
+) -> Value {
+    json!({
+        "scaledCapacity": scaled_ortools_value(problem.capacity, weight_scale)
+            .expect("weight scale chosen for capacity"),
+        "valueScale": value_scale,
+        "items": problem.items.iter().enumerate().map(|(index, item)| {
+            json!({
+                "id": item.id,
+                "index": index,
+                "weight": item.weight,
+                "value": item.value,
+                "scaledWeight": scaled_ortools_value(item.weight, weight_scale)
+                    .expect("weight scale chosen for item weights"),
+                "scaledValue": scaled_ortools_value(item.value, value_scale)
+                    .expect("value scale chosen for item values"),
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn knapsack_reference_timeout_ms() -> u64 {
@@ -563,26 +668,42 @@ fn wait_for_knapsack_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll knapsack_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll OR-Tools knapsack adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for knapsack_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools knapsack adapter: {err}"))
 }
 
-fn run_knapsack_reference_json(
-    payload: Value,
-    opts: &ExternalKnapsackReferenceOptions,
-) -> ExternalKnapsackReferenceSolution {
+fn run_ortools_knapsack_reference(problem: &KnapsackProblem) -> ExternalKnapsackReferenceSolution {
     let started = Instant::now();
+    if let Err(message) = validate_rust_knapsack_problem(problem) {
+        return ortools_empty_solution(
+            ExternalKnapsackReferenceStatus::NumericalError,
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let Some(weight_scale) = choose_ortools_weight_scale(problem) else {
+        return ortools_empty_solution(
+            ExternalKnapsackReferenceStatus::Unsupported,
+            "OR-Tools CP-SAT bridge requires integer-scalable weights/capacity and values",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let Some(value_scale) = choose_ortools_value_scale(problem) else {
+        return ortools_empty_solution(
+            ExternalKnapsackReferenceStatus::Unsupported,
+            "OR-Tools CP-SAT bridge requires integer-scalable weights/capacity and values",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let payload = ortools_knapsack_payload(problem, weight_scale, value_scale);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_KNAPSACK_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -591,16 +712,18 @@ fn run_knapsack_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return unavailable(
-                format!("failed to start knapsack_reference.py with {python}: {err}"),
+            return ortools_empty_solution(
+                ExternalKnapsackReferenceStatus::Unavailable,
+                format!("failed to start OR-Tools knapsack adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
     if let Some(stdin) = child.stdin.as_mut() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write knapsack_reference.py stdin: {err}"),
+            return ortools_empty_solution(
+                ExternalKnapsackReferenceStatus::NumericalError,
+                format!("failed to write OR-Tools knapsack adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -610,11 +733,15 @@ fn run_knapsack_reference_json(
     let (mut output, timed_out) = match wait_for_knapsack_reference_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => {
-            return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
+            return ortools_empty_solution(
+                ExternalKnapsackReferenceStatus::NumericalError,
+                err,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
     };
     if timed_out {
-        let timeout_message = format!("knapsack_reference.py timed out after {timeout_ms}ms");
+        let timeout_message = format!("OR-Tools knapsack adapter timed out after {timeout_ms}ms");
         if output.stderr.is_empty() {
             output.stderr = timeout_message.into_bytes();
         } else {
@@ -653,9 +780,10 @@ fn run_knapsack_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
+        Err(err) => ortools_empty_solution(
+            ExternalKnapsackReferenceStatus::NumericalError,
             format!(
-                "failed to parse knapsack_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools knapsack adapter output: {err}; stderr={}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
             elapsed_ms,
@@ -674,17 +802,7 @@ pub fn solve_knapsack_with_external_reference(
         );
     }
 
-    run_knapsack_reference_json(
-        json!({
-            "capacity": problem.capacity,
-            "items": problem.items.iter().map(|item| json!({
-                "id": &item.id,
-                "weight": item.weight,
-                "value": item.value,
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_knapsack_reference(problem)
 }
 
 #[cfg(test)]
@@ -817,7 +935,61 @@ mod tests {
     }
 
     #[test]
-    fn knapsack_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_values_without_python() {
+        let _lock = KNAPSACK_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("KNAPSACK_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = KnapsackProblem {
+            capacity: 1.0 / 3.0,
+            items: vec![KnapsackItem {
+                id: "A".to_string(),
+                weight: 1.0 / 3.0,
+                value: 1.0,
+            }],
+        };
+
+        let solution = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalKnapsackReferenceStatus::Unsupported
+        );
+        assert_eq!(solution.solver, "ortools:cp-sat-knapsack");
+        assert!(solution
+            .message
+            .contains("requires integer-scalable weights/capacity and values"));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = KNAPSACK_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("KNAPSACK_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = build_sample_knapsack_problem();
+
+        let solution = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalKnapsackReferenceStatus::Unavailable
+        );
+        assert_eq!(solution.solver, "ortools:cp-sat-knapsack");
+        assert!(solution.message.contains("OR-Tools knapsack adapter"));
+        assert!(!solution.message.contains("knapsack_reference.py"));
+    }
+
+    #[test]
+    fn knapsack_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -833,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn knapsack_python_bridge_wait_observes_closed_stdin() {
+    fn knapsack_adapter_wait_observes_closed_stdin() {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("cat >/dev/null; printf done")

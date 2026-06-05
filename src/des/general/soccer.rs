@@ -4300,19 +4300,19 @@ impl PlayerAgent {
             * (0.70 + (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0) * 0.58)
             * fatigue_dribble
             * shot_creation_carry
-            * patient_carry_multiplier
             * striker_carry_boost
             * (1.0 + offensive_urgency * 0.30 + pressure_urgency * 0.20))
             .clamp(0.02, 1.32);
+        let patient_carry_score_base = (dribble_score * patient_carry_multiplier).clamp(0.02, 1.58);
         let carry_forward_legal = observation.forward_dribble_space_yards >= 1.2
             && !must_shoot_near_goal(observation, self.role);
-        let carry_forward_score = (dribble_score
+        let carry_forward_score = (patient_carry_score_base
             * (0.34 + patience_factor * 0.62 + poor_floor_pass * 0.36 + forward_space_fit * 0.34)
             * (1.0 - pressure * 0.24).clamp(0.70, 1.0))
         .clamp(0.01, 1.16);
         let carry_out_legal = observation.forward_dribble_space_yards >= 0.8
             && !must_shoot_near_goal(observation, self.role);
-        let carry_out_score = (dribble_score
+        let carry_out_score = (patient_carry_score_base
             * (0.20
                 + patience_factor * 0.42
                 + poor_floor_pass * 0.30
@@ -30847,7 +30847,7 @@ fn low_pressure_patient_carry_multiplier(observation: &SoccerPomdpObservation) -
 
 fn low_pressure_patient_carry_preferred(observation: &SoccerPomdpObservation) -> bool {
     low_pressure_patience_factor(observation) >= 0.45
-        && pass_quality_for_patience(observation, PassFlight::Floor) <= 0.58
+        && pass_quality_for_patience(observation, PassFlight::Floor) <= 0.64
         && observation.forward_dribble_space_yards >= 2.0
 }
 
@@ -38188,9 +38188,11 @@ mod tests {
             sim.config.dt_seconds,
         );
 
+        let favorable_dribble = action_option_score(&favorable, "dribble");
+        let unfavorable_dribble = action_option_score(&unfavorable, "dribble");
         assert!(
-            action_option_score(&favorable, "dribble")
-                > action_option_score(&unfavorable, "dribble") * 1.12
+            favorable_dribble > unfavorable_dribble * 1.12,
+            "tired defender cue should boost dribble: favorable={favorable_dribble} unfavorable={unfavorable_dribble}"
         );
     }
 
@@ -44109,6 +44111,9 @@ mod tests {
                 DribbleMoveKind::LeftCut => left += 1,
                 DribbleMoveKind::RightCut => right += 1,
                 DribbleMoveKind::Nutmeg => nutmeg += 1,
+                DribbleMoveKind::CarryForward
+                | DribbleMoveKind::CarryOut
+                | DribbleMoveKind::ProtectBall => {}
                 DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft => {}
             }
         }
@@ -44667,13 +44672,24 @@ mod tests {
             snapshot.dt_seconds,
         );
         let dribble_score = action_option_score(&options, "dribble");
+        let carry_forward_score = action_option_score(&options, "carry-forward");
+        let carry_out_score = action_option_score(&options, "carry-out");
         let pass_score = action_option_score(&options, "pass1");
         assert!(
-            dribble_score > pass_score * 1.6,
-            "patient carry should outrank forced pass: dribble={dribble_score} pass={pass_score}"
+            dribble_score > pass_score * 1.05,
+            "patient base dribble should stay viable: dribble={dribble_score} pass={pass_score}"
+        );
+        assert!(
+            carry_forward_score > pass_score * 1.25,
+            "carrying forward should outrank forced pass: carry_forward={carry_forward_score} pass={pass_score}"
+        );
+        assert!(
+            carry_out_score > pass_score * 0.82,
+            "carrying out should remain viable while waiting for support: carry_out={carry_out_score} pass={pass_score}"
         );
 
         let mut dribble_count = 0;
+        let mut carry_count = 0;
         let mut pass_count = 0;
         let trials = 80;
         for seed in 0..trials {
@@ -44681,7 +44697,12 @@ mod tests {
             let mut rng = mulberry32(26_000 + seed);
             let intent = player.run_time_step(&snapshot, None, None, &mut rng);
             match intent.action {
-                SoccerAction::DribbleMove { .. } => dribble_count += 1,
+                SoccerAction::DribbleMove { kind, .. } => {
+                    dribble_count += 1;
+                    if matches!(kind, DribbleMoveKind::CarryForward | DribbleMoveKind::CarryOut) {
+                        carry_count += 1;
+                    }
+                }
                 SoccerAction::Pass { .. } => pass_count += 1,
                 _ => {}
             }
@@ -44690,6 +44711,10 @@ mod tests {
         assert!(
             dribble_count >= 45,
             "low-pressure bad-pass context should carry often, got {dribble_count}/{trials}"
+        );
+        assert!(
+            carry_count >= 24,
+            "low-pressure bad-pass context should choose carry actions often, got {carry_count}/{trials}"
         );
         assert!(
             pass_count <= 12,

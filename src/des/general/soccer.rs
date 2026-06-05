@@ -32340,6 +32340,7 @@ mod tests {
                     enabled: false,
                     ..SoccerNeuralLearningConfig::default()
                 },
+                max_human_players: 0,
                 ..MatchConfig::default()
             },
             1_000,

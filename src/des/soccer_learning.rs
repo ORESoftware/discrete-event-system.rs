@@ -610,14 +610,16 @@ pub fn evolve_soccer_tactical_learning_weights(
     let Some(weighted_summary) = weighted_tactical_evolution_summary(parents, options) else {
         return base.clone();
     };
-    let population_size = options.population_size.max(1);
+    let search_options =
+        adapt_soccer_evolution_options_for_tactical_search(options, &weighted_summary);
+    let population_size = search_options.population_size.max(1);
     let mut best = base.clone();
     let mut best_score = soccer_tactical_weight_search_score(&best, &weighted_summary);
     for candidate_index in 0..population_size {
-        let mut candidate_options = options;
+        let mut candidate_options = search_options;
         candidate_options.population_size = 1;
         candidate_options.seed =
-            candidate_seed(options.seed, candidate_index, 0x7ac7_1ca1_5eed_c0de);
+            candidate_seed(search_options.seed, candidate_index, 0x7ac7_1ca1_5eed_c0de);
         let candidate =
             evolve_soccer_tactical_learning_candidate(base, &weighted_summary, candidate_options);
         let score = soccer_tactical_weight_search_score(&candidate, &weighted_summary);
@@ -627,6 +629,65 @@ pub fn evolve_soccer_tactical_learning_weights(
         }
     }
     best
+}
+
+pub fn soccer_tactical_search_pressure(summary: &SoccerTacticalLearningSummary) -> f64 {
+    let attack_width_gap = (1.0 - summary.mean_attack_width_score).clamp(0.0, 1.0);
+    let attack_flank_gap = (1.0 - summary.mean_attack_flank_lane_score).clamp(0.0, 1.0);
+    let attack_spacing_gap = (1.0 - summary.mean_attack_spacing_score).clamp(0.0, 1.0);
+    let defense_contract_gap = (1.0 - summary.mean_defense_contract_score).clamp(0.0, 1.0);
+    let defense_spacing_gap = (1.0 - summary.mean_defense_spacing_score).clamp(0.0, 1.0);
+    let defense_ball_gap = (1.0 - summary.mean_defense_ball_gap_score).clamp(0.0, 1.0);
+    let press_gap = (1.0 - summary.mean_defense_role_press_score).clamp(0.0, 1.0);
+
+    (attack_width_gap * 0.22
+        + attack_flank_gap * 0.28
+        + attack_spacing_gap * 0.08
+        + defense_contract_gap * 0.26
+        + defense_spacing_gap * 0.06
+        + defense_ball_gap * 0.05
+        + press_gap * 0.05)
+        .clamp(0.0, 1.0)
+}
+
+pub fn adapt_soccer_evolution_options_for_tactical_search(
+    mut options: SoccerEvolutionOptions,
+    summary: &SoccerTacticalLearningSummary,
+) -> SoccerEvolutionOptions {
+    let pressure = soccer_tactical_search_pressure(summary);
+    if pressure <= 1e-12 {
+        return options;
+    }
+    let search_enabled = options.population_size > 1
+        || options.mutation_rate > 0.0
+        || options.mutation_scale > 0.0
+        || options.crossover_rate > 0.0
+        || options.exploration_rate > 0.0
+        || options.exploration_scale > 0.0;
+    if !search_enabled {
+        return options;
+    }
+
+    options.mutation_rate = (options.mutation_rate + pressure * 0.015).clamp(0.0, 0.35);
+    options.mutation_scale = (options.mutation_scale * (1.0 + pressure * 0.45))
+        .max(options.mutation_scale)
+        .min(0.85);
+    if options.exploration_rate > 0.0 || options.exploration_scale > 0.0 {
+        options.exploration_rate = (options.exploration_rate + pressure * 0.08).clamp(0.0, 0.4);
+        options.exploration_scale = (options.exploration_scale * (1.0 + pressure * 0.55))
+            .max(options.exploration_scale)
+            .min(1.2);
+    }
+    if options.population_size > 1 {
+        let extra_candidates = ((options.population_size as f64) * pressure).ceil() as usize;
+        let cap = options.population_size.saturating_mul(2).min(64);
+        options.population_size = options
+            .population_size
+            .saturating_add(extra_candidates)
+            .min(cap)
+            .max(2);
+    }
+    options
 }
 
 fn weighted_tactical_evolution_summary(
@@ -1960,6 +2021,77 @@ mod tests {
         assert!(soccer_should_flush_postgres_policy_versions_for_new_sim(
             true, true, 2
         ));
+    }
+
+    #[test]
+    fn tactical_search_pressure_prioritizes_flanks_and_defensive_contraction() {
+        let healthy = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.92,
+            mean_attack_flank_lane_score: 0.88,
+            mean_attack_spacing_score: 0.86,
+            mean_defense_contract_score: 0.90,
+            mean_defense_spacing_score: 0.84,
+            mean_defense_ball_gap_score: 0.86,
+            mean_defense_role_press_score: 0.82,
+            ..Default::default()
+        };
+        let poor_shape = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.24,
+            mean_attack_flank_lane_score: 0.12,
+            mean_attack_spacing_score: 0.52,
+            mean_defense_contract_score: 0.16,
+            mean_defense_spacing_score: 0.46,
+            mean_defense_ball_gap_score: 0.56,
+            mean_defense_role_press_score: 0.58,
+            ..Default::default()
+        };
+
+        assert!(
+            soccer_tactical_search_pressure(&poor_shape)
+                > soccer_tactical_search_pressure(&healthy) + 0.45
+        );
+    }
+
+    #[test]
+    fn tactical_search_adapts_evolution_budget_without_enabling_disabled_search() {
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.15,
+            mean_attack_flank_lane_score: 0.10,
+            mean_attack_spacing_score: 0.30,
+            mean_defense_contract_score: 0.18,
+            mean_defense_spacing_score: 0.35,
+            mean_defense_ball_gap_score: 0.45,
+            mean_defense_role_press_score: 0.38,
+            ..Default::default()
+        };
+        let base = SoccerEvolutionOptions::default();
+        let adapted = adapt_soccer_evolution_options_for_tactical_search(base, &summary);
+
+        assert!(adapted.population_size > base.population_size);
+        assert!(adapted.mutation_rate > base.mutation_rate);
+        assert!(adapted.mutation_scale > base.mutation_scale);
+        assert!(adapted.exploration_rate > base.exploration_rate);
+        assert!(adapted.exploration_scale > base.exploration_scale);
+        assert!(adapted.population_size <= base.population_size * 2);
+
+        let disabled = SoccerEvolutionOptions {
+            mutation_rate: 0.0,
+            mutation_scale: 0.0,
+            crossover_rate: 0.0,
+            exploration_rate: 0.0,
+            exploration_scale: 0.0,
+            elite_weight_floor: 0.0,
+            population_size: 1,
+            seed: 99,
+        };
+        assert_eq!(
+            adapt_soccer_evolution_options_for_tactical_search(disabled, &summary).population_size,
+            disabled.population_size
+        );
+        assert_eq!(
+            adapt_soccer_evolution_options_for_tactical_search(disabled, &summary).mutation_rate,
+            disabled.mutation_rate
+        );
     }
 
     #[test]

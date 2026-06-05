@@ -14696,6 +14696,8 @@ pub struct SoccerPlaybackBallFrame {
     pub velocity: Vec2,
     pub acceleration: Vec2,
     #[serde(default)]
+    pub altitude_yards: f64,
+    #[serde(default)]
     pub holder: Option<usize>,
     #[serde(default)]
     pub last_touch_team: Option<Team>,
@@ -14887,6 +14889,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                 position: frame.ball.position,
                 velocity: frame.ball.velocity,
                 acceleration: frame.ball.acceleration,
+                altitude_yards: frame.ball.altitude_yards,
                 holder: frame.ball.holder,
                 last_touch_team: frame.ball.last_touch_team,
             },

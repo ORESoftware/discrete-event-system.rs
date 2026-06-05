@@ -717,10 +717,20 @@ function drawOfficial(o, r) {
     ctx.stroke();
   }
 }
+function ballAltitudeYards(ball) {
+  return Math.max(0, Number(ball?.altitudeYards ?? ball?.altitude_yards ?? 0));
+}
 function drawBall(ball, r) {
   const pt = mapPoint(ball.position, r);
+  const altitude = ballAltitudeYards(ball);
+  const lift = Math.min(15, altitude * 1.65);
+  const radius = 6.5 + Math.min(2.2, altitude * 0.16);
   ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 6.5, 0, Math.PI * 2);
+  ctx.ellipse(pt.x + lift * 0.18, pt.y + lift * 0.14, radius * 0.95, radius * 0.44, 0, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(21, 29, 17, ${altitude > 0.05 ? 0.26 : 0.18})`;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y - lift, radius, 0, Math.PI * 2);
   ctx.fillStyle = "#c58a13";
   ctx.fill();
   ctx.strokeStyle = "#4b3306";
@@ -743,7 +753,7 @@ function render() {
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
   homeBrain.textContent = directiveLabel(f.homeDirective);
   awayBrain.textContent = directiveLabel(f.awayDirective);
-  ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2`;
+  ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2 z${ballAltitudeYards(f.ball).toFixed(1)}y`;
   actionIntent.textContent = intentLabel(primaryIntent(f));
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
   scrub.value = frameIndex;

@@ -213,6 +213,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::des::general::soccer::{DEFAULT_DT_SECONDS, DEFAULT_DURATION_SECONDS};
     use std::collections::BTreeMap;
 
     #[test]
@@ -221,6 +222,9 @@ mod tests {
 
         assert_eq!(cfg.match_config.human_slots(), 4);
         assert_eq!(cfg.http_worker_threads, 4);
+        assert_eq!(cfg.match_config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(cfg.match_config.duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(cfg.match_config.total_ticks(), 6_000);
         assert!(!cfg.match_config.learning_enabled);
         assert!(!cfg.match_config.learning_logging_enabled);
         assert!(!cfg.match_config.neural_learning.enabled);

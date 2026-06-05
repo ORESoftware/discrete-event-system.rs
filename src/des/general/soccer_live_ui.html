@@ -330,6 +330,7 @@
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Episode</span><b id="episode">#0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
+      <div class="metric"><span>Step</span><b id="matchStep">dt 0.1s 10:00</b></div>
       <div class="metric"><span>Speed</span><b id="simSpeed">20x 20t</b></div>
       <div class="surface-control">
         <label for="gridOverlayLevel">Grid</label>
@@ -434,8 +435,10 @@
       <div class="section">Human Controller</div>
       <div class="metric"><span>Workers</span><b id="controllerThreads">0 native</b></div>
       <div class="metric"><span>HTTP</span><b id="liveHttp">pool 0</b></div>
+      <div class="metric"><span>Timing</span><b id="runtimeTiming">0ms</b></div>
       <div class="metric"><span>Main Loop</span><b id="controllerYield">idle</b></div>
       <div class="metric"><span>Input Queue</span><b id="inputQueue">0 pending</b></div>
+      <div class="row"><button id="inspectMode" type="button" aria-pressed="false">Inspect</button></div>
       <div id="slots"></div>
       <div class="row">
         <select id="passFlight" aria-label="Pass flight">
@@ -512,6 +515,7 @@ const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const episode = document.getElementById("episode");
 const ticks = document.getElementById("ticks");
+const matchStep = document.getElementById("matchStep");
 const simSpeed = document.getElementById("simSpeed");
 const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const learning = document.getElementById("learning");
@@ -523,8 +527,10 @@ const recentActions = document.getElementById("recentActions");
 const recentMoments = document.getElementById("recentMoments");
 const controllerThreads = document.getElementById("controllerThreads");
 const liveHttp = document.getElementById("liveHttp");
+const runtimeTiming = document.getElementById("runtimeTiming");
 const controllerYield = document.getElementById("controllerYield");
 const inputQueue = document.getElementById("inputQueue");
+const inspectModeButton = document.getElementById("inspectMode");
 const learningEnabled = document.getElementById("learningEnabled");
 const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
 const autoEpisodeEnabled = document.getElementById("autoEpisodeEnabled");
@@ -611,14 +617,18 @@ let eventLog = [];
 let recentLearningTransitions = [];
 let stepping = false;
 let resetting = false;
+let inputFlushInFlight = false;
+let inputFlushTimer = null;
 let surfaceTimer = null;
 let syncingSurface = false;
 let syncingLearning = false;
 let policyAutosaveTimer = null;
 let syncingPolicyAutosave = false;
 let hoverPlayerId = null;
+let inspectedPlayerId = null;
 let lastSemanticBallAction = null;
 const LIVE_STEP_INTERVAL_MS = 100;
+const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
 const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
 const SEMANTIC_BALL_ACTIONS = new Set([
   "pass",
@@ -1075,6 +1085,25 @@ function liveHttpLabel(http = state?.liveHttp) {
   const spawn = http.spawnsPerRequest ? " spawn/request" : "";
   return `${model} ${workers} ${reuse}${stepBatch}${spawn}`;
 }
+function runtimeTimingLabel(timing = state?.stepTiming) {
+  if (!timing || Number(timing.ticks ?? 0) <= 0) return "0ms";
+  const ticks = Math.max(1, Number(timing.ticks || 1));
+  const avg = Number(timing.totalMs ?? 0) / ticks;
+  const snapshot = Number(timing.fieldSnapshotMs ?? 0) / ticks;
+  const decision = Number(timing.fieldPlayerDecisionMs ?? 0) / ticks;
+  const learning = Number(timing.learningDefenseMs ?? 0)
+    + Number(timing.learningTransitionsMs ?? 0)
+    + Number(timing.recentLearningMs ?? 0)
+    + Number(timing.neuralSamplesMs ?? 0)
+    + Number(timing.policyTrainMs ?? 0)
+    + Number(timing.learningLogMs ?? 0)
+    + Number(timing.fullGameLearningMs ?? 0);
+  const learningPct = Number(timing.totalMs ?? 0) > 0 ? learning / Number(timing.totalMs) * 100 : 0;
+  const fieldPct = Number(timing.totalMs ?? 0) > 0
+    ? Number(timing.fieldLoopMs ?? 0) / Number(timing.totalMs) * 100
+    : 0;
+  return `avg ${avg.toFixed(1)} max ${Number(timing.maxStepMs ?? 0).toFixed(1)} snap ${snapshot.toFixed(1)} dec ${decision.toFixed(1)} F${fieldPct.toFixed(0)} L${learningPct.toFixed(0)}`;
+}
 function controllerYieldLabel(stats = state?.controllerYield) {
   if (!stats) return "idle";
   const assigned = Number(stats.assignedPlayers ?? 0);
@@ -1138,6 +1167,13 @@ function episodeLabel() {
   const current = Number(state?.episodeIndex ?? 0);
   const completed = Array.isArray(state?.completedEpisodes) ? state.completedEpisodes.length : 0;
   return `#${current} ${completed} done`;
+}
+function matchStepLabel(config = state?.config) {
+  if (!config) return "dt 0.1s 10:00";
+  const dt = Number(config.dtSeconds ?? 0.1);
+  const duration = Number(config.durationSeconds ?? 600);
+  const totalTicks = dt > 0 ? Math.round(duration / dt) : 0;
+  return `dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t`;
 }
 function episodeSummaryLine(item) {
   const summary = item?.summary || {};
@@ -1432,10 +1468,51 @@ function gridCellLabel(grid) {
   const macroLabel = macro ? ` M${Number(macro.x ?? 0)},${Number(macro.y ?? 0)}` : "";
   return `${fineLabel} T${Number(tactical.x ?? 0)},${Number(tactical.y ?? 0)}${macroLabel}`;
 }
-function selectedGridAddress() {
-  const p = controlledPlayer();
+function pitchGridZone(value, max, buckets) {
+  const v = Number(value || 0);
+  const m = Math.max(1e-6, Number(max || 1));
+  return Math.floor(clamp(v / m, 0, 0.999999) * Math.max(1, Number(buckets || 1)));
+}
+function pitchGridCellFromPosition(position, columns, rows, level, parentId = null) {
+  const fieldWidth = Number(state?.config?.fieldWidthYards || 80);
+  const fieldLength = Number(state?.config?.fieldLengthYards || 120);
+  const x = pitchGridZone(position?.x, fieldWidth, columns);
+  const y = pitchGridZone(position?.y, fieldLength, rows);
+  return {
+    level,
+    columns,
+    rows,
+    x,
+    y,
+    id: y * columns + x,
+    parentId
+  };
+}
+function pitchGridAddressFromPosition(position) {
+  if (!position) return null;
+  const wholePitch = {
+    level: "WholePitch",
+    columns: 1,
+    rows: 1,
+    x: 0,
+    y: 0,
+    id: 0,
+    parentId: null
+  };
+  const macroZone = pitchGridCellFromPosition(position, 3, 4, "Macro", wholePitch.id);
+  const tactical = pitchGridCellFromPosition(position, 6, 8, "Tactical", macroZone.id);
+  const fine = pitchGridCellFromPosition(position, 12, 16, "Fine", tactical.id);
+  return {fine, tactical, macroZone, wholePitch};
+}
+function gridAddressForPlayer(p) {
   const d = p?.lastDecision;
-  return d?.observation?.playerGrid || d?.mdpState?.playerGrid || null;
+  return d?.observation?.playerGrid
+    || d?.mdpState?.playerGrid
+    || pitchGridAddressFromPosition(p?.position);
+}
+function selectedGridAddress() {
+  const p = inspectedPlayer();
+  return gridAddressForPlayer(p);
 }
 function gridCellForLevel(grid, level) {
   if (!grid) return null;
@@ -1466,7 +1543,7 @@ function fieldRectForGridCell(cell, level) {
 }
 function selectedGridLabel() {
   const grid = selectedGridAddress();
-  const learned = controlledPlayer()?.learnedPolicy?.state;
+  const learned = inspectedPlayer()?.learnedPolicy?.state;
   if (grid) {
     const level = gridOverlayLevel.value;
     const cell = gridCellForLevel(grid, level);
@@ -1562,7 +1639,7 @@ function decisionTelemetryItems(d) {
   ];
 }
 function updateAgentStatePanel() {
-  const p = controlledPlayer();
+  const p = inspectedPlayer();
   if (!p) {
     agentSelected.textContent = "Autonomous";
     agentMotion.textContent = "-";
@@ -1583,7 +1660,9 @@ function updateAgentStatePanel() {
     return;
   }
   const d = p.lastDecision;
-  agentSelected.textContent = `${p.team} ${p.shirt} ${p.name} / ${gaitLabel(p.movementGait)}`;
+  const controlled = controlledPlayer();
+  const inspected = controlled?.id === p.id ? "" : " inspect";
+  agentSelected.textContent = `${p.team} ${p.shirt} ${p.name}${inspected} / ${gaitLabel(p.movementGait)}`;
   agentMotion.textContent = agentMotionLabel(p);
   agentKinematics.textContent = playerHistoryKinematicsLabel(p);
   agentEnergy.textContent = agentEnergyLabel(p);
@@ -1989,7 +2068,7 @@ function drawMovementTrails(r) {
   }
   const hover = state.frame.players.find(p => p.id === hoverPlayerId);
   if (hover) drawTrail(hover.positionHistory, r, "rgba(255,255,255,.48)", 2);
-  const selected = controlledPlayer();
+  const selected = inspectedPlayer();
   if (selected) drawTrail(selected.positionHistory, r, "rgba(246,201,68,.86)", 3);
 }
 function drawIntentArrow(from, to, color, width = 2, dashed = false) {
@@ -2173,7 +2252,7 @@ function render() {
   drawPitchGridOverlay(r);
   drawAssistantOffsideLines(r);
   drawMovementTrails(r);
-  drawSelectedVision(controlledPlayer(), r);
+  drawSelectedVision(inspectedPlayer(), r);
   drawDecisionIntentTraces(r);
   for (const o of f.officials) drawOfficial(o, r);
   for (const p of f.players) drawPlayer(p, r);
@@ -2209,6 +2288,7 @@ function render() {
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
   episode.textContent = episodeLabel();
   ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
+  matchStep.textContent = matchStepLabel();
   simSpeed.textContent = simSpeedLabel();
   learning.textContent = learningLabel(state.learning);
   policyAutosave.textContent = policyAutosaveLabel(state.policyAutosave);
@@ -2216,6 +2296,7 @@ function render() {
   policyProbability.textContent = policyProbabilityLabel();
   controllerThreads.textContent = controllerThreadLabel();
   liveHttp.textContent = liveHttpLabel();
+  runtimeTiming.textContent = runtimeTimingLabel();
   controllerYield.textContent = controllerYieldLabel();
   inputQueue.textContent = queuedHumanInputsLabel();
   tickReward.textContent = tickRewardLabel();
@@ -2270,6 +2351,13 @@ function applyAssignmentsToFrame(assignments) {
   for (const p of state.frame.players) {
     p.controllerSlot = byPlayer.has(p.id) ? byPlayer.get(p.id) : null;
   }
+}
+function inspectModeEnabled() {
+  return inspectModeButton.classList.contains("active");
+}
+function setInspectMode(enabled) {
+  inspectModeButton.classList.toggle("active", enabled);
+  inspectModeButton.setAttribute("aria-pressed", enabled ? "true" : "false");
 }
 function surfaceValues() {
   return {
@@ -2432,6 +2520,8 @@ function rebuildControls(assignments) {
   }
   slotPick.innerHTML = "";
   slots.innerHTML = "";
+  const assignedByPlayer = new Map((state.controllerAssignments || [])
+    .map(a => [Number(a.playerId), Number(a.controllerSlot)]));
   for (let slot = 0; slot < humanSlotCount(); slot++) {
     const assignment = assignmentForSlot(slot);
     const opt = document.createElement("option");
@@ -2451,7 +2541,12 @@ function rebuildControls(assignments) {
     for (const p of state.frame.players) {
       const playerOpt = document.createElement("option");
       playerOpt.value = p.id;
-      playerOpt.textContent = playerLabel(p);
+      const assignedSlot = assignedByPlayer.get(Number(p.id));
+      const assignedElsewhere = assignedSlot != null && assignedSlot !== slot;
+      playerOpt.disabled = assignedElsewhere;
+      playerOpt.textContent = assignedElsewhere
+        ? `${playerLabel(p)} · S${assignedSlot + 1}`
+        : playerLabel(p);
       pick.appendChild(playerOpt);
     }
     pick.value = assignment ? String(assignment.playerId) : "";
@@ -2556,6 +2651,18 @@ function controlledPlayer() {
   const id = selectedPlayerId();
   return id == null ? null : state?.frame?.players?.find(p => p.id === id) || null;
 }
+function playerById(playerId) {
+  return playerId == null ? null : state?.frame?.players?.find(p => p.id === playerId) || null;
+}
+function hoveredPlayer() {
+  return playerById(hoverPlayerId);
+}
+function pinnedInspectionPlayer() {
+  return playerById(inspectedPlayerId);
+}
+function inspectedPlayer() {
+  return hoveredPlayer() || pinnedInspectionPlayer() || controlledPlayer();
+}
 function selectedPassTargetId() {
   return targetPick.value === "" ? null : Number(targetPick.value);
 }
@@ -2655,6 +2762,16 @@ function queueGamepadInputs() {
   }
   return queued;
 }
+function pulseLowLatencyControllerInput() {
+  if (!state || resetting) return 0;
+  let queued = 0;
+  if (running) {
+    queued += queueMotionInputsForPressedControllers();
+    queued += queueGamepadInputs();
+  }
+  if (queuedInputs.length) scheduleInputFlush(0);
+  return queued;
+}
 function controllerSlotForCode(code) {
   return CONTROLLER_KEYMAPS.findIndex(map =>
     code === map.left
@@ -2713,14 +2830,21 @@ async function assignSlot(slot, playerId) {
   state.controllerAssignments = response.controllerAssignments;
   applyAssignmentsToFrame(response.controllerAssignments);
   rebuildControls(response.controllerAssignments);
+  if (playerId != null) inspectedPlayerId = playerId;
   statusEl.textContent = "controller assigned";
   render();
 }
 async function handlePitchClick(e) {
-  if (!state?.frame?.players?.length || humanSlotCount() <= 0) return;
+  if (!state?.frame?.players?.length) return;
   const hit = nearestPlayerAtCanvas(canvasPointFromEvent(e));
   if (!hit) return;
   const clicked = hit.player;
+  if (inspectModeEnabled() || e.shiftKey || e.altKey || e.metaKey || humanSlotCount() <= 0) {
+    inspectedPlayerId = clicked.id;
+    statusEl.textContent = `inspect ${clicked.shirt} ${clicked.name}`;
+    render();
+    return;
+  }
   const selected = controlledPlayer();
   if (selected
       && clicked.id !== selected.id
@@ -2932,6 +3056,10 @@ async function resetMatch(options = {}) {
     recentLearningTransitions = [];
     lastSemanticBallAction = null;
     queuedInputs = [];
+    if (inputFlushTimer != null) {
+      clearTimeout(inputFlushTimer);
+      inputFlushTimer = null;
+    }
     keys.clear();
     rememberSemanticBallActionsFromFrames([state.frame]);
     applyAssignmentsToFrame(state.controllerAssignments);
@@ -3183,15 +3311,33 @@ async function stepOnce(options = {}) {
     stepping = false;
   }
 }
+function scheduleInputFlush(delayMs = 0) {
+  if (!queuedInputs.length || resetting) return;
+  if (inputFlushTimer != null) clearTimeout(inputFlushTimer);
+  inputFlushTimer = setTimeout(() => {
+    inputFlushTimer = null;
+    flushQueuedInputsToInputApi().catch(e => statusEl.textContent = e.message);
+  }, Math.max(0, delayMs));
+}
+async function flushQueuedInputsToInputApi() {
+  if (!state || resetting || inputFlushInFlight || !queuedInputs.length) return;
+  inputFlushInFlight = true;
+  const inputs = queuedInputs.splice(0, queuedInputs.length);
+  try {
+    const ack = await postJson("/api/input", inputs);
+    applyInputAck(ack, inputs.length);
+    render();
+  } finally {
+    inputFlushInFlight = false;
+    if (queuedInputs.length) scheduleInputFlush(LIVE_INPUT_FLUSH_INTERVAL_MS);
+  }
+}
 async function submitInputOnly(pass = false, shoot = false, action = null) {
   if (!queueInput(pass, shoot, Number(slotPick.value || 0), action)) {
     statusEl.textContent = "autonomous";
     return;
   }
-  const inputs = queuedInputs.splice(0, queuedInputs.length);
-  const ack = await postJson("/api/input", inputs);
-  applyInputAck(ack, inputs.length);
-  render();
+  await flushQueuedInputsToInputApi();
 }
 runButton.addEventListener("click", () => {
   if (state?.done) {
@@ -3243,6 +3389,7 @@ trackingFile.addEventListener("change", () => {
   });
 });
 slotPick.addEventListener("change", () => setActiveSlot(Number(slotPick.value || 0)));
+inspectModeButton.addEventListener("click", () => setInspectMode(!inspectModeEnabled()));
 canvas.addEventListener("click", e => {
   handlePitchClick(e).catch(err => statusEl.textContent = err.message);
 });
@@ -3329,6 +3476,8 @@ window.addEventListener("keydown", e => {
     const action = e.code === "KeyC" ? "clearance" : "route-one";
     if (!e.repeat && !queueInput(false, false, activeSlot, action)) {
       statusEl.textContent = `slot ${activeSlot + 1} autonomous`;
+    } else if (!e.repeat) {
+      scheduleInputFlush(0);
     }
     return;
   }
@@ -3338,12 +3487,15 @@ window.addEventListener("keydown", e => {
     e.preventDefault();
     if (!e.repeat && !queueSlotAction(actionSlot)) {
       statusEl.textContent = `slot ${actionSlot + 1} autonomous`;
+    } else if (!e.repeat) {
+      scheduleInputFlush(0);
     }
     return;
   }
   if (CONTROLLER_CODES.has(e.code)) {
     e.preventDefault();
     queueMotionInputsForPressedControllers();
+    scheduleInputFlush(0);
   }
 });
 window.addEventListener("keyup", e => {
@@ -3355,8 +3507,12 @@ window.addEventListener("keyup", e => {
       queueInput(false, false, slot);
     }
     queueMotionInputsForPressedControllers();
+    scheduleInputFlush(0);
   }
 });
+setInterval(() => {
+  pulseLowLatencyControllerInput();
+}, LIVE_INPUT_FLUSH_INTERVAL_MS);
 setInterval(() => {
   if (running && !resetting) stepOnce().catch(e => statusEl.textContent = e.message);
 }, LIVE_STEP_INTERVAL_MS);

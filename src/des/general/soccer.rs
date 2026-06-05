@@ -7542,6 +7542,113 @@ impl HumanControllerMailbox {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SharedControllerAssignments {
+    inner: Arc<RwLock<SharedControllerAssignmentStore>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SharedControllerAssignmentStore {
+    human_slots: usize,
+    player_by_slot: HashMap<usize, usize>,
+}
+
+impl SharedControllerAssignments {
+    pub fn new(human_slots: usize) -> Self {
+        let assignments = SharedControllerAssignments::default();
+        assignments.set_human_slots(human_slots);
+        assignments
+    }
+
+    pub fn set_human_slots(&self, human_slots: usize) {
+        let mut store = self
+            .inner
+            .write()
+            .expect("controller assignment lock poisoned");
+        store.human_slots = human_slots.min(4);
+        let human_slots = store.human_slots;
+        store.player_by_slot.retain(|slot, _| *slot < human_slots);
+    }
+
+    pub fn replace_from_assignments(
+        &self,
+        human_slots: usize,
+        assignments: &[ControllerAssignment],
+    ) {
+        let mut store = self
+            .inner
+            .write()
+            .expect("controller assignment lock poisoned");
+        store.human_slots = human_slots.min(4);
+        store.player_by_slot.clear();
+        for assignment in assignments {
+            if assignment.controller_slot < store.human_slots {
+                store
+                    .player_by_slot
+                    .insert(assignment.controller_slot, assignment.player_id);
+            }
+        }
+    }
+
+    pub fn assign_slot(&self, controller_slot: usize, player_id: Option<usize>) {
+        let mut store = self
+            .inner
+            .write()
+            .expect("controller assignment lock poisoned");
+        if controller_slot >= store.human_slots {
+            return;
+        }
+        if let Some(player_id) = player_id {
+            store.player_by_slot.insert(controller_slot, player_id);
+        } else {
+            store.player_by_slot.remove(&controller_slot);
+        }
+    }
+
+    pub fn assigned_player_for_slot(&self, controller_slot: usize) -> Option<usize> {
+        self.inner
+            .read()
+            .expect("controller assignment lock poisoned")
+            .player_by_slot
+            .get(&controller_slot)
+            .copied()
+    }
+
+    pub fn accepts_input(&self, input: &HumanInputFrame) -> bool {
+        let store = self
+            .inner
+            .read()
+            .expect("controller assignment lock poisoned");
+        if input.controller_slot >= store.human_slots {
+            return false;
+        }
+        let Some(assigned_player_id) = store.player_by_slot.get(&input.controller_slot) else {
+            return false;
+        };
+        input
+            .player_id
+            .map_or(true, |player_id| player_id == *assigned_player_id)
+    }
+}
+
+#[derive(Clone)]
+struct HumanControllerInputSink {
+    controller_slot: usize,
+    mailbox: HumanControllerMailbox,
+}
+
+impl HumanControllerInputSink {
+    fn send_input(&self, mut input: HumanInputFrame) -> Result<bool, String> {
+        input.controller_slot = self.controller_slot;
+        self.mailbox.send(input).map_err(|err| {
+            format!(
+                "controller thread {} send failed: {err}",
+                self.controller_slot
+            )
+        })
+    }
+}
+
 pub struct HumanControllerThread {
     controller_slot: usize,
     mailbox: HumanControllerMailbox,
@@ -7588,6 +7695,13 @@ impl HumanControllerThread {
         })
     }
 
+    fn input_sink(&self) -> HumanControllerInputSink {
+        HumanControllerInputSink {
+            controller_slot: self.controller_slot,
+            mailbox: self.mailbox.clone(),
+        }
+    }
+
     pub fn stats(&self) -> HumanControllerThreadStats {
         self.mailbox.stats(self.controller_slot)
     }
@@ -7632,6 +7746,92 @@ fn run_human_controller_thread(
         input.controller_slot = controller_slot;
         let accepted = input_queue.push(input);
         mailbox.record_push(accepted);
+    }
+}
+
+#[derive(Clone)]
+pub struct HumanControllerInputRouter {
+    input_queue: SharedHumanInputs,
+    assignments: SharedControllerAssignments,
+    controller_sinks: Vec<HumanControllerInputSink>,
+}
+
+impl HumanControllerInputRouter {
+    fn new(
+        input_queue: SharedHumanInputs,
+        assignments: SharedControllerAssignments,
+        controller_threads: &[HumanControllerThread],
+    ) -> Self {
+        HumanControllerInputRouter {
+            input_queue,
+            assignments,
+            controller_sinks: controller_threads
+                .iter()
+                .map(HumanControllerThread::input_sink)
+                .collect(),
+        }
+    }
+
+    pub fn without_controller_threads(
+        input_queue: SharedHumanInputs,
+        assignments: SharedControllerAssignments,
+    ) -> Self {
+        HumanControllerInputRouter {
+            input_queue,
+            assignments,
+            controller_sinks: Vec::new(),
+        }
+    }
+
+    pub fn push_human_input(&self, input: HumanInputFrame) -> bool {
+        if !self.assignments.accepts_input(&input) {
+            return false;
+        }
+        self.dispatch_human_input(input)
+    }
+
+    pub fn push_human_inputs<I>(&self, inputs: I) -> usize
+    where
+        I: IntoIterator<Item = HumanInputFrame>,
+    {
+        let mut latest_by_slot = HashMap::<usize, HumanInputFrame>::new();
+        for input in inputs {
+            if !self.assignments.accepts_input(&input) {
+                continue;
+            }
+            latest_by_slot
+                .entry(input.controller_slot)
+                .and_modify(|current| {
+                    if input.seq > current.seq {
+                        *current = input.clone();
+                    }
+                })
+                .or_insert(input);
+        }
+        latest_by_slot
+            .into_values()
+            .filter(|input| self.dispatch_human_input(input.clone()))
+            .count()
+    }
+
+    fn dispatch_human_input(&self, input: HumanInputFrame) -> bool {
+        if let Some(controller) = self
+            .controller_sinks
+            .iter()
+            .find(|controller| controller.controller_slot == input.controller_slot)
+        {
+            controller.send_input(input).unwrap_or(false)
+        } else {
+            self.input_queue.push(input)
+        }
+    }
+
+    pub fn queued_len(&self) -> usize {
+        self.input_queue.queued_len()
+    }
+
+    pub fn assignments(&self) -> SharedControllerAssignments {
+        self.assignments.clone()
     }
 }
 
@@ -10513,11 +10713,25 @@ impl WorldSnapshotOptions {
         include_ball_history: true,
     };
 
+    const DEFENSIVE_OR_LOOSE_AGENT_DECISION: Self = Self {
+        include_player_histories: false,
+        include_shared_histories: false,
+        include_player_decisions: false,
+        include_ball_history: false,
+    };
+
     const LEARNING: Self = Self {
         include_player_histories: false,
         include_shared_histories: false,
         include_player_decisions: false,
         include_ball_history: true,
+    };
+
+    const OFFICIAL_DECISION: Self = Self {
+        include_player_histories: false,
+        include_shared_histories: false,
+        include_player_decisions: false,
+        include_ball_history: false,
     };
 
     const LIVE_HTTP_FRAME: Self = Self {
@@ -10537,8 +10751,16 @@ impl WorldSnapshot {
         Self::from_match_with_options(m, WorldSnapshotOptions::AGENT_DECISION)
     }
 
+    fn from_match_for_defensive_or_loose_agent_decision(m: &SoccerMatch) -> Self {
+        Self::from_match_with_options(m, WorldSnapshotOptions::DEFENSIVE_OR_LOOSE_AGENT_DECISION)
+    }
+
     fn from_match_for_learning(m: &SoccerMatch) -> Self {
         Self::from_match_with_options(m, WorldSnapshotOptions::LEARNING)
+    }
+
+    fn from_match_for_official_decision(m: &SoccerMatch) -> Self {
+        Self::from_match_with_options(m, WorldSnapshotOptions::OFFICIAL_DECISION)
     }
 
     fn from_match_with_options(m: &SoccerMatch, options: WorldSnapshotOptions) -> Self {
@@ -20249,6 +20471,8 @@ pub struct SoccerStepResponse {
     pub episode_index: usize,
     pub completed_episodes: Vec<SoccerLiveEpisodeSummary>,
     pub summary: MatchSummary,
+    #[serde(default)]
+    pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
     #[serde(default)]
     pub controller_threads: Vec<HumanControllerThreadStats>,
@@ -20285,6 +20509,8 @@ pub struct SoccerLiveStateResponse {
     pub episode_index: usize,
     pub completed_episodes: Vec<SoccerLiveEpisodeSummary>,
     pub summary: MatchSummary,
+    #[serde(default)]
+    pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
     #[serde(default)]
     pub controller_threads: Vec<HumanControllerThreadStats>,
@@ -24370,6 +24596,27 @@ impl SoccerMatch {
             .position(|official| official.id == official_id)
     }
 
+    fn player_decision_timing_context_for(
+        &self,
+        actor_index: usize,
+        scheduled_id: usize,
+    ) -> SoccerPlayerDecisionTimingContext {
+        if self.ball.holder == Some(scheduled_id) {
+            return SoccerPlayerDecisionTimingContext::Possession;
+        }
+        let player_team = self.players[actor_index].team;
+        match self.ball.holder.and_then(|holder_id| {
+            self.players
+                .iter()
+                .find(|player| player.id == holder_id)
+                .map(|player| player.team)
+        }) {
+            Some(team) if team == player_team => SoccerPlayerDecisionTimingContext::Support,
+            Some(_) => SoccerPlayerDecisionTimingContext::Defense,
+            None => SoccerPlayerDecisionTimingContext::Loose,
+        }
+    }
+
     pub fn run_time_step(&mut self) {
         if self.is_done() {
             return;
@@ -24431,20 +24678,20 @@ impl SoccerMatch {
                     let Some(actor) = self.player_index_for_id(scheduled.id) else {
                         continue;
                     };
+                    let decision_context =
+                        self.player_decision_timing_context_for(actor, scheduled.id);
                     let phase_started = Instant::now();
-                    let snapshot = WorldSnapshot::from_match_for_agent_decision(self);
-                    field_snapshot_elapsed += phase_started.elapsed();
-                    let decision_context = if snapshot.ball.holder == Some(scheduled.id) {
+                    let snapshot = match decision_context {
                         SoccerPlayerDecisionTimingContext::Possession
-                    } else {
-                        match snapshot.controlled_possession_team() {
-                            Some(team) if team == self.players[actor].team => {
-                                SoccerPlayerDecisionTimingContext::Support
-                            }
-                            Some(_) => SoccerPlayerDecisionTimingContext::Defense,
-                            None => SoccerPlayerDecisionTimingContext::Loose,
+                        | SoccerPlayerDecisionTimingContext::Support => {
+                            WorldSnapshot::from_match_for_agent_decision(self)
+                        }
+                        SoccerPlayerDecisionTimingContext::Defense
+                        | SoccerPlayerDecisionTimingContext::Loose => {
+                            WorldSnapshot::from_match_for_defensive_or_loose_agent_decision(self)
                         }
                     };
+                    field_snapshot_elapsed += phase_started.elapsed();
                     let phase_started = Instant::now();
                     let input_frame = self.players[actor]
                         .controller_slot
@@ -24495,7 +24742,7 @@ impl SoccerMatch {
                 }
                 AgentScheduleKind::Official => {
                     let phase_started = Instant::now();
-                    let snapshot = WorldSnapshot::from_match_for_agent_decision(self);
+                    let snapshot = WorldSnapshot::from_match_for_official_decision(self);
                     field_snapshot_elapsed += phase_started.elapsed();
                     if let Some(official_idx) = self.official_index_for_id(scheduled.id) {
                         let phase_started = Instant::now();
@@ -28556,6 +28803,8 @@ impl SoccerMatch {
 pub struct SoccerRealtimeSession {
     sim: SoccerMatch,
     input_queue: SharedHumanInputs,
+    controller_assignments: SharedControllerAssignments,
+    controller_input_router: HumanControllerInputRouter,
     controller_threads: Vec<HumanControllerThread>,
     emitted_event_cursor: usize,
     emitted_learning_cursor: usize,
@@ -28594,10 +28843,18 @@ impl SoccerRealtimeSession {
             .with_human_inputs(input_queue.clone())
             .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
         sim.clear_controller_assignments();
+        let controller_assignments = SharedControllerAssignments::new(sim.config.human_slots());
+        let controller_input_router = HumanControllerInputRouter::new(
+            input_queue.clone(),
+            controller_assignments.clone(),
+            &controller_threads,
+        );
         let tracking_frames = vec![tracking_frame_from_match(&sim)];
         SoccerRealtimeSession {
             sim,
             input_queue,
+            controller_assignments,
+            controller_input_router,
             controller_threads,
             emitted_event_cursor: 0,
             emitted_learning_cursor: 0,
@@ -28632,10 +28889,20 @@ impl SoccerRealtimeSession {
         } else {
             Vec::new()
         };
+        let controller_assignments = SharedControllerAssignments::new(sim.config.human_slots());
+        controller_assignments
+            .replace_from_assignments(sim.config.human_slots(), &sim.controller_assignments());
+        let controller_input_router = HumanControllerInputRouter::new(
+            input_queue.clone(),
+            controller_assignments.clone(),
+            &controller_threads,
+        );
         let tracking_frames = vec![tracking_frame_from_match(&sim)];
         SoccerRealtimeSession {
             sim,
             input_queue,
+            controller_assignments,
+            controller_input_router,
             controller_threads,
             emitted_event_cursor: 0,
             emitted_learning_cursor: 0,
@@ -28652,6 +28919,18 @@ impl SoccerRealtimeSession {
 
     pub fn input_queue(&self) -> SharedHumanInputs {
         self.input_queue.clone()
+    }
+
+    pub fn controller_input_router(&self) -> HumanControllerInputRouter {
+        self.sync_controller_input_assignments();
+        self.controller_input_router.clone()
+    }
+
+    fn sync_controller_input_assignments(&self) {
+        self.controller_assignments.replace_from_assignments(
+            self.sim.config.human_slots(),
+            &self.sim.controller_assignments(),
+        );
     }
 
     pub fn spawn_human_controller_threads(
@@ -28689,69 +28968,16 @@ impl SoccerRealtimeSession {
     }
 
     pub fn push_human_input(&self, input: HumanInputFrame) -> bool {
-        if !self.human_input_matches_assignment(&input) {
-            return false;
-        }
-        self.dispatch_human_input(input)
+        self.sync_controller_input_assignments();
+        self.controller_input_router.push_human_input(input)
     }
 
     pub fn push_human_inputs<I>(&self, inputs: I) -> usize
     where
         I: IntoIterator<Item = HumanInputFrame>,
     {
-        let mut latest_by_slot = HashMap::<usize, HumanInputFrame>::new();
-        for input in inputs {
-            if !self.human_input_matches_assignment(&input) {
-                continue;
-            }
-            if self
-                .input_queue
-                .last_seq_for_slot(input.controller_slot)
-                .is_some_and(|last_seq| input.seq <= last_seq)
-            {
-                continue;
-            }
-            latest_by_slot
-                .entry(input.controller_slot)
-                .and_modify(|current| {
-                    if input.seq > current.seq {
-                        *current = input.clone();
-                    }
-                })
-                .or_insert(input);
-        }
-        latest_by_slot
-            .into_values()
-            .filter(|input| self.dispatch_human_input(input.clone()))
-            .count()
-    }
-
-    fn human_input_matches_assignment(&self, input: &HumanInputFrame) -> bool {
-        if input.controller_slot >= self.sim.config.human_slots() {
-            return false;
-        }
-        let Some(assigned_player_id) = self
-            .sim
-            .assigned_player_for_controller_slot(input.controller_slot)
-        else {
-            return false;
-        };
-        match input.player_id {
-            Some(player_id) => player_id == assigned_player_id,
-            None => true,
-        }
-    }
-
-    fn dispatch_human_input(&self, input: HumanInputFrame) -> bool {
-        if let Some(controller) = self
-            .controller_threads
-            .iter()
-            .find(|controller| controller.controller_slot() == input.controller_slot)
-        {
-            controller.send_input(input).unwrap_or(false)
-        } else {
-            self.input_queue.push(input)
-        }
+        self.sync_controller_input_assignments();
+        self.controller_input_router.push_human_inputs(inputs)
     }
 
     pub fn match_ref(&self) -> &SoccerMatch {
@@ -29152,6 +29378,7 @@ impl SoccerRealtimeSession {
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
+            step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads: self.controller_thread_stats(),
             controller_yield: self.sim.controller_yield_stats(),
@@ -29196,6 +29423,7 @@ impl SoccerRealtimeSession {
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
+            step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads: self.controller_thread_stats(),
             controller_yield: self.sim.controller_yield_stats(),
@@ -29254,6 +29482,7 @@ impl SoccerRealtimeSession {
 
         let _ = self.input_queue.drain_latest_by_slot();
         self.sim = next_match;
+        self.sync_controller_input_assignments();
         if let Some(episode) = previous_episode.clone() {
             self.remember_completed_episode(episode);
         }
@@ -29279,6 +29508,7 @@ impl SoccerRealtimeSession {
     ) -> Result<SoccerControllerAssignmentResponse, String> {
         self.sim
             .assign_controller_slot(request.controller_slot, request.player_id)?;
+        self.sync_controller_input_assignments();
         Ok(SoccerControllerAssignmentResponse {
             controller_assignments: self.sim.controller_assignments(),
         })
@@ -29735,6 +29965,7 @@ impl SoccerRealtimeSession {
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
+            step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads: self.controller_thread_stats(),
             controller_yield: self.sim.controller_yield_stats(),
@@ -30062,6 +30293,7 @@ pub struct SoccerLiveServer {
     config: SoccerLiveServerConfig,
     session: Arc<Mutex<SoccerRealtimeSession>>,
     input_queue: SharedHumanInputs,
+    controller_input_router: HumanControllerInputRouter,
 }
 
 impl SoccerLiveServer {
@@ -30095,10 +30327,12 @@ impl SoccerLiveServer {
             }
         }
         let input_queue = session.input_queue();
+        let controller_input_router = session.controller_input_router();
         SoccerLiveServer {
             config,
             session: Arc::new(Mutex::new(session)),
             input_queue,
+            controller_input_router,
         }
     }
 
@@ -30115,6 +30349,7 @@ impl SoccerLiveServer {
         for worker_id in 0..worker_count {
             let session = Arc::clone(&self.session);
             let input_queue = self.input_queue.clone();
+            let controller_input_router = self.controller_input_router.clone();
             let stream_rx = Arc::clone(&stream_rx);
             thread::Builder::new()
                 .name(format!("soccer-live-http-worker-{worker_id}"))
@@ -30133,6 +30368,7 @@ impl SoccerLiveServer {
                         stream,
                         Arc::clone(&session),
                         input_queue.clone(),
+                        controller_input_router.clone(),
                     );
                 })?;
         }
@@ -30159,12 +30395,18 @@ fn handle_live_soccer_stream(
     mut stream: TcpStream,
     session: Arc<Mutex<SoccerRealtimeSession>>,
     input_queue: SharedHumanInputs,
+    controller_input_router: HumanControllerInputRouter,
 ) -> std::io::Result<()> {
     let raw = read_http_request(&mut stream)?;
     if write_live_soccer_streaming_response(&mut stream, &raw, &session)? {
         return stream.flush();
     }
-    let response = handle_live_soccer_request(&raw, &session, &input_queue);
+    let response = handle_live_soccer_request_with_input_router(
+        &raw,
+        &session,
+        &input_queue,
+        &controller_input_router,
+    );
     stream.write_all(&response.to_bytes())?;
     stream.flush()
 }
@@ -30615,10 +30857,40 @@ fn write_pretty_json_file<T: Serialize>(
     Ok(Some(path.to_string()))
 }
 
+enum LiveInputDispatch<'a> {
+    SessionLockedFallback(&'a SharedHumanInputs),
+    Router(&'a HumanControllerInputRouter),
+}
+
 fn handle_live_soccer_request(
     raw: &str,
     session: &Arc<Mutex<SoccerRealtimeSession>>,
+    input_queue: &SharedHumanInputs,
+) -> LiveHttpResponse {
+    handle_live_soccer_request_inner(
+        raw,
+        session,
+        LiveInputDispatch::SessionLockedFallback(input_queue),
+    )
+}
+
+fn handle_live_soccer_request_with_input_router(
+    raw: &str,
+    session: &Arc<Mutex<SoccerRealtimeSession>>,
     _input_queue: &SharedHumanInputs,
+    controller_input_router: &HumanControllerInputRouter,
+) -> LiveHttpResponse {
+    handle_live_soccer_request_inner(
+        raw,
+        session,
+        LiveInputDispatch::Router(controller_input_router),
+    )
+}
+
+fn handle_live_soccer_request_inner(
+    raw: &str,
+    session: &Arc<Mutex<SoccerRealtimeSession>>,
+    input_dispatch: LiveInputDispatch<'_>,
 ) -> LiveHttpResponse {
     let req = match parse_live_http_request(raw) {
         Ok(req) => req,
@@ -31221,18 +31493,27 @@ fn handle_live_soccer_request(
         }
         ("POST", "/api/input") => match parse_human_input_payload(req.body) {
             Ok(inputs) => {
-                let guard = match session.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        return LiveHttpResponse::error(
-                            500,
-                            "Internal Server Error",
-                            "soccer session lock poisoned",
-                        )
+                let (count, queued_human_inputs) = match input_dispatch {
+                    LiveInputDispatch::Router(router) => {
+                        let count = router.push_human_inputs(inputs);
+                        (count, router.queued_len())
+                    }
+                    LiveInputDispatch::SessionLockedFallback(input_queue) => {
+                        let guard = match session.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                return LiveHttpResponse::error(
+                                    500,
+                                    "Internal Server Error",
+                                    "soccer session lock poisoned",
+                                )
+                            }
+                        };
+                        let count = guard.push_human_inputs(inputs);
+                        let queued_human_inputs = input_queue.queued_len();
+                        (count, queued_human_inputs)
                     }
                 };
-                let count = guard.push_human_inputs(inputs);
-                let queued_human_inputs = guard.queued_human_input_count();
                 LiveHttpResponse::json(&SoccerInputAck {
                     accepted_inputs: count,
                     queued: count > 0,
@@ -45733,6 +46014,9 @@ mod tests {
     fn live_gameplay_defaults_disable_learning_work() {
         let config = SoccerLiveServerConfig::default().match_config;
 
+        assert_eq!(config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(config.duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(config.total_ticks(), 6_000);
         assert_eq!(config.human_slots(), 4);
         assert!(!config.learning_enabled);
         assert!(!config.learning_logging_enabled);
@@ -53152,6 +53436,169 @@ mod tests {
     }
 
     #[test]
+    fn official_decision_snapshot_skips_ball_history_clone() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.8,
+            seed: 22_407,
+            ..Default::default()
+        });
+        for _ in 0..5 {
+            sim.run_time_step();
+        }
+
+        let player_snapshot = WorldSnapshot::from_match_for_agent_decision(&sim);
+        let official_snapshot = WorldSnapshot::from_match_for_official_decision(&sim);
+
+        assert!(
+            !player_snapshot.ball_history.is_empty(),
+            "player decisions still keep ball history for settled-possession spacing"
+        );
+        assert!(
+            official_snapshot.ball_history.is_empty(),
+            "official decisions do not need cloned rolling ball history"
+        );
+        assert_eq!(official_snapshot.players.len(), 22);
+        assert_eq!(official_snapshot.ball.position, sim.ball.position);
+        assert!(assistant_offside_line_snapshot(
+            &official_snapshot,
+            OfficialKind::AssistantRefereeNear
+        )
+        .is_some());
+
+        let mut assistant = sim.officials[1].clone();
+        assistant.run_time_step(&official_snapshot, &mut mulberry32(22_407));
+        assert!(assistant.position.x.is_finite());
+        assert!(assistant.position.y.is_finite());
+    }
+
+    #[test]
+    fn player_decision_context_classifies_holder_support_defense_and_loose() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 22_408,
+            ..Default::default()
+        });
+        let holder = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Midfielder)
+            .map(|player| player.id)
+            .expect("home holder");
+        let support = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.id != holder)
+            .map(|player| player.id)
+            .expect("home support");
+        let defender = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Away && player.role == PlayerRole::Defender)
+            .map(|player| player.id)
+            .expect("away defender");
+        let holder_idx = sim.player_index_for_id(holder).expect("holder index");
+        let support_idx = sim.player_index_for_id(support).expect("support index");
+        let defender_idx = sim.player_index_for_id(defender).expect("defender index");
+        sim.ball.holder = Some(holder);
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        assert_eq!(
+            sim.player_decision_timing_context_for(holder_idx, holder),
+            SoccerPlayerDecisionTimingContext::Possession
+        );
+        assert_eq!(
+            sim.player_decision_timing_context_for(support_idx, support),
+            SoccerPlayerDecisionTimingContext::Support
+        );
+        assert_eq!(
+            sim.player_decision_timing_context_for(defender_idx, defender),
+            SoccerPlayerDecisionTimingContext::Defense
+        );
+
+        sim.ball.holder = None;
+        assert_eq!(
+            sim.player_decision_timing_context_for(defender_idx, defender),
+            SoccerPlayerDecisionTimingContext::Loose
+        );
+    }
+
+    #[test]
+    fn defensive_and_loose_decision_snapshots_skip_ball_history_clone() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.8,
+            seed: 22_409,
+            ..Default::default()
+        });
+        for _ in 0..5 {
+            sim.run_time_step();
+        }
+        let defender = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Away && player.role == PlayerRole::Defender)
+            .map(|player| player.id)
+            .expect("away defender");
+        let defender_idx = sim.player_index_for_id(defender).expect("defender index");
+        let defender_home = sim.players[defender_idx].home_position;
+
+        let rich = WorldSnapshot::from_match_for_agent_decision(&sim);
+        let light = WorldSnapshot::from_match_for_defensive_or_loose_agent_decision(&sim);
+        assert!(
+            !rich.ball_history.is_empty(),
+            "support/possession decisions keep settled-possession ball history"
+        );
+        assert!(
+            light.ball_history.is_empty(),
+            "defensive/loose decisions should not clone ball history"
+        );
+        assert_eq!(rich.ball.position, light.ball.position);
+        assert_eq!(rich.players.len(), light.players.len());
+        assert_eq!(
+            rich.defensive_assignment_for(defender, defender_home, false),
+            light.defensive_assignment_for(defender, defender_home, false)
+        );
+
+        let rich_obs = rich.observation_for(defender);
+        let light_obs = light.observation_for(defender);
+        assert_eq!(rich_obs.has_ball, light_obs.has_ball);
+        assert_eq!(rich_obs.visible_ball, light_obs.visible_ball);
+        assert_eq!(rich_obs.visible_teammates, light_obs.visible_teammates);
+        assert_eq!(rich_obs.visible_opponents, light_obs.visible_opponents);
+        assert_eq!(rich_obs.team_brain_mode, light_obs.team_brain_mode);
+        assert!(
+            (rich_obs.ball_distance - light_obs.ball_distance).abs() < 1e-9,
+            "defender ball distance should not depend on cloned ball history"
+        );
+        assert!(
+            (rich_obs.real_pressure - light_obs.real_pressure).abs() < 1e-9,
+            "defender pressure should not depend on cloned ball history"
+        );
+
+        let chaser = defender;
+        sim.ball.holder = None;
+        sim.ball.velocity = Vec2::new(1.6, -7.5);
+        sim.pending_pass = None;
+        let rich_loose = WorldSnapshot::from_match_for_agent_decision(&sim);
+        let light_loose = WorldSnapshot::from_match_for_defensive_or_loose_agent_decision(&sim);
+        assert!(light_loose.ball_history.is_empty());
+        assert_eq!(
+            rich_loose.loose_ball_recovery_target_for(chaser),
+            light_loose.loose_ball_recovery_target_for(chaser)
+        );
+        let rich_loose_obs = rich_loose.observation_for(chaser);
+        let light_loose_obs = light_loose.observation_for(chaser);
+        assert_eq!(rich_loose_obs.has_ball, light_loose_obs.has_ball);
+        assert_eq!(
+            rich_loose.controlled_possession_team(),
+            light_loose.controlled_possession_team()
+        );
+        assert!(
+            (rich_loose_obs.ball_distance - light_loose_obs.ball_distance).abs() < 1e-9,
+            "loose-ball distance should not depend on cloned ball history"
+        );
+    }
+
+    #[test]
     fn carry_out_legality_uses_configured_pitch_width() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -53310,6 +53757,17 @@ mod tests {
         assert!(html.body.contains("exportPostgresTeamPolicyJsonl"));
         assert!(html.body.contains("id=\"liveHttp\""));
         assert!(html.body.contains("function liveHttpLabel"));
+        assert!(html.body.contains("id=\"runtimeTiming\""));
+        assert!(html.body.contains("function runtimeTimingLabel"));
+        assert!(html.body.contains("id=\"inspectMode\""));
+        assert!(html.body.contains("function inspectModeEnabled"));
+        assert!(html.body.contains("let inspectedPlayerId = null;"));
+        assert!(html.body.contains("function inspectedPlayer"));
+        assert!(html.body.contains("function pitchGridAddressFromPosition"));
+        assert!(html.body.contains("function gridAddressForPlayer"));
+        assert!(html.body.contains("playerOpt.disabled = assignedElsewhere"));
+        assert!(html.body.contains("humanSlotCount() <= 0"));
+        assert!(html.body.contains("e.shiftKey || e.altKey || e.metaKey"));
         assert!(html.body.contains("<button id=\"run\">Run</button>"));
         assert!(html.body.contains("let resetting = false;"));
         assert!(html.body.contains("freshMatchRequestedOnLoad"));
@@ -53397,6 +53855,8 @@ mod tests {
         assert_eq!(state_value["liveHttp"]["reusesWorkers"], true);
         assert_eq!(state_value["liveHttp"]["spawnsPerRequest"], false);
         assert_eq!(state_value["liveHttp"]["batchesStepTicks"], true);
+        assert_eq!(state_value["stepTiming"]["ticks"], 0);
+        assert_eq!(state_value["stepTiming"]["totalMs"], 0.0);
         assert_eq!(state_value["queuedHumanInputs"], 0);
         assert_eq!(state_value["episodeIndex"], 0);
         assert!(state_value["completedEpisodes"]
@@ -53423,6 +53883,15 @@ mod tests {
         assert_eq!(value["liveHttp"]["workerModel"], "worker-pool");
         assert_eq!(value["liveHttp"]["spawnsPerRequest"], false);
         assert_eq!(value["liveHttp"]["batchesStepTicks"], true);
+        assert_eq!(value["stepTiming"]["ticks"], 2);
+        assert!(value["stepTiming"]["totalMs"].as_f64().unwrap() > 0.0);
+        assert!(value["stepTiming"]["fieldSnapshotMs"].as_f64().unwrap() > 0.0);
+        assert!(
+            value["stepTiming"]["fieldPlayerDecisionMs"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
         assert_eq!(value["queuedHumanInputs"], 0);
         assert_eq!(value["controllerYield"]["assignedPlayers"], 0);
         assert_eq!(value["controllerYield"]["waitAttempts"], 0);
@@ -55222,6 +55691,50 @@ mod tests {
     }
 
     #[test]
+    fn live_http_input_router_queues_without_session_mutex() {
+        let session = Arc::new(Mutex::new(
+            SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+                duration_seconds: 1.0,
+                max_human_players: 1,
+                seed: 568,
+                ..Default::default()
+            }),
+        ));
+        let input_queue = session.lock().unwrap().input_queue();
+        {
+            session
+                .lock()
+                .unwrap()
+                .assign_controller_slot(SoccerControllerAssignmentRequest {
+                    controller_slot: 0,
+                    player_id: Some(0),
+                })
+                .expect("assign human controller");
+        }
+        let input_router = session.lock().unwrap().controller_input_router();
+        let _held_session_lock = session.lock().unwrap();
+
+        let input = r#"{"controllerSlot":0,"playerId":0,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}"#;
+        let ack = handle_live_soccer_request_with_input_router(
+            &format!(
+                "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                input.len(),
+                input
+            ),
+            &session,
+            &input_queue,
+            &input_router,
+        );
+
+        assert_eq!(ack.status, 200);
+        let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
+        assert_eq!(ack_value["acceptedInputs"], 1);
+        assert_eq!(ack_value["queued"], true);
+        assert_eq!(ack_value["queuedHumanInputs"], 1);
+        assert_eq!(input_queue.queued_len(), 1);
+    }
+
+    #[test]
     fn live_http_input_route_counts_only_newer_controller_frames() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
@@ -56543,8 +57056,13 @@ mod tests {
         assert!(html.contains("Math.min(Number(state.config.maxHumanPlayers || 0), 4)"));
         assert!(html.contains("for (let slot = 0; slot < humanSlotCount(); slot++)"));
         assert!(html.contains("label.textContent = `Slot ${slot + 1}`"));
+        assert!(html.contains("const assignedByPlayer = new Map"));
+        assert!(html.contains("playerOpt.disabled = assignedElsewhere"));
         assert!(html.contains("keymap.textContent = controllerKeymapLabel(slot)"));
         assert!(html.contains("controllerSlot: slot"));
+        assert!(html.contains("id=\"inspectMode\""));
+        assert!(html.contains("setInspectMode(!inspectModeEnabled())"));
+        assert!(html.contains("humanSlotCount() <= 0"));
         assert!(html.contains("const actionSlot = CONTROLLER_KEYMAPS.findIndex"));
         assert!(html.contains("if (!isFormEditingTarget(e.target) && /^Digit[1-4]$/.test(e.code))"));
         assert!(html.contains("const GAMEPAD_BUTTONS = {"));
@@ -56553,6 +57071,17 @@ mod tests {
         assert!(html.contains("function queueGamepadInputs()"));
         assert!(html.contains("gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.action)"));
         assert!(html.contains("queueGamepadInputs();"));
+        assert!(html.contains("const LIVE_INPUT_FLUSH_INTERVAL_MS = 33"));
+        assert!(html.contains("function scheduleInputFlush"));
+        assert!(html.contains("function flushQueuedInputsToInputApi"));
+        assert!(html.contains("postJson(\"/api/input\", inputs)"));
+        assert!(html.contains("function pulseLowLatencyControllerInput"));
+        assert!(html.contains("pulseLowLatencyControllerInput();"));
+        assert!(html.contains("scheduleInputFlush(0);"));
+        assert!(html.contains("id=\"matchStep\""));
+        assert!(html.contains("function matchStepLabel"));
+        assert!(html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t"));
+        assert!(html.contains("liveControllerAssigned() ? 1 : configuredSimTicksPerPulse()"));
     }
 
     #[test]

@@ -8972,11 +8972,15 @@ fn model_validation_nonlinear_solver_for_tool(
             ExternalNonlinearValidationReferenceSolver::Fallback
         }
         "nlopt" | "nlopt-adapter" => ExternalNonlinearValidationReferenceSolver::Nlopt,
-        "nlopt-rs" | "nlopt-rs-adapter" => ExternalNonlinearValidationReferenceSolver::Nlopt,
-        "nlopt-cli" => ExternalNonlinearValidationReferenceSolver::NloptCli,
-        "ipopt" | "ipopt-adapter" | "ipopt-rust" | "ipopt-rust-adapter" => {
-            ExternalNonlinearValidationReferenceSolver::Ipopt
+        "nlopt-rs" | "nlopt-rs-adapter" | "ores-nlopt-rs-adapter" => {
+            ExternalNonlinearValidationReferenceSolver::Nlopt
         }
+        "nlopt-cli" => ExternalNonlinearValidationReferenceSolver::NloptCli,
+        "ipopt"
+        | "ipopt-adapter"
+        | "ipopt-rust"
+        | "ipopt-rust-adapter"
+        | "ores-ipopt-rust-adapter" => ExternalNonlinearValidationReferenceSolver::Ipopt,
         "casadi" | "casadi-adapter" => ExternalNonlinearValidationReferenceSolver::Casadi,
         "mosek" | "mosek-adapter" => ExternalNonlinearValidationReferenceSolver::Mosek,
         "copt" | "copt-adapter" => ExternalNonlinearValidationReferenceSolver::Copt,
@@ -14115,6 +14119,40 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "xpress-python-adapter",
         "docplex",
         "docplex-adapter",
+        "gurobi-rust",
+        "gurobi-rust-adapter",
+        "ores-gurobi-rust-adapter",
+        "cplex-rust",
+        "cplex-rust-adapter",
+        "ores-cplex-rust-adapter",
+        "highs-rust",
+        "highs-rust-adapter",
+        "ores-highs-rust-adapter",
+        "scip-rust",
+        "scip-rust-adapter",
+        "ores-scip-rust-adapter",
+        "cbc-rust",
+        "cbc-rust-adapter",
+        "ores-cbc-rust-adapter",
+        "highs-cli",
+        "highs",
+        "glpk-cli",
+        "glpsol",
+        "scip-cli",
+        "scip",
+        "cbc-cli",
+        "cbc",
+        "clp-cli",
+        "clp",
+        "soplex-cli",
+        "soplex",
+        "qsopt-ex-cli",
+        "qsopt-ex",
+        "qsopt",
+        "esolver",
+        "lp-solve-cli",
+        "lp-solve",
+        "lpsolve",
         "ortools-glop",
         "ortools-pdlp",
         "good-lp",
@@ -14140,6 +14178,15 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "cplex-python-adapter",
         "docplex",
         "docplex-adapter",
+        "highs-rust",
+        "highs-rust-adapter",
+        "ores-highs-rust-adapter",
+        "gurobi-rust",
+        "gurobi-rust-adapter",
+        "ores-gurobi-rust-adapter",
+        "cplex-rust",
+        "cplex-rust-adapter",
+        "ores-cplex-rust-adapter",
         "jump",
         "jump-adapter",
         "good-lp",
@@ -14179,6 +14226,15 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "gurobipy-adapter",
         "cplex-python",
         "cplex-python-adapter",
+        "highs-rust",
+        "highs-rust-adapter",
+        "ores-highs-rust-adapter",
+        "gurobi-rust",
+        "gurobi-rust-adapter",
+        "ores-gurobi-rust-adapter",
+        "cplex-rust",
+        "cplex-rust-adapter",
+        "ores-cplex-rust-adapter",
     ];
     let nonlinear_modeling_tools = [
         "scipy-optimize",
@@ -14186,15 +14242,18 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "scipy-adapter",
         "argmin",
         "argmin-adapter",
+        "ores-argmin-adapter",
         "nlopt",
         "nlopt-adapter",
         "nlopt-rs",
         "nlopt-rs-adapter",
+        "ores-nlopt-rs-adapter",
         "nlopt-cli",
         "ipopt",
         "ipopt-adapter",
         "ipopt-rust",
         "ipopt-rust-adapter",
+        "ores-ipopt-rust-adapter",
         "casadi",
         "casadi-adapter",
         "mosek",
@@ -20846,6 +20905,49 @@ mod tests {
             }),
             "{miqp:?}"
         );
+
+        for (alias, expected_validator) in [
+            (
+                "highs-rust-adapter",
+                "builtin:quadratic-small-for-highs-rust-adapter",
+            ),
+            (
+                "gurobi-rust-adapter",
+                "builtin:quadratic-small-for-gurobi-rust-adapter",
+            ),
+            (
+                "cplex-rust-adapter",
+                "builtin:quadratic-small-for-cplex-rust-adapter",
+            ),
+        ] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "miqp-validation",
+                    "Q": [
+                        [2, 0],
+                        [0, 2]
+                    ],
+                    "c": [-2, -4],
+                    "lb": [0, 0],
+                    "ub": [5, 5],
+                    "integerVars": [true, true]
+                }),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("optimal"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+            assert!(
+                run["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("solver=rust:miqp-enumeration")),
+                "{alias}: {run:?}"
+            );
+        }
     }
 
     #[test]
@@ -20888,6 +20990,58 @@ mod tests {
             }),
             "{slp:?}"
         );
+
+        for (alias, expected_validator) in [
+            (
+                "highs-rust-adapter",
+                "builtin:stochastic-lp-small-for-highs-rust-adapter",
+            ),
+            (
+                "gurobi-rust-adapter",
+                "builtin:stochastic-lp-small-for-gurobi-rust-adapter",
+            ),
+            (
+                "cplex-rust-adapter",
+                "builtin:stochastic-lp-small-for-cplex-rust-adapter",
+            ),
+        ] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "stochastic-lp-validation",
+                    "cFirst": [-1],
+                    "aFirst": [[1]],
+                    "bFirst": [20],
+                    "qSecond": [3],
+                    "wSecond": [[1], [1]],
+                    "scenarios": [
+                        {
+                            "t": [[-1], [0]],
+                            "h": [0, 5],
+                            "prob": 0.5
+                        },
+                        {
+                            "t": [[-1], [0]],
+                            "h": [0, 15],
+                            "prob": 0.5
+                        }
+                    ]
+                }),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("optimal"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+            assert!(
+                run["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("solver=rust:monolithic-slp")),
+                "{alias}: {run:?}"
+            );
+        }
     }
 
     #[test]
@@ -20961,6 +21115,64 @@ mod tests {
             docplex["validator"].as_str(),
             Some("builtin:linear-mip-small-for-docplex-adapter")
         );
+
+        for (alias, expected_validator) in [
+            (
+                "gurobi-rust-adapter",
+                "builtin:linear-mip-small-for-gurobi-rust-adapter",
+            ),
+            (
+                "cplex-rust-adapter",
+                "builtin:linear-mip-small-for-cplex-rust-adapter",
+            ),
+            (
+                "highs-rust-adapter",
+                "builtin:linear-mip-small-for-highs-rust-adapter",
+            ),
+            (
+                "scip-rust-adapter",
+                "builtin:linear-mip-small-for-scip-rust-adapter",
+            ),
+            (
+                "cbc-rust-adapter",
+                "builtin:linear-mip-small-for-cbc-rust-adapter",
+            ),
+            ("highs-cli", "builtin:linear-mip-small-for-highs-cli"),
+            ("glpsol", "builtin:linear-mip-small-for-glpsol"),
+            ("scip", "builtin:linear-mip-small-for-scip"),
+            ("cbc", "builtin:linear-mip-small-for-cbc"),
+            ("clp", "builtin:linear-mip-small-for-clp"),
+            ("soplex", "builtin:linear-mip-small-for-soplex"),
+            ("qsopt-ex-cli", "builtin:linear-mip-small-for-qsopt-ex-cli"),
+            ("esolver", "builtin:linear-mip-small-for-esolver"),
+            ("lp_solve", "builtin:linear-mip-small-for-lp-solve"),
+        ] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "linear-mip-validation",
+                    "sense": "max",
+                    "objective": [3, 2],
+                    "constraints": [
+                        {"coefs": [1, 1], "sense": "<=", "rhs": 1}
+                    ],
+                    "domains": [[0, 1], [0, 1]]
+                }),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("optimal"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+            assert!(
+                run["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("x0=1") && stdout.contains("objective=3")),
+                "{alias}: {run:?}"
+            );
+        }
     }
 
     #[test]
@@ -21650,6 +21862,47 @@ mod tests {
             ),
             "{nlopt:?}"
         );
+
+        for (tool, solver) in [
+            ("ores-argmin-adapter", "solver=builtin:nlp-pattern-search"),
+            (
+                "ores-nlopt-rs-adapter",
+                "solver=builtin:nlp-pattern-search-for-nlopt",
+            ),
+            (
+                "ores-ipopt-rust-adapter",
+                "solver=builtin:nlp-pattern-search-for-ipopt",
+            ),
+        ] {
+            let result = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "nonlinear-validation",
+                    "variables": [
+                        {"name": "x", "lb": -1.0, "ub": 2.0, "start": 0.0}
+                    ],
+                    "objective": "(x - 0.5)**2",
+                    "constraints": [],
+                    "sense": "min"
+                }),
+                tool,
+            );
+            assert_eq!(result["status"].as_str(), Some("ok"), "{tool}: {result:?}");
+            assert_eq!(
+                result["verdict"].as_str(),
+                Some("optimal"),
+                "{tool}: {result:?}"
+            );
+            assert_eq!(
+                result["validator"].as_str(),
+                Some(format!("builtin:nonlinear-reference-for-{tool}").as_str())
+            );
+            assert!(
+                result["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("x=0.500") && stdout.contains(solver)),
+                "{tool}: {result:?}"
+            );
+        }
     }
 
     #[test]

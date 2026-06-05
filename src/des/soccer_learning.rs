@@ -4,7 +4,7 @@
 //! the cross-run layer: outcome scoring, policy deltas, weighted merge, simple
 //! evolutionary spawning, and a queue runner that keeps worker slots full.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,7 +21,7 @@ use crate::des::general::soccer::{
 
 pub const SOCCER_LEARNING_FIXED_SCALE: i64 = 1_000_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoccerLearningPolicyEntryKind {
     Action,
@@ -173,7 +173,7 @@ impl Default for SoccerEvolutionOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PolicyEntryKey {
     team: &'static str,
     entry_kind: SoccerLearningPolicyEntryKind,
@@ -284,7 +284,15 @@ pub fn soccer_policy_delta_entries(
     after: &SoccerTeamQPolicies,
     score: &SoccerLearningRunScore,
 ) -> SoccerLearningPolicyDelta {
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(
+        after
+            .home
+            .q_values
+            .len()
+            .saturating_add(after.home.target_values.len())
+            .saturating_add(after.away.q_values.len())
+            .saturating_add(after.away.target_values.len()),
+    );
     collect_team_policy_delta(
         Team::Home,
         &before.home,
@@ -525,7 +533,7 @@ where
     let mut completed_games = 0usize;
     let mut failed_games = 0usize;
     let mut policies = initial_policies;
-    let mut episode_summaries = Vec::new();
+    let mut episode_summaries = Vec::with_capacity(config.games);
     let mut tactical_summary = SoccerTacticalLearningSummary::default();
     let mut total_home_goals = 0u32;
     let mut total_away_goals = 0u32;
@@ -747,11 +755,14 @@ fn push_delta_entry(
 fn entry_map(
     team: Team,
     entry_kind: SoccerLearningPolicyEntryKind,
-    entries: impl Iterator<Item = EntryValue>,
-) -> BTreeMap<PolicyEntryKey, EntryValue> {
-    entries
-        .map(|entry| (policy_entry_key(team, entry_kind, &entry), entry))
-        .collect()
+    mut entries: impl Iterator<Item = EntryValue>,
+) -> HashMap<PolicyEntryKey, EntryValue> {
+    let (lower, upper) = entries.size_hint();
+    let mut map = HashMap::with_capacity(upper.unwrap_or(lower));
+    for entry in entries.by_ref() {
+        map.insert(policy_entry_key(team, entry_kind, &entry), entry);
+    }
+    map
 }
 
 fn action_entry_value(entry: SoccerQEntry) -> EntryValue {
@@ -876,10 +887,12 @@ fn build_policies_from_accumulators(
     action_accumulators: BTreeMap<PolicyEntryKey, MergeAccumulator>,
     target_accumulators: BTreeMap<PolicyEntryKey, MergeAccumulator>,
 ) -> Result<SoccerTeamQPolicies, String> {
-    let mut home_entries = Vec::new();
-    let mut away_entries = Vec::new();
-    let mut home_targets = Vec::new();
-    let mut away_targets = Vec::new();
+    let action_capacity = action_accumulators.len();
+    let target_capacity = target_accumulators.len();
+    let mut home_entries = Vec::with_capacity(action_capacity.saturating_add(1) / 2);
+    let mut away_entries = Vec::with_capacity(action_capacity / 2);
+    let mut home_targets = Vec::with_capacity(target_capacity.saturating_add(1) / 2);
+    let mut away_targets = Vec::with_capacity(target_capacity / 2);
 
     for (key, accumulator) in action_accumulators {
         if accumulator.effective_visits <= 0.0 {

@@ -2,13 +2,9 @@
 //!
 //! Tests the warehouse MDP/POMDP comparison (`general/factory-floor-track3t`):
 //! POMDP state-space / action-set cardinality identities, the sharper Track3t
-//! observation model, and the end-to-end comparison metrics (cycle time,
-//! throughput, search misses, shipping error rate, belief entropy, trace).
-//!
-//! PORT NOTE: the two animation assertions at the tail of the TS test depend on
-//! `animation/scenes/warehouse-track3t-scene` (buildWarehouseComparisonFrame /
-//! buildWarehouseComparisonCharts), which is not yet ported; those checks are
-//! deferred.
+//! observation model, the end-to-end comparison metrics (cycle time, throughput,
+//! search misses, shipping error rate, belief entropy, trace), and the rendered
+//! Track3t animation scene.
 
 #![allow(dead_code)]
 
@@ -18,6 +14,7 @@ mod tests {
         baseline_warehouse_scenario, build_warehouse_pomdp, default_warehouse_layout,
         run_warehouse_comparison, track3t_warehouse_scenario, WarehouseSimulationOptions,
     };
+    use crate::des::model::track3t_warehouse::build_track3t_animation;
 
     #[test]
     fn pomdp_state_space_includes_terminal_state() {
@@ -136,8 +133,21 @@ mod tests {
         );
     }
 
-    // PORT NOTE: the animation-frame / comparison-chart assertions
-    // (`buildWarehouseComparisonFrame`, `buildWarehouseComparisonCharts` from
-    // `animation/scenes/warehouse-track3t-scene`) are deferred because that scene
-    // module is not yet ported.
+    #[test]
+    fn track3t_animation_scene_builds_frames_and_charts() {
+        let result = run_warehouse_comparison(WarehouseSimulationOptions {
+            jobs: Some(8),
+            seed: Some(7),
+            record_trace: Some(true),
+            ..Default::default()
+        });
+        let animation = build_track3t_animation(&result, 2, Some(24));
+
+        assert!(!animation.frames.is_empty(), "no animation frames");
+        assert!(
+            !animation.frames[0].shapes.is_empty(),
+            "first animation frame has no shapes"
+        );
+        assert_eq!(animation.charts.len(), 2);
+    }
 }

@@ -10606,6 +10606,29 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
     }
 
     #[test]
+    fn native_soplex_json_plain_lp_stays_off_python_bridge() {
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Soplex,
+                command_path: Some(PathBuf::from("/definitely/not-a-soplex-binary")),
+                python: Some("/definitely/not-a-python-for-soplex-json-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "soplex:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
     fn native_lpsolve_json_plain_mip_stays_off_python_bridge() {
         let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
         let solution = super::solve_linear_cli_json(

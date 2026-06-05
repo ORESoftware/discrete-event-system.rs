@@ -44,6 +44,36 @@ const SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE: usize = 1024;
 const SOCCER_RUN_DELTA_INSERT_BATCH_SIZE: usize = 1024;
 const SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE: usize = 512;
 
+const _: () = {
+    assert!(
+        SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE * SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT
+            <= POSTGRES_MAX_QUERY_PARAMETERS
+    );
+    assert!(
+        SOCCER_RUN_DELTA_INSERT_BATCH_SIZE * SOCCER_RUN_DELTA_PARAMETER_COUNT
+            <= POSTGRES_MAX_QUERY_PARAMETERS
+    );
+    assert!(
+        SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE * SOCCER_POLICY_ACTION_ENTRY_PARAMETER_COUNT
+            <= POSTGRES_MAX_QUERY_PARAMETERS
+    );
+    assert!(
+        SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE * SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT
+            <= POSTGRES_MAX_QUERY_PARAMETERS
+    );
+};
+
+fn postgres_insert_sql_buffer(prefix: &str, rows: usize, parameters_per_row: usize) -> String {
+    let estimated_tuple_bytes = parameters_per_row.saturating_mul(8).saturating_add(24);
+    let mut sql = String::with_capacity(
+        prefix
+            .len()
+            .saturating_add(rows.saturating_mul(estimated_tuple_bytes)),
+    );
+    sql.push_str(prefix);
+    sql
+}
+
 pub struct SoccerLearningPgStore {
     client: Client,
 }
@@ -969,8 +999,7 @@ fn insert_completed_run_headers_in_transaction(
         .iter()
         .map(completed_run_header_insert)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut sql = String::from(
-        r#"
+    let sql_prefix = r#"
         insert into des_soccer_learning_runs
           (
             id,
@@ -998,7 +1027,11 @@ fn insert_completed_run_headers_in_transaction(
             stats
           )
         values
-        "#,
+        "#;
+    let mut sql = postgres_insert_sql_buffer(
+        sql_prefix,
+        batch_rows.len(),
+        SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT,
     );
     let mut params: Vec<&(dyn ToSql + Sync)> =
         Vec::with_capacity(batch_rows.len() * SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT);
@@ -1152,8 +1185,7 @@ fn insert_run_delta_batch_rows(
     rows: &[SoccerRunDeltaBatchEntryInsert],
 ) -> Result<(), String> {
     for chunk in rows.chunks(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE) {
-        let mut sql = String::from(
-            r#"
+        let sql_prefix = r#"
             insert into des_soccer_learning_run_deltas
               (
                 run_id,
@@ -1174,8 +1206,9 @@ fn insert_run_delta_batch_rows(
                 effective_visit_micros
               )
             values
-            "#,
-        );
+            "#;
+        let mut sql =
+            postgres_insert_sql_buffer(sql_prefix, chunk.len(), SOCCER_RUN_DELTA_PARAMETER_COUNT);
         let mut params: Vec<&(dyn ToSql + Sync)> =
             Vec::with_capacity(chunk.len() * SOCCER_RUN_DELTA_PARAMETER_COUNT);
         for (idx, batch_row) in chunk.iter().enumerate() {
@@ -1189,10 +1222,7 @@ fn insert_run_delta_batch_rows(
             if idx > 0 {
                 sql.push_str(", ");
             }
-            append_run_delta_value_tuple(
-                &mut sql,
-                idx * SOCCER_RUN_DELTA_PARAMETER_COUNT + 1,
-            );
+            append_run_delta_value_tuple(&mut sql, idx * SOCCER_RUN_DELTA_PARAMETER_COUNT + 1);
             params.push(run_id);
             params.push(&row.team);
             params.push(&row.entry_kind);
@@ -1300,8 +1330,7 @@ fn insert_policy_action_entry_rows(
 ) -> Result<(), String> {
     let entry_kind = SoccerLearningPolicyEntryKind::Action.as_str();
     for chunk in rows.chunks(SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE) {
-        let mut sql = String::from(
-            r#"
+        let sql_prefix = r#"
             insert into des_soccer_learning_policy_entries
               (
                 policy_version_id,
@@ -1315,7 +1344,11 @@ fn insert_policy_action_entry_rows(
                 source_run_id
               )
             values
-            "#,
+            "#;
+        let mut sql = postgres_insert_sql_buffer(
+            sql_prefix,
+            chunk.len(),
+            SOCCER_POLICY_ACTION_ENTRY_PARAMETER_COUNT,
         );
         let mut params: Vec<&(dyn ToSql + Sync)> =
             Vec::with_capacity(chunk.len() * SOCCER_POLICY_ACTION_ENTRY_PARAMETER_COUNT);
@@ -1353,8 +1386,7 @@ fn insert_policy_target_entry_rows(
 ) -> Result<(), String> {
     let entry_kind = SoccerLearningPolicyEntryKind::Target.as_str();
     for chunk in rows.chunks(SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE) {
-        let mut sql = String::from(
-            r#"
+        let sql_prefix = r#"
             insert into des_soccer_learning_policy_entries
               (
                 policy_version_id,
@@ -1372,7 +1404,11 @@ fn insert_policy_target_entry_rows(
                 source_run_id
               )
             values
-            "#,
+            "#;
+        let mut sql = postgres_insert_sql_buffer(
+            sql_prefix,
+            chunk.len(),
+            SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT,
         );
         let mut params: Vec<&(dyn ToSql + Sync)> =
             Vec::with_capacity(chunk.len() * SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT);
@@ -1998,8 +2034,7 @@ mod tests {
     #[test]
     fn soccer_learning_pg_batch_sizes_stay_under_postgres_parameter_limit() {
         assert!(
-            SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE
-                * SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT
+            SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE * SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT
                 <= POSTGRES_MAX_QUERY_PARAMETERS
         );
         assert!(

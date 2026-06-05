@@ -5191,10 +5191,18 @@ impl PlayerAgent {
         let aggression = ability01(self.skills.aggression);
         let tackle_score =
             ((defending * 0.6 + aggression * 0.4) * directive.press_intensity).clamp(0.02, 0.92);
+        let defensive_mindedness = self.preferences.defensive_mindedness.clamp(0.0, 1.0);
+        let offensive_mindedness = self.preferences.offensive_mindedness.clamp(0.0, 1.0);
+        let press = directive.press_intensity.clamp(0.0, 1.0);
+        let shape_score =
+            (0.44 + defensive_mindedness * 0.46 + (1.0 - press) * 0.18).clamp(0.10, 1.18);
+        let roam_score =
+            (0.08 + offensive_mindedness * 0.22 + aggression * 0.14 + press * 0.30)
+                .clamp(0.04, 0.82);
         let mut options = normalize_action_options(vec![
             AgentActionOptionTrace::new("tackle", tackle_score, tackle_legal),
-            AgentActionOptionTrace::new("defend-shape", 0.90, true),
-            AgentActionOptionTrace::new("defend-roam", 0.10, true),
+            AgentActionOptionTrace::new("defend-shape", shape_score, true),
+            AgentActionOptionTrace::new("defend-roam", roam_score, true),
         ]);
         annotate_tick_probability_from_score(&mut options, "tackle", dt_seconds);
         options
@@ -40904,6 +40912,90 @@ mod tests {
         assert!(
             pass_pref_pass > pass_pref_shoot,
             "pass-biased player should inspect passes first more often: {pass_first:?}"
+        );
+    }
+
+    #[test]
+    fn defensive_operation_order_uses_preferences_and_team_press() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 204,
+            ..Default::default()
+        });
+        let defender = 3;
+        let holder = 15;
+        park_players_except(&mut sim, &[defender, holder]);
+        sim.players[defender].position = Vec2::new(40.0, 67.0);
+        sim.players[defender].home_position = Vec2::new(38.0, 48.0);
+        sim.players[defender].skills.defending = 8.2;
+        sim.players[holder].position = Vec2::new(40.0, 72.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let mut low_press_snapshot = WorldSnapshot::from_match(&sim);
+        low_press_snapshot.home_directive.press_intensity = 0.10;
+        let mut high_press_snapshot = low_press_snapshot.clone();
+        high_press_snapshot.home_directive.press_intensity = 0.95;
+
+        let mut cautious = sim.players[defender].clone();
+        cautious.preferences.offensive_mindedness = 0.05;
+        cautious.preferences.defensive_mindedness = 0.98;
+        cautious.skills.aggression = 3.0;
+        let cautious_options = cautious.defensive_action_options(
+            &low_press_snapshot,
+            low_press_snapshot.tactical_directive(Team::Home),
+            low_press_snapshot.dt_seconds,
+        );
+        assert!(
+            action_option_score(&cautious_options, "defend-shape")
+                > action_option_score(&cautious_options, "defend-roam") * 4.0,
+            "low-press cautious defender should strongly prefer shape: {cautious_options:?}"
+        );
+
+        let mut roamer = sim.players[defender].clone();
+        roamer.preferences.offensive_mindedness = 0.95;
+        roamer.preferences.defensive_mindedness = 0.05;
+        roamer.skills.aggression = 10.0;
+        let roamer_options = roamer.defensive_action_options(
+            &high_press_snapshot,
+            high_press_snapshot.tactical_directive(Team::Home),
+            high_press_snapshot.dt_seconds,
+        );
+        assert!(
+            action_option_score(&roamer_options, "defend-roam")
+                > action_option_score(&roamer_options, "defend-shape"),
+            "high-press aggressive defender should be allowed to roam first: {roamer_options:?}"
+        );
+
+        let sample_first_order =
+            |template: &PlayerAgent, snapshot: &WorldSnapshot, seed_base: u32| {
+                let mut first_counts: HashMap<String, usize> = HashMap::new();
+                for seed in 0..180 {
+                    let mut player = template.clone();
+                    let mut rng = mulberry32(seed_base + seed);
+                    let _ = player.run_time_step(snapshot, None, None, &mut rng);
+                    let first = player
+                        .last_decision
+                        .as_ref()
+                        .and_then(|decision| decision.operation_order.first())
+                        .cloned()
+                        .unwrap_or_default();
+                    *first_counts.entry(first).or_insert(0) += 1;
+                }
+                first_counts
+            };
+
+        let cautious_first = sample_first_order(&cautious, &low_press_snapshot, 31_000);
+        let roamer_first = sample_first_order(&roamer, &high_press_snapshot, 32_000);
+        assert!(
+            cautious_first.get("defend-shape").copied().unwrap_or(0)
+                > cautious_first.get("defend-roam").copied().unwrap_or(0) * 3,
+            "cautious low-press defender should mostly inspect shape first: {cautious_first:?}"
+        );
+        assert!(
+            roamer_first.get("defend-roam").copied().unwrap_or(0)
+                > roamer_first.get("defend-shape").copied().unwrap_or(0),
+            "aggressive high-press defender should inspect roam first more often: {roamer_first:?}"
         );
     }
 

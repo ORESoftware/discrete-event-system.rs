@@ -1,13 +1,12 @@
 //! Rust-facing bridge for external/reference bin-packing solvers.
 //!
 //! The native Rust reference computes a deterministic exact small-instance
-//! check without Python startup. The checked-in Python bridge
-//! (`scripts/bin_packing_reference.py`) remains available for OR-Tools CP-SAT
-//! on the same item/capacity input.
+//! check without Python startup. Explicit OR-Tools CP-SAT validation is
+//! launched from Rust with a tiny Python adapter over an integer-scaled copy
+//! of the same item/capacity input.
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -138,6 +137,8 @@ struct BinPackingReferencePayload {
     ortools_objective: Option<usize>,
     #[serde(rename = "ortoolsObjectiveBound")]
     ortools_objective_bound: Option<f64>,
+    #[serde(rename = "objectiveBound")]
+    objective_bound: Option<f64>,
     message: Option<String>,
 }
 
@@ -170,6 +171,125 @@ struct RustBinPackingSearchBin {
 
 const RUST_BIN_PACKING_EPS: f64 = 1e-9;
 const RUST_BIN_PACKING_MAX_EXACT_ITEMS: usize = 24;
+const ORTOOLS_BIN_PACKING_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_BIN_PACKING_SOLVER: &str = "ortools:cp-sat-bin-packing";
+
+const ORTOOLS_BIN_PACKING_ADAPTER: &str = r#"
+import json
+import math
+import sys
+
+SOLVER = "ortools:cp-sat-bin-packing"
+
+
+def total_weight(problem):
+    return float(sum(float(item["weight"]) for item in problem["items"]))
+
+
+def lower_bound_bins(problem):
+    return int(math.ceil(total_weight(problem) / float(problem["capacity"])))
+
+
+def output(status, problem, bins=None, objective_bound=None, message=""):
+    packed_bins = [] if bins is None else bins
+    result = {
+        "status": status,
+        "solver": SOLVER,
+        "bins": [
+            {
+                "items": list(bin_["items"]),
+                "load": float(bin_["load"]),
+            }
+            for bin_ in packed_bins
+        ],
+        "objective": None if bins is None else len(packed_bins),
+        "totalWeight": total_weight(problem),
+        "lowerBoundBins": lower_bound_bins(problem),
+        "message": message,
+    }
+    if objective_bound is not None:
+        result["objectiveBound"] = objective_bound
+    return result
+
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    print(json.dumps(output(
+        "unavailable",
+        {"capacity": 1.0, "items": []},
+        None,
+        None,
+        str(exc),
+    )))
+    sys.exit(0)
+
+
+try:
+    problem = json.load(sys.stdin)
+    items = problem["items"]
+    n = len(items)
+    capacity = int(problem["scaledCapacity"])
+    weights = [int(item["scaledWeight"]) for item in items]
+    model = cp_model.CpModel()
+    x = {
+        (item, bin_): model.NewBoolVar(f"x_i{item}_b{bin_}")
+        for item in range(n)
+        for bin_ in range(n)
+    }
+    y = {bin_: model.NewBoolVar(f"y_b{bin_}") for bin_ in range(n)}
+    for item in range(n):
+        model.AddExactlyOne(x[(item, bin_)] for bin_ in range(n))
+    for bin_ in range(n):
+        model.Add(sum(weights[item] * x[(item, bin_)] for item in range(n)) <= capacity * y[bin_])
+    for bin_ in range(n - 1):
+        model.Add(y[bin_] >= y[bin_ + 1])
+    model.Minimize(sum(y.values()))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(json.dumps(output(
+            "infeasible" if status_name == "infeasible" else status_name,
+            problem,
+            None,
+            None,
+            f"OR-Tools CP-SAT status {status_name}",
+        )))
+        sys.exit(0)
+
+    bins = []
+    for bin_ in range(n):
+        indices = [item for item in range(n) if solver.BooleanValue(x[(item, bin_)])]
+        if not indices:
+            continue
+        bins.append({
+            "items": [items[index]["id"] for index in indices],
+            "indices": indices,
+            "load": sum(float(items[index]["weight"]) for index in indices),
+        })
+    print(json.dumps(output(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        problem,
+        bins,
+        solver.BestObjectiveBound(),
+        f"OR-Tools CP-SAT status {status_name}",
+    )))
+except Exception as exc:
+    print(json.dumps({
+        "status": "error",
+        "solver": SOLVER,
+        "bins": [],
+        "objective": None,
+        "totalWeight": None,
+        "lowerBoundBins": None,
+        "message": str(exc),
+    }))
+    sys.exit(1)
+"#;
 
 fn status_from_str(status: &str) -> ExternalBinPackingReferenceStatus {
     match status {
@@ -235,6 +355,55 @@ fn rust_bin_packing_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn ortools_bin_packing_empty_solution(
+    status: ExternalBinPackingReferenceStatus,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalBinPackingReferenceSolution {
+    rust_bin_packing_empty_solution(status, ORTOOLS_BIN_PACKING_SOLVER, message, elapsed_ms)
+}
+
+fn scaled_ortools_bin_packing_value(value: f64, scale: i64) -> Option<i64> {
+    if !value.is_finite() || scale <= 0 {
+        return None;
+    }
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (scaled - rounded).abs() > 1e-6 {
+        return None;
+    }
+    Some(rounded as i64)
+}
+
+fn choose_ortools_bin_packing_scale(problem: &BinPackingProblem) -> Option<i64> {
+    ORTOOLS_BIN_PACKING_SCALES.iter().copied().find(|&scale| {
+        scaled_ortools_bin_packing_value(problem.capacity, scale).is_some()
+            && problem
+                .items
+                .iter()
+                .all(|item| scaled_ortools_bin_packing_value(item.weight, scale).is_some())
+    })
+}
+
+fn ortools_bin_packing_payload(problem: &BinPackingProblem, scale: i64) -> Value {
+    json!({
+        "capacity": problem.capacity,
+        "scaledCapacity": scaled_ortools_bin_packing_value(problem.capacity, scale)
+            .expect("selected OR-Tools scale must scale capacity"),
+        "weightScale": scale,
+        "items": problem.items.iter().enumerate().map(|(index, item)| json!({
+            "index": index,
+            "id": &item.id,
+            "weight": item.weight,
+            "scaledWeight": scaled_ortools_bin_packing_value(item.weight, scale)
+                .expect("selected OR-Tools scale must scale every item weight"),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn relabel_registered_bin_packing_fallback(
@@ -488,50 +657,6 @@ fn solve_bin_packing_with_rust_reference(
     )
 }
 
-fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalBinPackingReferenceSolution {
-    ExternalBinPackingReferenceSolution {
-        status: ExternalBinPackingReferenceStatus::Unavailable,
-        solver: "external-bin-packing-reference".to_string(),
-        bins: Vec::new(),
-        objective: None,
-        total_weight: None,
-        lower_bound_bins: None,
-        ortools_status: None,
-        ortools_bins: Vec::new(),
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn numerical_error(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalBinPackingReferenceSolution {
-    ExternalBinPackingReferenceSolution {
-        status: ExternalBinPackingReferenceStatus::NumericalError,
-        solver: "external-bin-packing-reference".to_string(),
-        bins: Vec::new(),
-        objective: None,
-        total_weight: None,
-        lower_bound_bins: None,
-        ortools_status: None,
-        ortools_bins: Vec::new(),
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("bin_packing_reference.py")
-}
-
 fn bin_packing_reference_timeout_ms() -> u64 {
     std::env::var("BIN_PACKING_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -559,26 +684,41 @@ fn wait_for_bin_packing_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll bin_packing_reference.py: {err}")),
+            Err(err) => {
+                return Err(format!(
+                    "failed to poll OR-Tools bin-packing adapter: {err}"
+                ))
+            }
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for bin_packing_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools bin-packing adapter: {err}"))
 }
 
-fn run_bin_packing_reference_json(
-    payload: Value,
-    opts: &ExternalBinPackingReferenceOptions,
+fn run_ortools_bin_packing_reference(
+    problem: &BinPackingProblem,
 ) -> ExternalBinPackingReferenceSolution {
     let started = Instant::now();
+    if let Err(message) = validate_rust_bin_packing_problem(problem) {
+        return ortools_bin_packing_empty_solution(
+            ExternalBinPackingReferenceStatus::NumericalError,
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let Some(scale) = choose_ortools_bin_packing_scale(problem) else {
+        return ortools_bin_packing_empty_solution(
+            ExternalBinPackingReferenceStatus::Unsupported,
+            "OR-Tools CP-SAT bin-packing bridge requires integer-scalable weights/capacity",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let payload = ortools_bin_packing_payload(problem, scale);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_BIN_PACKING_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -587,16 +727,18 @@ fn run_bin_packing_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return unavailable(
-                format!("failed to start bin_packing_reference.py with {python}: {err}"),
+            return ortools_bin_packing_empty_solution(
+                ExternalBinPackingReferenceStatus::Unavailable,
+                format!("failed to start OR-Tools bin-packing adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
     if let Some(stdin) = child.stdin.as_mut() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write bin_packing_reference.py stdin: {err}"),
+            return ortools_bin_packing_empty_solution(
+                ExternalBinPackingReferenceStatus::NumericalError,
+                format!("failed to write OR-Tools bin-packing adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -606,11 +748,18 @@ fn run_bin_packing_reference_json(
     let (mut output, timed_out) = match wait_for_bin_packing_reference_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => {
-            return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
+            return ortools_bin_packing_empty_solution(
+                ExternalBinPackingReferenceStatus::NumericalError,
+                err,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
     };
     if timed_out {
-        let timeout_message = format!("bin_packing_reference.py timed out after {}ms", timeout_ms);
+        let timeout_message = format!(
+            "OR-Tools bin-packing adapter timed out after {}ms",
+            timeout_ms
+        );
         if output.stderr.is_empty() {
             output.stderr = timeout_message.into_bytes();
         } else {
@@ -644,7 +793,7 @@ fn run_bin_packing_reference_json(
                 .map(ExternalBinPackingReferenceBin::from)
                 .collect(),
             ortools_objective: parsed.ortools_objective,
-            ortools_objective_bound: parsed.ortools_objective_bound,
+            ortools_objective_bound: parsed.ortools_objective_bound.or(parsed.objective_bound),
             message: parsed.message.unwrap_or_else(|| {
                 if output.status.success() {
                     "ok".to_string()
@@ -654,9 +803,10 @@ fn run_bin_packing_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
+        Err(err) => ortools_bin_packing_empty_solution(
+            ExternalBinPackingReferenceStatus::NumericalError,
             format!(
-                "failed to parse bin_packing_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools bin-packing adapter output: {err}; stderr={}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
             elapsed_ms,
@@ -677,16 +827,7 @@ pub fn solve_bin_packing_with_external_reference(
         );
     }
 
-    run_bin_packing_reference_json(
-        json!({
-            "capacity": problem.capacity,
-            "items": problem.items.iter().map(|item| json!({
-                "id": &item.id,
-                "weight": item.weight,
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_bin_packing_reference(problem)
 }
 
 #[cfg(test)]
@@ -805,7 +946,58 @@ mod tests {
     }
 
     #[test]
-    fn bin_packing_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_values_without_python() {
+        let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = bin_packing_problem_from_weights(1.0, vec![1.0 / 3.0]);
+
+        let solution = solve_bin_packing_with_external_reference(
+            &problem,
+            &ExternalBinPackingReferenceOptions {
+                solver: ExternalBinPackingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalBinPackingReferenceStatus::Unsupported
+        );
+        assert_eq!(solution.solver, ORTOOLS_BIN_PACKING_SOLVER);
+        assert!(solution
+            .message
+            .contains("integer-scalable weights/capacity"));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = build_sample_bin_packing_problem();
+
+        let solution = solve_bin_packing_with_external_reference(
+            &problem,
+            &ExternalBinPackingReferenceOptions {
+                solver: ExternalBinPackingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalBinPackingReferenceStatus::Unavailable
+        );
+        assert_eq!(solution.solver, ORTOOLS_BIN_PACKING_SOLVER);
+        assert!(solution.message.contains("OR-Tools bin-packing adapter"));
+        assert!(!solution.message.contains("bin_packing_reference.py"));
+    }
+
+    #[test]
+    fn bin_packing_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -821,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn bin_packing_python_bridge_wait_observes_closed_stdin() {
+    fn bin_packing_adapter_wait_observes_closed_stdin() {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("cat >/dev/null; printf done")

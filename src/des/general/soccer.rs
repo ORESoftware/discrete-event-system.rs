@@ -22941,6 +22941,8 @@ impl SoccerMatch {
                 });
                 self.ball.holder = Some(holder);
                 self.ball.altitude_yards = 0.0;
+                self.ball.untargeted_long_ball_flight = None;
+                self.ball.untargeted_long_ball_launcher = None;
                 self.ball.last_touch_team = Some(holder_team);
                 if let Some(offside) = self
                     .pending_pass
@@ -22985,6 +22987,8 @@ impl SoccerMatch {
             } => {
                 self.pending_shot = None;
                 self.ball.altitude_yards = 0.0;
+                self.ball.untargeted_long_ball_flight = None;
+                self.ball.untargeted_long_ball_launcher = None;
                 self.stat_shot_on_target(shot.team);
                 self.record_shot_on_target_rewards(shot.team, shot.shooter);
                 self.stat_save(defending_team);
@@ -23027,6 +23031,8 @@ impl SoccerMatch {
                 }
                 self.record_goal_rewards(scoring_team, shot.as_ref().map(|shot| shot.shooter));
                 self.ball.altitude_yards = 0.0;
+                self.ball.untargeted_long_ball_flight = None;
+                self.ball.untargeted_long_ball_launcher = None;
                 if let Some(shot) = shot {
                     self.pending_shot = None;
                     self.stat_shot_on_target(shot.team);
@@ -23036,6 +23042,8 @@ impl SoccerMatch {
             BallStepOutcome::Miss { shot } => {
                 self.pending_shot = None;
                 self.ball.altitude_yards = 0.0;
+                self.ball.untargeted_long_ball_flight = None;
+                self.ball.untargeted_long_ball_launcher = None;
                 let shooter_name = self
                     .players
                     .iter()
@@ -23071,6 +23079,8 @@ impl SoccerMatch {
                 self.ball.velocity = velocity;
                 self.ball.holder = None;
                 self.ball.altitude_yards = 0.0;
+                self.ball.untargeted_long_ball_flight = None;
+                self.ball.untargeted_long_ball_launcher = None;
                 self.ball.last_touch_team = Some(defending_team);
                 self.mark_ball_received(blocker_id);
                 self.stat_shot_block(defending_team);
@@ -23110,6 +23120,8 @@ impl SoccerMatch {
                 self.pending_pass = None;
                 self.pending_shot = None;
                 self.ball.altitude_yards = 0.0;
+                self.ball.untargeted_long_ball_flight = None;
+                self.ball.untargeted_long_ball_launcher = None;
                 if let Some(shot) = shot {
                     self.record_miss_event(shot);
                 }
@@ -31869,18 +31881,30 @@ fn nearest_ball_controller_for(
             }
         } else if let Some(long_ball_team) = loose_long_ball_team {
             if ball_altitude_yards > 0.02 || ball_speed >= 8.0 {
-                let aerial_duel = aerial_duel_skill_from_agent(p);
-                let altitude_bonus = (ball_altitude_yards / 0.22).clamp(0.0, 1.0);
-                control_radius += aerial_duel * (0.34 + altitude_bonus * 0.24);
-                aerial_score_bonus += aerial_duel * (0.58 + altitude_bonus * 0.18);
+                let airborne = ball_altitude_yards > 0.02;
+                if airborne {
+                    let aerial_duel = aerial_duel_skill_from_agent(p);
+                    let altitude_bonus = (ball_altitude_yards / 0.22).clamp(0.0, 1.0);
+                    control_radius += aerial_duel * (0.34 + altitude_bonus * 0.24);
+                    aerial_score_bonus += aerial_duel * (0.58 + altitude_bonus * 0.18);
+                } else {
+                    control_radius += ability01(p.skills.first_touch) * 0.18;
+                    pass_reception_score_bonus += ability01(p.skills.dribbling) * 0.08;
+                }
                 if p.team == long_ball_team {
                     pass_reception_score_bonus += ability01(p.skills.first_touch) * 0.12;
                 } else {
-                    aerial_score_bonus += ability01(p.skills.defending) * 0.18
-                        + ability01(p.skills.aggression) * 0.12;
+                    let defensive_duel_bonus =
+                        ability01(p.skills.defending) * 0.18 + ability01(p.skills.aggression) * 0.12;
+                    if airborne {
+                        aerial_score_bonus += defensive_duel_bonus;
+                    } else {
+                        pass_reception_score_bonus += defensive_duel_bonus * 0.72;
+                    }
                     let facing_multiplier = player_facing_ball_control_multiplier(p, ball_pos);
                     control_radius *= facing_multiplier;
                     aerial_score_bonus *= facing_multiplier;
+                    pass_reception_score_bonus *= facing_multiplier;
                 }
             }
         }
@@ -41299,6 +41323,61 @@ mod tests {
         assert_eq!(
             sim.events.last().map(|event| event.kind.as_str()),
             Some("route-one")
+        );
+    }
+
+    #[test]
+    fn route_one_long_ball_tracks_airborne_arc_until_landing_zone() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        for player in &mut sim.players {
+            player.position = Vec2::new(3.0, 3.0);
+            player.velocity = Vec2::zero();
+        }
+        sim.players[holder].position = Vec2::new(40.0, 36.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        let target = Vec2::new(44.0, 92.0);
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: holder,
+            action: SoccerAction::RouteOne {
+                target,
+                power: 0.94,
+            },
+            sprint: false,
+        });
+
+        let flight = sim
+            .ball
+            .untargeted_long_ball_flight
+            .expect("route-one launch stores flight path");
+        assert_eq!(flight.origin, Vec2::new(40.0, 36.0));
+        assert_eq!(flight.target, target);
+        assert!(flight.launch_speed_yps > 18.0);
+        assert!(flight.distance_yards > 50.0);
+
+        let midpoint = flight.origin + (flight.target - flight.origin) * 0.5;
+        let midpoint_altitude =
+            untargeted_long_ball_altitude_yards(&flight, midpoint, flight.launch_speed_yps * 0.9);
+        assert!(
+            midpoint_altitude > 6.0,
+            "route-one ball should stay materially airborne at carry midpoint: {midpoint_altitude}"
+        );
+        let near_landing = flight.origin + (flight.target - flight.origin) * 0.99;
+        assert!(
+            untargeted_long_ball_altitude_yards(&flight, near_landing, flight.launch_speed_yps * 0.7)
+                < 0.6
+        );
+
+        sim.integrate_ball();
+        let old_speed_only_altitude = loose_long_ball_altitude_yards(sim.ball.velocity.len());
+        assert!(
+            sim.ball.altitude_yards > old_speed_only_altitude + 0.45,
+            "integrated route-one altitude should use flight arc, old={old_speed_only_altitude}, actual={}",
+            sim.ball.altitude_yards
         );
     }
 

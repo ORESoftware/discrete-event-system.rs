@@ -622,22 +622,23 @@ fn run_ortools_minimum_spanning_tree_reference(
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
     command.arg("-c").arg(ORTOOLS_MST_ADAPTER);
-    let mut child =
-        match command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(err) => return ortools_empty_solution(
+    let mut child = match command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return ortools_empty_solution(
                 ExternalMinimumSpanningTreeReferenceStatus::Unavailable,
                 format!(
                     "failed to start OR-Tools minimum-spanning-tree adapter with {python}: {err}"
                 ),
                 started.elapsed().as_secs_f64() * 1000.0,
-            ),
-        };
+            )
+        }
+    };
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return ortools_empty_solution(

@@ -824,7 +824,11 @@ function teamBrainLabel(brain, fallbackDirective) {
   const ballSchedule = scheduleSlotLabel(brain.ballScheduledIndex);
   const ballAction = brain.ballLastAction ? ` ${brain.ballLastAction}` : "";
   const ballText = ` B${ballSpeed.toFixed(0)} z${ballZ.toFixed(1)}${ballSchedule}${ballAction}`;
-  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)} ${cover} Q${actions}/${targets}${numbersUp}${humanText}${ballText}`;
+  const centroid = brain.teamCentroid;
+  const shapeText = centroid
+    ? ` T${Number(centroid.x ?? 0).toFixed(0)},${Number(centroid.y ?? 0).toFixed(0)} W${Number(brain.teamSpreadYards ?? 0).toFixed(0)} NB${Number(brain.playersNearBall ?? 0)}`
+    : "";
+  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)} ${cover} Q${actions}/${targets}${numbersUp}${humanText}${shapeText}${ballText}`;
 }
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";

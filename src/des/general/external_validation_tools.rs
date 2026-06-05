@@ -4616,6 +4616,668 @@ fn output_validation_table_reference(payload: &Value, validator: &str) -> Value 
     )
 }
 
+fn output_validation_columnar_metadata<'a>(payload: &'a Value) -> &'a Value {
+    payload.get("metadata").unwrap_or(payload)
+}
+
+fn output_validation_columnar_schema<'a>(payload: &'a Value) -> Option<&'a Value> {
+    payload
+        .get("parquet_schema")
+        .or_else(|| payload.get("parquetSchema"))
+        .or_else(|| payload.get("arrow_schema"))
+        .or_else(|| payload.get("arrowSchema"))
+        .or_else(|| payload.get("schema"))
+        .or_else(|| {
+            payload
+                .get("metadata")
+                .and_then(|metadata| metadata.get("schema"))
+        })
+}
+
+fn output_validation_has_columnar_payload(payload: &Value) -> bool {
+    payload
+        .get("format")
+        .or_else(|| output_validation_columnar_metadata(payload).get("format"))
+        .and_then(Value::as_str)
+        .is_some_and(|format| {
+            matches!(
+                format.trim().to_ascii_lowercase().as_str(),
+                "parquet" | "arrow" | "arrow-ipc" | "feather"
+            )
+        })
+        || [
+            "parquet_schema",
+            "parquetSchema",
+            "arrow_schema",
+            "arrowSchema",
+            "row_groups",
+            "rowGroups",
+        ]
+        .iter()
+        .any(|key| payload.get(*key).is_some())
+        || ["num_rows", "numRows", "row_count", "rowCount", "created_by"]
+            .iter()
+            .any(|key| {
+                output_validation_columnar_metadata(payload)
+                    .get(*key)
+                    .is_some()
+            })
+}
+
+fn output_validation_columnar_field_specs(
+    schema: &Value,
+) -> (Vec<(String, serde_json::Map<String, Value>)>, Vec<String>) {
+    let fields = schema
+        .get("fields")
+        .or_else(|| schema.get("columns"))
+        .unwrap_or(schema);
+    let mut specs = Vec::new();
+    let mut errors = Vec::new();
+    let mut seen = BTreeMap::<String, usize>::new();
+    match fields {
+        Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                match item {
+                    Value::String(name) if !name.trim().is_empty() => {
+                        specs.push((name.trim().to_string(), serde_json::Map::new()));
+                    }
+                    Value::Object(obj) => {
+                        let name = obj
+                            .get("name")
+                            .or_else(|| obj.get("column"))
+                            .or_else(|| obj.get("column_name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim();
+                        if name.is_empty() {
+                            errors.push(format!("columnar field {idx}: missing name"));
+                        } else {
+                            specs.push((name.to_string(), obj.clone()));
+                        }
+                    }
+                    _ => errors.push(format!("columnar field {idx}: unsupported field shape")),
+                }
+            }
+        }
+        Value::Object(items) => {
+            for (name, spec) in items {
+                let spec_obj = match spec {
+                    Value::Object(obj) => obj.clone(),
+                    Value::String(kind) => {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("type".to_string(), Value::String(kind.clone()));
+                        obj
+                    }
+                    _ => serde_json::Map::new(),
+                };
+                specs.push((name.clone(), spec_obj));
+            }
+        }
+        _ => errors.push("columnar schema fields must be an array or object".to_string()),
+    }
+    for (name, _) in &specs {
+        let count = seen.entry(name.clone()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            errors.push(format!("columnar field '{name}' is duplicated"));
+        }
+    }
+    (specs, errors)
+}
+
+fn output_validation_columnar_type_known(kind: &str) -> bool {
+    let lower = kind.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    matches!(
+        lower.as_str(),
+        "boolean"
+            | "bool"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "int96"
+            | "float"
+            | "float16"
+            | "float32"
+            | "float64"
+            | "double"
+            | "byte_array"
+            | "fixed_len_byte_array"
+            | "binary"
+            | "large_binary"
+            | "utf8"
+            | "large_utf8"
+            | "string"
+            | "date32"
+            | "date64"
+            | "timestamp"
+            | "time32"
+            | "time64"
+            | "duration"
+            | "interval"
+            | "decimal"
+            | "decimal128"
+            | "decimal256"
+            | "list"
+            | "large_list"
+            | "fixed_size_list"
+            | "struct"
+            | "map"
+            | "dictionary"
+            | "null"
+    ) || lower.starts_with("timestamp[")
+        || lower.starts_with("decimal(")
+        || lower.starts_with("list<")
+        || lower.starts_with("struct<")
+        || lower.starts_with("map<")
+}
+
+fn output_validation_columnar_integer(metadata: &Value, keys: &[&str]) -> Option<i128> {
+    keys.iter()
+        .find_map(|key| metadata.get(*key).and_then(output_validation_json_integer))
+}
+
+fn output_validation_columnar_row_groups<'a>(metadata: &'a Value) -> Option<&'a Vec<Value>> {
+    metadata
+        .get("row_groups")
+        .or_else(|| metadata.get("rowGroups"))
+        .and_then(Value::as_array)
+}
+
+fn output_validation_columnar_reference(payload: &Value, validator: &str) -> Value {
+    let Some(schema) = output_validation_columnar_schema(payload) else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "payload needs schema, parquet_schema, parquetSchema, arrow_schema, or arrowSchema",
+            Vec::new(),
+        );
+    };
+    let metadata = output_validation_columnar_metadata(payload);
+    let (fields, mut errors) = output_validation_columnar_field_specs(schema);
+    if fields.is_empty() {
+        errors.push("columnar schema must contain at least one field".to_string());
+    }
+    for (name, spec) in &fields {
+        let kind = spec
+            .get("type")
+            .or_else(|| spec.get("data_type"))
+            .or_else(|| spec.get("dataType"))
+            .or_else(|| spec.get("logical_type"))
+            .or_else(|| spec.get("logicalType"))
+            .or_else(|| spec.get("physical_type"))
+            .or_else(|| spec.get("physicalType"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !output_validation_columnar_type_known(kind) {
+            errors.push(format!("columnar field '{name}' has unknown type {kind:?}"));
+        }
+    }
+
+    let row_count = output_validation_columnar_integer(
+        metadata,
+        &["num_rows", "numRows", "row_count", "rowCount"],
+    );
+    if let Some(row_count) = row_count {
+        if row_count < 0 {
+            errors.push(format!(
+                "columnar row count must be non-negative, got {row_count}"
+            ));
+        }
+    }
+    if let Some(file_size) =
+        output_validation_columnar_integer(metadata, &["file_size", "fileSize", "size_bytes"])
+    {
+        if file_size <= 0 {
+            errors.push(format!(
+                "columnar file size must be positive, got {file_size}"
+            ));
+        }
+    }
+    if let Some(column_count) = output_validation_columnar_integer(
+        metadata,
+        &["num_columns", "numColumns", "column_count", "columnCount"],
+    ) {
+        if column_count != fields.len() as i128 {
+            errors.push(format!(
+                "columnar metadata says {column_count} columns but schema has {} fields",
+                fields.len()
+            ));
+        }
+    }
+    if let Some(compression) = metadata.get("compression").and_then(Value::as_str) {
+        let compression = compression.trim().to_ascii_lowercase();
+        if !matches!(
+            compression.as_str(),
+            "uncompressed" | "none" | "snappy" | "gzip" | "brotli" | "lz4" | "lz4_raw" | "zstd"
+        ) {
+            errors.push(format!(
+                "columnar compression {compression:?} is not recognized"
+            ));
+        }
+    }
+    if let Some(row_groups) = output_validation_columnar_row_groups(metadata) {
+        if let Some(expected_groups) = output_validation_columnar_integer(
+            metadata,
+            &[
+                "num_row_groups",
+                "numRowGroups",
+                "row_group_count",
+                "rowGroupCount",
+            ],
+        ) {
+            if expected_groups != row_groups.len() as i128 {
+                errors.push(format!(
+                    "columnar metadata says {expected_groups} row groups but payload has {}",
+                    row_groups.len()
+                ));
+            }
+        }
+        let mut sum = 0_i128;
+        let mut all_counts_present = true;
+        for (idx, group) in row_groups.iter().enumerate() {
+            let count = output_validation_columnar_integer(
+                group,
+                &["num_rows", "numRows", "row_count", "rowCount"],
+            );
+            match count {
+                Some(count) if count >= 0 => sum += count,
+                Some(count) => errors.push(format!("row group {idx}: negative row count {count}")),
+                None => all_counts_present = false,
+            }
+        }
+        if all_counts_present {
+            if let Some(row_count) = row_count {
+                if row_count >= 0 && sum != row_count {
+                    errors.push(format!(
+                        "row group row counts sum to {sum}, expected {row_count}"
+                    ));
+                }
+            }
+        }
+    }
+
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
+    )
+}
+
+fn output_validation_has_profile_payload(payload: &Value) -> bool {
+    [
+        "profile",
+        "profiles",
+        "statistics",
+        "stats",
+        "baseline",
+        "current",
+        "constraints",
+        "drift",
+        "anomalies",
+    ]
+    .iter()
+    .any(|key| payload.get(*key).is_some())
+}
+
+fn output_validation_profile_root<'a>(payload: &'a Value) -> &'a Value {
+    payload
+        .get("profile")
+        .or_else(|| payload.get("statistics"))
+        .or_else(|| payload.get("stats"))
+        .or_else(|| payload.get("current"))
+        .unwrap_or(payload)
+}
+
+fn output_validation_profile_features<'a>(
+    profile: &'a Value,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    if let Some(features) = profile
+        .get("features")
+        .or_else(|| profile.get("columns"))
+        .or_else(|| profile.get("variables"))
+        .or_else(|| profile.get("fields"))
+        .and_then(Value::as_object)
+    {
+        return Some(features);
+    }
+    let object = profile.as_object()?;
+    let feature_like = object.values().any(|value| {
+        value.as_object().is_some_and(|obj| {
+            [
+                "count", "missing", "mean", "min", "max", "stddev", "distinct", "type",
+            ]
+            .iter()
+            .any(|key| obj.contains_key(*key))
+        })
+    });
+    feature_like.then_some(object)
+}
+
+fn output_validation_profile_number(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Number(_)) => value.and_then(output_validation_json_number),
+        Some(Value::String(text)) => text.parse::<f64>().ok().filter(|number| number.is_finite()),
+        _ => None,
+    }
+}
+
+fn output_validation_profile_metric(feature: &Value, names: &[&str]) -> Option<f64> {
+    let obj = feature.as_object()?;
+    names
+        .iter()
+        .find_map(|name| output_validation_profile_number(obj.get(*name)))
+}
+
+fn output_validation_profile_known_type(kind: &str) -> bool {
+    matches!(
+        kind.trim().to_ascii_lowercase().as_str(),
+        "number"
+            | "numeric"
+            | "float"
+            | "double"
+            | "integer"
+            | "int"
+            | "long"
+            | "string"
+            | "categorical"
+            | "bool"
+            | "boolean"
+            | "datetime"
+            | "timestamp"
+            | "date"
+            | "object"
+            | "array"
+            | "unknown"
+    )
+}
+
+fn output_validation_profile_compare(
+    actual: f64,
+    comparison: &str,
+    target: f64,
+    tolerance: f64,
+) -> bool {
+    match comparison.trim().to_ascii_lowercase().as_str() {
+        "<" | "lt" => actual < target + tolerance,
+        "<=" | "le" | "lte" | "at-most" | "max" => actual <= target + tolerance,
+        ">" | "gt" => actual > target - tolerance,
+        ">=" | "ge" | "gte" | "at-least" | "min" => actual >= target - tolerance,
+        "==" | "=" | "eq" | "equal" => (actual - target).abs() <= tolerance,
+        "!=" | "ne" | "not-equal" => (actual - target).abs() > tolerance,
+        _ => false,
+    }
+}
+
+fn output_validation_profile_constraint_errors(
+    payload: &Value,
+    features: &serde_json::Map<String, Value>,
+) -> Vec<String> {
+    let Some(constraints) = payload
+        .get("constraints")
+        .or_else(|| payload.get("expectations"))
+        .or_else(|| payload.get("checks"))
+    else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    let constraint_iter: Vec<Value> = match constraints {
+        Value::Array(items) => items.clone(),
+        Value::Object(obj) => obj.values().cloned().collect(),
+        _ => {
+            return vec!["profile constraints must be an array or object".to_string()];
+        }
+    };
+    for (idx, constraint) in constraint_iter.iter().enumerate() {
+        let Some(obj) = constraint.as_object() else {
+            errors.push(format!("profile constraint {idx}: must be an object"));
+            continue;
+        };
+        let feature_name = obj
+            .get("feature")
+            .or_else(|| obj.get("column"))
+            .or_else(|| obj.get("field"))
+            .or_else(|| obj.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let metric_name = obj
+            .get("metric")
+            .or_else(|| obj.get("stat"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let comparison = obj
+            .get("comparison")
+            .or_else(|| obj.get("op"))
+            .or_else(|| obj.get("operator"))
+            .and_then(Value::as_str)
+            .unwrap_or("<=");
+        let target =
+            output_validation_profile_number(obj.get("target").or_else(|| obj.get("value")));
+        let tolerance = output_validation_profile_number(obj.get("tolerance")).unwrap_or(0.0);
+        if feature_name.is_empty() || metric_name.is_empty() {
+            errors.push(format!(
+                "profile constraint {idx}: needs feature/column and metric"
+            ));
+            continue;
+        }
+        let Some(feature) = features.get(feature_name) else {
+            errors.push(format!(
+                "profile constraint {idx}: feature '{feature_name}' not found"
+            ));
+            continue;
+        };
+        let Some(actual) = output_validation_profile_metric(feature, &[metric_name]) else {
+            errors.push(format!(
+                "profile constraint {idx}: metric '{metric_name}' not found on '{feature_name}'"
+            ));
+            continue;
+        };
+        let Some(target) = target else {
+            errors.push(format!("profile constraint {idx}: target must be numeric"));
+            continue;
+        };
+        if !output_validation_profile_compare(actual, comparison, target, tolerance) {
+            errors.push(format!(
+                "profile constraint {idx}: {feature_name}.{metric_name}={actual} failed {comparison} {target}"
+            ));
+        }
+    }
+    errors
+}
+
+fn output_validation_profile_drift_errors(payload: &Value) -> Vec<String> {
+    let Some(baseline) = payload.get("baseline") else {
+        return Vec::new();
+    };
+    let Some(current) = payload.get("current").or_else(|| payload.get("profile")) else {
+        return Vec::new();
+    };
+    let Some(baseline_features) = output_validation_profile_features(baseline) else {
+        return vec!["baseline profile has no feature statistics".to_string()];
+    };
+    let Some(current_features) = output_validation_profile_features(current) else {
+        return vec!["current profile has no feature statistics".to_string()];
+    };
+    let threshold = output_validation_profile_number(
+        payload
+            .get("drift_threshold")
+            .or_else(|| payload.get("max_drift"))
+            .or_else(|| payload.get("maxDrift")),
+    )
+    .unwrap_or(0.25);
+    let mut errors = Vec::new();
+    for (name, current_feature) in current_features {
+        let Some(baseline_feature) = baseline_features.get(name) else {
+            continue;
+        };
+        for metric in ["mean", "missing", "missing_fraction", "null_fraction"] {
+            let current_metric = output_validation_profile_metric(current_feature, &[metric]);
+            let baseline_metric = output_validation_profile_metric(baseline_feature, &[metric]);
+            if let (Some(current_metric), Some(baseline_metric)) = (current_metric, baseline_metric)
+            {
+                let delta = (current_metric - baseline_metric).abs();
+                if delta > threshold {
+                    errors.push(format!(
+                        "profile drift: {name}.{metric} changed by {delta}, threshold {threshold}"
+                    ));
+                }
+            }
+        }
+    }
+    errors
+}
+
+fn output_validation_profile_reference(payload: &Value, validator: &str) -> Value {
+    let profile = output_validation_profile_root(payload);
+    let Some(features) = output_validation_profile_features(profile) else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "payload needs profile/statistics with features, columns, variables, or field metrics",
+            Vec::new(),
+        );
+    };
+    let mut errors = Vec::new();
+    if features.is_empty() {
+        errors.push("profile must contain at least one feature".to_string());
+    }
+    let row_count = output_validation_profile_number(
+        profile
+            .get("row_count")
+            .or_else(|| profile.get("rowCount"))
+            .or_else(|| profile.get("num_rows"))
+            .or_else(|| profile.get("numRows")),
+    );
+    if let Some(row_count) = row_count {
+        if row_count < 0.0 {
+            errors.push(format!(
+                "profile row count must be non-negative, got {row_count}"
+            ));
+        }
+    }
+    for (name, feature) in features {
+        let Some(feature_obj) = feature.as_object() else {
+            errors.push(format!("profile feature '{name}' must be an object"));
+            continue;
+        };
+        if let Some(kind) = feature_obj
+            .get("type")
+            .or_else(|| feature_obj.get("data_type"))
+            .or_else(|| feature_obj.get("dataType"))
+            .and_then(Value::as_str)
+        {
+            if !output_validation_profile_known_type(kind) {
+                errors.push(format!(
+                    "profile feature '{name}' has unknown type {kind:?}"
+                ));
+            }
+        }
+        let count = output_validation_profile_metric(feature, &["count", "n"]);
+        if let Some(count) = count {
+            if count < 0.0 {
+                errors.push(format!(
+                    "profile feature '{name}' has negative count {count}"
+                ));
+            }
+            if let Some(row_count) = row_count {
+                if row_count >= 0.0 && count > row_count {
+                    errors.push(format!(
+                        "profile feature '{name}' count {count} exceeds row count {row_count}"
+                    ));
+                }
+            }
+        }
+        let missing = output_validation_profile_metric(
+            feature,
+            &["missing", "null_count", "nullCount", "missing_count"],
+        );
+        if let Some(missing) = missing {
+            if missing < 0.0 {
+                errors.push(format!(
+                    "profile feature '{name}' has negative missing count {missing}"
+                ));
+            }
+            if let Some(count) = count {
+                if count >= 0.0 && missing > count {
+                    errors.push(format!(
+                        "profile feature '{name}' missing count {missing} exceeds count {count}"
+                    ));
+                }
+            }
+        }
+        let distinct =
+            output_validation_profile_metric(feature, &["distinct", "unique", "distinct_count"]);
+        if let (Some(distinct), Some(count)) = (distinct, count) {
+            if distinct < 0.0 {
+                errors.push(format!(
+                    "profile feature '{name}' has negative distinct count {distinct}"
+                ));
+            } else if count >= 0.0 && distinct > count {
+                errors.push(format!(
+                    "profile feature '{name}' distinct count {distinct} exceeds count {count}"
+                ));
+            }
+        }
+        let minimum = output_validation_profile_metric(feature, &["min", "minimum"]);
+        let maximum = output_validation_profile_metric(feature, &["max", "maximum"]);
+        if let (Some(minimum), Some(maximum)) = (minimum, maximum) {
+            if minimum > maximum {
+                errors.push(format!(
+                    "profile feature '{name}' minimum {minimum} exceeds maximum {maximum}"
+                ));
+            }
+            if let Some(mean) = output_validation_profile_metric(feature, &["mean", "avg"]) {
+                if mean < minimum || mean > maximum {
+                    errors.push(format!(
+                        "profile feature '{name}' mean {mean} is outside [{minimum}, {maximum}]"
+                    ));
+                }
+            }
+        }
+    }
+    errors.extend(output_validation_profile_constraint_errors(
+        payload, features,
+    ));
+    errors.extend(output_validation_profile_drift_errors(payload));
+    if let Some(anomalies) = payload.get("anomalies").and_then(Value::as_array) {
+        if !anomalies.is_empty()
+            && payload
+                .get("allow_anomalies")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                == false
+        {
+            errors.push(format!("profile reports {} anomalies", anomalies.len()));
+        }
+    }
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
+    )
+}
+
 fn output_validation_object_fields(
     schema: &Value,
 ) -> BTreeMap<String, serde_json::Map<String, Value>> {
@@ -5474,6 +6136,299 @@ fn output_validation_yaml_reference(payload: &Value, validator: &str) -> Value {
     )
 }
 
+fn output_validation_cue_without_comments(text: &str) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(text.len());
+    let mut errors = Vec::new();
+    let mut chars = text.chars().peekable();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut block_comment_line = None::<usize>;
+    let mut line = 1_usize;
+    while let Some(ch) = chars.next() {
+        if ch == '\n' {
+            line += 1;
+        }
+        if let Some(start_line) = block_comment_line {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                block_comment_line = None;
+                out.push(' ');
+            } else if ch == '\n' {
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+            if chars.peek().is_none() && block_comment_line == Some(start_line) {
+                errors.push(format!(
+                    "line {start_line} starts an unterminated CUE block comment"
+                ));
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            out.push(ch);
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            out.push(ch);
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            out.push(ch);
+            continue;
+        }
+        if quote.is_none() && ch == '/' && chars.peek() == Some(&'/') {
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    line += 1;
+                    out.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if quote.is_none() && ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            block_comment_line = Some(line);
+            out.push(' ');
+            continue;
+        }
+        out.push(ch);
+    }
+    if let Some(active_quote) = quote {
+        errors.push(format!(
+            "cue has an unterminated {active_quote} quoted string"
+        ));
+    }
+    if let Some(start_line) = block_comment_line {
+        errors.push(format!(
+            "line {start_line} starts an unterminated CUE block comment"
+        ));
+    }
+    (out, errors)
+}
+
+fn output_validation_text_looks_cue(text: &str) -> bool {
+    let (without_comments, _) = output_validation_cue_without_comments(text);
+    let lower = without_comments.trim_start().to_ascii_lowercase();
+    lower.starts_with("package ")
+        || lower.starts_with("import ")
+        || lower.contains("#")
+        || lower.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.contains(':') || trimmed.contains("=~") || trimmed.contains("!=")
+        })
+}
+
+fn output_validation_has_cue_payload(payload: &Value) -> bool {
+    [
+        "cue",
+        "cue_schema",
+        "cueSchema",
+        "document",
+        "text",
+        "content",
+    ]
+    .iter()
+    .any(|key| {
+        payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(output_validation_text_looks_cue)
+    }) || payload
+        .get("schema")
+        .and_then(Value::as_str)
+        .is_some_and(output_validation_text_looks_cue)
+}
+
+fn output_validation_cue_field_constraint(line: &str) -> Option<(String, String, bool)> {
+    let trimmed = line
+        .trim()
+        .trim_end_matches(',')
+        .trim_end_matches(';')
+        .trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("package ")
+        || trimmed.starts_with("import ")
+        || trimmed.starts_with("//")
+        || matches!(trimmed, "{" | "}" | "[" | "]")
+    {
+        return None;
+    }
+    let (label, rest) = trimmed.split_once(':')?;
+    let label = label.trim();
+    if label.starts_with('#') || label.starts_with('@') || label.contains(' ') {
+        return None;
+    }
+    let optional = label.ends_with('?');
+    let label = label
+        .trim_end_matches('?')
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim();
+    if label.is_empty()
+        || !label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return None;
+    }
+    let constraint = rest.trim();
+    if constraint.is_empty() {
+        return None;
+    }
+    Some((label.to_string(), constraint.to_string(), optional))
+}
+
+fn output_validation_cue_scalar_constraint_matches(constraint: &str, value: &Value) -> bool {
+    let constraint = constraint.trim().trim_end_matches(',').trim();
+    let lower = constraint.to_ascii_lowercase();
+    if matches!(lower.as_str(), "_" | "any" | "top") {
+        return true;
+    }
+    if lower.starts_with("string") {
+        return value.is_string();
+    }
+    if lower.starts_with("number") {
+        return value.is_number();
+    }
+    if lower.starts_with("int") {
+        return value.as_i64().is_some() || value.as_u64().is_some();
+    }
+    if lower.starts_with("bool") || lower.starts_with("boolean") {
+        return value.is_boolean();
+    }
+    if constraint.starts_with('[') || lower.starts_with("list") {
+        return value.is_array();
+    }
+    if constraint.starts_with('{') || lower.starts_with("struct") {
+        return value.is_object();
+    }
+    if constraint.starts_with('"') && value.is_string() {
+        let Some(actual) = value.as_str() else {
+            return false;
+        };
+        return constraint
+            .split('|')
+            .map(str::trim)
+            .filter_map(|part| part.strip_prefix('"')?.split_once('"').map(|(lit, _)| lit))
+            .any(|literal| literal == actual);
+    }
+    true
+}
+
+fn output_validation_cue_reference(payload: &Value, validator: &str) -> Value {
+    let Some(text) = output_validation_payload_text(
+        payload,
+        &[
+            "cue",
+            "cue_schema",
+            "cueSchema",
+            "schema",
+            "document",
+            "text",
+            "content",
+        ],
+    ) else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "payload needs cue, cue_schema, cueSchema, schema text, document, text, or content",
+            Vec::new(),
+        );
+    };
+    let (without_comments, mut errors) = output_validation_cue_without_comments(text);
+    errors.extend(output_validation_balanced_delimiters(&without_comments));
+    if without_comments.trim().is_empty() {
+        errors.push("cue document is empty".to_string());
+    }
+    if !without_comments.contains(':')
+        && !without_comments.contains('=')
+        && !without_comments
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("package ")
+    {
+        errors.push("cue document has no fields, definitions, or declarations".to_string());
+    }
+
+    let instance = payload
+        .get("instance")
+        .or_else(|| payload.get("data"))
+        .or_else(|| payload.get("value"));
+    let mut depth = 0_i32;
+    let mut constraints = Vec::new();
+    for (line_idx, line) in without_comments.lines().enumerate() {
+        let trimmed = line.trim();
+        if depth == 0 {
+            if let Some((field, constraint, optional)) =
+                output_validation_cue_field_constraint(trimmed)
+            {
+                constraints.push((field, constraint, optional));
+            } else {
+                let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+                if tokens.len() == 2
+                    && matches!(tokens[1], "string" | "number" | "int" | "bool" | "boolean")
+                    && !trimmed.contains(':')
+                    && !trimmed.contains('=')
+                {
+                    errors.push(format!(
+                        "cue line {} looks like a field missing ':'",
+                        line_idx + 1
+                    ));
+                }
+            }
+        }
+        for ch in trimmed.chars() {
+            match ch {
+                '{' | '[' | '(' => depth += 1,
+                '}' | ']' | ')' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    if let Some(instance) = instance {
+        if let Some(instance_obj) = instance.as_object() {
+            for (field, constraint, optional) in constraints {
+                match instance_obj.get(&field) {
+                    Some(value)
+                        if !output_validation_cue_scalar_constraint_matches(&constraint, value) =>
+                    {
+                        errors.push(format!(
+                            "$.{field}: value does not satisfy CUE constraint {constraint:?}"
+                        ));
+                    }
+                    Some(_) => {}
+                    None if !optional => errors.push(format!("$.{field}: missing required field")),
+                    None => {}
+                }
+            }
+        } else if !constraints.is_empty() {
+            errors.push("instance must be an object for top-level CUE field checks".to_string());
+        }
+    }
+
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
+    )
+}
+
 fn output_validation_graphql_reference(payload: &Value, validator: &str) -> Value {
     let Some(text) = output_validation_payload_text(
         payload,
@@ -5735,10 +6690,16 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         "json-schema" | "jsonschema" => {
             output_validation_json_schema_reference(payload, "builtin:json-schema-subset")
         }
-        "ajv" | "ajv-cli" | "check-jsonschema" | "cue" => output_validation_json_schema_reference(
+        "ajv" | "ajv-cli" | "check-jsonschema" => output_validation_json_schema_reference(
             payload,
             &format!("builtin:json-schema-subset-for-{tool}"),
         ),
+        "cue" if kind == "cue-validation" || output_validation_has_cue_payload(payload) => {
+            output_validation_cue_reference(payload, "builtin:cue-structural")
+        }
+        "cue" => {
+            output_validation_json_schema_reference(payload, "builtin:json-schema-subset-for-cue")
+        }
         "openapi"
         | "openapi-validator"
         | "openapi-generator-cli"
@@ -5796,6 +6757,32 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         "sqlfluff" | "sql-lint" | "sql-validator" => {
             output_validation_sql_reference(payload, &format!("builtin:sql-structural-for-{tool}"))
         }
+        "parquet-tools" | "apache-arrow" | "arrow-adapter" | "pyarrow-adapter"
+            if kind == "parquet-validation"
+                || kind == "arrow-validation"
+                || output_validation_has_columnar_payload(payload) =>
+        {
+            output_validation_columnar_reference(
+                payload,
+                &format!("builtin:columnar-metadata-for-{tool}"),
+            )
+        }
+        "whylogs"
+        | "evidently"
+        | "deepchecks"
+        | "tensorflow-data-validation"
+        | "soda-core"
+        | "deequ"
+            if kind == "profile-validation"
+                || kind == "data-profile-validation"
+                || kind == "drift-validation"
+                || output_validation_has_profile_payload(payload) =>
+        {
+            output_validation_profile_reference(
+                payload,
+                &format!("builtin:data-profile-structural-for-{tool}"),
+            )
+        }
         "frictionless"
         | "pandera"
         | "dbt"
@@ -5838,6 +6825,15 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         _ if kind == "sql-validation" || kind == "dbt-validation" => {
             output_validation_sql_reference(payload, "builtin:sql-structural")
         }
+        _ if kind == "parquet-validation" || kind == "arrow-validation" => {
+            output_validation_columnar_reference(payload, "builtin:columnar-metadata")
+        }
+        _ if kind == "profile-validation"
+            || kind == "data-profile-validation"
+            || kind == "drift-validation" =>
+        {
+            output_validation_profile_reference(payload, "builtin:data-profile-structural")
+        }
         _ if kind == "protobuf-validation" => output_validation_protobuf_reference(payload),
         _ if kind == "avro-validation" => output_validation_avro_reference(payload),
         "yamllint" => output_validation_yaml_reference(payload, "builtin:yaml-structural"),
@@ -5846,6 +6842,9 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         }
         _ if kind == "yaml-validation" || kind == "yamllint-validation" => {
             output_validation_yaml_reference(payload, "builtin:yaml-structural")
+        }
+        _ if kind == "cue-validation" => {
+            output_validation_cue_reference(payload, "builtin:cue-structural")
         }
         _ if kind == "graphql-validation" || kind == "graphql-schema-validation" => {
             output_validation_graphql_reference(payload, "builtin:graphql-schema-structural")
@@ -6141,6 +7140,290 @@ fn model_validation_asp_reference(payload: &Value, tool: &str) -> Value {
         "",
         "",
     )
+}
+
+fn model_validation_payload_optional_text<'a>(
+    payload: &'a Value,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .filter_map(|key| payload.get(*key).and_then(Value::as_str))
+        .find(|text| !text.trim().is_empty())
+}
+
+fn model_validation_pddl_without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let before_comment = line.split_once(';').map_or(line, |(before, _)| before);
+        out.push_str(before_comment);
+        out.push('\n');
+    }
+    out
+}
+
+fn model_validation_pddl_text_has_marker(text: &str, marker: &str) -> bool {
+    model_validation_pddl_without_comments(text)
+        .to_ascii_lowercase()
+        .contains(marker)
+}
+
+fn model_validation_payload_has_pddl(payload: &Value) -> bool {
+    [
+        "domain",
+        "domain_pddl",
+        "domainPddl",
+        "problem",
+        "problem_pddl",
+        "problemPddl",
+        "pddl",
+        "model",
+        "text",
+        "content",
+        "plan",
+        "plan_text",
+        "solution",
+        "output",
+    ]
+    .iter()
+    .any(|key| {
+        payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| {
+                let lower = model_validation_pddl_without_comments(text).to_ascii_lowercase();
+                lower.contains("(define")
+                    || lower.contains("(:action")
+                    || lower.contains("(:durative-action")
+                    || lower.lines().any(|line| {
+                        let action = model_validation_pddl_plan_action_fragment(line);
+                        action.starts_with('(') && action.contains(')')
+                    })
+            })
+    })
+}
+
+fn model_validation_pddl_domain_errors(text: &str) -> Vec<String> {
+    let stripped = model_validation_pddl_without_comments(text);
+    let lower = stripped.to_ascii_lowercase();
+    let mut errors = output_validation_balanced_delimiters(&stripped);
+    if !lower.contains("(define") {
+        errors.push("domain: missing (define ...) form".to_string());
+    }
+    if !lower.contains("(domain") {
+        errors.push("domain: missing (domain NAME) declaration".to_string());
+    }
+    if !lower.contains(":predicates")
+        && !lower.contains(":functions")
+        && !lower.contains(":action")
+        && !lower.contains(":durative-action")
+    {
+        errors.push("domain: missing predicates, functions, or actions".to_string());
+    }
+    if !lower.contains(":action") && !lower.contains(":durative-action") {
+        errors.push("domain: missing action or durative-action declaration".to_string());
+    }
+    errors
+}
+
+fn model_validation_pddl_problem_errors(text: &str) -> Vec<String> {
+    let stripped = model_validation_pddl_without_comments(text);
+    let lower = stripped.to_ascii_lowercase();
+    let mut errors = output_validation_balanced_delimiters(&stripped);
+    if !lower.contains("(define") {
+        errors.push("problem: missing (define ...) form".to_string());
+    }
+    if !lower.contains("(problem") {
+        errors.push("problem: missing (problem NAME) declaration".to_string());
+    }
+    for marker in [":domain", ":init", ":goal"] {
+        if !lower.contains(marker) {
+            errors.push(format!("problem: missing {marker} section"));
+        }
+    }
+    errors
+}
+
+fn model_validation_pddl_plan_action_fragment(line: &str) -> &str {
+    let trimmed = line.trim();
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        if prefix.trim().parse::<f64>().is_ok() {
+            return rest.trim();
+        }
+    }
+    trimmed
+}
+
+fn model_validation_pddl_plan_errors(text: &str, allow_empty_plan: bool) -> (Vec<String>, usize) {
+    let stripped = model_validation_pddl_without_comments(text);
+    let mut errors = output_validation_balanced_delimiters(&stripped);
+    let mut action_count = 0_usize;
+    for (line_idx, line) in stripped.lines().enumerate() {
+        let action = model_validation_pddl_plan_action_fragment(line);
+        if action.is_empty() {
+            continue;
+        }
+        if action.starts_with('(') && action.contains(')') {
+            action_count += 1;
+            continue;
+        }
+        if action.to_ascii_lowercase().starts_with("cost")
+            || action.to_ascii_lowercase().starts_with("metric")
+        {
+            continue;
+        }
+        errors.push(format!(
+            "plan line {} is not a parenthesized PDDL action",
+            line_idx + 1
+        ));
+    }
+    if action_count == 0 && !allow_empty_plan {
+        errors.push("plan: missing parenthesized action lines".to_string());
+    }
+    (errors, action_count)
+}
+
+fn model_validation_pddl_reference(payload: &Value, tool: &str) -> Value {
+    let tool = model_validation_normalized_tool(tool);
+    let kind = payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(model_validation_normalized_tool)
+        .unwrap_or_default();
+    let validator = format!("builtin:pddl-structural-for-{tool}");
+    let generic =
+        model_validation_payload_optional_text(payload, &["pddl", "model", "text", "content"]);
+    let domain = model_validation_payload_optional_text(
+        payload,
+        &["domain", "domain_pddl", "domainPddl", "domain_text"],
+    )
+    .or_else(|| generic.filter(|text| model_validation_pddl_text_has_marker(text, "(domain")));
+    let problem = model_validation_payload_optional_text(
+        payload,
+        &[
+            "problem",
+            "problem_pddl",
+            "problemPddl",
+            "problem_text",
+            "instance",
+        ],
+    )
+    .or_else(|| generic.filter(|text| model_validation_pddl_text_has_marker(text, "(problem")));
+    let plan = model_validation_payload_optional_text(
+        payload,
+        &["plan", "plan_text", "solution", "output", "actions"],
+    );
+    let plan_validator_tools = ["pddl-val", "validate", "val", "pddl-validate"];
+    let planning_solver_tools = [
+        "fast-downward",
+        "fast-downward.py",
+        "lpg-td",
+        "lpg",
+        "optic",
+        "optic-clp",
+        "enhsp",
+        "enhsp.jar",
+    ];
+    let needs_plan = kind.contains("plan") || plan_validator_tools.contains(&tool.as_str());
+    let needs_domain_problem =
+        needs_plan || planning_solver_tools.contains(&tool.as_str()) || kind.contains("planning");
+    if generic.is_none() && domain.is_none() && problem.is_none() && plan.is_none() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            &validator,
+            "payload needs PDDL domain/problem text or a plan",
+            "",
+            "",
+        );
+    }
+    if needs_domain_problem && domain.is_none() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            &validator,
+            "payload needs domain, domain_pddl, domainPddl, or combined pddl/model/text content",
+            "",
+            "",
+        );
+    }
+    if needs_domain_problem && problem.is_none() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            &validator,
+            "payload needs problem, problem_pddl, problemPddl, or combined pddl/model/text content",
+            "",
+            "",
+        );
+    }
+    if needs_plan && plan.is_none() {
+        return model_validation_result(
+            "failed",
+            "failure",
+            &validator,
+            "payload needs plan, plan_text, solution, output, or actions",
+            "",
+            "",
+        );
+    }
+
+    let mut errors = Vec::new();
+    if let Some(domain) = domain {
+        errors.extend(model_validation_pddl_domain_errors(domain));
+    }
+    if let Some(problem) = problem {
+        errors.extend(model_validation_pddl_problem_errors(problem));
+    }
+    if domain.is_none() && problem.is_none() {
+        if let Some(generic) = generic {
+            let stripped = model_validation_pddl_without_comments(generic);
+            let lower = stripped.to_ascii_lowercase();
+            errors.extend(output_validation_balanced_delimiters(&stripped));
+            if !lower.contains("(define") {
+                errors.push("pddl: missing (define ...) form".to_string());
+            }
+            if !lower.contains("(domain") && !lower.contains("(problem") {
+                errors.push("pddl: missing domain or problem declaration".to_string());
+            }
+        }
+    }
+    let mut action_count = 0_usize;
+    if let Some(plan) = plan {
+        let (plan_errors, count) = model_validation_pddl_plan_errors(
+            plan,
+            payload
+                .get("allow_empty_plan")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        );
+        errors.extend(plan_errors);
+        action_count = count;
+    }
+
+    if errors.is_empty() {
+        let stdout = format!(
+            "domain={} problem={} plan_actions={action_count}\n",
+            domain.is_some(),
+            problem.is_some()
+        );
+        model_validation_result(
+            "ok",
+            "valid",
+            &validator,
+            "PDDL structure accepted",
+            stdout,
+            "",
+        )
+    } else {
+        model_validation_result(
+            "ok",
+            "invalid",
+            &validator,
+            errors.first().cloned().unwrap_or_default(),
+            "",
+            errors.join("\n"),
+        )
+    }
 }
 
 fn model_validation_parse_dimacs_cnf(text: &str) -> Result<(usize, Vec<Vec<i32>>), String> {
@@ -6602,6 +7885,20 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "python-sat",
         "python-sat-adapter",
     ];
+    let pddl_tools = [
+        "pddl-val",
+        "validate",
+        "val",
+        "pddl-validate",
+        "fast-downward",
+        "fast-downward.py",
+        "lpg-td",
+        "lpg",
+        "optic",
+        "optic-clp",
+        "enhsp",
+        "enhsp.jar",
+    ];
     if kind == "minizinc-validation" || minizinc_tools.contains(&tool.as_str()) {
         return model_validation_minizinc_reference(payload);
     }
@@ -6642,6 +7939,17 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
             && model_validation_payload_has_opb(payload))
     {
         return model_validation_opb_reference(payload);
+    }
+    if matches!(
+        kind.as_str(),
+        "pddl-validation"
+            | "pddl-plan-validation"
+            | "plan-validation"
+            | "planning-validation"
+            | "classical-planning-validation"
+    ) || (pddl_tools.contains(&tool.as_str()) && model_validation_payload_has_pddl(payload))
+    {
+        return model_validation_pddl_reference(payload, &tool);
     }
     if kind == "dimacs-validation"
         || kind == "dimacs-cnf-validation"
@@ -11857,6 +13165,53 @@ mod tests {
     }
 
     #[test]
+    fn cue_payloads_use_rust_structural_fallback_without_breaking_json_schema_alias() {
+        let cue = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "cue-validation",
+                "cue": "objective: number\nstatus?: \"ok\" | \"warn\"\n",
+                "instance": {"objective": 3.5, "status": "ok"},
+            }),
+            "cue",
+        );
+        assert_eq!(cue["status"].as_str(), Some("ok"));
+        assert_eq!(cue["verdict"].as_str(), Some("valid"));
+        assert_eq!(cue["validator"].as_str(), Some("builtin:cue-structural"));
+
+        let bad_cue = run_output_validation_json_with_rust_reference(
+            &json!({
+                "cue": "objective: number\nstatus: bool\n",
+                "instance": {"objective": "wide", "status": "ok"},
+            }),
+            "cue",
+        );
+        assert_eq!(bad_cue["status"].as_str(), Some("ok"));
+        assert_eq!(bad_cue["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            bad_cue["validator"].as_str(),
+            Some("builtin:cue-structural")
+        );
+
+        let json_schema_alias = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "type": "object",
+                    "required": ["objective"],
+                    "properties": {"objective": {"type": "number"}}
+                },
+                "instance": {"objective": 3.5},
+            }),
+            "cue",
+        );
+        assert_eq!(json_schema_alias["status"].as_str(), Some("ok"));
+        assert_eq!(json_schema_alias["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            json_schema_alias["validator"].as_str(),
+            Some("builtin:json-schema-subset-for-cue")
+        );
+    }
+
+    #[test]
     fn table_package_tools_use_rust_csv_fallback_when_payload_is_table_shaped() {
         let valid = run_output_validation_json_with_rust_reference(
             &json!({
@@ -11897,6 +13252,159 @@ mod tests {
         assert_eq!(
             invalid["validator"].as_str(),
             Some("builtin:table-schema-subset-for-great-expectations")
+        );
+    }
+
+    #[test]
+    fn columnar_metadata_tools_use_rust_structural_fallbacks() {
+        let parquet = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "parquet-validation",
+                "schema": {
+                    "fields": [
+                        {"name": "episode", "type": "int64"},
+                        {"name": "score", "type": "double"},
+                        {"name": "status", "type": "utf8"}
+                    ]
+                },
+                "metadata": {
+                    "format": "parquet",
+                    "num_rows": 3,
+                    "num_columns": 3,
+                    "num_row_groups": 2,
+                    "row_groups": [{"num_rows": 2}, {"num_rows": 1}],
+                    "compression": "zstd",
+                    "file_size": 1024
+                }
+            }),
+            "parquet-tools",
+        );
+        assert_eq!(parquet["status"].as_str(), Some("ok"));
+        assert_eq!(parquet["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            parquet["validator"].as_str(),
+            Some("builtin:columnar-metadata-for-parquet-tools")
+        );
+
+        let arrow = run_output_validation_json_with_rust_reference(
+            &json!({
+                "arrow_schema": {
+                    "fields": [
+                        {"name": "embedding", "type": "tensor"},
+                        {"name": "embedding", "type": "float64"}
+                    ]
+                },
+                "metadata": {
+                    "format": "arrow",
+                    "num_rows": 4,
+                    "num_columns": 1,
+                    "row_groups": [{"num_rows": 2}, {"num_rows": 1}],
+                    "compression": "mystery"
+                }
+            }),
+            "pyarrow_adapter",
+        );
+        assert_eq!(arrow["status"].as_str(), Some("ok"));
+        assert_eq!(arrow["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            arrow["validator"].as_str(),
+            Some("builtin:columnar-metadata-for-pyarrow-adapter")
+        );
+        assert!(
+            arrow["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.len() >= 3),
+            "{arrow:?}"
+        );
+
+        let table = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "columns": {"episode": {"type": "integer", "required": true}},
+                    "minRows": 1
+                },
+                "rows": [{"episode": 1}]
+            }),
+            "apache-arrow",
+        );
+        assert_eq!(table["status"].as_str(), Some("ok"));
+        assert_eq!(table["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            table["validator"].as_str(),
+            Some("builtin:table-schema-subset-for-apache-arrow")
+        );
+    }
+
+    #[test]
+    fn data_profile_tools_use_rust_structural_fallbacks() {
+        let whylogs = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "profile-validation",
+                "profile": {
+                    "row_count": 100,
+                    "features": {
+                        "score": {"type": "number", "count": 100, "missing": 0, "min": 0.0, "max": 10.0, "mean": 4.5, "distinct": 20},
+                        "status": {"type": "categorical", "count": 100, "missing": 0, "distinct": 3}
+                    }
+                },
+                "constraints": [
+                    {"feature": "score", "metric": "mean", "comparison": "<=", "target": 5.0}
+                ]
+            }),
+            "whylogs",
+        );
+        assert_eq!(whylogs["status"].as_str(), Some("ok"));
+        assert_eq!(whylogs["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            whylogs["validator"].as_str(),
+            Some("builtin:data-profile-structural-for-whylogs")
+        );
+
+        let evidently = run_output_validation_json_with_rust_reference(
+            &json!({
+                "baseline": {
+                    "features": {
+                        "score": {"type": "number", "count": 100, "missing": 0, "min": 0.0, "max": 10.0, "mean": 4.0}
+                    }
+                },
+                "current": {
+                    "features": {
+                        "score": {"type": "number", "count": 50, "missing": 70, "min": 8.0, "max": 3.0, "mean": 12.0}
+                    }
+                },
+                "drift_threshold": 0.5,
+                "anomalies": [{"feature": "score", "type": "range"}]
+            }),
+            "evidently",
+        );
+        assert_eq!(evidently["status"].as_str(), Some("ok"));
+        assert_eq!(evidently["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            evidently["validator"].as_str(),
+            Some("builtin:data-profile-structural-for-evidently")
+        );
+        assert!(
+            evidently["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.len() >= 4),
+            "{evidently:?}"
+        );
+
+        let table = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "columns": {"score": {"type": "number", "required": true}},
+                    "minRows": 1
+                },
+                "rows": [{"score": 4.0}]
+            }),
+            "deepchecks",
+        );
+        assert_eq!(table["status"].as_str(), Some("ok"));
+        assert_eq!(table["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            table["validator"].as_str(),
+            Some("builtin:table-schema-subset-for-deepchecks")
         );
     }
 
@@ -12087,6 +13595,49 @@ mod tests {
         assert_eq!(
             pysat_opb["validator"].as_str(),
             Some("builtin:opb-small-pb")
+        );
+    }
+
+    #[test]
+    fn pddl_planning_aliases_use_rust_structural_fallbacks() {
+        let domain = "(define (domain flank)\n  (:predicates (at ?p ?x) (clear ?x))\n  (:action move\n    :parameters (?p ?from ?to)\n    :precondition (and (at ?p ?from) (clear ?to))\n    :effect (and (not (at ?p ?from)) (at ?p ?to)))\n)\n";
+        let problem = "(define (problem spread-wide)\n  (:domain flank)\n  (:objects p1 left center)\n  (:init (at p1 center) (clear left))\n  (:goal (and (at p1 left)))\n)\n";
+        let plan = "0.000: (move p1 center left) [1.000]\n";
+        let val = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "plan-validation",
+                "domain": domain,
+                "problem": problem,
+                "plan": plan,
+            }),
+            "pddl_val",
+        );
+        assert_eq!(val["status"].as_str(), Some("ok"));
+        assert_eq!(val["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            val["validator"].as_str(),
+            Some("builtin:pddl-structural-for-pddl-val")
+        );
+
+        let fast_downward = run_model_validation_json_with_rust_reference(
+            &json!({
+                "domain": "(define (domain flank) (:predicates (at ?p ?x)) (:action move :parameters (?p ?x ?y) :precondition (at ?p ?x) :effect (at ?p ?y))",
+                "problem": problem,
+            }),
+            "fast-downward.py",
+        );
+        assert_eq!(fast_downward["status"].as_str(), Some("ok"));
+        assert_eq!(fast_downward["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            fast_downward["validator"].as_str(),
+            Some("builtin:pddl-structural-for-fast-downward.py")
+        );
+        assert!(
+            fast_downward["stderr"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unclosed"),
+            "{fast_downward:?}"
         );
     }
 

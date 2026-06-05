@@ -66,8 +66,10 @@ When one of `SOCCER_DATABASE_URL`, `AGENT_TASKS_RDS_DATABASE_URL`,
 loads the latest active policy for `SOCCER_EXPERIMENT_SLUG` before each newly
 submitted simulation and writes the result back to Postgres. The refresh includes
 MDP/POMDP policy entries, neural-network snapshots, and tactical-learning
-weights, so locally started runs and des-rs runs converge on the same active
-Postgres head while still batching completed-run writes. Set-play restart
+weights, so locally started runs and des-rs submissions converge on the same
+active Postgres head while still batching completed-run writes. The local batch
+and queue runners refresh before each newly dispatched simulation; the des-rs
+server adapter refreshes before each HTTP training request. Set-play restart
 training uses the same refresh path before each episode and archives stale
 output policies if a newer active head lands before the run is persisted. By
 default, Postgres tactical weights are authoritative for new simulation
@@ -136,3 +138,10 @@ server response before writing local artifacts. When Postgres resume/import is
 enabled, it also imports the returned `learnedParams` as a new
 `des_soccer_learning_policy_versions` row with `source_kind = 'import'`; stale
 remote results are archived instead of replacing a newer active policy.
+
+For database-fresh tactical weights between remote runs, submit smaller des-rs
+requests and keep `SOCCER_SERVER_RESUME_POSTGRES_POLICY=true` and
+`SOCCER_SERVER_IMPORT_POSTGRES_POLICY=true` enabled. Each request reloads the
+latest active Postgres policy before payload construction, then the import step
+publishes the returned MDP/POMDP, neural, and tactical-learning weights for the
+next local or des-rs request.

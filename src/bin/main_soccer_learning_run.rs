@@ -3255,6 +3255,27 @@ mod tests {
     }
 
     #[test]
+    fn default_postgres_refreshes_before_new_sims_even_with_resume_artifacts() {
+        assert!(DEFAULT_SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT);
+        assert!(soccer_should_refresh_postgres_for_new_sim(
+            true,
+            DEFAULT_SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT
+        ));
+    }
+
+    #[test]
+    fn default_evolutionary_search_stays_enabled_for_new_sims() {
+        let options = SoccerEvolutionOptions::default();
+
+        assert!(DEFAULT_SOCCER_EVOLUTION_ENABLED);
+        assert!(DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES >= 1);
+        assert!(options.population_size > 1);
+        assert!(options.mutation_rate > 0.0);
+        assert!(options.mutation_scale > 0.0);
+        assert!(options.crossover_rate > 0.0);
+    }
+
+    #[test]
     fn postgres_batches_only_coalesce_for_same_run_and_shard() {
         let mut batch = empty_pg_batch("experiment-a", "runner-a", 0, 2);
 

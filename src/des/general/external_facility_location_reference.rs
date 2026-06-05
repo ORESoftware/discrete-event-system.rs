@@ -1,12 +1,12 @@
 //! Rust-facing bridge for external/reference facility-location solvers.
 //!
 //! The native Rust reference computes an exact small-instance check without
-//! Python startup. The Python bridge (`scripts/facility_location_reference.py`)
-//! remains available for OR-Tools CP-SAT.
+//! Python startup. Explicit OR-Tools CP-SAT validation is launched from Rust
+//! through a tiny inline Python adapter, so the checked-in Python script can
+//! remain launcher glue.
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,15 +36,21 @@ impl ExternalFacilityLocationReferenceSolver {
 }
 
 fn registered_facility_location_rust_fallback_enabled() -> bool {
-    std::env::var("FACILITY_LOCATION_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("FACILITY_LOCATION_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "FACILITY_LOCATION_REFERENCE_REGISTERED_FALLBACK",
+        "FACILITY_LOCATION_REFERENCE_EXTERNAL_FALLBACK",
+        "FACILITY_LOCATION_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .find_map(|key| std::env::var(key).ok())
+    .map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+        )
+    })
+    .unwrap_or(false)
 }
 
 fn should_use_rust_facility_location_reference(
@@ -470,13 +476,6 @@ fn numerical_error(
     }
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("facility_location_reference.py")
-}
-
 fn facility_location_reference_timeout_ms() -> u64 {
     std::env::var("FACILITY_LOCATION_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -486,7 +485,7 @@ fn facility_location_reference_timeout_ms() -> u64 {
         .unwrap_or(120_000)
 }
 
-fn wait_for_facility_location_reference_output(
+fn wait_for_facility_location_adapter_output(
     mut child: std::process::Child,
     timeout_ms: u64,
 ) -> Result<(Output, bool), String> {
@@ -506,7 +505,7 @@ fn wait_for_facility_location_reference_output(
             }
             Err(err) => {
                 return Err(format!(
-                    "failed to poll facility_location_reference.py: {err}"
+                    "failed to poll OR-Tools facility-location adapter: {err}"
                 ))
             }
         }
@@ -514,20 +513,215 @@ fn wait_for_facility_location_reference_output(
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for facility_location_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools facility-location adapter: {err}"))
 }
 
-fn run_facility_location_reference_json(
-    payload: Value,
-    opts: &ExternalFacilityLocationReferenceOptions,
+const ORTOOLS_FACILITY_LOCATION_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+
+const ORTOOLS_FACILITY_LOCATION_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:cp-sat-facility-location"
+
+def emit(status, message, data=None, open_indices=None, assignments=None, objective=None, objective_bound=None, ortools_status=None):
+    data = {} if data is None else data
+    facilities = data.get("facilities", [])
+    open_indices = [] if open_indices is None else sorted(set(int(index) for index in open_indices))
+    open_ids = [facilities[index] for index in open_indices] if facilities else []
+    assignments = [] if assignments is None else assignments
+    payload = {
+        "status": status,
+        "solver": SOLVER,
+        "openFacilityIndices": open_indices,
+        "openFacilities": open_ids,
+        "assignments": assignments,
+        "objective": objective,
+        "message": message,
+        "ortoolsStatus": ortools_status,
+        "ortoolsOpenFacilityIndices": open_indices,
+        "ortoolsOpenFacilities": open_ids,
+        "ortoolsAssignments": assignments,
+        "ortoolsObjective": objective,
+        "ortoolsObjectiveBound": objective_bound,
+    }
+    print(json.dumps(payload))
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    emit("unavailable", f"OR-Tools CP-SAT unavailable: {exc}", ortools_status="unavailable")
+    raise SystemExit(0)
+
+try:
+    data = json.load(sys.stdin)
+    facilities = data["facilities"]
+    customers = data["customers"]
+    fixed_costs = data["fixedCosts"]
+    service_costs = data["serviceCosts"]
+    scaled_fixed_costs = data["scaledFixedCosts"]
+    scaled_service_costs = data["scaledServiceCosts"]
+    scale = int(data["scale"])
+    facility_count = len(facilities)
+    customer_count = len(customers)
+
+    model = cp_model.CpModel()
+    y = [model.NewBoolVar(f"open_f{facility}") for facility in range(facility_count)]
+    x = [
+        [
+            model.NewBoolVar(f"assign_f{facility}_c{customer}")
+            for customer in range(customer_count)
+        ]
+        for facility in range(facility_count)
+    ]
+    for customer in range(customer_count):
+        model.Add(sum(x[facility][customer] for facility in range(facility_count)) == 1)
+    for facility in range(facility_count):
+        for customer in range(customer_count):
+            model.Add(x[facility][customer] <= y[facility])
+    model.Minimize(
+        sum(int(scaled_fixed_costs[facility]) * y[facility] for facility in range(facility_count))
+        + sum(
+            int(scaled_service_costs[facility][customer]) * x[facility][customer]
+            for facility in range(facility_count)
+            for customer in range(customer_count)
+        )
+    )
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        emit(
+            "infeasible" if status_name == "infeasible" else status_name,
+            f"OR-Tools CP-SAT status {status_name}",
+            data=data,
+            ortools_status=status_name,
+        )
+        raise SystemExit(0)
+
+    open_indices = [facility for facility, var in enumerate(y) if solver.BooleanValue(var)]
+    assignments = []
+    objective = sum(fixed_costs[facility] for facility in open_indices)
+    for customer in range(customer_count):
+        assigned = [
+            facility
+            for facility in range(facility_count)
+            if solver.BooleanValue(x[facility][customer])
+        ]
+        facility = int(assigned[0])
+        cost = float(service_costs[facility][customer])
+        objective += cost
+        assignments.append(
+            {
+                "customerIndex": customer,
+                "customer": customers[customer],
+                "facilityIndex": facility,
+                "facility": facilities[facility],
+                "cost": cost,
+            }
+        )
+
+    emit(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        f"OR-Tools CP-SAT status {status_name}",
+        data=data,
+        open_indices=open_indices,
+        assignments=assignments,
+        objective=float(objective),
+        objective_bound=float(solver.BestObjectiveBound()) / scale,
+        ortools_status=status_name,
+    )
+except Exception as exc:
+    emit("numerical-error", str(exc), ortools_status="error")
+    raise SystemExit(1)
+"#;
+
+fn scaled_ortools_facility_cost(value: f64, scale: i64) -> Option<i64> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let scaled = value * scale as f64;
+    let rounded = scaled.round();
+    if (rounded - scaled).abs() > 1e-6
+        || !rounded.is_finite()
+        || rounded < 0.0
+        || rounded > i64::MAX as f64
+    {
+        return None;
+    }
+    Some(rounded as i64)
+}
+
+fn choose_ortools_facility_location_scale(problem: &FacilityLocationProblem) -> Option<i64> {
+    ORTOOLS_FACILITY_LOCATION_SCALES.into_iter().find(|scale| {
+        problem
+            .fixed_costs
+            .iter()
+            .chain(problem.service_costs.iter().flatten())
+            .all(|&value| scaled_ortools_facility_cost(value, *scale).is_some())
+    })
+}
+
+fn ortools_facility_location_payload(problem: &FacilityLocationProblem) -> Result<Value, String> {
+    validate_rust_facility_location_problem(problem)?;
+    let Some(scale) = choose_ortools_facility_location_scale(problem) else {
+        return Err("OR-Tools CP-SAT bridge requires integer-scalable costs".to_string());
+    };
+    let scaled_fixed_costs = problem
+        .fixed_costs
+        .iter()
+        .map(|&cost| {
+            scaled_ortools_facility_cost(cost, scale)
+                .expect("scale was selected only after checking fixed costs")
+        })
+        .collect::<Vec<_>>();
+    let scaled_service_costs = problem
+        .service_costs
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&cost| {
+                    scaled_ortools_facility_cost(cost, scale)
+                        .expect("scale was selected only after checking service costs")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "facilities": &problem.facility_ids,
+        "customers": &problem.customer_ids,
+        "fixedCosts": &problem.fixed_costs,
+        "serviceCosts": &problem.service_costs,
+        "scale": scale,
+        "scaledFixedCosts": scaled_fixed_costs,
+        "scaledServiceCosts": scaled_service_costs,
+    }))
+}
+
+fn run_ortools_facility_location_reference(
+    problem: &FacilityLocationProblem,
 ) -> ExternalFacilityLocationReferenceSolution {
     let started = Instant::now();
+    let payload = match ortools_facility_location_payload(problem) {
+        Ok(payload) => payload,
+        Err(message) if message.contains("integer-scalable costs") => {
+            return rust_facility_location_empty_solution(
+                ExternalFacilityLocationReferenceStatus::Unsupported,
+                "ortools:cp-sat-facility-location",
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Err(message) => {
+            return numerical_error(message, started.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_FACILITY_LOCATION_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -537,7 +731,7 @@ fn run_facility_location_reference_json(
         Ok(child) => child,
         Err(err) => {
             return unavailable(
-                format!("failed to start facility_location_reference.py with {python}: {err}"),
+                format!("failed to start OR-Tools facility-location adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
@@ -545,13 +739,13 @@ fn run_facility_location_reference_json(
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return numerical_error(
-                format!("failed to write facility_location_reference.py stdin: {err}"),
+                format!("failed to write OR-Tools facility-location adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
     }
     let timeout_ms = facility_location_reference_timeout_ms();
-    let (output, timed_out) = match wait_for_facility_location_reference_output(child, timeout_ms) {
+    let (output, timed_out) = match wait_for_facility_location_adapter_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
     };
@@ -559,9 +753,9 @@ fn run_facility_location_reference_json(
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("facility_location_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools facility-location adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; facility_location_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools facility-location adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -593,7 +787,7 @@ fn run_facility_location_reference_json(
         },
         Err(err) => numerical_error(
             format!(
-                "failed to parse facility_location_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools facility-location adapter output: {err}; stderr={}",
                 stderr
             ),
             elapsed_ms,
@@ -614,15 +808,7 @@ pub fn solve_facility_location_with_external_reference(
         );
     }
 
-    run_facility_location_reference_json(
-        json!({
-            "facilities": &problem.facility_ids,
-            "customers": &problem.customer_ids,
-            "fixedCosts": &problem.fixed_costs,
-            "serviceCosts": &problem.service_costs,
-        }),
-        opts,
-    )
+    run_ortools_facility_location_reference(problem)
 }
 
 #[cfg(test)]
@@ -753,7 +939,64 @@ mod tests {
     }
 
     #[test]
-    fn facility_location_python_bridge_wait_enforces_timeout() {
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = FACILITY_LOCATION_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("FACILITY_LOCATION_REFERENCE_RUST_FIRST", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-facility-location");
+        let problem = build_sample_facility_location_problem();
+
+        let solution = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalFacilityLocationReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-facility-location-fallback-for-ortools"
+        );
+        assert_eq!(solution.open_facility_ids, vec!["North", "South"]);
+        assert_eq!(solution.objective, Some(28.0));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = FACILITY_LOCATION_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-facility-location-ortools",
+        );
+        let problem = build_sample_facility_location_problem();
+
+        let solution = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalFacilityLocationReferenceStatus::Unavailable
+        );
+        assert!(solution
+            .message
+            .contains("OR-Tools facility-location adapter"));
+        assert!(!solution.message.contains("facility_location_reference.py"));
+    }
+
+    #[test]
+    fn facility_location_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -762,7 +1005,7 @@ mod tests {
             .expect("spawn sleep");
 
         let (output, timed_out) =
-            wait_for_facility_location_reference_output(child, 10).expect("timeout output");
+            wait_for_facility_location_adapter_output(child, 10).expect("timeout output");
 
         assert!(timed_out);
         assert!(!output.status.success());

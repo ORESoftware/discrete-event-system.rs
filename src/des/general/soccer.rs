@@ -125,8 +125,11 @@ const BEATEN_BY_DRIBBLE_PENALTY_POINTS: f64 = 3.0;
 const DRIBBLE_BEAT_REWARD_POINTS: f64 = 6.0;
 const NUTMEG_BEAT_REWARD_POINTS: f64 = 7.0;
 const SIDE_STEP_BEAT_REWARD_POINTS: f64 = DRIBBLE_BEAT_REWARD_POINTS;
-const DRIBBLE_LEFT_CUT_CHANCE: f64 = 0.45;
-const DRIBBLE_RIGHT_CUT_CHANCE: f64 = 0.45;
+const DRIBBLE_LEFT_CUT_CHANCE: f64 = 0.28;
+const DRIBBLE_RIGHT_CUT_CHANCE: f64 = 0.28;
+const DRIBBLE_CARRY_FORWARD_CHANCE: f64 = 0.28;
+const DRIBBLE_CARRY_OUT_LEFT_CHANCE: f64 = 0.06;
+const DRIBBLE_CARRY_OUT_RIGHT_CHANCE: f64 = 0.06;
 const DRIBBLE_CUT_LATERAL_YARDS: f64 = 1.0;
 const DRIBBLE_CUT_FORWARD_YARDS: f64 = 0.35;
 const DRIBBLE_NUTMEG_FORWARD_YARDS: f64 = 1.65;
@@ -3856,6 +3859,14 @@ fn normalize_soccer_action_label(action: &str) -> &str {
         "hold-up" | "holdup" | "hold_up" | "hold-up-dribble" | "hold-up-flank-dribble" => {
             "hold-up-flank"
         }
+        "carryforward" | "carry_forward" | "carry-forward-dribble" => "carry-forward",
+        "carryoutleft" | "carry_out_left" | "carry-left" | "carry_left" => "carry-out-left",
+        "carryoutright" | "carry_out_right" | "carry-right" | "carry_right" => {
+            "carry-out-right"
+        }
+        "protectball" | "protect_ball" | "shield" | "shield-ball" | "shield_ball" => {
+            "protect-ball"
+        }
         "leftcut" | "left_cut" | "left-cut-dribble" | "cut-left" => "left-cut",
         "rightcut" | "right_cut" | "right-cut-dribble" | "cut-right" => "right-cut",
         "nut-meg" | "nut_meg" | "meg" => "nutmeg",
@@ -3876,6 +3887,10 @@ fn dribble_move_kind_for_action_label(action: &str) -> Option<DribbleMoveKind> {
         "nutmeg" => Some(DribbleMoveKind::Nutmeg),
         "fake-left-cut-right" => Some(DribbleMoveKind::FakeLeftCutRight),
         "fake-right-cut-left" => Some(DribbleMoveKind::FakeRightCutLeft),
+        "carry-forward" => Some(DribbleMoveKind::CarryForward),
+        "carry-out-left" => Some(DribbleMoveKind::CarryOutLeft),
+        "carry-out-right" => Some(DribbleMoveKind::CarryOutRight),
+        "protect-ball" => Some(DribbleMoveKind::ProtectBall),
         _ => None,
     }
 }
@@ -3894,14 +3909,27 @@ fn dribble_final_cut_kind(kind: DribbleMoveKind) -> DribbleMoveKind {
 
 fn choose_dribble_move_kind(rng: &mut SeededRandom) -> DribbleMoveKind {
     let draw = rng.next_float();
-    if draw < DRIBBLE_LEFT_CUT_CHANCE {
-        DribbleMoveKind::LeftCut
-    } else if draw < DRIBBLE_LEFT_CUT_CHANCE + DRIBBLE_RIGHT_CUT_CHANCE {
-        DribbleMoveKind::RightCut
-    } else {
-        debug_assert!((DRIBBLE_LEFT_CUT_CHANCE + DRIBBLE_RIGHT_CUT_CHANCE - 0.90).abs() < 1e-9);
-        DribbleMoveKind::Nutmeg
+    let mut threshold = DRIBBLE_LEFT_CUT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::LeftCut;
     }
+    threshold += DRIBBLE_RIGHT_CUT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::RightCut;
+    }
+    threshold += DRIBBLE_CARRY_FORWARD_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::CarryForward;
+    }
+    threshold += DRIBBLE_CARRY_OUT_LEFT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::CarryOutLeft;
+    }
+    threshold += DRIBBLE_CARRY_OUT_RIGHT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::CarryOutRight;
+    }
+    DribbleMoveKind::Nutmeg
 }
 
 fn deterministic_dribble_move_kind(tick: u64, player_id: usize) -> DribbleMoveKind {
@@ -3914,13 +3942,27 @@ fn deterministic_dribble_move_kind(tick: u64, player_id: usize) -> DribbleMoveKi
     value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^= value >> 31;
     let draw = (value % 10_000) as f64 / 10_000.0;
-    if draw < DRIBBLE_LEFT_CUT_CHANCE {
-        DribbleMoveKind::LeftCut
-    } else if draw < DRIBBLE_LEFT_CUT_CHANCE + DRIBBLE_RIGHT_CUT_CHANCE {
-        DribbleMoveKind::RightCut
-    } else {
-        DribbleMoveKind::Nutmeg
+    let mut threshold = DRIBBLE_LEFT_CUT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::LeftCut;
     }
+    threshold += DRIBBLE_RIGHT_CUT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::RightCut;
+    }
+    threshold += DRIBBLE_CARRY_FORWARD_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::CarryForward;
+    }
+    threshold += DRIBBLE_CARRY_OUT_LEFT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::CarryOutLeft;
+    }
+    threshold += DRIBBLE_CARRY_OUT_RIGHT_CHANCE;
+    if draw < threshold {
+        return DribbleMoveKind::CarryOutRight;
+    }
+    DribbleMoveKind::Nutmeg
 }
 
 fn dribble_touch_bucket_components(bucket: u8) -> (f64, f64) {
@@ -3960,6 +4002,34 @@ fn dribble_touch_angle_weight(kind: DribbleMoveKind, bucket: u8) -> f64 {
         DribbleMoveKind::Nutmeg => {
             let through_lane = forward.max(0.0).powi(2);
             0.45 + through_lane * 2.75
+        }
+        DribbleMoveKind::CarryForward => 0.48 + forward.max(0.0).powi(2) * 2.90,
+        DribbleMoveKind::CarryOutLeft => {
+            if lateral < -0.20 && forward > -0.15 {
+                2.10 + forward.max(0.0) * 0.56
+            } else if lateral > 0.20 {
+                0.40
+            } else {
+                0.72 + forward.max(0.0) * 0.36
+            }
+        }
+        DribbleMoveKind::CarryOutRight => {
+            if lateral > 0.20 && forward > -0.15 {
+                2.10 + forward.max(0.0) * 0.56
+            } else if lateral < -0.20 {
+                0.40
+            } else {
+                0.72 + forward.max(0.0) * 0.36
+            }
+        }
+        DribbleMoveKind::ProtectBall => {
+            if forward < -0.20 {
+                1.34
+            } else if lateral.abs() > 0.20 {
+                1.18
+            } else {
+                0.62
+            }
         }
         DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft => {
             unreachable!("feints are resolved into their final cut before angle weighting")
@@ -6057,6 +6127,10 @@ pub enum DribbleMoveKind {
     Nutmeg,
     FakeLeftCutRight,
     FakeRightCutLeft,
+    CarryForward,
+    CarryOutLeft,
+    CarryOutRight,
+    ProtectBall,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -6101,6 +6175,10 @@ impl DribbleMoveKind {
             DribbleMoveKind::Nutmeg => "nutmeg",
             DribbleMoveKind::FakeLeftCutRight => "fake-left-cut-right",
             DribbleMoveKind::FakeRightCutLeft => "fake-right-cut-left",
+            DribbleMoveKind::CarryForward => "carry-forward",
+            DribbleMoveKind::CarryOutLeft => "carry-out-left",
+            DribbleMoveKind::CarryOutRight => "carry-out-right",
+            DribbleMoveKind::ProtectBall => "protect-ball",
         }
     }
 
@@ -6115,6 +6193,10 @@ impl DribbleMoveKind {
             DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft => {
                 DRIBBLE_BEAT_REWARD_POINTS * 1.08
             }
+            DribbleMoveKind::CarryForward
+            | DribbleMoveKind::CarryOutLeft
+            | DribbleMoveKind::CarryOutRight => DRIBBLE_BEAT_REWARD_POINTS * 0.72,
+            DribbleMoveKind::ProtectBall => DRIBBLE_BEAT_REWARD_POINTS * 0.42,
         }
     }
 }

@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::des::general::soccer::{
     MatchConfig, SoccerNeuralNetworkSnapshot, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions,
-    SoccerQStateKey, SoccerQTargetEntry, SoccerSetPlayTrainingArtifact, SoccerTeamQPolicies, Team,
+    SoccerQStateKey, SoccerQTargetEntry, SoccerSetPlayTrainingArtifact,
+    SoccerTacticalLearningWeights, SoccerTeamQPolicies, Team,
 };
 use crate::des::soccer_learning::{
     soccer_learning_from_micros, soccer_learning_to_micros, soccer_team_label,
@@ -26,6 +27,15 @@ pub struct SoccerLearningPgPolicyVersion {
     pub generation: i32,
     pub policies: SoccerTeamQPolicies,
     pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
+    pub tactical_learning: Option<SoccerTacticalLearningWeights>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SoccerLearningPgPolicyMetadata {
+    pub id: String,
+    pub generation: i32,
+    pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
+    pub tactical_learning: Option<SoccerTacticalLearningWeights>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,11 +88,16 @@ fn postgres_insert_sql_buffer(prefix: &str, rows: usize, parameters_per_row: usi
 fn soccer_policy_version_metrics(
     fitness: f64,
     neural_network: Option<&SoccerNeuralNetworkSnapshot>,
+    tactical_learning: Option<&SoccerTacticalLearningWeights>,
 ) -> Result<Value, String> {
     let mut metrics = json!({ "fitness": fitness });
     if let Some(neural_network) = neural_network {
         metrics["neuralNetwork"] = serde_json::to_value(neural_network)
             .map_err(|err| format!("serialize soccer neural network snapshot: {err}"))?;
+    }
+    if let Some(tactical_learning) = tactical_learning {
+        metrics["tacticalLearning"] = serde_json::to_value(tactical_learning)
+            .map_err(|err| format!("serialize soccer tactical learning weights: {err}"))?;
     }
     Ok(metrics)
 }
@@ -96,6 +111,81 @@ fn soccer_policy_version_neural_network_from_metrics(
     serde_json::from_value(neural_network.clone())
         .map(Some)
         .map_err(|err| format!("decode soccer neural network snapshot: {err}"))
+}
+
+fn soccer_policy_version_tactical_learning_from_values(
+    config: &Value,
+    metrics: &Value,
+) -> Result<Option<SoccerTacticalLearningWeights>, String> {
+    let tactical_learning = metrics
+        .get("tacticalLearning")
+        .or_else(|| config.get("tacticalLearning"));
+    let Some(tactical_learning) = tactical_learning else {
+        return Ok(None);
+    };
+    let weights =
+        serde_json::from_value::<SoccerTacticalLearningWeights>(tactical_learning.clone())
+            .map_err(|err| format!("decode soccer tactical learning weights: {err}"))?;
+    validate_soccer_tactical_learning_weights_for_pg(&weights)?;
+    Ok(Some(weights))
+}
+
+fn validate_soccer_tactical_learning_weights_for_pg(
+    weights: &SoccerTacticalLearningWeights,
+) -> Result<(), String> {
+    for (name, value) in [
+        (
+            "attackSpacingDeltaWeight",
+            weights.attack_spacing_delta_weight,
+        ),
+        (
+            "attackSpacingScoreWeight",
+            weights.attack_spacing_score_weight,
+        ),
+        ("attackWidthDeltaWeight", weights.attack_width_delta_weight),
+        ("attackWidthScoreWeight", weights.attack_width_score_weight),
+        ("attackFlankLaneWeight", weights.attack_flank_lane_weight),
+        (
+            "defenseSpacingDeltaWeight",
+            weights.defense_spacing_delta_weight,
+        ),
+        (
+            "defenseSpacingScoreWeight",
+            weights.defense_spacing_score_weight,
+        ),
+        (
+            "defenseContractDeltaWeight",
+            weights.defense_contract_delta_weight,
+        ),
+        (
+            "defenseCompactnessScoreWeight",
+            weights.defense_compactness_score_weight,
+        ),
+        (
+            "defenseBallDepthScoreWeight",
+            weights.defense_ball_depth_score_weight,
+        ),
+        (
+            "defenseEndlineSoftPenaltyWeight",
+            weights.defense_endline_soft_penalty_weight,
+        ),
+        (
+            "defenseEndlineHardPenaltyWeight",
+            weights.defense_endline_hard_penalty_weight,
+        ),
+        (
+            "defenderMidfielderPressWeight",
+            weights.defender_midfielder_press_weight,
+        ),
+        ("midfielderPressWeight", weights.midfielder_press_weight),
+    ] {
+        if !value.is_finite() {
+            return Err(format!(
+                "{name} must be finite in soccer tactical learning weights"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub struct SoccerLearningPgStore {
@@ -172,11 +262,28 @@ impl SoccerLearningPgStore {
         home_options: SoccerQPolicyOptions,
         away_options: SoccerQPolicyOptions,
     ) -> Result<Option<SoccerLearningPgPolicyVersion>, String> {
+        let Some(metadata) = self.load_latest_active_policy_metadata(experiment_id)? else {
+            return Ok(None);
+        };
+        let policies = self.load_policy_entries(&metadata.id, home_options, away_options)?;
+        Ok(Some(SoccerLearningPgPolicyVersion {
+            id: metadata.id,
+            generation: metadata.generation,
+            policies,
+            neural_network: metadata.neural_network,
+            tactical_learning: metadata.tactical_learning,
+        }))
+    }
+
+    pub fn load_latest_active_policy_metadata(
+        &mut self,
+        experiment_id: &str,
+    ) -> Result<Option<SoccerLearningPgPolicyMetadata>, String> {
         let Some(row) = self
             .client
             .query_opt(
                 r#"
-                select id::text, generation, metrics
+                select id::text, generation, metrics, config
                 from des_soccer_learning_policy_versions
                 where experiment_id = $1::text::uuid and status = 'active'
                 order by generation desc, updated_at desc
@@ -184,20 +291,22 @@ impl SoccerLearningPgStore {
                 "#,
                 &[&experiment_id],
             )
-            .map_err(|err| format!("select latest soccer policy version: {err}"))?
+            .map_err(|err| format!("select latest soccer policy version metadata: {err}"))?
         else {
             return Ok(None);
         };
         let id: String = row.get(0);
         let generation: i32 = row.get(1);
         let metrics: Value = row.get(2);
+        let config: Value = row.get(3);
         let neural_network = soccer_policy_version_neural_network_from_metrics(&metrics)?;
-        let policies = self.load_policy_entries(&id, home_options, away_options)?;
-        Ok(Some(SoccerLearningPgPolicyVersion {
+        let tactical_learning =
+            soccer_policy_version_tactical_learning_from_values(&config, &metrics)?;
+        Ok(Some(SoccerLearningPgPolicyMetadata {
             id,
             generation,
-            policies,
             neural_network,
+            tactical_learning,
         }))
     }
 
@@ -323,7 +432,11 @@ impl SoccerLearningPgStore {
         let lineage = parent_policy_version_id
             .map(|id| json!([id]))
             .unwrap_or_else(|| json!([]));
-        let metrics = soccer_policy_version_metrics(fitness, neural_network)?;
+        let metrics = soccer_policy_version_metrics(
+            fitness,
+            neural_network,
+            Some(&config.tactical_learning),
+        )?;
         let entry_count =
             checked_i32(policies.home.entries().len() + policies.away.entries().len());
         let target_entry_count = checked_i32(
@@ -2071,7 +2184,10 @@ mod tests {
     #[test]
     fn policy_version_metrics_round_trip_neural_snapshot() {
         let snapshot = tiny_neural_snapshot();
-        let metrics = soccer_policy_version_metrics(1.25, Some(&snapshot)).expect("metrics");
+        let tactical_learning = SoccerTacticalLearningWeights::default();
+        let metrics =
+            soccer_policy_version_metrics(1.25, Some(&snapshot), Some(&tactical_learning))
+                .expect("metrics");
         assert_eq!(metrics["fitness"], json!(1.25));
 
         let decoded =
@@ -2080,6 +2196,19 @@ mod tests {
         assert_eq!(decoded.parameter_count, snapshot.parameter_count);
         assert_eq!(decoded.layers[0].weights, snapshot.layers[0].weights);
         assert_eq!(decoded.layers[0].biases, snapshot.layers[0].biases);
+
+        let decoded_weights =
+            soccer_policy_version_tactical_learning_from_values(&json!({}), &metrics)
+                .expect("decode tactical learning")
+                .expect("tactical learning present");
+        assert_eq!(
+            decoded_weights.attack_flank_lane_weight,
+            tactical_learning.attack_flank_lane_weight
+        );
+        assert_eq!(
+            decoded_weights.defense_contract_delta_weight,
+            tactical_learning.defense_contract_delta_weight
+        );
     }
 
     #[test]

@@ -334,6 +334,135 @@ fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<
     })
 }
 
+fn validate_tactical_learning_weights(
+    weights: &SoccerTacticalLearningWeights,
+) -> Result<(), Box<dyn Error>> {
+    for (name, value) in [
+        (
+            "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
+            weights.attack_spacing_delta_weight,
+        ),
+        (
+            "SOCCER_ATTACK_SPACING_SCORE_WEIGHT",
+            weights.attack_spacing_score_weight,
+        ),
+        (
+            "SOCCER_ATTACK_WIDTH_DELTA_WEIGHT",
+            weights.attack_width_delta_weight,
+        ),
+        (
+            "SOCCER_ATTACK_WIDTH_SCORE_WEIGHT",
+            weights.attack_width_score_weight,
+        ),
+        (
+            "SOCCER_ATTACK_FLANK_LANE_WEIGHT",
+            weights.attack_flank_lane_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_SPACING_DELTA_WEIGHT",
+            weights.defense_spacing_delta_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_SPACING_SCORE_WEIGHT",
+            weights.defense_spacing_score_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT",
+            weights.defense_contract_delta_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
+            weights.defense_compactness_score_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_BALL_DEPTH_SCORE_WEIGHT",
+            weights.defense_ball_depth_score_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_ENDLINE_SOFT_PENALTY_WEIGHT",
+            weights.defense_endline_soft_penalty_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_ENDLINE_HARD_PENALTY_WEIGHT",
+            weights.defense_endline_hard_penalty_weight,
+        ),
+        (
+            "SOCCER_DEFENDER_MIDFIELDER_PRESS_WEIGHT",
+            weights.defender_midfielder_press_weight,
+        ),
+        (
+            "SOCCER_MIDFIELDER_PRESS_WEIGHT",
+            weights.midfielder_press_weight,
+        ),
+    ] {
+        if !value.is_finite() {
+            return Err(invalid_data(format!("{name} must be finite")).into());
+        }
+    }
+    Ok(())
+}
+
+fn tactical_learning_weight_values(weights: &SoccerTacticalLearningWeights) -> [f64; 14] {
+    [
+        weights.attack_spacing_delta_weight,
+        weights.attack_spacing_score_weight,
+        weights.attack_width_delta_weight,
+        weights.attack_width_score_weight,
+        weights.attack_flank_lane_weight,
+        weights.defense_spacing_delta_weight,
+        weights.defense_spacing_score_weight,
+        weights.defense_contract_delta_weight,
+        weights.defense_compactness_score_weight,
+        weights.defense_ball_depth_score_weight,
+        weights.defense_endline_soft_penalty_weight,
+        weights.defense_endline_hard_penalty_weight,
+        weights.defender_midfielder_press_weight,
+        weights.midfielder_press_weight,
+    ]
+}
+
+fn tactical_learning_weights_match(
+    left: &SoccerTacticalLearningWeights,
+    right: &SoccerTacticalLearningWeights,
+) -> bool {
+    tactical_learning_weight_values(left)
+        .into_iter()
+        .zip(tactical_learning_weight_values(right))
+        .all(|(left, right)| (left - right).abs() <= 1e-12)
+}
+
+fn maybe_apply_postgres_tactical_learning(
+    event_label: &str,
+    next_episode: usize,
+    policy_version_id: &str,
+    generation: i32,
+    match_config: &mut MatchConfig,
+    active_weights: &mut SoccerTacticalLearningWeights,
+    postgres_weights: Option<SoccerTacticalLearningWeights>,
+) -> Result<bool, String> {
+    let Some(postgres_weights) = postgres_weights else {
+        return Ok(false);
+    };
+    validate_tactical_learning_weights(&postgres_weights).map_err(|err| err.to_string())?;
+    if tactical_learning_weights_match(active_weights, &postgres_weights)
+        && tactical_learning_weights_match(&match_config.tactical_learning, &postgres_weights)
+    {
+        return Ok(false);
+    }
+    println!(
+        "{} next_episode={} policy_version={} generation={} attack_flank_lane={:.3} defense_contract_delta={:.3}",
+        event_label,
+        next_episode,
+        policy_version_id,
+        generation,
+        postgres_weights.attack_flank_lane_weight,
+        postgres_weights.defense_contract_delta_weight
+    );
+    match_config.tactical_learning = postgres_weights.clone();
+    *active_weights = postgres_weights;
+    Ok(true)
+}
+
 fn invalid_data(message: impl Into<String>) -> IoError {
     IoError::new(ErrorKind::InvalidData, message.into())
 }
@@ -807,14 +936,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         parallel_games,
         &options,
     )?;
-    let tactical_learning = env_tactical_learning_weights()?;
+    let mut tactical_learning = env_tactical_learning_weights()?;
+    validate_tactical_learning_weights(&tactical_learning)?;
     let half_duration_seconds = half_minutes * 60.0;
     let halftime_fatigue_recovery = if half_duration_seconds > 0.0 {
         (period_break_recovery_seconds / half_duration_seconds).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    let config = MatchConfig {
+    let mut config = MatchConfig {
         dt_seconds,
         duration_seconds: minutes * 60.0,
         halves: halves as u8,
@@ -825,7 +955,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         learning_enabled: true,
         learning_logging_enabled: env_bool("SOCCER_LEARNING_LOGGING", false)?,
         learning_interval_ticks,
-        tactical_learning,
+        tactical_learning: tactical_learning.clone(),
         neural_learning: neural_learning.clone(),
         max_human_players: 0,
         seed,
@@ -878,6 +1008,16 @@ fn run() -> Result<(), Box<dyn Error>> {
                 );
                 initial_policies = version.policies;
                 initial_neural_network = version.neural_network;
+                maybe_apply_postgres_tactical_learning(
+                    "postgres_resume_tactical_learning",
+                    1,
+                    &version.id,
+                    version.generation,
+                    &mut config,
+                    &mut tactical_learning,
+                    version.tactical_learning,
+                )
+                .map_err(invalid_data)?;
                 pg_base_policy_version_id = Some(version.id.clone());
                 pg_last_policy_version_id = Some(version.id);
                 pg_generation = version.generation;
@@ -919,6 +1059,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("resume_artifact={path}");
     }
 
+    let mut active_config = config.clone();
     let report = run_soccer_learning_queue_with_events(
         SoccerLearningQueueRunnerConfig {
             games,
@@ -940,6 +1081,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             match event {
                 SoccerLearningQueueEvent::StartingBatch {
                     next_episode,
+                    match_config,
                     policies: starting_policies,
                     neural_network,
                 } => {
@@ -951,25 +1093,40 @@ fn run() -> Result<(), Box<dyn Error>> {
                             } else {
                                 0
                             };
-                        if pg_policy_version_buffer.is_empty() && pending_async_pg_batches == 0 {
-                            if let (Some(experiment_id), Some(store)) =
-                                (pg_experiment_id.as_deref(), pg_store.as_mut())
+                        if let (Some(experiment_id), Some(store)) =
+                            (pg_experiment_id.as_deref(), pg_store.as_mut())
+                        {
+                            if let Some(metadata) =
+                                store.load_latest_active_policy_metadata(experiment_id)?
                             {
-                                if let Some(version) = store.load_latest_active_policy(
-                                    experiment_id,
-                                    options.clone(),
-                                    options.clone(),
-                                )? {
-                                    let same_policy_version = pg_base_policy_version_id.as_deref()
-                                        == Some(version.id.as_str());
-                                    let should_refresh = pg_base_policy_version_id.is_none()
-                                        || version.generation > pg_generation
-                                        || (version.generation == pg_generation
-                                            && !same_policy_version)
-                                        || (same_policy_version
-                                            && neural_network.is_none()
-                                            && version.neural_network.is_some());
-                                    if should_refresh {
+                                let same_policy_version = pg_base_policy_version_id.as_deref()
+                                    == Some(metadata.id.as_str());
+                                let should_refresh = pg_base_policy_version_id.is_none()
+                                    || metadata.generation > pg_generation
+                                    || (metadata.generation == pg_generation
+                                        && !same_policy_version)
+                                    || (same_policy_version
+                                        && neural_network.is_none()
+                                        && metadata.neural_network.is_some());
+                                maybe_apply_postgres_tactical_learning(
+                                    "postgres_refresh_tactical_learning_for_queue",
+                                    next_episode + 1,
+                                    &metadata.id,
+                                    metadata.generation,
+                                    match_config,
+                                    &mut tactical_learning,
+                                    metadata.tactical_learning.clone(),
+                                )?;
+                                active_config = match_config.clone();
+                                if should_refresh
+                                    && pg_policy_version_buffer.is_empty()
+                                    && pending_async_pg_batches == 0
+                                {
+                                    if let Some(version) = store.load_latest_active_policy(
+                                        experiment_id,
+                                        options.clone(),
+                                        options.clone(),
+                                    )? {
                                         println!(
                                             "postgres_refresh_policy_for_queue next_episode={} policy_version={} previous_policy_version={} generation={} neural_network={}",
                                             next_episode + 1,
@@ -1015,7 +1172,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             version_label,
                             source_kind: "merge",
                             status: "active",
-                            config: config.clone(),
+                            config: active_config.clone(),
                             home_options: options.clone(),
                             away_options: options.clone(),
                             policies: merged_policies.clone(),
@@ -1089,7 +1246,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         pg_persisted_games += writer.finish().map_err(invalid_data)?;
     }
 
-    let artifact = soccer_self_play_artifact_from_queue_report(config, options, &report);
+    let artifact = soccer_self_play_artifact_from_queue_report(active_config, options, &report);
     write_json(&artifact_path, &artifact)?;
     let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact_with_neural_network(
         &artifact,

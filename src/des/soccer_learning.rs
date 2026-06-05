@@ -158,6 +158,7 @@ pub struct SoccerLearningQueueReport {
 pub enum SoccerLearningQueueEvent<'a> {
     StartingBatch {
         next_episode: usize,
+        match_config: &'a mut MatchConfig,
         policies: &'a mut SoccerTeamQPolicies,
         neural_network: &'a mut Option<SoccerNeuralNetworkSnapshot>,
     },
@@ -172,6 +173,9 @@ pub enum SoccerLearningQueueEvent<'a> {
 pub struct SoccerEvolutionOptions {
     pub mutation_rate: f64,
     pub mutation_scale: f64,
+    pub crossover_rate: f64,
+    pub exploration_rate: f64,
+    pub exploration_scale: f64,
     pub elite_weight_floor: f64,
     pub seed: u64,
 }
@@ -181,6 +185,9 @@ impl Default for SoccerEvolutionOptions {
         Self {
             mutation_rate: 0.025,
             mutation_scale: 0.18,
+            crossover_rate: 0.35,
+            exploration_rate: 0.04,
+            exploration_scale: 0.45,
             elite_weight_floor: 0.05,
             seed: 2026,
         }
@@ -414,6 +421,28 @@ pub fn evolve_soccer_team_policies(
     }
 
     let mut rng = DeterministicRng::new(options.seed);
+    let parent_action_maps = parents
+        .iter()
+        .map(|(policy, _)| policy_action_entry_map(policy))
+        .collect::<Vec<_>>();
+    let parent_target_maps = parents
+        .iter()
+        .map(|(policy, _)| policy_target_entry_map(policy))
+        .collect::<Vec<_>>();
+    crossover_accumulators(
+        &mut action_accumulators,
+        &parent_action_maps,
+        &mut rng,
+        options,
+    );
+    crossover_accumulators(
+        &mut target_accumulators,
+        &parent_target_maps,
+        &mut rng,
+        options,
+    );
+    explore_accumulators(&mut action_accumulators, &mut rng, options);
+    explore_accumulators(&mut target_accumulators, &mut rng, options);
     mutate_accumulators(&mut action_accumulators, &mut rng, options);
     mutate_accumulators(&mut target_accumulators, &mut rng, options);
 
@@ -540,6 +569,7 @@ where
     F: for<'a> FnMut(SoccerLearningQueueEvent<'a>) -> Result<(), String>,
 {
     let started = Instant::now();
+    let mut config = config;
     let parallel_games = config.parallel_games.clamp(1, 100);
     let (task_tx, task_rx) = mpsc::sync_channel::<SoccerLearningQueueTask>(parallel_games);
     let task_rx = Arc::new(Mutex::new(task_rx));
@@ -586,6 +616,7 @@ where
         if active < parallel_games && next_episode < config.games {
             if let Err(err) = on_event(SoccerLearningQueueEvent::StartingBatch {
                 next_episode,
+                match_config: &mut config.match_config,
                 policies: &mut policies,
                 neural_network: &mut latest_neural_network,
             }) {
@@ -920,77 +951,106 @@ fn seed_entry_accumulator(
         return;
     }
     let key = policy_entry_key(team, entry_kind, &entry);
-    accumulators.insert(
-        key,
-        MergeAccumulator {
-            state_key: entry.state_key,
-            action: entry.action,
-            weighted_value_sum: entry.value * effective_visits,
-            effective_visits,
-            display_visits: entry.visits.max(1),
-            target_fine_cell_id: entry.target_fine_cell_id,
-            target_tactical_cell_id: entry.target_tactical_cell_id,
-            target_macro_cell_id: entry.target_macro_cell_id,
-            target_root_cell_id: entry.target_root_cell_id,
-        },
-    );
+    let item = accumulators.entry(key).or_insert_with(|| MergeAccumulator {
+        state_key: entry.state_key.clone(),
+        action: entry.action.clone(),
+        weighted_value_sum: 0.0,
+        effective_visits: 0.0,
+        display_visits: 0,
+        target_fine_cell_id: entry.target_fine_cell_id,
+        target_tactical_cell_id: entry.target_tactical_cell_id,
+        target_macro_cell_id: entry.target_macro_cell_id,
+        target_root_cell_id: entry.target_root_cell_id,
+    });
+    item.weighted_value_sum += entry.value * effective_visits;
+    item.effective_visits += effective_visits;
+    item.display_visits = item.display_visits.saturating_add(entry.visits.max(1));
 }
 
-fn build_policies_from_accumulators(
-    home_options: SoccerQPolicyOptions,
-    away_options: SoccerQPolicyOptions,
-    action_accumulators: BTreeMap<PolicyEntryKey, MergeAccumulator>,
-    target_accumulators: BTreeMap<PolicyEntryKey, MergeAccumulator>,
-) -> Result<SoccerTeamQPolicies, String> {
-    let action_capacity = action_accumulators.len();
-    let target_capacity = target_accumulators.len();
-    let mut home_entries = Vec::with_capacity(action_capacity.saturating_add(1) / 2);
-    let mut away_entries = Vec::with_capacity(action_capacity / 2);
-    let mut home_targets = Vec::with_capacity(target_capacity.saturating_add(1) / 2);
-    let mut away_targets = Vec::with_capacity(target_capacity / 2);
+fn policy_action_entry_map(policy: &SoccerTeamQPolicies) -> HashMap<PolicyEntryKey, EntryValue> {
+    let mut map = entry_map(
+        Team::Home,
+        SoccerLearningPolicyEntryKind::Action,
+        policy.home.entries().into_iter().map(action_entry_value),
+    );
+    map.extend(entry_map(
+        Team::Away,
+        SoccerLearningPolicyEntryKind::Action,
+        policy.away.entries().into_iter().map(action_entry_value),
+    ));
+    map
+}
 
-    for (key, accumulator) in action_accumulators {
-        if accumulator.effective_visits <= 0.0 {
+fn policy_target_entry_map(policy: &SoccerTeamQPolicies) -> HashMap<PolicyEntryKey, EntryValue> {
+    let mut map = entry_map(
+        Team::Home,
+        SoccerLearningPolicyEntryKind::Target,
+        policy
+            .home
+            .target_entries()
+            .into_iter()
+            .map(target_entry_value),
+    );
+    map.extend(entry_map(
+        Team::Away,
+        SoccerLearningPolicyEntryKind::Target,
+        policy
+            .away
+            .target_entries()
+            .into_iter()
+            .map(target_entry_value),
+    ));
+    map
+}
+
+fn crossover_accumulators(
+    accumulators: &mut BTreeMap<PolicyEntryKey, MergeAccumulator>,
+    parent_maps: &[HashMap<PolicyEntryKey, EntryValue>],
+    rng: &mut DeterministicRng,
+    options: SoccerEvolutionOptions,
+) {
+    let crossover_rate = options.crossover_rate.clamp(0.0, 1.0);
+    if parent_maps.len() < 2 || crossover_rate <= 0.0 {
+        return;
+    }
+    for (key, accumulator) in accumulators.iter_mut() {
+        if rng.next_f64() > crossover_rate || accumulator.effective_visits <= 0.0 {
             continue;
         }
-        let entry = SoccerQEntry {
-            state: accumulator.state_key,
-            action: accumulator.action,
-            value: accumulator.weighted_value_sum / accumulator.effective_visits,
-            visits: accumulator.display_visits.max(1),
-        };
-        match key.team {
-            "home" => home_entries.push(entry),
-            "away" => away_entries.push(entry),
-            _ => {}
+        let start = rng.next_usize(parent_maps.len());
+        for offset in 0..parent_maps.len() {
+            let index = (start + offset) % parent_maps.len();
+            let Some(parent_value) = parent_maps[index].get(key) else {
+                continue;
+            };
+            accumulator.weighted_value_sum =
+                parent_value.value.clamp(-120.0, 120.0) * accumulator.effective_visits;
+            accumulator.display_visits = accumulator.display_visits.max(parent_value.visits.max(1));
+            break;
         }
     }
+}
 
-    for (key, accumulator) in target_accumulators {
-        if accumulator.effective_visits <= 0.0 {
+fn explore_accumulators(
+    accumulators: &mut BTreeMap<PolicyEntryKey, MergeAccumulator>,
+    rng: &mut DeterministicRng,
+    options: SoccerEvolutionOptions,
+) {
+    let exploration_rate = options.exploration_rate.clamp(0.0, 1.0);
+    let exploration_scale = options.exploration_scale.max(0.0);
+    if exploration_rate <= 0.0 || exploration_scale <= 0.0 {
+        return;
+    }
+    for accumulator in accumulators.values_mut() {
+        if rng.next_f64() > exploration_rate || accumulator.effective_visits <= 0.0 {
             continue;
         }
-        let entry = SoccerQTargetEntry {
-            state: accumulator.state_key,
-            action: accumulator.action,
-            target_fine_cell_id: accumulator.target_fine_cell_id.max(0) as usize,
-            target_tactical_cell_id: accumulator.target_tactical_cell_id.max(0) as usize,
-            target_macro_cell_id: accumulator.target_macro_cell_id.max(0) as usize,
-            target_root_cell_id: accumulator.target_root_cell_id.max(0) as usize,
-            value: accumulator.weighted_value_sum / accumulator.effective_visits,
-            visits: accumulator.display_visits.max(1),
-        };
-        match key.team {
-            "home" => home_targets.push(entry),
-            "away" => away_targets.push(entry),
-            _ => {}
-        }
+        let current = accumulator.weighted_value_sum / accumulator.effective_visits;
+        let sign = if rng.next_f64() < 0.5 { -1.0 } else { 1.0 };
+        let magnitude = (0.25 + rng.next_f64() * 0.75) * exploration_scale;
+        accumulator.weighted_value_sum =
+            (current + sign * magnitude).clamp(-120.0, 120.0) * accumulator.effective_visits;
     }
-
-    Ok(SoccerTeamQPolicies {
-        home: SoccerQPolicy::from_entries_with_targets(home_options, &home_entries, &home_targets)?,
-        away: SoccerQPolicy::from_entries_with_targets(away_options, &away_entries, &away_targets)?,
-    })
 }
 
 fn mutate_accumulators(
@@ -1053,6 +1113,71 @@ impl DeterministicRng {
     fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
     }
+
+    fn next_usize(&mut self, upper_bound: usize) -> usize {
+        if upper_bound == 0 {
+            0
+        } else {
+            (self.next_u64() as usize) % upper_bound
+        }
+    }
+}
+
+fn build_policies_from_accumulators(
+    home_options: SoccerQPolicyOptions,
+    away_options: SoccerQPolicyOptions,
+    action_accumulators: BTreeMap<PolicyEntryKey, MergeAccumulator>,
+    target_accumulators: BTreeMap<PolicyEntryKey, MergeAccumulator>,
+) -> Result<SoccerTeamQPolicies, String> {
+    let action_capacity = action_accumulators.len();
+    let target_capacity = target_accumulators.len();
+    let mut home_entries = Vec::with_capacity(action_capacity.saturating_add(1) / 2);
+    let mut away_entries = Vec::with_capacity(action_capacity / 2);
+    let mut home_targets = Vec::with_capacity(target_capacity.saturating_add(1) / 2);
+    let mut away_targets = Vec::with_capacity(target_capacity / 2);
+
+    for (key, accumulator) in action_accumulators {
+        if accumulator.effective_visits <= 0.0 {
+            continue;
+        }
+        let entry = SoccerQEntry {
+            state: accumulator.state_key,
+            action: accumulator.action,
+            value: accumulator.weighted_value_sum / accumulator.effective_visits,
+            visits: accumulator.display_visits.max(1),
+        };
+        match key.team {
+            "home" => home_entries.push(entry),
+            "away" => away_entries.push(entry),
+            _ => {}
+        }
+    }
+
+    for (key, accumulator) in target_accumulators {
+        if accumulator.effective_visits <= 0.0 {
+            continue;
+        }
+        let entry = SoccerQTargetEntry {
+            state: accumulator.state_key,
+            action: accumulator.action,
+            target_fine_cell_id: accumulator.target_fine_cell_id.max(0) as usize,
+            target_tactical_cell_id: accumulator.target_tactical_cell_id.max(0) as usize,
+            target_macro_cell_id: accumulator.target_macro_cell_id.max(0) as usize,
+            target_root_cell_id: accumulator.target_root_cell_id.max(0) as usize,
+            value: accumulator.weighted_value_sum / accumulator.effective_visits,
+            visits: accumulator.display_visits.max(1),
+        };
+        match key.team {
+            "home" => home_targets.push(entry),
+            "away" => away_targets.push(entry),
+            _ => {}
+        }
+    }
+
+    Ok(SoccerTeamQPolicies {
+        home: SoccerQPolicy::from_entries_with_targets(home_options, &home_entries, &home_targets)?,
+        away: SoccerQPolicy::from_entries_with_targets(away_options, &away_entries, &away_targets)?,
+    })
 }
 
 #[cfg(test)]
@@ -1164,6 +1289,51 @@ mod tests {
     }
 
     #[test]
+    fn evolution_blends_elite_parent_weights() {
+        let low = policy_with_action(0.0, 1);
+        let high = policy_with_action(10.0, 1);
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.0,
+            mutation_scale: 0.0,
+            crossover_rate: 0.0,
+            exploration_rate: 0.0,
+            exploration_scale: 0.0,
+            elite_weight_floor: 0.0,
+            seed: 7,
+        };
+
+        let evolved =
+            evolve_soccer_team_policies(&[(&low, 1.0), (&high, 3.0)], options).expect("evolved");
+        let value = evolved.home.entries()[0].value;
+
+        assert!((value - 7.5).abs() < 1e-9, "weighted value was {value}");
+    }
+
+    #[test]
+    fn evolution_crossover_samples_parent_values() {
+        let left = policy_with_action(-4.0, 1);
+        let right = policy_with_action(4.0, 1);
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.0,
+            mutation_scale: 0.0,
+            crossover_rate: 1.0,
+            exploration_rate: 0.0,
+            exploration_scale: 0.0,
+            elite_weight_floor: 0.0,
+            seed: 11,
+        };
+
+        let evolved =
+            evolve_soccer_team_policies(&[(&left, 1.0), (&right, 1.0)], options).expect("evolved");
+        let value = evolved.home.entries()[0].value;
+
+        assert!(
+            (value - -4.0).abs() < 1e-9 || (value - 4.0).abs() < 1e-9,
+            "crossover should inherit a parent value, got {value}"
+        );
+    }
+
+    #[test]
     fn queue_runner_keeps_policy_output_available() {
         let options = SoccerQPolicyOptions::default();
         let report = run_soccer_learning_queue(
@@ -1201,6 +1371,45 @@ mod tests {
         );
         assert!(report.tactical_summary.total_transitions > 0);
         assert!(report.tactical_summary.shape_transitions > 0);
+    }
+
+    #[test]
+    fn queue_starting_batch_can_update_match_config() {
+        let options = SoccerQPolicyOptions::default();
+        let mut saw_starting_batch = false;
+        let report = run_soccer_learning_queue_with_events(
+            SoccerLearningQueueRunnerConfig {
+                games: 1,
+                parallel_games: 1,
+                base_seed: 1999,
+                match_config: MatchConfig {
+                    duration_seconds: 0.2,
+                    learning_logging_enabled: false,
+                    max_human_players: 0,
+                    ..Default::default()
+                },
+                initial_neural_network: None,
+                neural_drain_timeout: Duration::from_millis(0),
+                options: options.clone(),
+                prune_action_entries_per_team: 0,
+                prune_target_entries_per_team: 0,
+                min_policy_visits: 0,
+            },
+            SoccerTeamQPolicies::new(options),
+            |event| {
+                if let SoccerLearningQueueEvent::StartingBatch { match_config, .. } = event {
+                    match_config.tactical_learning.attack_flank_lane_weight = 0.91;
+                    match_config.tactical_learning.defense_contract_delta_weight = 0.73;
+                    saw_starting_batch = true;
+                }
+                Ok(())
+            },
+        )
+        .expect("queue run");
+
+        assert!(saw_starting_batch);
+        assert_eq!(report.completed_games, 1);
+        assert_eq!(report.failed_games, 0);
     }
 
     #[test]

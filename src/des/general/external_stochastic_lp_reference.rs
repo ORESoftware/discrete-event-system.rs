@@ -35,6 +35,34 @@ impl ExternalStochasticLpReferenceSolver {
     }
 }
 
+fn registered_stochastic_lp_rust_fallback_enabled() -> bool {
+    std::env::var("STOCHASTIC_LP_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("STOCHASTIC_LP_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_stochastic_lp_reference(opts: &ExternalStochasticLpReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalStochasticLpReferenceSolver::Auto
+            | ExternalStochasticLpReferenceSolver::RustMonolithic
+            | ExternalStochasticLpReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_stochastic_lp_fallback(
+    opts: &ExternalStochasticLpReferenceOptions,
+) -> bool {
+    registered_stochastic_lp_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalStochasticLpReferenceSolver::Scipy)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalStochasticLpReferenceOptions {
     pub solver: ExternalStochasticLpReferenceSolver,
@@ -246,6 +274,22 @@ fn rust_stochastic_lp_empty_solution(
     }
 }
 
+fn relabel_registered_stochastic_lp_fallback(
+    mut solution: ExternalStochasticLpReferenceSolution,
+    opts: &ExternalStochasticLpReferenceOptions,
+) -> ExternalStochasticLpReferenceSolution {
+    if should_use_registered_stochastic_lp_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-stochastic-lp-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
+}
+
 fn solve_stochastic_lp_with_rust_reference(
     problem: &SLPProblem,
     scenarios: &[Scenario],
@@ -453,13 +497,13 @@ pub fn solve_stochastic_lp_with_external_reference(
     scenarios: &[Scenario],
     opts: &ExternalStochasticLpReferenceOptions,
 ) -> ExternalStochasticLpReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalStochasticLpReferenceSolver::Auto
-            | ExternalStochasticLpReferenceSolver::RustMonolithic
-            | ExternalStochasticLpReferenceSolver::Fallback
-    ) {
-        return solve_stochastic_lp_with_rust_reference(problem, scenarios);
+    if should_use_rust_stochastic_lp_reference(opts)
+        || should_use_registered_stochastic_lp_fallback(opts)
+    {
+        return relabel_registered_stochastic_lp_fallback(
+            solve_stochastic_lp_with_rust_reference(problem, scenarios),
+            opts,
+        );
     }
 
     run_stochastic_lp_reference_json(
@@ -487,6 +531,31 @@ mod tests {
     use crate::des::general::stochastic_lp::{
         build_production_scenarios, build_production_slp, UniformDemandSpec,
     };
+    use std::sync::Mutex;
+
+    static STOCHASTIC_LP_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_sample_stochastic_lp() {
@@ -545,6 +614,45 @@ mod tests {
         assert_eq!(solution.solver, "rust:monolithic-slp");
         assert_eq!(solution.x.len(), 1);
         assert_eq!(solution.y_by_scenario.len(), scenarios.len());
+    }
+
+    #[test]
+    fn registered_scipy_alias_can_use_rust_reference_without_python() {
+        let _lock = STOCHASTIC_LP_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set("STOCHASTIC_LP_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let problem = build_production_slp(vec![1.0], vec![3.0], None);
+        let scenarios = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: vec![(5.0, 15.0)],
+                seed: 11,
+            },
+            5,
+        );
+
+        let solution = solve_stochastic_lp_with_external_reference(
+            &problem,
+            &scenarios,
+            &ExternalStochasticLpReferenceOptions {
+                solver: ExternalStochasticLpReferenceSolver::Scipy,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalStochasticLpReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-stochastic-lp-fallback-for-scipy"
+        );
+        assert_eq!(solution.x.len(), 1);
+        assert_eq!(solution.y_by_scenario.len(), scenarios.len());
+        assert!(solution.objective.is_some());
+        assert!(solution
+            .message
+            .contains("requested solver 'scipy' was validated with Rust fallback"));
     }
 
     #[test]

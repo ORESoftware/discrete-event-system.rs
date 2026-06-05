@@ -36,6 +36,32 @@ impl ExternalMaxFlowReferenceSolver {
     }
 }
 
+fn registered_max_flow_rust_fallback_enabled() -> bool {
+    std::env::var("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("MAX_FLOW_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_max_flow_reference(opts: &ExternalMaxFlowReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalMaxFlowReferenceSolver::Auto
+            | ExternalMaxFlowReferenceSolver::RustEdmondsKarp
+            | ExternalMaxFlowReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_max_flow_fallback(opts: &ExternalMaxFlowReferenceOptions) -> bool {
+    registered_max_flow_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalMaxFlowReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalMaxFlowReferenceOptions {
     pub solver: ExternalMaxFlowReferenceSolver,
@@ -422,6 +448,22 @@ fn empty_solution(
     }
 }
 
+fn relabel_registered_max_flow_fallback(
+    mut solution: ExternalMaxFlowReferenceSolution,
+    opts: &ExternalMaxFlowReferenceOptions,
+) -> ExternalMaxFlowReferenceSolution {
+    if should_use_registered_max_flow_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-max-flow-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
+}
+
 fn reference_script() -> PathBuf {
     let root = std::env::var("REPO_ROOT")
         .map(PathBuf::from)
@@ -572,13 +614,11 @@ pub fn solve_max_flow_with_external_reference(
     problem: &MaxFlowProblem,
     opts: &ExternalMaxFlowReferenceOptions,
 ) -> ExternalMaxFlowReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalMaxFlowReferenceSolver::Auto
-            | ExternalMaxFlowReferenceSolver::RustEdmondsKarp
-            | ExternalMaxFlowReferenceSolver::Fallback
-    ) {
-        return solve_max_flow_with_rust_reference(problem);
+    if should_use_rust_max_flow_reference(opts) || should_use_registered_max_flow_fallback(opts) {
+        return relabel_registered_max_flow_fallback(
+            solve_max_flow_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_max_flow_reference_json(
@@ -603,6 +643,31 @@ pub fn solve_max_flow_with_external_reference(
 mod tests {
     use super::*;
     use crate::des::general::max_flow::{build_textbook_max_flow_problem, MaxFlowEdge};
+    use std::sync::Mutex;
+
+    static MAX_FLOW_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_textbook_max_flow() {
@@ -687,6 +752,31 @@ mod tests {
         assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Optimal);
         assert_eq!(solution.solver, "rust:edmonds-karp-max-flow");
         assert!((solution.max_flow.unwrap() - 23.0).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let problem = build_textbook_max_flow_problem();
+
+        let solution = solve_max_flow_with_external_reference(
+            &problem,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-max-flow-fallback-for-ortools"
+        );
+        assert!((solution.max_flow.unwrap() - 23.0).abs() <= 1e-9);
+        assert!((solution.min_cut.capacity - 23.0).abs() <= 1e-9);
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

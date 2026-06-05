@@ -33,6 +33,32 @@ impl ExternalTspReferenceSolver {
     }
 }
 
+fn registered_tsp_rust_fallback_enabled() -> bool {
+    std::env::var("TSP_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("TSP_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_tsp_reference(opts: &ExternalTspReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalTspReferenceSolver::Auto
+            | ExternalTspReferenceSolver::RustHeldKarp
+            | ExternalTspReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_tsp_fallback(opts: &ExternalTspReferenceOptions) -> bool {
+    registered_tsp_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalTspReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalTspReferenceOptions {
     pub solver: ExternalTspReferenceSolver,
@@ -132,6 +158,22 @@ fn rust_tsp_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_tsp_fallback(
+    mut solution: ExternalTspReferenceSolution,
+    opts: &ExternalTspReferenceOptions,
+) -> ExternalTspReferenceSolution {
+    if should_use_registered_tsp_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-tsp-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn validate_rust_tsp_distance_matrix(distance_matrix: &[Vec<f64>]) -> Result<usize, String> {
@@ -449,13 +491,11 @@ pub fn solve_tsp_with_external_reference(
     distance_matrix: &[Vec<f64>],
     opts: &ExternalTspReferenceOptions,
 ) -> ExternalTspReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalTspReferenceSolver::Auto
-            | ExternalTspReferenceSolver::RustHeldKarp
-            | ExternalTspReferenceSolver::Fallback
-    ) {
-        return solve_tsp_with_rust_reference(distance_matrix);
+    if should_use_rust_tsp_reference(opts) || should_use_registered_tsp_fallback(opts) {
+        return relabel_registered_tsp_fallback(
+            solve_tsp_with_rust_reference(distance_matrix),
+            opts,
+        );
     }
 
     run_tsp_reference_json(
@@ -470,14 +510,12 @@ pub fn solve_euclidean_tsp_with_external_reference(
     points: &[ExternalTspPoint],
     opts: &ExternalTspReferenceOptions,
 ) -> ExternalTspReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalTspReferenceSolver::Auto
-            | ExternalTspReferenceSolver::RustHeldKarp
-            | ExternalTspReferenceSolver::Fallback
-    ) {
+    if should_use_rust_tsp_reference(opts) || should_use_registered_tsp_fallback(opts) {
         let distance_matrix = rust_tsp_points_to_distance_matrix(points);
-        return solve_tsp_with_rust_reference(&distance_matrix);
+        return relabel_registered_tsp_fallback(
+            solve_tsp_with_rust_reference(&distance_matrix),
+            opts,
+        );
     }
 
     let points_json: Vec<Value> = points
@@ -502,6 +540,31 @@ pub fn solve_euclidean_tsp_with_external_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TSP_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn unit_square_matrix() -> Vec<Vec<f64>> {
         vec![
@@ -564,6 +627,58 @@ mod tests {
         assert_eq!(solution.solver, "rust:held-karp-tsp");
         assert_eq!(solution.tour, vec![0, 1, 2, 3]);
         assert_eq!(solution.objective, Some(4.0));
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = TSP_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("TSP_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let opts = ExternalTspReferenceOptions {
+            solver: ExternalTspReferenceSolver::OrTools,
+        };
+
+        let matrix_solution = solve_tsp_with_external_reference(&unit_square_matrix(), &opts);
+        assert_eq!(matrix_solution.status, ExternalTspReferenceStatus::Optimal);
+        assert_eq!(
+            matrix_solution.solver,
+            "rust:registered-tsp-fallback-for-ortools"
+        );
+        assert_eq!(matrix_solution.tour, vec![0, 1, 2, 3]);
+        assert_eq!(matrix_solution.objective, Some(4.0));
+        assert!(matrix_solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
+
+        let points = vec![
+            ExternalTspPoint {
+                id: Some("A".to_string()),
+                x: 0.0,
+                y: 0.0,
+            },
+            ExternalTspPoint {
+                id: Some("B".to_string()),
+                x: 1.0,
+                y: 0.0,
+            },
+            ExternalTspPoint {
+                id: Some("C".to_string()),
+                x: 1.0,
+                y: 1.0,
+            },
+            ExternalTspPoint {
+                id: Some("D".to_string()),
+                x: 0.0,
+                y: 1.0,
+            },
+        ];
+        let point_solution = solve_euclidean_tsp_with_external_reference(&points, &opts);
+        assert_eq!(point_solution.status, ExternalTspReferenceStatus::Optimal);
+        assert_eq!(
+            point_solution.solver,
+            "rust:registered-tsp-fallback-for-ortools"
+        );
+        assert_eq!(point_solution.tour, vec![0, 1, 2, 3]);
+        assert_eq!(point_solution.objective, Some(4.0));
     }
 
     #[test]

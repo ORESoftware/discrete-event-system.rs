@@ -9,12 +9,17 @@ remaining continuous subproblems are delegated to the Rust reference binary.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
 import subprocess
 import sys
 from typing import List, Optional, Sequence, Tuple
+
+RUST_REFERENCE_SOLVERS = ("auto", "brute-force", "enumeration", "rust-enumeration")
+ORTOOLS_SOLVERS = ("ortools", "ortools-cp-sat")
+SCIPY_SOLVERS = ("scipy", "scipy-milp")
 
 def payload(status: str, solver: str, x=None, objective=None, message="", enumerated=0, **extra) -> dict:
     result = {
@@ -46,6 +51,45 @@ def rust_reference_command() -> list[str]:
     if explicit:
         return [explicit]
     return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def exec_rust_reference(args: argparse.Namespace) -> None:
+    command = rust_reference_command() + [
+        "--problem",
+        args.problem,
+        "--out",
+        args.out,
+        "--solver",
+        args.solver,
+        "--max-enumerations",
+        str(args.max_enumerations),
+    ]
+    if args.pool_size is not None:
+        command.extend(["--pool-size", str(args.pool_size)])
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(os.path.dirname(script_dir))
+    os.execvp(command[0], command)
+
+
+def package_available(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def external_rust_fallback_enabled() -> bool:
+    value = os.environ.get("IP_MIP_REFERENCE_EXTERNAL_FALLBACK", "")
+    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
+
+
+def external_solver_package_available(solver: str) -> bool:
+    if solver in ORTOOLS_SOLVERS:
+        return package_available("ortools")
+    if solver in SCIPY_SOLVERS:
+        return package_available("numpy") and package_available("scipy")
+    return False
 
 
 def rust_bounded_reference(
@@ -1587,6 +1631,16 @@ def main() -> int:
     parser.add_argument("--max-enumerations", type=int, default=1_000_000)
     parser.add_argument("--pool-size", type=int)
     args = parser.parse_args()
+    args.solver = args.solver.strip().lower().replace("_", "-")
+    if args.solver in RUST_REFERENCE_SOLVERS:
+        exec_rust_reference(args)
+    if (
+        external_rust_fallback_enabled()
+        and args.solver in ORTOOLS_SOLVERS + SCIPY_SOLVERS
+        and not external_solver_package_available(args.solver)
+    ):
+        args.solver = "rust-enumeration"
+        exec_rust_reference(args)
     p = load_problem(args.problem)
     result = solve(p, args.solver, args.max_enumerations, args.pool_size)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)

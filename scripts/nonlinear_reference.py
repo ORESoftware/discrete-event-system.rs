@@ -19,8 +19,8 @@ import argparse
 import json
 import math
 import os
-import subprocess
 import sys
+import tempfile
 from typing import Callable, Optional, Sequence
 
 RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust", "rust-fallback", "rust-reference")
@@ -53,44 +53,24 @@ def rust_reference_command() -> list[str]:
     return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
 
 
-def rust_reference(raw: dict, solver: str = "auto", max_iterations: int = 200) -> dict:
+def exec_rust_reference(
+    solver: str = "auto",
+    max_iterations: int = 200,
+    raw_stdin: Optional[str] = None,
+) -> None:
     command = rust_reference_command()
-    cwd = None
     if command[0] == "cargo":
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        cwd = os.path.dirname(script_dir)
-    completed = subprocess.run(
-        [
-            *command,
-            "--solver",
-            solver,
-            "--max-iterations",
-            str(max_iterations),
-        ],
-        input=json.dumps(raw),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        check=False,
-    )
-    try:
-        parsed = json.loads(completed.stdout)
-    except Exception as exc:
-        return {
-            "status": "numerical-error",
-            "solver": "rust:nonlinear-reference",
-            "x": [],
-            "objective": None,
-            "gradientNorm": None,
-            "residualNorm": None,
-            "iterations": None,
-            "evaluations": None,
-            "message": f"failed to parse Rust nonlinear output: {exc}; stderr={completed.stderr.strip()}",
-        }
-    if completed.returncode != 0 and not parsed.get("message"):
-        parsed["message"] = completed.stderr.strip()
-    return parsed
+        os.chdir(os.path.dirname(script_dir))
+    args = [*command, "--solver", solver, "--max-iterations", str(max_iterations)]
+    if raw_stdin is None:
+        os.execvp(command[0], args)
+    with tempfile.TemporaryFile(mode="w+b") as stdin_file:
+        stdin_file.write(raw_stdin.encode("utf-8"))
+        stdin_file.flush()
+        stdin_file.seek(0)
+        os.dup2(stdin_file.fileno(), sys.stdin.fileno())
+        os.execvp(command[0], args)
 
 
 def rosenbrock(x: Sequence[float]) -> float:
@@ -478,15 +458,15 @@ def main() -> int:
     )
     parser.add_argument("--max-iterations", type=int, default=200)
     args = parser.parse_args()
+    if args.solver in RUST_REFERENCE_SOLVERS:
+        exec_rust_reference(args.solver, args.max_iterations)
+
     try:
-        raw = json.load(sys.stdin)
-        if args.solver in RUST_REFERENCE_SOLVERS:
-            out = rust_reference(raw, args.solver, args.max_iterations)
-            print(json.dumps(out))
-            return 0
+        raw_stdin = sys.stdin.read()
+        raw = json.loads(raw_stdin)
         kind = str(raw.get("kind", "rosenbrock"))
         if kind == "pareto_portfolio":
-            out = rust_reference(raw, "fallback", args.max_iterations)
+            exec_rust_reference("fallback", args.max_iterations, raw_stdin)
         elif kind == "rosenbrock":
             out = solve_rosenbrock(raw, args.solver, args.max_iterations)
         elif kind == "least_squares":

@@ -10,8 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
-import sys
 from typing import Any
 
 
@@ -53,31 +51,12 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     )
 
 
-def rust_reference(payload: dict[str, Any], tool: str) -> dict[str, Any]:
+def exec_rust_reference(tool: str) -> None:
     command = rust_reference_command()
-    cwd = None
     if command[0] == "cargo":
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        cwd = os.path.dirname(script_dir)
-    completed = subprocess.run(
-        [*command, "--tool", tool],
-        input=json.dumps(payload),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        check=False,
-    )
-    try:
-        parsed = json.loads(completed.stdout)
-    except Exception as exc:
-        return result(
-            tool,
-            f"failed to parse Rust proof validation output: {exc}; stderr={completed.stderr.strip()}",
-        )
-    if completed.returncode != 0 and not parsed.get("message"):
-        parsed["message"] = completed.stderr.strip()
-    return parsed
+        os.chdir(os.path.dirname(script_dir))
+    os.execvp(command[0], [*command, "--tool", tool])
 
 
 def main() -> int:
@@ -86,10 +65,7 @@ def main() -> int:
     args = parser.parse_args()
     tool = args.tool.lower().replace("_", "-")
     try:
-        payload = json.load(sys.stdin)
-        if not isinstance(payload, dict):
-            raise ValueError("top-level payload must be an object")
-        print(json.dumps(rust_reference(payload, tool), sort_keys=True))
+        exec_rust_reference(tool)
         return 0
     except Exception as exc:
         print(json.dumps(result(tool, str(exc)), sort_keys=True))

@@ -35,6 +35,32 @@ impl ExternalSetCoverReferenceSolver {
     }
 }
 
+fn registered_set_cover_rust_fallback_enabled() -> bool {
+    std::env::var("SET_COVER_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("SET_COVER_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_set_cover_reference(opts: &ExternalSetCoverReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalSetCoverReferenceSolver::Auto
+            | ExternalSetCoverReferenceSolver::RustExact
+            | ExternalSetCoverReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_set_cover_fallback(opts: &ExternalSetCoverReferenceOptions) -> bool {
+    registered_set_cover_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalSetCoverReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalSetCoverReferenceOptions {
     pub solver: ExternalSetCoverReferenceSolver,
@@ -202,6 +228,22 @@ fn rust_set_cover_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_set_cover_fallback(
+    mut solution: ExternalSetCoverReferenceSolution,
+    opts: &ExternalSetCoverReferenceOptions,
+) -> ExternalSetCoverReferenceSolution {
+    if should_use_registered_set_cover_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-set-cover-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn rust_set_cover_masks(
@@ -645,13 +687,11 @@ pub fn solve_set_cover_with_external_reference(
     problem: &SetCoverProblem,
     opts: &ExternalSetCoverReferenceOptions,
 ) -> ExternalSetCoverReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalSetCoverReferenceSolver::Auto
-            | ExternalSetCoverReferenceSolver::RustExact
-            | ExternalSetCoverReferenceSolver::Fallback
-    ) {
-        return solve_set_cover_with_rust_reference(problem);
+    if should_use_rust_set_cover_reference(opts) || should_use_registered_set_cover_fallback(opts) {
+        return relabel_registered_set_cover_fallback(
+            solve_set_cover_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_set_cover_reference_json(
@@ -673,6 +713,31 @@ mod tests {
     use crate::des::general::set_cover::{
         build_sample_set_cover_problem, SetCoverProblem, SetCoverSet,
     };
+    use std::sync::Mutex;
+
+    static SET_COVER_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_sample_set_cover() {
@@ -729,6 +794,32 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-set-cover");
         assert_eq!(solution.objective, Some(7.0));
         assert_eq!(solution.selected_set_ids, vec!["A", "B", "D"]);
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = SET_COVER_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("SET_COVER_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let problem = build_sample_set_cover_problem();
+
+        let solution = solve_set_cover_with_external_reference(
+            &problem,
+            &ExternalSetCoverReferenceOptions {
+                solver: ExternalSetCoverReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalSetCoverReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-set-cover-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(7.0));
+        assert_eq!(solution.selected_set_ids, vec!["A", "B", "D"]);
+        assert_eq!(solution.covered_elements, problem.universe);
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

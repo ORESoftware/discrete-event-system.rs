@@ -35,6 +35,39 @@ impl ExternalFacilityLocationReferenceSolver {
     }
 }
 
+fn registered_facility_location_rust_fallback_enabled() -> bool {
+    std::env::var("FACILITY_LOCATION_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("FACILITY_LOCATION_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_facility_location_reference(
+    opts: &ExternalFacilityLocationReferenceOptions,
+) -> bool {
+    matches!(
+        opts.solver,
+        ExternalFacilityLocationReferenceSolver::Auto
+            | ExternalFacilityLocationReferenceSolver::RustExact
+            | ExternalFacilityLocationReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_facility_location_fallback(
+    opts: &ExternalFacilityLocationReferenceOptions,
+) -> bool {
+    registered_facility_location_rust_fallback_enabled()
+        && matches!(
+            opts.solver,
+            ExternalFacilityLocationReferenceSolver::OrTools
+        )
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalFacilityLocationReferenceOptions {
     pub solver: ExternalFacilityLocationReferenceSolver,
@@ -220,6 +253,22 @@ fn rust_facility_location_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_facility_location_fallback(
+    mut solution: ExternalFacilityLocationReferenceSolution,
+    opts: &ExternalFacilityLocationReferenceOptions,
+) -> ExternalFacilityLocationReferenceSolution {
+    if should_use_registered_facility_location_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-facility-location-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn rust_facility_location_evaluate_open(
@@ -556,13 +605,13 @@ pub fn solve_facility_location_with_external_reference(
     problem: &FacilityLocationProblem,
     opts: &ExternalFacilityLocationReferenceOptions,
 ) -> ExternalFacilityLocationReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalFacilityLocationReferenceSolver::Auto
-            | ExternalFacilityLocationReferenceSolver::RustExact
-            | ExternalFacilityLocationReferenceSolver::Fallback
-    ) {
-        return solve_facility_location_with_rust_reference(problem);
+    if should_use_rust_facility_location_reference(opts)
+        || should_use_registered_facility_location_fallback(opts)
+    {
+        return relabel_registered_facility_location_fallback(
+            solve_facility_location_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_facility_location_reference_json(
@@ -582,6 +631,31 @@ mod tests {
     use crate::des::general::facility_location::{
         build_sample_facility_location_problem, FacilityLocationProblem,
     };
+    use std::sync::Mutex;
+
+    static FACILITY_LOCATION_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_sample_facility_location() {
@@ -645,6 +719,37 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-facility-location");
         assert_eq!(solution.open_facility_ids, vec!["North", "South"]);
         assert_eq!(solution.objective, Some(28.0));
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = FACILITY_LOCATION_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set("FACILITY_LOCATION_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let problem = build_sample_facility_location_problem();
+
+        let solution = solve_facility_location_with_external_reference(
+            &problem,
+            &ExternalFacilityLocationReferenceOptions {
+                solver: ExternalFacilityLocationReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalFacilityLocationReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-facility-location-fallback-for-ortools"
+        );
+        assert_eq!(solution.open_facility_ids, vec!["North", "South"]);
+        assert_eq!(solution.objective, Some(28.0));
+        assert_eq!(solution.assignments.len(), problem.customer_ids.len());
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

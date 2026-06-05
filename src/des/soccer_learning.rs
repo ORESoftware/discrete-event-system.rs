@@ -179,6 +179,7 @@ pub struct SoccerEvolutionOptions {
     pub exploration_rate: f64,
     pub exploration_scale: f64,
     pub elite_weight_floor: f64,
+    pub population_size: usize,
     pub seed: u64,
 }
 
@@ -191,6 +192,7 @@ impl Default for SoccerEvolutionOptions {
             exploration_rate: 0.04,
             exploration_scale: 0.45,
             elite_weight_floor: 0.05,
+            population_size: 4,
             seed: 2026,
         }
     }
@@ -207,6 +209,7 @@ pub struct SoccerPostgresPolicyRefreshCheck<'a> {
     pub latest_updated_at_micros: i64,
     pub latest_neural_network_present: bool,
     pub local_tactical_evolved_since_pg_refresh: bool,
+    pub postgres_tactical_learning_authoritative: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,7 +242,9 @@ pub fn soccer_postgres_policy_refresh_decision(
         || newer_generation
         || different_head_at_same_generation
         || same_policy_newer_revision
-        || (same_policy_version && !check.local_tactical_evolved_since_pg_refresh);
+        || (same_policy_version
+            && (check.postgres_tactical_learning_authoritative
+                || !check.local_tactical_evolved_since_pg_refresh));
 
     SoccerPostgresPolicyRefreshDecision {
         refresh_policy,
@@ -247,6 +252,21 @@ pub fn soccer_postgres_policy_refresh_decision(
         same_policy_version,
         same_policy_newer_revision,
     }
+}
+
+pub fn soccer_should_refresh_postgres_for_new_sim(
+    resume_artifact_present: bool,
+    refresh_with_resume_artifact: bool,
+) -> bool {
+    !resume_artifact_present || refresh_with_resume_artifact
+}
+
+pub fn soccer_should_flush_postgres_policy_versions_for_new_sim(
+    refresh_for_new_sims: bool,
+    flush_policy_versions_before_new_sim: bool,
+    pending_policy_versions: usize,
+) -> bool {
+    refresh_for_new_sims && flush_policy_versions_before_new_sim && pending_policy_versions > 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -473,6 +493,30 @@ pub fn evolve_soccer_team_policies(
     parents: &[(&SoccerTeamQPolicies, f64)],
     options: SoccerEvolutionOptions,
 ) -> Result<SoccerTeamQPolicies, String> {
+    let population_size = options.population_size.max(1);
+    let mut best = None::<(SoccerTeamQPolicies, f64)>;
+    for candidate_index in 0..population_size {
+        let mut candidate_options = options;
+        candidate_options.population_size = 1;
+        candidate_options.seed =
+            candidate_seed(options.seed, candidate_index, 0x51f1_7ea9_8d12_0b1d);
+        let candidate = evolve_soccer_team_policy_candidate(parents, candidate_options)?;
+        let score = soccer_team_policy_search_score(&candidate);
+        if best
+            .as_ref()
+            .map_or(true, |(_, best_score)| score > *best_score)
+        {
+            best = Some((candidate, score));
+        }
+    }
+    best.map(|(policy, _)| policy)
+        .ok_or_else(|| "at least one parent policy is required".to_string())
+}
+
+fn evolve_soccer_team_policy_candidate(
+    parents: &[(&SoccerTeamQPolicies, f64)],
+    options: SoccerEvolutionOptions,
+) -> Result<SoccerTeamQPolicies, String> {
     let Some((first_parent, _)) = parents.first() else {
         return Err("at least one parent policy is required".to_string());
     };
@@ -531,13 +575,66 @@ pub fn evolve_soccer_team_policies(
     )
 }
 
+fn soccer_team_policy_search_score(policy: &SoccerTeamQPolicies) -> f64 {
+    let (home_score, home_weight) = soccer_q_policy_search_score(&policy.home);
+    let (away_score, away_weight) = soccer_q_policy_search_score(&policy.away);
+    let weight = home_weight + away_weight;
+    if weight <= 0.0 {
+        0.0
+    } else {
+        (home_score + away_score) / weight
+    }
+}
+
+fn soccer_q_policy_search_score(policy: &SoccerQPolicy) -> (f64, f64) {
+    let mut weighted_score = 0.0;
+    let mut total_weight = 0.0;
+    for entry in policy.entries() {
+        let weight = f64::from(entry.visits.max(1)).sqrt();
+        weighted_score += entry.value.clamp(-120.0, 120.0) * weight;
+        total_weight += weight;
+    }
+    for entry in policy.target_entries() {
+        let weight = f64::from(entry.visits.max(1)).sqrt();
+        weighted_score += entry.value.clamp(-120.0, 120.0) * weight;
+        total_weight += weight;
+    }
+    (weighted_score, total_weight)
+}
+
 pub fn evolve_soccer_tactical_learning_weights(
     base: &SoccerTacticalLearningWeights,
     parents: &[(&SoccerTacticalLearningSummary, f64)],
     options: SoccerEvolutionOptions,
 ) -> SoccerTacticalLearningWeights {
-    if parents.is_empty() {
+    let Some(weighted_summary) = weighted_tactical_evolution_summary(parents, options) else {
         return base.clone();
+    };
+    let population_size = options.population_size.max(1);
+    let mut best = base.clone();
+    let mut best_score = soccer_tactical_weight_search_score(&best, &weighted_summary);
+    for candidate_index in 0..population_size {
+        let mut candidate_options = options;
+        candidate_options.population_size = 1;
+        candidate_options.seed =
+            candidate_seed(options.seed, candidate_index, 0x7ac7_1ca1_5eed_c0de);
+        let candidate =
+            evolve_soccer_tactical_learning_candidate(base, &weighted_summary, candidate_options);
+        let score = soccer_tactical_weight_search_score(&candidate, &weighted_summary);
+        if score > best_score {
+            best_score = score;
+            best = candidate;
+        }
+    }
+    best
+}
+
+fn weighted_tactical_evolution_summary(
+    parents: &[(&SoccerTacticalLearningSummary, f64)],
+    options: SoccerEvolutionOptions,
+) -> Option<SoccerTacticalLearningSummary> {
+    if parents.is_empty() {
+        return None;
     }
     let mut weighted_summary = SoccerTacticalLearningSummary::default();
     let mut total_weight = 0.0;
@@ -560,7 +657,7 @@ pub fn evolve_soccer_tactical_learning_weights(
             summary.mean_defense_role_press_score * weight;
     }
     if total_weight <= 0.0 {
-        return base.clone();
+        return None;
     }
     weighted_summary.mean_attack_width_score /= total_weight;
     weighted_summary.mean_attack_flank_lane_score /= total_weight;
@@ -569,7 +666,14 @@ pub fn evolve_soccer_tactical_learning_weights(
     weighted_summary.mean_defense_spacing_score /= total_weight;
     weighted_summary.mean_defense_ball_gap_score /= total_weight;
     weighted_summary.mean_defense_role_press_score /= total_weight;
+    Some(weighted_summary)
+}
 
+fn evolve_soccer_tactical_learning_candidate(
+    base: &SoccerTacticalLearningWeights,
+    weighted_summary: &SoccerTacticalLearningSummary,
+    options: SoccerEvolutionOptions,
+) -> SoccerTacticalLearningWeights {
     let mut rng = DeterministicRng::new(options.seed ^ 0x5eed_f00d_cafe_babe);
     let mut evolved = base.clone();
     let mutation_scale = options.mutation_scale.max(0.0) * 0.22;
@@ -667,6 +771,32 @@ pub fn evolve_soccer_tactical_learning_weights(
     );
 
     evolved
+}
+
+fn soccer_tactical_weight_search_score(
+    weights: &SoccerTacticalLearningWeights,
+    summary: &SoccerTacticalLearningSummary,
+) -> f64 {
+    let attack_width_gap = (1.0 - summary.mean_attack_width_score).clamp(0.0, 1.0);
+    let attack_flank_gap = (1.0 - summary.mean_attack_flank_lane_score).clamp(0.0, 1.0);
+    let attack_spacing_gap = (1.0 - summary.mean_attack_spacing_score).clamp(0.0, 1.0);
+    let defense_contract_gap = (1.0 - summary.mean_defense_contract_score).clamp(0.0, 1.0);
+    let defense_spacing_gap = (1.0 - summary.mean_defense_spacing_score).clamp(0.0, 1.0);
+    let defense_ball_gap = (1.0 - summary.mean_defense_ball_gap_score).clamp(0.0, 1.0);
+    let press_gap = (1.0 - summary.mean_defense_role_press_score).clamp(0.0, 1.0);
+
+    weights.attack_width_delta_weight * attack_width_gap * 1.15
+        + weights.attack_width_score_weight * attack_width_gap * 0.45
+        + weights.attack_flank_lane_weight * attack_flank_gap * 1.35
+        + weights.attack_spacing_delta_weight * attack_spacing_gap * 0.85
+        + weights.attack_spacing_score_weight * attack_spacing_gap * 0.35
+        + weights.defense_contract_delta_weight * defense_contract_gap * 1.35
+        + weights.defense_compactness_score_weight * defense_contract_gap * 1.05
+        + weights.defense_spacing_delta_weight * defense_spacing_gap * 0.80
+        + weights.defense_spacing_score_weight * defense_spacing_gap * 0.35
+        + weights.defense_ball_depth_score_weight * defense_ball_gap * 0.70
+        + weights.defender_midfielder_press_weight * press_gap * 0.40
+        + weights.midfielder_press_weight * press_gap * 0.35
 }
 
 pub fn run_soccer_learning_game(
@@ -1324,6 +1454,16 @@ fn fnv1a_hex(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
+fn candidate_seed(base_seed: u64, candidate_index: usize, salt: u64) -> u64 {
+    if candidate_index == 0 {
+        return base_seed;
+    }
+    let mut mixed = base_seed ^ salt;
+    mixed ^= (candidate_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^ (mixed >> 29)
+}
+
 #[derive(Clone, Debug)]
 struct DeterministicRng {
     state: u64,
@@ -1538,6 +1678,7 @@ mod tests {
             exploration_rate: 0.0,
             exploration_scale: 0.0,
             elite_weight_floor: 0.0,
+            population_size: 1,
             seed: 7,
         };
 
@@ -1559,6 +1700,7 @@ mod tests {
             exploration_rate: 0.0,
             exploration_scale: 0.0,
             elite_weight_floor: 0.0,
+            population_size: 1,
             seed: 11,
         };
 
@@ -1569,6 +1711,37 @@ mod tests {
         assert!(
             (value - -4.0).abs() < 1e-9 || (value - 4.0).abs() < 1e-9,
             "crossover should inherit a parent value, got {value}"
+        );
+    }
+
+    #[test]
+    fn evolution_population_search_keeps_best_policy_candidate() {
+        let low = policy_with_action(0.5, 4);
+        let high = policy_with_action(3.0, 4);
+        let single_options = SoccerEvolutionOptions {
+            mutation_rate: 1.0,
+            mutation_scale: 0.35,
+            crossover_rate: 1.0,
+            exploration_rate: 1.0,
+            exploration_scale: 0.45,
+            elite_weight_floor: 0.0,
+            population_size: 1,
+            seed: 41,
+        };
+        let population_options = SoccerEvolutionOptions {
+            population_size: 8,
+            ..single_options
+        };
+
+        let single = evolve_soccer_team_policies(&[(&low, 1.0), (&high, 2.0)], single_options)
+            .expect("single candidate");
+        let population =
+            evolve_soccer_team_policies(&[(&low, 1.0), (&high, 2.0)], population_options)
+                .expect("population candidate");
+
+        assert!(
+            soccer_team_policy_search_score(&population)
+                >= soccer_team_policy_search_score(&single) - 1e-12
         );
     }
 
@@ -1628,6 +1801,7 @@ mod tests {
             latest_updated_at_micros: 100,
             latest_neural_network_present: true,
             local_tactical_evolved_since_pg_refresh: false,
+            postgres_tactical_learning_authoritative: false,
         });
         assert!(first.refresh_policy);
         assert!(first.apply_tactical_learning);
@@ -1643,6 +1817,7 @@ mod tests {
                 latest_updated_at_micros: 125,
                 latest_neural_network_present: true,
                 local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: false,
             });
         assert!(newer_head.refresh_policy);
         assert!(newer_head.apply_tactical_learning);
@@ -1662,6 +1837,7 @@ mod tests {
                 latest_updated_at_micros: 125,
                 latest_neural_network_present: true,
                 local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: false,
             });
         assert!(revised_same_head.refresh_policy);
         assert!(revised_same_head.apply_tactical_learning);
@@ -1678,6 +1854,7 @@ mod tests {
                 latest_updated_at_micros: 100,
                 latest_neural_network_present: true,
                 local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: false,
             });
         assert!(neural_arrived.refresh_policy);
         assert!(!neural_arrived.apply_tactical_learning);
@@ -1695,6 +1872,7 @@ mod tests {
             latest_updated_at_micros: 100,
             latest_neural_network_present: true,
             local_tactical_evolved_since_pg_refresh: true,
+            postgres_tactical_learning_authoritative: false,
         });
         assert!(!unchanged.refresh_policy);
         assert!(!unchanged.apply_tactical_learning);
@@ -1712,10 +1890,31 @@ mod tests {
                     latest_updated_at_micros: 100,
                     latest_neural_network_present: true,
                     local_tactical_evolved_since_pg_refresh: true,
+                    postgres_tactical_learning_authoritative: false,
                 }
             });
         assert!(!no_local_search.refresh_policy);
         assert!(no_local_search.apply_tactical_learning);
+    }
+
+    #[test]
+    fn postgres_policy_refresh_can_make_postgres_tactical_weights_authoritative() {
+        let unchanged_head_with_local_search =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_neural_network_present: true,
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 100,
+                latest_neural_network_present: true,
+                local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: true,
+            });
+
+        assert!(!unchanged_head_with_local_search.refresh_policy);
+        assert!(unchanged_head_with_local_search.apply_tactical_learning);
     }
 
     #[test]
@@ -1731,11 +1930,36 @@ mod tests {
                 latest_updated_at_micros: 200,
                 latest_neural_network_present: true,
                 local_tactical_evolved_since_pg_refresh: false,
+                postgres_tactical_learning_authoritative: true,
             });
 
         assert!(!pending_local_head.refresh_policy);
         assert!(!pending_local_head.apply_tactical_learning);
         assert!(!pending_local_head.same_policy_version);
+    }
+
+    #[test]
+    fn postgres_refresh_for_new_sim_can_include_resume_artifacts() {
+        assert!(soccer_should_refresh_postgres_for_new_sim(false, false));
+        assert!(soccer_should_refresh_postgres_for_new_sim(false, true));
+        assert!(!soccer_should_refresh_postgres_for_new_sim(true, false));
+        assert!(soccer_should_refresh_postgres_for_new_sim(true, true));
+    }
+
+    #[test]
+    fn postgres_policy_version_flush_for_new_sim_requires_pending_refreshable_head() {
+        assert!(!soccer_should_flush_postgres_policy_versions_for_new_sim(
+            false, true, 1
+        ));
+        assert!(!soccer_should_flush_postgres_policy_versions_for_new_sim(
+            true, false, 1
+        ));
+        assert!(!soccer_should_flush_postgres_policy_versions_for_new_sim(
+            true, true, 0
+        ));
+        assert!(soccer_should_flush_postgres_policy_versions_for_new_sim(
+            true, true, 2
+        ));
     }
 
     #[test]
@@ -1758,6 +1982,7 @@ mod tests {
             exploration_rate: 0.0,
             exploration_scale: 0.0,
             elite_weight_floor: 0.0,
+            population_size: 1,
             seed: 29,
         };
 
@@ -1767,6 +1992,48 @@ mod tests {
         assert!(evolved.attack_flank_lane_weight > base.attack_flank_lane_weight);
         assert!(evolved.defense_contract_delta_weight > base.defense_contract_delta_weight);
         assert!(evolved.defense_compactness_score_weight > base.defense_compactness_score_weight);
+    }
+
+    #[test]
+    fn tactical_population_search_keeps_best_weight_candidate() {
+        let base = SoccerTacticalLearningWeights::default();
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.15,
+            mean_attack_flank_lane_score: 0.12,
+            mean_attack_spacing_score: 0.30,
+            mean_defense_contract_score: 0.16,
+            mean_defense_spacing_score: 0.35,
+            mean_defense_ball_gap_score: 0.45,
+            mean_defense_role_press_score: 0.38,
+            ..Default::default()
+        };
+        let single_options = SoccerEvolutionOptions {
+            mutation_rate: 1.0,
+            mutation_scale: 0.40,
+            crossover_rate: 0.0,
+            exploration_rate: 1.0,
+            exploration_scale: 0.55,
+            elite_weight_floor: 0.0,
+            population_size: 1,
+            seed: 73,
+        };
+        let population_options = SoccerEvolutionOptions {
+            population_size: 10,
+            ..single_options
+        };
+
+        let single =
+            evolve_soccer_tactical_learning_weights(&base, &[(&summary, 1.0)], single_options);
+        let population =
+            evolve_soccer_tactical_learning_weights(&base, &[(&summary, 1.0)], population_options);
+        let weighted_summary =
+            weighted_tactical_evolution_summary(&[(&summary, 1.0)], single_options)
+                .expect("weighted summary");
+
+        assert!(
+            soccer_tactical_weight_search_score(&population, &weighted_summary)
+                >= soccer_tactical_weight_search_score(&single, &weighted_summary) - 1e-12
+        );
     }
 
     #[test]

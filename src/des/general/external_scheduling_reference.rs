@@ -39,6 +39,32 @@ impl ExternalSchedulingReferenceSolver {
     }
 }
 
+fn registered_scheduling_rust_fallback_enabled() -> bool {
+    std::env::var("SCHEDULING_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("SCHEDULING_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_scheduling_reference(opts: &ExternalSchedulingReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalSchedulingReferenceSolver::Auto
+            | ExternalSchedulingReferenceSolver::RustExact
+            | ExternalSchedulingReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_scheduling_fallback(opts: &ExternalSchedulingReferenceOptions) -> bool {
+    registered_scheduling_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalSchedulingReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalSchedulingReferenceOptions {
     pub solver: ExternalSchedulingReferenceSolver,
@@ -244,6 +270,22 @@ fn rust_scheduling_empty_solution(
     }
 }
 
+fn relabel_registered_scheduling_fallback(
+    mut solution: ExternalJobShopReferenceSolution,
+    opts: &ExternalSchedulingReferenceOptions,
+) -> ExternalJobShopReferenceSolution {
+    if should_use_registered_scheduling_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-scheduling-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
+}
+
 fn solve_job_shop_with_rust_reference(jobs: &[JobShopJob]) -> ExternalJobShopReferenceSolution {
     let started = Instant::now();
     if let Err(message) = validate_rust_job_shop_jobs(jobs) {
@@ -421,7 +463,8 @@ fn run_scheduling_reference_json(
     command
         .arg(reference_script())
         .arg("--solver")
-        .arg(opts.solver.as_arg());
+        .arg(opts.solver.as_arg())
+        .env("SCHEDULING_REFERENCE_RUST_REFERENCE_EMBEDDED", "1");
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -508,13 +551,12 @@ pub fn solve_job_shop_with_external_reference(
     jobs: &[JobShopJob],
     opts: &ExternalSchedulingReferenceOptions,
 ) -> ExternalJobShopReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalSchedulingReferenceSolver::Auto
-            | ExternalSchedulingReferenceSolver::RustExact
-            | ExternalSchedulingReferenceSolver::Fallback
-    ) {
-        return solve_job_shop_with_rust_reference(jobs);
+    if should_use_rust_scheduling_reference(opts) || should_use_registered_scheduling_fallback(opts)
+    {
+        return relabel_registered_scheduling_fallback(
+            solve_job_shop_with_rust_reference(jobs),
+            opts,
+        );
     }
 
     run_scheduling_reference_json(
@@ -537,13 +579,12 @@ pub fn solve_flow_shop_with_external_reference(
     jobs: &[FlowShopJob],
     opts: &ExternalSchedulingReferenceOptions,
 ) -> ExternalJobShopReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalSchedulingReferenceSolver::Auto
-            | ExternalSchedulingReferenceSolver::RustExact
-            | ExternalSchedulingReferenceSolver::Fallback
-    ) {
-        return solve_flow_shop_with_rust_reference(jobs);
+    if should_use_rust_scheduling_reference(opts) || should_use_registered_scheduling_fallback(opts)
+    {
+        return relabel_registered_scheduling_fallback(
+            solve_flow_shop_with_rust_reference(jobs),
+            opts,
+        );
     }
 
     run_scheduling_reference_json(
@@ -563,6 +604,31 @@ pub fn solve_flow_shop_with_external_reference(
 mod tests {
     use super::*;
     use crate::des::general::classical_optimization_models::JobOperation;
+    use std::sync::Mutex;
+
+    static SCHEDULING_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn sample_job_shop_jobs() -> Vec<JobShopJob> {
         vec![
@@ -718,6 +784,37 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-flow-shop");
         assert!(solution.makespan.is_some());
         assert_eq!(solution.sequence.len(), 4);
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = SCHEDULING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set("SCHEDULING_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let opts = ExternalSchedulingReferenceOptions {
+            solver: ExternalSchedulingReferenceSolver::OrTools,
+        };
+
+        let job_shop = solve_job_shop_with_external_reference(&sample_job_shop_jobs(), &opts);
+        assert_eq!(job_shop.status, ExternalSchedulingReferenceStatus::Optimal);
+        assert_eq!(
+            job_shop.solver,
+            "rust:registered-scheduling-fallback-for-ortools"
+        );
+        assert!(job_shop
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
+        assert_eq!(job_shop.makespan, Some(9.0));
+
+        let flow_shop = solve_flow_shop_with_external_reference(&sample_flow_shop_jobs(), &opts);
+        assert_eq!(flow_shop.status, ExternalSchedulingReferenceStatus::Optimal);
+        assert_eq!(
+            flow_shop.solver,
+            "rust:registered-scheduling-fallback-for-ortools"
+        );
+        assert_eq!(flow_shop.sequence.len(), 4);
+        assert!(flow_shop.makespan.is_some());
     }
 
     #[test]

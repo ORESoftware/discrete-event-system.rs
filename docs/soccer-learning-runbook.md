@@ -69,13 +69,35 @@ MDP/POMDP policy entries, neural-network snapshots, and tactical-learning
 weights, so locally started runs and des-rs runs converge on the same active
 Postgres head while still batching completed-run writes. Set-play restart
 training uses the same refresh path before each episode and archives stale
-output policies if a newer active head lands before the run is persisted.
+output policies if a newer active head lands before the run is persisted. By
+default, Postgres tactical weights are authoritative for new simulation
+snapshots; set `SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE=false` only for
+local experiments that should keep unpersisted tactical exploration ahead of
+the active database head. Pending policy-version heads are also flushed to
+Postgres before newly submitted simulations by default, so another local or
+des-rs runner can pick up newly evolved weights without waiting for the
+completed-run batch; set
+`SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM=false` only when
+benchmarking maximum Postgres write batching. The queue runner accepts
+`SOCCER_QUEUE_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM`. Artifact resumes
+still refresh from the active Postgres policy before newly submitted simulations
+by default; set
+`SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT=false` only when the artifact must
+remain frozen. The queue runner also accepts
+`SOCCER_QUEUE_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT`, and queue/set-play runners
+accept `SOCCER_QUEUE_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE` and
+`SOCCER_SET_PLAY_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE` overrides.
 Evolutionary policy search is enabled by default; tune it with
 `SOCCER_EVOLUTION_INTERVAL_GAMES`,
 `SOCCER_EVOLUTION_ELITE_GAMES`, `SOCCER_EVOLUTION_MUTATION_RATE`,
 `SOCCER_EVOLUTION_MUTATION_SCALE`, `SOCCER_EVOLUTION_CROSSOVER_RATE`,
 `SOCCER_EVOLUTION_EXPLORATION_RATE`, and
-`SOCCER_EVOLUTION_EXPLORATION_SCALE`. The portable JSONB summaries remain on the
+`SOCCER_EVOLUTION_EXPLORATION_SCALE`. Set
+`SOCCER_EVOLUTION_POPULATION_SIZE` above `1` to generate multiple deterministic
+mutation/crossover candidates and keep the best Rust-side policy and tactical
+weight candidate before the next Postgres policy-version write; the queue runner
+also accepts `SOCCER_QUEUE_EVOLUTION_POPULATION_SIZE`. The portable JSONB
+summaries remain on the
 main run and policy rows, but the queryable learning facts are normalized into:
 
 - `des_soccer_learning_policy_versions` and

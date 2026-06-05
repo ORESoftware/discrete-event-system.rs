@@ -37,6 +37,32 @@ impl ExternalRoutingReferenceSolver {
     }
 }
 
+fn registered_routing_rust_fallback_enabled() -> bool {
+    std::env::var("ROUTING_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("ROUTING_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_routing_reference(opts: &ExternalRoutingReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalRoutingReferenceSolver::Auto
+            | ExternalRoutingReferenceSolver::RustExact
+            | ExternalRoutingReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_routing_fallback(opts: &ExternalRoutingReferenceOptions) -> bool {
+    registered_routing_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalRoutingReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalRoutingReferenceOptions {
     pub solver: ExternalRoutingReferenceSolver,
@@ -153,6 +179,22 @@ fn rust_routing_empty_solution(
         ortools_message: String::new(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_routing_fallback(
+    mut solution: ExternalRoutingReferenceSolution,
+    opts: &ExternalRoutingReferenceOptions,
+) -> ExternalRoutingReferenceSolution {
+    if should_use_registered_routing_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-routing-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn validate_rust_cvrp_inputs(
@@ -433,13 +475,11 @@ pub fn solve_cvrp_with_external_reference(
     vehicle_capacity: f64,
     opts: &ExternalRoutingReferenceOptions,
 ) -> ExternalRoutingReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalRoutingReferenceSolver::Auto
-            | ExternalRoutingReferenceSolver::RustExact
-            | ExternalRoutingReferenceSolver::Fallback
-    ) {
-        return solve_cvrp_with_rust_reference(depot, customers, vehicle_capacity);
+    if should_use_rust_routing_reference(opts) || should_use_registered_routing_fallback(opts) {
+        return relabel_registered_routing_fallback(
+            solve_cvrp_with_rust_reference(depot, customers, vehicle_capacity),
+            opts,
+        );
     }
 
     run_routing_reference_json(
@@ -463,6 +503,31 @@ pub fn solve_cvrp_with_external_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ROUTING_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn sample_customers() -> Vec<VRPCustomer> {
         vec![
@@ -567,6 +632,38 @@ mod tests {
             5
         );
         assert!(solution.objective.is_some());
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("ROUTING_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let solution = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &sample_customers(),
+            5.0,
+            &ExternalRoutingReferenceOptions {
+                solver: ExternalRoutingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-routing-fallback-for-ortools"
+        );
+        assert_eq!(
+            solution
+                .routes
+                .iter()
+                .map(|route| route.customers.len())
+                .sum::<usize>(),
+            5
+        );
+        assert!(solution.objective.is_some());
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

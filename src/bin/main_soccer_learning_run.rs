@@ -563,6 +563,7 @@ struct SoccerLearningWorkerTask {
     adversarial_moment_windows: Arc<Vec<SoccerMomentWindow>>,
     print_progress: bool,
     neural_drain_timeout: Duration,
+    retain_neural_network_in_game_artifact: bool,
 }
 
 struct SoccerLearningWorkerPool {
@@ -603,6 +604,7 @@ impl SoccerLearningWorkerPool {
                         task.adversarial_moment_windows,
                         task.print_progress,
                         task.neural_drain_timeout,
+                        task.retain_neural_network_in_game_artifact,
                     )
                 }))
                 .unwrap_or_else(|_| Err("soccer learning worker thread panicked".to_string()));
@@ -1113,6 +1115,7 @@ fn run_game(
     adversarial_moment_windows: Arc<Vec<SoccerMomentWindow>>,
     print_progress: bool,
     neural_drain_timeout: Duration,
+    retain_neural_network_in_game_artifact: bool,
 ) -> Result<CompletedGame, String> {
     let started = Instant::now();
     let total_ticks = config.total_ticks();
@@ -1147,7 +1150,11 @@ fn run_game(
         .cloned()
         .ok_or_else(|| "soccer learning produced no team policies".to_string())?;
     let mut artifact = sim.team_policy_artifact();
-    let neural_network = artifact.learning.neural_network.take();
+    let neural_network = if retain_neural_network_in_game_artifact {
+        artifact.learning.neural_network.clone()
+    } else {
+        artifact.learning.neural_network.take()
+    };
     let episode_summary = SoccerSelfPlayEpisodeSummary {
         episode,
         seed: episode_seed,
@@ -1910,6 +1917,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_policy_version_buffer = Vec::new();
     let mut pg_completed_buffer = Vec::new();
     let worker_pool = SoccerLearningWorkerPool::start(parallel_games);
+    let retain_neural_network_in_game_artifact =
+        write_game_artifacts && game_artifact_mode.as_str() == "full";
 
     while next_episode < games {
         let batch_size = parallel_games.min(games - next_episode);
@@ -1934,6 +1943,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 adversarial_moment_windows: Arc::clone(&batch_adversarial_moment_windows),
                 print_progress,
                 neural_drain_timeout,
+                retain_neural_network_in_game_artifact,
             })?;
         }
 

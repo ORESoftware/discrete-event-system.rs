@@ -54,6 +54,7 @@ const SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT: usize = 13;
 const SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE: usize = 1024;
 const SOCCER_RUN_DELTA_INSERT_BATCH_SIZE: usize = 1024;
 const SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE: usize = 512;
+const SOCCER_POLICY_RETENTION_BRANCH_TIP: &str = "branch_tip";
 
 const _: () = {
     assert!(
@@ -102,6 +103,22 @@ fn soccer_policy_version_metrics(
     Ok(metrics)
 }
 
+fn soccer_policy_version_metrics_with_retention(
+    mut metrics: Value,
+    policy_version_id: &str,
+    branch_key: &str,
+    retention_kind: &str,
+    full_entries_retained: bool,
+) -> Value {
+    metrics["postgresRetention"] = json!({
+        "policyVersionId": policy_version_id,
+        "branchKey": branch_key,
+        "retentionKind": retention_kind,
+        "fullEntriesRetained": full_entries_retained,
+    });
+    metrics
+}
+
 fn soccer_policy_version_neural_network_from_metrics(
     metrics: &Value,
 ) -> Result<Option<SoccerNeuralNetworkSnapshot>, String> {
@@ -128,6 +145,10 @@ fn soccer_policy_version_tactical_learning_from_values(
             .map_err(|err| format!("decode soccer tactical learning weights: {err}"))?;
     validate_soccer_tactical_learning_weights_for_pg(&weights)?;
     Ok(Some(weights))
+}
+
+fn soccer_policy_version_retains_full_entries(status: &str) -> bool {
+    !matches!(status, "archived" | "rejected")
 }
 
 fn validate_soccer_tactical_learning_weights_for_pg(
@@ -432,11 +453,13 @@ impl SoccerLearningPgStore {
         let lineage = parent_policy_version_id
             .map(|id| json!([id]))
             .unwrap_or_else(|| json!([]));
-        let metrics = soccer_policy_version_metrics(
+        let base_metrics = soccer_policy_version_metrics(
             fitness,
             neural_network,
             Some(&config.tactical_learning),
         )?;
+        let retention_kind = SOCCER_POLICY_RETENTION_BRANCH_TIP;
+        let full_entries_retained = soccer_policy_version_retains_full_entries(status);
         let entry_count =
             checked_i32(policies.home.entries().len() + policies.away.entries().len());
         let target_entry_count = checked_i32(
@@ -448,6 +471,19 @@ impl SoccerLearningPgStore {
             .client
             .transaction()
             .map_err(|err| format!("begin soccer policy version transaction: {err}"))?;
+        ensure_soccer_learning_policy_retention_columns(&mut tx)?;
+        let branch_key = soccer_policy_branch_key_for_insert(
+            &mut tx,
+            parent_policy_version_id,
+            policy_version_id,
+        )?;
+        let metrics = soccer_policy_version_metrics_with_retention(
+            base_metrics,
+            policy_version_id,
+            &branch_key,
+            retention_kind,
+            full_entries_retained,
+        );
 
         if status == "active" {
             tx.execute(
@@ -480,7 +516,10 @@ impl SoccerLearningPgStore {
                 entry_count,
                 target_entry_count,
                 visit_count,
-                fitness_micros
+                fitness_micros,
+                branch_key,
+                retention_kind,
+                full_entries_retained
               )
             values
               (
@@ -498,7 +537,10 @@ impl SoccerLearningPgStore {
                 $12,
                 $13,
                 $14,
-                $15
+                $15,
+                $16::text::uuid,
+                $17,
+                $18
               )
             "#,
                 &[
@@ -517,6 +559,9 @@ impl SoccerLearningPgStore {
                     &target_entry_count,
                     &visit_count,
                     &fitness_micros,
+                    &branch_key,
+                    &retention_kind,
+                    &full_entries_retained,
                 ],
             )
             .map_err(|err| format!("insert soccer policy version: {err}"))?;
@@ -526,20 +571,28 @@ impl SoccerLearningPgStore {
             ));
         }
 
-        insert_policy_entries_for_team(
-            &mut tx,
-            &policy_version_id,
-            Team::Home,
-            &policies.home,
-            None,
-        )?;
-        insert_policy_entries_for_team(
-            &mut tx,
-            &policy_version_id,
-            Team::Away,
-            &policies.away,
-            None,
-        )?;
+        if full_entries_retained {
+            insert_policy_entries_for_team(
+                &mut tx,
+                &policy_version_id,
+                Team::Home,
+                &policies.home,
+                None,
+            )?;
+            insert_policy_entries_for_team(
+                &mut tx,
+                &policy_version_id,
+                Team::Away,
+                &policies.away,
+                None,
+            )?;
+            let _ = prune_old_policy_entries_for_branch_tip(
+                &mut tx,
+                experiment_id,
+                &branch_key,
+                policy_version_id,
+            )?;
+        }
 
         tx.commit()
             .map_err(|err| format!("commit soccer policy version: {err}"))?;
@@ -647,7 +700,7 @@ impl SoccerLearningPgStore {
             "lastLoss": artifact.learning.neural_learning_last_loss,
             "averageLoss": artifact.learning.neural_learning_average_loss,
         });
-        let metrics = json!({
+        let base_metrics = json!({
             "fitness": artifact.goal_rate,
             "kind": "set-play-restart-training",
             "restart": &artifact.restart,
@@ -679,7 +732,7 @@ impl SoccerLearningPgStore {
         });
         let stats_json = json!({
             "learning": &artifact.learning,
-            "neural": metrics["neural"].clone(),
+            "neural": base_metrics["neural"].clone(),
             "episodes": &artifact.episodes,
         });
         let entry_count =
@@ -743,7 +796,23 @@ impl SoccerLearningPgStore {
             .client
             .transaction()
             .map_err(|err| format!("begin soccer set-play training transaction: {err}"))?;
+        ensure_soccer_learning_policy_retention_columns(&mut tx)?;
         ensure_soccer_learning_set_play_tables(&mut tx)?;
+        let policy_version_id = Uuid::new_v4().to_string();
+        let retention_kind = SOCCER_POLICY_RETENTION_BRANCH_TIP;
+        let full_entries_retained = soccer_policy_version_retains_full_entries(status);
+        let branch_key = soccer_policy_branch_key_for_insert(
+            &mut tx,
+            base_policy_version_id,
+            &policy_version_id,
+        )?;
+        let metrics = soccer_policy_version_metrics_with_retention(
+            base_metrics,
+            &policy_version_id,
+            &branch_key,
+            retention_kind,
+            full_entries_retained,
+        );
 
         if status == "active" {
             tx.execute(
@@ -757,11 +826,12 @@ impl SoccerLearningPgStore {
             .map_err(|err| format!("archive old soccer policy versions: {err}"))?;
         }
 
-        let policy_row = tx
-            .query_one(
+        let inserted_policy_rows = tx
+            .execute(
                 r#"
                 insert into des_soccer_learning_policy_versions
                   (
+                    id,
                     experiment_id,
                     parent_policy_version_id,
                     generation,
@@ -775,16 +845,19 @@ impl SoccerLearningPgStore {
                     entry_count,
                     target_entry_count,
                     visit_count,
-                    fitness_micros
+                    fitness_micros,
+                    branch_key,
+                    retention_kind,
+                    full_entries_retained
                   )
                 values
                   (
                     $1::text::uuid,
                     $2::text::uuid,
-                    $3,
+                    $3::text::uuid,
                     $4,
-                    'replay',
                     $5,
+                    'replay',
                     $6,
                     $7,
                     $8,
@@ -792,11 +865,15 @@ impl SoccerLearningPgStore {
                     $10,
                     $11,
                     $12,
-                    $13
+                    $13,
+                    $14,
+                    $15::text::uuid,
+                    $16,
+                    $17
                   )
-                returning id::text
                 "#,
                 &[
+                    &policy_version_id,
                     &experiment_id,
                     &base_policy_version_id,
                     &generation,
@@ -810,10 +887,17 @@ impl SoccerLearningPgStore {
                     &target_entry_count,
                     &visit_count,
                     &fitness_micros,
+                    &branch_key,
+                    &retention_kind,
+                    &full_entries_retained,
                 ],
             )
             .map_err(|err| format!("insert soccer set-play policy version: {err}"))?;
-        let policy_version_id: String = policy_row.get(0);
+        if inserted_policy_rows != 1 {
+            return Err(format!(
+                "insert soccer set-play policy version inserted {inserted_policy_rows} rows for policy version {policy_version_id}"
+            ));
+        }
 
         let run_row = tx
             .query_one(
@@ -896,20 +980,28 @@ impl SoccerLearningPgStore {
             .map_err(|err| format!("insert soccer set-play learning run: {err}"))?;
         let run_id: String = run_row.get(0);
 
-        insert_policy_entries_for_team(
-            &mut tx,
-            &policy_version_id,
-            Team::Home,
-            &policies.home,
-            Some(&run_id),
-        )?;
-        insert_policy_entries_for_team(
-            &mut tx,
-            &policy_version_id,
-            Team::Away,
-            &policies.away,
-            Some(&run_id),
-        )?;
+        if full_entries_retained {
+            insert_policy_entries_for_team(
+                &mut tx,
+                &policy_version_id,
+                Team::Home,
+                &policies.home,
+                Some(&run_id),
+            )?;
+            insert_policy_entries_for_team(
+                &mut tx,
+                &policy_version_id,
+                Team::Away,
+                &policies.away,
+                Some(&run_id),
+            )?;
+            let _ = prune_old_policy_entries_for_branch_tip(
+                &mut tx,
+                experiment_id,
+                &branch_key,
+                &policy_version_id,
+            )?;
+        }
         insert_normalized_set_play_training_records(
             &mut tx,
             &run_id,
@@ -1712,6 +1804,137 @@ fn append_policy_entry_value_tuple(
     }
 }
 
+fn ensure_soccer_learning_policy_retention_columns(
+    tx: &mut postgres::Transaction<'_>,
+) -> Result<(), String> {
+    tx.batch_execute(
+        r#"
+        alter table des_soccer_learning_policy_versions
+          add column if not exists branch_key uuid,
+          add column if not exists retention_kind varchar(32) default 'branch_tip' not null,
+          add column if not exists full_entries_retained boolean default true not null,
+          add column if not exists full_entries_pruned_at timestamptz;
+
+        with recursive policy_lineage as (
+          select
+            id,
+            id as root_branch_key
+          from des_soccer_learning_policy_versions
+          where parent_policy_version_id is null
+          union all
+          select
+            child.id,
+            parent.root_branch_key
+          from des_soccer_learning_policy_versions child
+          join policy_lineage parent
+            on child.parent_policy_version_id = parent.id
+        )
+        update des_soccer_learning_policy_versions versions
+        set branch_key = policy_lineage.root_branch_key
+        from policy_lineage
+        where versions.id = policy_lineage.id
+          and (
+            versions.branch_key is null
+            or (
+              versions.branch_key = versions.id
+              and versions.parent_policy_version_id is not null
+            )
+          );
+
+        alter table des_soccer_learning_policy_versions
+          alter column branch_key set not null;
+
+        do $$
+        begin
+          if not exists (
+            select 1
+            from pg_constraint
+            where conname = 'des_soccer_learning_policy_versions_retention_kind_chk'
+          ) then
+            alter table des_soccer_learning_policy_versions
+              add constraint des_soccer_learning_policy_versions_retention_kind_chk
+              check (retention_kind in ('branch_tip', 'retain_all', 'metadata_only'));
+          end if;
+        end $$;
+
+        create index if not exists des_soccer_learning_policy_versions_branch_tip_idx
+          on des_soccer_learning_policy_versions (
+            experiment_id,
+            branch_key,
+            generation desc,
+            updated_at desc
+          )
+          where full_entries_retained = true;
+        "#,
+    )
+    .map_err(|err| format!("ensure soccer policy retention columns: {err}"))?;
+    Ok(())
+}
+
+fn soccer_policy_branch_key_for_insert(
+    tx: &mut postgres::Transaction<'_>,
+    parent_policy_version_id: Option<&str>,
+    policy_version_id: &str,
+) -> Result<String, String> {
+    if let Some(parent_policy_version_id) = parent_policy_version_id {
+        if let Some(row) = tx
+            .query_opt(
+                r#"
+                select branch_key::text
+                from des_soccer_learning_policy_versions
+                where id = $1::text::uuid
+                limit 1
+                "#,
+                &[&parent_policy_version_id],
+            )
+            .map_err(|err| format!("select parent soccer policy branch key: {err}"))?
+        {
+            return Ok(row.get(0));
+        }
+    }
+    Ok(policy_version_id.to_string())
+}
+
+fn prune_old_policy_entries_for_branch_tip(
+    tx: &mut postgres::Transaction<'_>,
+    experiment_id: &str,
+    branch_key: &str,
+    policy_version_id: &str,
+) -> Result<u64, String> {
+    tx.execute(
+        r#"
+        with pruned_versions as (
+          update des_soccer_learning_policy_versions
+          set
+            full_entries_retained = false,
+            full_entries_pruned_at = now(),
+            updated_at = now(),
+            metrics = jsonb_set(
+              metrics,
+              '{postgresRetention}',
+              coalesce(metrics->'postgresRetention', '{}'::jsonb)
+                || jsonb_build_object(
+                  'fullEntriesRetained', false,
+                  'prunedByPolicyVersionId', $3,
+                  'retentionKind', 'branch_tip'
+                ),
+              true
+            )
+          where experiment_id = $1::text::uuid
+            and branch_key = $2::text::uuid
+            and id <> $3::text::uuid
+            and full_entries_retained = true
+          returning id
+        )
+        delete from des_soccer_learning_policy_entries entries
+        using pruned_versions
+        where entries.policy_version_id = pruned_versions.id
+        "#,
+        &[&experiment_id, &branch_key, &policy_version_id],
+    )
+    .map_err(|err| format!("prune old soccer policy branch entries: {err}"))
+}
+
 fn ensure_soccer_learning_set_play_tables(
     tx: &mut postgres::Transaction<'_>,
 ) -> Result<(), String> {
@@ -2209,6 +2432,42 @@ mod tests {
             decoded_weights.defense_contract_delta_weight,
             tactical_learning.defense_contract_delta_weight
         );
+    }
+
+    #[test]
+    fn policy_version_metrics_record_branch_tip_retention() {
+        let metrics = soccer_policy_version_metrics_with_retention(
+            json!({ "fitness": 2.5 }),
+            "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+            SOCCER_POLICY_RETENTION_BRANCH_TIP,
+            true,
+        );
+
+        assert_eq!(
+            metrics["postgresRetention"]["policyVersionId"],
+            json!("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa")
+        );
+        assert_eq!(
+            metrics["postgresRetention"]["branchKey"],
+            json!("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb")
+        );
+        assert_eq!(
+            metrics["postgresRetention"]["retentionKind"],
+            json!("branch_tip")
+        );
+        assert_eq!(
+            metrics["postgresRetention"]["fullEntriesRetained"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn policy_version_retention_skips_archived_and_rejected_entries() {
+        assert!(soccer_policy_version_retains_full_entries("active"));
+        assert!(soccer_policy_version_retains_full_entries("candidate"));
+        assert!(!soccer_policy_version_retains_full_entries("archived"));
+        assert!(!soccer_policy_version_retains_full_entries("rejected"));
     }
 
     #[test]

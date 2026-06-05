@@ -328,7 +328,7 @@
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Episode</span><b id="episode">#0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
-      <div class="metric"><span>Speed</span><b id="simSpeed">1.0x 1t</b></div>
+      <div class="metric"><span>Speed</span><b id="simSpeed">20x 20t</b></div>
       <div class="surface-control">
         <label for="gridOverlayLevel">Grid</label>
         <select id="gridOverlayLevel" aria-label="Grid overlay">
@@ -352,8 +352,8 @@
       </div>
       <div class="surface-control">
         <label for="simTicksPerPulse">Speed</label>
-        <input id="simTicksPerPulse" type="range" min="1" max="20" step="1" value="1">
-        <input id="simTicksPerPulseNumber" type="number" min="1" max="200" step="1" value="1">
+        <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="20">
+        <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="20">
       </div>
       <div class="toggle-control">
         <label for="policyAutosaveEnabled"><input id="policyAutosaveEnabled" type="checkbox">Auto Save</label>
@@ -824,6 +824,9 @@ function sharedPositionLabel(frame = state?.frame) {
   const histories = shared?.histories && typeof shared.histories === "object"
     ? Object.values(shared.histories).filter(Array.isArray)
     : [];
+  if (!histories.length && players.length) {
+    histories.push(...players.map(player => player.positionHistory).filter(Array.isArray));
+  }
   const historyLens = histories.map(history => history.length);
   const minHistory = historyLens.length ? Math.min(...historyLens) : 0;
   const maxHistory = historyLens.length ? Math.max(...historyLens) : 0;
@@ -2235,7 +2238,7 @@ function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
 function configuredSimTicksPerPulse() {
-  return Math.max(1, Math.round(Number(simTicksPerPulseNumber.value || simTicksPerPulse.value || 1)));
+  return clamp(Math.round(Number(simTicksPerPulseNumber.value || simTicksPerPulse.value || 20)), 1, 1000);
 }
 function liveControllerAssigned() {
   return Array.isArray(state?.controllerAssignments) && state.controllerAssignments.length > 0;
@@ -3032,7 +3035,10 @@ async function stepOnce(options = {}) {
     recentLearningTransitions = Array.isArray(response.learningTransitions)
       ? response.learningTransitions
       : [];
-    rememberSemanticBallActionsFromFrames(Array.isArray(response.frames) ? response.frames : [response.frame]);
+    const semanticFrames = Array.isArray(response.frames) && response.frames.length
+      ? response.frames
+      : [response.frame];
+    rememberSemanticBallActionsFromFrames(semanticFrames);
     rememberSemanticBallActionsFromTransitions(recentLearningTransitions);
     applyAssignmentsToFrame(state.controllerAssignments);
     if (assignmentKey(state.controllerAssignments) !== beforeAssignments) {

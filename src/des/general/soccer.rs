@@ -9004,6 +9004,8 @@ pub struct PlayerSnapshot {
     pub home_position: Vec2,
     pub controller_slot: Option<usize>,
     #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    #[serde(default)]
     pub preferences: AgentPreferences,
     #[serde(default)]
     pub vision_range_yards: f64,
@@ -9218,6 +9220,7 @@ impl WorldSnapshot {
                 fatigue: p.fatigue,
                 home_position: p.home_position,
                 controller_slot: p.controller_slot,
+                scheduled_index: None,
                 preferences: p.preferences.clone(),
                 vision_range_yards: vision_range_yards(p.skills.vision),
                 field_of_view_degrees: field_of_view_degrees(p.skills.vision),
@@ -14479,6 +14482,8 @@ pub struct OfficialSnapshot {
     pub acceleration: Vec2,
     pub jerk: Vec2,
     #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    #[serde(default)]
     pub offside_line: Option<AssistantOffsideLineSnapshot>,
 }
 
@@ -14510,6 +14515,8 @@ pub struct SoccerPlaybackPlayerFrame {
     pub action_facing: FacingBucket,
     #[serde(default)]
     pub controller_slot: Option<usize>,
+    #[serde(default)]
+    pub scheduled_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -14521,6 +14528,8 @@ pub struct SoccerPlaybackOfficialFrame {
     pub velocity: Vec2,
     pub acceleration: Vec2,
     pub jerk: Vec2,
+    #[serde(default)]
+    pub scheduled_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -14693,6 +14702,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     receive_facing: player.receive_facing,
                     action_facing: player.action_facing,
                     controller_slot: player.controller_slot,
+                    scheduled_index: player.scheduled_index,
                 })
                 .collect(),
             officials: frame
@@ -14705,6 +14715,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     velocity: official.velocity,
                     acceleration: official.acceleration,
                     jerk: official.jerk,
+                    scheduled_index: official.scheduled_index,
                 })
                 .collect(),
             score_home: frame.score_home,
@@ -20758,6 +20769,10 @@ impl SoccerMatch {
         let mut players = snapshot.players.clone();
         for player in &mut players {
             player.learned_policy = self.learned_policy_trace_for_player(&snapshot, player.id);
+            player.scheduled_index = self
+                .last_agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id);
         }
         let officials = self
             .officials
@@ -20770,6 +20785,9 @@ impl SoccerMatch {
                 velocity: o.velocity,
                 acceleration: o.acceleration,
                 jerk: o.jerk,
+                scheduled_index: self.last_agent_schedule.iter().position(|entry| {
+                    entry.kind == AgentScheduleKind::Official && entry.id == o.id
+                }),
                 offside_line: assistant_offside_line_snapshot(&snapshot, o.kind),
             })
             .collect();
@@ -29045,6 +29063,7 @@ fn tracking_frame_to_world_snapshot(
                     .copied()
                     .unwrap_or(p.home_position.unwrap_or(p.position)),
                 controller_slot: None,
+                scheduled_index: None,
                 preferences: AgentPreferences::default(),
                 acceleration: p.motion_acceleration.unwrap_or_default(),
                 jerk: p.motion_jerk.unwrap_or_default(),
@@ -33058,6 +33077,14 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         let expected_player_ids = (0..22).collect::<std::collections::BTreeSet<_>>();
         assert_eq!(scheduled_player_ids, expected_player_ids);
+        for player in &frame.players {
+            let expected_index = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id)
+                .expect("player scheduled");
+            assert_eq!(player.scheduled_index, Some(expected_index));
+        }
         let scheduled_official_ids = frame
             .agent_schedule
             .iter()
@@ -33070,6 +33097,16 @@ mod tests {
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
         );
+        for official in &frame.officials {
+            let expected_index = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| {
+                    entry.kind == AgentScheduleKind::Official && entry.id == official.id
+                })
+                .expect("official scheduled");
+            assert_eq!(official.scheduled_index, Some(expected_index));
+        }
     }
 
     #[test]
@@ -44789,6 +44826,26 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("playback json"))
             .collect::<Vec<_>>();
+        let scheduled_frame = frames
+            .iter()
+            .find(|frame| frame["tick"].as_u64().unwrap_or(0) > 0)
+            .expect("scheduled playback frame");
+        assert!(scheduled_frame["players"][0]
+            .get("scheduledIndex")
+            .is_some());
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["scheduledIndex"].as_u64().is_some()));
+        assert!(scheduled_frame["officials"][0]
+            .get("scheduledIndex")
+            .is_some());
+        assert!(scheduled_frame["officials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|official| official["scheduledIndex"].as_u64().is_some()));
         let intent_frame = frames
             .iter()
             .find(|frame| {

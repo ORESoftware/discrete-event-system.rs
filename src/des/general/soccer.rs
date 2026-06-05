@@ -4329,6 +4329,8 @@ impl PlayerAgent {
             route_one_score,
             route_one_legal,
         ));
+        let near_goal_pass_multiplier =
+            near_goal_pass_release_multiplier(observation, self.role);
         for rank in 0..pass_target_count.min(3) {
             let rank_weight = match rank {
                 0 => 1.00,
@@ -4348,8 +4350,9 @@ impl PlayerAgent {
                 * (1.0 + quick_release * 0.22)
                 * completion_bonus
                 * (1.0 + observation.pass_curl_probability * 0.055)
+                * near_goal_pass_multiplier
                 * rank_weight)
-                .clamp(0.04, 0.97);
+                .clamp(0.004, 0.97);
             options.push(AgentActionOptionTrace::new(
                 format!("pass{}", rank + 1),
                 pass_score,
@@ -4385,8 +4388,9 @@ impl PlayerAgent {
                 * interception_penalty
                 * aerial_completion_bonus
                 * (1.0 + observation.pass_curl_probability * 0.075)
+                * near_goal_pass_multiplier
                 * rank_weight)
-                .clamp(0.02, 0.74);
+                .clamp(0.004, 0.74);
             options.push(AgentActionOptionTrace::new(
                 format!("aerial-pass{}", rank + 1),
                 aerial_score,
@@ -30516,7 +30520,8 @@ fn teammate_near_goal_shot_is_qualified(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
 ) -> bool {
-    if role == PlayerRole::Goalkeeper || !observation.shot_lane_open {
+    let _ = role;
+    if !observation.shot_lane_open {
         return false;
     }
     let block_risk = observation.shot_block_probability.clamp(0.0, 1.0);
@@ -30549,12 +30554,17 @@ fn must_shoot_near_goal(observation: &SoccerPomdpObservation, role: PlayerRole) 
 }
 
 fn striker_legal_shot_attempt_bonus(observation: &SoccerPomdpObservation, role: PlayerRole) -> f64 {
-    if !striker_shot_window_is_qualified(observation, role) {
+    let window_qualified = striker_shot_window_is_qualified(observation, role)
+        || teammate_near_goal_shot_is_qualified(observation, role);
+    if !window_qualified {
         return 0.0;
     }
-    let range_fit = ((STRIKER_SHOT_WINDOW_YARDS - observation.yards_to_goal)
-        / STRIKER_SHOT_WINDOW_YARDS)
-        .clamp(0.0, 1.0);
+    let window_yards = if role == PlayerRole::Forward {
+        STRIKER_SHOT_WINDOW_YARDS
+    } else {
+        TEAMMATE_MUST_SHOOT_YARDS
+    };
+    let range_fit = ((window_yards - observation.yards_to_goal) / window_yards).clamp(0.0, 1.0);
     let lane_fit = (1.0
         - observation.shot_block_probability.clamp(0.0, 1.0)
             / STRIKER_SHOT_MAX_BLOCK_PROBABILITY.max(1e-6))
@@ -30581,6 +30591,19 @@ fn striker_legal_shot_attempt_bonus(observation: &SoccerPomdpObservation, role: 
         .clamp(0.0, 0.34)
 }
 
+fn near_goal_pass_release_multiplier(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> f64 {
+    if must_shoot_near_goal(observation, role) {
+        0.10
+    } else if striker_shot_window_is_qualified(observation, role) {
+        0.34
+    } else {
+        1.0
+    }
+}
+
 fn close_clear_shot_attempt_probability(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
@@ -30591,7 +30614,7 @@ fn close_clear_shot_attempt_probability(
     }
     let (window_yards, ramp_yards) = match role {
         PlayerRole::Forward => (STRIKER_SHOT_WINDOW_YARDS, 18.0),
-        _ => (22.0, 14.0),
+        _ => (TEAMMATE_MUST_SHOOT_YARDS, 16.0),
     };
     let mut close_fit = ((window_yards - observation.yards_to_goal) / ramp_yards).clamp(0.0, 1.0);
     if role == PlayerRole::Forward && observation.yards_to_goal <= STRIKER_SHOT_WINDOW_YARDS {

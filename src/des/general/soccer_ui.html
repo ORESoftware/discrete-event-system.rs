@@ -784,7 +784,7 @@ function tick(ts) {
 }
 function selectedPlayer(slot) {
   const sel = document.getElementById(`slot-${slot}`);
-  return sel ? Number(sel.value) : null;
+  return sel && sel.value !== "" ? Number(sel.value) : null;
 }
 function selectedPassTarget() {
   return passTarget.value === "" ? null : Number(passTarget.value);
@@ -803,13 +803,16 @@ function selectedPlayerCanShoot() {
   return Math.abs(goalY - Number(p.position?.y || 0)) <= 20;
 }
 function pushActionInput(forceShoot = false) {
+  if (selectedPlayer(activeSlot) == null) return false;
   const shoot = forceShoot
     || keys.has("ShiftLeft")
     || keys.has("ShiftRight")
     || selectedPlayerCanShoot();
-  pushInput(!shoot, shoot);
+  return pushInput(!shoot, shoot);
 }
 function pushInput(pass = false, shoot = false) {
+  const playerId = selectedPlayer(activeSlot);
+  if (playerId == null) return false;
   const axis = {x: 0, y: 0};
   if (keys.has("ArrowLeft") || keys.has("KeyA")) axis.x -= 1;
   if (keys.has("ArrowRight") || keys.has("KeyD")) axis.x += 1;
@@ -817,7 +820,7 @@ function pushInput(pass = false, shoot = false) {
   if (keys.has("ArrowDown") || keys.has("KeyS")) axis.y -= 1;
   window.dispatchHumanInput({
     controllerSlot: activeSlot,
-    playerId: selectedPlayer(activeSlot),
+    playerId,
     seq: ++inputSeq,
     axis,
     sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
@@ -826,6 +829,7 @@ function pushInput(pass = false, shoot = false) {
     shoot,
     targetPlayer: pass ? selectedPassTarget() : null
   });
+  return true;
 }
 function rebuildPassTargets() {
   const frame = currentFrame();
@@ -863,6 +867,10 @@ function buildSlots() {
     label.textContent = `Slot ${i + 1}`;
     const select = document.createElement("select");
     select.id = `slot-${i}`;
+    const autonomous = document.createElement("option");
+    autonomous.value = "";
+    autonomous.textContent = "Autonomous";
+    select.appendChild(autonomous);
     for (const p of players) {
       const opt = document.createElement("option");
       opt.value = p.id;

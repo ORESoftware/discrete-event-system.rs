@@ -5909,9 +5909,10 @@ impl PlayerAgent {
             let first_support_label = support_order
                 .first()
                 .map(|label| normalize_soccer_action_label(label.as_str()))
-                .unwrap_or("support-shape");
-            order_names.extend(support_order.into_iter().map(str::to_string));
-            let support_target = match first_support_label {
+                .unwrap_or("support-shape")
+                .to_string();
+            order_names.extend(support_order);
+            let support_target = match first_support_label.as_str() {
                 "check-to-ball" => snapshot
                     .check_to_ball_target_for(self.id, self.home_position)
                     .map(|point| SupportMovementTarget {
@@ -5950,7 +5951,7 @@ impl PlayerAgent {
                 snapshot.attacking_support_movement_for(
                     self.id,
                     self.home_position,
-                    first_support_label == "support-roam",
+                    first_support_label.as_str() == "support-roam",
                 )
             });
             (

@@ -4340,19 +4340,19 @@ impl PlayerAgent {
             * (0.70 + (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0) * 0.58)
             * fatigue_dribble
             * shot_creation_carry
-            * patient_carry_multiplier
             * striker_carry_boost
             * (1.0 + offensive_urgency * 0.30 + pressure_urgency * 0.20))
             .clamp(0.02, 1.32);
+        let patient_carry_score_base = (dribble_score * patient_carry_multiplier).clamp(0.02, 1.58);
         let carry_forward_legal = observation.forward_dribble_space_yards >= 1.2
             && !must_shoot_near_goal(observation, self.role);
-        let carry_forward_score = (dribble_score
+        let carry_forward_score = (patient_carry_score_base
             * (0.34 + patience_factor * 0.62 + poor_floor_pass * 0.36 + forward_space_fit * 0.34)
             * (1.0 - pressure * 0.24).clamp(0.70, 1.0))
         .clamp(0.01, 1.16);
         let carry_out_legal = observation.forward_dribble_space_yards >= 0.8
             && !must_shoot_near_goal(observation, self.role);
-        let carry_out_score = (dribble_score
+        let carry_out_score = (patient_carry_score_base
             * (0.20
                 + patience_factor * 0.42
                 + poor_floor_pass * 0.30
@@ -38293,9 +38293,11 @@ mod tests {
             sim.config.dt_seconds,
         );
 
+        let favorable_dribble = action_option_score(&favorable, "dribble");
+        let unfavorable_dribble = action_option_score(&unfavorable, "dribble");
         assert!(
-            action_option_score(&favorable, "dribble")
-                > action_option_score(&unfavorable, "dribble") * 1.12
+            favorable_dribble > unfavorable_dribble * 1.12,
+            "tired defender cue should boost dribble: favorable={favorable_dribble} unfavorable={unfavorable_dribble}"
         );
     }
 

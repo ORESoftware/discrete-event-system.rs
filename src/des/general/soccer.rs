@@ -26687,6 +26687,7 @@ fn run_site_simulation() -> SimulationTrace {
 
 pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> SimulationTrace {
     let mut sim = SoccerMatch::default_11v11(config.clone());
+    sim.clear_controller_assignments();
     let mut frames = vec![sim.to_frame()];
     let total_ticks = config.total_ticks();
     let record_every_ticks = record_every_ticks.max(1);
@@ -32374,6 +32375,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full 6000-tick debug smoke is slow; run explicitly for duration/performance checks"]
     fn simulation_runner_reaches_full_ten_minute_default_duration_with_sparse_frames() {
         let trace = run_simulation(
             MatchConfig {
@@ -32383,6 +32385,7 @@ mod tests {
                     enabled: false,
                     ..SoccerNeuralLearningConfig::default()
                 },
+                max_human_players: 0,
                 ..MatchConfig::default()
             },
             1_000,
@@ -34084,6 +34087,41 @@ mod tests {
         assert_eq!(trace.summary.ticks, 30);
         assert!(trace.frames.len() >= 15);
         assert_eq!(trace.frames[0].players.len(), 22);
+        assert!(trace
+            .frames
+            .first()
+            .expect("initial frame")
+            .players
+            .iter()
+            .all(|player| player.controller_slot.is_none()));
+        assert!(trace
+            .frames
+            .first()
+            .expect("initial frame")
+            .central_brain
+            .tracked_players
+            .iter()
+            .all(|player| player.controller_slot.is_none()));
+    }
+
+    #[test]
+    fn offline_autonomous_match_skips_controller_yield_waits_after_clearing_assignments() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 100,
+            ..Default::default()
+        });
+        assert_eq!(sim.controller_assignments().len(), 4);
+
+        sim.clear_controller_assignments();
+        sim.run_time_step();
+
+        let stats = sim.controller_yield_stats();
+        assert_eq!(stats.assigned_players, 0);
+        assert_eq!(stats.wait_attempts, 0);
+        assert_eq!(stats.skipped_no_assignment, 1);
+        assert_eq!(stats.last_queued_before, 0);
+        assert_eq!(stats.last_queued_after, 0);
     }
 
     #[test]
@@ -44604,6 +44642,11 @@ mod tests {
         assert!(html.contains("pushActionInput"));
         assert!(html.contains("\"Enter\""));
         assert!(html.contains("\"Space\""));
+        assert!(html.contains("Autonomous"));
+        assert!(html.contains("sel && sel.value !== \"\""));
+        assert!(html.contains("autonomous.value = \"\""));
+        assert!(html.contains("if (playerId == null) return false"));
+        assert!(html.contains("return pushInput(!shoot, shoot)"));
         assert!(
             !html.contains("\"frames\""),
             "static HTML shell should not inline the large frame trace"

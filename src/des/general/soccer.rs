@@ -9391,7 +9391,10 @@ impl WorldSnapshot {
     }
 
     pub fn set_player_position(&mut self, player_id: usize, position: Vec2) {
-        let player_index = self.players.iter().position(|player| player.id == player_id);
+        let player_index = self
+            .players
+            .iter()
+            .position(|player| player.id == player_id);
         let mut sample = player_index
             .map(|index| {
                 let player = &self.players[index];
@@ -9431,7 +9434,11 @@ impl WorldSnapshot {
             self.shared_positions.latest.push(sample.clone());
         }
 
-        let history = self.shared_positions.histories.entry(player_id).or_default();
+        let history = self
+            .shared_positions
+            .histories
+            .entry(player_id)
+            .or_default();
         if let Some(last) = history.last_mut() {
             *last = sample;
         } else {

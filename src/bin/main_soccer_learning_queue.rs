@@ -262,6 +262,11 @@ fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Er
             "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
             default.target_clip,
         )?,
+        snapshot_every_batches: env_usize_alias(
+            "SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES",
+            "SOCCER_NEURAL_LEARNING_SNAPSHOT_EVERY_BATCHES",
+            default.snapshot_every_batches,
+        )?,
     })
 }
 

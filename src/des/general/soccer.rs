@@ -4451,6 +4451,7 @@ impl PlayerAgent {
             SoccerAction::DribbleMove { target, touch, .. } => (*target, None, Some(*touch)),
             SoccerAction::Pass {
                 target_player,
+                power,
                 flight,
                 ..
             } => {
@@ -4463,8 +4464,13 @@ impl PlayerAgent {
                         }
                     })
                     .or_else(|| snapshot.best_pass_target(self.id));
+                let speed = pass_speed_yps_from_power(*power, *flight, false, &self.skills);
                 let point = resolved_target
-                    .and_then(|id| snapshot.player_position(id))
+                    .and_then(|id| {
+                        snapshot
+                            .anticipated_pass_reception_point(self.id, id, *flight, speed)
+                            .or_else(|| snapshot.player_position(id))
+                    })
                     .unwrap_or_else(|| {
                         Vec2::new(
                             self.position.x,
@@ -14344,6 +14350,23 @@ pub struct SoccerPlaybackDirectiveFrame {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerPlaybackIntentFrame {
+    pub player_id: usize,
+    pub team: Team,
+    pub role: PlayerRole,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_point: Option<Vec2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_player: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flight: Option<PassFlight>,
+    #[serde(default)]
+    pub urgency: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerPlaybackFrame {
     pub tick: u64,
     pub clock_seconds: f64,
@@ -14356,6 +14379,97 @@ pub struct SoccerPlaybackFrame {
     pub central_brain: SoccerPlaybackCentralBrainFrame,
     pub home_directive: SoccerPlaybackDirectiveFrame,
     pub away_directive: SoccerPlaybackDirectiveFrame,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<SoccerPlaybackIntentFrame>,
+}
+
+fn playback_intent_priority(
+    player: &PlayerSnapshot,
+    action: &str,
+    possession_team: Option<Team>,
+    ball_holder: Option<usize>,
+) -> Option<f64> {
+    let holder_bonus = if ball_holder == Some(player.id) {
+        32.0
+    } else {
+        0.0
+    };
+    match action {
+        "shoot" | "first-time-shot" | "first-time-header" => Some(110.0 + holder_bonus),
+        "pass" | "aerial-pass" | "first-time-pass" => Some(104.0 + holder_bonus),
+        "clearance" | "route-one" => Some(98.0 + holder_bonus),
+        "left-cut" | "right-cut" | "nutmeg" | "fake-left-cut-right" | "fake-right-cut-left"
+        | "hold-up-flank" => Some(92.0 + holder_bonus),
+        "space" if possession_team == Some(player.team) => {
+            let role_bonus = match player.role {
+                PlayerRole::Forward => 9.0,
+                PlayerRole::Midfielder => 7.0,
+                PlayerRole::Defender => 3.0,
+                PlayerRole::Goalkeeper => 0.0,
+            };
+            Some(62.0 + role_bonus)
+        }
+        "recover" if ball_holder.is_none() => Some(58.0),
+        _ => None,
+    }
+}
+
+fn playback_pass_flight_for_action(action: &str) -> Option<PassFlight> {
+    match action {
+        "aerial-pass" => Some(PassFlight::Aerial),
+        "pass" | "first-time-pass" => Some(PassFlight::Floor),
+        _ => None,
+    }
+}
+
+fn playback_intents_from_frame(frame: &MatchFrame) -> Vec<SoccerPlaybackIntentFrame> {
+    let possession_team = frame.central_brain.possession_team.or_else(|| {
+        frame
+            .ball
+            .holder
+            .and_then(|holder| frame.players.iter().find(|player| player.id == holder))
+            .map(|player| player.team)
+    });
+    let mut candidates = frame
+        .players
+        .iter()
+        .filter_map(|player| {
+            let decision = player.last_decision.as_ref()?;
+            let action = normalize_soccer_action_label(&decision.action).to_string();
+            let priority =
+                playback_intent_priority(player, &action, possession_team, frame.ball.holder)?;
+            let action_target = decision.action_target.as_ref();
+            let target_point = action_target.and_then(|target| target.point);
+            if target_point.is_none() {
+                return None;
+            }
+            let urgency = decision.observation.decision_urgency.clamp(0.0, 1.0);
+            Some((
+                priority + urgency * 4.0,
+                player.id,
+                SoccerPlaybackIntentFrame {
+                    player_id: player.id,
+                    team: player.team,
+                    role: player.role,
+                    action: action.clone(),
+                    target_point,
+                    target_player: action_target.and_then(|target| target.player_id),
+                    flight: playback_pass_flight_for_action(&action),
+                    urgency,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    candidates
+        .into_iter()
+        .take(8)
+        .map(|(_, _, intent)| intent)
+        .collect()
 }
 
 impl From<&MatchFrame> for SoccerPlaybackFrame {
@@ -14417,6 +14531,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                 press_intensity: frame.away_directive.press_intensity,
                 risk_tolerance: frame.away_directive.risk_tolerance,
             },
+            intents: playback_intents_from_frame(frame),
         }
     }
 }

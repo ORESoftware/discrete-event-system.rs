@@ -1,13 +1,11 @@
 //! Rust-facing bridge for external/reference minimum spanning tree solvers.
 //!
 //! The native Rust reference computes an independent Kruskal check without
-//! Python startup. The Python bridge (`scripts/minimum_spanning_tree_reference.py`)
-//! remains available for OR-Tools CP-SAT using a root-flow connectivity
-//! formulation.
+//! Python startup. Explicit OR-Tools CP-SAT validation is launched from Rust
+//! with a tiny Python adapter over an integer-scaled copy of the same graph.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,6 +85,7 @@ pub enum ExternalMinimumSpanningTreeReferenceStatus {
     Optimal,
     Feasible,
     Infeasible,
+    Unsupported,
     NumericalError,
     Unavailable,
 }
@@ -97,6 +96,7 @@ impl ExternalMinimumSpanningTreeReferenceStatus {
             ExternalMinimumSpanningTreeReferenceStatus::Optimal => "optimal",
             ExternalMinimumSpanningTreeReferenceStatus::Feasible => "feasible",
             ExternalMinimumSpanningTreeReferenceStatus::Infeasible => "infeasible",
+            ExternalMinimumSpanningTreeReferenceStatus::Unsupported => "unsupported",
             ExternalMinimumSpanningTreeReferenceStatus::NumericalError => "numerical-error",
             ExternalMinimumSpanningTreeReferenceStatus::Unavailable => "unavailable",
         }
@@ -144,6 +144,8 @@ struct MinimumSpanningTreeReferencePayload {
     ortools_total_weight: Option<f64>,
     #[serde(rename = "ortoolsObjectiveBound")]
     ortools_objective_bound: Option<f64>,
+    #[serde(rename = "objectiveBound")]
+    objective_bound: Option<f64>,
     message: Option<String>,
 }
 
@@ -152,10 +154,129 @@ fn status_from_str(status: &str) -> ExternalMinimumSpanningTreeReferenceStatus {
         "optimal" => ExternalMinimumSpanningTreeReferenceStatus::Optimal,
         "feasible" => ExternalMinimumSpanningTreeReferenceStatus::Feasible,
         "infeasible" => ExternalMinimumSpanningTreeReferenceStatus::Infeasible,
+        "unsupported" => ExternalMinimumSpanningTreeReferenceStatus::Unsupported,
         "unavailable" => ExternalMinimumSpanningTreeReferenceStatus::Unavailable,
         _ => ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
     }
 }
+
+const ORTOOLS_INTEGER_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_MST_SOLVER: &str = "ortools:cp-sat-mst";
+
+const ORTOOLS_MST_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:cp-sat-mst"
+
+
+def output(status, problem, selected=None, objective_bound=None, message=""):
+    if selected is None:
+        total = None
+        ids = []
+        indices = []
+    else:
+        indices = sorted(int(index) for index in selected)
+        total = sum(float(problem["edges"][index]["weight"]) for index in indices)
+        ids = [problem["edges"][index]["id"] for index in indices]
+    result = {
+        "status": status,
+        "solver": SOLVER,
+        "selectedEdgeIndices": indices,
+        "selectedEdgeIds": ids,
+        "objective": total,
+        "totalWeight": total,
+        "message": message,
+    }
+    if objective_bound is not None:
+        result["objectiveBound"] = objective_bound
+    return result
+
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    print(json.dumps(output("unavailable", {"edges": []}, None, None, str(exc))))
+    sys.exit(0)
+
+
+try:
+    problem = json.load(sys.stdin)
+    n = int(problem["numVertices"])
+    if n == 1:
+        print(json.dumps(output("optimal", problem, [], 0.0, "single-vertex MST")))
+        sys.exit(0)
+    if not problem["edges"]:
+        print(json.dumps(output("infeasible", problem, None, None, "graph is disconnected")))
+        sys.exit(0)
+
+    model = cp_model.CpModel()
+    selected = [model.NewBoolVar(f"select_{edge['id']}") for edge in problem["edges"]]
+    forward = []
+    reverse = []
+    max_flow = n - 1
+    for edge_idx, edge in enumerate(problem["edges"]):
+        fwd = model.NewIntVar(0, max_flow, f"flow_{edge['from']}_{edge['to']}_{edge_idx}")
+        rev = model.NewIntVar(0, max_flow, f"flow_{edge['to']}_{edge['from']}_{edge_idx}")
+        model.Add(fwd + rev <= max_flow * selected[edge_idx])
+        forward.append(fwd)
+        reverse.append(rev)
+
+    model.Add(sum(selected) == n - 1)
+    for vertex in range(n):
+        inflow = []
+        outflow = []
+        for edge_idx, edge in enumerate(problem["edges"]):
+            if int(edge["to"]) == vertex:
+                inflow.append(forward[edge_idx])
+                outflow.append(reverse[edge_idx])
+            elif int(edge["from"]) == vertex:
+                inflow.append(reverse[edge_idx])
+                outflow.append(forward[edge_idx])
+        if vertex == 0:
+            model.Add(sum(outflow) - sum(inflow) == n - 1)
+        else:
+            model.Add(sum(inflow) - sum(outflow) == 1)
+
+    model.Minimize(sum(
+        int(edge["scaledWeight"]) * selected[index]
+        for index, edge in enumerate(problem["edges"])
+    ))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(json.dumps(output(
+            "infeasible" if status_name == "infeasible" else status_name,
+            problem,
+            None,
+            None,
+            f"OR-Tools CP-SAT status {status_name}",
+        )))
+        sys.exit(0)
+    selected_indices = [index for index, var in enumerate(selected) if solver.Value(var)]
+    print(json.dumps(output(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        problem,
+        selected_indices,
+        solver.BestObjectiveBound() / float(problem["weightScale"]),
+        f"OR-Tools CP-SAT status {status_name}",
+    )))
+except Exception as exc:
+    print(json.dumps({
+        "status": "error",
+        "solver": SOLVER,
+        "selectedEdgeIndices": [],
+        "selectedEdgeIds": [],
+        "objective": None,
+        "totalWeight": None,
+        "message": str(exc),
+    }))
+    sys.exit(1)
+"#;
 
 #[derive(Clone, Debug)]
 struct RustDisjointSet {
@@ -273,6 +394,59 @@ fn minimum_spanning_tree_empty_solution(
     }
 }
 
+fn ortools_empty_solution(
+    status: ExternalMinimumSpanningTreeReferenceStatus,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalMinimumSpanningTreeReferenceSolution {
+    minimum_spanning_tree_empty_solution(status, ORTOOLS_MST_SOLVER, message, elapsed_ms)
+}
+
+fn scaled_ortools_weight(value: f64, scale: i64) -> Option<i64> {
+    if !value.is_finite() || scale <= 0 {
+        return None;
+    }
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (scaled - rounded).abs() > 1e-6 {
+        return None;
+    }
+    Some(rounded as i64)
+}
+
+fn choose_ortools_weight_scale(problem: &MinimumSpanningTreeProblem) -> Option<i64> {
+    ORTOOLS_INTEGER_SCALES.iter().copied().find(|&scale| {
+        problem
+            .edges
+            .iter()
+            .all(|edge| scaled_ortools_weight(edge.weight, scale).is_some())
+    })
+}
+
+fn ortools_mst_payload(
+    problem: &MinimumSpanningTreeProblem,
+    vertex_index: &HashMap<String, usize>,
+    weight_scale: i64,
+) -> Value {
+    json!({
+        "numVertices": problem.vertices.len(),
+        "vertices": &problem.vertices,
+        "weightScale": weight_scale,
+        "edges": problem.edges.iter().enumerate().map(|(edge_index, edge)| json!({
+            "index": edge_index,
+            "id": edge.id,
+            "from": vertex_index[&edge.from],
+            "to": vertex_index[&edge.to],
+            "weight": edge.weight,
+            "scaledWeight": scaled_ortools_weight(edge.weight, weight_scale)
+                .expect("selected OR-Tools scale must scale every edge weight"),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn relabel_registered_minimum_spanning_tree_fallback(
     mut solution: ExternalMinimumSpanningTreeReferenceSolution,
     opts: &ExternalMinimumSpanningTreeReferenceOptions,
@@ -383,58 +557,6 @@ fn solve_minimum_spanning_tree_with_rust_reference(
     }
 }
 
-fn unavailable(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalMinimumSpanningTreeReferenceSolution {
-    ExternalMinimumSpanningTreeReferenceSolution {
-        status: ExternalMinimumSpanningTreeReferenceStatus::Unavailable,
-        solver: "external-minimum-spanning-tree-reference".to_string(),
-        selected_edge_indices: Vec::new(),
-        selected_edge_ids: Vec::new(),
-        objective: None,
-        total_weight: None,
-        ortools_status: None,
-        ortools_selected_edge_indices: Vec::new(),
-        ortools_selected_edge_ids: Vec::new(),
-        ortools_objective: None,
-        ortools_total_weight: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn numerical_error(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalMinimumSpanningTreeReferenceSolution {
-    ExternalMinimumSpanningTreeReferenceSolution {
-        status: ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
-        solver: "external-minimum-spanning-tree-reference".to_string(),
-        selected_edge_indices: Vec::new(),
-        selected_edge_ids: Vec::new(),
-        objective: None,
-        total_weight: None,
-        ortools_status: None,
-        ortools_selected_edge_indices: Vec::new(),
-        ortools_selected_edge_ids: Vec::new(),
-        ortools_objective: None,
-        ortools_total_weight: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts")
-        .join("minimum_spanning_tree_reference.py")
-}
-
 fn minimum_spanning_tree_reference_timeout_ms() -> u64 {
     std::env::var("MINIMUM_SPANNING_TREE_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -464,7 +586,7 @@ fn wait_for_minimum_spanning_tree_reference_output(
             }
             Err(err) => {
                 return Err(format!(
-                    "failed to poll minimum_spanning_tree_reference.py: {err}"
+                    "failed to poll OR-Tools minimum-spanning-tree adapter: {err}"
                 ))
             }
         }
@@ -472,38 +594,55 @@ fn wait_for_minimum_spanning_tree_reference_output(
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for minimum_spanning_tree_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools minimum-spanning-tree adapter: {err}"))
 }
 
-fn run_minimum_spanning_tree_reference_json(
-    payload: Value,
-    opts: &ExternalMinimumSpanningTreeReferenceOptions,
+fn run_ortools_minimum_spanning_tree_reference(
+    problem: &MinimumSpanningTreeProblem,
 ) -> ExternalMinimumSpanningTreeReferenceSolution {
     let started = Instant::now();
-    let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-    let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
-    let mut child = match command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(err) => {
-            return unavailable(
-                format!("failed to start minimum_spanning_tree_reference.py with {python}: {err}"),
+    let vertex_index = match validate_rust_minimum_spanning_tree_problem(problem) {
+        Ok(vertex_index) => vertex_index,
+        Err(message) => {
+            return ortools_empty_solution(
+                ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
+                message,
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
+    let Some(weight_scale) = choose_ortools_weight_scale(problem) else {
+        return ortools_empty_solution(
+            ExternalMinimumSpanningTreeReferenceStatus::Unsupported,
+            "OR-Tools CP-SAT MST bridge requires integer-scalable edge weights",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let payload = ortools_mst_payload(problem, &vertex_index, weight_scale);
+    let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+    let mut command = Command::new(&python);
+    command.arg("-c").arg(ORTOOLS_MST_ADAPTER);
+    let mut child =
+        match command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) => return ortools_empty_solution(
+                ExternalMinimumSpanningTreeReferenceStatus::Unavailable,
+                format!(
+                    "failed to start OR-Tools minimum-spanning-tree adapter with {python}: {err}"
+                ),
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+        };
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write minimum_spanning_tree_reference.py stdin: {err}"),
+            return ortools_empty_solution(
+                ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
+                format!("failed to write OR-Tools minimum-spanning-tree adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -512,15 +651,23 @@ fn run_minimum_spanning_tree_reference_json(
     let (output, timed_out) =
         match wait_for_minimum_spanning_tree_reference_output(child, timeout_ms) {
             Ok(output) => output,
-            Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
+            Err(err) => {
+                return ortools_empty_solution(
+                    ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
+                    err,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                )
+            }
         };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("minimum_spanning_tree_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools minimum-spanning-tree adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; minimum_spanning_tree_reference.py timed out after {timeout_ms}ms")
+            format!(
+                "{stderr}; OR-Tools minimum-spanning-tree adapter timed out after {timeout_ms}ms"
+            )
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -540,7 +687,7 @@ fn run_minimum_spanning_tree_reference_json(
             ortools_selected_edge_ids: parsed.ortools_selected_edge_ids.unwrap_or_default(),
             ortools_objective: parsed.ortools_objective,
             ortools_total_weight: parsed.ortools_total_weight,
-            ortools_objective_bound: parsed.ortools_objective_bound,
+            ortools_objective_bound: parsed.ortools_objective_bound.or(parsed.objective_bound),
             message: parsed.message.unwrap_or_else(|| {
                 if output.status.success() {
                     "ok".to_string()
@@ -550,11 +697,9 @@ fn run_minimum_spanning_tree_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
-            format!(
-                "failed to parse minimum_spanning_tree_reference.py output: {err}; stderr={}",
-                stderr
-            ),
+        Err(err) => ortools_empty_solution(
+            ExternalMinimumSpanningTreeReferenceStatus::NumericalError,
+            format!("failed to parse OR-Tools minimum-spanning-tree adapter output: {err}; stderr={stderr}"),
             elapsed_ms,
         ),
     }
@@ -573,18 +718,7 @@ pub fn solve_minimum_spanning_tree_with_external_reference(
         );
     }
 
-    run_minimum_spanning_tree_reference_json(
-        json!({
-            "vertices": &problem.vertices,
-            "edges": problem.edges.iter().map(|edge| json!({
-                "id": edge.id,
-                "from": edge.from,
-                "to": edge.to,
-                "weight": edge.weight,
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_minimum_spanning_tree_reference(problem)
 }
 
 #[cfg(test)]
@@ -720,7 +854,70 @@ mod tests {
     }
 
     #[test]
-    fn minimum_spanning_tree_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_weights_without_python() {
+        let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard =
+            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = MinimumSpanningTreeProblem {
+            vertices: vec!["A".to_string(), "B".to_string()],
+            edges: vec![MinimumSpanningTreeEdge {
+                id: "AB".to_string(),
+                from: "A".to_string(),
+                to: "B".to_string(),
+                weight: 1.0 / 3.0,
+            }],
+        };
+
+        let solution = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinimumSpanningTreeReferenceStatus::Unsupported
+        );
+        assert_eq!(solution.solver, ORTOOLS_MST_SOLVER);
+        assert!(solution.message.contains("integer-scalable edge weights"));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard =
+            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = build_sample_minimum_spanning_tree_problem();
+
+        let solution = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinimumSpanningTreeReferenceStatus::Unavailable
+        );
+        assert_eq!(solution.solver, ORTOOLS_MST_SOLVER);
+        assert!(solution
+            .message
+            .contains("OR-Tools minimum-spanning-tree adapter"));
+        assert!(!solution
+            .message
+            .contains("minimum_spanning_tree_reference.py"));
+    }
+
+    #[test]
+    fn minimum_spanning_tree_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())

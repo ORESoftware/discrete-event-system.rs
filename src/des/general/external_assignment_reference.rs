@@ -1,14 +1,11 @@
 //! Rust-facing bridge for external/reference assignment solvers.
 //!
 //! The native Rust reference computes an exact small assignment check without
-//! Python startup. The checked-in Python bridge (`scripts/assignment_reference.py`)
-//! remains available for OR-Tools SimpleLinearSumAssignment when costs can be
-//! integer-scaled, and also records SciPy's
-//! `linear_sum_assignment` result when available.
+//! Python startup. Explicit OR-Tools/SciPy validation is launched from Rust with
+//! a tiny Python adapter over the same cost matrix.
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -149,6 +146,103 @@ fn status_from_str(status: &str) -> ExternalAssignmentReferenceStatus {
 
 const RUST_ASSIGNMENT_EPS: f64 = 1e-12;
 const RUST_ASSIGNMENT_MAX_COLUMNS: usize = 128;
+const ASSIGNMENT_INTEGER_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_ASSIGNMENT_SOLVER: &str = "ortools:simple-linear-sum-assignment";
+const SCIPY_ASSIGNMENT_SOLVER: &str = "scipy:linear_sum_assignment";
+
+const ASSIGNMENT_EXTERNAL_ADAPTER: &str = r#"
+import json
+import sys
+
+ORTOOLS_SOLVER = "ortools:simple-linear-sum-assignment"
+SCIPY_SOLVER = "scipy:linear_sum_assignment"
+
+
+def result(status, solver, assignment=None, objective=None, message=""):
+    return {
+        "status": status,
+        "solver": solver,
+        "assignment": [] if assignment is None else [int(value) for value in assignment],
+        "objective": None if objective is None else float(objective),
+        "message": message,
+    }
+
+
+def status_name(status):
+    return str(status).split(".")[-1].lower()
+
+
+def solve_ortools(problem):
+    try:
+        from ortools.graph.python import linear_sum_assignment
+    except Exception as exc:
+        return result("unavailable", ORTOOLS_SOLVER, message=str(exc))
+
+    cost = problem["cost"]
+    scaled_cost = problem["scaledCost"]
+    scale = float(problem["costScale"])
+    solver = linear_sum_assignment.SimpleLinearSumAssignment()
+    for row, values in enumerate(scaled_cost):
+        for col, value in enumerate(values):
+            solver.add_arc_with_cost(row, col, int(value))
+    status = solver.solve()
+    if status != solver.OPTIMAL:
+        mapped = status_name(status)
+        return result(
+            "infeasible" if mapped == "infeasible" else mapped,
+            ORTOOLS_SOLVER,
+            message=f"OR-Tools SimpleLinearSumAssignment status {mapped}",
+        )
+    assignment = [int(solver.right_mate(row)) for row in range(len(cost))]
+    objective = sum(float(cost[row][col]) for row, col in enumerate(assignment))
+    scaled_objective = solver.optimal_cost() / scale
+    return result(
+        "optimal",
+        ORTOOLS_SOLVER,
+        assignment=assignment,
+        objective=objective if abs(objective - scaled_objective) <= 1e-7 else scaled_objective,
+        message="OR-Tools SimpleLinearSumAssignment",
+    )
+
+
+def solve_scipy(problem):
+    try:
+        from scipy.optimize import linear_sum_assignment
+    except Exception as exc:
+        return result("unavailable", SCIPY_SOLVER, message=str(exc))
+
+    cost = problem["cost"]
+    row_ind, col_ind = linear_sum_assignment(cost)
+    assignment = [-1 for _ in cost]
+    objective = 0.0
+    for row, col in zip(row_ind, col_ind):
+        assignment[int(row)] = int(col)
+        objective += float(cost[int(row)][int(col)])
+    if any(col < 0 for col in assignment):
+        return result("infeasible", SCIPY_SOLVER, message="not all rows assigned")
+    return result(
+        "optimal",
+        SCIPY_SOLVER,
+        assignment=assignment,
+        objective=objective,
+        message="SciPy linear_sum_assignment",
+    )
+
+
+try:
+    problem = json.load(sys.stdin)
+    solver = problem["solver"]
+    if solver == "ortools":
+        print(json.dumps(solve_ortools(problem)))
+    elif solver == "scipy":
+        print(json.dumps(solve_scipy(problem)))
+    else:
+        print(json.dumps(result("error", "assignment-reference", message=f"unknown solver {solver}")))
+        sys.exit(1)
+except Exception as exc:
+    print(json.dumps(result("error", "assignment-reference", message=str(exc))))
+    sys.exit(1)
+"#;
 
 fn validate_rust_assignment_cost(cost: &[Vec<f64>]) -> Result<(usize, usize), String> {
     if cost.is_empty() {
@@ -302,48 +396,68 @@ fn solve_assignment_with_rust_reference(cost: &[Vec<f64>]) -> ExternalAssignment
     }
 }
 
-fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalAssignmentReferenceSolution {
-    ExternalAssignmentReferenceSolution {
-        status: ExternalAssignmentReferenceStatus::Unavailable,
-        solver: "external-assignment-reference".to_string(),
-        assignment: Vec::new(),
-        objective: None,
-        ortools_status: None,
-        ortools_assignment: Vec::new(),
-        ortools_objective: None,
-        scipy_status: None,
-        scipy_assignment: Vec::new(),
-        scipy_objective: None,
-        message: message.into(),
-        elapsed_ms,
+fn assignment_external_solver_name(opts: &ExternalAssignmentReferenceOptions) -> &'static str {
+    match opts.solver {
+        ExternalAssignmentReferenceSolver::OrTools => ORTOOLS_ASSIGNMENT_SOLVER,
+        ExternalAssignmentReferenceSolver::Scipy => SCIPY_ASSIGNMENT_SOLVER,
+        _ => "external-assignment-reference",
     }
 }
 
-fn numerical_error(
+fn assignment_adapter_empty_solution(
+    status: ExternalAssignmentReferenceStatus,
+    solver: impl Into<String>,
     message: impl Into<String>,
     elapsed_ms: f64,
 ) -> ExternalAssignmentReferenceSolution {
-    ExternalAssignmentReferenceSolution {
-        status: ExternalAssignmentReferenceStatus::NumericalError,
-        solver: "external-assignment-reference".to_string(),
-        assignment: Vec::new(),
-        objective: None,
-        ortools_status: None,
-        ortools_assignment: Vec::new(),
-        ortools_objective: None,
-        scipy_status: None,
-        scipy_assignment: Vec::new(),
-        scipy_objective: None,
-        message: message.into(),
-        elapsed_ms,
+    assignment_empty_solution(status, solver, message, elapsed_ms)
+}
+
+fn scaled_assignment_cost(value: f64, scale: i64) -> Option<i64> {
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (rounded - scaled).abs() <= 1e-6 {
+        Some(rounded as i64)
+    } else {
+        None
     }
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("assignment_reference.py")
+fn choose_assignment_cost_scale(cost: &[Vec<f64>]) -> Option<i64> {
+    ASSIGNMENT_INTEGER_SCALES.into_iter().find(|scale| {
+        cost.iter().all(|row| {
+            row.iter()
+                .all(|&value| scaled_assignment_cost(value, *scale).is_some())
+        })
+    })
+}
+
+fn assignment_external_payload(
+    cost: &[Vec<f64>],
+    opts: &ExternalAssignmentReferenceOptions,
+    cost_scale: Option<i64>,
+) -> Value {
+    let scaled_cost = cost_scale.map(|scale| {
+        cost.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|&value| {
+                        scaled_assignment_cost(value, scale)
+                            .expect("cost scale chosen for assignment costs")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    });
+    json!({
+        "solver": opts.solver.as_arg(),
+        "cost": cost,
+        "costScale": cost_scale.unwrap_or(1),
+        "scaledCost": scaled_cost.unwrap_or_default(),
+    })
 }
 
 fn assignment_reference_timeout_ms() -> u64 {
@@ -373,26 +487,45 @@ fn wait_for_assignment_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll assignment_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll external assignment adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for assignment_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for external assignment adapter: {err}"))
 }
 
-fn run_assignment_reference_json(
-    payload: Value,
+fn run_assignment_external_reference(
+    cost: &[Vec<f64>],
     opts: &ExternalAssignmentReferenceOptions,
 ) -> ExternalAssignmentReferenceSolution {
     let started = Instant::now();
+    if let Err(message) = validate_rust_assignment_cost(cost) {
+        return assignment_adapter_empty_solution(
+            ExternalAssignmentReferenceStatus::NumericalError,
+            assignment_external_solver_name(opts),
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let cost_scale = if matches!(opts.solver, ExternalAssignmentReferenceSolver::OrTools) {
+        let Some(cost_scale) = choose_assignment_cost_scale(cost) else {
+            return assignment_adapter_empty_solution(
+                ExternalAssignmentReferenceStatus::Unsupported,
+                ORTOOLS_ASSIGNMENT_SOLVER,
+                "OR-Tools SimpleLinearSumAssignment requires integer-scalable costs",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        };
+        Some(cost_scale)
+    } else {
+        None
+    };
+    let payload = assignment_external_payload(cost, opts, cost_scale);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ASSIGNMENT_EXTERNAL_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -401,16 +534,20 @@ fn run_assignment_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return unavailable(
-                format!("failed to start assignment_reference.py with {python}: {err}"),
+            return assignment_adapter_empty_solution(
+                ExternalAssignmentReferenceStatus::Unavailable,
+                assignment_external_solver_name(opts),
+                format!("failed to start external assignment adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
     if let Some(stdin) = child.stdin.as_mut() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write assignment_reference.py stdin: {err}"),
+            return assignment_adapter_empty_solution(
+                ExternalAssignmentReferenceStatus::NumericalError,
+                assignment_external_solver_name(opts),
+                format!("failed to write external assignment adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -420,11 +557,19 @@ fn run_assignment_reference_json(
     let (mut output, timed_out) = match wait_for_assignment_reference_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => {
-            return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0);
+            return assignment_adapter_empty_solution(
+                ExternalAssignmentReferenceStatus::NumericalError,
+                assignment_external_solver_name(opts),
+                err,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
     };
     if timed_out {
-        let timeout_message = format!("assignment_reference.py timed out after {}ms", timeout_ms);
+        let timeout_message = format!(
+            "external assignment adapter timed out after {}ms",
+            timeout_ms
+        );
         if output.stderr.is_empty() {
             output.stderr = timeout_message.into_bytes();
         } else {
@@ -458,9 +603,11 @@ fn run_assignment_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
+        Err(err) => assignment_adapter_empty_solution(
+            ExternalAssignmentReferenceStatus::NumericalError,
+            assignment_external_solver_name(opts),
             format!(
-                "failed to parse assignment_reference.py output: {err}; stderr={}",
+                "failed to parse external assignment adapter output: {err}; stderr={}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
             elapsed_ms,
@@ -480,12 +627,7 @@ pub fn solve_assignment_with_external_reference(
         );
     }
 
-    run_assignment_reference_json(
-        json!({
-            "cost": cost,
-        }),
-        opts,
-    )
+    run_assignment_external_reference(cost, opts)
 }
 
 #[cfg(test)]
@@ -614,7 +756,66 @@ mod tests {
     }
 
     #[test]
-    fn assignment_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_costs_without_python() {
+        let _lock = ASSIGNMENT_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let cost = vec![vec![1.0 / 3.0]];
+
+        let solution = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalAssignmentReferenceStatus::Unsupported
+        );
+        assert_eq!(solution.solver, "ortools:simple-linear-sum-assignment");
+        assert!(solution.message.contains("integer-scalable costs"));
+    }
+
+    #[test]
+    fn external_adapters_report_startup_without_repo_script() {
+        let _lock = ASSIGNMENT_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let cost = vec![vec![3.0, 1.0], vec![2.0, 4.0]];
+
+        let ortools = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::OrTools,
+            },
+        );
+        assert_eq!(
+            ortools.status,
+            ExternalAssignmentReferenceStatus::Unavailable
+        );
+        assert_eq!(ortools.solver, "ortools:simple-linear-sum-assignment");
+        assert!(ortools.message.contains("external assignment adapter"));
+        assert!(!ortools.message.contains("assignment_reference.py"));
+
+        let scipy = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::Scipy,
+            },
+        );
+        assert_eq!(scipy.status, ExternalAssignmentReferenceStatus::Unavailable);
+        assert_eq!(scipy.solver, "scipy:linear_sum_assignment");
+        assert!(scipy.message.contains("external assignment adapter"));
+        assert!(!scipy.message.contains("assignment_reference.py"));
+    }
+
+    #[test]
+    fn assignment_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -630,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn assignment_python_bridge_wait_observes_closed_stdin() {
+    fn assignment_adapter_wait_observes_closed_stdin() {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("cat >/dev/null; printf done")

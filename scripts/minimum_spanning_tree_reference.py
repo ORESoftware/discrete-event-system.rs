@@ -1,42 +1,21 @@
 #!/usr/bin/env python3
-"""Reference bridge for small minimum-spanning-tree instances.
-
-The deterministic Kruskal oracle lives in Rust. This Python bridge remains as
-thin adapter glue for explicit OR-Tools CP-SAT checks using binary
-selected-edge variables and integer flow variables that force root
-connectivity.
-"""
-
-from __future__ import annotations
+"""Thin compatibility launcher for the Rust minimum-spanning-tree reference."""
 
 import argparse
-import importlib.util
 import json
-import math
 import os
-import sys
-from typing import Optional
 
 
-OBJECTIVE_SCALE = 1_000_000
-RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust-kruskal", "rust-exact")
-
-
-def exec_rust_reference(solver: str) -> None:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(script_dir)
-    binary_name = "minimum_spanning_tree_reference"
-    explicit = os.environ.get("MINIMUM_SPANNING_TREE_REFERENCE_RUST_BIN")
-    if explicit:
-        os.execv(explicit, [explicit, "--solver", solver])
-    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
-    if local_rust_binary_is_current(repo_root, local_binary):
-        os.execv(local_binary, [local_binary, "--solver", solver])
-    os.chdir(repo_root)
-    os.execvp(
-        "cargo",
-        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
-    )
+def result(status: str, solver: str, message: str) -> dict:
+    return {
+        "status": status,
+        "solver": solver,
+        "selectedEdgeIndices": [],
+        "selectedEdgeIds": [],
+        "objective": None,
+        "totalWeight": None,
+        "message": message,
+    }
 
 
 def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
@@ -60,158 +39,23 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     )
 
 
-def package_available(module: str) -> bool:
-    try:
-        return importlib.util.find_spec(module) is not None
-    except Exception:
-        return False
+def rust_reference_command(solver: str) -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "minimum_spanning_tree_reference"
+    explicit = os.environ.get("MINIMUM_SPANNING_TREE_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit, "--solver", solver]
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary, "--solver", solver]
+    os.chdir(repo_root)
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver]
 
 
-def external_rust_fallback_enabled() -> bool:
-    value = os.environ.get("MINIMUM_SPANNING_TREE_REFERENCE_EXTERNAL_FALLBACK", "")
-    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
-
-
-def external_rust_first_enabled() -> bool:
-    values = (
-        os.environ.get("MINIMUM_SPANNING_TREE_REFERENCE_RUST_FIRST", ""),
-        os.environ.get("ORES_EXTERNAL_REFERENCE_RUST_FIRST", ""),
-    )
-    return any(value.strip().lower() in ("1", "true", "yes", "on", "rust") for value in values)
-
-
-def normalize(raw: dict) -> dict:
-    vertices = [str(value) for value in (raw.get("vertices") or [])]
-    if not vertices:
-        raise ValueError("vertices must be non-empty")
-    if any(not vertex.strip() for vertex in vertices):
-        raise ValueError("vertices must be non-empty strings")
-    if len(set(vertices)) != len(vertices):
-        raise ValueError("vertices must be unique")
-    index = {vertex: i for i, vertex in enumerate(vertices)}
-    seen_ids = set()
-    seen_edges = set()
-    edges = []
-    for edge_index, raw_edge in enumerate(raw.get("edges") or []):
-        edge_id = str(raw_edge.get("id") or f"E{edge_index + 1}")
-        if not edge_id.strip():
-            raise ValueError(f"edges[{edge_index}].id must be non-empty")
-        if edge_id in seen_ids:
-            raise ValueError(f"duplicate edge id {edge_id!r}")
-        seen_ids.add(edge_id)
-        a = str(raw_edge.get("from"))
-        b = str(raw_edge.get("to"))
-        if a not in index or b not in index:
-            raise ValueError(f"edges[{edge_index}] endpoints must belong to vertices")
-        ai = index[a]
-        bi = index[b]
-        if ai == bi:
-            raise ValueError(f"edges[{edge_index}] must not be a self-loop")
-        key = (ai, bi) if ai < bi else (bi, ai)
-        if key in seen_edges:
-            raise ValueError(f"duplicate undirected edge {a!r}-{b!r}")
-        seen_edges.add(key)
-        weight = float(raw_edge.get("weight"))
-        if not math.isfinite(weight):
-            raise ValueError(f"edges[{edge_index}].weight must be finite")
-        edges.append({"id": edge_id, "from": ai, "to": bi, "weight": weight})
-    return {"vertices": vertices, "edges": edges}
-
-
-def output(
-    status: str,
-    solver: str,
-    problem: dict,
-    selected: Optional[list[int]] = None,
-    message: str = "",
-) -> dict:
-    if selected is None:
-        total = None
-        ids: list[str] = []
-    else:
-        selected = sorted(selected)
-        total = sum(problem["edges"][idx]["weight"] for idx in selected)
-        ids = [problem["edges"][idx]["id"] for idx in selected]
-    return {
-        "status": status,
-        "solver": solver,
-        "selectedEdgeIndices": [] if selected is None else selected,
-        "selectedEdgeIds": ids,
-        "objective": total,
-        "totalWeight": total,
-        "message": message,
-    }
-
-
-def ortools_mst(problem: dict) -> dict:
-    try:
-        from ortools.sat.python import cp_model  # type: ignore
-    except Exception as exc:
-        return output("unavailable", "ortools:cp-sat-mst", problem, None, str(exc))
-
-    n = len(problem["vertices"])
-    if n == 1:
-        return output("optimal", "ortools:cp-sat-mst", problem, [], "single-vertex MST")
-    if not problem["edges"]:
-        return output("infeasible", "ortools:cp-sat-mst", problem, None, "graph is disconnected")
-
-    model = cp_model.CpModel()
-    selected = [model.NewBoolVar(f"select_{edge['id']}") for edge in problem["edges"]]
-    forward = []
-    reverse = []
-    max_flow = n - 1
-    for edge_idx, edge in enumerate(problem["edges"]):
-        fwd = model.NewIntVar(0, max_flow, f"flow_{edge['from']}_{edge['to']}_{edge_idx}")
-        rev = model.NewIntVar(0, max_flow, f"flow_{edge['to']}_{edge['from']}_{edge_idx}")
-        model.Add(fwd + rev <= max_flow * selected[edge_idx])
-        forward.append(fwd)
-        reverse.append(rev)
-
-    model.Add(sum(selected) == n - 1)
-    for vertex in range(n):
-        inflow = []
-        outflow = []
-        for edge_idx, edge in enumerate(problem["edges"]):
-            if edge["to"] == vertex:
-                inflow.append(forward[edge_idx])
-                outflow.append(reverse[edge_idx])
-            elif edge["from"] == vertex:
-                inflow.append(reverse[edge_idx])
-                outflow.append(forward[edge_idx])
-        if vertex == 0:
-            model.Add(sum(outflow) - sum(inflow) == n - 1)
-        else:
-            model.Add(sum(inflow) - sum(outflow) == 1)
-
-    objective = sum(
-        int(round(edge["weight"] * OBJECTIVE_SCALE)) * selected[idx]
-        for idx, edge in enumerate(problem["edges"])
-    )
-    model.Minimize(objective)
-
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10.0
-    solver.parameters.num_search_workers = 1
-    status_code = solver.Solve(model)
-    status_name = solver.StatusName(status_code).lower()
-    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return output(
-            "infeasible" if status_name == "infeasible" else status_name,
-            "ortools:cp-sat-mst",
-            problem,
-            None,
-            f"OR-Tools CP-SAT status {status_name}",
-        )
-    selected_indices = [idx for idx, var in enumerate(selected) if solver.Value(var)]
-    result = output(
-        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
-        "ortools:cp-sat-mst",
-        problem,
-        selected_indices,
-        f"OR-Tools CP-SAT status {status_name}",
-    )
-    result["objectiveBound"] = solver.BestObjectiveBound() / OBJECTIVE_SCALE
-    return result
+def exec_rust_reference(solver: str) -> None:
+    command = rust_reference_command(solver)
+    os.execvp(command[0], command)
 
 
 def main() -> int:
@@ -222,35 +66,17 @@ def main() -> int:
         default="auto",
     )
     args = parser.parse_args()
-    if args.solver in RUST_REFERENCE_SOLVERS:
-        exec_rust_reference(args.solver)
-    if external_rust_first_enabled() and args.solver == "ortools":
-        os.environ["MINIMUM_SPANNING_TREE_REFERENCE_EXTERNAL_FALLBACK"] = "rust"
-        exec_rust_reference(args.solver)
-    if (
-        external_rust_fallback_enabled()
-        and args.solver == "ortools"
-        and not package_available("ortools")
-    ):
-        exec_rust_reference("rust-exact")
 
     try:
-        problem = normalize(json.load(sys.stdin))
-        output = ortools_mst(problem)
-        print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "feasible", "infeasible", "unavailable") else 1
+        exec_rust_reference(args.solver)
     except Exception as exc:
         print(
             json.dumps(
-                {
-                    "status": "error",
-                    "solver": "python:minimum-spanning-tree-reference",
-                    "selectedEdgeIndices": [],
-                    "selectedEdgeIds": [],
-                    "objective": None,
-                    "totalWeight": None,
-                    "message": str(exc),
-                }
+                result(
+                    "error",
+                    "rust:minimum-spanning-tree-reference",
+                    str(exc),
+                )
             )
         )
         return 1

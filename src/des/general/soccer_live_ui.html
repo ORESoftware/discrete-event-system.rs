@@ -3432,6 +3432,18 @@ runButton.addEventListener("click", () => {
   updateRunButton();
 });
 resetMatchButton.addEventListener("click", () => resetMatch().catch(e => statusEl.textContent = e.message));
+replaySeedButton.addEventListener("click", () => {
+  try {
+    resetMatch({seed: seedResetValue()}).catch(e => statusEl.textContent = e.message);
+  } catch (e) {
+    statusEl.textContent = e.message;
+  }
+});
+seedInput.addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  replaySeedButton.click();
+});
 document.getElementById("step").addEventListener("click", () => stepOnce({manual: true}).catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));

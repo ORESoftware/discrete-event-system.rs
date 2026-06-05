@@ -1,13 +1,12 @@
 //! Rust-facing bridge for external/reference weighted independent-set solvers.
 //!
 //! The native Rust reference computes a deterministic exact branch-and-bound
-//! check without Python startup. The Python bridge
-//! (`scripts/weighted_independent_set_reference.py`) remains available for
-//! OR-Tools CP-SAT.
+//! check without Python startup. Explicit OR-Tools CP-SAT validation is launched
+//! from Rust with a tiny Python adapter over an integer-scaled copy of the same
+//! conflict graph.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -170,6 +169,93 @@ struct RustWisSearchVertex {
 
 const RUST_WIS_EPS: f64 = 1e-9;
 const RUST_WIS_MAX_EXACT_VERTICES: usize = 64;
+const ORTOOLS_INTEGER_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_WIS_SOLVER: &str = "ortools:cp-sat-weighted-independent-set";
+
+const ORTOOLS_WIS_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:cp-sat-weighted-independent-set"
+
+
+def output(status, problem, selected_indices=None, upper_bound=None, message=""):
+    indices = [] if selected_indices is None else sorted(int(index) for index in selected_indices)
+    by_index = {int(vertex["index"]): vertex for vertex in problem["vertices"]}
+    selected_ids = [by_index[index]["id"] for index in indices]
+    total_weight = float(sum(float(by_index[index]["weight"]) for index in indices))
+    result = {
+        "status": status,
+        "solver": SOLVER,
+        "selectedVertexIndices": indices,
+        "selectedVertexIds": selected_ids,
+        "totalWeight": total_weight,
+        "objective": total_weight,
+        "upperBound": upper_bound,
+        "message": message,
+    }
+    if upper_bound is not None:
+        result["objectiveBound"] = upper_bound
+    return result
+
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    print(json.dumps(output("unavailable", {"vertices": []}, None, None, str(exc))))
+    sys.exit(0)
+
+
+try:
+    problem = json.load(sys.stdin)
+    model = cp_model.CpModel()
+    x = [
+        model.NewBoolVar(f"x_{vertex['id']}")
+        for vertex in problem["vertices"]
+    ]
+    for ai, bi in problem["edges"]:
+        model.Add(x[int(ai)] + x[int(bi)] <= 1)
+    model.Maximize(sum(
+        int(vertex["scaledWeight"]) * x[index]
+        for index, vertex in enumerate(problem["vertices"])
+    ))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(json.dumps(output(
+            "infeasible" if status_name == "infeasible" else status_name,
+            problem,
+            None,
+            None,
+            f"OR-Tools CP-SAT status {status_name}",
+        )))
+        sys.exit(0)
+    selected = [
+        index for index, var in enumerate(x) if solver.Value(var)
+    ]
+    print(json.dumps(output(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        problem,
+        selected,
+        solver.BestObjectiveBound() / float(problem["valueScale"]),
+        f"OR-Tools CP-SAT status {status_name}",
+    )))
+except Exception as exc:
+    print(json.dumps({
+        "status": "error",
+        "solver": SOLVER,
+        "selectedVertexIndices": [],
+        "selectedVertexIds": [],
+        "totalWeight": 0.0,
+        "objective": None,
+        "upperBound": None,
+        "message": str(exc),
+    }))
+    sys.exit(1)
+"#;
 
 fn validate_rust_weighted_independent_set_problem(
     problem: &WeightedIndependentSetProblem,
@@ -489,58 +575,56 @@ fn solve_weighted_independent_set_with_rust_reference(
     )
 }
 
-fn unavailable(
+fn ortools_empty_solution(
+    status: ExternalWeightedIndependentSetReferenceStatus,
     message: impl Into<String>,
     elapsed_ms: f64,
 ) -> ExternalWeightedIndependentSetReferenceSolution {
-    ExternalWeightedIndependentSetReferenceSolution {
-        status: ExternalWeightedIndependentSetReferenceStatus::Unavailable,
-        solver: "external-weighted-independent-set-reference".to_string(),
-        selected_vertex_indices: Vec::new(),
-        selected_vertex_ids: Vec::new(),
-        total_weight: None,
-        objective: None,
-        upper_bound: None,
-        ortools_status: None,
-        ortools_selected_vertex_indices: Vec::new(),
-        ortools_selected_vertex_ids: Vec::new(),
-        ortools_total_weight: None,
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
+    rust_wis_empty_solution(status, ORTOOLS_WIS_SOLVER, message, elapsed_ms)
+}
+
+fn scaled_ortools_value(value: f64, scale: i64) -> Option<i64> {
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled < 0.0 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (rounded - scaled).abs() <= 1e-6 {
+        Some(rounded as i64)
+    } else {
+        None
     }
 }
 
-fn numerical_error(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalWeightedIndependentSetReferenceSolution {
-    ExternalWeightedIndependentSetReferenceSolution {
-        status: ExternalWeightedIndependentSetReferenceStatus::NumericalError,
-        solver: "external-weighted-independent-set-reference".to_string(),
-        selected_vertex_indices: Vec::new(),
-        selected_vertex_ids: Vec::new(),
-        total_weight: None,
-        objective: None,
-        upper_bound: None,
-        ortools_status: None,
-        ortools_selected_vertex_indices: Vec::new(),
-        ortools_selected_vertex_ids: Vec::new(),
-        ortools_total_weight: None,
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
+fn choose_ortools_value_scale(problem: &WeightedIndependentSetProblem) -> Option<i64> {
+    ORTOOLS_INTEGER_SCALES.into_iter().find(|scale| {
+        problem
+            .vertices
+            .iter()
+            .all(|vertex| scaled_ortools_value(vertex.weight, *scale).is_some())
+    })
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts")
-        .join("weighted_independent_set_reference.py")
+fn ortools_wis_payload(
+    problem: &WeightedIndependentSetProblem,
+    vertex_index: &HashMap<String, usize>,
+    value_scale: i64,
+) -> Value {
+    json!({
+        "valueScale": value_scale,
+        "vertices": problem.vertices.iter().enumerate().map(|(index, vertex)| {
+            json!({
+                "id": vertex.id,
+                "index": index,
+                "weight": vertex.weight,
+                "scaledWeight": scaled_ortools_value(vertex.weight, value_scale)
+                    .expect("value scale chosen for vertex weights"),
+            })
+        }).collect::<Vec<_>>(),
+        "edges": problem.edges.iter().map(|(from, to)| {
+            json!([vertex_index[from], vertex_index[to]])
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn weighted_independent_set_reference_timeout_ms() -> u64 {
@@ -572,7 +656,7 @@ fn wait_for_weighted_independent_set_reference_output(
             }
             Err(err) => {
                 return Err(format!(
-                    "failed to poll weighted_independent_set_reference.py: {err}"
+                    "failed to poll OR-Tools weighted-independent-set adapter: {err}"
                 ))
             }
         }
@@ -580,20 +664,36 @@ fn wait_for_weighted_independent_set_reference_output(
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for weighted_independent_set_reference.py: {err}"))
+        .map_err(|err| {
+            format!("failed to wait for OR-Tools weighted-independent-set adapter: {err}")
+        })
 }
 
-fn run_weighted_independent_set_reference_json(
-    payload: Value,
-    opts: &ExternalWeightedIndependentSetReferenceOptions,
+fn run_ortools_weighted_independent_set_reference(
+    problem: &WeightedIndependentSetProblem,
 ) -> ExternalWeightedIndependentSetReferenceSolution {
     let started = Instant::now();
+    let vertex_index = match validate_rust_weighted_independent_set_problem(problem) {
+        Ok(vertex_index) => vertex_index,
+        Err(message) => {
+            return ortools_empty_solution(
+                ExternalWeightedIndependentSetReferenceStatus::NumericalError,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let Some(value_scale) = choose_ortools_value_scale(problem) else {
+        return ortools_empty_solution(
+            ExternalWeightedIndependentSetReferenceStatus::Unsupported,
+            "OR-Tools CP-SAT bridge requires integer-scalable vertex weights",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let payload = ortools_wis_payload(problem, &vertex_index, value_scale);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_WIS_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -602,9 +702,10 @@ fn run_weighted_independent_set_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return unavailable(
+            return ortools_empty_solution(
+                ExternalWeightedIndependentSetReferenceStatus::Unavailable,
                 format!(
-                    "failed to start weighted_independent_set_reference.py with {python}: {err}"
+                    "failed to start OR-Tools weighted-independent-set adapter with {python}: {err}"
                 ),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
@@ -612,8 +713,9 @@ fn run_weighted_independent_set_reference_json(
     };
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write weighted_independent_set_reference.py stdin: {err}"),
+            return ortools_empty_solution(
+                ExternalWeightedIndependentSetReferenceStatus::NumericalError,
+                format!("failed to write OR-Tools weighted-independent-set adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -622,16 +724,22 @@ fn run_weighted_independent_set_reference_json(
     let (output, timed_out) =
         match wait_for_weighted_independent_set_reference_output(child, timeout_ms) {
             Ok(output) => output,
-            Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
+            Err(err) => {
+                return ortools_empty_solution(
+                    ExternalWeightedIndependentSetReferenceStatus::NumericalError,
+                    err,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                )
+            }
         };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("weighted_independent_set_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools weighted-independent-set adapter timed out after {timeout_ms}ms")
         } else {
             format!(
-                "{stderr}; weighted_independent_set_reference.py timed out after {timeout_ms}ms"
+                "{stderr}; OR-Tools weighted-independent-set adapter timed out after {timeout_ms}ms"
             )
         }
     } else {
@@ -665,9 +773,10 @@ fn run_weighted_independent_set_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
+        Err(err) => ortools_empty_solution(
+            ExternalWeightedIndependentSetReferenceStatus::NumericalError,
             format!(
-                "failed to parse weighted_independent_set_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools weighted-independent-set adapter output: {err}; stderr={}",
                 stderr
             ),
             elapsed_ms,
@@ -688,16 +797,7 @@ pub fn solve_weighted_independent_set_with_external_reference(
         );
     }
 
-    run_weighted_independent_set_reference_json(
-        json!({
-            "vertices": problem.vertices.iter().map(|vertex| json!({
-                "id": &vertex.id,
-                "weight": vertex.weight,
-            })).collect::<Vec<_>>(),
-            "edges": problem.edges.iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_weighted_independent_set_reference(problem)
 }
 
 #[cfg(test)]
@@ -852,7 +952,74 @@ mod tests {
     }
 
     #[test]
-    fn weighted_independent_set_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_weights_without_python() {
+        let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set(
+            "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
+            "0",
+        );
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = WeightedIndependentSetProblem {
+            vertices: vec![WeightedIndependentSetVertex {
+                id: "A".to_string(),
+                weight: 1.0 / 3.0,
+            }],
+            edges: Vec::new(),
+        };
+
+        let solution = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedIndependentSetReferenceStatus::Unsupported
+        );
+        assert_eq!(solution.solver, "ortools:cp-sat-weighted-independent-set");
+        assert!(solution
+            .message
+            .contains("requires integer-scalable vertex weights"));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set(
+            "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
+            "0",
+        );
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = build_sample_weighted_independent_set_problem();
+
+        let solution = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedIndependentSetReferenceStatus::Unavailable
+        );
+        assert_eq!(solution.solver, "ortools:cp-sat-weighted-independent-set");
+        assert!(solution
+            .message
+            .contains("OR-Tools weighted-independent-set adapter"));
+        assert!(!solution
+            .message
+            .contains("weighted_independent_set_reference.py"));
+    }
+
+    #[test]
+    fn weighted_independent_set_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())

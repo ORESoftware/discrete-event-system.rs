@@ -55203,7 +55203,11 @@ mod tests {
         assert_eq!(html.status, 200);
         assert!(html.body.contains("id=\"ballAction\""));
         assert!(html.body.contains("id=\"seed\""));
+        assert!(html.body.contains("id=\"seedInput\""));
+        assert!(html.body.contains("id=\"replaySeed\""));
         assert!(html.body.contains("state.config.seed"));
+        assert!(html.body.contains("function seedResetValue"));
+        assert!(html.body.contains("resetMatch({seed: seedResetValue()})"));
         assert!(html.body.contains("semanticBallActionLabel"));
         assert!(html.body.contains("function scheduleSlotLabel"));
         assert!(html.body.contains("scheduleSlotLabel(ball?.scheduledIndex"));

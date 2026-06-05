@@ -12578,6 +12578,7 @@ fn model_validation_mst_reference(payload: &Value, tool: &str) -> Value {
         ExternalMinimumSpanningTreeReferenceStatus::Optimal => ("ok", "optimal"),
         ExternalMinimumSpanningTreeReferenceStatus::Feasible => ("ok", "feasible"),
         ExternalMinimumSpanningTreeReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalMinimumSpanningTreeReferenceStatus::Unsupported => ("failed", "failure"),
         ExternalMinimumSpanningTreeReferenceStatus::Unavailable => ("unavailable", "unknown"),
         ExternalMinimumSpanningTreeReferenceStatus::NumericalError => ("failed", "failure"),
     };

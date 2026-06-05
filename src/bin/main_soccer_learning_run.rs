@@ -3158,6 +3158,47 @@ mod tests {
     }
 
     #[test]
+    fn postgres_tactical_learning_is_cloned_into_next_worker_config() {
+        let mut active_weights = SoccerTacticalLearningWeights::default();
+        let mut config = MatchConfig {
+            tactical_learning: active_weights.clone(),
+            ..Default::default()
+        };
+        let mut postgres_weights = SoccerTacticalLearningWeights::default();
+        postgres_weights.attack_flank_lane_weight = 1.42;
+        postgres_weights.defense_contract_delta_weight = 1.17;
+
+        let applied = maybe_apply_postgres_tactical_learning(
+            "test_postgres_tactical_learning",
+            17,
+            "pg-v17",
+            17,
+            &mut config,
+            &mut active_weights,
+            Some(postgres_weights.clone()),
+        )
+        .expect("valid postgres tactical learning weights");
+        let mut episode_config = config.clone();
+        episode_config.seed = 9090;
+
+        assert!(applied);
+        assert_eq!(
+            active_weights.attack_flank_lane_weight,
+            postgres_weights.attack_flank_lane_weight
+        );
+        assert_eq!(
+            episode_config.tactical_learning.attack_flank_lane_weight,
+            postgres_weights.attack_flank_lane_weight
+        );
+        assert_eq!(
+            episode_config
+                .tactical_learning
+                .defense_contract_delta_weight,
+            postgres_weights.defense_contract_delta_weight
+        );
+    }
+
+    #[test]
     fn default_postgres_policy_versions_are_batched_for_single_game_workers() {
         assert_eq!(default_postgres_policy_version_interval_games(0), 10);
         assert_eq!(default_postgres_policy_version_interval_games(1), 10);

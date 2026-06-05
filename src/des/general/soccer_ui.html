@@ -282,6 +282,7 @@
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
+      <div class="metric"><span>Ball Hist</span><b id="ballKinematics">H0 V0.0 A0.0 J0.0</b></div>
       <div class="metric"><span>Intent</span><b id="actionIntent">Idle</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
@@ -294,6 +295,8 @@
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="section">Controller Slots</div>
       <div id="slots"></div>
+      <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
+      <div class="metric"><span>Kinematics</span><b id="agentKinematics">-</b></div>
       <div class="row">
         <select id="passTarget"></select>
         <select id="passFlight" aria-label="Pass flight">
@@ -373,6 +376,7 @@ const centralBrain = document.getElementById("centralBrain");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
+const ballKinematics = document.getElementById("ballKinematics");
 const actionIntent = document.getElementById("actionIntent");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
@@ -388,6 +392,8 @@ const play = document.getElementById("play");
 const speed = document.getElementById("speed");
 const events = document.getElementById("events");
 const slots = document.getElementById("slots");
+const agentSelected = document.getElementById("agentSelected");
+const agentKinematics = document.getElementById("agentKinematics");
 const passTarget = document.getElementById("passTarget");
 const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
@@ -430,10 +436,10 @@ function loadedFrameRate() {
 }
 function expectedFrameCount() {
   const ticks = Number(trace.summary?.ticks || 0);
-  return Math.max(ticks, trace.frames.length, 0);
+  return Math.max(ticks + 1, trace.frames.length, 0);
 }
 function bufferedSeconds() {
-  return trace.frames.length * Number(trace.config.dtSeconds || 0.1);
+  return Math.max(0, trace.frames.length - 1) * Number(trace.config.dtSeconds || 0.1);
 }
 function canStartPlayback() {
   if (trace.frames.length < 2) return false;
@@ -502,6 +508,24 @@ function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
   return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
 }
+function teamBrainModeLabel(mode) {
+  const v = String(mode || "").toLowerCase();
+  if (v === "attack") return "Atk";
+  if (v === "buildup" || v === "build-up") return "Build";
+  if (v === "defend") return "Def";
+  if (v === "kickoff") return "KO";
+  return "Tran";
+}
+function teamBrainLabel(brain, fallbackDirective) {
+  if (!brain) return directiveLabel(fallbackDirective);
+  const d = brain.directive || fallbackDirective || {};
+  const target = Number(brain.defensiveCoverTarget ?? d.defensiveCoverTarget ?? 0);
+  const actual = Number(brain.defensiveCoverActual ?? d.defensiveCoverActual ?? 0);
+  const cover = target > 0 ? ` C${actual}/${target >= 4 ? "4+" : target}` : "";
+  const actions = Number(brain.policyActionEntries ?? 0);
+  const targets = Number(brain.policyTargetEntries ?? 0);
+  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)}${cover} Q${actions}/${targets}`;
+}
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
@@ -510,7 +534,11 @@ function centralBrainLabel(b) {
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   const center = b.centerOfPlay;
   const centerText = center ? ` C${Number(center.x ?? 0).toFixed(0)},${Number(center.y ?? 0).toFixed(0)}` : "";
-  return `${players}p ${officials}o ${possession}${holder}${centerText}`;
+  const ballSpeed = vecLen(b.ballVelocity || {x: 0, y: 0});
+  const ballAccel = vecLen(b.ballAcceleration || {x: 0, y: 0});
+  const ballZ = Number(b.ballAltitudeYards ?? 0);
+  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)} z${ballZ.toFixed(1)}`;
+  return `${players}p ${officials}o ${possession}${holder}${centerText}${ballText}`;
 }
 function primaryIntent(f) {
   const intents = Array.isArray(f?.intents) ? f.intents : [];
@@ -526,6 +554,61 @@ function intentLabel(i) {
 function vecLen(v) {
   if (!v) return 0;
   return Math.hypot(Number(v.x || 0), Number(v.y || 0));
+}
+function finiteVec2(v) {
+  const point = v?.position || v;
+  return {
+    x: Number(point?.x ?? 0),
+    y: Number(point?.y ?? 0),
+  };
+}
+function vecSub(a, b) {
+  return {x: Number(a?.x ?? 0) - Number(b?.x ?? 0), y: Number(a?.y ?? 0) - Number(b?.y ?? 0)};
+}
+function vecScale(v, scale) {
+  return {x: Number(v?.x ?? 0) * scale, y: Number(v?.y ?? 0) * scale};
+}
+function historyKinematicsFromPositions(history, dtSeconds) {
+  const samples = Array.isArray(history) ? history.map(finiteVec2) : [];
+  const dt = Math.max(1e-6, Number(dtSeconds || trace.config?.dtSeconds || 0.1));
+  const last = samples.length - 1;
+  const velocity = samples.length >= 2 ? vecScale(vecSub(samples[last], samples[last - 1]), 1 / dt) : null;
+  if (samples.length < 3) return {samples: samples.length, velocity, acceleration: null, jerk: null};
+  const v0 = vecScale(vecSub(samples[last - 1], samples[last - 2]), 1 / dt);
+  const v1 = velocity;
+  const acceleration = vecScale(vecSub(v1, v0), 1 / dt);
+  if (samples.length < 4) return {samples: samples.length, velocity, acceleration, jerk: null};
+  const vMinus = vecScale(vecSub(samples[last - 2], samples[last - 3]), 1 / dt);
+  const a0 = vecScale(vecSub(v0, vMinus), 1 / dt);
+  const jerk = vecScale(vecSub(acceleration, a0), 1 / dt);
+  return {samples: samples.length, velocity, acceleration, jerk};
+}
+function playbackPlayerHistoryForFrame(playerId, index = frameIndex) {
+  if (playerId == null) return [];
+  const start = Math.max(0, Number(index || 0) - 49);
+  return trace.frames.slice(start, Number(index || 0) + 1)
+    .map(frame => frame.players?.find(player => player.id === playerId)?.position)
+    .filter(Boolean);
+}
+function playerHistoryKinematicsLabel(p, dtSeconds = trace.config?.dtSeconds, history = null) {
+  const sourceHistory = Array.isArray(history) ? history : p?.positionHistory;
+  const k = historyKinematicsFromPositions(sourceHistory, dtSeconds);
+  const velocity = k.velocity || p?.velocity || {x: 0, y: 0};
+  const acceleration = k.acceleration || p?.acceleration || {x: 0, y: 0};
+  const jerk = k.jerk || p?.jerk || {x: 0, y: 0};
+  return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
+}
+function playbackBallHistoryForFrame(index = frameIndex) {
+  const start = Math.max(0, Number(index || 0) - 49);
+  return trace.frames.slice(start, Number(index || 0) + 1).map(frame => frame.ball?.position).filter(Boolean);
+}
+function ballHistoryKinematicsLabel(f, dtSeconds = trace.config?.dtSeconds) {
+  const k = historyKinematicsFromPositions(playbackBallHistoryForFrame(frameIndex), dtSeconds);
+  const ball = f?.ball || {};
+  const velocity = k.velocity || ball.velocity || {x: 0, y: 0};
+  const acceleration = k.acceleration || ball.acceleration || {x: 0, y: 0};
+  const jerk = k.jerk || {x: 0, y: 0};
+  return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
 }
 function fmtClock(s) {
   const m = Math.floor(s / 60);
@@ -628,14 +711,48 @@ function drawPitch(r) {
   const boxH = r.h * 0.14;
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y, boxW, boxH);
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
+  drawGoalPosts(r);
+}
+function drawGoalPosts(r) {
   const config = trace.config || FALLBACK_CONFIG;
-  const goalW = Number(config.goalWidthYards || 8) / Number(config.fieldWidthYards || 80) * r.w;
-  const goalX = r.x + (r.w - goalW) / 2;
-  const goalDepth = Math.min(18, Math.max(8, r.h * 0.018));
+  const fieldWidth = Number(config.fieldWidthYards || 80);
+  const goalWidth = Number(config.goalWidthYards || 8);
+  const centerX = r.x + r.w * 0.5;
+  const halfGoalPx = r.w * (goalWidth / fieldWidth) * 0.5;
+  const postRadius = 4;
+  const goalDepth = 9;
+  const topY = r.y;
+  const bottomY = r.y + r.h;
+  const posts = [
+    {x: centerX - halfGoalPx, y: topY},
+    {x: centerX + halfGoalPx, y: topY},
+    {x: centerX - halfGoalPx, y: bottomY},
+    {x: centerX + halfGoalPx, y: bottomY},
+  ];
+
+  ctx.save();
   ctx.strokeStyle = "rgba(255,255,255,.96)";
-  ctx.lineWidth = 4;
-  ctx.strokeRect(goalX, r.y - goalDepth, goalW, goalDepth);
-  ctx.strokeRect(goalX, r.y + r.h, goalW, goalDepth);
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(centerX - halfGoalPx, topY);
+  ctx.lineTo(centerX - halfGoalPx, topY - goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, topY - goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, topY);
+  ctx.moveTo(centerX - halfGoalPx, bottomY);
+  ctx.lineTo(centerX - halfGoalPx, bottomY + goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, bottomY + goalDepth);
+  ctx.lineTo(centerX + halfGoalPx, bottomY);
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  for (const post of posts) {
+    ctx.beginPath();
+    ctx.arc(post.x, post.y, postRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(17,32,38,.55)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 function drawArrow(from, to, color, width = 2, dashed = false) {
   const dx = to.x - from.x;
@@ -790,11 +907,13 @@ function render() {
   clock.textContent = fmtClock(f.clockSeconds);
   phase.textContent = phaseLabel(f.phase);
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
-  homeBrain.textContent = directiveLabel(f.homeDirective);
-  awayBrain.textContent = directiveLabel(f.awayDirective);
+  homeBrain.textContent = teamBrainLabel(f.homeBrain, f.homeDirective);
+  awayBrain.textContent = teamBrainLabel(f.awayBrain, f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2 z${ballAltitudeYards(f.ball).toFixed(1)}y`;
+  ballKinematics.textContent = ballHistoryKinematicsLabel(f, trace.config?.dtSeconds);
   actionIntent.textContent = intentLabel(primaryIntent(f));
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
+  updateAgentStatePanel();
   scrub.value = frameIndex;
 }
 function updateMetrics() {
@@ -842,6 +961,23 @@ function selectedPlayerSnapshot() {
   const frame = currentFrame();
   const playerId = selectedPlayer(activeSlot);
   return frame && playerId != null ? frame.players.find(p => p.id === playerId) || null : null;
+}
+function playerLabel(p) {
+  return `${p.team} ${p.shirt} ${p.name}`;
+}
+function updateAgentStatePanel() {
+  const p = selectedPlayerSnapshot();
+  if (!p) {
+    agentSelected.textContent = "Autonomous";
+    agentKinematics.textContent = "-";
+    return;
+  }
+  agentSelected.textContent = `${p.team} ${p.shirt} ${p.name}`;
+  agentKinematics.textContent = playerHistoryKinematicsLabel(
+    p,
+    trace.config?.dtSeconds,
+    playbackPlayerHistoryForFrame(p.id)
+  );
 }
 function selectedPlayerCanShoot() {
   const frame = currentFrame();
@@ -897,7 +1033,7 @@ function rebuildPassTargets() {
     for (const p of players.filter(p => p.team === activePlayer.team && p.id !== activePlayer.id)) {
       const opt = document.createElement("option");
       opt.value = p.id;
-      opt.textContent = `${p.shirt} ${p.name}`;
+      opt.textContent = playerLabel(p);
       passTarget.appendChild(opt);
     }
   }
@@ -908,7 +1044,7 @@ function rebuildPassTargets() {
 function buildSlots() {
   const firstFrame = trace.frames[0];
   if (!firstFrame) return;
-  const players = firstFrame.players.filter(p => p.team === "Home");
+  const players = firstFrame.players;
   slots.innerHTML = "";
   for (let i = 0; i < trace.config.maxHumanPlayers; i++) {
     const row = document.createElement("div");
@@ -924,7 +1060,7 @@ function buildSlots() {
     for (const p of players) {
       const opt = document.createElement("option");
       opt.value = p.id;
-      opt.textContent = `${p.shirt} ${p.name}`;
+      opt.textContent = playerLabel(p);
       if (p.controllerSlot === i) opt.selected = true;
       select.appendChild(opt);
     }

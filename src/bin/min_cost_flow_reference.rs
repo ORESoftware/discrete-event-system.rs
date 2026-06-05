@@ -88,11 +88,7 @@ fn parse_usize(value: &Value, message: impl Into<String>) -> Result<usize, Strin
     value
         .as_u64()
         .and_then(|value| usize::try_from(value).ok())
-        .or_else(|| {
-            value
-                .as_i64()
-                .and_then(|value| usize::try_from(value).ok())
-        })
+        .or_else(|| value.as_i64().and_then(|value| usize::try_from(value).ok()))
         .or_else(|| value.as_str().and_then(|text| text.parse::<usize>().ok()))
         .ok_or_else(|| message.into())
 }
@@ -217,13 +213,11 @@ fn solution_json(solution: &ExternalMinCostFlowReferenceSolution) -> Value {
     {
         output["ortoolsStatus"] = json!(solution.ortools_status);
         output["ortoolsObjective"] = json!(solution.ortools_objective);
-        output["ortoolsFlows"] = json!(
-            solution
-                .ortools_flows
-                .iter()
-                .map(arc_result_json)
-                .collect::<Vec<_>>()
-        );
+        output["ortoolsFlows"] = json!(solution
+            .ortools_flows
+            .iter()
+            .map(arc_result_json)
+            .collect::<Vec<_>>());
         output["ortoolsNodeBalance"] = json!(solution.ortools_node_balance);
     }
     output

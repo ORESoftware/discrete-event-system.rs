@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Reference bridge for small scheduling instances.
 
-For job-shop inputs, the deterministic oracle is an exact depth-first
-branch-and-bound over semi-active schedules. For flow-shop inputs, the oracle
-enumerates small permutation schedules. When OR-Tools is installed, the same
-input is also sent to CP-SAT so Rust validation can cross-check against a real
-CP engine without vendoring solver executables.
+The deterministic exact job-shop and flow-shop oracles live in Rust. This
+Python bridge remains as thin adapter glue for explicit OR-Tools CP-SAT checks
+without vendoring solver executables.
 """
 
 from __future__ import annotations
@@ -13,12 +11,82 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import subprocess
 import sys
 from typing import Optional
 
 
-EPS = 1e-9
 SCALE = 1000
+
+
+def rust_reference_command() -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "scheduling_reference"
+    explicit = os.environ.get("SCHEDULING_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit]
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary]
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "scheduling_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_scheduling_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "scheduling.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def exec_rust_reference(solver: str, kind: str) -> None:
+    command = rust_reference_command() + ["--solver", solver, "--kind", kind]
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(os.path.dirname(script_dir))
+        os.execvp(command[0], command)
+    os.execv(command[0], command)
+
+
+def rust_reference(raw: dict, kind: str) -> dict:
+    command = rust_reference_command() + ["--solver", "rust-exact", "--kind", kind]
+    cwd = None
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.dirname(script_dir)
+    completed = subprocess.run(
+        command,
+        input=json.dumps(raw),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        check=False,
+    )
+    try:
+        output = json.loads(completed.stdout)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "solver": "rust:scheduling-reference",
+            "schedule": [],
+            "sequence": [],
+            "makespan": None,
+            "totalFlowTime": None,
+            "message": f"failed to parse Rust reference output: {exc}; stderr={completed.stderr.strip()}",
+        }
+    if completed.returncode != 0 and not output.get("message"):
+        output["message"] = completed.stderr.strip()
+    return output
 
 
 def normalize_job_shop(raw: dict) -> list[dict]:
@@ -120,42 +188,6 @@ def schedule_result(
     }
 
 
-def dispatch_spt(jobs: list[dict]) -> dict:
-    machine_ready: dict[str, float] = {}
-    job_ready = [0.0 for _ in jobs]
-    next_ops = [0 for _ in jobs]
-    schedule = []
-    total_ops = sum(len(job["operations"]) for job in jobs)
-    while len(schedule) < total_ops:
-        candidates = []
-        for job_index, job in enumerate(jobs):
-            op_index = next_ops[job_index]
-            if op_index >= len(job["operations"]):
-                continue
-            op = job["operations"][op_index]
-            start = max(job_ready[job_index], machine_ready.get(op["machine"], 0.0))
-            finish = start + op["duration"]
-            candidates.append((op["duration"], finish, start, job_index))
-        _, _, start, job_index = min(candidates)
-        op_index = next_ops[job_index]
-        job = jobs[job_index]
-        op = job["operations"][op_index]
-        finish = start + op["duration"]
-        schedule.append(
-            {
-                "jobId": job["id"],
-                "opIndex": op_index,
-                "machine": op["machine"],
-                "start": float(start),
-                "finish": float(finish),
-            }
-        )
-        machine_ready[op["machine"]] = finish
-        job_ready[job_index] = finish
-        next_ops[job_index] += 1
-    return schedule_result("feasible", "python:spt-dispatch", schedule)
-
-
 def flow_shop_schedule(sequence: list[dict]) -> list[dict]:
     if not sequence:
         return []
@@ -179,169 +211,6 @@ def flow_shop_schedule(sequence: list[dict]) -> list[dict]:
             machine_ready[machine_index] = finish
             job_ready = finish
     return schedule
-
-
-def exact_flow_shop(jobs: list[dict]) -> dict:
-    if len(jobs) > 10:
-        return {
-            "status": "unsupported",
-            "solver": "python:exact-flow-shop",
-            "sequence": [],
-            "schedule": [],
-            "makespan": None,
-            "totalFlowTime": None,
-            "message": f"exact flow-shop only practical for <= 10 jobs, got {len(jobs)}",
-        }
-
-    best_sequence: list[dict] = []
-    best_schedule: list[dict] = []
-    best_makespan = math.inf
-    best_total_flow = math.inf
-    used = [False for _ in jobs]
-    current: list[dict] = []
-
-    def consider(sequence: list[dict]) -> None:
-        nonlocal best_sequence, best_schedule, best_makespan, best_total_flow
-        schedule = flow_shop_schedule(sequence)
-        result = schedule_result("optimal", "python:exact-flow-shop", schedule)
-        makespan = float(result["makespan"])
-        total_flow = float(result["totalFlowTime"])
-        seq_ids = [job["id"] for job in sequence]
-        best_ids = [job["id"] for job in best_sequence]
-        if makespan < best_makespan - EPS or (
-            abs(makespan - best_makespan) <= EPS
-            and (total_flow < best_total_flow - EPS or (abs(total_flow - best_total_flow) <= EPS and seq_ids < best_ids))
-        ):
-            best_sequence = [dict(job) for job in sequence]
-            best_schedule = schedule
-            best_makespan = makespan
-            best_total_flow = total_flow
-
-    def recurse() -> None:
-        if len(current) == len(jobs):
-            consider(current)
-            return
-        for index, job in enumerate(jobs):
-            if used[index]:
-                continue
-            used[index] = True
-            current.append(job)
-            recurse()
-            current.pop()
-            used[index] = False
-
-    recurse()
-    return schedule_result(
-        "optimal",
-        "python:exact-flow-shop",
-        best_schedule,
-        "exact permutation flow-shop enumeration",
-        [job["id"] for job in best_sequence],
-    )
-
-
-def exact_job_shop(jobs: list[dict]) -> dict:
-    total_ops = sum(len(job["operations"]) for job in jobs)
-    if total_ops > 20:
-        return {
-            "status": "unsupported",
-            "solver": "python:exact-job-shop",
-            "schedule": [],
-            "makespan": None,
-            "totalFlowTime": None,
-            "message": f"exact job-shop only practical for <= 20 operations, got {total_ops}",
-        }
-
-    incumbent = dispatch_spt(jobs)
-    best_schedule = list(incumbent["schedule"])
-    best_makespan = float(incumbent["makespan"])
-    best_total_flow = float(incumbent["totalFlowTime"])
-
-    next_ops = [0 for _ in jobs]
-    machine_ready: dict[str, float] = {}
-    job_ready = [0.0 for _ in jobs]
-    schedule: list[dict] = []
-
-    def lower_bound() -> float:
-        bound = max(job_ready, default=0.0)
-        for job_index, job in enumerate(jobs):
-            remaining = sum(op["duration"] for op in job["operations"][next_ops[job_index] :])
-            bound = max(bound, job_ready[job_index] + remaining)
-        machine_work: dict[str, float] = {}
-        for job_index, job in enumerate(jobs):
-            for op in job["operations"][next_ops[job_index] :]:
-                machine_work[op["machine"]] = machine_work.get(op["machine"], 0.0) + op["duration"]
-        for machine, work in machine_work.items():
-            bound = max(bound, machine_ready.get(machine, 0.0) + work)
-        return bound
-
-    def recurse() -> None:
-        nonlocal best_schedule, best_makespan, best_total_flow
-        if len(schedule) == total_ops:
-            makespan = max(job_ready, default=0.0)
-            total_flow = sum(job_ready)
-            if makespan < best_makespan - EPS or (
-                abs(makespan - best_makespan) <= EPS and total_flow < best_total_flow - EPS
-            ):
-                best_schedule = [dict(op) for op in schedule]
-                best_makespan = makespan
-                best_total_flow = total_flow
-            return
-        if lower_bound() > best_makespan + EPS:
-            return
-
-        candidates = []
-        for job_index, job in enumerate(jobs):
-            op_index = next_ops[job_index]
-            if op_index >= len(job["operations"]):
-                continue
-            op = job["operations"][op_index]
-            start = max(job_ready[job_index], machine_ready.get(op["machine"], 0.0))
-            finish = start + op["duration"]
-            candidates.append((finish, start, job_index))
-        candidates.sort()
-
-        for _, start, job_index in candidates:
-            op_index = next_ops[job_index]
-            job = jobs[job_index]
-            op = job["operations"][op_index]
-            machine = op["machine"]
-            finish = start + op["duration"]
-            previous_machine_ready = machine_ready.get(machine)
-            previous_job_ready = job_ready[job_index]
-
-            machine_ready[machine] = finish
-            job_ready[job_index] = finish
-            next_ops[job_index] += 1
-            schedule.append(
-                {
-                    "jobId": job["id"],
-                    "opIndex": op_index,
-                    "machine": machine,
-                    "start": float(start),
-                    "finish": float(finish),
-                }
-            )
-
-            recurse()
-
-            schedule.pop()
-            next_ops[job_index] -= 1
-            job_ready[job_index] = previous_job_ready
-            if previous_machine_ready is None:
-                machine_ready.pop(machine, None)
-            else:
-                machine_ready[machine] = previous_machine_ready
-
-    recurse()
-    return {
-        "status": "optimal",
-        "solver": "python:exact-job-shop",
-        "schedule": best_schedule,
-        "makespan": float(best_makespan),
-        "totalFlowTime": float(best_total_flow),
-        "message": "exact job-shop branch-and-bound",
-    }
 
 
 def scaled_duration(duration: float) -> int:
@@ -500,55 +369,41 @@ def infer_kind(raw: dict, requested: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-exact"],
+        default="auto",
+    )
     parser.add_argument("--kind", choices=["auto", "job-shop", "flow-shop"], default="auto")
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-exact"):
+        exec_rust_reference(args.solver, args.kind)
 
     try:
         raw = json.load(sys.stdin)
         kind = infer_kind(raw, args.kind)
         if kind == "flow-shop":
             jobs = normalize_flow_shop(raw)
-            exact = exact_flow_shop(jobs)
             ortools_fn = ortools_flow_shop_cp_sat
-            fallback_solver = "python:exact-flow-shop"
-            combined_solver = "ortools:cp-sat-flow-shop+python:exact-flow-shop"
         else:
             jobs = normalize_job_shop(raw)
-            exact = exact_job_shop(jobs)
             ortools_fn = ortools_cp_sat
-            fallback_solver = "python:exact-job-shop"
-            combined_solver = "ortools:cp-sat+python:exact-job-shop"
-        if args.solver == "fallback":
-            output = dict(exact)
-            output["solver"] = fallback_solver
-            print(json.dumps(output))
-            return 0 if output["status"] in ("optimal", "feasible", "unsupported") else 1
 
         ortools = ortools_fn(jobs)
-        if args.solver == "ortools":
-            output = dict(ortools)
-            output.setdefault("sequence", [])
-            output.setdefault("schedule", [])
-            output.setdefault("makespan", None)
-            output.setdefault("totalFlowTime", None)
-            output["referenceStatus"] = exact.get("status")
-            output["referenceMakespan"] = exact.get("makespan")
-            print(json.dumps(output))
-            return 0 if output["status"] in ("optimal", "feasible", "unavailable") else 1
-
-        solver = combined_solver if ortools.get("status") != "unavailable" else fallback_solver
-        output = dict(exact)
-        output["solver"] = solver
-        output["ortoolsStatus"] = ortools.get("status")
-        output["ortoolsSequence"] = ortools.get("sequence", [])
-        output["ortoolsMakespan"] = ortools.get("makespan")
-        output["ortoolsTotalFlowTime"] = ortools.get("totalFlowTime")
-        output["ortoolsSchedule"] = ortools.get("schedule", [])
-        output["ortoolsMessage"] = ortools.get("message", "")
-        output["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
+        reference = rust_reference(raw, kind)
+        output = dict(ortools)
+        output.setdefault(
+            "solver",
+            "ortools:cp-sat-flow-shop" if kind == "flow-shop" else "ortools:cp-sat",
+        )
+        output.setdefault("sequence", [])
+        output.setdefault("schedule", [])
+        output.setdefault("makespan", None)
+        output.setdefault("totalFlowTime", None)
+        output["referenceStatus"] = reference.get("status")
+        output["referenceMakespan"] = reference.get("makespan")
         print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "feasible", "unsupported") else 1
+        return 0 if output["status"] in ("optimal", "feasible", "unavailable") else 1
     except Exception as exc:
         print(
             json.dumps(

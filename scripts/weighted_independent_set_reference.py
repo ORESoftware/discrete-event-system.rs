@@ -27,12 +27,33 @@ def exec_rust_reference(solver: str) -> None:
     if explicit:
         os.execv(explicit, [explicit, "--solver", solver])
     local_binary = os.path.join(repo_root, "target", "debug", binary_name)
-    if os.path.exists(local_binary):
+    if local_rust_binary_is_current(repo_root, local_binary):
         os.execv(local_binary, [local_binary, "--solver", solver])
     os.chdir(repo_root)
     os.execvp(
         "cargo",
         ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "weighted_independent_set_reference.rs"),
+        os.path.join(
+            repo_root,
+            "src",
+            "des",
+            "general",
+            "external_weighted_independent_set_reference.rs",
+        ),
+        os.path.join(repo_root, "src", "des", "general", "weighted_independent_set.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
     )
 
 

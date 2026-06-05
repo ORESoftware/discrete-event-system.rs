@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Reference bridge for small uncapacitated facility-location instances.
 
-The deterministic oracle enumerates open-facility subsets. When OR-Tools is
-installed and costs are integer-scalable, the same model is also sent to CP-SAT
-with Boolean open and assignment variables.
+The deterministic open-facility subset oracle lives in Rust. This Python bridge
+remains as thin adapter glue for explicit OR-Tools CP-SAT checks.
 """
 
 from __future__ import annotations
@@ -11,13 +10,45 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
 EPS = 1e-9
-MAX_EXACT_FACILITIES = 24
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "facility_location_reference"
+    explicit = os.environ.get("FACILITY_LOCATION_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "facility_location_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_facility_location_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "facility_location.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -61,33 +92,6 @@ def normalize(raw: dict) -> dict:
     }
 
 
-def assignments_for(problem: dict, open_indices: list[int]) -> tuple[float, list[dict]]:
-    if not open_indices:
-        raise ValueError("at least one facility must be open")
-    total = sum(problem["fixed_costs"][index] for index in open_indices)
-    assignments = []
-    for customer_index, customer in enumerate(problem["customers"]):
-        best_facility = min(
-            open_indices,
-            key=lambda facility_index: (
-                problem["service_costs"][facility_index][customer_index],
-                facility_index,
-            ),
-        )
-        cost = problem["service_costs"][best_facility][customer_index]
-        total += cost
-        assignments.append(
-            {
-                "customerIndex": customer_index,
-                "customer": customer,
-                "facilityIndex": best_facility,
-                "facility": problem["facilities"][best_facility],
-                "cost": cost,
-            }
-        )
-    return float(total), assignments
-
-
 def result(
     status: str,
     solver: str,
@@ -104,8 +108,7 @@ def result(
     else:
         open_indices = sorted(set(int(index) for index in open_indices))
         open_ids = [problem["facilities"][index] for index in open_indices]
-        if assignments is None or objective is None:
-            objective, assignments = assignments_for(problem, open_indices)
+        assignments = [] if assignments is None else assignments
     return {
         "status": status,
         "solver": solver,
@@ -115,53 +118,6 @@ def result(
         "objective": objective,
         "message": message,
     }
-
-
-def exact_facility_location(problem: dict) -> dict:
-    facility_count = len(problem["facilities"])
-    if facility_count > MAX_EXACT_FACILITIES:
-        return result(
-            "unsupported",
-            "python:exact-facility-location",
-            problem,
-            None,
-            message=(
-                "exact facility-location enumeration only practical for "
-                f"<= {MAX_EXACT_FACILITIES} facilities, got {facility_count}"
-            ),
-        )
-
-    best_open: list[int] | None = None
-    best_assignments: list[dict] | None = None
-    best_objective = math.inf
-    for mask in range(1, 1 << facility_count):
-        open_indices = [index for index in range(facility_count) if mask & (1 << index)]
-        objective, assignments = assignments_for(problem, open_indices)
-        if objective < best_objective - EPS or (
-            abs(objective - best_objective) <= EPS
-            and (best_open is None or open_indices < best_open)
-        ):
-            best_open = open_indices
-            best_assignments = assignments
-            best_objective = objective
-
-    if best_open is None:
-        return result(
-            "infeasible",
-            "python:exact-facility-location",
-            problem,
-            None,
-            message="no feasible facility subset",
-        )
-    return result(
-        "optimal",
-        "python:exact-facility-location",
-        problem,
-        best_open,
-        best_assignments,
-        best_objective,
-        "exact open-facility subset enumeration",
-    )
 
 
 def choose_scale(values: list[float]) -> Optional[int]:
@@ -265,36 +221,20 @@ def ortools_facility_location(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_facility_location(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
-
-        ortools = ortools_facility_location(problem)
-        if args.solver == "ortools":
-            print(json.dumps(ortools))
-            return 0 if ortools["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
-
-        output = dict(exact)
-        output["solver"] = (
-            "ortools:cp-sat-facility-location+python:exact-facility-location"
-            if ortools.get("status") != "unavailable"
-            else "python:exact-facility-location"
-        )
-        output["ortoolsStatus"] = ortools.get("status")
-        output["ortoolsOpenFacilityIndices"] = ortools.get("openFacilityIndices", [])
-        output["ortoolsOpenFacilities"] = ortools.get("openFacilities", [])
-        output["ortoolsAssignments"] = ortools.get("assignments", [])
-        output["ortoolsObjective"] = ortools.get("objective")
-        output["ortoolsMessage"] = ortools.get("message")
-        output["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
+        output = ortools_facility_location(problem)
         print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
+        return 0 if output["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
     except Exception as exc:
         print(
             json.dumps(

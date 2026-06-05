@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Reference bridge for small 0/1 knapsack instances.
 
-The deterministic oracle uses branch-and-bound with a fractional knapsack upper
-bound. When OR-Tools is installed and the input can be safely integer-scaled,
-the same model is solved with CP-SAT.
+The deterministic branch-and-bound oracle lives in Rust. This Python bridge
+remains as thin adapter glue for explicit OR-Tools CP-SAT checks.
 """
 
 from __future__ import annotations
@@ -11,13 +10,44 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
-EPS = 1e-9
-MAX_EXACT_ITEMS = 64
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "knapsack_reference"
+    explicit = os.environ.get("KNAPSACK_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "knapsack_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_knapsack_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "knapsack.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -57,60 +87,6 @@ def normalize(raw: dict) -> dict:
     return {"capacity": capacity, "items": items}
 
 
-def sorted_items(problem: dict) -> list[dict]:
-    return sorted(
-        problem["items"],
-        key=lambda item: (
-            -float(item["value"]) / float(item["weight"]),
-            -float(item["value"]),
-            float(item["weight"]),
-            int(item["index"]),
-        ),
-    )
-
-
-def fractional_upper_bound(
-    capacity: float,
-    order: list[dict],
-    pos: int,
-    current_weight: float,
-    current_value: float,
-) -> float:
-    if current_weight > capacity + EPS:
-        return -math.inf
-    bound = current_value
-    remaining = capacity - current_weight
-    for item in order[pos:]:
-        weight = float(item["weight"])
-        value = float(item["value"])
-        if weight <= remaining + EPS:
-            bound += value
-            remaining -= weight
-        elif remaining > EPS:
-            bound += value * (remaining / weight)
-            break
-        else:
-            break
-    return bound
-
-
-def candidate_better(
-    value: float,
-    weight: float,
-    indices: list[int],
-    best_value: float,
-    best_weight: float,
-    best_indices: list[int],
-) -> bool:
-    if value > best_value + EPS:
-        return True
-    if abs(value - best_value) <= EPS and weight < best_weight - EPS:
-        return True
-    if abs(value - best_value) <= EPS and abs(weight - best_weight) <= EPS:
-        return sorted(indices) < sorted(best_indices)
-    return False
-
-
 def solution(
     status: str,
     solver: str,
@@ -135,74 +111,6 @@ def solution(
         "upperBound": upper_bound,
         "message": message,
     }
-
-
-def greedy_density(problem: dict) -> dict:
-    selected = []
-    total_weight = 0.0
-    for item in sorted_items(problem):
-        if total_weight + item["weight"] <= problem["capacity"] + EPS:
-            selected.append(int(item["index"]))
-            total_weight += float(item["weight"])
-    return solution(
-        "feasible",
-        "python:greedy-density-knapsack",
-        problem,
-        selected,
-        None,
-        "greedy value-density heuristic",
-    )
-
-
-def exact_knapsack(problem: dict) -> dict:
-    items = problem["items"]
-    if len(items) > MAX_EXACT_ITEMS:
-        return solution(
-            "unsupported",
-            "python:exact-knapsack",
-            problem,
-            [],
-            None,
-            f"exact knapsack only practical for <= {MAX_EXACT_ITEMS} items, got {len(items)}",
-        )
-
-    order = sorted_items(problem)
-    root_bound = fractional_upper_bound(problem["capacity"], order, 0, 0.0, 0.0)
-    incumbent = greedy_density(problem)
-    best_indices = list(incumbent["selectedItemIndices"])
-    best_weight = float(incumbent["totalWeight"])
-    best_value = float(incumbent["totalValue"])
-    current: list[int] = []
-
-    def search(pos: int, weight: float, value: float) -> None:
-        nonlocal best_indices, best_weight, best_value
-        if weight > problem["capacity"] + EPS:
-            return
-        if pos == len(order):
-            if candidate_better(value, weight, current, best_value, best_weight, best_indices):
-                best_indices = list(current)
-                best_weight = weight
-                best_value = value
-            return
-        bound = fractional_upper_bound(problem["capacity"], order, pos, weight, value)
-        if bound + EPS < best_value:
-            return
-
-        item = order[pos]
-        current.append(int(item["index"]))
-        search(pos + 1, weight + float(item["weight"]), value + float(item["value"]))
-        current.pop()
-        search(pos + 1, weight, value)
-
-    search(0, 0.0, 0.0)
-    return solution(
-        "optimal",
-        "python:exact-knapsack",
-        problem,
-        best_indices,
-        root_bound,
-        "exact branch-and-bound with fractional-relaxation bound",
-    )
 
 
 def choose_scale(values: list[float]) -> Optional[int]:
@@ -270,37 +178,20 @@ def ortools_knapsack(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-branch-and-bound", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-branch-and-bound", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_knapsack(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "feasible", "unsupported") else 1
-
-        ortools = ortools_knapsack(problem)
-        if args.solver == "ortools":
-            print(json.dumps(ortools))
-            return 0 if ortools["status"] in ("optimal", "feasible", "unavailable", "unsupported") else 1
-
-        result = dict(exact)
-        result["solver"] = (
-            "ortools:cp-sat-knapsack+python:exact-knapsack"
-            if ortools.get("status") != "unavailable"
-            else "python:exact-knapsack"
-        )
-        result["ortoolsStatus"] = ortools.get("status")
-        result["ortoolsSelectedItemIndices"] = ortools.get("selectedItemIndices", [])
-        result["ortoolsSelectedItemIds"] = ortools.get("selectedItemIds", [])
-        result["ortoolsTotalWeight"] = ortools.get("totalWeight")
-        result["ortoolsTotalValue"] = ortools.get("totalValue")
-        result["ortoolsObjective"] = ortools.get("objective")
-        result["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
-        result["ortoolsMessage"] = ortools.get("message")
-        print(json.dumps(result))
-        return 0 if result["status"] in ("optimal", "feasible", "unsupported") else 1
+        output = ortools_knapsack(problem)
+        print(json.dumps(output))
+        return 0 if output["status"] in ("optimal", "feasible", "unavailable", "unsupported") else 1
     except Exception as exc:
         print(
             json.dumps(

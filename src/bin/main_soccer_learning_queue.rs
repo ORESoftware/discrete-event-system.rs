@@ -20,9 +20,11 @@ use des_engine::des::general::soccer::{
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
-    evolve_soccer_tactical_learning_weights, run_soccer_learning_queue_with_events,
-    soccer_self_play_artifact_from_queue_report, SoccerEvolutionOptions,
-    SoccerLearningCompletedGame, SoccerLearningQueueEvent, SoccerLearningQueueRunnerConfig,
+    evolve_soccer_tactical_learning_weights, evolve_soccer_team_policies,
+    run_soccer_learning_queue_with_events, soccer_policy_version_insert_status_after_active_head,
+    soccer_postgres_policy_refresh_decision, soccer_self_play_artifact_from_queue_report,
+    SoccerEvolutionOptions, SoccerLearningCompletedGame, SoccerLearningQueueEvent,
+    SoccerLearningQueueRunnerConfig, SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -42,6 +44,12 @@ const DEFAULT_SOCCER_QUEUE_EVOLUTION_ELITE_GAMES: usize = 4;
 #[derive(Clone, Debug)]
 struct TacticalEvolutionSample {
     summary: SoccerTacticalLearningSummary,
+    fitness: f64,
+}
+
+#[derive(Clone, Debug)]
+struct PolicyEvolutionSample {
+    policies: SoccerTeamQPolicies,
     fitness: f64,
 }
 
@@ -518,6 +526,41 @@ fn flush_postgres_completed_runs(
     }
     let policy_versions_written = pending_policy_versions.len();
     for policy_version in pending_policy_versions.iter() {
+        let latest_active_metadata = if policy_version.status == SOCCER_POLICY_STATUS_ACTIVE {
+            store.load_latest_active_policy_metadata(experiment_id)?
+        } else {
+            None
+        };
+        let insert_status = soccer_policy_version_insert_status_after_active_head(
+            policy_version.status,
+            policy_version.parent_policy_version_id.as_deref(),
+            policy_version.generation,
+            latest_active_metadata
+                .as_ref()
+                .map(|metadata| metadata.id.as_str()),
+            latest_active_metadata
+                .as_ref()
+                .map(|metadata| metadata.generation),
+        );
+        if insert_status != policy_version.status {
+            println!(
+                "postgres_policy_version_marked_stale policy_version={} parent_policy_version={} generation={} latest_active={} latest_generation={}",
+                policy_version.id,
+                policy_version
+                    .parent_policy_version_id
+                    .as_deref()
+                    .unwrap_or("none"),
+                policy_version.generation,
+                latest_active_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.id.as_str())
+                    .unwrap_or("none"),
+                latest_active_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.generation.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            );
+        }
         store.insert_policy_version_with_id_and_neural_network(
             &policy_version.id,
             experiment_id,
@@ -525,7 +568,7 @@ fn flush_postgres_completed_runs(
             policy_version.generation,
             &policy_version.version_label,
             policy_version.source_kind,
-            policy_version.status,
+            insert_status,
             &policy_version.config,
             policy_version.home_options.clone(),
             policy_version.away_options.clone(),
@@ -1063,6 +1106,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_base_policy_version_id = None::<String>;
     let mut pg_last_policy_version_id = None::<String>;
     let mut pg_generation = 0i32;
+    let mut pg_base_policy_version_updated_at_micros = 0i64;
     let mut pg_completed_games_seen = 0usize;
     let mut pg_policy_version_buffer = Vec::<PendingPostgresPolicyVersion>::new();
     let mut pg_completed_buffer = Vec::<PendingPostgresCompletedRun>::new();
@@ -1105,6 +1149,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 pg_base_policy_version_id = Some(version.id.clone());
                 pg_last_policy_version_id = Some(version.id);
                 pg_generation = version.generation;
+                pg_base_policy_version_updated_at_micros = version.updated_at_micros;
             }
         }
         pg_experiment_id = Some(experiment_id);
@@ -1163,6 +1208,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let tactical_evolution_window_games = evolution_interval_games.max(evolution_elite_games);
     let mut tactical_evolution_samples =
         VecDeque::<TacticalEvolutionSample>::with_capacity(tactical_evolution_window_games);
+    let mut policy_evolution_samples =
+        VecDeque::<PolicyEvolutionSample>::with_capacity(tactical_evolution_window_games);
     let report = run_soccer_learning_queue_with_events(
         SoccerLearningQueueRunnerConfig {
             games,
@@ -1202,22 +1249,25 @@ fn run() -> Result<(), Box<dyn Error>> {
                             if let Some(metadata) =
                                 store.load_latest_active_policy_metadata(experiment_id)?
                             {
-                                let same_policy_version = pg_base_policy_version_id.as_deref()
-                                    == Some(metadata.id.as_str());
-                                let should_refresh = pg_base_policy_version_id.is_none()
-                                    || metadata.generation > pg_generation
-                                    || (metadata.generation == pg_generation
-                                        && !same_policy_version)
-                                    || (same_policy_version
-                                        && neural_network.is_none()
-                                        && metadata.neural_network.is_some());
-                                let should_apply_postgres_tactical =
-                                    !local_tactical_evolved_since_pg_refresh
-                                        || pg_base_policy_version_id.is_none()
-                                        || metadata.generation > pg_generation
-                                        || (metadata.generation == pg_generation
-                                            && !same_policy_version);
-                                if should_apply_postgres_tactical {
+                                let refresh_decision =
+                                    soccer_postgres_policy_refresh_decision(
+                                        SoccerPostgresPolicyRefreshCheck {
+                                            current_policy_version_id: pg_base_policy_version_id
+                                                .as_deref(),
+                                            current_generation: pg_generation,
+                                            current_updated_at_micros:
+                                                pg_base_policy_version_updated_at_micros,
+                                            current_neural_network_present: neural_network.is_some(),
+                                            latest_policy_version_id: &metadata.id,
+                                            latest_generation: metadata.generation,
+                                            latest_updated_at_micros: metadata.updated_at_micros,
+                                            latest_neural_network_present: metadata
+                                                .neural_network
+                                                .is_some(),
+                                            local_tactical_evolved_since_pg_refresh,
+                                        },
+                                    );
+                                if refresh_decision.apply_tactical_learning {
                                     if maybe_apply_postgres_tactical_learning(
                                         "postgres_refresh_tactical_learning_for_queue",
                                         next_episode + 1,
@@ -1231,30 +1281,32 @@ fn run() -> Result<(), Box<dyn Error>> {
                                     }
                                     active_config = match_config.clone();
                                 }
-                                if should_refresh
-                                    && pg_policy_version_buffer.is_empty()
-                                    && pending_async_pg_batches == 0
-                                {
+                                if refresh_decision.refresh_policy {
                                     if let Some(version) = store.load_latest_active_policy(
                                         experiment_id,
                                         options.clone(),
                                         options.clone(),
                                     )? {
                                         println!(
-                                            "postgres_refresh_policy_for_queue next_episode={} policy_version={} previous_policy_version={} generation={} neural_network={}",
+                                            "postgres_refresh_policy_for_queue next_episode={} policy_version={} previous_policy_version={} generation={} neural_network={} pending_policy_versions={} pending_async_batches={}",
                                             next_episode + 1,
                                             version.id,
                                             pg_base_policy_version_id
                                                 .as_deref()
                                                 .unwrap_or("none"),
                                             version.generation,
-                                            version.neural_network.is_some()
+                                            version.neural_network.is_some(),
+                                            pg_policy_version_buffer.len(),
+                                            pending_async_pg_batches
                                         );
                                         *starting_policies = version.policies;
                                         *neural_network = version.neural_network;
                                         pg_base_policy_version_id = Some(version.id.clone());
                                         pg_last_policy_version_id = Some(version.id);
                                         pg_generation = version.generation;
+                                        pg_base_policy_version_updated_at_micros =
+                                            version.updated_at_micros;
+                                        local_tactical_evolved_since_pg_refresh = false;
                                     }
                                 }
                             }
@@ -1274,17 +1326,80 @@ fn run() -> Result<(), Box<dyn Error>> {
                     merged_policies,
                 } => {
                     queue_completed_games_seen = queue_completed_games_seen.saturating_add(1);
+                    let game_fitness = game.score.match_fitness;
                     tactical_evolution_samples.push_back(TacticalEvolutionSample {
                         summary: game.tactical_summary.clone(),
-                        fitness: game.score.match_fitness,
+                        fitness: game_fitness,
+                    });
+                    policy_evolution_samples.push_back(PolicyEvolutionSample {
+                        policies: game.policies.clone(),
+                        fitness: game_fitness,
                     });
                     while tactical_evolution_samples.len() > tactical_evolution_window_games {
                         tactical_evolution_samples.pop_front();
+                    }
+                    while policy_evolution_samples.len() > tactical_evolution_window_games {
+                        policy_evolution_samples.pop_front();
                     }
                     let should_evolve_tactical = evolution_enabled
                         && (evolution_interval_games <= 1
                             || queue_completed_games_seen >= games
                             || queue_completed_games_seen % evolution_interval_games == 0);
+                    let mut policy_evolved_fitness = None::<f64>;
+                    if should_evolve_tactical && !policy_evolution_samples.is_empty() {
+                        let mut ranked_policy_samples = policy_evolution_samples
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, sample)| sample.fitness.is_finite())
+                            .map(|(sample_index, sample)| (sample_index, sample.fitness))
+                            .collect::<Vec<_>>();
+                        ranked_policy_samples.sort_by(|left, right| {
+                            right
+                                .1
+                                .partial_cmp(&left.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        if !ranked_policy_samples.is_empty() {
+                            let elite_count = evolution_elite_games
+                                .min(ranked_policy_samples.len())
+                                .max(1);
+                            let best_fitness = ranked_policy_samples
+                                .first()
+                                .map(|(_, fitness)| *fitness)
+                                .unwrap_or(0.0);
+                            let mut queue_policy_evolution_options = evolution_options;
+                            queue_policy_evolution_options.seed = queue_policy_evolution_options
+                                .seed
+                                .wrapping_add(queue_completed_games_seen as u64)
+                                .wrapping_add((game.episode as u64) << 32)
+                                .wrapping_add(0x9e37_79b9_7f4a_7c15);
+                            let evolved_policies = {
+                                let mut parents = Vec::with_capacity(elite_count + 1);
+                                parents.push((&*merged_policies, best_fitness));
+                                for (sample_index, fitness) in
+                                    ranked_policy_samples.iter().take(elite_count)
+                                {
+                                    parents
+                                        .push((&policy_evolution_samples[*sample_index].policies, *fitness));
+                                }
+                                evolve_soccer_team_policies(&parents, queue_policy_evolution_options)
+                                    .map_err(|err| err.to_string())?
+                            };
+                            *merged_policies = evolved_policies;
+                            policy_evolved_fitness = Some(best_fitness);
+                            println!(
+                                "queue_policy_evolved completed_games={} elite_games={} best_fitness={:.4} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4}",
+                                queue_completed_games_seen,
+                                elite_count,
+                                best_fitness,
+                                queue_policy_evolution_options.mutation_rate,
+                                queue_policy_evolution_options.mutation_scale,
+                                queue_policy_evolution_options.crossover_rate,
+                                queue_policy_evolution_options.exploration_rate,
+                                queue_policy_evolution_options.exploration_scale
+                            );
+                        }
+                    }
                     if should_evolve_tactical && !tactical_evolution_samples.is_empty() {
                         let mut ranked_samples = tactical_evolution_samples
                             .iter()
@@ -1346,7 +1461,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                     };
                     pg_completed_games_seen = pg_completed_games_seen.saturating_add(1);
                     let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
-                    let should_write_policy_version = pg_policy_version_interval_games <= 1
+                    let should_write_policy_version = policy_evolved_fitness.is_some()
+                        || pg_policy_version_interval_games <= 1
                         || pg_completed_games_seen >= games
                         || pg_completed_games_seen % pg_policy_version_interval_games == 0;
                     let output_policy_version_id = if should_write_policy_version {
@@ -1358,18 +1474,23 @@ fn run() -> Result<(), Box<dyn Error>> {
                             parent_policy_version_id: pg_batch_base_policy_version_id.clone(),
                             generation: next_generation,
                             version_label,
-                            source_kind: "merge",
+                            source_kind: if policy_evolved_fitness.is_some() {
+                                "mutation"
+                            } else {
+                                "merge"
+                            },
                             status: "active",
                             config: active_config.clone(),
                             home_options: options.clone(),
                             away_options: options.clone(),
-                            policies: merged_policies.clone(),
-                            fitness: game.score.match_fitness,
+                            policies: (*merged_policies).clone(),
+                            fitness: policy_evolved_fitness.unwrap_or(game.score.match_fitness),
                             neural_network: game.neural_network.clone(),
                         });
                         pg_base_policy_version_id = Some(output_policy_version_id.clone());
                         pg_last_policy_version_id = Some(output_policy_version_id.clone());
                         pg_generation = next_generation;
+                        pg_base_policy_version_updated_at_micros = 0;
                         Some(output_policy_version_id)
                     } else {
                         pg_last_policy_version_id.clone()

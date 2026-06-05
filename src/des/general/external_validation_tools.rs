@@ -14773,6 +14773,32 @@ fn proof_validation_is_frat_tool(tool: &str) -> bool {
     matches!(tool, "frat" | "frat-rs" | "frat-trim")
 }
 
+fn proof_validation_artifact_content<'a>(payload: &'a Value, names: &[&str]) -> Option<&'a str> {
+    let artifacts = payload.get("artifacts")?.as_array()?;
+    artifacts.iter().find_map(|artifact| {
+        let artifact = artifact.as_object()?;
+        let name = artifact.get("name")?.as_str()?;
+        if names.iter().any(|wanted| name.eq_ignore_ascii_case(wanted)) {
+            artifact.get("content")?.as_str()
+        } else {
+            None
+        }
+    })
+}
+
+fn proof_validation_payload_text<'a>(
+    payload: &'a Value,
+    keys: &[&str],
+    artifact_names: &[&str],
+) -> &'a str {
+    let direct = model_validation_payload_text(payload, keys);
+    if direct.trim().is_empty() {
+        proof_validation_artifact_content(payload, artifact_names).unwrap_or("")
+    } else {
+        direct
+    }
+}
+
 pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str) -> Value {
     let tool = model_validation_normalized_tool(tool);
     let kind = payload
@@ -14786,8 +14812,8 @@ pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str
             "pseudo-boolean-proof-validation" | "opb-proof-validation" | "veripb-validation"
         )
     {
-        let opb = model_validation_payload_text(payload, &["opb", "model"]);
-        let proof = model_validation_payload_text(payload, &["proof"]);
+        let opb = proof_validation_payload_text(payload, &["opb", "model"], &["opb", "model"]);
+        let proof = proof_validation_payload_text(payload, &["proof"], &["proof", "pbp", "rup"]);
         let validator = format!("builtin:small-opb-proof-for-{tool}");
         if opb.trim().is_empty() || proof.trim().is_empty() {
             return proof_validation_result(
@@ -14842,8 +14868,9 @@ pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str
             )
         }
     } else {
-        let cnf = model_validation_payload_text(payload, &["cnf", "dimacs"]);
-        let proof = model_validation_payload_text(payload, &["proof"]);
+        let cnf = proof_validation_payload_text(payload, &["cnf", "dimacs"], &["cnf", "model"]);
+        let proof =
+            proof_validation_payload_text(payload, &["proof"], &["proof", "drat", "lrat", "frat"]);
         let validator = format!("builtin:small-cnf-proof-for-{tool}");
         if cnf.trim().is_empty() || proof.trim().is_empty() {
             return proof_validation_result(

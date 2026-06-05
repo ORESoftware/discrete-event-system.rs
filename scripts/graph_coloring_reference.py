@@ -1,21 +1,49 @@
 #!/usr/bin/env python3
 """Reference bridge for small graph-coloring instances.
 
-The deterministic oracle is a DSATUR-style chromatic-number search. When
-OR-Tools is installed, the same graph is also sent to CP-SAT with one integer
-color variable per vertex and an objective minimizing max(color) + 1.
+The deterministic DSATUR-style chromatic-number search lives in Rust. This
+Python bridge remains as thin adapter glue for explicit OR-Tools CP-SAT checks.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Optional
 
 
-UNCOLORED = -1
-MAX_EXACT_VERTICES = 40
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "graph_coloring_reference"
+    explicit = os.environ.get("GRAPH_COLORING_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "graph_coloring_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_graph_coloring_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "graph_coloring.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -48,14 +76,6 @@ def normalize(raw: dict) -> dict:
     return {"vertices": vertices, "edges": edges}
 
 
-def adjacency(problem: dict) -> list[list[int]]:
-    adj = [[] for _ in problem["vertices"]]
-    for ai, bi in problem["edges"]:
-        adj[ai].append(bi)
-        adj[bi].append(ai)
-    return [sorted(set(row)) for row in adj]
-
-
 def color_names(count: int) -> list[str]:
     return [f"C{index + 1}" for index in range(count)]
 
@@ -84,77 +104,6 @@ def output(
         "objective": objective,
         "message": message,
     }
-
-
-def greedy_coloring(problem: dict) -> dict:
-    adj = adjacency(problem)
-    order = list(range(len(problem["vertices"])))
-    order.sort(key=lambda vertex: (-len(adj[vertex]), problem["vertices"][vertex]))
-    colors = [UNCOLORED for _ in problem["vertices"]]
-    for vertex in order:
-        unavailable = {colors[neighbor] for neighbor in adj[vertex] if colors[neighbor] != UNCOLORED}
-        color = 0
-        while color in unavailable:
-            color += 1
-        colors[vertex] = color
-    return output("feasible", "python:greedy-graph-coloring", problem, colors, "Welsh-Powell greedy graph coloring")
-
-
-def select_dsatur_vertex(adj: list[list[int]], colors: list[int]) -> Optional[int]:
-    best = None
-    for vertex, color in enumerate(colors):
-        if color != UNCOLORED:
-            continue
-        sat = len({colors[neighbor] for neighbor in adj[vertex] if colors[neighbor] != UNCOLORED})
-        degree = len(adj[vertex])
-        if best is None or sat > best[1] or (sat == best[1] and degree > best[2]):
-            best = (vertex, sat, degree)
-    return None if best is None else best[0]
-
-
-def can_use_color(adj: list[list[int]], colors: list[int], vertex: int, color: int) -> bool:
-    return all(colors[neighbor] != color for neighbor in adj[vertex])
-
-
-def dsatur_color(adj: list[list[int]], max_colors: int, colors: list[int], used_colors: int) -> bool:
-    vertex = select_dsatur_vertex(adj, colors)
-    if vertex is None:
-        return True
-    for color in range(min(used_colors + 1, max_colors)):
-        if not can_use_color(adj, colors, vertex, color):
-            continue
-        colors[vertex] = color
-        if dsatur_color(adj, max_colors, colors, max(used_colors, color + 1)):
-            return True
-        colors[vertex] = UNCOLORED
-    return False
-
-
-def exact_graph_coloring(problem: dict) -> dict:
-    n = len(problem["vertices"])
-    if n > MAX_EXACT_VERTICES:
-        return output(
-            "unsupported",
-            "python:exact-graph-coloring",
-            problem,
-            None,
-            f"exact graph-coloring only practical for <= {MAX_EXACT_VERTICES} vertices, got {n}",
-        )
-    adj = adjacency(problem)
-    greedy = greedy_coloring(problem)
-    upper = int(greedy["usedColorCount"] or max(1, n))
-    lower = 1 if not problem["edges"] else 2
-    for k in range(lower, upper + 1):
-        colors = [UNCOLORED for _ in problem["vertices"]]
-        if dsatur_color(adj, k, colors, 0):
-            return output(
-                "optimal",
-                "python:exact-graph-coloring",
-                problem,
-                colors,
-                "exact DSATUR-style chromatic search",
-            )
-    return output("infeasible", "python:exact-graph-coloring", problem, None, "no coloring found")
 
 
 def ortools_graph_coloring(problem: dict) -> dict:
@@ -199,36 +148,20 @@ def ortools_graph_coloring(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-dsatur", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-dsatur", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_graph_coloring(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
-
-        ortools = ortools_graph_coloring(problem)
-        if args.solver == "ortools":
-            print(json.dumps(ortools))
-            return 0 if ortools["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
-
-        result = dict(exact)
-        result["solver"] = (
-            "ortools:cp-sat-graph-coloring+python:exact-graph-coloring"
-            if ortools.get("status") != "unavailable"
-            else "python:exact-graph-coloring"
-        )
-        result["ortoolsStatus"] = ortools.get("status")
-        result["ortoolsColorIndices"] = ortools.get("colorIndices", [])
-        result["ortoolsColorNames"] = ortools.get("colorNames", [])
-        result["ortoolsUsedColorCount"] = ortools.get("usedColorCount")
-        result["ortoolsObjective"] = ortools.get("objective")
-        result["ortoolsMessage"] = ortools.get("message")
-        result["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
-        print(json.dumps(result))
-        return 0 if result["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
+        output = ortools_graph_coloring(problem)
+        print(json.dumps(output))
+        return 0 if output["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
     except Exception as exc:
         print(
             json.dumps(

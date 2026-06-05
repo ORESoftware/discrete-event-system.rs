@@ -2,23 +2,19 @@
 """External IP/MIP reference solver for small Rust validation cases.
 
 The preferred external engines are open-source packages when present:
-OR-Tools CP-SAT or scipy.optimize.milp. The dependency-free fallback is exact
-bounded enumeration of integer variables, solving any remaining continuous
-subproblem with the vertex-enumeration LP reference.
+OR-Tools CP-SAT or scipy.optimize.milp. Built-in bounded enumeration and any
+remaining continuous subproblems are delegated to the Rust reference binary.
 """
 
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import math
 import os
+import subprocess
 import sys
 from typing import List, Optional, Sequence, Tuple
-
-from lp_solve import dot, vertex_enumeration
-
 
 def payload(status: str, solver: str, x=None, objective=None, message="", enumerated=0, **extra) -> dict:
     result = {
@@ -33,9 +29,63 @@ def payload(status: str, solver: str, x=None, objective=None, message="", enumer
     return {"result": result}
 
 
+def dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
 def load_problem(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def rust_reference_command() -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "ip_mip_reference"
+    explicit = os.environ.get("IP_MIP_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit]
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def rust_bounded_reference(
+    p: dict,
+    solver: str,
+    max_enumerations: int,
+    pool_size: int | None = None,
+) -> dict:
+    command = rust_reference_command() + [
+        "--solver",
+        solver,
+        "--max-enumerations",
+        str(max_enumerations),
+    ]
+    if pool_size is not None:
+        command.extend(["--pool-size", str(pool_size)])
+    cwd = None
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.dirname(script_dir)
+    completed = subprocess.run(
+        command,
+        input=json.dumps(p, allow_nan=True),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        check=False,
+    )
+    try:
+        result = json.loads(completed.stdout)
+    except Exception as exc:
+        return payload(
+            "unavailable",
+            "rust:bounded-enumeration",
+            message=f"failed to parse Rust IP/MIP reference output: {exc}; stderr={completed.stderr.strip()}",
+        )
+    if completed.returncode not in (0, 2) and not result.get("message"):
+        result["message"] = completed.stderr.strip()
+    return {"result": result}
 
 
 def bounds(p: dict) -> Tuple[List[float], List[Optional[float]]]:
@@ -49,10 +99,6 @@ def bounds(p: dict) -> Tuple[List[float], List[Optional[float]]]:
 
 def objective(p: dict, x: Sequence[float]) -> float:
     return dot([float(v) for v in p["c"]], x)
-
-
-def objective_from_coefficients(c: Sequence[float], x: Sequence[float]) -> float:
-    return dot([float(v) for v in c], x)
 
 
 def max_lhs_over_bounds(p: dict, row: Sequence[float], rhs: float, name: str) -> float:
@@ -1383,214 +1429,12 @@ def expand_semi_variables(p: dict) -> dict:
     return expanded
 
 
-def feasible(p: dict, x: Sequence[float], tol: float = 1e-7) -> bool:
-    lbs, ubs = bounds(p)
-    for j, v in enumerate(x):
-        if v < lbs[j] - tol:
-            return False
-        if ubs[j] is not None and v > ubs[j] + tol:
-            return False
-        if p["integer_vars"][j] and abs(v - round(v)) > tol:
-            return False
-    for row, rhs in zip(p.get("a", []), p.get("b", [])):
-        if dot(row, x) > rhs + tol:
-            return False
-    return True
-
-
-def default_continuous_point(p: dict, fixed: dict[int, float]) -> Optional[List[float]]:
-    lbs, ubs = bounds(p)
-    x = [0.0] * len(p["c"])
-    for j, value in fixed.items():
-        x[j] = value
-    for j in range(len(x)):
-        if j in fixed:
-            continue
-        value = 0.0
-        if value < lbs[j]:
-            value = lbs[j]
-        if ubs[j] is not None and value > float(ubs[j]):
-            value = float(ubs[j])
-        x[j] = value
-    return x if feasible(p, x) else None
-
-
-def continuous_remainder_unbounded(p: dict, fixed: dict[int, float]) -> bool:
-    n = len(p["c"])
-    _, ubs = bounds(p)
-    objective_direction = [float(v) for v in p["c"]]
-    if p.get("sense", "max") != "max":
-        objective_direction = [-v for v in objective_direction]
-    movable = [
-        j
-        for j in range(n)
-        if j not in fixed and ubs[j] is None and objective_direction[j] > 1e-9
-    ]
-    if not movable:
-        return False
-
-    rows = [[float(v) for v in row] for row in p.get("a", [])]
-    if any(all(row[j] <= 1e-12 for row in rows) for j in movable):
-        return True
-
-    direction_lb = []
-    direction_ub = []
-    for j in range(n):
-        direction_lb.append(0.0)
-        direction_ub.append(0.0 if j in fixed or ubs[j] is not None else 1.0)
-
-    try:
-        import numpy as np  # type: ignore
-        from scipy.optimize import linprog  # type: ignore
-
-        result = linprog(
-            [-v for v in objective_direction],
-            A_ub=np.array(rows, dtype=float) if rows else None,
-            b_ub=np.zeros(len(rows), dtype=float) if rows else None,
-            bounds=list(zip(direction_lb, direction_ub)),
-            method="highs",
-        )
-        if result.success and result.fun is not None:
-            return -float(result.fun) > 1e-9
-        return False
-    except Exception:
-        pass
-
-    if n > 8:
-        return False
-    direction_lp = {
-        "sense": "max",
-        "c": objective_direction,
-        "A_ub": rows,
-        "b_ub": [0.0 for _ in rows],
-        "lb": direction_lb,
-        "ub": direction_ub,
-    }
-    result = vertex_enumeration(direction_lp)
-    return result["status"] == "optimal" and float(result.get("objective") or 0.0) > 1e-9
-
-
-def solve_continuous_remainder(p: dict, fixed: dict[int, float]) -> Tuple[str, Optional[List[float]], Optional[float]]:
-    n = len(p["c"])
-    cont = [j for j in range(n) if j not in fixed]
-    x = [0.0] * n
-    for j, v in fixed.items():
-        x[j] = v
-    if not cont:
-        return ("optimal", x, objective(p, x)) if feasible(p, x) else ("infeasible", None, None)
-
-    c_cont = [float(p["c"][j]) for j in cont]
-    a_ub = []
-    b_ub = []
-    for row, rhs in zip(p.get("a", []), p.get("b", [])):
-        adjusted = float(rhs) - sum(float(row[j]) * v for j, v in fixed.items())
-        a_ub.append([float(row[j]) for j in cont])
-        b_ub.append(adjusted)
-    lbs, ubs = bounds(p)
-    lp = {
-        "sense": p.get("sense", "max"),
-        "c": c_cont,
-        "A_ub": a_ub,
-        "b_ub": b_ub,
-        "lb": [lbs[j] for j in cont],
-        "ub": [ubs[j] for j in cont],
-    }
-    result = vertex_enumeration(lp)
-    if result["status"] != "optimal":
-        x = default_continuous_point(p, fixed)
-        if x is not None and continuous_remainder_unbounded(p, fixed):
-            return "unbounded", x, None
-        return "infeasible", None, None
-    for k, j in enumerate(cont):
-        x[j] = float(result["x"][k])
-    if not feasible(p, x):
-        return "infeasible", None, None
-    if continuous_remainder_unbounded(p, fixed):
-        return "unbounded", x, None
-    return "optimal", x, objective(p, x)
-
-
 def brute_force(p: dict, max_enumerations: int) -> dict:
-    int_vars = [j for j, is_int in enumerate(p["integer_vars"]) if is_int]
-    lbs, ubs = bounds(p)
-    domains = []
-    for j in int_vars:
-        if ubs[j] is None:
-            return payload("unavailable", "python:bounded-enumeration", message=f"x{j} has no finite upper bound")
-        lo = math.ceil(lbs[j])
-        hi = math.floor(float(ubs[j]))
-        if hi < lo:
-            return payload("infeasible", "python:bounded-enumeration", enumerated=0)
-        domains.append(range(lo, hi + 1))
-
-    best_x = None
-    best_obj = -math.inf if p.get("sense", "max") == "max" else math.inf
-    enumerated = 0
-    for values in itertools.product(*domains):
-        enumerated += 1
-        if enumerated > max_enumerations:
-            return payload("unavailable", "python:bounded-enumeration", message="enumeration cap reached", enumerated=enumerated)
-        fixed = {j: float(v) for j, v in zip(int_vars, values)}
-        status, x, obj = solve_continuous_remainder(p, fixed)
-        if status == "unbounded":
-            return payload("unbounded", "python:bounded-enumeration", enumerated=enumerated)
-        if status != "optimal" or x is None or obj is None:
-            continue
-        if p.get("sense", "max") == "max":
-            better = obj > best_obj + 1e-9
-        else:
-            better = obj < best_obj - 1e-9
-        if best_x is None or better:
-            best_x, best_obj = x, obj
-    if best_x is None:
-        return payload("infeasible", "python:bounded-enumeration", enumerated=enumerated)
-    return payload("optimal", "python:bounded-enumeration", best_x, best_obj, "exact bounded enumeration", enumerated)
+    return rust_bounded_reference(p, "enumeration", max_enumerations)
 
 
 def brute_force_pool(p: dict, pool_size: int, max_enumerations: int) -> dict:
-    int_vars = [j for j, is_int in enumerate(p["integer_vars"]) if is_int]
-    if not int_vars:
-        return payload("unavailable", "python:bounded-enumeration-pool", message="solution pool requires integer variables")
-    lbs, ubs = bounds(p)
-    domains = []
-    for j in int_vars:
-        if ubs[j] is None:
-            return payload("unavailable", "python:bounded-enumeration-pool", message=f"x{j} has no finite upper bound")
-        lo = math.ceil(lbs[j])
-        hi = math.floor(float(ubs[j]))
-        if hi < lo:
-            return payload("infeasible", "python:bounded-enumeration-pool", enumerated=0, solutions=[], exhausted=True)
-        domains.append(range(lo, hi + 1))
-
-    candidates = []
-    enumerated = 0
-    for values in itertools.product(*domains):
-        enumerated += 1
-        if enumerated > max_enumerations:
-            return payload("unavailable", "python:bounded-enumeration-pool", message="enumeration cap reached", enumerated=enumerated)
-        fixed = {j: float(v) for j, v in zip(int_vars, values)}
-        status, x, obj = solve_continuous_remainder(p, fixed)
-        if status == "unbounded":
-            return payload("unbounded", "python:bounded-enumeration-pool", enumerated=enumerated, solutions=[], exhausted=False)
-        if status == "optimal" and x is not None and obj is not None:
-            candidates.append((x, obj))
-    if not candidates:
-        return payload("infeasible", "python:bounded-enumeration-pool", enumerated=enumerated, solutions=[], exhausted=True)
-
-    reverse = p.get("sense", "max") == "max"
-    candidates.sort(key=lambda item: item[1], reverse=reverse)
-    chosen = candidates[:pool_size]
-    solutions = [{"x": x, "objective": obj} for x, obj in chosen]
-    return payload(
-        "optimal",
-        "python:bounded-enumeration-pool",
-        chosen[0][0],
-        chosen[0][1],
-        "exact bounded solution-pool enumeration",
-        enumerated,
-        solutions=solutions,
-        exhausted=len(chosen) == len(candidates),
-    )
+    return rust_bounded_reference(p, "enumeration", max_enumerations, pool_size)
 
 
 def try_ortools_cp_sat(p: dict) -> Optional[dict]:
@@ -1685,7 +1529,14 @@ def expand_source_features(p: dict) -> dict:
     return p
 
 
+def rust_can_parse_source_features(p: dict) -> bool:
+    unsupported_feature_keys = ()
+    return not any(p.get(key) for key in unsupported_feature_keys)
+
+
 def solve_expanded(p: dict, solver: str, max_enumerations: int) -> dict:
+    if solver in ("auto", "brute-force", "enumeration", "rust-enumeration"):
+        return rust_bounded_reference(p, solver, max_enumerations)
     if solver in ("auto", "ortools", "ortools-cp-sat"):
         r = try_ortools_cp_sat(p)
         if r and r["result"]["status"] in ("optimal", "feasible", "infeasible"):
@@ -1698,75 +1549,15 @@ def solve_expanded(p: dict, solver: str, max_enumerations: int) -> dict:
             return r
         if solver in ("scipy", "scipy-milp"):
             return r or payload("unavailable", "scipy:milp", message="scipy is not installed")
-    if solver in ("auto", "brute-force", "enumeration"):
-        return brute_force(p, max_enumerations)
     return payload("unavailable", solver, message=f"unknown or unavailable solver '{solver}'")
 
 
-def solve_multi_objective(p: dict, objectives: list[dict], solver: str, max_enumerations: int) -> dict:
-    if not objectives:
-        return payload("unavailable", "multi-objective", message="multi_objectives must be non-empty")
-    p = dict(p)
-    p.pop("multi_objectives", None)
-    rows = [[float(v) for v in row] for row in p.get("a", [])]
-    rhs_values = [float(v) for v in p.get("b", [])]
-    row_names = list(p.get("con_names") or [f"c{i}" for i in range(len(rows))])
-    p["a"] = rows
-    p["b"] = rhs_values
-    p["con_names"] = row_names
-    stage_results = []
-
-    for idx, objective_spec in enumerate(objectives):
-        coeffs = [float(v) for v in objective_spec["c"]]
-        if len(coeffs) < len(p["c"]):
-            coeffs.extend([0.0] * (len(p["c"]) - len(coeffs)))
-        if len(coeffs) != len(p["c"]):
-            return payload(
-                "unavailable",
-                "multi-objective",
-                message=f"objective {idx} coefficient length does not match variable count",
-            )
-        p["c"] = coeffs
-        p["sense"] = objective_spec.get("sense", "max")
-        result = solve_expanded(p, solver, max_enumerations)
-        stage_results.append(result["result"])
-        if result["result"]["status"] != "optimal":
-            return payload(
-                result["result"]["status"],
-                result["result"]["solver"],
-                x=result["result"].get("x"),
-                objective=result["result"].get("objective"),
-                message=result["result"].get("message", ""),
-                enumerated=result["result"].get("enumerated", 0),
-                objective_values=[],
-                stages=stage_results,
-            )
-        x = result["result"]["x"]
-        optimum = objective_from_coefficients(coeffs, x)
-        name = objective_spec.get("name", f"multi_objective_{idx}")
-        add_compiled_equality(rows, rhs_values, row_names, coeffs, optimum, name)
-
-    final_x = stage_results[-1]["x"]
-    values = [
-        objective_from_coefficients(
-            ([float(v) for v in objective_spec["c"]] + [0.0] * len(p["c"]))[: len(p["c"])],
-            final_x,
-        )
-        for objective_spec in objectives
-    ]
-    return payload(
-        "optimal",
-        "python:lexicographic-multi-objective",
-        final_x,
-        values[-1] if values else None,
-        "sequential lexicographic optimization",
-        sum(int(stage.get("enumerated") or 0) for stage in stage_results),
-        objective_values=values,
-        stages=stage_results,
-    )
-
-
 def solve(p: dict, solver: str, max_enumerations: int, pool_size: int | None = None) -> dict:
+    if (
+        solver in ("auto", "brute-force", "enumeration", "rust-enumeration")
+        and rust_can_parse_source_features(p)
+    ):
+        return rust_bounded_reference(p, solver, max_enumerations, pool_size)
     try:
         p = expand_source_features(p)
     except Exception as exc:
@@ -1774,10 +1565,17 @@ def solve(p: dict, solver: str, max_enumerations: int, pool_size: int | None = N
     objectives = p.get("multi_objectives") or []
     if objectives:
         if pool_size is not None:
-            return payload("unavailable", "python:bounded-enumeration-pool", message="solution pools for multi-objective MIPs are not supported")
-        return solve_multi_objective(p, objectives, solver, max_enumerations)
+            return payload("unavailable", "rust:bounded-enumeration-pool", message="solution pools for multi-objective MIPs are not supported")
+        rust_solver = (
+            solver
+            if solver in ("auto", "brute-force", "enumeration", "rust-enumeration")
+            else "rust-enumeration"
+        )
+        return rust_bounded_reference(p, rust_solver, max_enumerations)
     if pool_size is not None:
-        return brute_force_pool(p, pool_size, max_enumerations)
+        if solver in ("auto", "brute-force", "enumeration", "rust-enumeration"):
+            return rust_bounded_reference(p, solver, max_enumerations, pool_size)
+        return payload("unavailable", solver, message=f"solution pools are unavailable for solver '{solver}'")
     return solve_expanded(p, solver, max_enumerations)
 
 

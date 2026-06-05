@@ -9,7 +9,6 @@ the smoke models used by the Rust cross-check suite.
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import os
 import re
@@ -37,6 +36,65 @@ def result(
         "stdout": stdout,
         "stderr": stderr,
     }
+
+
+def rust_reference_command() -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "model_validation_reference"
+    explicit = os.environ.get("MODEL_VALIDATION_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit]
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary]
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "model_validation_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_validation_tools.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def rust_builtin_reference(payload: dict[str, Any], tool: str | None = None) -> dict[str, Any]:
+    command = rust_reference_command()
+    args = []
+    if tool:
+        args.extend(["--tool", tool])
+    cwd = None
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.dirname(script_dir)
+    completed = subprocess.run(
+        [*command, *args],
+        input=json.dumps(payload),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        check=False,
+    )
+    try:
+        parsed = json.loads(completed.stdout)
+    except Exception as exc:
+        return result(
+            "failed",
+            "failure",
+            "rust:model-validation-reference",
+            f"failed to parse Rust model validation output: {exc}; stderr={completed.stderr.strip()}",
+        )
+    if completed.returncode != 0 and not parsed.get("message"):
+        parsed["message"] = completed.stderr.strip()
+    return parsed
 
 
 def normalize_tool_id(tool: str | None) -> str:
@@ -140,53 +198,8 @@ def run_command(command: str, args: list[str], stdin_text: str = "") -> tuple[bo
     return completed.returncode == 0, completed.stdout, completed.stderr
 
 
-def parse_dimacs_cnf(text: str) -> tuple[int, list[list[int]]]:
-    variables = 0
-    clauses: list[list[int]] = []
-    pending: list[int] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("c"):
-            continue
-        if line.startswith("p"):
-            parts = line.split()
-            if len(parts) >= 4:
-                variables = int(parts[2])
-            continue
-        for token in line.split():
-            literal = int(token)
-            if literal == 0:
-                clauses.append(pending)
-                pending = []
-            else:
-                variables = max(variables, abs(literal))
-                pending.append(literal)
-    if pending:
-        clauses.append(pending)
-    return variables, clauses
-
-
 def brute_force_dimacs(text: str) -> dict[str, Any]:
-    variables, clauses = parse_dimacs_cnf(text)
-    if variables > 24:
-        return result(
-            "unavailable",
-            "unknown",
-            "builtin:dimacs-small-cnf",
-            f"builtin CNF fallback is capped at 24 variables, got {variables}",
-        )
-    for bits in itertools.product([False, True], repeat=variables):
-        assignment = {idx + 1: value for idx, value in enumerate(bits)}
-        if all(any(assignment[abs(lit)] == (lit > 0) for lit in clause) for clause in clauses):
-            model = [idx if value else -idx for idx, value in assignment.items()]
-            return result(
-                "ok",
-                "sat",
-                "builtin:dimacs-small-cnf",
-                "satisfying assignment found",
-                "s SATISFIABLE\nv " + " ".join(str(value) for value in model) + " 0\n",
-            )
-    return result("ok", "unsat", "builtin:dimacs-small-cnf", "all assignments exhausted")
+    return rust_builtin_reference({"kind": "dimacs-validation", "dimacs": text})
 
 
 def validate_dimacs(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -229,63 +242,8 @@ def validate_dimacs(payload: dict[str, Any], tool: str) -> dict[str, Any]:
     return brute_force_dimacs(text)
 
 
-def parse_wcnf(text: str) -> tuple[int, int | None, list[tuple[int, list[int]]]]:
-    variables = 0
-    top_weight: int | None = None
-    clauses: list[tuple[int, list[int]]] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("c"):
-            continue
-        if line.startswith("p"):
-            parts = line.split()
-            if len(parts) >= 4 and parts[1].lower() == "wcnf":
-                variables = int(parts[2])
-                if len(parts) >= 5:
-                    top_weight = int(parts[4])
-            continue
-        tokens = [int(token) for token in line.split()]
-        if len(tokens) < 2 or tokens[-1] != 0:
-            raise ValueError("WCNF clauses must be '<weight> <lits...> 0'")
-        weight = tokens[0]
-        clause = tokens[1:-1]
-        variables = max([variables, *[abs(literal) for literal in clause]])
-        clauses.append((weight, clause))
-    return variables, top_weight, clauses
-
-
 def brute_force_wcnf(text: str) -> dict[str, Any]:
-    variables, top_weight, clauses = parse_wcnf(text)
-    if variables > 24:
-        return result(
-            "unavailable",
-            "unknown",
-            "builtin:wcnf-small-maxsat",
-            f"builtin WCNF fallback is capped at 24 variables, got {variables}",
-        )
-    best_cost: int | None = None
-    best_model: list[int] = []
-    for bits in itertools.product([False, True], repeat=variables):
-        assignment = {idx + 1: value for idx, value in enumerate(bits)}
-        hard_failed = False
-        cost = 0
-        for weight, clause in clauses:
-            satisfied = any(assignment[abs(lit)] == (lit > 0) for lit in clause)
-            if satisfied:
-                continue
-            if top_weight is not None and weight >= top_weight:
-                hard_failed = True
-                break
-            cost += weight
-        if hard_failed:
-            continue
-        if best_cost is None or cost < best_cost:
-            best_cost = cost
-            best_model = [idx if value else -idx for idx, value in assignment.items()]
-    if best_cost is None:
-        return result("ok", "unsat", "builtin:wcnf-small-maxsat", "hard clauses are unsatisfiable")
-    stdout = f"o {best_cost}\ns OPTIMUM FOUND\nv {' '.join(str(value) for value in best_model)} 0\n"
-    return result("ok", "optimal", "builtin:wcnf-small-maxsat", f"optimum={best_cost}", stdout)
+    return rust_builtin_reference({"kind": "wcnf-validation", "wcnf": text})
 
 
 def validate_wcnf(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -309,64 +267,8 @@ def validate_wcnf(payload: dict[str, Any], tool: str) -> dict[str, Any]:
     return brute_force_wcnf(text)
 
 
-def parse_opb(text: str) -> tuple[list[str], list[tuple[list[tuple[int, str]], str, int]]]:
-    variables: set[str] = set()
-    constraints: list[tuple[list[tuple[int, str]], str, int]] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("*"):
-            continue
-        if line.lower().startswith(("min:", "max:")):
-            continue
-        match = re.fullmatch(r"(.+?)\s*(>=|<=|=)\s*(-?\d+)\s*;?", line)
-        if not match:
-            raise ValueError(f"unsupported OPB constraint {line!r}")
-        lhs, op, rhs_text = match.groups()
-        tokens = lhs.split()
-        if len(tokens) % 2 != 0:
-            raise ValueError(f"unsupported OPB term list {lhs!r}")
-        terms: list[tuple[int, str]] = []
-        for idx in range(0, len(tokens), 2):
-            coeff = int(tokens[idx])
-            name = tokens[idx + 1]
-            if not re.fullmatch(r"[A-Za-z_]\w*", name):
-                raise ValueError(f"unsupported OPB variable {name!r}")
-            variables.add(name)
-            terms.append((coeff, name))
-        constraints.append((terms, op, int(rhs_text)))
-    if not constraints:
-        raise ValueError("missing OPB constraints")
-    return sorted(variables), constraints
-
-
-def opb_constraint_satisfied(
-    constraint: tuple[list[tuple[int, str]], str, int],
-    assignment: dict[str, bool],
-) -> bool:
-    terms, op, rhs = constraint
-    total = sum(coeff * int(assignment[name]) for coeff, name in terms)
-    if op == ">=":
-        return total >= rhs
-    if op == "<=":
-        return total <= rhs
-    return total == rhs
-
-
 def brute_force_opb(text: str) -> dict[str, Any]:
-    variables, constraints = parse_opb(text)
-    if len(variables) > 24:
-        return result(
-            "unavailable",
-            "unknown",
-            "builtin:opb-small-pb",
-            f"builtin OPB fallback is capped at 24 variables, got {len(variables)}",
-        )
-    for bits in itertools.product([False, True], repeat=len(variables)):
-        assignment = dict(zip(variables, bits))
-        if all(opb_constraint_satisfied(constraint, assignment) for constraint in constraints):
-            model = " ".join(f"{name}={int(assignment[name])}" for name in variables)
-            return result("ok", "sat", "builtin:opb-small-pb", "satisfying assignment found", model)
-    return result("ok", "unsat", "builtin:opb-small-pb", "all assignments exhausted")
+    return rust_builtin_reference({"kind": "opb-validation", "opb": text})
 
 
 def validate_opb(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -390,15 +292,7 @@ def validate_opb(payload: dict[str, Any], tool: str) -> dict[str, Any]:
 
 
 def builtin_smtlib(text: str) -> dict[str, Any]:
-    lowered = re.sub(r"\s+", " ", text.lower())
-    if "(assert false)" in lowered:
-        return result("ok", "unsat", "builtin:smtlib-smoke", "assert false detected")
-    equalities: dict[str, str] = {}
-    for name, value in re.findall(r"\(assert\s+\(=\s+([a-zA-Z_][\w.-]*)\s+(-?\d+)\s*\)\s*\)", text):
-        if name in equalities and equalities[name] != value:
-            return result("ok", "unsat", "builtin:smtlib-smoke", f"conflicting equalities for {name}")
-        equalities[name] = value
-    return result("ok", "sat", "builtin:smtlib-smoke", "no contradiction found")
+    return rust_builtin_reference({"kind": "smtlib-validation", "script": text})
 
 
 def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -460,54 +354,8 @@ def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
     return builtin_smtlib(text)
 
 
-def minizinc_var_domains(model: str) -> dict[str, range]:
-    domains: dict[str, range] = {}
-    for lower, upper, name in re.findall(r"var\s+(-?\d+)\s*\.\.\s*(-?\d+)\s*:\s*([A-Za-z_]\w*)\s*;", model):
-        lo = int(lower)
-        hi = int(upper)
-        if hi - lo > 100:
-            raise ValueError("builtin MiniZinc fallback supports domains of size <= 101")
-        domains[name] = range(lo, hi + 1)
-    return domains
-
-
-def eval_minizinc_constraint(expr: str, assignment: dict[str, int]) -> bool:
-    match = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*(<=|>=|=|==|<|>)\s*(-?\d+)\s*", expr)
-    if not match:
-        raise ValueError(f"unsupported MiniZinc constraint {expr!r}")
-    name, op, value_text = match.groups()
-    actual = assignment[name]
-    expected = int(value_text)
-    if op == "<=":
-        return actual <= expected
-    if op == ">=":
-        return actual >= expected
-    if op in ("=", "=="):
-        return actual == expected
-    if op == "<":
-        return actual < expected
-    return actual > expected
-
-
 def builtin_minizinc(model: str) -> dict[str, Any]:
-    domains = minizinc_var_domains(model)
-    constraints = re.findall(r"constraint\s+([^;]+);", model)
-    if not domains:
-        if "constraint false;" in model:
-            return result("ok", "unsat", "builtin:minizinc-smoke", "constraint false detected")
-        return result("ok", "sat", "builtin:minizinc-smoke", "no finite-domain variables detected")
-    names = list(domains)
-    total = 1
-    for domain in domains.values():
-        total *= len(domain)
-    if total > 250_000:
-        return result("unavailable", "unknown", "builtin:minizinc-smoke", f"search space too large: {total}")
-    for values in itertools.product(*(domains[name] for name in names)):
-        assignment = dict(zip(names, values))
-        if all(eval_minizinc_constraint(expr, assignment) for expr in constraints):
-            stdout = "\n".join(f"{name} = {assignment[name]};" for name in names) + "\n----------\n"
-            return result("ok", "sat", "builtin:minizinc-smoke", "satisfying assignment found", stdout)
-    return result("ok", "unsat", "builtin:minizinc-smoke", "all assignments exhausted")
+    return rust_builtin_reference({"kind": "minizinc-validation", "model": model})
 
 
 def validate_minizinc(payload: dict[str, Any], tool: str) -> dict[str, Any]:

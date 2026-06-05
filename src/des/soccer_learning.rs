@@ -20,6 +20,8 @@ use crate::des::general::soccer::{
 };
 
 pub const SOCCER_LEARNING_FIXED_SCALE: i64 = 1_000_000;
+pub const SOCCER_POLICY_STATUS_ACTIVE: &str = "active";
+pub const SOCCER_POLICY_STATUS_ARCHIVED: &str = "archived";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -164,7 +166,7 @@ pub enum SoccerLearningQueueEvent<'a> {
     },
     CompletedGame {
         game: &'a SoccerLearningCompletedGame,
-        merged_policies: &'a SoccerTeamQPolicies,
+        merged_policies: &'a mut SoccerTeamQPolicies,
     },
 }
 
@@ -191,6 +193,59 @@ impl Default for SoccerEvolutionOptions {
             elite_weight_floor: 0.05,
             seed: 2026,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SoccerPostgresPolicyRefreshCheck<'a> {
+    pub current_policy_version_id: Option<&'a str>,
+    pub current_generation: i32,
+    pub current_updated_at_micros: i64,
+    pub current_neural_network_present: bool,
+    pub latest_policy_version_id: &'a str,
+    pub latest_generation: i32,
+    pub latest_updated_at_micros: i64,
+    pub latest_neural_network_present: bool,
+    pub local_tactical_evolved_since_pg_refresh: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoccerPostgresPolicyRefreshDecision {
+    pub refresh_policy: bool,
+    pub apply_tactical_learning: bool,
+    pub same_policy_version: bool,
+    pub same_policy_newer_revision: bool,
+}
+
+pub fn soccer_postgres_policy_refresh_decision(
+    check: SoccerPostgresPolicyRefreshCheck<'_>,
+) -> SoccerPostgresPolicyRefreshDecision {
+    let same_policy_version =
+        check.current_policy_version_id == Some(check.latest_policy_version_id);
+    let same_policy_newer_revision =
+        same_policy_version && check.latest_updated_at_micros > check.current_updated_at_micros;
+    let newer_generation = check.latest_generation > check.current_generation;
+    let different_head_at_same_generation =
+        check.latest_generation == check.current_generation && !same_policy_version;
+
+    let refresh_policy = check.current_policy_version_id.is_none()
+        || newer_generation
+        || different_head_at_same_generation
+        || same_policy_newer_revision
+        || (same_policy_version
+            && !check.current_neural_network_present
+            && check.latest_neural_network_present);
+    let apply_tactical_learning = check.current_policy_version_id.is_none()
+        || newer_generation
+        || different_head_at_same_generation
+        || same_policy_newer_revision
+        || (same_policy_version && !check.local_tactical_evolved_since_pg_refresh);
+
+    SoccerPostgresPolicyRefreshDecision {
+        refresh_policy,
+        apply_tactical_learning,
+        same_policy_version,
+        same_policy_newer_revision,
     }
 }
 
@@ -241,6 +296,28 @@ pub fn soccer_learning_to_micros(value: f64) -> i64 {
 
 pub fn soccer_learning_from_micros(value: i64) -> f64 {
     value as f64 / SOCCER_LEARNING_FIXED_SCALE as f64
+}
+
+pub fn soccer_policy_version_insert_status_after_active_head(
+    requested_status: &'static str,
+    parent_policy_version_id: Option<&str>,
+    generation: i32,
+    latest_active_policy_version_id: Option<&str>,
+    latest_active_generation: Option<i32>,
+) -> &'static str {
+    if requested_status != SOCCER_POLICY_STATUS_ACTIVE {
+        return requested_status;
+    }
+    let Some(latest_active_policy_version_id) = latest_active_policy_version_id else {
+        return SOCCER_POLICY_STATUS_ACTIVE;
+    };
+    if parent_policy_version_id != Some(latest_active_policy_version_id) {
+        return SOCCER_POLICY_STATUS_ARCHIVED;
+    }
+    if latest_active_generation.is_some_and(|active_generation| active_generation >= generation) {
+        return SOCCER_POLICY_STATUS_ARCHIVED;
+    }
+    SOCCER_POLICY_STATUS_ACTIVE
 }
 
 pub fn soccer_team_label(team: Team) -> &'static str {
@@ -752,18 +829,18 @@ where
 
     while completed_games + failed_games < config.games && first_error.is_none() {
         if active < parallel_games && next_episode < config.games {
-            if let Err(err) = on_event(SoccerLearningQueueEvent::StartingBatch {
-                next_episode,
-                match_config: &mut config.match_config,
-                policies: &mut policies,
-                neural_network: &mut latest_neural_network,
-            }) {
-                first_error = Some(err);
-                break;
-            }
-            let starting_policies = Arc::new(policies.clone());
-            let starting_neural_network = latest_neural_network.clone().map(Arc::new);
             while active < parallel_games && next_episode < config.games {
+                if let Err(err) = on_event(SoccerLearningQueueEvent::StartingBatch {
+                    next_episode,
+                    match_config: &mut config.match_config,
+                    policies: &mut policies,
+                    neural_network: &mut latest_neural_network,
+                }) {
+                    first_error = Some(err);
+                    break;
+                }
+                let starting_policies = Arc::new(policies.clone());
+                let starting_neural_network = latest_neural_network.clone().map(Arc::new);
                 let episode = next_episode;
                 let mut match_config = config.match_config.clone();
                 match_config.seed = config.base_seed;
@@ -819,7 +896,7 @@ where
                 );
                 if let Err(err) = on_event(SoccerLearningQueueEvent::CompletedGame {
                     game: &game,
-                    merged_policies: &policies,
+                    merged_policies: &mut policies,
                 }) {
                     first_error = Some(err);
                     break;
@@ -1496,6 +1573,172 @@ mod tests {
     }
 
     #[test]
+    fn pending_policy_stays_active_only_when_latest_head_matches_parent() {
+        assert_eq!(
+            soccer_policy_version_insert_status_after_active_head(
+                SOCCER_POLICY_STATUS_ACTIVE,
+                Some("parent"),
+                12,
+                Some("parent"),
+                Some(11),
+            ),
+            SOCCER_POLICY_STATUS_ACTIVE
+        );
+        assert_eq!(
+            soccer_policy_version_insert_status_after_active_head(
+                SOCCER_POLICY_STATUS_ACTIVE,
+                Some("parent"),
+                12,
+                Some("newer-head"),
+                Some(12),
+            ),
+            SOCCER_POLICY_STATUS_ARCHIVED
+        );
+        assert_eq!(
+            soccer_policy_version_insert_status_after_active_head(
+                SOCCER_POLICY_STATUS_ACTIVE,
+                Some("parent"),
+                12,
+                Some("parent"),
+                Some(12),
+            ),
+            SOCCER_POLICY_STATUS_ARCHIVED
+        );
+        assert_eq!(
+            soccer_policy_version_insert_status_after_active_head(
+                "archived",
+                Some("parent"),
+                12,
+                Some("newer-head"),
+                Some(14),
+            ),
+            "archived"
+        );
+    }
+
+    #[test]
+    fn postgres_policy_refresh_picks_up_first_or_newer_active_weights() {
+        let first = soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+            current_policy_version_id: None,
+            current_generation: 0,
+            current_updated_at_micros: 0,
+            current_neural_network_present: false,
+            latest_policy_version_id: "v1",
+            latest_generation: 4,
+            latest_updated_at_micros: 100,
+            latest_neural_network_present: true,
+            local_tactical_evolved_since_pg_refresh: false,
+        });
+        assert!(first.refresh_policy);
+        assert!(first.apply_tactical_learning);
+
+        let newer_head =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_neural_network_present: true,
+                latest_policy_version_id: "v2",
+                latest_generation: 5,
+                latest_updated_at_micros: 125,
+                latest_neural_network_present: true,
+                local_tactical_evolved_since_pg_refresh: true,
+            });
+        assert!(newer_head.refresh_policy);
+        assert!(newer_head.apply_tactical_learning);
+        assert!(!newer_head.same_policy_version);
+    }
+
+    #[test]
+    fn postgres_policy_refresh_picks_up_same_head_revision_and_neural_snapshot() {
+        let revised_same_head =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_neural_network_present: true,
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 125,
+                latest_neural_network_present: true,
+                local_tactical_evolved_since_pg_refresh: true,
+            });
+        assert!(revised_same_head.refresh_policy);
+        assert!(revised_same_head.apply_tactical_learning);
+        assert!(revised_same_head.same_policy_newer_revision);
+
+        let neural_arrived =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_neural_network_present: false,
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 100,
+                latest_neural_network_present: true,
+                local_tactical_evolved_since_pg_refresh: true,
+            });
+        assert!(neural_arrived.refresh_policy);
+        assert!(!neural_arrived.apply_tactical_learning);
+    }
+
+    #[test]
+    fn postgres_policy_refresh_preserves_local_tactical_search_without_new_pg_head() {
+        let unchanged = soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+            current_policy_version_id: Some("v1"),
+            current_generation: 4,
+            current_updated_at_micros: 100,
+            current_neural_network_present: true,
+            latest_policy_version_id: "v1",
+            latest_generation: 4,
+            latest_updated_at_micros: 100,
+            latest_neural_network_present: true,
+            local_tactical_evolved_since_pg_refresh: true,
+        });
+        assert!(!unchanged.refresh_policy);
+        assert!(!unchanged.apply_tactical_learning);
+
+        let no_local_search =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                local_tactical_evolved_since_pg_refresh: false,
+                ..SoccerPostgresPolicyRefreshCheck {
+                    current_policy_version_id: Some("v1"),
+                    current_generation: 4,
+                    current_updated_at_micros: 100,
+                    current_neural_network_present: true,
+                    latest_policy_version_id: "v1",
+                    latest_generation: 4,
+                    latest_updated_at_micros: 100,
+                    latest_neural_network_present: true,
+                    local_tactical_evolved_since_pg_refresh: true,
+                }
+            });
+        assert!(!no_local_search.refresh_policy);
+        assert!(no_local_search.apply_tactical_learning);
+    }
+
+    #[test]
+    fn postgres_policy_refresh_does_not_reapply_older_active_tactical_weights() {
+        let pending_local_head =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("pending-v2"),
+                current_generation: 5,
+                current_updated_at_micros: 0,
+                current_neural_network_present: true,
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 200,
+                latest_neural_network_present: true,
+                local_tactical_evolved_since_pg_refresh: false,
+            });
+
+        assert!(!pending_local_head.refresh_policy);
+        assert!(!pending_local_head.apply_tactical_learning);
+        assert!(!pending_local_head.same_policy_version);
+    }
+
+    #[test]
     fn tactical_weight_evolution_pushes_flank_and_contract_search() {
         let base = SoccerTacticalLearningWeights::default();
         let summary = SoccerTacticalLearningSummary {
@@ -1603,6 +1846,138 @@ mod tests {
         assert!(saw_starting_batch);
         assert_eq!(report.completed_games, 1);
         assert_eq!(report.failed_games, 0);
+    }
+
+    #[test]
+    fn queue_starting_batch_fires_before_each_enqueued_game() {
+        let options = SoccerQPolicyOptions::default();
+        let mut start_episodes = Vec::new();
+        let report = run_soccer_learning_queue_with_events(
+            SoccerLearningQueueRunnerConfig {
+                games: 3,
+                parallel_games: 3,
+                base_seed: 2010,
+                match_config: MatchConfig {
+                    duration_seconds: 0.2,
+                    learning_logging_enabled: false,
+                    max_human_players: 0,
+                    ..Default::default()
+                },
+                initial_neural_network: None,
+                neural_drain_timeout: Duration::from_millis(0),
+                options: options.clone(),
+                prune_action_entries_per_team: 0,
+                prune_target_entries_per_team: 0,
+                min_policy_visits: 0,
+            },
+            SoccerTeamQPolicies::new(options),
+            |event| {
+                if let SoccerLearningQueueEvent::StartingBatch { next_episode, .. } = event {
+                    start_episodes.push(next_episode);
+                }
+                Ok(())
+            },
+        )
+        .expect("queue run");
+
+        assert_eq!(report.completed_games, 3);
+        assert_eq!(report.failed_games, 0);
+        assert_eq!(start_episodes, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn queue_starting_batch_replaces_policy_for_next_game() {
+        let options = SoccerQPolicyOptions::default();
+        let refreshed = policy_with_action(12.0, 7);
+        let mut refreshed_episodes = Vec::new();
+        let report = run_soccer_learning_queue_with_events(
+            SoccerLearningQueueRunnerConfig {
+                games: 1,
+                parallel_games: 1,
+                base_seed: 2031,
+                match_config: MatchConfig {
+                    duration_seconds: 0.0,
+                    half_duration_seconds: 0.0,
+                    learning_logging_enabled: false,
+                    max_human_players: 0,
+                    ..Default::default()
+                },
+                initial_neural_network: None,
+                neural_drain_timeout: Duration::from_millis(0),
+                options: options.clone(),
+                prune_action_entries_per_team: 0,
+                prune_target_entries_per_team: 0,
+                min_policy_visits: 0,
+            },
+            policy_with_action(-2.0, 1),
+            |event| {
+                if let SoccerLearningQueueEvent::StartingBatch {
+                    next_episode,
+                    policies,
+                    ..
+                } = event
+                {
+                    refreshed_episodes.push(next_episode);
+                    *policies = refreshed.clone();
+                }
+                Ok(())
+            },
+        )
+        .expect("queue run");
+
+        assert_eq!(refreshed_episodes, vec![0]);
+        assert_eq!(report.completed_games, 1);
+        assert_eq!(report.failed_games, 0);
+        let entries = report.final_policies.home.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "pass");
+        assert!((entries[0].value - 12.0).abs() < 1e-12);
+        assert_eq!(entries[0].visits, 7);
+    }
+
+    #[test]
+    fn queue_completed_game_can_replace_merged_policy() {
+        let options = SoccerQPolicyOptions::default();
+        let replacement = policy_with_action(8.0, 3);
+        let mut replaced = false;
+        let report = run_soccer_learning_queue_with_events(
+            SoccerLearningQueueRunnerConfig {
+                games: 1,
+                parallel_games: 1,
+                base_seed: 2021,
+                match_config: MatchConfig {
+                    duration_seconds: 0.2,
+                    learning_logging_enabled: false,
+                    max_human_players: 0,
+                    ..Default::default()
+                },
+                initial_neural_network: None,
+                neural_drain_timeout: Duration::from_millis(0),
+                options: options.clone(),
+                prune_action_entries_per_team: 0,
+                prune_target_entries_per_team: 0,
+                min_policy_visits: 0,
+            },
+            SoccerTeamQPolicies::new(options),
+            |event| {
+                if let SoccerLearningQueueEvent::CompletedGame {
+                    merged_policies, ..
+                } = event
+                {
+                    *merged_policies = replacement.clone();
+                    replaced = true;
+                }
+                Ok(())
+            },
+        )
+        .expect("queue run");
+
+        assert!(replaced);
+        let entries = report.final_policies.home.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "pass");
+        assert!((entries[0].value - 8.0).abs() < 1e-12);
+        assert_eq!(entries[0].visits, 3);
     }
 
     #[test]

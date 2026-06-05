@@ -6,9 +6,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
-    train_soccer_set_play_restarts, train_soccer_set_play_restarts_with_initial_policies,
-    MatchConfig, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig, SoccerQPolicyOptions,
-    SoccerSetPlayRestartKind, SoccerSetPlayTrainingRequest, Team, Vec2,
+    train_soccer_set_play_restarts_with_events, MatchConfig, SoccerNeuralLearningBackend,
+    SoccerNeuralLearningConfig, SoccerNeuralNetworkSnapshot, SoccerQPolicyOptions,
+    SoccerSetPlayRestartKind, SoccerSetPlayTrainingEvent, SoccerSetPlayTrainingRequest,
+    SoccerTeamQPolicies, Team, Vec2,
+};
+use des_engine::des::soccer_learning::{
+    soccer_policy_version_insert_status_after_active_head, soccer_postgres_policy_refresh_decision,
+    SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde::Serialize;
@@ -263,6 +268,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_experiment_id = None::<String>;
     let mut pg_base_policy_version_id = None::<String>;
     let mut pg_base_generation = None::<i32>;
+    let mut pg_base_policy_version_updated_at_micros = 0i64;
+    let mut postgres_resume_policy = false;
+    let mut initial_neural_network = None::<SoccerNeuralNetworkSnapshot>;
     let initial_policies = if let Some(store) = pg_store.as_mut() {
         let slug = env_value("SOCCER_EXPERIMENT_SLUG")
             .unwrap_or_else(|| "soccer-free-kick-restarts".to_string());
@@ -270,18 +278,37 @@ fn run() -> Result<(), Box<dyn Error>> {
             .unwrap_or_else(|| "Soccer free-kick restart learning".to_string());
         let experiment_id = store.ensure_experiment(&slug, &display_name, &config)?;
         let resume = env_bool("SOCCER_RESUME_POSTGRES_POLICY", true)?;
+        postgres_resume_policy = resume;
         let latest = if resume {
             store.load_latest_active_policy(&experiment_id, options.clone(), options.clone())?
         } else {
             None
         };
         if let Some(version) = latest {
+            let policy_version_id = version.id.clone();
+            let generation = version.generation;
+            if let Some(tactical_learning) = version.tactical_learning.clone() {
+                config.tactical_learning = tactical_learning;
+                println!(
+                    "postgres_resume_tactical_learning experiment={} policy_version={} generation={} attack_flank_lane={:.3} defense_contract_delta={:.3}",
+                    experiment_id,
+                    policy_version_id,
+                    generation,
+                    config.tactical_learning.attack_flank_lane_weight,
+                    config.tactical_learning.defense_contract_delta_weight
+                );
+            }
             println!(
-                "postgres_resume_policy experiment={} policy_version={} generation={}",
-                experiment_id, version.id, version.generation
+                "postgres_resume_policy experiment={} policy_version={} generation={} neural_network={}",
+                experiment_id,
+                policy_version_id,
+                generation,
+                version.neural_network.is_some()
             );
-            pg_base_policy_version_id = Some(version.id);
-            pg_base_generation = Some(version.generation);
+            initial_neural_network = version.neural_network;
+            pg_base_policy_version_id = Some(policy_version_id);
+            pg_base_generation = Some(generation);
+            pg_base_policy_version_updated_at_micros = version.updated_at_micros;
             pg_experiment_id = Some(experiment_id);
             Some(version.policies)
         } else {
@@ -314,14 +341,79 @@ fn run() -> Result<(), Box<dyn Error>> {
         team,
         spot: Some(spot),
         duration_seconds,
-        options: Some(options),
+        options: Some(options.clone()),
+        initial_neural_network,
         vector_hint: None,
     };
-    let artifact = if let Some(policies) = initial_policies {
-        train_soccer_set_play_restarts_with_initial_policies(request, policies)?
-    } else {
-        train_soccer_set_play_restarts(request)?
-    };
+    let starting_policies =
+        initial_policies.unwrap_or_else(|| SoccerTeamQPolicies::new(options.clone()));
+    let artifact = train_soccer_set_play_restarts_with_events(
+        request,
+        starting_policies,
+        |event| -> Result<(), String> {
+            let SoccerSetPlayTrainingEvent::StartingEpisode {
+                episode,
+                config,
+                policies,
+                neural_network,
+                reset_neural_learner,
+            } = event;
+            if !postgres_resume_policy {
+                return Ok(());
+            }
+            let Some(experiment_id) = pg_experiment_id.as_deref() else {
+                return Ok(());
+            };
+            let Some(store) = pg_store.as_mut() else {
+                return Ok(());
+            };
+            let Some(metadata) = store.load_latest_active_policy_metadata(experiment_id)? else {
+                return Ok(());
+            };
+            let refresh_decision =
+                soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                    current_policy_version_id: pg_base_policy_version_id.as_deref(),
+                    current_generation: pg_base_generation.unwrap_or(-1),
+                    current_updated_at_micros: pg_base_policy_version_updated_at_micros,
+                    current_neural_network_present: neural_network.is_some(),
+                    latest_policy_version_id: &metadata.id,
+                    latest_generation: metadata.generation,
+                    latest_updated_at_micros: metadata.updated_at_micros,
+                    latest_neural_network_present: metadata.neural_network.is_some(),
+                    local_tactical_evolved_since_pg_refresh: false,
+                });
+            if refresh_decision.refresh_policy {
+                if let Some(version) = store.load_latest_active_policy(
+                    experiment_id,
+                    options.clone(),
+                    options.clone(),
+                )? {
+                    println!(
+                        "postgres_refresh_policy_for_set_play episode={} policy_version={} previous_policy_version={} generation={} neural_network={}",
+                        episode + 1,
+                        version.id,
+                        pg_base_policy_version_id.as_deref().unwrap_or("none"),
+                        version.generation,
+                        version.neural_network.is_some()
+                    );
+                    *policies = version.policies;
+                    *neural_network = version.neural_network;
+                    *reset_neural_learner = true;
+                    if let Some(tactical_learning) = version.tactical_learning {
+                        config.tactical_learning = tactical_learning;
+                    }
+                    pg_base_policy_version_id = Some(version.id);
+                    pg_base_generation = Some(version.generation);
+                    pg_base_policy_version_updated_at_micros = version.updated_at_micros;
+                }
+            } else if refresh_decision.apply_tactical_learning {
+                if let Some(tactical_learning) = metadata.tactical_learning {
+                    config.tactical_learning = tactical_learning;
+                }
+            }
+            Ok(())
+        },
+    )?;
     let elapsed = started.elapsed().as_secs_f64();
     write_json(&artifact_path, &artifact)?;
 
@@ -331,13 +423,41 @@ fn run() -> Result<(), Box<dyn Error>> {
         let generation = pg_base_generation.unwrap_or(-1).saturating_add(1);
         let version_label = env_value("SOCCER_POLICY_VERSION_LABEL")
             .unwrap_or_else(|| version_label_from_run_id(&run_id));
+        let latest_active_metadata = store.load_latest_active_policy_metadata(experiment_id)?;
+        let insert_status = soccer_policy_version_insert_status_after_active_head(
+            SOCCER_POLICY_STATUS_ACTIVE,
+            pg_base_policy_version_id.as_deref(),
+            generation,
+            latest_active_metadata
+                .as_ref()
+                .map(|metadata| metadata.id.as_str()),
+            latest_active_metadata
+                .as_ref()
+                .map(|metadata| metadata.generation),
+        );
+        if insert_status != SOCCER_POLICY_STATUS_ACTIVE {
+            println!(
+                "postgres_set_play_policy_marked_stale run_id={} parent_policy_version={} generation={} latest_active={} latest_generation={}",
+                run_id,
+                pg_base_policy_version_id.as_deref().unwrap_or("none"),
+                generation,
+                latest_active_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.id.as_str())
+                    .unwrap_or("none"),
+                latest_active_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.generation.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            );
+        }
         let (policy_version_id, run_pg_id) = store.insert_set_play_training_artifact(
             experiment_id,
             &run_id,
             pg_base_policy_version_id.as_deref(),
             generation,
             &version_label,
-            "active",
+            insert_status,
             &artifact,
             elapsed,
         )?;

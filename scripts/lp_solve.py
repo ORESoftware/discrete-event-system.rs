@@ -5,16 +5,16 @@ Input is JSON on stdin:
   {"lp": {...}, "method": "highs"}
 
 The bridge supports SciPy/HiGHS methods plus OR-Tools GLOP/PDLP. If the requested
-solver is unavailable, it falls back to dependency-free vertex enumeration,
-which is intended for small validation models rather than production-scale LPs.
+solver is unavailable, it falls back to the Rust internal simplex reference.
 """
 
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import math
+import os
+import subprocess
 import sys
 from typing import List, Optional, Sequence, Tuple
 
@@ -28,6 +28,61 @@ def status_payload(status: str, solver: str, message: str = "") -> dict:
         "solver": solver,
         "message": message,
     }
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "lp_solve_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "lp.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def rust_reference_command() -> list[str]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "lp_solve_reference"
+    explicit = os.environ.get("LP_SOLVE_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit]
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary]
+    return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
+
+
+def rust_reference(lp: dict, method: str = "fallback") -> dict:
+    command = rust_reference_command()
+    cwd = None
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd = os.path.dirname(script_dir)
+    completed = subprocess.run(
+        [*command, "--method", method],
+        input=json.dumps({"lp": lp, "method": method}),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        check=False,
+    )
+    try:
+        parsed = json.loads(completed.stdout)
+    except Exception as exc:
+        return status_payload(
+            "numerical-error",
+            "rust:internal-simplex",
+            f"failed to parse Rust LP output: {exc}; stderr={completed.stderr.strip()}",
+        )
+    if completed.returncode != 0 and not parsed.get("message"):
+        parsed["message"] = completed.stderr.strip()
+    return parsed
 
 
 def objective_offset(lp: dict) -> float:
@@ -112,45 +167,6 @@ def normalize_lp(lp: dict) -> Tuple[str, List[float], List[List[float]], List[fl
     return sense, c, a_ub, b_ub, a_eq, b_eq, lbs, ubs
 
 
-def with_bound_inequalities(
-    n: int,
-    a_ub: List[List[float]],
-    b_ub: List[float],
-    lb: Sequence[Optional[float]],
-    ub: Sequence[Optional[float]],
-) -> Tuple[List[List[float]], List[float]]:
-    rows = [row[:] for row in a_ub]
-    rhs = b_ub[:]
-    for j in range(n):
-        if ub[j] is not None:
-            row = [0.0] * n
-            row[j] = 1.0
-            rows.append(row)
-            rhs.append(float(ub[j]))
-        if lb[j] is not None:
-            row = [0.0] * n
-            row[j] = -1.0
-            rows.append(row)
-            rhs.append(-float(lb[j]))
-    return rows, rhs
-
-
-def feasible(
-    x: Sequence[float],
-    a_ub: Sequence[Sequence[float]],
-    b_ub: Sequence[float],
-    a_eq: Sequence[Sequence[float]],
-    b_eq: Sequence[float],
-) -> bool:
-    for row, rhs in zip(a_ub, b_ub):
-        if dot(row, x) > rhs + 1e-7:
-            return False
-    for row, rhs in zip(a_eq, b_eq):
-        if abs(dot(row, x) - rhs) > 1e-7:
-            return False
-    return True
-
-
 def recover_certificate(lp: dict, x: Sequence[float], tol: float = 1e-8) -> dict:
     sense, c, a_ub, b_ub, a_eq, b_eq, lb, ub = normalize_lp(lp)
     n = len(c)
@@ -231,169 +247,6 @@ def recover_certificate(lp: dict, x: Sequence[float], tol: float = 1e-8) -> dict
         "dualEQ": dual_eq,
         "reducedCosts": reduced,
     }
-
-
-def rank(rows: Sequence[Sequence[float]]) -> int:
-    if not rows:
-        return 0
-    work = [list(map(float, row)) for row in rows]
-    m, n = len(work), len(work[0])
-    r = 0
-    for c in range(n):
-        pivot = max(range(r, m), key=lambda i: abs(work[i][c]), default=r)
-        if pivot >= m or abs(work[pivot][c]) <= 1e-10:
-            continue
-        work[r], work[pivot] = work[pivot], work[r]
-        pv = work[r][c]
-        for j in range(c, n):
-            work[r][j] /= pv
-        for i in range(m):
-            if i == r:
-                continue
-            factor = work[i][c]
-            for j in range(c, n):
-                work[i][j] -= factor * work[r][j]
-        r += 1
-        if r == m:
-            break
-    return r
-
-
-def null_vector_rank_n_minus_one(rows: Sequence[Sequence[float]], n: int) -> Optional[List[float]]:
-    if n == 0:
-        return None
-    work = [list(map(float, row)) for row in rows if any(abs(float(v)) > 1e-10 for v in row)]
-    pivots: List[int] = []
-    r = 0
-    for c in range(n):
-        pivot = max(range(r, len(work)), key=lambda i: abs(work[i][c]), default=r)
-        if pivot >= len(work) or abs(work[pivot][c]) <= 1e-10:
-            continue
-        work[r], work[pivot] = work[pivot], work[r]
-        pv = work[r][c]
-        for j in range(c, n):
-            work[r][j] /= pv
-        for i in range(len(work)):
-            if i == r:
-                continue
-            factor = work[i][c]
-            if abs(factor) <= 1e-15:
-                continue
-            for j in range(c, n):
-                work[i][j] -= factor * work[r][j]
-        pivots.append(c)
-        r += 1
-        if r == len(work):
-            break
-    if len(pivots) != n - 1:
-        return None
-    free_cols = [c for c in range(n) if c not in pivots]
-    if len(free_cols) != 1:
-        return None
-    free = free_cols[0]
-    d = [0.0] * n
-    d[free] = 1.0
-    for row_idx, pivot_col in enumerate(pivots):
-        d[pivot_col] = -work[row_idx][free]
-    norm = max(abs(v) for v in d)
-    if norm <= 1e-12:
-        return None
-    return [v / norm for v in d]
-
-
-def improving_recession_ray(
-    sense: str,
-    c: Sequence[float],
-    a_ub: Sequence[Sequence[float]],
-    a_eq: Sequence[Sequence[float]],
-) -> Optional[List[float]]:
-    n = len(c)
-    if n == 0:
-        return None
-    objective_sign = 1.0 if sense == "max" else -1.0
-    active_needed = max(0, n - 1 - rank(a_eq))
-    if active_needed > len(a_ub):
-        candidates = [()]
-    else:
-        candidates = itertools.combinations(range(len(a_ub)), active_needed)
-    for active in candidates:
-        rows = [list(row) for row in a_eq] + [list(a_ub[i]) for i in active]
-        ray = null_vector_rank_n_minus_one(rows, n)
-        if ray is None:
-            continue
-        for direction in (ray, [-v for v in ray]):
-            if all(dot(row, direction) <= 1e-8 for row in a_ub) and all(
-                abs(dot(row, direction)) <= 1e-8 for row in a_eq
-            ):
-                improvement = objective_sign * dot(c, direction)
-                if improvement > 1e-8:
-                    return direction
-    return None
-
-
-def vertex_enumeration(lp: dict) -> dict:
-    sense, c, raw_a_ub, raw_b_ub, a_eq, b_eq, lb, ub = normalize_lp(lp)
-    n = len(c)
-    solver = "python:vertex-enumeration"
-    a_ub, b_ub = with_bound_inequalities(n, raw_a_ub, raw_b_ub, lb, ub)
-    if n == 0:
-        if feasible([], a_ub, b_ub, a_eq, b_eq):
-            return apply_objective_offset(lp, {"status": "optimal", "x": [], "objective": 0.0, "iters": 0, "solver": solver})
-        return status_payload("infeasible", solver, "empty LP violates constraints")
-
-    eq_rank = rank(a_eq)
-    if eq_rank > n:
-        return status_payload("infeasible", solver, "equality system rank exceeds variable count")
-    need = n - eq_rank
-    candidates: List[List[float]] = []
-    if need < 0:
-        return status_payload("infeasible", solver, "too many independent equalities")
-    if need == 0:
-        x = solve_square(a_eq[:n], b_eq[:n]) if len(a_eq) >= n else None
-        if x is not None and feasible(x, a_ub, b_ub, a_eq, b_eq):
-            candidates.append(x)
-    else:
-        if need > len(a_ub):
-            return status_payload(
-                "numerical-error",
-                solver,
-                "not enough finite active constraints for dependency-free vertex enumeration",
-            )
-        for active in itertools.combinations(range(len(a_ub)), need):
-            mat = [row[:] for row in a_eq] + [a_ub[i][:] for i in active]
-            rhs = b_eq[:] + [b_ub[i] for i in active]
-            if len(mat) != n:
-                continue
-            x = solve_square(mat, rhs)
-            if x is not None and feasible(x, a_ub, b_ub, a_eq, b_eq):
-                candidates.append(x)
-    if not candidates:
-        return status_payload("infeasible", solver, "no feasible vertex found")
-
-    ray = improving_recession_ray(sense, c, a_ub, a_eq)
-    if ray is not None:
-        return {
-            "status": "unbounded",
-            "x": [],
-            "objective": None,
-            "iters": len(candidates),
-            "solver": solver,
-            "unboundedRay": ray,
-            "message": "dependency-free recession-ray fallback",
-        }
-
-    sign = 1.0 if sense == "max" else -1.0
-    best = max(candidates, key=lambda x: sign * dot(c, x))
-    result = {
-        "status": "optimal",
-        "x": best,
-        "objective": dot(c, best),
-        "iters": len(candidates),
-        "solver": solver,
-        "message": "dependency-free vertex enumeration fallback",
-    }
-    result.update(recover_certificate(lp, best))
-    return apply_objective_offset(lp, result)
 
 
 def scipy_linprog(lp: dict, method: str) -> Optional[dict]:
@@ -509,6 +362,8 @@ def ortools_linear_solver(lp: dict, backend: str) -> Optional[dict]:
 
 def solve_external(lp: dict, method: str) -> Optional[dict]:
     normalized = method.lower().replace("_", "-")
+    if normalized in ("rust", "fallback", "internal", "internal-simplex", "rust-internal"):
+        return rust_reference(lp, method)
     if normalized in ("glop", "ortools-glop", "ortools:glop"):
         return ortools_linear_solver(lp, "glop")
     if normalized in ("pdlp", "ortools-pdlp", "ortools:pdlp"):
@@ -526,7 +381,7 @@ def main() -> int:
         method = payload.get("method", args.method)
         result = solve_external(lp, method)
         if result is None:
-            result = vertex_enumeration(lp)
+            result = rust_reference(lp, "fallback")
         print(json.dumps(result, allow_nan=True))
         return 0
     except Exception as exc:

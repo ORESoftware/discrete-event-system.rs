@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Reference bridge for directed maximum-flow instances.
 
-The deterministic oracle is Edmonds-Karp on the supplied edge order. When
-OR-Tools is installed and capacities can be safely integer-scaled, the same
-input is also sent to OR-Tools SimpleMaxFlow so Rust validation can compare the
-native DES solver with a local open-source graph optimizer.
+The deterministic Edmonds-Karp oracle lives in Rust. This Python bridge remains
+as thin adapter glue for explicit OR-Tools SimpleMaxFlow checks when installed
+and when capacities can be safely integer-scaled.
 """
 
 from __future__ import annotations
@@ -12,13 +11,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
-from collections import deque
 from typing import Optional
 
 
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
-EPS = 1e-12
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "max_flow_reference"
+    explicit = os.environ.get("MAX_FLOW_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if os.path.exists(local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -114,107 +129,6 @@ def cut_payload(problem: dict, source_side: list[int], edge_flows: list[dict]) -
     }
 
 
-def exact_max_flow(problem: dict) -> dict:
-    num_nodes = problem["numNodes"]
-    source = problem["source"]
-    sink = problem["sink"]
-    edges = problem["edges"]
-    residual: list[list[dict]] = [[] for _ in range(num_nodes)]
-    forward_refs: list[tuple[int, int]] = []
-    for i, edge in enumerate(edges):
-        from_node = edge["from"]
-        to_node = edge["to"]
-        fwd = {"to": to_node, "rev": len(residual[to_node]), "cap": edge["capacity"], "idx": i}
-        rev = {"to": from_node, "rev": len(residual[from_node]), "cap": 0.0, "idx": i}
-        residual[from_node].append(fwd)
-        residual[to_node].append(rev)
-        forward_refs.append((from_node, len(residual[from_node]) - 1))
-
-    max_flow = 0.0
-    trace = []
-    iterations = 0
-    while True:
-        parent_node = [-1 for _ in range(num_nodes)]
-        parent_edge = [-1 for _ in range(num_nodes)]
-        parent_node[source] = source
-        queue: deque[int] = deque([source])
-        found = False
-        while queue and not found:
-            node = queue.popleft()
-            for edge_index, edge in enumerate(residual[node]):
-                if edge["cap"] <= EPS or parent_node[edge["to"]] != -1:
-                    continue
-                parent_node[edge["to"]] = node
-                parent_edge[edge["to"]] = edge_index
-                if edge["to"] == sink:
-                    found = True
-                    break
-                queue.append(edge["to"])
-        if not found:
-            break
-
-        path = []
-        bottleneck = math.inf
-        v = sink
-        while v != source:
-            path.append(v)
-            u = parent_node[v]
-            edge_index = parent_edge[v]
-            bottleneck = min(bottleneck, residual[u][edge_index]["cap"])
-            v = u
-        path.append(source)
-        path.reverse()
-
-        v = sink
-        while v != source:
-            u = parent_node[v]
-            edge_index = parent_edge[v]
-            to = residual[u][edge_index]["to"]
-            rev = residual[u][edge_index]["rev"]
-            residual[u][edge_index]["cap"] -= bottleneck
-            residual[to][rev]["cap"] += bottleneck
-            v = u
-
-        iterations += 1
-        max_flow += bottleneck
-        trace.append(
-            {
-                "iter": iterations,
-                "path": [int(v) for v in path],
-                "bottleneck": float(bottleneck),
-                "flowAfter": float(max_flow),
-            }
-        )
-
-    edge_flows = []
-    for edge, (from_node, edge_index) in zip(edges, forward_refs):
-        flow = edge["capacity"] - residual[from_node][edge_index]["cap"]
-        edge_flows.append(edge_flow_payload(edge, flow))
-
-    seen = [False for _ in range(num_nodes)]
-    queue = deque([source])
-    seen[source] = True
-    while queue:
-        node = queue.popleft()
-        for edge in residual[node]:
-            if edge["cap"] > EPS and not seen[edge["to"]]:
-                seen[edge["to"]] = True
-                queue.append(edge["to"])
-    source_side = [i for i, value in enumerate(seen) if value]
-    balances = node_balance(num_nodes, edge_flows)
-    return result(
-        "optimal",
-        "python:edmonds-karp-max-flow",
-        max_flow=max_flow,
-        edge_flows=edge_flows,
-        min_cut=cut_payload(problem, source_side, edge_flows),
-        node_balance=balances,
-        iterations=iterations,
-        trace=trace,
-        message="Edmonds-Karp augmenting-path reference",
-    )
-
-
 def choose_scale(values: list[float]) -> Optional[int]:
     for scale in SCALES:
         if all(abs(round(value * scale) - value * scale) <= 1e-6 for value in values):
@@ -275,38 +189,20 @@ def ortools_max_flow(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-edmonds-karp", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-edmonds-karp", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_max_flow(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "infeasible") else 1
-
-        ortools = ortools_max_flow(problem)
-        if args.solver == "ortools":
-            output = dict(ortools)
-            output["referenceStatus"] = exact.get("status")
-            output["referenceMaxFlow"] = exact.get("maxFlow")
-            print(json.dumps(output))
-            return 0 if output["status"] in ("optimal", "infeasible", "unsupported", "unavailable") else 1
-
-        output = dict(exact)
-        output["solver"] = (
-            "ortools:simple-max-flow+python:edmonds-karp"
-            if ortools.get("status") != "unavailable"
-            else "python:edmonds-karp-max-flow"
-        )
-        output["ortoolsStatus"] = ortools.get("status")
-        output["ortoolsMaxFlow"] = ortools.get("maxFlow")
-        output["ortoolsEdgeFlows"] = ortools.get("edgeFlows", [])
-        output["ortoolsMinCut"] = ortools.get("minCut", {})
-        output["ortoolsNodeBalance"] = ortools.get("nodeBalance", [])
-        output["ortoolsMessage"] = ortools.get("message", "")
+        output = ortools_max_flow(problem)
         print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "infeasible") else 1
+        return 0 if output["status"] in ("optimal", "infeasible", "unsupported", "unavailable") else 1
     except Exception as exc:
         print(
             json.dumps(

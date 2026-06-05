@@ -256,6 +256,14 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
     let defense_contract_delta_weight = env_f64("SOCCER_DEFENSE_CONTRACT_DELTA_WEIGHT", 0.42)?;
     let defense_compactness_score_weight =
         env_f64("SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT", 0.14)?;
+    let defense_ball_depth_score_weight = env_f64("SOCCER_DEFENSE_BALL_DEPTH_SCORE_WEIGHT", 0.22)?;
+    let defense_endline_soft_penalty_weight =
+        env_f64("SOCCER_DEFENSE_ENDLINE_SOFT_PENALTY_WEIGHT", 0.18)?;
+    let defense_endline_hard_penalty_weight =
+        env_f64("SOCCER_DEFENSE_ENDLINE_HARD_PENALTY_WEIGHT", 0.90)?;
+    let defender_midfielder_press_weight =
+        env_f64("SOCCER_DEFENDER_MIDFIELDER_PRESS_WEIGHT", 0.18)?;
+    let midfielder_press_weight = env_f64("SOCCER_MIDFIELDER_PRESS_WEIGHT", 0.20)?;
     let tactical_weights = [
         (
             "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
@@ -290,6 +298,23 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
             "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
             defense_compactness_score_weight,
         ),
+        (
+            "SOCCER_DEFENSE_BALL_DEPTH_SCORE_WEIGHT",
+            defense_ball_depth_score_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_ENDLINE_SOFT_PENALTY_WEIGHT",
+            defense_endline_soft_penalty_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_ENDLINE_HARD_PENALTY_WEIGHT",
+            defense_endline_hard_penalty_weight,
+        ),
+        (
+            "SOCCER_DEFENDER_MIDFIELDER_PRESS_WEIGHT",
+            defender_midfielder_press_weight,
+        ),
+        ("SOCCER_MIDFIELDER_PRESS_WEIGHT", midfielder_press_weight),
     ];
     validate_payload_settings(
         episodes,
@@ -325,6 +350,11 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
             "defenseSpacingScoreWeight": defense_spacing_score_weight,
             "defenseContractDeltaWeight": defense_contract_delta_weight,
             "defenseCompactnessScoreWeight": defense_compactness_score_weight,
+            "defenseBallDepthScoreWeight": defense_ball_depth_score_weight,
+            "defenseEndlineSoftPenaltyWeight": defense_endline_soft_penalty_weight,
+            "defenseEndlineHardPenaltyWeight": defense_endline_hard_penalty_weight,
+            "defenderMidfielderPressWeight": defender_midfielder_press_weight,
+            "midfielderPressWeight": midfielder_press_weight,
         },
         "artifactPath": &args.server_artifact_path,
         "learnedParamsPath": &args.server_learned_params_path,

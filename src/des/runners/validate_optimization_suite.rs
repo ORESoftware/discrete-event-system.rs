@@ -4606,12 +4606,6 @@ impl Driver {
                 ExternalLinearCliStatus::from_str(expected_status.as_str());
             for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
                 let solver_name = solver.as_str();
-                if case_name == "unbounded" && solver == ExternalLinearCliSolver::LpSolve {
-                    println!(
-                        "  SKIP  LP {case_name} {solver_name}: lp_solve reports the smoke unbounded LP as optimal"
-                    );
-                    continue;
-                }
                 let reference = solve_lp_with_external_cli(
                     &status_lp,
                     &ExternalLinearCliOptions {
@@ -6143,12 +6137,6 @@ impl Driver {
                 ExternalLinearCliStatus::from_str(expected_status.as_str());
             for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
                 let solver_name = solver.as_str();
-                if case_name == "unbounded" && solver == ExternalLinearCliSolver::LpSolve {
-                    println!(
-                        "  SKIP  IP/MIP {case_name} {solver_name}: lp_solve reports the smoke unbounded model as optimal"
-                    );
-                    continue;
-                }
                 let reference = solve_ipmip_with_external_cli(
                     &status_mip,
                     &ExternalLinearCliOptions {
@@ -6628,7 +6616,7 @@ impl Driver {
                             == legacy_external_optimization_ecosystem::ExternalOptimizationEcosystem::Python
                     })
                     .count()
-                    == 27
+                    == 28
                 && legacy_tools
                     .iter()
                     .any(|tool| tool.as_str() == "hexaly" && tool.ecosystem().as_str() == "native"),
@@ -6665,7 +6653,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 27 && julia_count == 1 && native_count == 45,
+            python_count == 28 && julia_count == 1 && native_count == 44,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6791,7 +6779,7 @@ impl Driver {
                     && spec.family == ExternalOptimizationFamily::NonlinearOptimization
                     && spec.exactness == ExternalOptimizationExactness::ModelingLayer
             }),
-            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, PDDL planners, Pyomo, HiGHS/SoPlex/lp_solve CLI, OR-Tools GLOP/PDLP, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, Gurobi/CPLEX/Ipopt Rust bindings, MOSEK, Z3, OptiMathSAT, and CasADi classifications".to_string(),
+            "checked Choco, CPMpy, clingo, Open-WBO, OptaPlanner, Timefold, PDDL planners, Pyomo, HiGHS/SoPlex/lp_solve CLI, OR-Tools GLOP/PDLP, CVXPY, PySCIPOpt, Hexaly, argmin, Ipopt, Gurobi/CPLEX/Ipopt Rust bindings, MOSEK, COPT, Z3, OptiMathSAT, and CasADi classifications".to_string(),
         );
         let cp_specs = external_cp_sat_reference_solver_specs();
         let direct_cp_specs = cp_specs
@@ -7367,7 +7355,7 @@ impl Driver {
         let specs = external_validation_tool_specs();
         self.check(
             "External validation registry covers recommended tools",
-            specs.len() == 264,
+            specs.len() == 265,
             format!("tools={}", specs.len()),
         );
         for (family, expected_at_least) in [
@@ -20398,11 +20386,15 @@ impl Driver {
                     ..Default::default()
                 },
             );
+            let optional_qp_unavailable = optional_external_quadratic_reference_unavailable(
+                optional_qp.status,
+                &optional_qp.message,
+            );
             let recognized = matches!(
                 optional_qp.status,
                 ExternalQuadraticReferenceStatus::Optimal
                     | ExternalQuadraticReferenceStatus::Unavailable
-            );
+            ) || optional_qp_unavailable;
             self.check(
                 format!("QP Rust optional {} bridge recognized", solver.as_arg()),
                 recognized,

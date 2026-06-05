@@ -71,6 +71,7 @@
   .stage {
     min-height: 0;
     padding: 16px;
+    position: relative;
   }
   canvas {
     width: 100%;
@@ -163,6 +164,75 @@
     display: inline-block;
     margin-right: 4px;
   }
+  .loading-overlay {
+    position: absolute;
+    inset: 16px;
+    display: grid;
+    place-items: center;
+    background: rgba(238, 241, 244, .86);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    z-index: 2;
+  }
+  .loading-overlay.hidden { display: none; }
+  .loading-overlay.playable {
+    align-items: end;
+    background: transparent;
+    border: 0;
+    pointer-events: none;
+  }
+  .loading-overlay.playable .loading-card {
+    margin-bottom: 12px;
+    opacity: .92;
+  }
+  .loading-card {
+    width: min(420px, calc(100% - 28px));
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px;
+    box-shadow: 0 14px 40px rgba(23, 32, 38, .16);
+  }
+  .loading-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+  }
+  .spinner {
+    width: 22px;
+    height: 22px;
+    border: 3px solid #d7e0e6;
+    border-top-color: var(--home);
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .progress {
+    height: 10px;
+    margin: 14px 0 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #e7edf2;
+  }
+  .progress-fill {
+    width: 0%;
+    height: 100%;
+    background: linear-gradient(90deg, var(--home), #13a66b);
+    transition: width .16s ease;
+  }
+  .loading-status,
+  .loading-bytes {
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  button:disabled,
+  select:disabled,
+  input:disabled {
+    opacity: .55;
+    cursor: wait;
+  }
   @media (max-width: 860px) {
     header { grid-template-columns: 1fr; }
     .main { grid-template-columns: 1fr; }
@@ -182,7 +252,17 @@
     </div>
   </header>
   <div class="main">
-    <div class="stage"><canvas id="pitch" width="1280" height="820"></canvas></div>
+    <div class="stage">
+      <canvas id="pitch" width="1280" height="820"></canvas>
+      <div id="loadingOverlay" class="loading-overlay">
+        <div class="loading-card">
+          <div class="loading-title"><span class="spinner"></span><span>Loading match data</span></div>
+          <div class="progress"><div id="loadingBar" class="progress-fill"></div></div>
+          <div id="loadingStatus" class="loading-status">Starting download</div>
+          <div id="loadingBytes" class="loading-bytes">0 B</div>
+        </div>
+      </div>
+    </div>
     <aside>
       <div class="row">
         <button id="play">Play</button>
@@ -237,7 +317,49 @@
   </div>
 </div>
 <script>
-const trace = __SOCCER_TRACE__;
+const TRACE_META_URL = "__SOCCER_TRACE_META_URL__";
+const TRACE_FRAMES_URL = "__SOCCER_TRACE_FRAMES_URL__";
+const FALLBACK_CONFIG = {
+  fieldWidthYards: 80,
+  fieldLengthYards: 120,
+  goalWidthYards: 8,
+  maxHumanPlayers: 4,
+  dtSeconds: 0.1
+};
+function emptyStats() {
+  return {
+    shotsHome: 0,
+    shotsAway: 0,
+    shotsOnTargetHome: 0,
+    shotsOnTargetAway: 0,
+    savesHome: 0,
+    savesAway: 0,
+    passesCompletedHome: 0,
+    passesCompletedAway: 0,
+    passesAttemptedHome: 0,
+    passesAttemptedAway: 0,
+    looseBallRecoveriesHome: 0,
+    looseBallRecoveriesAway: 0,
+    offsidesHome: 0,
+    offsidesAway: 0,
+    throwInsHome: 0,
+    throwInsAway: 0,
+    goalKicksHome: 0,
+    goalKicksAway: 0,
+    cornerKicksHome: 0,
+    cornerKicksAway: 0,
+    freeKicksHome: 0,
+    freeKicksAway: 0,
+    foulsHome: 0,
+    foulsAway: 0
+  };
+}
+const trace = {
+  config: {...FALLBACK_CONFIG},
+  summary: {ticks: 0, stats: emptyStats()},
+  frames: [],
+  events: []
+};
 const canvas = document.getElementById("pitch");
 const ctx = canvas.getContext("2d");
 const homeScore = document.getElementById("homeScore");
@@ -264,17 +386,91 @@ const events = document.getElementById("events");
 const slots = document.getElementById("slots");
 const passTarget = document.getElementById("passTarget");
 const passFlight = document.getElementById("passFlight");
+const loadingOverlay = document.getElementById("loadingOverlay");
+const loadingBar = document.getElementById("loadingBar");
+const loadingStatus = document.getElementById("loadingStatus");
+const loadingBytes = document.getElementById("loadingBytes");
 const keys = new Set();
 let frameIndex = 0;
 let playing = false;
 let lastTs = 0;
 let inputSeq = 0;
 let activeSlot = 0;
+let traceFramesComplete = false;
+let uiReady = false;
+let loadStartedAt = performance.now();
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
   if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
 };
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value.toFixed(0)} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+function currentFrame() {
+  if (!trace.frames.length) return null;
+  return trace.frames[Math.min(frameIndex, trace.frames.length - 1)];
+}
+function loadedFrameRate() {
+  const seconds = Math.max(.25, (performance.now() - loadStartedAt) / 1000);
+  return trace.frames.length / seconds;
+}
+function canStartPlayback() {
+  if (trace.frames.length < 2) return false;
+  if (traceFramesComplete) return true;
+  const fps = 10 * Number(speed.value || 1);
+  const bufferedSeconds = trace.frames.length * Number(trace.config.dtSeconds || 0.1);
+  return bufferedSeconds >= 3 && loadedFrameRate() > fps * 1.25;
+}
+function setControlsEnabled(enabled) {
+  play.disabled = !enabled;
+  document.getElementById("prev").disabled = !enabled;
+  document.getElementById("next").disabled = !enabled;
+  document.getElementById("capture").disabled = !enabled;
+  document.getElementById("pass").disabled = !enabled;
+  document.getElementById("shoot").disabled = !enabled;
+  scrub.disabled = !enabled;
+  passTarget.disabled = !enabled;
+  passFlight.disabled = !enabled;
+}
+function updatePlaybackAvailability() {
+  const enabled = canStartPlayback();
+  setControlsEnabled(enabled);
+  if (enabled && !traceFramesComplete) {
+    loadingOverlay.classList.add("playable");
+  } else {
+    loadingOverlay.classList.remove("playable");
+  }
+  if (!enabled) {
+    play.textContent = "Loading";
+  } else if (!playing) {
+    play.textContent = "Play";
+  }
+}
+function updateLoadingProgress(loadedBytes = 0, totalBytes = 0, message = "Loading match data") {
+  const percent = totalBytes > 0 ? Math.min(100, loadedBytes / totalBytes * 100) : 0;
+  loadingBar.style.width = totalBytes > 0 ? `${percent.toFixed(1)}%` : "18%";
+  loadingStatus.textContent = `${message}; ${trace.frames.length} frames buffered`;
+  loadingBytes.textContent = totalBytes > 0
+    ? `${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)}`
+    : `${formatBytes(loadedBytes)}`;
+  updatePlaybackAvailability();
+}
+function hideLoadingOverlay() {
+  loadingOverlay.classList.add("hidden");
+}
+function initializeUiWhenReady() {
+  if (uiReady || !trace.frames.length) return;
+  uiReady = true;
+  scrub.max = Math.max(0, trace.frames.length - 1);
+  buildSlots();
+  updateMetrics();
+  render();
+}
 
 function phaseLabel(v) {
   return String(v || "").replace(/([a-z])([A-Z])/g, "$1 $2");
@@ -304,7 +500,8 @@ function pitchRect() {
   const pad = 34;
   const w = canvas.width - pad * 2;
   const h = canvas.height - pad * 2;
-  const fieldAspect = trace.config.fieldWidthYards / trace.config.fieldLengthYards;
+  const config = trace.config || FALLBACK_CONFIG;
+  const fieldAspect = config.fieldWidthYards / config.fieldLengthYards;
   let drawH = h;
   let drawW = drawH * fieldAspect;
   if (drawW > w) {
@@ -319,13 +516,15 @@ function pitchRect() {
   };
 }
 function mapPoint(p, r) {
+  const config = trace.config || FALLBACK_CONFIG;
   return {
-    x: r.x + p.x / trace.config.fieldWidthYards * r.w,
-    y: r.y + (1 - p.y / trace.config.fieldLengthYards) * r.h
+    x: r.x + p.x / config.fieldWidthYards * r.w,
+    y: r.y + (1 - p.y / config.fieldLengthYards) * r.h
   };
 }
 function fieldDirToCanvas(dir, r) {
-  return {x: dir.x / trace.config.fieldWidthYards * r.w, y: -dir.y / trace.config.fieldLengthYards * r.h};
+  const config = trace.config || FALLBACK_CONFIG;
+  return {x: dir.x / config.fieldWidthYards * r.w, y: -dir.y / config.fieldLengthYards * r.h};
 }
 function norm(v) {
   const len = Math.hypot(Number(v?.x || 0), Number(v?.y || 0));
@@ -432,9 +631,10 @@ function drawBall(ball, r) {
   ctx.stroke();
 }
 function render() {
-  const f = trace.frames[frameIndex];
   const r = pitchRect();
   drawPitch(r);
+  const f = currentFrame();
+  if (!f) return;
   for (const o of f.officials) drawOfficial(o, r);
   for (const p of f.players) drawPlayer(p, r);
   drawBall(f.ball, r);
@@ -450,7 +650,7 @@ function render() {
   scrub.value = frameIndex;
 }
 function updateMetrics() {
-  const s = trace.summary.stats;
+  const s = trace.summary?.stats || emptyStats();
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
@@ -461,18 +661,25 @@ function updateMetrics() {
   const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
-  events.innerHTML = trace.events.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
+  events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function tick(ts) {
   if (!lastTs) lastTs = ts;
   const elapsed = ts - lastTs;
   const fps = 10 * Number(speed.value);
   if (playing && elapsed > 1000 / fps) {
-    frameIndex = Math.min(trace.frames.length - 1, frameIndex + 1);
-    if (frameIndex >= trace.frames.length - 1) playing = false;
-    play.textContent = playing ? "Pause" : "Play";
+    if (frameIndex < trace.frames.length - 1) {
+      frameIndex += 1;
+      if (traceFramesComplete && frameIndex >= trace.frames.length - 1) playing = false;
+      play.textContent = playing ? "Pause" : "Play";
+      render();
+    } else if (traceFramesComplete) {
+      playing = false;
+      play.textContent = "Play";
+    } else {
+      play.textContent = "Buffering";
+    }
     lastTs = ts;
-    render();
   }
   requestAnimationFrame(tick);
 }
@@ -502,7 +709,9 @@ function pushInput(pass = false, shoot = false) {
   });
 }
 function rebuildPassTargets() {
-  const players = trace.frames[Math.min(frameIndex, trace.frames.length - 1)].players;
+  const frame = currentFrame();
+  if (!frame) return;
+  const players = frame.players;
   const activePlayerId = selectedPlayer(activeSlot);
   const activePlayer = players.find(p => p.id === activePlayerId);
   const existing = passTarget.value;
@@ -524,7 +733,9 @@ function rebuildPassTargets() {
   }
 }
 function buildSlots() {
-  const players = trace.frames[0].players.filter(p => p.team === "Home");
+  const firstFrame = trace.frames[0];
+  if (!firstFrame) return;
+  const players = firstFrame.players.filter(p => p.team === "Home");
   slots.innerHTML = "";
   for (let i = 0; i < trace.config.maxHumanPlayers; i++) {
     const row = document.createElement("div");
@@ -547,9 +758,90 @@ function buildSlots() {
   }
   rebuildPassTargets();
 }
-scrub.max = Math.max(0, trace.frames.length - 1);
+
+function appendFrameLine(line) {
+  const raw = line.trim();
+  if (!raw) return;
+  trace.frames.push(JSON.parse(raw));
+  scrub.max = Math.max(0, trace.frames.length - 1);
+  initializeUiWhenReady();
+  if (!playing && frameIndex >= trace.frames.length - 2) render();
+}
+
+async function loadTraceMeta() {
+  const response = await fetch(TRACE_META_URL, {headers: {"Accept": "application/json"}});
+  if (!response.ok) throw new Error(`metadata ${response.status}`);
+  const meta = await response.json();
+  trace.config = meta.config || trace.config || {...FALLBACK_CONFIG};
+  trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
+  trace.summary.stats = trace.summary.stats || emptyStats();
+  trace.events = Array.isArray(meta.events) ? meta.events : [];
+  updateMetrics();
+}
+
+async function loadTraceFrames() {
+  const response = await fetch(TRACE_FRAMES_URL, {
+    headers: {"Accept": "application/x-ndjson,text/plain,application/jsonl"}
+  });
+  if (!response.ok) throw new Error(`frames ${response.status}`);
+  const totalBytes = Number(response.headers.get("content-length") || 0);
+  let loadedBytes = 0;
+  let buffer = "";
+  loadStartedAt = performance.now();
+
+  if (!response.body || !response.body.getReader) {
+    updateLoadingProgress(0, totalBytes, "Downloading frames");
+    const text = await response.text();
+    loadedBytes = text.length;
+    for (const line of text.split(/\n/)) appendFrameLine(line);
+    traceFramesComplete = true;
+    updateLoadingProgress(loadedBytes, totalBytes || loadedBytes, "Frames loaded");
+    hideLoadingOverlay();
+    updatePlaybackAvailability();
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    loadedBytes += value.byteLength;
+    buffer += decoder.decode(value, {stream: true});
+    const lines = buffer.split(/\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) appendFrameLine(line);
+    updateLoadingProgress(loadedBytes, totalBytes, "Streaming frames");
+  }
+  buffer += decoder.decode();
+  appendFrameLine(buffer);
+  traceFramesComplete = true;
+  updateLoadingProgress(loadedBytes, totalBytes || loadedBytes, "Frames loaded");
+  hideLoadingOverlay();
+  updatePlaybackAvailability();
+}
+
+async function bootstrapTrace() {
+  setControlsEnabled(false);
+  updateLoadingProgress(0, 0, "Loading metadata");
+  render();
+  try {
+    await loadTraceMeta();
+    updateLoadingProgress(0, 0, "Connecting to frame stream");
+    await loadTraceFrames();
+  } catch (err) {
+    playing = false;
+    loadingBar.style.width = "100%";
+    loadingStatus.textContent = `Load failed: ${err.message}`;
+    loadingBytes.textContent = "Retry after redeploying the split trace artifacts";
+    play.textContent = "Load failed";
+    setControlsEnabled(false);
+  }
+}
+
 scrub.addEventListener("input", () => { frameIndex = Number(scrub.value); rebuildPassTargets(); render(); });
 play.addEventListener("click", () => {
+  if (play.disabled) return;
   playing = !playing;
   play.textContent = playing ? "Pause" : "Play";
 });
@@ -577,10 +869,11 @@ window.addEventListener("keyup", e => {
   keys.delete(e.code);
   pushInput(false, false);
 });
-buildSlots();
+setControlsEnabled(false);
 updateMetrics();
 render();
 requestAnimationFrame(tick);
+bootstrapTrace();
 </script>
 </body>
 </html>

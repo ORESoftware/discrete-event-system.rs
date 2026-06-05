@@ -147,6 +147,7 @@ pub enum ExternalValidationRuntime {
     NativeCli,
     Java,
     Python,
+    Node,
     Rust,
     Dataset,
     GenericAdapter,
@@ -158,6 +159,7 @@ impl ExternalValidationRuntime {
             ExternalValidationRuntime::NativeCli => "native-cli",
             ExternalValidationRuntime::Java => "java",
             ExternalValidationRuntime::Python => "python",
+            ExternalValidationRuntime::Node => "node",
             ExternalValidationRuntime::Rust => "rust",
             ExternalValidationRuntime::Dataset => "dataset",
             ExternalValidationRuntime::GenericAdapter => "generic-adapter",
@@ -201,6 +203,7 @@ pub enum ExternalValidationArtifactKind {
     None,
     JavaClasspath,
     PythonPackage,
+    NodePackage,
     RustCrate,
     NativeInstallDir,
     BenchmarkDataDir,
@@ -213,6 +216,7 @@ impl ExternalValidationArtifactKind {
             ExternalValidationArtifactKind::None => None,
             ExternalValidationArtifactKind::JavaClasspath => Some("CLASSPATH"),
             ExternalValidationArtifactKind::PythonPackage => Some("PYTHON"),
+            ExternalValidationArtifactKind::NodePackage => Some("NODE_PATH"),
             ExternalValidationArtifactKind::RustCrate => Some("CRATE"),
             ExternalValidationArtifactKind::NativeInstallDir => Some("DIR"),
             ExternalValidationArtifactKind::BenchmarkDataDir => Some("DATA_DIR"),
@@ -2211,12 +2215,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "MOSEK",
         env_key: "MOSEK",
         family: ExternalValidationFamily::NonlinearGlobalSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["mosek"],
         capabilities: NONLINEAR_CAPS,
         input_formats: &["mps", "ptf", "opf", "task", "json"],
-        notes: "Commercial conic, quadratic, and nonlinear optimization solver",
+        notes: "Commercial conic, quadratic, and nonlinear optimization solver via CLI or Python API",
     },
     ExternalValidationToolSpec {
         id: "baron",
@@ -2235,12 +2239,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "COPT",
         env_key: "COPT",
         family: ExternalValidationFamily::NonlinearGlobalSolver,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["copt_cmd", "copt"],
         capabilities: NONLINEAR_CAPS,
         input_formats: &["mps", "lp", "json"],
-        notes: "Commercial LP/QP/QCP/MIP solver CLI for independent checks",
+        notes: "Commercial LP/QP/QCP/MIP solver via CLI or Python API for independent checks",
     },
     ExternalValidationToolSpec {
         id: "nlopt",
@@ -3040,12 +3044,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "JSON Schema",
         env_key: "JSON_SCHEMA",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["check-jsonschema", "jsonschema"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: OUTPUT_FORMATS,
-        notes: "Schema validation for JSON run artifacts and traces",
+        notes: "Schema validation for JSON run artifacts and traces via generic CLI or Python package",
     },
     ExternalValidationToolSpec {
         id: "check-jsonschema",
@@ -3100,12 +3104,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "CSV Validator",
         env_key: "CSV_VALIDATOR",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["csv-validator", "csvlint"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: &["csv", "json"],
-        notes: "CSV/table schema validation adapter for tabular run artifacts",
+        notes: "CSV/table schema validation adapter for tabular run artifacts via CLI or Python csvvalidator",
     },
     ExternalValidationToolSpec {
         id: "openapi-validator",
@@ -3208,20 +3212,20 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "Schematron",
         env_key: "SCHEMATRON",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["schematron-adapter", "jing", "saxon"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: XML_OUTPUT_FORMATS,
-        notes: "Rule-based XML validation adapter for cross-field output constraints",
+        notes: "Rule-based XML validation adapter for cross-field output constraints via generic CLI or Python lxml ISO Schematron",
     },
     ExternalValidationToolSpec {
         id: "jing",
         display_name: "Jing",
         env_key: "JING",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        runtime: ExternalValidationRuntime::Java,
+        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
         command_aliases: &["jing"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: XML_OUTPUT_FORMATS,
@@ -3232,12 +3236,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "Saxon",
         env_key: "SAXON",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::SchemaOrSpecPath,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["saxon", "saxon-he", "saxon9he"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: XML_OUTPUT_FORMATS,
-        notes: "Saxon-backed XML, XPath, and Schematron-style validation adapter",
+        notes: "Saxon-backed XML, XPath, and Schematron-style validation adapter via CLI or Python SaxonC",
     },
     ExternalValidationToolSpec {
         id: "pydantic",
@@ -3256,8 +3260,8 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "Zod",
         env_key: "ZOD",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Node,
+        artifact_kind: ExternalValidationArtifactKind::NodePackage,
         command_aliases: &["zod-adapter"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: OUTPUT_FORMATS,
@@ -3268,8 +3272,8 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "Valibot",
         env_key: "VALIBOT",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::GenericAdapter,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Node,
+        artifact_kind: ExternalValidationArtifactKind::NodePackage,
         command_aliases: &["valibot-adapter"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: OUTPUT_FORMATS,
@@ -3352,12 +3356,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "Apache Avro",
         env_key: "APACHE_AVRO",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::Java,
-        artifact_kind: ExternalValidationArtifactKind::JavaClasspath,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["avro-tools", "avro"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: &["avro", "avsc", "json"],
-        notes: "Apache Avro schema and data-file validation adapter",
+        notes: "Apache Avro schema and data-file validation adapter via CLI or Python package",
     },
     ExternalValidationToolSpec {
         id: "great-expectations",
@@ -3400,12 +3404,12 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         display_name: "SQLFluff",
         env_key: "SQLFLUFF",
         family: ExternalValidationFamily::OutputDataValidator,
-        runtime: ExternalValidationRuntime::NativeCli,
-        artifact_kind: ExternalValidationArtifactKind::None,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
         command_aliases: &["sqlfluff", "sql-lint", "sql-validator"],
         capabilities: OUTPUT_VALIDATOR_CAPS,
         input_formats: SQL_OUTPUT_FORMATS,
-        notes: "SQL linting and structural query validation adapter for relational model outputs",
+        notes: "SQL linting and structural query validation adapter via CLI or Python package",
     },
     ExternalValidationToolSpec {
         id: "whylogs",
@@ -18905,6 +18909,9 @@ pub fn probe_external_validation_tool(
     if tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage {
         return probe_python_validation_package(tool);
     }
+    if tool.artifact_kind == ExternalValidationArtifactKind::NodePackage {
+        return probe_node_validation_package(tool, None);
+    }
 
     ExternalValidationProbe {
         tool_id: tool.id.to_string(),
@@ -19099,6 +19106,8 @@ fn external_validation_python_modules(
         "docplex" => &["docplex"],
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ortools"],
         "scipy-optimize" => &["scipy.optimize", "scipy"],
+        "mosek" => &["mosek"],
+        "copt" => &["coptpy"],
         "nlopt" => &["nlopt"],
         "kissat" => &["pysat.solvers:kissat"],
         "cadical" => &["pysat.solvers:cadical153"],
@@ -19125,12 +19134,16 @@ fn external_validation_python_modules(
         "pybullet" => &["pybullet"],
         "mesa" => &["mesa"],
         "agentpy" => &["agentpy"],
+        "json-schema" => &["jsonschema"],
         "check-jsonschema" => &["check_jsonschema"],
         "openapi-spec-validator" => &["openapi_spec_validator"],
+        "csv-validator" => &["csvvalidator:smoke"],
         "pydantic" => &["pydantic"],
         "marshmallow" => &["marshmallow"],
         "cerberus" => &["cerberus"],
         "python-xmlschema" => &["xmlschema"],
+        "schematron" => &["lxml.isoschematron:smoke"],
+        "saxon" => &["saxonche:smoke"],
         "great-expectations" => &["great_expectations"],
         "pandera" => &["pandera"],
         "whylogs" => &["whylogs"],
@@ -19138,8 +19151,59 @@ fn external_validation_python_modules(
         "evidently" => &["evidently"],
         "deepchecks" => &["deepchecks"],
         "frictionless" => &["frictionless"],
+        "sqlfluff" => &["sqlfluff"],
+        "apache-avro" => &["avro"],
         "apache-arrow" => &["pyarrow"],
         "tensorflow-data-validation" => &["tensorflow_data_validation"],
+        _ => &[],
+    }
+}
+
+fn probe_node_validation_package(
+    tool: &ExternalValidationToolSpec,
+    node_path: Option<&str>,
+) -> ExternalValidationProbe {
+    let Some(node) = default_node_probe_command() else {
+        return ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} needs a local adapter command or Node.js env; set {} or {}",
+                tool.display_name,
+                external_validation_adapter_env_names(tool)[0],
+                external_validation_artifact_hint(tool)
+            ),
+        };
+    };
+    if external_validation_node_modules(tool)
+        .iter()
+        .any(|module| node_can_import(&node, module, node_path))
+    {
+        return ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::Ready,
+            command: Some(node),
+            message: format!("{} Node package is importable", tool.display_name),
+        };
+    }
+    ExternalValidationProbe {
+        tool_id: tool.id.to_string(),
+        status: ExternalValidationProbeStatus::NotConfigured,
+        command: Some(node),
+        message: format!(
+            "{} needs a local adapter command or importable Node package; set {} or {}",
+            tool.display_name,
+            external_validation_adapter_env_names(tool)[0],
+            external_validation_artifact_hint(tool)
+        ),
+    }
+}
+
+fn external_validation_node_modules(tool: &ExternalValidationToolSpec) -> &'static [&'static str] {
+    match tool.id {
+        "zod" => &["zod"],
+        "valibot" => &["valibot"],
         _ => &[],
     }
 }
@@ -19157,6 +19221,9 @@ fn probe_configured_artifact(
             command: None,
             message: format!("{} artifact marker is configured", tool.display_name),
         },
+        ExternalValidationArtifactKind::NodePackage => {
+            probe_node_validation_package(tool, Some(value.as_str()))
+        }
         ExternalValidationArtifactKind::JavaClasspath => {
             let java = find_first_command(&["java"]);
             if java.is_none() {
@@ -19392,6 +19459,44 @@ fn python_can_import(python: &Path, module: &str) -> bool {
         format!(
             "import sys; from pysat.solvers import Solver; solver = Solver(name={solver_name:?}, bootstrap_with=[[1], [-1]]); result = solver.solve(); solver.delete(); sys.exit(0 if result is False else 1)"
         )
+    } else if module == "lxml.isoschematron:smoke" {
+        r#"
+import sys
+from lxml import etree, isoschematron
+schema_doc = etree.XML(b'<schema xmlns="http://purl.oclc.org/dsdl/schematron"><pattern><rule context="item"><assert test="@id">item needs id</assert></rule></pattern></schema>')
+schematron = isoschematron.Schematron(schema_doc)
+valid_doc = etree.XML(b'<root><item id="a"/></root>')
+invalid_doc = etree.XML(b'<root><item/></root>')
+sys.exit(0 if schematron.validate(valid_doc) and not schematron.validate(invalid_doc) else 1)
+"#
+        .to_string()
+    } else if module == "csvvalidator:smoke" {
+        r#"
+import sys
+from csvvalidator import CSVValidator, number_range_inclusive
+validator = CSVValidator(["name", "score"])
+validator.add_header_check()
+validator.add_record_length_check()
+validator.add_value_check("score", number_range_inclusive(0, 10))
+valid = validator.validate([["name", "score"], ["alpha", "7"]])
+invalid = validator.validate([["name", "score"], ["alpha", "11"]])
+sys.exit(0 if not valid and invalid else 1)
+"#
+        .to_string()
+    } else if module == "saxonche:smoke" {
+        r#"
+import sys
+from saxonche import PySaxonProcessor
+with PySaxonProcessor(license=False) as proc:
+    xpath = proc.new_xpath_processor()
+    two = xpath.evaluate_single("1 + 1")
+    xslt = proc.new_xslt30_processor()
+    executable = xslt.compile_stylesheet(stylesheet_text='<xsl:stylesheet version="3.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><ok><xsl:value-of select="count(/root/item)"/></ok></xsl:template></xsl:stylesheet>')
+    node = proc.parse_xml(xml_text="<root><item/><item/></root>")
+    rendered = executable.transform_to_string(xdm_node=node)
+sys.exit(0 if two is not None and two.string_value == "2" and "<ok>2</ok>" in rendered else 1)
+"#
+        .to_string()
     } else if module == "pycsp3" {
         format!(
             "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module:?}) else 1)"
@@ -19402,6 +19507,62 @@ fn python_can_import(python: &Path, module: &str) -> bool {
     Command::new(python)
         .arg("-c")
         .arg(probe)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn default_node_probe_command() -> Option<PathBuf> {
+    node_probe_command_from_env(env::var_os("NODE_BIN"), env::var_os("NODE"))
+        .or_else(|| find_first_command(&["node"]))
+}
+
+fn node_probe_command_from_env(
+    node_bin: Option<OsString>,
+    node: Option<OsString>,
+) -> Option<PathBuf> {
+    node_bin
+        .filter(|value| !value.is_empty())
+        .or_else(|| node.filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+fn node_can_import(node: &Path, module: &str, node_path: Option<&str>) -> bool {
+    let mut esm_import = Command::new(node);
+    esm_import
+        .arg("--input-type=module")
+        .arg("-e")
+        .arg(format!("await import({module:?});"));
+    if let Some(path) = node_path.filter(|path| !path.is_empty()) {
+        esm_import.env("NODE_PATH", path);
+    }
+    if esm_import
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return true;
+    }
+
+    let mut require_resolve = Command::new(node);
+    require_resolve
+        .arg("-e")
+        .arg(
+            r#"
+const { createRequire } = require("module");
+const { pathToFileURL } = require("url");
+const req = createRequire(process.cwd() + "/");
+Promise.resolve()
+  .then(async () => {
+    const resolved = req.resolve(process.argv[1]);
+    await import(pathToFileURL(resolved).href);
+  })
+  .then(() => process.exit(0), () => process.exit(1));
+"#,
+        )
+        .arg(module);
+    if let Some(path) = node_path.filter(|path| !path.is_empty()) {
+        require_resolve.env("NODE_PATH", path);
+    }
+    require_resolve
         .output()
         .is_ok_and(|output| output.status.success())
 }
@@ -19431,14 +19592,15 @@ mod tests {
         external_validation_consensus_report_to_json,
         external_validation_default_artifact_cli_args, external_validation_default_file_cli_args,
         external_validation_default_text_cli_args, external_validation_file_cli_args,
-        external_validation_python_modules, external_validation_tool_specs,
-        find_command_in_install_dir, find_external_validation_tool,
+        external_validation_node_modules, external_validation_python_modules,
+        external_validation_tool_specs, find_command_in_install_dir, find_external_validation_tool,
         find_java_classpath_in_install_dir, infer_external_validation_text_verdict, is_jar_file,
         json_schema_validation_request_to_json, minizinc_validation_request_to_json,
-        prism_validation_model_to_string, prism_validation_properties_to_string,
-        python_probe_command_from_env, run_external_validation_artifact_cli,
-        run_external_validation_consensus, run_external_validation_file_cli,
-        run_external_validation_text_cli, run_model_validation_json_with_rust_reference,
+        node_probe_command_from_env, prism_validation_model_to_string,
+        prism_validation_properties_to_string, python_probe_command_from_env,
+        run_external_validation_artifact_cli, run_external_validation_consensus,
+        run_external_validation_file_cli, run_external_validation_text_cli,
+        run_model_validation_json_with_rust_reference,
         run_output_validation_json_with_rust_reference,
         run_proof_validation_json_with_rust_reference,
         run_simulation_validation_json_with_external_reference,
@@ -19486,6 +19648,26 @@ mod tests {
     }
 
     #[test]
+    fn validation_node_probe_command_honors_node_bin_precedence() {
+        assert_eq!(
+            node_probe_command_from_env(
+                Some(OsString::from("/tmp/node-bin")),
+                Some(OsString::from("/tmp/node")),
+            ),
+            Some(PathBuf::from("/tmp/node-bin")),
+        );
+        assert_eq!(
+            node_probe_command_from_env(None, Some(OsString::from("/tmp/node"))),
+            Some(PathBuf::from("/tmp/node")),
+        );
+        assert_eq!(
+            node_probe_command_from_env(Some(OsString::new()), Some(OsString::from("/tmp/node")),),
+            Some(PathBuf::from("/tmp/node")),
+        );
+        assert_eq!(node_probe_command_from_env(None, None), None);
+    }
+
+    #[test]
     fn python_package_import_map_covers_declared_validation_tools() {
         for tool in external_validation_tool_specs()
             .iter()
@@ -19515,6 +19697,55 @@ mod tests {
             assert!(
                 external_validation_python_modules(tool).contains(&backend),
                 "{tool_id} should probe its concrete PySAT backend"
+            );
+        }
+
+        for (tool_id, module) in [
+            ("mosek", "mosek"),
+            ("copt", "coptpy"),
+            ("apache-avro", "avro"),
+            ("json-schema", "jsonschema"),
+            ("schematron", "lxml.isoschematron:smoke"),
+            ("csv-validator", "csvvalidator:smoke"),
+            ("saxon", "saxonche:smoke"),
+        ] {
+            let tool = find_external_validation_tool(tool_id).unwrap();
+            assert_eq!(tool.runtime, ExternalValidationRuntime::Python);
+            assert_eq!(
+                tool.artifact_kind,
+                ExternalValidationArtifactKind::PythonPackage
+            );
+            assert!(
+                external_validation_python_modules(tool).contains(&module),
+                "{tool_id} should probe its Python API package"
+            );
+        }
+    }
+
+    #[test]
+    fn node_package_import_map_covers_declared_validation_tools() {
+        for tool in external_validation_tool_specs()
+            .iter()
+            .filter(|tool| tool.artifact_kind == ExternalValidationArtifactKind::NodePackage)
+        {
+            assert_eq!(tool.runtime, ExternalValidationRuntime::Node);
+            assert!(
+                !external_validation_node_modules(tool).is_empty(),
+                "{} is declared as a Node package but has no probe module",
+                tool.id
+            );
+        }
+
+        for (tool_id, module) in [("zod", "zod"), ("valibot", "valibot")] {
+            let tool = find_external_validation_tool(tool_id).unwrap();
+            assert_eq!(tool.runtime, ExternalValidationRuntime::Node);
+            assert_eq!(
+                tool.artifact_kind,
+                ExternalValidationArtifactKind::NodePackage
+            );
+            assert!(
+                external_validation_node_modules(tool).contains(&module),
+                "{tool_id} should probe its Node API package"
             );
         }
     }
@@ -21323,6 +21554,16 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "nlopt" && tool.input_formats.contains(&"json") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "mosek"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "copt"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "highs-rust" && tool.input_formats.contains(&"mps") }));
@@ -21610,10 +21851,25 @@ mod tests {
                 && tool.family == ExternalValidationFamily::OutputDataValidator
         }));
         assert!(tools.iter().any(|tool| {
+            tool.id == "json-schema"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+        }));
+        assert!(tools.iter().any(|tool| {
             tool.id == "cue" && tool.family == ExternalValidationFamily::OutputDataValidator
         }));
         assert!(tools.iter().any(|tool| {
-            tool.id == "zod" && tool.family == ExternalValidationFamily::OutputDataValidator
+            tool.id == "zod"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::Node
+                && tool.artifact_kind == ExternalValidationArtifactKind::NodePackage
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "valibot"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::Node
+                && tool.artifact_kind == ExternalValidationArtifactKind::NodePackage
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "dbt" && tool.family == ExternalValidationFamily::OutputDataValidator
@@ -21621,7 +21877,8 @@ mod tests {
         assert!(tools.iter().any(|tool| {
             tool.id == "sqlfluff"
                 && tool.family == ExternalValidationFamily::OutputDataValidator
-                && tool.runtime == ExternalValidationRuntime::NativeCli
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
                 && tool.input_formats.contains(&"sql")
         }));
         assert!(tools.iter().any(|tool| {
@@ -21632,7 +21889,10 @@ mod tests {
             tool.id == "spectral" && tool.family == ExternalValidationFamily::OutputDataValidator
         }));
         assert!(tools.iter().any(|tool| {
-            tool.id == "schematron" && tool.family == ExternalValidationFamily::OutputDataValidator
+            tool.id == "schematron"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "xml-schema" && tool.family == ExternalValidationFamily::OutputDataValidator
@@ -21644,17 +21904,25 @@ mod tests {
             tool.id == "jing" && tool.family == ExternalValidationFamily::OutputDataValidator
         }));
         assert!(tools.iter().any(|tool| {
-            tool.id == "saxon" && tool.family == ExternalValidationFamily::OutputDataValidator
+            tool.id == "saxon"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "csv-validator"
                 && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "protoc" && tool.family == ExternalValidationFamily::OutputDataValidator
         }));
         assert!(tools.iter().any(|tool| {
-            tool.id == "apache-avro" && tool.family == ExternalValidationFamily::OutputDataValidator
+            tool.id == "apache-avro"
+                && tool.family == ExternalValidationFamily::OutputDataValidator
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
         }));
         assert!(tools.iter().any(|tool| {
             tool.id == "frictionless"
@@ -21693,6 +21961,36 @@ mod tests {
         assert_eq!(
             external_validation_artifact_env_names(check_jsonschema)[0],
             "ORES_CHECK_JSONSCHEMA_PYTHON"
+        );
+        let json_schema = find_external_validation_tool("json-schema").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(json_schema)[0],
+            "ORES_JSON_SCHEMA_PYTHON"
+        );
+        let schematron = find_external_validation_tool("schematron").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(schematron)[0],
+            "ORES_SCHEMATRON_PYTHON"
+        );
+        let jing = find_external_validation_tool("jing").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(jing)[0],
+            "ORES_JING_CLASSPATH"
+        );
+        let csv_validator = find_external_validation_tool("csv-validator").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(csv_validator)[0],
+            "ORES_CSV_VALIDATOR_PYTHON"
+        );
+        let saxon = find_external_validation_tool("saxon").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(saxon)[0],
+            "ORES_SAXON_PYTHON"
+        );
+        let zod = find_external_validation_tool("zod").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(zod)[0],
+            "ORES_ZOD_NODE_PATH"
         );
         let sumo = find_external_validation_tool("sumo").unwrap();
         assert!(
@@ -21772,6 +22070,21 @@ mod tests {
             "ORES_NLOPT_PYTHON"
         );
         assert!(external_validation_python_modules(nlopt).contains(&"nlopt"));
+        let mosek = find_external_validation_tool("mosek").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(mosek)[0],
+            "ORES_MOSEK_PYTHON"
+        );
+        assert!(external_validation_artifact_env_names(mosek)
+            .contains(&"MOSEKLM_LICENSE_FILE".to_string()));
+        assert!(external_validation_python_modules(mosek).contains(&"mosek"));
+        let copt = find_external_validation_tool("copt").unwrap();
+        assert_eq!(
+            external_validation_artifact_env_names(copt)[0],
+            "ORES_COPT_PYTHON"
+        );
+        assert!(external_validation_artifact_env_names(copt).contains(&"COPT_HOME".to_string()));
+        assert!(external_validation_python_modules(copt).contains(&"coptpy"));
         let highs_rust = find_external_validation_tool("highs_rust").unwrap();
         assert!(external_validation_command_dir_env_names(highs_rust)
             .contains(&"HIGHS_HOME".to_string()));
@@ -22922,6 +23235,10 @@ mod tests {
         assert_eq!(
             ExternalValidationArtifactKind::SchemaOrSpecPath.env_suffix(),
             Some("SPEC")
+        );
+        assert_eq!(
+            ExternalValidationArtifactKind::NodePackage.env_suffix(),
+            Some("NODE_PATH")
         );
         assert_eq!(ExternalValidationArtifactKind::None.env_suffix(), None);
     }

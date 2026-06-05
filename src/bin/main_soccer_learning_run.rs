@@ -317,6 +317,26 @@ fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<
             "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
             default.defense_compactness_score_weight,
         )?,
+        defense_ball_depth_score_weight: env_f64(
+            "SOCCER_DEFENSE_BALL_DEPTH_SCORE_WEIGHT",
+            default.defense_ball_depth_score_weight,
+        )?,
+        defense_endline_soft_penalty_weight: env_f64(
+            "SOCCER_DEFENSE_ENDLINE_SOFT_PENALTY_WEIGHT",
+            default.defense_endline_soft_penalty_weight,
+        )?,
+        defense_endline_hard_penalty_weight: env_f64(
+            "SOCCER_DEFENSE_ENDLINE_HARD_PENALTY_WEIGHT",
+            default.defense_endline_hard_penalty_weight,
+        )?,
+        defender_midfielder_press_weight: env_f64(
+            "SOCCER_DEFENDER_MIDFIELDER_PRESS_WEIGHT",
+            default.defender_midfielder_press_weight,
+        )?,
+        midfielder_press_weight: env_f64(
+            "SOCCER_MIDFIELDER_PRESS_WEIGHT",
+            default.midfielder_press_weight,
+        )?,
     })
 }
 
@@ -457,6 +477,26 @@ fn validate_tactical_learning_weights(
         (
             "SOCCER_DEFENSE_COMPACTNESS_SCORE_WEIGHT",
             tactical_learning.defense_compactness_score_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_BALL_DEPTH_SCORE_WEIGHT",
+            tactical_learning.defense_ball_depth_score_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_ENDLINE_SOFT_PENALTY_WEIGHT",
+            tactical_learning.defense_endline_soft_penalty_weight,
+        ),
+        (
+            "SOCCER_DEFENSE_ENDLINE_HARD_PENALTY_WEIGHT",
+            tactical_learning.defense_endline_hard_penalty_weight,
+        ),
+        (
+            "SOCCER_DEFENDER_MIDFIELDER_PRESS_WEIGHT",
+            tactical_learning.defender_midfielder_press_weight,
+        ),
+        (
+            "SOCCER_MIDFIELDER_PRESS_WEIGHT",
+            tactical_learning.midfielder_press_weight,
         ),
     ];
     for (name, value) in weights {

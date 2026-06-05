@@ -4129,7 +4129,8 @@ fn solve_native_lp_solve_cli_model(
     let mut command = Command::new(&command_path);
     command
         .arg("-timeout")
-        .arg(glpk_time_limit_arg(opts.time_limit_secs));
+        .arg(glpk_time_limit_arg(opts.time_limit_secs))
+        .arg("-presolve");
     if kind == ExternalLinearCliKind::Lp {
         command.arg("-S4").arg("-wbas").arg(&basis_path);
     } else if kind == ExternalLinearCliKind::Mip {

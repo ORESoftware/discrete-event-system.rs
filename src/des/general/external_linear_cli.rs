@@ -1869,6 +1869,34 @@ pub fn external_linear_cli_command_with_options(
         .or_else(|| external_linear_cli_command(solver))
 }
 
+fn external_linear_cli_env_configured(names: &[&str]) -> bool {
+    names.iter().any(|name| {
+        std::env::var_os(name).is_some_and(|value| !value.to_string_lossy().trim().is_empty())
+    })
+}
+
+fn gams_lindo_command_with_options(opts: &ExternalLinearCliOptions) -> Option<PathBuf> {
+    if opts.solver != ExternalLinearCliSolver::Lindo
+        || opts.command_path.is_some()
+        || external_linear_cli_env_configured(ExternalLinearCliSolver::Lindo.command_env_vars())
+        || external_linear_cli_env_configured(ExternalLinearCliSolver::Lindo.command_dir_env_vars())
+        || external_linear_cli_command(ExternalLinearCliSolver::Lindo).is_some()
+    {
+        return None;
+    }
+    find_first_command(
+        &["ORES_LINDO_GAMS_CMD", "ORES_GAMS_CMD", "GAMS_CMD"],
+        &[
+            "ORES_LINDO_GAMS_DIR",
+            "ORES_GAMS_DIR",
+            "GAMS_HOME",
+            "GAMS_DIR",
+            "GAMSDIR",
+        ],
+        &["gams"],
+    )
+}
+
 /// Probe one solver for installation, bridge support, and a tiny smoke solve.
 pub fn probe_external_linear_cli_solver(
     kind: ExternalLinearCliKind,
@@ -1877,6 +1905,7 @@ pub fn probe_external_linear_cli_solver(
     let t0 = Instant::now();
     let solver = opts.solver;
     let command = external_linear_cli_command_with_options(solver, opts);
+    let command = command.or_else(|| gams_lindo_command_with_options(opts));
     if command.is_none() {
         return ExternalLinearCliProbe {
             kind,
@@ -2561,6 +2590,15 @@ fn solve_lp_with_native_lindo_cli(
     problem: &LPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if let Some(gams_command) = gams_lindo_command_with_options(opts) {
+        return solve_native_lindo_gams_model(
+            ExternalLinearCliKind::Lp,
+            &lp_problem_to_plain_linear_model(problem),
+            &problem.c,
+            opts,
+            &gams_command,
+        );
+    }
     let model_text = lp_problem_to_mps_string(problem);
     solve_native_lindo_cli_model(
         ExternalLinearCliKind::Lp,
@@ -2576,6 +2614,15 @@ fn solve_ipmip_with_native_lindo_cli(
     problem: &IPMIPProblem,
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
+    if let Some(gams_command) = gams_lindo_command_with_options(opts) {
+        return solve_native_lindo_gams_model(
+            ExternalLinearCliKind::Mip,
+            &ipmip_problem_to_plain_linear_model(problem),
+            &problem.c,
+            opts,
+            &gams_command,
+        );
+    }
     let model_text = ipmip_problem_to_mps_string(problem);
     solve_native_lindo_cli_model(
         ExternalLinearCliKind::Mip,
@@ -3323,16 +3370,20 @@ fn solve_native_plain_cli_json_direct(
             solve_native_xpress_cli_model(kind, &model_text, model.c.len(), &model.c, opts)
         }
         ExternalLinearCliSolver::Lindo => {
-            let model_text =
-                plain_linear_model_to_string(&model, ExternalLinearCliModelFormat::Mps, true);
-            solve_native_lindo_cli_model(
-                kind,
-                model.sense,
-                &model_text,
-                model.c.len(),
-                &model.c,
-                opts,
-            )
+            if let Some(gams_command) = gams_lindo_command_with_options(opts) {
+                solve_native_lindo_gams_model(kind, &model, &model.c, opts, &gams_command)
+            } else {
+                let model_text =
+                    plain_linear_model_to_string(&model, ExternalLinearCliModelFormat::Mps, true);
+                solve_native_lindo_cli_model(
+                    kind,
+                    model.sense,
+                    &model_text,
+                    model.c.len(),
+                    &model.c,
+                    opts,
+                )
+            }
         }
         ExternalLinearCliSolver::Glpk => solve_native_glpk_cli_model(
             kind,
@@ -3568,6 +3619,21 @@ fn plain_linear_model_to_lpsolve_lp_string(model: &PlainLinearCliModel) -> Strin
         &model.ubs,
         &model.integer_vars,
     )
+}
+
+fn lp_problem_to_plain_linear_model(problem: &LPProblem) -> PlainLinearCliModel {
+    let n = problem.c.len();
+    PlainLinearCliModel {
+        sense: problem.sense,
+        c: problem.c.clone(),
+        le_rows: problem.a_ub.clone().unwrap_or_default(),
+        le_rhs: problem.b_ub.clone().unwrap_or_default(),
+        eq_rows: problem.a_eq.clone().unwrap_or_default(),
+        eq_rhs: problem.b_eq.clone().unwrap_or_default(),
+        lbs: problem.lb.clone().unwrap_or_else(|| vec![Some(0.0); n]),
+        ubs: problem.ub.clone().unwrap_or_else(|| vec![None; n]),
+        integer_vars: vec![false; n],
+    }
 }
 
 fn ipmip_problem_to_plain_linear_model(problem: &IPMIPProblem) -> PlainLinearCliModel {
@@ -6763,6 +6829,406 @@ fn solve_native_lindo_cli_model(
     }
 }
 
+fn solve_native_lindo_gams_model(
+    kind: ExternalLinearCliKind,
+    model: &PlainLinearCliModel,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+    gams_command: &Path,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "lindo:gams".to_string();
+    let model_path = native_lindo_gams_temp_path("model", "gms");
+    let solution_path = native_lindo_gams_temp_path("solution", "txt");
+    let listing_path = native_lindo_gams_temp_path("listing", "lst");
+    let cleanup_paths = vec![
+        model_path.clone(),
+        solution_path.clone(),
+        listing_path.clone(),
+    ];
+
+    let model_text = gams_lindo_model_text(kind, model, &solution_path, opts);
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_lindo_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write GAMS LINDO model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(gams_command);
+    command
+        .arg(&model_path)
+        .arg("lo=0")
+        .arg(format!("o={}", listing_path.display()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(parent) = gams_command.parent() {
+        command.current_dir(parent);
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_lindo_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start GAMS LINDO executable '{}': {err}",
+                    gams_command.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let listing = fs::read_to_string(&listing_path).unwrap_or_default();
+    let diagnostics = format!("{stdout}\n{stderr}\n{listing}");
+    let solver_version = parse_lindo_solver_version(&diagnostics).or_else(|| {
+        parse_gams_solver_version(&diagnostics).map(|version| format!("GAMS {version}"))
+    });
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &diagnostics, "");
+        cleanup_native_lindo_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &diagnostics, ""),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let solution_text = match fs::read_to_string(&solution_path) {
+        Ok(text) => text,
+        Err(err) => {
+            cleanup_native_lindo_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                format!(
+                    "failed to read GAMS LINDO solution file '{}': {err}",
+                    solution_path.display()
+                ),
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    let parsed = parse_native_lindo_gams_solution_text(&solution_text, model.c.len(), &listing);
+    cleanup_native_lindo_temp_files(&cleanup_paths);
+
+    let status = ExternalLinearCliStatus::from_str(&parsed.status);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            parsed.status,
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let objective = dot_f64(objective_coefficients, &parsed.x);
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(objective),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: (kind == ExternalLinearCliKind::Mip
+            && status == ExternalLinearCliStatus::Optimal)
+            .then_some(objective),
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: (kind == ExternalLinearCliKind::Mip && status == ExternalLinearCliStatus::Optimal)
+            .then_some(0.0),
+        absolute_gap: (kind == ExternalLinearCliKind::Mip
+            && status == ExternalLinearCliStatus::Optimal)
+            .then_some(0.0),
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: parse_gams_iteration_count(&listing),
+        elapsed_ms: elapsed,
+        message: "GAMS LINDO solve".to_string(),
+    }
+}
+
+fn gams_lindo_model_text(
+    kind: ExternalLinearCliKind,
+    model: &PlainLinearCliModel,
+    solution_path: &Path,
+    opts: &ExternalLinearCliOptions,
+) -> String {
+    let mut continuous = Vec::new();
+    let mut binary = Vec::new();
+    let mut general = Vec::new();
+    for i in 0..model.c.len() {
+        let name = gams_var_name(i);
+        if model.integer_vars.get(i).copied().unwrap_or(false) {
+            if is_binary_bound(&model.integer_vars, &model.lbs, &model.ubs, i) {
+                binary.push(name);
+            } else {
+                general.push(name);
+            }
+        } else {
+            continuous.push(name);
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("Variable z;\n");
+    push_gams_declaration(&mut out, "Variables", &continuous);
+    push_gams_declaration(&mut out, "Binary Variables", &binary);
+    push_gams_declaration(&mut out, "Integer Variables", &general);
+    out.push_str("Equations obj");
+    for i in 0..model.le_rows.len() {
+        out.push_str(&format!(", le{i}"));
+    }
+    for i in 0..model.eq_rows.len() {
+        out.push_str(&format!(", eq{i}"));
+    }
+    out.push_str(";\n");
+    out.push_str(&format!("obj.. z =e= {};\n", gams_linear_expr(&model.c)));
+    for (i, (row, rhs)) in model.le_rows.iter().zip(&model.le_rhs).enumerate() {
+        out.push_str(&format!(
+            "le{i}.. {} =l= {};\n",
+            gams_linear_expr(row),
+            fmt_lp_number(*rhs)
+        ));
+    }
+    for (i, (row, rhs)) in model.eq_rows.iter().zip(&model.eq_rhs).enumerate() {
+        out.push_str(&format!(
+            "eq{i}.. {} =e= {};\n",
+            gams_linear_expr(row),
+            fmt_lp_number(*rhs)
+        ));
+    }
+    for i in 0..model.c.len() {
+        let name = gams_var_name(i);
+        if let Some(lower) = model.lbs.get(i).copied().flatten() {
+            if lower.is_finite() {
+                out.push_str(&format!("{name}.lo = {};\n", fmt_lp_number(lower)));
+            }
+        }
+        if let Some(upper) = model.ubs.get(i).copied().flatten() {
+            if upper.is_finite() {
+                out.push_str(&format!("{name}.up = {};\n", fmt_lp_number(upper)));
+            }
+        }
+    }
+    if let Some(seconds) = opts
+        .time_limit_secs
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+    {
+        out.push_str(&format!("option reslim = {};\n", fmt_lp_number(seconds)));
+    }
+    out.push_str("option lp = lindo;\n");
+    out.push_str("option mip = lindo;\n");
+    out.push_str("Model m /all/;\n");
+    let model_kind = if kind == ExternalLinearCliKind::Mip {
+        "mip"
+    } else {
+        "lp"
+    };
+    let direction = match model.sense {
+        Sense::Max => "maximizing",
+        Sense::Min => "minimizing",
+    };
+    out.push_str(&format!("Solve m using {model_kind} {direction} z;\n"));
+    out.push_str(&format!(
+        "File result / {} /;\n",
+        gams_single_quoted_path(solution_path)
+    ));
+    out.push_str("put result;\n");
+    out.push_str("put 'modelstat ' m.modelstat:0:0 /;\n");
+    out.push_str("put 'solvestat ' m.solvestat:0:0 /;\n");
+    out.push_str("put 'objective ' z.l:0:17 /;\n");
+    for i in 0..model.c.len() {
+        out.push_str(&format!("put 'x{i} ' x{i}.l:0:17 /;\n"));
+    }
+    out.push_str("putclose result;\n");
+    out
+}
+
+fn push_gams_declaration(out: &mut String, keyword: &str, names: &[String]) {
+    if !names.is_empty() {
+        out.push_str(keyword);
+        out.push(' ');
+        out.push_str(&names.join(", "));
+        out.push_str(";\n");
+    }
+}
+
+fn gams_var_name(index: usize) -> String {
+    format!("x{index}")
+}
+
+fn gams_linear_expr(coefs: &[f64]) -> String {
+    let mut out = String::new();
+    for (idx, coef) in coefs.iter().copied().enumerate() {
+        if !coef.is_finite() || coef.abs() <= 1.0e-12 {
+            continue;
+        }
+        let magnitude = coef.abs();
+        let term = if (magnitude - 1.0).abs() <= 1.0e-12 {
+            gams_var_name(idx)
+        } else {
+            format!("{}*{}", fmt_lp_number(magnitude), gams_var_name(idx))
+        };
+        if out.is_empty() {
+            if coef < 0.0 {
+                out.push_str("- ");
+            }
+            out.push_str(&term);
+        } else if coef < 0.0 {
+            out.push_str(" - ");
+            out.push_str(&term);
+        } else {
+            out.push_str(" + ");
+            out.push_str(&term);
+        }
+    }
+    if out.is_empty() {
+        "0".to_string()
+    } else {
+        out
+    }
+}
+
+fn gams_single_quoted_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+}
+
+fn parse_native_lindo_gams_solution_text(
+    text: &str,
+    variable_count: usize,
+    listing: &str,
+) -> ParsedNativeNamedSolution {
+    let mut x = vec![0.0; variable_count];
+    let mut modelstat = None;
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        let Some(value) = parts.next().and_then(parse_f64_token) else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("modelstat") {
+            modelstat = Some(value.round() as i32);
+        } else if let Some(index_text) = key.strip_prefix('x') {
+            if let Ok(index) = index_text.parse::<usize>() {
+                if index < x.len() {
+                    x[index] = value;
+                }
+            }
+        }
+    }
+    ParsedNativeNamedSolution {
+        status: gams_model_status(modelstat, listing).to_string(),
+        x,
+    }
+}
+
+fn gams_model_status(modelstat: Option<i32>, listing: &str) -> &'static str {
+    match modelstat {
+        Some(1 | 2) => "optimal",
+        Some(8) => "feasible",
+        Some(3 | 18) => "unbounded",
+        Some(4 | 5 | 6 | 10 | 19) => "infeasible",
+        _ => match classify_native_linear_status("", listing, "") {
+            ExternalLinearCliStatus::Optimal => "optimal",
+            ExternalLinearCliStatus::Feasible => "feasible",
+            ExternalLinearCliStatus::Infeasible => "infeasible",
+            ExternalLinearCliStatus::Unbounded => "unbounded",
+            ExternalLinearCliStatus::NumericalError => "numerical-error",
+            ExternalLinearCliStatus::Unavailable => "unavailable",
+            ExternalLinearCliStatus::Unknown => "unknown",
+        },
+    }
+}
+
+fn parse_gams_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some((_, rest)) = line.split_once("GAMS ") {
+            let version = rest
+                .split_whitespace()
+                .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                .unwrap_or("")
+                .trim();
+            if !version.is_empty() {
+                return Some(version.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_gams_iteration_count(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        let stripped = line.trim();
+        if stripped.starts_with("ITERATION COUNT") {
+            return first_float_after_colon(stripped)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.round() as u64);
+        }
+    }
+    None
+}
+
 fn solve_native_highs_cli_model(
     kind: ExternalLinearCliKind,
     model_text: &str,
@@ -7184,6 +7650,10 @@ fn native_xpress_temp_path(stem: &str, extension: &str) -> PathBuf {
 
 fn native_lindo_temp_path(stem: &str, extension: &str) -> PathBuf {
     native_solver_temp_path("lindo", stem, extension)
+}
+
+fn native_lindo_gams_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("lindo-gams", stem, extension)
 }
 
 fn native_xpress_header_path(solution_path: &Path) -> PathBuf {
@@ -9493,8 +9963,15 @@ fn parse_xpress_solver_version(text: &str) -> Option<String> {
 
 fn parse_lindo_solver_version(text: &str) -> Option<String> {
     for line in text.lines() {
-        for marker in ["LINDO API ", "LINDO Optimizer ", "LINDO "] {
-            if let Some((_, rest)) = line.split_once(marker) {
+        let lower_line = line.to_ascii_lowercase();
+        for marker in [
+            "lindo api version ",
+            "lindo api ",
+            "lindo optimizer ",
+            "lindo ",
+        ] {
+            if let Some(start) = lower_line.find(marker) {
+                let rest = &line[start + marker.len()..];
                 let version = rest
                     .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
                     .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))

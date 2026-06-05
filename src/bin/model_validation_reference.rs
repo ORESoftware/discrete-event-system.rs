@@ -6,6 +6,8 @@ use std::io::{self, Read};
 
 use serde_json::{json, Value};
 
+use des_engine::des::general::external_validation_tools::run_model_validation_json_with_rust_reference;
+
 #[derive(Debug)]
 struct CliError(String);
 
@@ -783,14 +785,7 @@ fn dispatch(payload: &Value, tool_override: Option<&str>) -> Value {
         }
         return brute_force_dimacs(&text);
     }
-    result(
-        "unavailable",
-        "unknown",
-        &tool,
-        format!("unknown model validation payload kind {kind:?}"),
-        "",
-        "",
-    )
+    run_model_validation_json_with_rust_reference(payload, &tool)
 }
 
 fn next_option_value(
@@ -968,5 +963,36 @@ mod tests {
         assert_eq!(output["verdict"], "sat");
         assert_eq!(output["validator"], "rust:minizinc-smoke");
         assert!(output["stdout"].as_str().unwrap().contains("x = 2;"));
+    }
+
+    #[test]
+    fn rust_binding_aliases_delegate_to_shared_model_reference() {
+        for (tool, validator) in [
+            (
+                "gurobi-rust-adapter",
+                "builtin:linear-mip-small-for-gurobi-rust-adapter",
+            ),
+            (
+                "cplex-rust-adapter",
+                "builtin:linear-mip-small-for-cplex-rust-adapter",
+            ),
+        ] {
+            let output = dispatch(
+                &json!({
+                    "kind": "linear-mip-validation",
+                    "sense": "max",
+                    "objective": [3, 2],
+                    "constraints": [
+                        {"coefs": [1, 1], "sense": "<=", "rhs": 1}
+                    ],
+                    "domains": [[0, 1], [0, 1]]
+                }),
+                Some(tool),
+            );
+
+            assert_eq!(output["status"], "ok", "{tool}: {output:?}");
+            assert_eq!(output["verdict"], "optimal", "{tool}: {output:?}");
+            assert_eq!(output["validator"], validator, "{tool}: {output:?}");
+        }
     }
 }

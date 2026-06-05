@@ -6,6 +6,7 @@
 //! wrappers a stable JSON-in/JSON-out contract while keeping jars, native
 //! libraries, and generated executables out of version control.
 
+use super::external_gams_solver_probe::{probe_external_gams_solver, ExternalGamsSolver};
 use super::external_linear_cli::{
     probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
     solve_lower_bounded_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliKind,
@@ -3559,6 +3560,10 @@ pub fn probe_external_optimization_tool(
         };
     }
 
+    if let Some(probe) = probe_gams_backed_native_tool(opts.tool) {
+        return probe;
+    }
+
     match opts.tool.language() {
         ExternalOptimizationLanguage::Java => probe_java_tool(opts),
         ExternalOptimizationLanguage::Python => probe_python_tool(opts),
@@ -3566,6 +3571,30 @@ pub fn probe_external_optimization_tool(
         ExternalOptimizationLanguage::Native => probe_native_tool(opts),
         ExternalOptimizationLanguage::Rust => probe_rust_tool(opts),
     }
+}
+
+fn probe_gams_backed_native_tool(
+    tool: ExternalOptimizationTool,
+) -> Option<ExternalOptimizationProbe> {
+    let solver = match tool {
+        ExternalOptimizationTool::Knitro => ExternalGamsSolver::Knitro,
+        ExternalOptimizationTool::Mosek => ExternalGamsSolver::Mosek,
+        _ => return None,
+    };
+    let probe = probe_external_gams_solver(solver, 10_000);
+    if !probe.ready {
+        return None;
+    }
+    Some(ExternalOptimizationProbe {
+        tool,
+        status: ExternalOptimizationProbeStatus::Ready,
+        command: probe.command,
+        message: format!(
+            "{} via GAMS ready probe: {}",
+            tool.display_name(),
+            probe.message
+        ),
+    })
 }
 
 pub fn run_external_optimization_adapter(

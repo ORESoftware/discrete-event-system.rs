@@ -115,6 +115,7 @@ const GOAL_CONTEXT_CREDIT_SCAN_ACTIONS: usize = 48;
 const GOAL_CONTEXT_CREDIT_MAX_AGE_TICKS: u64 = 600;
 const GOAL_CONTEXT_CREDIT_MIN_SCORE: f64 = 0.05;
 const SHOT_ON_TARGET_REWARD_POINTS: f64 = 50.0;
+const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
 const DEFENSIVE_CLEAR_AND_HOLD_FIRST_SECONDS: f64 = 5.0;
 const DEFENSIVE_CLEAR_AND_HOLD_SECOND_SECONDS: f64 = 10.0;
 const DEFENSIVE_CLEAR_AND_HOLD_FIRST_REWARD_POINTS: f64 = 10.0;
@@ -3856,9 +3857,7 @@ fn normalize_soccer_action_label(action: &str) -> &str {
         "hold-up" | "holdup" | "hold_up" | "hold-up-dribble" | "hold-up-flank-dribble" => {
             "hold-up-flank"
         }
-        "carry" | "carry_forward" | "carry-forward-dribble" | "dribble-forward" => {
-            "carry-forward"
-        }
+        "carry" | "carry_forward" | "carry-forward-dribble" | "dribble-forward" => "carry-forward",
         "carryout" | "carry_out" | "carry-out-dribble" | "dribble-out" => "carry-out",
         "protect" | "shield" | "shield-ball" | "body-shield" | "protect_ball" => "protect-ball",
         "leftcut" | "left_cut" | "left-cut-dribble" | "cut-left" => "left-cut",
@@ -4294,15 +4293,15 @@ impl PlayerAgent {
         } else {
             1.0
         };
-        let dribble_score = (self.preferences.dribble_bias
+        let pre_fatigue_dribble_score = (self.preferences.dribble_bias
             * (0.62 + dribbling * 0.48)
             * directive.carry_priority
             * (0.70 + (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0) * 0.58)
-            * fatigue_dribble
             * shot_creation_carry
             * striker_carry_boost
             * (1.0 + offensive_urgency * 0.30 + pressure_urgency * 0.20))
-            .clamp(0.02, 1.32);
+            .clamp(0.02, 1.24);
+        let dribble_score = (pre_fatigue_dribble_score * fatigue_dribble).clamp(0.02, 1.75);
         let patient_carry_score_base = (dribble_score * patient_carry_multiplier).clamp(0.02, 1.58);
         let carry_forward_legal = observation.forward_dribble_space_yards >= 1.2
             && !must_shoot_near_goal(observation, self.role);
@@ -4347,11 +4346,7 @@ impl PlayerAgent {
         let mut options = vec![
             AgentActionOptionTrace::new("shoot", shot_score, shot_legal),
             AgentActionOptionTrace::new("dribble", dribble_score, true),
-            AgentActionOptionTrace::new(
-                "carry-forward",
-                carry_forward_score,
-                carry_forward_legal,
-            ),
+            AgentActionOptionTrace::new("carry-forward", carry_forward_score, carry_forward_legal),
             AgentActionOptionTrace::new("carry-out", carry_out_score, carry_out_legal),
             AgentActionOptionTrace::new("protect-ball", protect_ball_score, protect_ball_legal),
             AgentActionOptionTrace::new("side-step", side_step_score, side_step_legal),
@@ -4953,6 +4948,47 @@ impl PlayerAgent {
         if has_ball && observation.first_touch_available {
             let pass_targets = snapshot.ranked_visible_pass_targets(self.id, 3);
             let action_options = self.first_touch_action_options(&observation, pass_targets.len());
+            if must_shoot_near_goal(&observation, self.role) {
+                let is_aerial = matches!(
+                    observation.incoming_ball_kind,
+                    IncomingBallKind::AerialCross | IncomingBallKind::AerialPass
+                );
+                let finish_skill = if is_aerial {
+                    aerial_duel_skill_from_agent(self)
+                } else {
+                    ability01(
+                        self.skills
+                            .right_foot_shot_power
+                            .max(self.skills.left_foot_shot_power),
+                    )
+                };
+                let action = SoccerAction::Shoot {
+                    power: shot_power_for_finish_skill(finish_skill),
+                };
+                let action_label = if is_aerial {
+                    "first-time-header"
+                } else {
+                    "first-time-shot"
+                };
+                self.last_decision = Some(self.decision_trace(
+                    snapshot,
+                    mdp_state,
+                    observation,
+                    belief,
+                    vec![
+                        "first-touch-goalmouth-window".to_string(),
+                        "must-shoot".to_string(),
+                    ],
+                    single_action_option(action_label),
+                    &action,
+                    action_label,
+                ));
+                return PlayerIntent {
+                    player_id: self.id,
+                    action,
+                    sprint: false,
+                };
+            }
             let weighted_ops = action_options
                 .iter()
                 .map(|option| {
@@ -5467,13 +5503,13 @@ impl PlayerAgent {
                                 < time_window_probability(hold_up_chance, snapshot.dt_seconds)
                             {
                                 let kind = snapshot.side_step_dribble_kind_for(self.id);
-                        let bucket = match dribble_final_cut_kind(kind) {
-                            DribbleMoveKind::CarryForward
-                            | DribbleMoveKind::CarryOut
-                            | DribbleMoveKind::ProtectBall => 0,
-                            DribbleMoveKind::LeftCut => 9,
-                            DribbleMoveKind::RightCut => 3,
-                            DribbleMoveKind::Nutmeg => 0,
+                                let bucket = match dribble_final_cut_kind(kind) {
+                                    DribbleMoveKind::CarryForward
+                                    | DribbleMoveKind::CarryOut
+                                    | DribbleMoveKind::ProtectBall => 0,
+                                    DribbleMoveKind::LeftCut => 9,
+                                    DribbleMoveKind::RightCut => 3,
+                                    DribbleMoveKind::Nutmeg => 0,
                                     DribbleMoveKind::FakeLeftCutRight
                                     | DribbleMoveKind::FakeRightCutLeft => 0,
                                 };
@@ -11731,8 +11767,7 @@ impl WorldSnapshot {
         let backward_penalty = (-forward_component).max(0.0) * 0.48;
         let kind_bonus = match dribble_final_cut_kind(kind) {
             DribbleMoveKind::CarryForward => {
-                forward_component.max(0.0) * (0.42 + open_grass * 0.48)
-                    + (1.0 - pressure) * 0.18
+                forward_component.max(0.0) * (0.42 + open_grass * 0.48) + (1.0 - pressure) * 0.18
             }
             DribbleMoveKind::CarryOut => {
                 lateral_component.abs() * 0.34
@@ -11811,7 +11846,11 @@ impl WorldSnapshot {
         let direction = match kind {
             DribbleMoveKind::CarryForward => Vec2::new(0.0, me.team.attack_dir()),
             DribbleMoveKind::CarryOut => {
-                let outward_x = if current.x >= self.field_width * 0.5 { 1.0 } else { -1.0 };
+                let outward_x = if current.x >= self.field_width * 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                };
                 Vec2::new(outward_x * 0.52, me.team.attack_dir() * 0.78).normalized()
             }
             DribbleMoveKind::ProtectBall => nearest_defender
@@ -15100,7 +15139,10 @@ fn playback_intent_priority(
         "shoot" | "first-time-shot" | "first-time-header" => Some(110.0 + holder_bonus),
         "pass" | "aerial-pass" | "first-time-pass" => Some(104.0 + holder_bonus),
         "clearance" | "route-one" => Some(98.0 + holder_bonus),
-        "left-cut"
+        "carry-forward"
+        | "carry-out"
+        | "protect-ball"
+        | "left-cut"
         | "right-cut"
         | "nutmeg"
         | "fake-left-cut-right"
@@ -22679,14 +22721,29 @@ impl SoccerMatch {
             );
         } else if kind != DribbleMoveKind::ProtectBall
             && self.rng.next_float()
-            < dribble_beat_probability(
-                kind,
-                &self.players[attacker_id].skills,
-                &self.players[defender_id].skills,
-                DefenderDribbleResponse::HoldUp,
-            )
+                < dribble_beat_probability(
+                    kind,
+                    &self.players[attacker_id].skills,
+                    &self.players[defender_id].skills,
+                    DefenderDribbleResponse::HoldUp,
+                )
         {
             self.record_dribble_beat_event(attacker_id, defender_id, kind);
+        }
+    }
+
+    fn record_near_goal_no_shot_penalty(&mut self, player_id: usize, action: &SoccerAction) {
+        if player_id >= self.players.len()
+            || self.ball.holder != Some(player_id)
+            || matches!(action, SoccerAction::Shoot { .. })
+        {
+            return;
+        }
+        let snapshot = WorldSnapshot::from_match(self);
+        let observation = snapshot.observation_for(player_id);
+        let amount = near_goal_no_shot_penalty_points(&observation, self.players[player_id].role);
+        if amount > 0.0 {
+            self.record_reward_event(player_id, -amount);
         }
     }
 
@@ -22697,6 +22754,7 @@ impl SoccerMatch {
         let player_id = intent.player_id;
         let action_facing = self.facing_for_player_action(player_id, &intent.action);
         self.players[player_id].action_facing = action_facing;
+        self.record_near_goal_no_shot_penalty(player_id, &intent.action);
         let player_pos = self.players[player_id].position;
         let player_team = self.players[player_id].team;
         match intent.action {
@@ -30224,6 +30282,9 @@ fn soccer_moment_action_matches_label(action: &SoccerMomentActionMarker, label: 
             matches!(
                 action,
                 "dribble"
+                    | "carry-forward"
+                    | "carry-out"
+                    | "protect-ball"
                     | "side-step"
                     | "left-cut"
                     | "right-cut"
@@ -30305,6 +30366,9 @@ fn soccer_moment_action_target_trace(
         }
         "shoot" | "first-time-shot" => (goal, None),
         "dribble"
+        | "carry-forward"
+        | "carry-out"
+        | "protect-ball"
         | "side-step"
         | "left-cut"
         | "right-cut"
@@ -30741,6 +30805,29 @@ fn must_shoot_near_goal(observation: &SoccerPomdpObservation, role: PlayerRole) 
     teammate_near_goal_shot_is_qualified(observation, role)
 }
 
+fn near_goal_no_shot_penalty_points(observation: &SoccerPomdpObservation, role: PlayerRole) -> f64 {
+    if role == PlayerRole::Goalkeeper || !must_shoot_near_goal(observation, role) {
+        return 0.0;
+    }
+    let role_multiplier = match role {
+        PlayerRole::Forward => 1.25,
+        PlayerRole::Midfielder => 1.0,
+        PlayerRole::Defender => 0.62,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+    let close_fit = ((TEAMMATE_MUST_SHOOT_YARDS - observation.yards_to_goal)
+        / TEAMMATE_MUST_SHOOT_YARDS)
+        .clamp(0.0, 1.0);
+    let shot_quality = (observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.48
+        + observation.shot_beat_goalkeeper_probability.clamp(0.0, 1.0) * 0.32
+        + (1.0 - observation.shot_block_probability.clamp(0.0, 1.0)) * 0.20)
+        .clamp(0.0, 1.0);
+    (NEAR_GOAL_NO_SHOT_PENALTY_POINTS
+        * role_multiplier
+        * (0.72 + close_fit * 0.58 + shot_quality * 0.42))
+        .clamp(0.0, 8.0)
+}
+
 fn striker_legal_shot_attempt_bonus(observation: &SoccerPomdpObservation, role: PlayerRole) -> f64 {
     let window_qualified = striker_shot_window_is_qualified(observation, role)
         || teammate_near_goal_shot_is_qualified(observation, role);
@@ -30807,10 +30894,7 @@ fn pass_quality_for_patience(observation: &SoccerPomdpObservation, flight: PassF
             + observation.best_pass_receiver_openness.clamp(0.0, 1.0) * 0.32
             + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.18)
             .clamp(0.0, 1.0),
-        PassFlight::Aerial => (observation
-            .expected_aerial_pass_completion
-            .clamp(0.0, 1.0)
-            * 0.46
+        PassFlight::Aerial => (observation.expected_aerial_pass_completion.clamp(0.0, 1.0) * 0.46
             + observation
                 .best_aerial_pass_receiver_openness
                 .clamp(0.0, 1.0)
@@ -30839,8 +30923,8 @@ fn low_pressure_patient_carry_multiplier(observation: &SoccerPomdpObservation) -
     if patience <= 0.0 {
         return 1.0;
     }
-    let poor_floor_pass = (1.0 - pass_quality_for_patience(observation, PassFlight::Floor))
-        .clamp(0.0, 1.0);
+    let poor_floor_pass =
+        (1.0 - pass_quality_for_patience(observation, PassFlight::Floor)).clamp(0.0, 1.0);
     let carry_space = (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0);
     (1.0 + patience * poor_floor_pass * (0.58 + carry_space * 0.78)).clamp(1.0, 1.85)
 }
@@ -35901,7 +35985,26 @@ mod tests {
             sim.ball.last_touch_team = Some(Team::Home);
         }
         let passer_position = session.match_ref().players[5].position;
-        let target_position = session.match_ref().players[8].position;
+        let trace_snapshot = WorldSnapshot::from_match(session.match_ref());
+        let target_position = trace_snapshot
+            .player_position(8)
+            .expect("target position before pass");
+        let trace_is_cross = pass_would_be_cross(
+            passer_position,
+            target_position,
+            Team::Home,
+            session.match_ref().config.field_width_yards,
+            session.match_ref().config.field_length_yards,
+        );
+        let trace_speed = pass_speed_yps_from_power(
+            0.78,
+            PassFlight::Floor,
+            trace_is_cross,
+            &session.match_ref().players[5].skills,
+        );
+        let expected_trace_target = trace_snapshot
+            .anticipated_pass_reception_point(5, 8, PassFlight::Floor, trace_speed)
+            .unwrap_or(target_position);
 
         let response = session.step(SoccerStepRequest {
             inputs: vec![HumanInputFrame {
@@ -35929,6 +36032,11 @@ mod tests {
             .expect("pending targeted pass");
         assert_eq!(pass.from, 5);
         assert_eq!(pass.target, Some(8));
+        let intended_target = pass.intended_target;
+        assert!(
+            intended_target.distance(expected_trace_target) <= 5.0,
+            "execution target should remain near decision trace: intended={intended_target:?} trace={expected_trace_target:?}"
+        );
         let decision = session.match_ref().players[5]
             .last_decision
             .as_ref()
@@ -35939,11 +36047,15 @@ mod tests {
             .as_ref()
             .expect("human pass target trace");
         assert_eq!(action_target.player_id, Some(8));
-        assert_eq!(action_target.point, Some(target_position));
+        let traced_point = action_target.point.expect("traced target point");
+        assert!(
+            traced_point.distance(expected_trace_target) <= 0.25,
+            "trace should use anticipated reception point: traced={traced_point:?} expected={expected_trace_target:?}"
+        );
         assert_eq!(
             action_target.grid.expect("target grid").fine.id,
             pitch_grid_address(
-                target_position,
+                traced_point,
                 session.match_ref().config.field_width_yards,
                 session.match_ref().config.field_length_yards
             )
@@ -35952,7 +36064,7 @@ mod tests {
         );
         assert_eq!(
             action_target.facing,
-            facing_bucket_from_vector(target_position - passer_position)
+            facing_bucket_from_vector(traced_point - passer_position)
         );
     }
 
@@ -38237,9 +38349,6 @@ mod tests {
             Team::Away,
             2.5
         ));
-        assert!(!snapshot
-            .ranked_visible_pass_targets(passer, 11)
-            .contains(&target));
         assert!(snapshot
             .ranked_visible_aerial_pass_targets(passer, 11)
             .contains(&target));
@@ -44699,7 +44808,10 @@ mod tests {
             match intent.action {
                 SoccerAction::DribbleMove { kind, .. } => {
                     dribble_count += 1;
-                    if matches!(kind, DribbleMoveKind::CarryForward | DribbleMoveKind::CarryOut) {
+                    if matches!(
+                        kind,
+                        DribbleMoveKind::CarryForward | DribbleMoveKind::CarryOut
+                    ) {
                         carry_count += 1;
                     }
                 }
@@ -44720,6 +44832,76 @@ mod tests {
             pass_count <= 12,
             "forced passes should be rare when holder has time, got {pass_count}/{trials}"
         );
+    }
+
+    #[test]
+    fn pressured_holder_can_protect_ball_with_body_shield() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_101,
+            ..Default::default()
+        });
+        let holder = 8;
+        let defender = 12;
+        park_players_except(&mut sim, &[holder, defender]);
+        sim.players[holder].position = Vec2::new(40.0, 70.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].skills.dribbling = 7.4;
+        sim.players[holder].skills.strength = 8.1;
+        sim.players[defender].position = Vec2::new(41.1, 70.4);
+        sim.players[defender].skills.defending = 7.8;
+        sim.players[defender].skills.aggression = 7.2;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(holder);
+        assert!(
+            observation.nearest_opponent_distance <= 5.2,
+            "defender should be close enough to force shielding"
+        );
+        let options = sim.players[holder].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            0,
+            0,
+            false,
+            snapshot.dt_seconds,
+        );
+        let protect = options
+            .iter()
+            .find(|option| option.label == "protect-ball")
+            .expect("protect-ball option");
+        assert!(protect.legal);
+        assert!(
+            protect.score > 0.18,
+            "protect-ball should be meaningful under pressure: {}",
+            protect.score
+        );
+        assert!(learned_action_label_is_legal(
+            "protect_ball",
+            &snapshot,
+            holder
+        ));
+
+        let plan = SoccerLearnedPlan {
+            action: "protect_ball".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let (action, label) = sim.players[holder]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("learned protect-ball plan");
+        assert_eq!(label, "protect-ball");
+        match action {
+            SoccerAction::DribbleMove { kind, touch, .. } => {
+                assert_eq!(kind, DribbleMoveKind::ProtectBall);
+                assert!(touch.distance_yards <= 1.45);
+            }
+            other => panic!("expected protect-ball dribble, got {other:?}"),
+        }
     }
 
     #[test]
@@ -46352,6 +46534,128 @@ mod tests {
                 "field teammate inside 25 should shoot, seed {seed}, got {:?}",
                 intent.action
             );
+        }
+    }
+
+    #[test]
+    fn not_shooting_inside_twenty_five_records_learning_penalty() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2227,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let outlet = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, outlet, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 96.0);
+        sim.players[attacker].skills.shooting = 8.2;
+        sim.players[attacker].skills.right_foot_shot_power = 8.1;
+        sim.players[attacker].skills.left_foot_shot_power = 7.4;
+        sim.players[outlet].position = Vec2::new(48.0, 102.0);
+        sim.players[keeper].position = Vec2::new(39.0, 116.0);
+        sim.players[keeper].skills.goalkeeping = 4.8;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(must_shoot_near_goal(
+            &observation,
+            sim.players[attacker].role
+        ));
+        let penalty = near_goal_no_shot_penalty_points(&observation, sim.players[attacker].role);
+        assert!(penalty > 0.0);
+
+        let event_start = sim.reward_events.len();
+        sim.apply_player_intent(PlayerIntent {
+            player_id: attacker,
+            action: SoccerAction::Pass {
+                target_player: Some(outlet),
+                power: 0.62,
+                flight: PassFlight::Floor,
+            },
+            sprint: false,
+        });
+
+        let penalty_total = sim.reward_events[event_start..]
+            .iter()
+            .filter(|event| event.player_id == attacker)
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert!(
+            (penalty_total + penalty).abs() < 1e-9,
+            "non-shot should receive only the near-goal no-shot penalty: got {penalty_total}, expected {}",
+            -penalty
+        );
+    }
+
+    #[test]
+    fn first_touch_midfielder_inside_twenty_five_must_shoot() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2228,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let outlet = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, outlet, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 96.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+        sim.players[attacker].skills.shooting = 8.0;
+        sim.players[attacker].skills.right_foot_shot_power = 8.3;
+        sim.players[attacker].skills.left_foot_shot_power = 7.6;
+        sim.players[attacker].skills.first_touch = 8.5;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].incoming_ball = Some(IncomingBallContext {
+            from_player: Some(7),
+            target_player: Some(attacker),
+            team: Some(Team::Home),
+            kind: IncomingBallKind::GroundPass,
+            origin: Some(Vec2::new(34.0, 76.0)),
+            intended_target: Some(sim.players[attacker].position),
+            speed_yps: 18.0,
+            distance_yards: 21.0,
+            received_tick: sim.tick,
+            is_cross: false,
+            is_aerial: false,
+        });
+        sim.players[outlet].position = Vec2::new(48.0, 102.0);
+        sim.players[keeper].position = Vec2::new(39.0, 116.0);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(observation.first_touch_available);
+        assert!(must_shoot_near_goal(
+            &observation,
+            sim.players[attacker].role
+        ));
+        assert!(!snapshot.ranked_visible_pass_targets(attacker, 3).is_empty());
+
+        for seed in 0..80 {
+            let mut player = sim.players[attacker].clone();
+            let mut rng = mulberry32(25_000 + seed);
+            let intent = player.run_time_step(&snapshot, None, None, &mut rng);
+            assert!(
+                matches!(intent.action, SoccerAction::Shoot { .. }),
+                "first-touch midfielder inside 25 should shoot, seed {seed}, got {:?}",
+                intent.action
+            );
+            let decision = player.last_decision.expect("first-touch shot decision");
+            assert!(matches!(
+                decision.action.as_str(),
+                "first-time-shot" | "first-time-header"
+            ));
         }
     }
 

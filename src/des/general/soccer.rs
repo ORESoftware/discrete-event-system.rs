@@ -10519,6 +10519,13 @@ impl WorldSnapshotOptions {
         include_player_decisions: false,
         include_ball_history: true,
     };
+
+    const LIVE_HTTP_FRAME: Self = Self {
+        include_player_histories: true,
+        include_shared_histories: false,
+        include_player_decisions: false,
+        include_ball_history: true,
+    };
 }
 
 impl WorldSnapshot {
@@ -24674,11 +24681,22 @@ impl SoccerMatch {
     }
 
     fn to_live_http_frame(&self) -> MatchFrame {
-        self.to_frame_with_policy_traces(false)
+        self.to_frame_with_snapshot_options(false, WorldSnapshotOptions::LIVE_HTTP_FRAME)
     }
 
     fn to_frame_with_policy_traces(&self, include_learned_policy_traces: bool) -> MatchFrame {
-        let snapshot = WorldSnapshot::from_match(self);
+        self.to_frame_with_snapshot_options(
+            include_learned_policy_traces,
+            WorldSnapshotOptions::FULL,
+        )
+    }
+
+    fn to_frame_with_snapshot_options(
+        &self,
+        include_learned_policy_traces: bool,
+        snapshot_options: WorldSnapshotOptions,
+    ) -> MatchFrame {
+        let snapshot = WorldSnapshot::from_match_with_options(self, snapshot_options);
         let central_brain = self.central_brain.to_snapshot(&snapshot, &self.officials);
         let home_brain = self.team_brain_snapshot(Team::Home, &central_brain);
         let away_brain = self.team_brain_snapshot(Team::Away, &central_brain);
@@ -24697,6 +24715,12 @@ impl SoccerMatch {
         for player in &mut players {
             if include_learned_policy_traces {
                 player.learned_policy = self.learned_policy_trace_for_player(&snapshot, player.id);
+            } else if self.ball.holder == Some(player.id) || player.controller_slot.is_some() {
+                player.last_decision = self
+                    .players
+                    .iter()
+                    .find(|agent| agent.id == player.id)
+                    .and_then(|agent| agent.last_decision.clone());
             }
             player.scheduled_index = self
                 .last_agent_schedule
@@ -26114,6 +26138,7 @@ impl SoccerMatch {
                 power,
                 flight,
             } => {
+                let mut release_facing = action_facing;
                 if self.ball.holder == Some(player_id) {
                     let snapshot = WorldSnapshot::from_match(self);
                     let observation = snapshot.observation_for(player_id);
@@ -26263,6 +26288,11 @@ impl SoccerMatch {
                             );
                         }
                     }
+                    let resolved_facing = facing_bucket_from_vector(launch_target - player_pos);
+                    if resolved_facing != FacingBucket::Unknown {
+                        release_facing = resolved_facing;
+                        self.players[player_id].action_facing = resolved_facing;
+                    }
                     self.ball.holder = None;
                     self.ball.position = player_pos;
                     self.ball.velocity = (launch_target - player_pos).normalized() * speed;
@@ -26314,16 +26344,26 @@ impl SoccerMatch {
                     self.stat_pass_attempt(player_team);
                 }
                 self.move_player_towards(player_id, self.players[player_id].home_position, false);
+                if release_facing != FacingBucket::Unknown {
+                    self.players[player_id].action_facing = release_facing;
+                }
             }
             SoccerAction::Clearance { target, power } => {
                 self.launch_untargeted_long_ball(player_id, target, power, "clearance");
                 self.move_player_towards(player_id, self.players[player_id].home_position, false);
+                if action_facing != FacingBucket::Unknown {
+                    self.players[player_id].action_facing = action_facing;
+                }
             }
             SoccerAction::RouteOne { target, power } => {
                 self.launch_untargeted_long_ball(player_id, target, power, "route-one");
                 self.move_player_towards(player_id, self.players[player_id].home_position, false);
+                if action_facing != FacingBucket::Unknown {
+                    self.players[player_id].action_facing = action_facing;
+                }
             }
             SoccerAction::Shoot { power } => {
+                let mut release_facing = action_facing;
                 if self.ball.holder == Some(player_id) {
                     let snapshot = WorldSnapshot::from_match(self);
                     let observation = snapshot.observation_for(player_id);
@@ -26398,6 +26438,11 @@ impl SoccerMatch {
                             );
                         }
                     }
+                    let resolved_facing = facing_bucket_from_vector(launch_target - player_pos);
+                    if resolved_facing != FacingBucket::Unknown {
+                        release_facing = resolved_facing;
+                        self.players[player_id].action_facing = resolved_facing;
+                    }
                     self.ball.holder = None;
                     self.ball.position = player_pos;
                     self.ball.velocity = (launch_target - player_pos).normalized() * speed;
@@ -26423,6 +26468,9 @@ impl SoccerMatch {
                     });
                 }
                 self.move_player_towards(player_id, self.players[player_id].home_position, false);
+                if release_facing != FacingBucket::Unknown {
+                    self.players[player_id].action_facing = release_facing;
+                }
             }
             SoccerAction::Tackle { target_player } => {
                 self.stats.tackles += 1;
@@ -29092,15 +29140,13 @@ impl SoccerRealtimeSession {
         let events = self.sim.events[self.emitted_event_cursor..].to_vec();
         self.capture_moments_for_events(&events);
         self.emitted_event_cursor = self.sim.events.len();
-        let learning_transitions =
-            self.sim.learning_transitions[self.emitted_learning_cursor..].to_vec();
         self.emitted_learning_cursor = self.sim.learning_transitions.len();
 
         SoccerStepResponse {
             frame: self.sim.to_live_http_frame(),
             frames: Vec::new(),
             events,
-            learning_transitions,
+            learning_transitions: Vec::new(),
             recent_moments: self.recent_moment_summaries(),
             moment_storage: self.moment_storage_status(),
             learning: self.sim.learning_stats_snapshot(),
@@ -43638,6 +43684,76 @@ mod tests {
     }
 
     #[test]
+    fn pass_and_shot_preserve_release_facing_after_recovery_movement() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1410,
+            ..Default::default()
+        });
+        let passer = 5;
+        let receiver = 8;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].position = Vec2::new(40.0, 60.0);
+        sim.players[passer].home_position = Vec2::new(20.0, 20.0);
+        sim.players[passer].velocity = Vec2::zero();
+        sim.players[passer].action_facing = FacingBucket::Unknown;
+        sim.players[passer].skills.passing = 10.0;
+        sim.players[passer].skills.passing_completion_rate = 10.0;
+        sim.players[passer].skills.flair_passing = 1.0;
+        sim.players[receiver].position = Vec2::new(72.0, 60.0);
+        sim.players[receiver].velocity = Vec2::zero();
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: passer,
+            action: SoccerAction::Pass {
+                target_player: Some(receiver),
+                power: 0.64,
+                flight: PassFlight::Floor,
+            },
+            sprint: false,
+        });
+
+        assert_eq!(sim.ball.holder, None);
+        assert_eq!(
+            sim.pending_pass.as_ref().map(|pass| pass.from),
+            Some(passer)
+        );
+        assert_eq!(sim.players[passer].action_facing, FacingBucket::East);
+
+        let mut shot_sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1411,
+            ..Default::default()
+        });
+        let shooter = 9;
+        park_players_except(&mut shot_sim, &[shooter]);
+        shot_sim.players[shooter].position = Vec2::new(40.0, 90.0);
+        shot_sim.players[shooter].home_position = Vec2::new(20.0, 20.0);
+        shot_sim.players[shooter].velocity = Vec2::zero();
+        shot_sim.players[shooter].action_facing = FacingBucket::Unknown;
+        shot_sim.players[shooter].skills.shooting = 10.0;
+        shot_sim.ball.holder = Some(shooter);
+        shot_sim.ball.position = shot_sim.players[shooter].position;
+        shot_sim.ball.last_touch_team = Some(Team::Home);
+
+        shot_sim.apply_player_intent(PlayerIntent {
+            player_id: shooter,
+            action: SoccerAction::Shoot { power: 1.0 },
+            sprint: false,
+        });
+
+        assert_eq!(shot_sim.ball.holder, None);
+        assert_eq!(
+            shot_sim.pending_shot.as_ref().map(|shot| shot.shooter),
+            Some(shooter)
+        );
+        assert_eq!(shot_sim.players[shooter].action_facing, FacingBucket::South);
+    }
+
+    #[test]
     fn pomdp_observation_includes_goal_keeper_pressure_and_forward_space_features() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -53072,6 +53188,52 @@ mod tests {
         }
 
         assert!(saw_save);
+    }
+
+    #[test]
+    fn live_http_frame_builder_avoids_full_snapshot_churn() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 56,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.run_time_step();
+
+        let holder_id = sim.ball.holder.expect("live frame holder");
+        let frame = sim.to_live_http_frame();
+
+        assert!(
+            frame.shared_positions.histories.is_empty(),
+            "live HTTP frames should not clone duplicate shared position histories"
+        );
+        assert!(
+            frame
+                .players
+                .iter()
+                .any(|player| !player.position_history.is_empty()),
+            "live HTTP frames still expose per-player 50-position motion history"
+        );
+        assert!(
+            !frame.intents.is_empty(),
+            "live HTTP frames should expose compact intent traces for the UI"
+        );
+        let holder = frame
+            .players
+            .iter()
+            .find(|player| player.id == holder_id)
+            .expect("holder frame");
+        assert!(
+            holder.last_decision.is_some(),
+            "holder keeps the full decision trace for UI/inspection"
+        );
+        assert!(
+            frame
+                .players
+                .iter()
+                .any(|player| player.id != holder_id && player.last_decision.is_none()),
+            "autonomous non-holders should avoid cloned full decision traces"
+        );
     }
 
     #[test]

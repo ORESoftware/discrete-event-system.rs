@@ -1,0 +1,25 @@
+--- Job smoke.gms Start 06/05/26 13:03:22 53.5.1 f2e5fac3 DAX-DAC arm 64bit/macOS
+--- Applying:
+    /private/tmp/des-rs-gams-53.5.1-arm64/Resources/gmsprmun.txt
+--- GAMS Parameters defined
+    Input /private/tmp/des-rs-gams-smoke-3091/smoke.gms
+    Output /private/tmp/des-rs-gams-smoke-moved.lst
+    ScrDir /Users/maca5/codes/ores/discrete-event-system.rs/225a/
+    SysDir /private/tmp/des-rs-gams-53.5.1-arm64/Resources/
+    LogOption 2
+    LogFile /Users/maca5/codes/ores/discrete-event-system.rs/smoke.log
+    AppendLog 1
+Licensee: GAMS Demo, for EULA and demo limitations see   G260130+0003Cc-GEN
+          https://www.gams.com/latest/docs/UG%5FLicense.html         DC0000
+          /private/tmp/des-rs-gams-53.5.1-arm64/Resources/gamslice.txt
+          47c482f4-6e50-4644
+          v:2                                                              
+          Demo license for demonstration and instructional purposes only
+System information: 16 physical cores and 48 Gb physical memory detected
+GAMS 53.5.1   Copyright (C) 1987-2026 GAMS Development. All rights reserved
+--- Starting compilation
+--- smoke.gms(1) 2 Mb
+--- Starting execution: elapsed 0:00:00.002
+--- smoke.gms(1) 3 Mb
+*** Status: Normal completion
+--- Job smoke.gms Stop 06/05/26 13:03:22 elapsed 0:00:00.002

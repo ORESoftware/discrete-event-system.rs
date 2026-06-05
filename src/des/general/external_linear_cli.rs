@@ -1329,6 +1329,18 @@ pub fn solve_lp_with_external_cli(
     if should_use_native_highs_cli(ExternalLinearCliKind::Lp, opts) {
         return solve_lp_with_native_highs_cli(problem, opts);
     }
+    if should_use_native_gurobi_cli(ExternalLinearCliKind::Lp, opts) {
+        return solve_lp_with_native_gurobi_cli(problem, opts);
+    }
+    if should_use_native_cplex_cli(ExternalLinearCliKind::Lp, opts) {
+        return solve_lp_with_native_cplex_cli(problem, opts);
+    }
+    if should_use_native_xpress_cli(ExternalLinearCliKind::Lp, opts) {
+        return solve_lp_with_native_xpress_cli(problem, opts);
+    }
+    if should_use_native_lindo_cli(ExternalLinearCliKind::Lp, opts) {
+        return solve_lp_with_native_lindo_cli(problem, opts);
+    }
     if should_use_native_glpk_cli(ExternalLinearCliKind::Lp, opts) {
         return solve_lp_with_native_glpk_cli(problem, opts);
     }
@@ -1343,6 +1355,9 @@ pub fn solve_lp_with_external_cli(
     }
     if should_use_native_soplex_cli(opts) {
         return solve_lp_with_native_soplex_cli(problem, opts);
+    }
+    if should_use_native_qsopt_ex_cli(opts) {
+        return solve_lp_with_native_qsopt_ex_cli(problem, opts);
     }
     if should_use_native_lp_solve_cli(ExternalLinearCliKind::Lp, opts) {
         return solve_lp_with_native_lp_solve_cli(problem, opts);
@@ -1361,6 +1376,18 @@ pub fn solve_ipmip_with_external_cli(
 ) -> ExternalLinearCliSolution {
     if should_use_native_highs_cli(ExternalLinearCliKind::Mip, opts) {
         return solve_ipmip_with_native_highs_cli(problem, opts);
+    }
+    if should_use_native_gurobi_cli(ExternalLinearCliKind::Mip, opts) {
+        return solve_ipmip_with_native_gurobi_cli(problem, opts);
+    }
+    if should_use_native_cplex_cli(ExternalLinearCliKind::Mip, opts) {
+        return solve_ipmip_with_native_cplex_cli(problem, opts);
+    }
+    if should_use_native_xpress_cli(ExternalLinearCliKind::Mip, opts) {
+        return solve_ipmip_with_native_xpress_cli(problem, opts);
+    }
+    if should_use_native_lindo_cli(ExternalLinearCliKind::Mip, opts) {
+        return solve_ipmip_with_native_lindo_cli(problem, opts);
     }
     if should_use_native_glpk_cli(ExternalLinearCliKind::Mip, opts) {
         return solve_ipmip_with_native_glpk_cli(problem, opts);
@@ -2060,6 +2087,7 @@ pub fn solve_linear_cli_json(
     if let Some(command_path) = external_linear_cli_command_with_options(opts.solver, opts) {
         command.env(solver_command_env_var(opts.solver), command_path);
     }
+    command.env("LINEAR_CLI_REFERENCE_FROM_RUST", "1");
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2259,6 +2287,256 @@ fn solve_ipmip_with_native_highs_cli(
         problem.c.len(),
         ipmip_total_le_row_count(problem),
         0,
+        &problem.c,
+        opts,
+    )
+}
+
+fn should_use_native_gurobi_cli(
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Gurobi
+        || opts.script_path.is_some()
+        || opts.lp_algorithm.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.cuts.is_some()
+        || opts.heuristics.is_some()
+        || opts.branch_rule.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.node_selection.is_some()
+        || opts.mip_start.is_some()
+    {
+        return false;
+    }
+    if kind == ExternalLinearCliKind::Lp {
+        return opts.max_nodes.is_none()
+            && opts.node_limit.is_none()
+            && opts.solution_limit.is_none()
+            && opts.relative_gap.is_none()
+            && opts.absolute_gap.is_none()
+            && opts.objective_limit.is_none()
+            && opts.integer_feasibility_tolerance.is_none();
+    }
+    true
+}
+
+fn solve_lp_with_native_gurobi_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    solve_native_gurobi_cli_model(
+        ExternalLinearCliKind::Lp,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_gurobi_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
+    };
+    solve_native_gurobi_cli_model(
+        ExternalLinearCliKind::Mip,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn should_use_native_cplex_cli(
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Cplex
+        || opts.script_path.is_some()
+        || opts.lp_algorithm.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.cuts.is_some()
+        || opts.heuristics.is_some()
+        || opts.branch_rule.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.node_selection.is_some()
+        || opts.mip_start.is_some()
+        || opts.objective_limit.is_some()
+    {
+        return false;
+    }
+    if kind == ExternalLinearCliKind::Lp {
+        return opts.max_nodes.is_none()
+            && opts.node_limit.is_none()
+            && opts.solution_limit.is_none()
+            && opts.relative_gap.is_none()
+            && opts.absolute_gap.is_none()
+            && opts.integer_feasibility_tolerance.is_none();
+    }
+    true
+}
+
+fn solve_lp_with_native_cplex_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    solve_native_cplex_cli_model(
+        ExternalLinearCliKind::Lp,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_cplex_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
+    };
+    solve_native_cplex_cli_model(
+        ExternalLinearCliKind::Mip,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn should_use_native_xpress_cli(
+    kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Xpress
+        || opts.script_path.is_some()
+        || opts.lp_algorithm.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.cuts.is_some()
+        || opts.heuristics.is_some()
+        || opts.branch_rule.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.node_selection.is_some()
+        || opts.mip_start.is_some()
+        || opts.max_nodes.is_some()
+        || opts.node_limit.is_some()
+        || opts.relative_gap.is_some()
+        || opts.absolute_gap.is_some()
+        || opts.objective_limit.is_some()
+    {
+        return false;
+    }
+    if kind == ExternalLinearCliKind::Lp {
+        return opts.solution_limit.is_none() && opts.integer_feasibility_tolerance.is_none();
+    }
+    true
+}
+
+fn solve_lp_with_native_xpress_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => lp_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => lp_problem_to_mps_string(problem),
+    };
+    solve_native_xpress_cli_model(
+        ExternalLinearCliKind::Lp,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_xpress_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => ipmip_problem_to_cplex_lp_string(problem),
+        ExternalLinearCliModelFormat::Mps => ipmip_problem_to_mps_string(problem),
+    };
+    solve_native_xpress_cli_model(
+        ExternalLinearCliKind::Mip,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn should_use_native_lindo_cli(
+    _kind: ExternalLinearCliKind,
+    opts: &ExternalLinearCliOptions,
+) -> bool {
+    if opts.solver != ExternalLinearCliSolver::Lindo
+        || opts.script_path.is_some()
+        || opts.lp_algorithm.is_some()
+        || opts.solution_pool_size.is_some()
+        || opts.cuts.is_some()
+        || opts.heuristics.is_some()
+        || opts.branch_rule.is_some()
+        || opts.branch_priorities.is_some()
+        || opts.node_selection.is_some()
+        || opts.mip_start.is_some()
+        || opts.max_nodes.is_some()
+        || opts.node_limit.is_some()
+        || opts.solution_limit.is_some()
+        || opts.relative_gap.is_some()
+        || opts.absolute_gap.is_some()
+        || opts.objective_limit.is_some()
+        || opts.primal_feasibility_tolerance.is_some()
+        || opts.dual_feasibility_tolerance.is_some()
+        || opts.integer_feasibility_tolerance.is_some()
+        || opts.threads.is_some()
+        || opts.random_seed.is_some()
+        || opts.presolve.is_some()
+    {
+        return false;
+    }
+    true
+}
+
+fn solve_lp_with_native_lindo_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = lp_problem_to_mps_string(problem);
+    solve_native_lindo_cli_model(
+        ExternalLinearCliKind::Lp,
+        problem.sense,
+        &model_text,
+        problem.c.len(),
+        &problem.c,
+        opts,
+    )
+}
+
+fn solve_ipmip_with_native_lindo_cli(
+    problem: &IPMIPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = ipmip_problem_to_mps_string(problem);
+    solve_native_lindo_cli_model(
+        ExternalLinearCliKind::Mip,
+        problem.sense,
+        &model_text,
+        problem.c.len(),
         &problem.c,
         opts,
     )
@@ -2927,13 +3205,29 @@ fn solve_native_plain_cli_json_direct(
     t0: Instant,
 ) -> Option<ExternalLinearCliSolution> {
     let use_highs = should_use_native_highs_cli(kind, opts);
+    let use_gurobi = should_use_native_gurobi_cli(kind, opts);
+    let use_cplex = should_use_native_cplex_cli(kind, opts);
+    let use_xpress = should_use_native_xpress_cli(kind, opts);
+    let use_lindo = should_use_native_lindo_cli(kind, opts);
     let use_glpk = should_use_native_glpk_cli(kind, opts);
     let use_scip = should_use_native_scip_cli(kind, opts);
     let use_cbc = should_use_native_cbc_cli(kind, opts);
     let use_clp = kind == ExternalLinearCliKind::Lp && should_use_native_clp_cli(opts);
     let use_soplex = kind == ExternalLinearCliKind::Lp && should_use_native_soplex_cli(opts);
+    let use_qsopt_ex = kind == ExternalLinearCliKind::Lp && should_use_native_qsopt_ex_cli(opts);
     let use_lp_solve = should_use_native_lp_solve_cli(kind, opts);
-    if !use_highs && !use_glpk && !use_scip && !use_cbc && !use_clp && !use_soplex && !use_lp_solve
+    if !use_highs
+        && !use_gurobi
+        && !use_cplex
+        && !use_xpress
+        && !use_lindo
+        && !use_glpk
+        && !use_scip
+        && !use_cbc
+        && !use_clp
+        && !use_soplex
+        && !use_qsopt_ex
+        && !use_lp_solve
     {
         return None;
     }
@@ -2974,6 +3268,27 @@ fn solve_native_plain_cli_json_direct(
             &model.c,
             opts,
         ),
+        ExternalLinearCliSolver::Gurobi => {
+            solve_native_gurobi_cli_model(kind, &model_text, model.c.len(), &model.c, opts)
+        }
+        ExternalLinearCliSolver::Cplex => {
+            solve_native_cplex_cli_model(kind, &model_text, model.c.len(), &model.c, opts)
+        }
+        ExternalLinearCliSolver::Xpress => {
+            solve_native_xpress_cli_model(kind, &model_text, model.c.len(), &model.c, opts)
+        }
+        ExternalLinearCliSolver::Lindo => {
+            let model_text =
+                plain_linear_model_to_string(&model, ExternalLinearCliModelFormat::Mps, true);
+            solve_native_lindo_cli_model(
+                kind,
+                model.sense,
+                &model_text,
+                model.c.len(),
+                &model.c,
+                opts,
+            )
+        }
         ExternalLinearCliSolver::Glpk => solve_native_glpk_cli_model(
             kind,
             model.sense,
@@ -3023,6 +3338,18 @@ fn solve_native_plain_cli_json_direct(
         }
         ExternalLinearCliSolver::Soplex if kind == ExternalLinearCliKind::Lp => {
             solve_native_soplex_cli_model(
+                &model_text,
+                model.c.len(),
+                model.le_rows.len(),
+                model.eq_rows.len(),
+                &model.c,
+                opts,
+            )
+        }
+        ExternalLinearCliSolver::QsoptEx if kind == ExternalLinearCliKind::Lp => {
+            let model_text =
+                plain_linear_model_to_string(&model, ExternalLinearCliModelFormat::CplexLp, true);
+            solve_native_qsopt_ex_cli_model(
                 &model_text,
                 model.c.len(),
                 model.le_rows.len(),
@@ -4020,6 +4347,48 @@ fn solve_lp_with_native_soplex_cli(
     )
 }
 
+fn should_use_native_qsopt_ex_cli(opts: &ExternalLinearCliOptions) -> bool {
+    opts.solver == ExternalLinearCliSolver::QsoptEx
+        && opts.script_path.is_none()
+        && opts.lp_algorithm.is_none()
+        && opts.max_nodes.is_none()
+        && opts.node_limit.is_none()
+        && opts.solution_limit.is_none()
+        && opts.solution_pool_size.is_none()
+        && opts.relative_gap.is_none()
+        && opts.absolute_gap.is_none()
+        && opts.objective_limit.is_none()
+        && opts.primal_feasibility_tolerance.is_none()
+        && opts.dual_feasibility_tolerance.is_none()
+        && opts.integer_feasibility_tolerance.is_none()
+        && opts.threads.is_none()
+        && opts.random_seed.is_none()
+        && opts.presolve.is_none()
+        && opts.cuts.is_none()
+        && opts.heuristics.is_none()
+        && opts.branch_rule.is_none()
+        && opts.branch_priorities.is_none()
+        && opts.node_selection.is_none()
+        && opts.mip_start.is_none()
+}
+
+fn solve_lp_with_native_qsopt_ex_cli(
+    problem: &LPProblem,
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let model_text = lp_problem_to_cplex_lp_string(problem);
+    let le_count = problem.a_ub.as_ref().map_or(0, Vec::len);
+    let eq_count = problem.a_eq.as_ref().map_or(0, Vec::len);
+    solve_native_qsopt_ex_cli_model(
+        &model_text,
+        problem.c.len(),
+        le_count,
+        eq_count,
+        &problem.c,
+        opts,
+    )
+}
+
 fn should_use_native_lp_solve_cli(
     kind: ExternalLinearCliKind,
     opts: &ExternalLinearCliOptions,
@@ -4086,6 +4455,187 @@ fn solve_ipmip_with_native_lp_solve_cli(
         &problem.c,
         opts,
     )
+}
+
+fn solve_native_qsopt_ex_cli_model(
+    model_text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "qsopt-ex:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::QsoptEx, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "qsopt_ex executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let model_path = native_qsopt_ex_temp_path("model", "lp");
+    let solution_path = native_qsopt_ex_temp_path("solution", "sol");
+    let basis_path = native_qsopt_ex_temp_path("basis", "bas");
+    let cleanup_paths = vec![
+        model_path.clone(),
+        solution_path.clone(),
+        basis_path.clone(),
+    ];
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_qsopt_ex_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write QSopt_ex model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let output = match Command::new(&command_path)
+        .arg("-L")
+        .arg("-O")
+        .arg(&solution_path)
+        .arg("-b")
+        .arg(&basis_path)
+        .arg(&model_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_qsopt_ex_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start QSopt_ex executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_qsopt_ex_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_qsopt_ex_solver_version(&command_path));
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_qsopt_ex_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed = match parse_native_qsopt_ex_solution_file(
+        &solution_path,
+        Some(&basis_path),
+        variable_count,
+        le_count,
+        eq_count,
+        &stdout,
+        &stderr,
+    ) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            cleanup_native_qsopt_ex_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    cleanup_native_qsopt_ex_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: parsed.dual_ub,
+        dual_eq: parsed.dual_eq,
+        reduced_costs: parsed.reduced_costs,
+        var_basis: parsed.var_basis,
+        row_basis: parsed.row_basis,
+        iterations: None,
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
 }
 
 fn solve_native_lp_solve_cli_model(
@@ -5347,6 +5897,825 @@ fn solve_native_glpk_cli_model(
     }
 }
 
+fn solve_native_gurobi_cli_model(
+    kind: ExternalLinearCliKind,
+    model_text: &str,
+    variable_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "gurobi:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Gurobi, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "gurobi executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_gurobi_temp_path("model", extension);
+    let solution_path = native_gurobi_temp_path("solution", "sol");
+    let cleanup_paths = vec![model_path.clone(), solution_path.clone()];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_gurobi_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write Gurobi model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg(format!("ResultFile={}", solution_path.display()))
+        .arg(format!(
+            "TimeLimit={:.17}",
+            normalized_time_limit(opts.time_limit_secs)
+        ))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(max_nodes) = opts
+            .max_nodes
+            .or_else(|| opts.node_limit.map(|limit| limit as u64))
+        {
+            command.arg(format!("NodeLimit={max_nodes}"));
+        }
+        if let Some(solution_limit) = opts.solution_limit {
+            command.arg(format!("SolutionLimit={}", solution_limit.max(1)));
+        }
+        if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+            command.arg(format!("MIPGap={relative_gap:.17}"));
+        }
+        if let Some(absolute_gap) = normalized_absolute_gap(opts.absolute_gap) {
+            command.arg(format!("MIPGapAbs={absolute_gap:.17}"));
+        }
+        if let Some(objective_limit) = normalized_objective_limit(opts.objective_limit) {
+            command.arg(format!("BestObjStop={objective_limit:.17}"));
+        }
+        if let Some(tolerance) = normalized_tolerance(opts.integer_feasibility_tolerance) {
+            command.arg(format!("IntFeasTol={tolerance:.17}"));
+        }
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.primal_feasibility_tolerance) {
+        command.arg(format!("FeasibilityTol={tolerance:.17}"));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.dual_feasibility_tolerance) {
+        command.arg(format!("OptimalityTol={tolerance:.17}"));
+    }
+    if let Some(threads) = opts.threads.filter(|threads| *threads > 0) {
+        command.arg(format!("Threads={threads}"));
+    }
+    if let Some(seed) = opts.random_seed.filter(|seed| *seed <= i32::MAX as u64) {
+        command.arg(format!("Seed={seed}"));
+    }
+    if let Some(presolve) = opts.presolve {
+        let value = match presolve {
+            ExternalLinearCliPresolve::Auto => -1,
+            ExternalLinearCliPresolve::On => 1,
+            ExternalLinearCliPresolve::Off => 0,
+        };
+        command.arg(format!("Presolve={value}"));
+    }
+    command.arg(&model_path);
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_gurobi_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start Gurobi executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_gurobi_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_gurobi_solver_version(&command_path));
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_gurobi_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed = match parse_native_named_solution_file(&solution_path, variable_count, "optimal") {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            cleanup_native_gurobi_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    cleanup_native_gurobi_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: (kind == ExternalLinearCliKind::Mip)
+            .then_some(opts.solution_limit)
+            .flatten(),
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_objective_limit(opts.objective_limit))
+            .flatten(),
+        primal_feasibility_tolerance: normalized_tolerance(opts.primal_feasibility_tolerance),
+        dual_feasibility_tolerance: normalized_tolerance(opts.dual_feasibility_tolerance),
+        integer_feasibility_tolerance: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_tolerance(opts.integer_feasibility_tolerance))
+            .flatten(),
+        nodes_explored: None,
+        threads: opts.threads.filter(|threads| *threads > 0),
+        random_seed: opts.random_seed.filter(|seed| *seed <= i32::MAX as u64),
+        presolve: opts.presolve.map(|presolve| presolve.as_str().to_string()),
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
+fn solve_native_cplex_cli_model(
+    kind: ExternalLinearCliKind,
+    model_text: &str,
+    variable_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "cplex:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Cplex, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "cplex executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_cplex_temp_path("model", extension);
+    let solution_path = native_cplex_temp_path("solution", "sol");
+    let cleanup_paths = vec![model_path.clone(), solution_path.clone()];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_cplex_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write CPLEX model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg("-c")
+        .arg(format!("read {}", model_path.display()))
+        .arg(format!(
+            "set timelimit {:.17}",
+            normalized_time_limit(opts.time_limit_secs)
+        ))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(max_nodes) = opts
+            .max_nodes
+            .or_else(|| opts.node_limit.map(|limit| limit as u64))
+        {
+            command.arg(format!("set mip limits nodes {max_nodes}"));
+        }
+        if let Some(solution_limit) = opts.solution_limit {
+            command.arg(format!(
+                "set mip limits solutions {}",
+                solution_limit.max(1)
+            ));
+        }
+        if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+            command.arg(format!("set mip tolerances mipgap {relative_gap:.17}"));
+        }
+        if let Some(absolute_gap) = normalized_absolute_gap(opts.absolute_gap) {
+            command.arg(format!("set mip tolerances absmipgap {absolute_gap:.17}"));
+        }
+        if let Some(tolerance) = normalized_tolerance(opts.integer_feasibility_tolerance) {
+            command.arg(format!("set mip tolerances integrality {tolerance:.17}"));
+        }
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.primal_feasibility_tolerance) {
+        command.arg(format!(
+            "set simplex tolerances feasibility {tolerance:.17}"
+        ));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.dual_feasibility_tolerance) {
+        command.arg(format!("set simplex tolerances optimality {tolerance:.17}"));
+    }
+    if let Some(threads) = opts.threads.filter(|threads| *threads > 0) {
+        command.arg(format!("set threads {threads}"));
+    }
+    if let Some(seed) = opts.random_seed.filter(|seed| *seed <= i32::MAX as u64) {
+        command.arg(format!("set randomseed {seed}"));
+    }
+    if let Some(presolve) = opts.presolve {
+        let value = match presolve {
+            ExternalLinearCliPresolve::Auto => -1,
+            ExternalLinearCliPresolve::On => 1,
+            ExternalLinearCliPresolve::Off => 0,
+        };
+        command.arg(format!("set preprocessing presolve {value}"));
+    }
+    command
+        .arg("optimize")
+        .arg(format!("write {}", solution_path.display()))
+        .arg("quit");
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_cplex_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start CPLEX executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_cplex_solver_version(&format!("{stdout}\n{stderr}"))
+        .or_else(|| probe_cplex_solver_version(&command_path));
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_cplex_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed = match parse_native_cplex_solution_file(&solution_path, variable_count) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            cleanup_native_cplex_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    cleanup_native_cplex_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: (kind == ExternalLinearCliKind::Mip)
+            .then_some(opts.solution_limit)
+            .flatten(),
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: normalized_tolerance(opts.primal_feasibility_tolerance),
+        dual_feasibility_tolerance: normalized_tolerance(opts.dual_feasibility_tolerance),
+        integer_feasibility_tolerance: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_tolerance(opts.integer_feasibility_tolerance))
+            .flatten(),
+        nodes_explored: None,
+        threads: opts.threads.filter(|threads| *threads > 0),
+        random_seed: opts.random_seed.filter(|seed| *seed <= i32::MAX as u64),
+        presolve: opts.presolve.map(|presolve| presolve.as_str().to_string()),
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
+fn solve_native_xpress_cli_model(
+    kind: ExternalLinearCliKind,
+    model_text: &str,
+    variable_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "xpress:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Xpress, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "xpress executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let extension = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "lp",
+        ExternalLinearCliModelFormat::Mps => "mps",
+    };
+    let model_path = native_xpress_temp_path("model", extension);
+    let solution_path = native_xpress_temp_path("solution", "sol");
+    let script_path = native_xpress_temp_path("commands", "txt");
+    let header_path = native_xpress_header_path(&solution_path);
+    let cleanup_paths = vec![
+        model_path.clone(),
+        solution_path.clone(),
+        script_path.clone(),
+        header_path,
+    ];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_xpress_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write Xpress model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+    let script_text = native_xpress_command_text(kind, &model_path, &solution_path, opts);
+    if let Err(err) = fs::write(&script_path, script_text) {
+        cleanup_native_xpress_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write Xpress command file '{}': {err}",
+                script_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg(format!("@{}", script_path.display()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(parent) = model_path.parent() {
+        command.current_dir(parent);
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_xpress_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start Xpress executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_xpress_solver_version(&format!("{stdout}\n{stderr}"));
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_xpress_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed = match parse_native_xpress_solution_file(&solution_path, variable_count) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            cleanup_native_xpress_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    cleanup_native_xpress_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: (kind == ExternalLinearCliKind::Mip)
+            .then_some(opts.solution_limit)
+            .flatten(),
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: normalized_tolerance(opts.primal_feasibility_tolerance),
+        dual_feasibility_tolerance: normalized_tolerance(opts.dual_feasibility_tolerance),
+        integer_feasibility_tolerance: (kind == ExternalLinearCliKind::Mip)
+            .then(|| normalized_tolerance(opts.integer_feasibility_tolerance))
+            .flatten(),
+        nodes_explored: None,
+        threads: opts.threads.filter(|threads| *threads > 0),
+        random_seed: opts.random_seed.filter(|seed| *seed <= i32::MAX as u64),
+        presolve: opts.presolve.map(|presolve| presolve.as_str().to_string()),
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
+fn solve_native_lindo_cli_model(
+    kind: ExternalLinearCliKind,
+    sense: Sense,
+    model_text: &str,
+    variable_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> ExternalLinearCliSolution {
+    let t0 = Instant::now();
+    let bridge_solver = "lindo:cli".to_string();
+    let Some(command_path) =
+        external_linear_cli_command_with_options(ExternalLinearCliSolver::Lindo, opts)
+    else {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "lindo executable not found".to_string(),
+            elapsed_ms(t0),
+        );
+    };
+
+    let model_path = native_lindo_temp_path("model", "mps");
+    let solution_path = native_lindo_solution_path(&model_path);
+    let cleanup_paths = vec![model_path.clone(), solution_path.clone()];
+
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_native_lindo_temp_files(&cleanup_paths);
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            bridge_solver,
+            format!(
+                "failed to write LINDO model file '{}': {err}",
+                model_path.display()
+            ),
+            elapsed_ms(t0),
+        );
+    }
+
+    let mut command = Command::new(&command_path);
+    command
+        .arg(&model_path)
+        .arg("-sol")
+        .arg(match sense {
+            Sense::Max => "-max",
+            Sense::Min => "-min",
+        })
+        .arg(if kind == ExternalLinearCliKind::Mip {
+            "-mip"
+        } else {
+            "-lp"
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(parent) = model_path.parent() {
+        command.current_dir(parent);
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup_native_lindo_temp_files(&cleanup_paths);
+            return external_cli_failure(
+                ExternalLinearCliStatus::Unavailable,
+                bridge_solver,
+                format!(
+                    "failed to start LINDO executable '{}': {err}",
+                    command_path.display()
+                ),
+                elapsed_ms(t0),
+            );
+        }
+    };
+    let elapsed = elapsed_ms(t0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let solver_version = parse_lindo_solver_version(&format!("{stdout}\n{stderr}"));
+
+    if !solution_path.exists() {
+        let status = classify_native_linear_status("", &stdout, &stderr);
+        cleanup_native_lindo_temp_files(&cleanup_paths);
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message("", &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    let parsed = match parse_native_lindo_solution_file(&solution_path, variable_count) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            cleanup_native_lindo_temp_files(&cleanup_paths);
+            let mut failure = external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed,
+            );
+            failure.solver_version = solver_version;
+            return failure;
+        }
+    };
+    cleanup_native_lindo_temp_files(&cleanup_paths);
+
+    let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
+    if !matches!(
+        status,
+        ExternalLinearCliStatus::Optimal | ExternalLinearCliStatus::Feasible
+    ) {
+        let mut failure = external_cli_failure(
+            if matches!(
+                status,
+                ExternalLinearCliStatus::Infeasible | ExternalLinearCliStatus::Unbounded
+            ) {
+                status
+            } else {
+                ExternalLinearCliStatus::Unavailable
+            },
+            bridge_solver,
+            native_solver_message(&parsed.status, &stdout, &stderr),
+            elapsed,
+        );
+        failure.solver_version = solver_version;
+        return failure;
+    }
+
+    ExternalLinearCliSolution {
+        status,
+        solver: bridge_solver,
+        solver_version,
+        x: parsed.x.clone(),
+        objective: Some(dot_f64(objective_coefficients, &parsed.x)),
+        objective_values: None,
+        lp_algorithm: None,
+        best_bound: None,
+        solution_limit: None,
+        solution_pool_size: None,
+        solutions: None,
+        exhausted: None,
+        mip_gap: None,
+        absolute_gap: None,
+        objective_limit: None,
+        primal_feasibility_tolerance: None,
+        dual_feasibility_tolerance: None,
+        integer_feasibility_tolerance: None,
+        nodes_explored: None,
+        threads: None,
+        random_seed: None,
+        presolve: None,
+        cuts: None,
+        heuristics: None,
+        branch_rule: None,
+        branch_priorities_accepted: None,
+        branch_priority_count: None,
+        node_selection: None,
+        mip_start_accepted: None,
+        mip_start_objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        iterations: None,
+        elapsed_ms: elapsed,
+        message: parsed.status,
+    }
+}
+
 fn solve_native_highs_cli_model(
     kind: ExternalLinearCliKind,
     model_text: &str,
@@ -5680,6 +7049,12 @@ struct ParsedNativeHighsSolution {
 }
 
 #[derive(Default)]
+struct ParsedNativeNamedSolution {
+    status: String,
+    x: Vec<f64>,
+}
+
+#[derive(Default)]
 struct ParsedNativeGlpkSolution {
     status: String,
     x: Vec<f64>,
@@ -5746,6 +7121,34 @@ fn native_highs_temp_path(stem: &str, extension: &str) -> PathBuf {
     native_solver_temp_path("highs", stem, extension)
 }
 
+fn native_gurobi_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("gurobi", stem, extension)
+}
+
+fn native_cplex_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("cplex", stem, extension)
+}
+
+fn native_xpress_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("xpress", stem, extension)
+}
+
+fn native_lindo_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("lindo", stem, extension)
+}
+
+fn native_xpress_header_path(solution_path: &Path) -> PathBuf {
+    let mut path = solution_path.to_path_buf();
+    path.set_extension("hdr");
+    path
+}
+
+fn native_lindo_solution_path(model_path: &Path) -> PathBuf {
+    let mut path = model_path.to_path_buf();
+    path.set_extension("sol");
+    path
+}
+
 fn native_solver_temp_path(solver: &str, stem: &str, extension: &str) -> PathBuf {
     static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -5763,6 +7166,84 @@ fn cleanup_native_highs_temp_files(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
     }
+}
+
+fn cleanup_native_gurobi_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn cleanup_native_cplex_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn cleanup_native_xpress_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn cleanup_native_lindo_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn native_xpress_command_text(
+    kind: ExternalLinearCliKind,
+    model_path: &Path,
+    solution_path: &Path,
+    opts: &ExternalLinearCliOptions,
+) -> String {
+    let mut text = String::new();
+    let time_limit = normalized_time_limit(opts.time_limit_secs).ceil().max(1.0) as u64;
+    text.push_str(&format!("MAXTIME = -{time_limit}\n"));
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(solution_limit) = opts.solution_limit {
+            text.push_str(&format!("MAXSOLS = {}\n", solution_limit.max(1)));
+        }
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.primal_feasibility_tolerance) {
+        text.push_str(&format!("FEASTOL = {tolerance:.17}\n"));
+    }
+    if let Some(tolerance) = normalized_tolerance(opts.dual_feasibility_tolerance) {
+        text.push_str(&format!("OPTTOL = {tolerance:.17}\n"));
+    }
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(tolerance) = normalized_tolerance(opts.integer_feasibility_tolerance) {
+            text.push_str(&format!("MIPTOL = {tolerance:.17}\n"));
+        }
+    }
+    if let Some(threads) = opts.threads.filter(|threads| *threads > 0) {
+        text.push_str(&format!("THREADS = {threads}\n"));
+    }
+    if let Some(seed) = opts.random_seed.filter(|seed| *seed <= i32::MAX as u64) {
+        text.push_str(&format!("RANDOMSEED = {seed}\n"));
+    }
+    if let Some(presolve) = opts.presolve {
+        let value = match presolve {
+            ExternalLinearCliPresolve::Auto => -1,
+            ExternalLinearCliPresolve::On => 1,
+            ExternalLinearCliPresolve::Off => 0,
+        };
+        text.push_str(&format!("PRESOLVE = {value}\n"));
+    }
+    let read_flag = match opts.model_format {
+        ExternalLinearCliModelFormat::CplexLp => "-l",
+        ExternalLinearCliModelFormat::Mps => "-m",
+    };
+    text.push_str(&format!("readprob {read_flag} {}\n", model_path.display()));
+    text.push_str(if kind == ExternalLinearCliKind::Mip {
+        "mipoptimize\n"
+    } else {
+        "lpoptimize\n"
+    });
+    text.push_str(&format!("writesol {} -npa\n", solution_path.display()));
+    text.push_str("quit\n");
+    text
 }
 
 fn native_highs_mip_start_text(start: &[f64], objective: f64) -> String {
@@ -5862,6 +7343,16 @@ fn native_soplex_temp_path(stem: &str, extension: &str) -> PathBuf {
 }
 
 fn cleanup_native_soplex_temp_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn native_qsopt_ex_temp_path(stem: &str, extension: &str) -> PathBuf {
+    native_solver_temp_path("qsopt-ex", stem, extension)
+}
+
+fn cleanup_native_qsopt_ex_temp_files(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
     }
@@ -6744,6 +8235,164 @@ fn parse_native_soplex_dual_text(
     }
 }
 
+fn parse_native_qsopt_ex_solution_file(
+    path: &Path,
+    basis_path: Option<&Path>,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    stdout: &str,
+    stderr: &str,
+) -> Result<ParsedNativeSoplexSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read QSopt_ex solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    let mut parsed = parse_native_qsopt_ex_solution_text(
+        &text,
+        variable_count,
+        le_count,
+        eq_count,
+        stdout,
+        stderr,
+    );
+    if let Some(path) = basis_path.filter(|path| path.exists()) {
+        let text = fs::read_to_string(path).map_err(|err| {
+            format!(
+                "failed to read QSopt_ex basis file '{}': {err}",
+                path.display()
+            )
+        })?;
+        let (var_basis, row_basis) =
+            parse_native_qsopt_ex_basis_text(&text, variable_count, le_count, eq_count);
+        parsed.var_basis = var_basis;
+        parsed.row_basis = row_basis;
+    }
+    Ok(parsed)
+}
+
+fn parse_native_qsopt_ex_solution_text(
+    text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+    stdout: &str,
+    stderr: &str,
+) -> ParsedNativeSoplexSolution {
+    let mut x = vec![0.0; variable_count];
+    let mut reduced_costs = vec![0.0; variable_count];
+    let mut row_duals = vec![0.0; le_count + eq_count];
+    let solution_lower = text.to_ascii_lowercase();
+    let combined_lower = format!("{stdout}\n{stderr}\n{text}").to_ascii_lowercase();
+    let status = if solution_lower.contains("status optimal")
+        || combined_lower.contains("problem solved exactly")
+    {
+        "optimal"
+    } else if solution_lower.contains("status infeasible") || combined_lower.contains("infeasible")
+    {
+        "infeasible"
+    } else if solution_lower.contains("status unbounded") || combined_lower.contains("unbounded") {
+        "unbounded"
+    } else if solution_lower.contains("optimal")
+        || solution_lower.contains("objective")
+        || solution_lower.contains("primal solution")
+    {
+        "optimal"
+    } else {
+        "unknown"
+    }
+    .to_string();
+
+    let mut section = None::<&str>;
+    let mut saw_reduced_costs = false;
+    let mut saw_pi = false;
+    for line in text.lines() {
+        let stripped = line.trim();
+        let upper = stripped.to_ascii_uppercase();
+        if upper == "VARS:" {
+            section = Some("vars");
+            continue;
+        }
+        if upper.starts_with("REDUCED COST") {
+            section = Some("reduced");
+            saw_reduced_costs = true;
+            continue;
+        }
+        if upper.starts_with("PI") {
+            section = Some("pi");
+            saw_pi = true;
+            continue;
+        }
+        if upper.starts_with("SLACK") {
+            section = None;
+            continue;
+        }
+
+        match section {
+            Some("vars") => {
+                if let Some((index, value)) =
+                    parse_named_variable_value_line(stripped, variable_count)
+                {
+                    x[index] = value;
+                }
+            }
+            Some("reduced") => {
+                if let Some((index, value)) =
+                    parse_prefixed_value_line(stripped, 'x', variable_count)
+                {
+                    reduced_costs[index] = value;
+                }
+            }
+            Some("pi") => {
+                if let Some((index, value)) = parse_prefixed_value_line(stripped, 'c', le_count) {
+                    row_duals[index] = value;
+                    continue;
+                }
+                if let Some((index, value)) = parse_prefixed_value_line(stripped, 'e', eq_count) {
+                    row_duals[le_count + index] = value;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ParsedNativeSoplexSolution {
+        status,
+        x,
+        reduced_costs: saw_reduced_costs.then_some(reduced_costs),
+        dual_ub: (saw_pi && le_count > 0).then(|| row_duals[..le_count].to_vec()),
+        dual_eq: (saw_pi && eq_count > 0).then(|| row_duals[le_count..].to_vec()),
+        var_basis: None,
+        row_basis: None,
+    }
+}
+
+fn parse_native_qsopt_ex_basis_text(
+    text: &str,
+    variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let mut var_basis = vec![None::<String>; variable_count];
+    let mut row_basis = vec![Some("basic".to_string()); le_count + eq_count];
+    for line in text.lines() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.len() < 3 || !matches!(parts[0].to_ascii_uppercase().as_str(), "XL" | "XU") {
+            continue;
+        }
+        if let Some(index) = highs_variable_index(parts[1]).filter(|index| *index < variable_count)
+        {
+            var_basis[index] = Some("basic".to_string());
+        }
+        if let Some(index) = basis_row_index(parts[2], le_count, eq_count) {
+            row_basis[index] = Some("at_upper".to_string());
+        }
+    }
+    (all_some_string(&var_basis), all_some_string(&row_basis))
+}
+
 fn parse_native_lp_solve_solution_text(
     text: &str,
     variable_count: usize,
@@ -6910,10 +8559,357 @@ fn parse_native_lp_solve_basis_text(
     (all_some_string(&var_basis), all_some_string(&row_basis))
 }
 
+fn parse_native_cplex_solution_file(
+    path: &Path,
+    variable_count: usize,
+) -> Result<ParsedNativeNamedSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read CPLEX solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    Ok(parse_native_cplex_solution_text(&text, variable_count))
+}
+
+fn parse_native_cplex_solution_text(
+    text: &str,
+    variable_count: usize,
+) -> ParsedNativeNamedSolution {
+    let mut x = vec![0.0; variable_count];
+    let mut status = "optimal".to_string();
+    let mut saw_cplex_xml = false;
+
+    for tag in xml_start_tags(text, "header") {
+        saw_cplex_xml = true;
+        if let Some(value) = xml_attribute_value(&tag, "solutionStatusString")
+            .or_else(|| xml_attribute_value(&tag, "solutionStatus"))
+            .or_else(|| xml_attribute_value(&tag, "solutionStatusValue"))
+        {
+            status = cplex_solution_status(&value);
+        }
+    }
+
+    for tag in xml_start_tags(text, "variable") {
+        saw_cplex_xml = true;
+        let Some(name) = xml_attribute_value(&tag, "name") else {
+            continue;
+        };
+        let Some(index) = highs_variable_index(&name).filter(|index| *index < variable_count)
+        else {
+            continue;
+        };
+        let Some(value) =
+            xml_attribute_value(&tag, "value").and_then(|value| parse_f64_token(&value))
+        else {
+            continue;
+        };
+        x[index] = value;
+    }
+
+    if saw_cplex_xml {
+        ParsedNativeNamedSolution { status, x }
+    } else {
+        parse_native_named_solution_text(text, variable_count, "optimal")
+    }
+}
+
+fn cplex_solution_status(value: &str) -> String {
+    let stripped = value.trim();
+    let lower = stripped.to_ascii_lowercase();
+    if lower.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return lower;
+    }
+    match stripped {
+        "1" | "101" | "102" => "optimal".to_string(),
+        "2" | "118" | "119" => "unbounded".to_string(),
+        "3" | "103" => "infeasible".to_string(),
+        "104" | "105" | "106" | "107" | "108" | "109" => "feasible".to_string(),
+        _ => lower,
+    }
+}
+
+fn xml_start_tags<'a>(text: &'a str, tag_name: &str) -> Vec<&'a str> {
+    let needle = format!("<{tag_name}");
+    let mut tags = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let Some(offset) = text[cursor..].find(&needle) else {
+            break;
+        };
+        let start = cursor + offset;
+        let name_end = start + needle.len();
+        if text
+            .as_bytes()
+            .get(name_end)
+            .is_some_and(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>'))
+        {
+            cursor = name_end;
+            continue;
+        }
+        let Some(end_offset) = text[start..].find('>') else {
+            break;
+        };
+        let end = start + end_offset + 1;
+        tags.push(&text[start..end]);
+        cursor = end;
+    }
+    tags
+}
+
+fn xml_attribute_value(tag: &str, name: &str) -> Option<String> {
+    let bytes = tag.as_bytes();
+    let mut cursor = 0;
+    while cursor < tag.len() {
+        let offset = tag[cursor..].find(name)?;
+        let start = cursor + offset;
+        let end = start + name.len();
+        if start > 0 && is_ascii_word_byte(bytes[start - 1]) {
+            cursor = end;
+            continue;
+        }
+        if end < bytes.len() && is_ascii_word_byte(bytes[end]) {
+            cursor = end;
+            continue;
+        }
+        let mut pos = end;
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if bytes.get(pos) != Some(&b'=') {
+            cursor = end;
+            continue;
+        }
+        pos += 1;
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let quote = *bytes.get(pos)?;
+        if !matches!(quote, b'\'' | b'"') {
+            cursor = pos;
+            continue;
+        }
+        pos += 1;
+        let value_start = pos;
+        while pos < bytes.len() && bytes[pos] != quote {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            return None;
+        }
+        return Some(xml_decode_attribute(&tag[value_start..pos]));
+    }
+    None
+}
+
+fn xml_decode_attribute(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn parse_native_xpress_solution_file(
+    path: &Path,
+    variable_count: usize,
+) -> Result<ParsedNativeNamedSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read Xpress solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    let header_path = native_xpress_header_path(path);
+    let header = fs::read_to_string(&header_path).ok();
+    Ok(parse_native_xpress_solution_text(
+        &text,
+        header.as_deref(),
+        variable_count,
+    ))
+}
+
+fn parse_native_xpress_solution_text(
+    text: &str,
+    header: Option<&str>,
+    variable_count: usize,
+) -> ParsedNativeNamedSolution {
+    let mut x = vec![0.0; variable_count];
+    let mut status = "optimal".to_string();
+    if let Some(header) = header {
+        let lower = header.to_ascii_lowercase();
+        if lower.contains("infeas") {
+            status = "infeasible".to_string();
+        } else if lower.contains("unbounded") {
+            status = "unbounded".to_string();
+        } else if lower.contains("optimal") {
+            status = "optimal".to_string();
+        }
+    }
+
+    for line in text.lines() {
+        let fields = split_xpress_solution_line(line);
+        if fields.len() < 2 {
+            continue;
+        }
+        for (name_pos, name) in fields.iter().enumerate() {
+            let clean_name = name.trim().trim_matches('"').trim_matches('\'');
+            let Some(index) =
+                highs_variable_index(clean_name).filter(|index| *index < variable_count)
+            else {
+                continue;
+            };
+            if let Some(value) = fields[name_pos + 1..]
+                .iter()
+                .map(|field| field.trim().trim_matches('"').trim_matches('\''))
+                .find_map(parse_f64_token)
+            {
+                x[index] = value;
+            }
+            break;
+        }
+    }
+    ParsedNativeNamedSolution { status, x }
+}
+
+fn split_xpress_solution_line(line: &str) -> Vec<String> {
+    let stripped = line.trim();
+    if stripped.is_empty() || stripped.starts_with('#') {
+        return Vec::new();
+    }
+    if stripped.contains(';') {
+        return split_delimited_solution_fields(stripped, ';');
+    }
+    if stripped.contains(',') {
+        return split_delimited_solution_fields(stripped, ',');
+    }
+    stripped.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+fn split_delimited_solution_fields(line: &str, delimiter: char) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quote = None;
+    for ch in line.chars() {
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == delimiter {
+            let trimmed = field.trim();
+            if !trimmed.is_empty() {
+                fields.push(trimmed.to_string());
+            }
+            field.clear();
+            continue;
+        }
+        field.push(ch);
+    }
+    let trimmed = field.trim();
+    if !trimmed.is_empty() {
+        fields.push(trimmed.to_string());
+    }
+    fields
+}
+
+fn parse_native_lindo_solution_file(
+    path: &Path,
+    variable_count: usize,
+) -> Result<ParsedNativeNamedSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read LINDO solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    Ok(parse_native_lindo_solution_text(&text, variable_count))
+}
+
+fn parse_native_lindo_solution_text(
+    text: &str,
+    variable_count: usize,
+) -> ParsedNativeNamedSolution {
+    let mut x = vec![0.0; variable_count];
+    let lower = text.to_ascii_lowercase();
+    let status = if lower.contains("infeasible") || lower.contains("no feasible") {
+        "infeasible"
+    } else if lower.contains("unbounded") {
+        "unbounded"
+    } else if lower.contains("optimal") || lower.contains("objective") {
+        "optimal"
+    } else {
+        "unknown"
+    }
+    .to_string();
+
+    for line in text.lines() {
+        if let Some((index, value)) = parse_named_variable_value_line(line.trim(), variable_count) {
+            x[index] = value;
+        }
+    }
+    ParsedNativeNamedSolution { status, x }
+}
+
+fn parse_native_named_solution_file(
+    path: &Path,
+    variable_count: usize,
+    default_status: &str,
+) -> Result<ParsedNativeNamedSolution, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read named solution file '{}': {err}",
+            path.display()
+        )
+    })?;
+    Ok(parse_native_named_solution_text(
+        &text,
+        variable_count,
+        default_status,
+    ))
+}
+
+fn parse_native_named_solution_text(
+    text: &str,
+    variable_count: usize,
+    default_status: &str,
+) -> ParsedNativeNamedSolution {
+    let mut x = vec![0.0; variable_count];
+    let mut status = default_status.to_string();
+    for line in text.lines() {
+        let stripped = line.trim();
+        let lower = stripped.to_ascii_lowercase();
+        if lower.contains("objective") && lower.contains("value") {
+            status = default_status.to_string();
+            continue;
+        }
+        if let Some((index, value)) = parse_named_variable_value_line(stripped, variable_count) {
+            x[index] = value;
+        }
+    }
+    ParsedNativeNamedSolution { status, x }
+}
+
 fn parse_named_variable_value_line(line: &str, variable_count: usize) -> Option<(usize, f64)> {
+    parse_prefixed_value_line(line, 'x', variable_count)
+}
+
+fn parse_prefixed_value_line(line: &str, prefix: char, count: usize) -> Option<(usize, f64)> {
     let bytes = line.as_bytes();
+    let prefix = prefix.to_ascii_lowercase() as u8;
     for start in 0..bytes.len() {
-        if !matches!(bytes[start], b'x' | b'X') {
+        if bytes[start].to_ascii_lowercase() != prefix {
             continue;
         }
         if start > 0 && is_ascii_word_byte(bytes[start - 1]) {
@@ -6929,15 +8925,15 @@ fn parse_named_variable_value_line(line: &str, variable_count: usize) -> Option<
         if end < bytes.len() && is_ascii_word_byte(bytes[end]) {
             continue;
         }
-        let idx = line[start + 1..end].parse::<usize>().ok()?;
-        if idx >= variable_count {
+        let index = line[start + 1..end].parse::<usize>().ok()?;
+        if index >= count {
             continue;
         }
         for token in
             line[end..].split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '='))
         {
             if let Some(value) = parse_f64_token(token) {
-                return Some((idx, value));
+                return Some((index, value));
             }
         }
         let mut before_value = None;
@@ -6949,7 +8945,7 @@ fn parse_named_variable_value_line(line: &str, variable_count: usize) -> Option<
             }
         }
         if let Some(value) = before_value {
-            return Some((idx, value));
+            return Some((index, value));
         }
     }
     None
@@ -7267,6 +9263,39 @@ fn probe_soplex_solver_version(command_path: &Path) -> Option<String> {
     parse_soplex_solver_version(&text)
 }
 
+fn parse_qsopt_ex_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        for marker in ["Using QSopt_ex ", "QSopt_ex "] {
+            if let Some((_, rest)) = line.split_once(marker) {
+                let version = rest
+                    .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                    .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                    .unwrap_or("")
+                    .trim();
+                if !version.is_empty() {
+                    return Some(format!("QSopt_ex {version}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn probe_qsopt_ex_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_qsopt_ex_solver_version(&text)
+}
+
 fn parse_lp_solve_solver_version(text: &str) -> Option<String> {
     for line in text.lines() {
         if let Some((_, rest)) = line.split_once("lp_solve version ") {
@@ -7296,6 +9325,115 @@ fn probe_lp_solve_solver_version(command_path: &Path) -> Option<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     parse_lp_solve_solver_version(&text)
+}
+
+fn parse_gurobi_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        for marker in ["Gurobi Optimizer version ", "Gurobi Optimizer "] {
+            if let Some((_, rest)) = line.split_once(marker) {
+                let version = rest
+                    .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                    .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                    .unwrap_or("")
+                    .trim();
+                if !version.is_empty() {
+                    return Some(format!("Gurobi {version}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn probe_gurobi_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_gurobi_solver_version(&text)
+}
+
+fn parse_cplex_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        for marker in [
+            "IBM ILOG CPLEX Interactive Optimizer ",
+            "IBM ILOG CPLEX Optimizer ",
+            "CPLEX Interactive Optimizer ",
+            "CPLEX Optimizer ",
+            "CPLEX ",
+        ] {
+            if let Some((_, rest)) = line.split_once(marker) {
+                let version = rest
+                    .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                    .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                    .unwrap_or("")
+                    .trim();
+                if !version.is_empty() {
+                    return Some(format!("CPLEX {version}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn probe_cplex_solver_version(command_path: &Path) -> Option<String> {
+    let output = Command::new(command_path)
+        .arg("-c")
+        .arg("quit")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_cplex_solver_version(&text)
+}
+
+fn parse_xpress_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        for marker in ["Xpress Optimizer ", "Xpress "] {
+            if let Some((_, rest)) = line.split_once(marker) {
+                let version = rest
+                    .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                    .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                    .unwrap_or("")
+                    .trim();
+                if !version.is_empty() {
+                    return Some(format!("Xpress {version}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_lindo_solver_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        for marker in ["LINDO API ", "LINDO Optimizer ", "LINDO "] {
+            if let Some((_, rest)) = line.split_once(marker) {
+                let version = rest
+                    .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')')
+                    .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+                    .unwrap_or("")
+                    .trim();
+                if !version.is_empty() {
+                    return Some(format!("LINDO {version}"));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn parse_highs_lp_iterations(stdout: &str, stderr: &str) -> Option<u64> {
@@ -9446,6 +11584,47 @@ ENDATA
     }
 
     #[test]
+    fn native_qsopt_ex_solution_parser_reads_certificates_basis_and_version() {
+        let solution_text = "\
+status optimal
+VARS:
+x0 1
+x2 -3.5
+REDUCED COSTS:
+x0 0.25
+x2 -0.75
+PI:
+c0 2
+e0 -1
+";
+        let stdout = "Using QSopt_ex 2.5.10\nProblem solved exactly\n";
+        let mut parsed =
+            super::parse_native_qsopt_ex_solution_text(solution_text, 3, 1, 1, stdout, "");
+        let basis_text = "\
+ XL x0 c0
+ XU x1 e0
+";
+        let (var_basis, row_basis) = super::parse_native_qsopt_ex_basis_text(basis_text, 3, 1, 1);
+        parsed.var_basis = var_basis;
+        parsed.row_basis = row_basis;
+
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![1.0, 0.0, -3.5]);
+        assert_eq!(parsed.reduced_costs, Some(vec![0.25, 0.0, -0.75]));
+        assert_eq!(parsed.dual_ub, Some(vec![2.0]));
+        assert_eq!(parsed.dual_eq, Some(vec![-1.0]));
+        assert_eq!(parsed.var_basis, None);
+        assert_eq!(
+            parsed.row_basis,
+            Some(vec!["at_upper".to_string(), "at_upper".to_string()])
+        );
+        assert_eq!(
+            super::parse_qsopt_ex_solver_version(stdout),
+            Some("QSopt_ex 2.5.10".to_string())
+        );
+    }
+
+    #[test]
     fn native_scip_solution_parser_reads_named_values_and_quality() {
         let solution_text = "\
 solution status: optimal solution found
@@ -9641,6 +11820,98 @@ x0                                  0          -1e+30           1e+30
         assert_eq!(
             super::parse_lp_solve_solver_version(stdout),
             Some("lp_solve 5.5.2.14".to_string())
+        );
+    }
+
+    #[test]
+    fn native_named_solution_parser_reads_gurobi_style_values_and_version() {
+        let text = "\
+# Objective value = 7
+x0 1
+x2 -3.5
+x9 99
+";
+        let parsed = super::parse_native_named_solution_text(text, 3, "optimal");
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![1.0, 0.0, -3.5]);
+        assert_eq!(
+            super::parse_gurobi_solver_version("Gurobi Optimizer version 12.0.1 build v12.0.1"),
+            Some("Gurobi 12.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn native_cplex_solution_parser_reads_xml_values_status_and_version() {
+        let text = r#"
+<?xml version="1.0" encoding="UTF-8"?>
+<CPLEXSolution version="1.2">
+  <header solutionStatusString="integer optimal solution" objectiveValue="7"/>
+  <variables>
+    <variable name="x0" index="0" value="1"/>
+    <variable name="x2" index="2" value="-3.5"/>
+    <variable name="x9" index="9" value="99"/>
+  </variables>
+</CPLEXSolution>
+"#;
+        let parsed = super::parse_native_cplex_solution_text(text, 3);
+        assert_eq!(parsed.status, "integer optimal solution");
+        assert_eq!(parsed.x, vec![1.0, 0.0, -3.5]);
+
+        let numeric_status = super::parse_native_cplex_solution_text(
+            r#"<CPLEXSolution><header solutionStatusValue="103"/></CPLEXSolution>"#,
+            1,
+        );
+        assert_eq!(numeric_status.status, "infeasible");
+        assert_eq!(
+            super::parse_cplex_solver_version("IBM ILOG CPLEX Interactive Optimizer 22.1.1.0"),
+            Some("CPLEX 22.1.1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn native_xpress_solution_parser_reads_delimited_values_status_and_version() {
+        let text = "\
+# Columns
+\"x0\", 1
+x1; 0
+x2; -3.5
+x9; 99
+";
+        let parsed = super::parse_native_xpress_solution_text(
+            text,
+            Some("Global search complete: optimal solution found"),
+            3,
+        );
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![1.0, 0.0, -3.5]);
+
+        let infeasible =
+            super::parse_native_xpress_solution_text("x0 1", Some("Problem is infeasible"), 1);
+        assert_eq!(infeasible.status, "infeasible");
+        assert_eq!(
+            super::parse_xpress_solver_version("FICO Xpress Optimizer 9.4.0"),
+            Some("Xpress 9.4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn native_lindo_solution_parser_reads_named_values_status_and_version() {
+        let text = "\
+Objective value: 7
+x0 1
+x1 0
+x2 -3.5
+x9 99
+";
+        let parsed = super::parse_native_lindo_solution_text(text, 3);
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![1.0, 0.0, -3.5]);
+
+        let infeasible = super::parse_native_lindo_solution_text("No feasible solution", 1);
+        assert_eq!(infeasible.status, "infeasible");
+        assert_eq!(
+            super::parse_lindo_solver_version("LINDO Optimizer 14.0"),
+            Some("LINDO 14.0".to_string())
         );
     }
 
@@ -10021,6 +12292,190 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(solution
             .mip_gap
             .is_some_and(|mip_gap| mip_gap.abs() <= 1.0e-8));
+    }
+
+    #[test]
+    fn native_gurobi_json_plain_lp_stays_off_python_bridge() {
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Gurobi,
+                command_path: Some(PathBuf::from("/definitely/not-a-gurobi-binary")),
+                python: Some("/definitely/not-a-python-for-gurobi-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "gurobi:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_gurobi_json_plain_mip_stays_off_python_bridge() {
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Gurobi,
+                command_path: Some(PathBuf::from("/definitely/not-a-gurobi-binary")),
+                python: Some("/definitely/not-a-python-for-gurobi-mip-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "gurobi:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_cplex_json_plain_lp_stays_off_python_bridge() {
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cplex,
+                command_path: Some(PathBuf::from("/definitely/not-a-cplex-binary")),
+                python: Some("/definitely/not-a-python-for-cplex-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "cplex:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_cplex_json_plain_mip_stays_off_python_bridge() {
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cplex,
+                command_path: Some(PathBuf::from("/definitely/not-a-cplex-binary")),
+                python: Some("/definitely/not-a-python-for-cplex-mip-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "cplex:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_xpress_json_plain_lp_stays_off_python_bridge() {
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Xpress,
+                command_path: Some(PathBuf::from("/definitely/not-an-xpress-binary")),
+                python: Some("/definitely/not-a-python-for-xpress-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "xpress:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_xpress_json_plain_mip_stays_off_python_bridge() {
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Xpress,
+                command_path: Some(PathBuf::from("/definitely/not-an-xpress-binary")),
+                python: Some("/definitely/not-a-python-for-xpress-mip-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "xpress:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_lindo_json_plain_lp_stays_off_python_bridge() {
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Lindo,
+                command_path: Some(PathBuf::from("/definitely/not-a-lindo-binary")),
+                python: Some("/definitely/not-a-python-for-lindo-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "lindo:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_lindo_json_plain_mip_stays_off_python_bridge() {
+        let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Lindo,
+                command_path: Some(PathBuf::from("/definitely/not-a-lindo-binary")),
+                python: Some("/definitely/not-a-python-for-lindo-mip-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "lindo:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
     }
 
     #[test]
@@ -10621,6 +13076,29 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         );
         assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
         assert_eq!(solution.solver, "soplex:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_qsoptex_json_plain_lp_stays_off_python_bridge() {
+        let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Lp,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::QsoptEx,
+                command_path: Some(PathBuf::from("/definitely/not-a-qsopt-ex-binary")),
+                python: Some("/definitely/not-a-python-for-qsoptex-json-direct".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "qsopt-ex:cli");
         assert!(
             !solution.message.to_ascii_lowercase().contains("python"),
             "{}",

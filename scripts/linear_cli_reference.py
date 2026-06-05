@@ -29,6 +29,49 @@ from ip_mip_reference import expand_source_features
 from lp_solve import dot, normalize_lp
 
 
+def rust_reference_disabled() -> bool:
+    value = os.environ.get("LINEAR_CLI_REFERENCE_FORCE_PYTHON", "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def called_from_rust_reference() -> bool:
+    value = os.environ.get("LINEAR_CLI_REFERENCE_FROM_RUST", "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "linear_cli_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_linear_cli.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def exec_rust_reference() -> None:
+    if called_from_rust_reference() or rust_reference_disabled():
+        return
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "linear_cli_reference"
+    explicit = os.environ.get("LINEAR_CLI_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, *sys.argv[1:]])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if local_rust_binary_is_current(repo_root, local_binary):
+        os.execv(local_binary, [local_binary, *sys.argv[1:]])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", *sys.argv[1:]],
+    )
+
+
 COMMAND_ALIASES = {
     "glpk": ["glpsol"],
     "highs": ["highs"],
@@ -3277,6 +3320,7 @@ def _first_existing_path(paths: Sequence[str]) -> Optional[str]:
 
 
 def main() -> int:
+    exec_rust_reference()
     parser = argparse.ArgumentParser()
     parser.add_argument("--kind", choices=["lp", "mip"], required=True)
     parser.add_argument("--solver", choices=sorted(COMMAND_ALIASES.keys()), required=True)

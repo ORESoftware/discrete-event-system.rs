@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import itertools
 import json
 import math
 import os
 import subprocess
 import sys
+import tempfile
 from typing import List, Optional, Sequence, Tuple
 
 CVXPY_SOLVER_ALIASES = {
@@ -87,6 +89,18 @@ def rust_reference_command() -> list[str]:
     return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
 
 
+def package_available(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def python_bridge_disabled() -> bool:
+    value = os.environ.get("QP_REFERENCE_PYTHON_BRIDGE", "auto")
+    return value.strip().lower() in ("0", "false", "off", "disabled", "rust")
+
+
 def rust_reference(qp: dict, solver: str = "auto", max_enumerations: int = 1_000_000) -> dict:
     command = rust_reference_command()
     cwd = None
@@ -121,6 +135,28 @@ def rust_reference(qp: dict, solver: str = "auto", max_enumerations: int = 1_000
     if completed.returncode != 0 and not parsed.get("message"):
         parsed["message"] = completed.stderr.strip()
     return parsed
+
+
+def exec_rust_reference(raw_stdin: str, solver: str, max_enumerations: int = 1_000_000) -> None:
+    command = rust_reference_command()
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(os.path.dirname(script_dir))
+    with tempfile.TemporaryFile(mode="w+b") as stdin_file:
+        stdin_file.write(raw_stdin.encode("utf-8"))
+        stdin_file.flush()
+        stdin_file.seek(0)
+        os.dup2(stdin_file.fileno(), sys.stdin.fileno())
+        os.execvp(
+            command[0],
+            [
+                *command,
+                "--solver",
+                solver,
+                "--max-enumerations",
+                str(max_enumerations),
+            ],
+        )
 
 
 def dot(a: Sequence[float], b: Sequence[float]) -> float:
@@ -1088,24 +1124,25 @@ def main() -> int:
     parser.add_argument("--solver", default="auto")
     parser.add_argument("--max-enumerations", type=int, default=1_000_000)
     args = parser.parse_args()
-    qp = json.load(sys.stdin)
+    args.solver = args.solver.strip().lower().replace("_", "-")
+    raw_stdin = sys.stdin.read()
     if args.solver in RUST_REFERENCE_SOLVERS:
-        result = rust_reference(qp, args.solver, args.max_enumerations)
-        print(json.dumps(result))
-        return 0 if result.get("status") != "unavailable" else 2
+        exec_rust_reference(raw_stdin, args.solver, args.max_enumerations)
+    qp = json.loads(raw_stdin)
+    if (
+        args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS
+        and not qp.get("integer_vars")
+        and (python_bridge_disabled() or not package_available("cvxpy"))
+    ):
+        os.environ["QP_REFERENCE_REGISTERED_FALLBACK"] = "rust"
+        exec_rust_reference(raw_stdin, args.solver, args.max_enumerations)
     result = None
     if qp.get("integer_vars") and qp.get("cones"):
-        result = rust_reference(qp, "fallback", args.max_enumerations)
-        print(json.dumps(result))
-        return 0 if result.get("status") != "unavailable" else 2
+        exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
     if qp.get("integer_vars") and (qp.get("quadratic_constraints") or qp.get("q_constraints")):
-        result = rust_reference(qp, "fallback", args.max_enumerations)
-        print(json.dumps(result))
-        return 0 if result.get("status") != "unavailable" else 2
+        exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
     if qp.get("integer_vars"):
-        result = rust_reference(qp, "fallback", args.max_enumerations)
-        print(json.dumps(result))
-        return 0 if result.get("status") != "unavailable" else 2
+        exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
     if qp.get("cones"):
         result = continuous_socp_reference(qp, args.solver)
         print(json.dumps(result))
@@ -1133,7 +1170,7 @@ def main() -> int:
     if result is None and args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
         result = registered_qp_reference(qp, args.solver)
     if result is None:
-        result = rust_reference(qp, "fallback", args.max_enumerations)
+        exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
     print(json.dumps(result))
     return 0 if result.get("status") != "unavailable" else 2
 

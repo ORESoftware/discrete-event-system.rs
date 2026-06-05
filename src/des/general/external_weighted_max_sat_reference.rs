@@ -36,6 +36,36 @@ impl ExternalWeightedMaxSatReferenceSolver {
     }
 }
 
+fn registered_weighted_max_sat_rust_fallback_enabled() -> bool {
+    std::env::var("WEIGHTED_MAX_SAT_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("WEIGHTED_MAX_SAT_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_weighted_max_sat_reference(
+    opts: &ExternalWeightedMaxSatReferenceOptions,
+) -> bool {
+    matches!(
+        opts.solver,
+        ExternalWeightedMaxSatReferenceSolver::Auto
+            | ExternalWeightedMaxSatReferenceSolver::RustEnumeration
+            | ExternalWeightedMaxSatReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_weighted_max_sat_fallback(
+    opts: &ExternalWeightedMaxSatReferenceOptions,
+) -> bool {
+    registered_weighted_max_sat_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalWeightedMaxSatReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalWeightedMaxSatReferenceOptions {
     pub solver: ExternalWeightedMaxSatReferenceSolver,
@@ -212,6 +242,22 @@ fn rust_weighted_max_sat_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_weighted_max_sat_fallback(
+    mut solution: ExternalWeightedMaxSatReferenceSolution,
+    opts: &ExternalWeightedMaxSatReferenceOptions,
+) -> ExternalWeightedMaxSatReferenceSolution {
+    if should_use_registered_weighted_max_sat_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-weighted-max-sat-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn rust_weighted_max_sat_literal_satisfied(literal: i64, assignment: &[bool]) -> bool {
@@ -549,13 +595,13 @@ pub fn solve_weighted_max_sat_with_external_reference(
     problem: &WeightedMaxSatProblem,
     opts: &ExternalWeightedMaxSatReferenceOptions,
 ) -> ExternalWeightedMaxSatReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalWeightedMaxSatReferenceSolver::Auto
-            | ExternalWeightedMaxSatReferenceSolver::RustEnumeration
-            | ExternalWeightedMaxSatReferenceSolver::Fallback
-    ) {
-        return solve_weighted_max_sat_with_rust_reference(problem);
+    if should_use_rust_weighted_max_sat_reference(opts)
+        || should_use_registered_weighted_max_sat_fallback(opts)
+    {
+        return relabel_registered_weighted_max_sat_fallback(
+            solve_weighted_max_sat_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_weighted_max_sat_reference_json(
@@ -578,6 +624,31 @@ mod tests {
     use crate::des::general::weighted_max_sat::{
         build_sample_weighted_max_sat_problem, WeightedMaxSatClause,
     };
+    use std::sync::Mutex;
+
+    static WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_sample_weighted_max_sat() {
@@ -653,6 +724,36 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-weighted-max-sat");
         assert_eq!(solution.objective, Some(16.0));
         assert_eq!(solution.assignment, vec![true, true, true]);
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let problem = build_sample_weighted_max_sat_problem();
+
+        let solution = solve_weighted_max_sat_with_external_reference(
+            &problem,
+            &ExternalWeightedMaxSatReferenceOptions {
+                solver: ExternalWeightedMaxSatReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedMaxSatReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-weighted-max-sat-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(16.0));
+        assert_eq!(solution.assignment, vec![true, true, true]);
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Reference bridge for two-stage stochastic linear programs.
 
-The deterministic oracle builds the extensive-form sample-average LP and solves
-it with SciPy's HiGHS-backed ``linprog`` when available. This gives the Rust
-validation suite a same-input open-source reference for native monolithic SAA
-and Benders/L-shaped stochastic LP solves without vendoring solver executables.
+The Rust reference binary owns default and fallback solves by building the
+extensive-form sample-average LP in Rust. This Python bridge is kept only for
+explicit SciPy/HiGHS checks against the same compact JSON model.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import argparse
 import json
 import math
 import os
-import subprocess
 import sys
 from typing import Any
 
@@ -134,6 +132,14 @@ def rust_reference_command() -> list[str]:
     return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
 
 
+def exec_rust_reference(solver: str) -> None:
+    command = rust_reference_command()
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(os.path.dirname(script_dir))
+    os.execvp(command[0], [*command, "--solver", solver])
+
+
 def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     if not os.path.exists(binary_path):
         return False
@@ -147,34 +153,6 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
         not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
         for source_path in source_paths
     )
-
-
-def rust_reference(raw: dict[str, Any], solver: str = "auto") -> dict[str, Any]:
-    command = rust_reference_command()
-    cwd = None
-    if command[0] == "cargo":
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        cwd = os.path.dirname(script_dir)
-    completed = subprocess.run(
-        [*command, "--solver", solver],
-        input=json.dumps(raw),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        check=False,
-    )
-    try:
-        parsed = json.loads(completed.stdout)
-    except Exception as exc:
-        return result(
-            "numerical-error",
-            "rust:stochastic-lp-reference",
-            message=f"failed to parse Rust stochastic LP output: {exc}; stderr={completed.stderr.strip()}",
-        )
-    if completed.returncode != 0 and not parsed.get("message"):
-        parsed["message"] = completed.stderr.strip()
-    return parsed
 
 
 def scipy_status(code: int) -> str:
@@ -291,13 +269,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.solver not in ("scipy", "scipy-highs", "highs"):
+        exec_rust_reference(args.solver)
+
     try:
         raw = json.load(sys.stdin)
-        if args.solver in ("scipy", "scipy-highs", "highs"):
-            problem = normalize(raw)
-            output = solve_scipy(problem)
-        else:
-            output = rust_reference(raw, args.solver)
+        problem = normalize(raw)
+        output = solve_scipy(problem)
         print(json.dumps(output, sort_keys=True))
         return 0 if output["status"] in {
             "optimal",

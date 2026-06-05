@@ -9,8 +9,8 @@
 //!      (`InternalInteriorPointSolver` / `solve_lp_internal_ipm`) for smooth
 //!      educational solves on medium-small dense LPs.
 //!   4. An external LP dispatcher (`ExternalSolver` / `solve_lp_external`) that
-//!      prefers the Rust local CLI bridge for supported solvers and keeps the
-//!      legacy Python bridge for explicit SciPy/OR-Tools compatibility.
+//!      prefers Rust local CLI/internal fallbacks and keeps the legacy Python
+//!      bridge only for explicit SciPy/OR-Tools compatibility.
 //!   5. `LPSolver` / `solve_lp`: selects a solver via the `LP_SOLVER` env var,
 //!      defaulting to the native internal simplex. Explicit external choices
 //!      fall back to the internal simplex if the bridge is unavailable.
@@ -3724,8 +3724,8 @@ fn pivot(t: &mut Vec<Vec<f64>>, basis: &mut [usize], pivot_row: usize, pivot_col
 // -----------------------------------------------------------------------------
 
 /// Default path to the repository-local Python LP bridge. This is retained for
-/// explicit SciPy/OR-Tools compatibility; supported HiGHS calls use the Rust
-/// local CLI bridge by default when no Python/script override is supplied.
+/// explicit SciPy/OR-Tools compatibility; supported calls use Rust CLI/internal
+/// validation paths by default when no Python/script override is supplied.
 const DEFAULT_SCRIPT: &str = "scripts/lp_solve.py";
 
 fn ortools_linear_method(method: &str) -> Option<&'static str> {
@@ -3801,6 +3801,8 @@ fn external_solver_label(method: &str) -> String {
             "scipy:highs-ipm" => "scipy:highs-ipm".to_string(),
             _ => format!("{}:cli", solver.as_str()),
         }
+    } else if normalized_external_lp_method(method).starts_with("scipy:") {
+        normalized_external_lp_method(method)
     } else {
         format!("scipy:{method}")
     }
@@ -3823,7 +3825,7 @@ fn rust_external_lp_cli_options(
     method: &str,
     opts: &ExternalSolverOptions,
 ) -> Option<ExternalLinearCliOptions> {
-    if opts.python.is_some() || opts.script.is_some() || lp_external_bridge_forced_python() {
+    if explicit_lp_python_bridge_requested(opts) {
         return None;
     }
     let (solver, lp_algorithm) = rust_external_lp_cli_method(method)?;
@@ -3832,6 +3834,49 @@ fn rust_external_lp_cli_options(
         lp_algorithm,
         ..ExternalLinearCliOptions::default()
     })
+}
+
+fn explicit_lp_python_bridge_requested(opts: &ExternalSolverOptions) -> bool {
+    opts.python.is_some() || opts.script.is_some() || lp_external_bridge_forced_python()
+}
+
+fn should_use_rust_external_lp_internal_fallback(
+    method: &str,
+    opts: &ExternalSolverOptions,
+) -> bool {
+    if explicit_lp_python_bridge_requested(opts) {
+        return false;
+    }
+    if ortools_linear_method(method).is_some() {
+        return true;
+    }
+    matches!(
+        normalized_external_lp_method(method).as_str(),
+        "simplex"
+            | "scipy:simplex"
+            | "revised-simplex"
+            | "scipy:revised-simplex"
+            | "interior-point"
+            | "scipy:interior-point"
+    )
+}
+
+fn lp_solution_from_rust_internal_fallback(
+    requested_solver: &str,
+    mut solution: LPSolution,
+    started: Instant,
+) -> LPSolution {
+    let rust_solver = solution.solver;
+    let prefix = match &solution.message {
+        Some(message) if !message.is_empty() => format!("{message}; "),
+        _ => String::new(),
+    };
+    solution.solver = format!("rust:lp-fallback-for-{requested_solver}");
+    solution.elapsed_ms = ms_since(started);
+    solution.message = Some(format!(
+        "{prefix}requested solver '{requested_solver}' was validated with Rust fallback '{rust_solver}'"
+    ));
+    solution
 }
 
 fn lp_status_from_external_cli_status(status: ExternalLinearCliStatus) -> LPStatus {
@@ -3946,6 +3991,13 @@ impl ExternalSolver {
         if let Some(cli_opts) = rust_external_lp_cli_options(&method, &self.opts) {
             let solution = solve_lp_with_external_cli(p, &cli_opts);
             return lp_solution_from_external_cli(&requested_solver, solution, t0);
+        }
+        if should_use_rust_external_lp_internal_fallback(&method, &self.opts) {
+            return lp_solution_from_rust_internal_fallback(
+                &requested_solver,
+                run_internal_simplex(p, &InternalSimplexOptions::default()),
+                t0,
+            );
         }
         let python = self
             .opts
@@ -4781,6 +4833,10 @@ mod tests {
         assert_eq!(external_solver_label("ortools-PDLP"), "ortools:pdlp");
         assert_eq!(external_solver_label("highs"), "highs:cli");
         assert_eq!(external_solver_label("scipy:highs"), "scipy:highs");
+        assert_eq!(
+            external_solver_label("scipy:interior-point"),
+            "scipy:interior-point"
+        );
         assert_eq!(external_solver_label("glpk"), "glpk:cli");
         assert_eq!(external_solver_label("cbc"), "cbc:cli");
         assert_eq!(external_solver_label("gurobi"), "gurobi:cli");
@@ -4855,6 +4911,73 @@ mod tests {
             ..Default::default()
         };
         assert!(rust_external_lp_cli_options("highs", &script_opts).is_none());
+    }
+
+    #[test]
+    fn ortools_and_legacy_scipy_lp_aliases_use_rust_fallback_without_python_override() {
+        if lp_external_bridge_forced_python() {
+            eprintln!("skipping Rust LP fallback test because LP_EXTERNAL_BRIDGE=python");
+            return;
+        }
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0]),
+            ..Default::default()
+        };
+
+        for (method, expected_solver) in [
+            ("glop", "rust:lp-fallback-for-ortools:glop"),
+            ("pdlp", "rust:lp-fallback-for-ortools:pdlp"),
+            ("simplex", "rust:lp-fallback-for-scipy:simplex"),
+            (
+                "scipy:interior-point",
+                "rust:lp-fallback-for-scipy:interior-point",
+            ),
+        ] {
+            let sol = solve_lp_external(
+                &p,
+                &ExternalSolverOptions {
+                    method: Some(method.to_string()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(sol.status, LPStatus::Optimal, "{method}: {:?}", sol.message);
+            assert_eq!(sol.solver, expected_solver, "{method}");
+            assert!((sol.objective - 7.0).abs() <= 1e-7, "{method}: {sol:?}");
+            assert!(sol
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("validated with Rust fallback")));
+        }
+    }
+
+    #[test]
+    fn explicit_python_lp_bridge_override_still_uses_python_path() {
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![1.0]]),
+            b_ub: Some(vec![1.0]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_external(
+            &p,
+            &ExternalSolverOptions {
+                method: Some("glop".to_string()),
+                python: Some("/definitely/not-a-python-for-lp-bridge".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sol.status, LPStatus::NumericalError);
+        assert_eq!(sol.solver, "ortools:glop");
+        assert!(sol
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("external solver could not start")));
     }
 
     #[test]

@@ -35,6 +35,32 @@ impl ExternalKnapsackReferenceSolver {
     }
 }
 
+fn registered_knapsack_rust_fallback_enabled() -> bool {
+    std::env::var("KNAPSACK_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("KNAPSACK_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_knapsack_reference(opts: &ExternalKnapsackReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalKnapsackReferenceSolver::Auto
+            | ExternalKnapsackReferenceSolver::RustBranchAndBound
+            | ExternalKnapsackReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_knapsack_fallback(opts: &ExternalKnapsackReferenceOptions) -> bool {
+    registered_knapsack_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalKnapsackReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalKnapsackReferenceOptions {
     pub solver: ExternalKnapsackReferenceSolver,
@@ -195,6 +221,22 @@ fn rust_knapsack_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_knapsack_fallback(
+    mut solution: ExternalKnapsackReferenceSolution,
+    opts: &ExternalKnapsackReferenceOptions,
+) -> ExternalKnapsackReferenceSolution {
+    if should_use_registered_knapsack_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-knapsack-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn rust_knapsack_sorted_items(problem: &KnapsackProblem) -> Vec<RustKnapsackSearchItem> {
@@ -625,13 +667,11 @@ pub fn solve_knapsack_with_external_reference(
     problem: &KnapsackProblem,
     opts: &ExternalKnapsackReferenceOptions,
 ) -> ExternalKnapsackReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalKnapsackReferenceSolver::Auto
-            | ExternalKnapsackReferenceSolver::RustBranchAndBound
-            | ExternalKnapsackReferenceSolver::Fallback
-    ) {
-        return solve_knapsack_with_rust_reference(problem);
+    if should_use_rust_knapsack_reference(opts) || should_use_registered_knapsack_fallback(opts) {
+        return relabel_registered_knapsack_fallback(
+            solve_knapsack_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_knapsack_reference_json(
@@ -653,6 +693,31 @@ mod tests {
     use crate::des::general::knapsack::{
         build_sample_knapsack_problem, KnapsackItem, KnapsackProblem,
     };
+    use std::sync::Mutex;
+
+    static KNAPSACK_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_sample_knapsack() {
@@ -724,6 +789,31 @@ mod tests {
         assert_eq!(solution.solver, "rust:branch-and-bound-knapsack");
         assert_eq!(solution.selected_item_ids, vec!["B", "C", "D"]);
         assert_eq!(solution.objective, Some(51.0));
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = KNAPSACK_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("KNAPSACK_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let problem = build_sample_knapsack_problem();
+
+        let solution = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalKnapsackReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-knapsack-fallback-for-ortools"
+        );
+        assert_eq!(solution.selected_item_ids, vec!["B", "C", "D"]);
+        assert_eq!(solution.objective, Some(51.0));
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

@@ -10,6 +10,7 @@ maximized weighted objective.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -18,6 +19,7 @@ from typing import Optional
 
 
 OBJECTIVE_SCALE = 1_000_000
+RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust-enumeration", "rust-exact")
 
 
 def exec_rust_reference(solver: str) -> None:
@@ -50,6 +52,18 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
         not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
         for source_path in source_paths
     )
+
+
+def package_available(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def external_rust_fallback_enabled() -> bool:
+    value = os.environ.get("WEIGHTED_MAX_SAT_REFERENCE_EXTERNAL_FALLBACK", "")
+    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
 def normalize(raw: dict) -> dict:
@@ -197,8 +211,14 @@ def main() -> int:
         default="auto",
     )
     args = parser.parse_args()
-    if args.solver in ("auto", "fallback", "rust-enumeration", "rust-exact"):
+    if args.solver in RUST_REFERENCE_SOLVERS:
         exec_rust_reference(args.solver)
+    if (
+        external_rust_fallback_enabled()
+        and args.solver == "ortools"
+        and not package_available("ortools")
+    ):
+        exec_rust_reference("rust-exact")
 
     try:
         problem = normalize(json.load(sys.stdin))

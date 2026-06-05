@@ -38,6 +38,34 @@ impl ExternalMinCostFlowReferenceSolver {
     }
 }
 
+fn registered_min_cost_flow_rust_fallback_enabled() -> bool {
+    std::env::var("MIN_COST_FLOW_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("MIN_COST_FLOW_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_min_cost_flow_reference(opts: &ExternalMinCostFlowReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalMinCostFlowReferenceSolver::Auto
+            | ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath
+            | ExternalMinCostFlowReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_min_cost_flow_fallback(
+    opts: &ExternalMinCostFlowReferenceOptions,
+) -> bool {
+    registered_min_cost_flow_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalMinCostFlowReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalMinCostFlowReferenceOptions {
     pub solver: ExternalMinCostFlowReferenceSolver,
@@ -222,6 +250,22 @@ fn rust_min_cost_flow_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_min_cost_flow_fallback(
+    mut solution: ExternalMinCostFlowReferenceSolution,
+    opts: &ExternalMinCostFlowReferenceOptions,
+) -> ExternalMinCostFlowReferenceSolution {
+    if should_use_registered_min_cost_flow_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-min-cost-flow-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn solve_min_cost_flow_with_rust_reference(
@@ -440,13 +484,13 @@ pub fn solve_min_cost_flow_with_external_reference(
     problem: &MinCostFlowProblem,
     opts: &ExternalMinCostFlowReferenceOptions,
 ) -> ExternalMinCostFlowReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalMinCostFlowReferenceSolver::Auto
-            | ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath
-            | ExternalMinCostFlowReferenceSolver::Fallback
-    ) {
-        return solve_min_cost_flow_with_rust_reference(problem);
+    if should_use_rust_min_cost_flow_reference(opts)
+        || should_use_registered_min_cost_flow_fallback(opts)
+    {
+        return relabel_registered_min_cost_flow_fallback(
+            solve_min_cost_flow_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_min_cost_flow_reference_json(
@@ -470,6 +514,31 @@ pub fn solve_min_cost_flow_with_external_reference(
 mod tests {
     use super::*;
     use crate::des::general::min_cost_flow::MinCostFlowArc;
+    use std::sync::Mutex;
+
+    static MIN_COST_FLOW_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn transportation_problem() -> MinCostFlowProblem {
         MinCostFlowProblem {
@@ -570,6 +639,32 @@ mod tests {
         assert_eq!(solution.solver, "rust:ssp-min-cost-flow");
         assert_eq!(solution.objective, Some(21.0));
         assert_eq!(solution.node_balance, vec![5.0, 7.0, -6.0, -6.0]);
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = MIN_COST_FLOW_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set("MIN_COST_FLOW_REFERENCE_REGISTERED_FALLBACK", "rust");
+
+        let solution = solve_min_cost_flow_with_external_reference(
+            &transportation_problem(),
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMinCostFlowReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-min-cost-flow-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(21.0));
+        assert_eq!(solution.node_balance, vec![5.0, 7.0, -6.0, -6.0]);
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

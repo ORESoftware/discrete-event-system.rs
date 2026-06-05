@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import math
 import os
@@ -46,6 +47,7 @@ SCIPY_BRIDGE_SOLVERS = (
 )
 
 PACKAGE_BRIDGE_SOLVERS = ("casadi", "nlopt", "nlopt-cli")
+RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust", "rust-fallback")
 
 
 def result(
@@ -79,6 +81,14 @@ def rust_reference_command() -> list[str]:
     return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
 
 
+def exec_rust_reference(solver: str = "auto") -> None:
+    command = rust_reference_command()
+    if command[0] == "cargo":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(os.path.dirname(script_dir))
+    os.execvp(command[0], [*command, "--solver", solver])
+
+
 def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     if not os.path.exists(binary_path):
         return False
@@ -97,6 +107,27 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
         not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
         for source_path in source_paths
     )
+
+
+def package_available(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def python_bridge_available(solver: str) -> bool:
+    if solver in SCIPY_BRIDGE_SOLVERS:
+        return package_available("scipy")
+    if solver in PACKAGE_BRIDGE_SOLVERS:
+        package = "nlopt" if solver in ("nlopt", "nlopt-cli") else solver
+        return package_available(package) and package_available("scipy")
+    return False
+
+
+def python_bridge_disabled() -> bool:
+    value = os.environ.get("NONLINEAR_VALIDATION_REFERENCE_PYTHON_BRIDGE", "auto")
+    return value.strip().lower() in ("0", "false", "off", "disabled", "rust")
 
 
 def rust_fallback_reference(payload: dict[str, Any], solver: str = "fallback") -> dict[str, Any]:
@@ -354,6 +385,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--solver", default="auto")
     args = parser.parse_args()
+    solver = args.solver.strip().lower().replace("_", "-")
+    if solver in RUST_REFERENCE_SOLVERS:
+        exec_rust_reference(args.solver)
+    if solver in SCIPY_BRIDGE_SOLVERS or solver in PACKAGE_BRIDGE_SOLVERS:
+        if python_bridge_disabled() or not python_bridge_available(solver):
+            exec_rust_reference(args.solver)
     try:
         payload = json.load(sys.stdin)
         if str(payload.get("kind", "nonlinear-validation")).replace("_", "-") not in (

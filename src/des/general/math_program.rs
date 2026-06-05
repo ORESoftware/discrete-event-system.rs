@@ -5243,8 +5243,9 @@ impl Default for MathProgramSolveOptions {
 /// When `method` is omitted for linear LP/MIP models, the facade defaults to
 /// the Rust-native `highs-cli` adapter. Python remains the fallback bridge for
 /// explicit SciPy, OR-Tools, nonlinear oracles, and external API bindings.
-/// Compatibility HiGHS and GLPK method names use the Rust CLI adapter for
-/// LP/MIP models unless a Python executable or script is explicitly provided.
+/// Compatibility HiGHS, GLPK, SCIP, CBC, CLP, SoPlex, QSopt_ex, and lp_solve
+/// method names use the Rust CLI adapter for LP/MIP models unless a Python
+/// executable or script is explicitly provided.
 /// The Python bridge remains a fallback when an explicit bridge is requested
 /// but its optional Python solver stack is missing.
 #[derive(Clone, Debug, Default)]
@@ -9233,7 +9234,10 @@ fn is_highs_default_method(method: &str) -> bool {
 
 fn is_glpk_default_method(method: &str) -> bool {
     let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
-    matches!(normalized.as_str(), "glpk" | "glpk:default")
+    matches!(
+        normalized.as_str(),
+        "glpk" | "glpk:default" | "glpsol" | "glpsol:default"
+    )
 }
 
 fn program_supports_linear_cli_fallback(program: &MathProgram) -> bool {
@@ -9363,6 +9367,25 @@ fn parse_external_math_program_linear_cli_method(method: &str) -> Option<Externa
     }
 }
 
+fn parse_external_math_program_default_linear_cli_method(
+    method: &str,
+) -> Option<ExternalLinearCliSolver> {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    let normalized = normalized
+        .strip_suffix(":default")
+        .unwrap_or(&normalized)
+        .to_string();
+    match normalized.as_str() {
+        "scip" => Some(ExternalLinearCliSolver::Scip),
+        "cbc" | "coin-cbc" | "coin-or-cbc" => Some(ExternalLinearCliSolver::Cbc),
+        "clp" => Some(ExternalLinearCliSolver::Clp),
+        "soplex" => Some(ExternalLinearCliSolver::Soplex),
+        "qsopt" | "qsopt-ex" => Some(ExternalLinearCliSolver::QsoptEx),
+        "lp-solve" | "lpsolve" => Some(ExternalLinearCliSolver::LpSolve),
+        _ => None,
+    }
+}
+
 fn resolve_external_math_program_linear_cli_solver(
     program: &MathProgram,
     opts: &ExternalMathProgramOptions,
@@ -9382,6 +9405,9 @@ fn resolve_external_math_program_linear_cli_solver(
     }
     if is_glpk_default_method(method) {
         return Some(ExternalLinearCliSolver::Glpk);
+    }
+    if let Some(solver) = parse_external_math_program_default_linear_cli_method(method) {
+        return Some(solver);
     }
     None
 }
@@ -21610,6 +21636,33 @@ mod tests {
             ),
             Some(ExternalLinearCliSolver::Glpk)
         );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "glpsol"
+            ),
+            Some(ExternalLinearCliSolver::Glpk)
+        );
+        for (method, solver) in [
+            ("scip", ExternalLinearCliSolver::Scip),
+            ("cbc", ExternalLinearCliSolver::Cbc),
+            ("coin-or-cbc:default", ExternalLinearCliSolver::Cbc),
+            ("clp", ExternalLinearCliSolver::Clp),
+            ("soplex", ExternalLinearCliSolver::Soplex),
+            ("qsopt_ex", ExternalLinearCliSolver::QsoptEx),
+            ("lp-solve", ExternalLinearCliSolver::LpSolve),
+        ] {
+            assert_eq!(
+                resolve_external_math_program_linear_cli_solver(
+                    &lp,
+                    &ExternalMathProgramOptions::default(),
+                    method
+                ),
+                Some(solver),
+                "{method} should use the Rust CLI adapter by default"
+            );
+        }
 
         let explicit_python = ExternalMathProgramOptions {
             python: Some("python3".to_string()),
@@ -21621,6 +21674,10 @@ mod tests {
         );
         assert_eq!(
             resolve_external_math_program_linear_cli_solver(&lp, &explicit_python, "glpk"),
+            None
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &explicit_python, "cbc"),
             None
         );
 
@@ -21635,6 +21692,10 @@ mod tests {
         assert_eq!(
             resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "highs-cli"),
             Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "soplex"),
+            None
         );
 
         let mut qp = MathProgram::new(ObjectiveSense::Min);

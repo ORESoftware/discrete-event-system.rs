@@ -175,6 +175,27 @@ fn should_use_rust_reference(opts: &ExternalNonlinearReferenceOptions) -> bool {
     )
 }
 
+fn registered_nonlinear_rust_fallback_enabled() -> bool {
+    std::env::var("NONLINEAR_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("NL_REFERENCE_REGISTERED_FALLBACK"))
+        .or_else(|_| std::env::var("NONLINEAR_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_registered_nonlinear_fallback(opts: &ExternalNonlinearReferenceOptions) -> bool {
+    registered_nonlinear_rust_fallback_enabled()
+        && matches!(
+            opts.solver,
+            ExternalNonlinearReferenceSolver::Scipy | ExternalNonlinearReferenceSolver::Nlopt
+        )
+}
+
 fn reference_max_iterations(opts: &ExternalNonlinearReferenceOptions, default: usize) -> usize {
     opts.max_iterations.unwrap_or(default).max(1)
 }
@@ -207,6 +228,38 @@ fn rust_nonlinear_solution(
         message: message.into(),
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     }
+}
+
+fn relabel_registered_nonlinear_fallback(
+    mut solution: ExternalNonlinearReferenceSolution,
+    opts: &ExternalNonlinearReferenceOptions,
+) -> ExternalNonlinearReferenceSolution {
+    if should_use_registered_nonlinear_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-nonlinear-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
+}
+
+fn relabel_registered_pareto_nonlinear_fallback(
+    mut solution: ExternalParetoPortfolioReferenceSolution,
+    opts: &ExternalNonlinearReferenceOptions,
+) -> ExternalParetoPortfolioReferenceSolution {
+    if should_use_registered_nonlinear_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-nonlinear-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn rust_rosenbrock(x: &[f64]) -> f64 {
@@ -876,8 +929,11 @@ pub fn solve_rosenbrock_with_external_reference(
     x0: &[f64],
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalNonlinearReferenceSolution {
-    if should_use_rust_reference(opts) {
-        return solve_rosenbrock_with_rust_reference(x0);
+    if should_use_rust_reference(opts) || should_use_registered_nonlinear_fallback(opts) {
+        return relabel_registered_nonlinear_fallback(
+            solve_rosenbrock_with_rust_reference(x0),
+            opts,
+        );
     }
     run_nonlinear_reference_json(
         json!({
@@ -894,8 +950,11 @@ pub fn solve_pareto_portfolio_with_external_reference(
     seed: u32,
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalParetoPortfolioReferenceSolution {
-    if should_use_rust_reference(opts) {
-        return solve_pareto_portfolio_with_rust_reference(assets, samples, seed);
+    if should_use_rust_reference(opts) || should_use_registered_nonlinear_fallback(opts) {
+        return relabel_registered_pareto_nonlinear_fallback(
+            solve_pareto_portfolio_with_rust_reference(assets, samples, seed),
+            opts,
+        );
     }
     run_pareto_portfolio_reference_json(
         json!({
@@ -917,8 +976,11 @@ pub fn solve_exponential_fit_with_external_reference(
     initial: &[f64],
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalNonlinearReferenceSolution {
-    if should_use_rust_reference(opts) {
-        return solve_exponential_fit_with_rust_reference(points, initial, opts);
+    if should_use_rust_reference(opts) || should_use_registered_nonlinear_fallback(opts) {
+        return relabel_registered_nonlinear_fallback(
+            solve_exponential_fit_with_rust_reference(points, initial, opts),
+            opts,
+        );
     }
     run_nonlinear_reference_json(
         json!({
@@ -940,8 +1002,11 @@ pub fn solve_global_benchmark_with_external_reference(
     upper: f64,
     opts: &ExternalNonlinearReferenceOptions,
 ) -> ExternalNonlinearReferenceSolution {
-    if should_use_rust_reference(opts) {
-        return solve_global_benchmark_with_rust_reference(objective, dimension, lower, upper);
+    if should_use_rust_reference(opts) || should_use_registered_nonlinear_fallback(opts) {
+        return relabel_registered_nonlinear_fallback(
+            solve_global_benchmark_with_rust_reference(objective, dimension, lower, upper),
+            opts,
+        );
     }
     run_nonlinear_reference_json(
         json!({
@@ -967,6 +1032,31 @@ mod tests {
     };
     use crate::des::general::nonlinear_optimization_models::CurveFitPoint;
     use std::process::{Command, Stdio};
+    use std::sync::Mutex;
+
+    static NONLINEAR_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn auto_prefers_rust_reference_without_python() {
@@ -1065,6 +1155,69 @@ mod tests {
         let pareto = solve_pareto_portfolio_with_external_reference(&[], 32, 11, &opts);
         assert_eq!(pareto.status, ExternalNonlinearReferenceStatus::Optimal);
         assert!(pareto.solver.starts_with("rust:"));
+    }
+
+    #[test]
+    fn registered_solver_aliases_can_use_rust_reference_without_python() {
+        let _lock = NONLINEAR_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("NONLINEAR_REFERENCE_REGISTERED_FALLBACK", "rust");
+
+        let scipy_opts = ExternalNonlinearReferenceOptions {
+            solver: ExternalNonlinearReferenceSolver::Scipy,
+            max_iterations: Some(64),
+        };
+        let rosenbrock = solve_rosenbrock_with_external_reference(&[-1.2, 1.0], &scipy_opts);
+        assert_eq!(rosenbrock.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert_eq!(
+            rosenbrock.solver,
+            "rust:registered-nonlinear-fallback-for-scipy"
+        );
+        assert!(rosenbrock
+            .message
+            .contains("requested solver 'scipy' was validated with Rust fallback"));
+
+        let pareto = solve_pareto_portfolio_with_external_reference(&[], 32, 5, &scipy_opts);
+        assert_eq!(pareto.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert_eq!(
+            pareto.solver,
+            "rust:registered-nonlinear-fallback-for-scipy"
+        );
+        assert!(!pareto.pareto_front.is_empty());
+
+        let nlopt_opts = ExternalNonlinearReferenceOptions {
+            solver: ExternalNonlinearReferenceSolver::Nlopt,
+            max_iterations: Some(64),
+        };
+        let points = [
+            CurveFitPoint { x: 0.0, y: 2.0 },
+            CurveFitPoint {
+                x: 1.0,
+                y: 2.0 * (-0.5_f64).exp(),
+            },
+            CurveFitPoint {
+                x: 2.0,
+                y: 2.0 * (-1.0_f64).exp(),
+            },
+        ];
+        let fit = solve_exponential_fit_with_external_reference(&points, &[1.0, -0.2], &nlopt_opts);
+        assert!(matches!(
+            fit.status,
+            ExternalNonlinearReferenceStatus::Optimal | ExternalNonlinearReferenceStatus::Feasible
+        ));
+        assert_eq!(fit.solver, "rust:registered-nonlinear-fallback-for-nlopt");
+
+        let global = solve_global_benchmark_with_external_reference(
+            ExternalNonlinearBenchmarkObjective::Sphere,
+            3,
+            -5.0,
+            5.0,
+            &nlopt_opts,
+        );
+        assert_eq!(global.status, ExternalNonlinearReferenceStatus::Optimal);
+        assert_eq!(
+            global.solver,
+            "rust:registered-nonlinear-fallback-for-nlopt"
+        );
     }
 
     #[test]

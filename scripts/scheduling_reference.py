@@ -9,6 +9,7 @@ without vendoring solver executables.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -18,6 +19,7 @@ from typing import Optional
 
 
 SCALE = 1000
+RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust-exact")
 
 
 def rust_reference_command() -> list[str]:
@@ -55,6 +57,18 @@ def exec_rust_reference(solver: str, kind: str) -> None:
         os.chdir(os.path.dirname(script_dir))
         os.execvp(command[0], command)
     os.execv(command[0], command)
+
+
+def package_available(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def external_rust_fallback_enabled() -> bool:
+    value = os.environ.get("SCHEDULING_REFERENCE_EXTERNAL_FALLBACK", "")
+    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
 def rust_reference(raw: dict, kind: str) -> dict:
@@ -367,6 +381,11 @@ def infer_kind(raw: dict, requested: str) -> str:
     return "job-shop"
 
 
+def rust_reference_embedded() -> bool:
+    value = os.environ.get("SCHEDULING_REFERENCE_RUST_REFERENCE_EMBEDDED", "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -376,8 +395,14 @@ def main() -> int:
     )
     parser.add_argument("--kind", choices=["auto", "job-shop", "flow-shop"], default="auto")
     args = parser.parse_args()
-    if args.solver in ("auto", "fallback", "rust-exact"):
+    if args.solver in RUST_REFERENCE_SOLVERS:
         exec_rust_reference(args.solver, args.kind)
+    if (
+        external_rust_fallback_enabled()
+        and args.solver == "ortools"
+        and not package_available("ortools")
+    ):
+        exec_rust_reference("rust-exact", args.kind)
 
     try:
         raw = json.load(sys.stdin)
@@ -390,7 +415,6 @@ def main() -> int:
             ortools_fn = ortools_cp_sat
 
         ortools = ortools_fn(jobs)
-        reference = rust_reference(raw, kind)
         output = dict(ortools)
         output.setdefault(
             "solver",
@@ -400,8 +424,10 @@ def main() -> int:
         output.setdefault("schedule", [])
         output.setdefault("makespan", None)
         output.setdefault("totalFlowTime", None)
-        output["referenceStatus"] = reference.get("status")
-        output["referenceMakespan"] = reference.get("makespan")
+        if not rust_reference_embedded():
+            reference = rust_reference(raw, kind)
+            output["referenceStatus"] = reference.get("status")
+            output["referenceMakespan"] = reference.get("makespan")
         print(json.dumps(output))
         return 0 if output["status"] in ("optimal", "feasible", "unavailable") else 1
     except Exception as exc:

@@ -38,6 +38,39 @@ impl ExternalWeightedIndependentSetReferenceSolver {
     }
 }
 
+fn registered_weighted_independent_set_rust_fallback_enabled() -> bool {
+    std::env::var("WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("WEIGHTED_INDEPENDENT_SET_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_weighted_independent_set_reference(
+    opts: &ExternalWeightedIndependentSetReferenceOptions,
+) -> bool {
+    matches!(
+        opts.solver,
+        ExternalWeightedIndependentSetReferenceSolver::Auto
+            | ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound
+            | ExternalWeightedIndependentSetReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_weighted_independent_set_fallback(
+    opts: &ExternalWeightedIndependentSetReferenceOptions,
+) -> bool {
+    registered_weighted_independent_set_rust_fallback_enabled()
+        && matches!(
+            opts.solver,
+            ExternalWeightedIndependentSetReferenceSolver::OrTools
+        )
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalWeightedIndependentSetReferenceOptions {
     pub solver: ExternalWeightedIndependentSetReferenceSolver,
@@ -210,6 +243,23 @@ fn rust_wis_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_weighted_independent_set_fallback(
+    mut solution: ExternalWeightedIndependentSetReferenceSolution,
+    opts: &ExternalWeightedIndependentSetReferenceOptions,
+) -> ExternalWeightedIndependentSetReferenceSolution {
+    if should_use_registered_weighted_independent_set_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver =
+            format!("rust:registered-weighted-independent-set-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn rust_wis_adjacency(
@@ -629,13 +679,13 @@ pub fn solve_weighted_independent_set_with_external_reference(
     problem: &WeightedIndependentSetProblem,
     opts: &ExternalWeightedIndependentSetReferenceOptions,
 ) -> ExternalWeightedIndependentSetReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalWeightedIndependentSetReferenceSolver::Auto
-            | ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound
-            | ExternalWeightedIndependentSetReferenceSolver::Fallback
-    ) {
-        return solve_weighted_independent_set_with_rust_reference(problem);
+    if should_use_rust_weighted_independent_set_reference(opts)
+        || should_use_registered_weighted_independent_set_fallback(opts)
+    {
+        return relabel_registered_weighted_independent_set_fallback(
+            solve_weighted_independent_set_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_weighted_independent_set_reference_json(
@@ -657,6 +707,31 @@ mod tests {
         build_sample_weighted_independent_set_problem, WeightedIndependentSetProblem,
         WeightedIndependentSetVertex,
     };
+    use std::sync::Mutex;
+
+    static WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_sample_weighted_independent_set() {
@@ -741,6 +816,39 @@ mod tests {
         );
         assert_eq!(solution.selected_vertex_ids, vec!["B", "D", "G"]);
         assert_eq!(solution.objective, Some(16.0));
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set(
+            "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
+            "rust",
+        );
+        let problem = build_sample_weighted_independent_set_problem();
+
+        let solution = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedIndependentSetReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-weighted-independent-set-fallback-for-ortools"
+        );
+        assert_eq!(solution.selected_vertex_ids, vec!["B", "D", "G"]);
+        assert_eq!(solution.objective, Some(16.0));
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

@@ -18,6 +18,8 @@ use des_engine::des::soccer_learning::{
 use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde::Serialize;
 
+const DEFAULT_SOCCER_SET_PLAY_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE: bool = true;
+
 fn env_value(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -217,6 +219,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     let team = env_team()?;
     let restarts = env_restarts()?;
     let restart = restarts[0];
+    let pg_tactical_learning_authoritative = env_bool(
+        "SOCCER_SET_PLAY_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE",
+        env_bool(
+            "SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE",
+            DEFAULT_SOCCER_SET_PLAY_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE,
+        )?,
+    )?;
     let mut config = MatchConfig::default();
     config.duration_seconds = duration_seconds;
     config.dt_seconds = env_parse("SOCCER_DT_SECONDS", config.dt_seconds)?;
@@ -321,7 +330,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let spot = free_kick_spot(&config, team, distance_yards);
     println!(
-        "soccer_set_play_learning_start run_id={} episodes={} restarts={:?} team={:?} duration={:.3}s distance={:.2}yd dt={:.3}s neural_enabled={} neural_backend={:?}",
+        "soccer_set_play_learning_start run_id={} episodes={} restarts={:?} team={:?} duration={:.3}s distance={:.2}yd dt={:.3}s neural_enabled={} neural_backend={:?} pg_tactical_learning_authoritative={}",
         run_id,
         episodes,
         restarts,
@@ -331,6 +340,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         config.dt_seconds,
         config.neural_learning.enabled,
         config.neural_learning.backend,
+        pg_tactical_learning_authoritative,
     );
 
     let request = SoccerSetPlayTrainingRequest {
@@ -381,6 +391,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     latest_updated_at_micros: metadata.updated_at_micros,
                     latest_neural_network_present: metadata.neural_network.is_some(),
                     local_tactical_evolved_since_pg_refresh: false,
+                    postgres_tactical_learning_authoritative: pg_tactical_learning_authoritative,
                 });
             if refresh_decision.refresh_policy {
                 if let Some(version) = store.load_latest_active_policy(

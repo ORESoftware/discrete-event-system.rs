@@ -4,7 +4,7 @@
 //! when one game finishes, its deltas are merged and the next game starts from
 //! the newest available policy.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fs;
 use std::io::{BufWriter, Error as IoError, ErrorKind, Write};
@@ -23,8 +23,10 @@ use des_engine::des::soccer_learning::{
     evolve_soccer_tactical_learning_weights, evolve_soccer_team_policies,
     run_soccer_learning_queue_with_events, soccer_policy_version_insert_status_after_active_head,
     soccer_postgres_policy_refresh_decision, soccer_self_play_artifact_from_queue_report,
-    SoccerEvolutionOptions, SoccerLearningCompletedGame, SoccerLearningQueueEvent,
-    SoccerLearningQueueRunnerConfig, SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
+    soccer_should_flush_postgres_policy_versions_for_new_sim,
+    soccer_should_refresh_postgres_for_new_sim, SoccerEvolutionOptions,
+    SoccerLearningCompletedGame, SoccerLearningQueueEvent, SoccerLearningQueueRunnerConfig,
+    SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -37,6 +39,9 @@ const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE: usize = 16;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES: usize = 16;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS: usize = 2;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE: bool = true;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT: bool = true;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM: bool = true;
 const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 10;
 const DEFAULT_SOCCER_QUEUE_EVOLUTION_ENABLED: bool = true;
 const DEFAULT_SOCCER_QUEUE_EVOLUTION_ELITE_GAMES: usize = 4;
@@ -514,6 +519,17 @@ fn default_queue_evolution_interval_games(parallel_games: usize) -> usize {
     parallel_games.max(10)
 }
 
+fn take_episode_starting_policy_version(
+    episode_starting_policy_versions: &mut HashMap<usize, (Option<String>, i32)>,
+    episode: usize,
+    current_policy_version_id: &Option<String>,
+    current_generation: i32,
+) -> (Option<String>, i32) {
+    episode_starting_policy_versions
+        .remove(&episode)
+        .unwrap_or_else(|| (current_policy_version_id.clone(), current_generation))
+}
+
 fn flush_postgres_completed_runs(
     store: &mut SoccerLearningPgStore,
     experiment_id: &str,
@@ -620,6 +636,30 @@ fn flush_postgres_completed_runs(
     pending_policy_versions.clear();
     pending_runs.clear();
     Ok(flushed)
+}
+
+fn flush_postgres_policy_versions_for_new_sims(
+    store: &mut SoccerLearningPgStore,
+    experiment_id: &str,
+    runner_id: &str,
+    pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
+) -> Result<(), String> {
+    if pending_policy_versions.is_empty() {
+        return Ok(());
+    }
+    let pending_count = pending_policy_versions.len();
+    let mut pending_runs = Vec::new();
+    flush_postgres_completed_runs(
+        store,
+        experiment_id,
+        runner_id,
+        pending_policy_versions,
+        &mut pending_runs,
+    )?;
+    println!(
+        "postgres_policy_versions_flushed_for_new_sims policy_versions_written={pending_count}"
+    );
+    Ok(())
 }
 
 impl AsyncPostgresCompletedRunWriter {
@@ -976,6 +1016,21 @@ fn run() -> Result<(), Box<dyn Error>> {
         "SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS",
         DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS,
     )?;
+    let pg_tactical_learning_authoritative = env_bool_alias(
+        "SOCCER_QUEUE_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE",
+        "SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE",
+        DEFAULT_SOCCER_QUEUE_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE,
+    )?;
+    let pg_refresh_with_resume_artifact = env_bool_alias(
+        "SOCCER_QUEUE_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT",
+        "SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT",
+        DEFAULT_SOCCER_QUEUE_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT,
+    )?;
+    let pg_flush_policy_versions_before_new_sim = env_bool_alias(
+        "SOCCER_QUEUE_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM",
+        "SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM",
+        DEFAULT_SOCCER_QUEUE_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM,
+    )?;
     let pg_policy_version_interval_games = pg_policy_version_interval_games.max(1);
     let pg_completed_run_batch_games = pg_completed_run_batch_games.max(1);
     let pg_completed_run_async_queue_batches = pg_completed_run_async_queue_batches.max(1);
@@ -1032,6 +1087,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             "SOCCER_EVOLUTION_ELITE_WEIGHT_FLOOR",
             default_evolution_options.elite_weight_floor,
         )?,
+        population_size: env_usize_alias(
+            "SOCCER_QUEUE_EVOLUTION_POPULATION_SIZE",
+            "SOCCER_EVOLUTION_POPULATION_SIZE",
+            default_evolution_options.population_size,
+        )?
+        .max(1),
         seed: env_u32_alias(
             "SOCCER_QUEUE_EVOLUTION_SEED",
             "SOCCER_EVOLUTION_SEED",
@@ -1110,9 +1171,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_completed_games_seen = 0usize;
     let mut pg_policy_version_buffer = Vec::<PendingPostgresPolicyVersion>::new();
     let mut pg_completed_buffer = Vec::<PendingPostgresCompletedRun>::new();
+    let mut pg_episode_starting_policy_versions = HashMap::<usize, (Option<String>, i32)>::new();
     let mut pg_persisted_games = 0usize;
 
     let mut initial_policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
+    let pg_refresh_for_new_sims = soccer_should_refresh_postgres_for_new_sim(
+        resume_artifact.is_some(),
+        pg_refresh_with_resume_artifact,
+    );
     let mut initial_neural_network = None::<SoccerNeuralNetworkSnapshot>;
     if let Some(store) = pg_store.as_mut() {
         let experiment_slug =
@@ -1122,7 +1188,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         let experiment_id = store
             .ensure_experiment(&experiment_slug, &experiment_name, &config)
             .map_err(invalid_data)?;
-        if resume_artifact.is_none() {
+        if pg_refresh_for_new_sims {
             if let Some(version) = store
                 .load_latest_active_policy(&experiment_id, options.clone(), options.clone())
                 .map_err(invalid_data)?
@@ -1165,7 +1231,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     println!(
-        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_snapshot_every_batches={} neural_drain_timeout_ms={} postgres_required={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={}",
+        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_snapshot_every_batches={} neural_drain_timeout_ms={} postgres_required={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={} pg_tactical_learning_authoritative={} pg_refresh_with_resume_artifact={} pg_flush_policy_versions_before_new_sim={}",
         run_id,
         games,
         parallel_games,
@@ -1184,9 +1250,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         pg_completed_run_async_queue_batches,
         pg_completed_run_async_coalesce_batches,
         pg_completed_run_async_coalesce_wait_ms,
+        pg_tactical_learning_authoritative,
+        pg_refresh_with_resume_artifact,
+        pg_flush_policy_versions_before_new_sim,
     );
     println!(
-        "queue_evolution enabled={} interval_games={} elite_games={} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} elite_weight_floor={:.4} seed={}",
+        "queue_evolution enabled={} interval_games={} elite_games={} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} elite_weight_floor={:.4} population_size={} seed={}",
         evolution_enabled,
         evolution_interval_games,
         evolution_elite_games,
@@ -1196,6 +1265,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         evolution_options.exploration_rate,
         evolution_options.exploration_scale,
         evolution_options.elite_weight_floor,
+        evolution_options.population_size,
         evolution_options.seed
     );
     if let Some(path) = &resume_artifact {
@@ -1235,7 +1305,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     policies: starting_policies,
                     neural_network,
                 } => {
-                    if resume_artifact.is_none() {
+                    if pg_refresh_for_new_sims {
                         let pending_async_pg_batches =
                             if let Some(writer) = pg_completed_writer.as_mut() {
                                 pg_persisted_games += writer.drain_finished()?;
@@ -1246,6 +1316,18 @@ fn run() -> Result<(), Box<dyn Error>> {
                         if let (Some(experiment_id), Some(store)) =
                             (pg_experiment_id.as_deref(), pg_store.as_mut())
                         {
+                            if soccer_should_flush_postgres_policy_versions_for_new_sim(
+                                pg_refresh_for_new_sims,
+                                pg_flush_policy_versions_before_new_sim,
+                                pg_policy_version_buffer.len(),
+                            ) {
+                                flush_postgres_policy_versions_for_new_sims(
+                                    store,
+                                    experiment_id,
+                                    &run_id,
+                                    &mut pg_policy_version_buffer,
+                                )?;
+                            }
                             if let Some(metadata) =
                                 store.load_latest_active_policy_metadata(experiment_id)?
                             {
@@ -1265,6 +1347,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                                                 .neural_network
                                                 .is_some(),
                                             local_tactical_evolved_since_pg_refresh,
+                                            postgres_tactical_learning_authoritative:
+                                                pg_tactical_learning_authoritative,
                                         },
                                     );
                                 if refresh_decision.apply_tactical_learning {
@@ -1318,6 +1402,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                     ) {
                         match_config.tactical_learning = tactical_learning.clone();
                         active_config = match_config.clone();
+                    }
+                    if pg_experiment_id.is_some() {
+                        pg_episode_starting_policy_versions.insert(
+                            next_episode,
+                            (pg_base_policy_version_id.clone(), pg_generation),
+                        );
                     }
                     Ok(())
                 }
@@ -1388,7 +1478,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             *merged_policies = evolved_policies;
                             policy_evolved_fitness = Some(best_fitness);
                             println!(
-                                "queue_policy_evolved completed_games={} elite_games={} best_fitness={:.4} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4}",
+                                "queue_policy_evolved completed_games={} elite_games={} best_fitness={:.4} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} population_size={}",
                                 queue_completed_games_seen,
                                 elite_count,
                                 best_fitness,
@@ -1396,7 +1486,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 queue_policy_evolution_options.mutation_scale,
                                 queue_policy_evolution_options.crossover_rate,
                                 queue_policy_evolution_options.exploration_rate,
-                                queue_policy_evolution_options.exploration_scale
+                                queue_policy_evolution_options.exploration_scale,
+                                queue_policy_evolution_options.population_size
                             );
                         }
                     }
@@ -1443,10 +1534,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                             active_config.tactical_learning = tactical_learning.clone();
                             local_tactical_evolved_since_pg_refresh = true;
                             println!(
-                                "queue_tactical_weights_evolved completed_games={} elite_games={} best_fitness={:.4} attack_width_delta={:.3}->{:.3} attack_flank_lane={:.3}->{:.3} defense_contract_delta={:.3}->{:.3}",
+                                "queue_tactical_weights_evolved completed_games={} elite_games={} best_fitness={:.4} population_size={} attack_width_delta={:.3}->{:.3} attack_flank_lane={:.3}->{:.3} defense_contract_delta={:.3}->{:.3}",
                                 queue_completed_games_seen,
                                 elite_count,
                                 best_fitness,
+                                queue_evolution_options.population_size,
                                 previous_tactical_learning.attack_width_delta_weight,
                                 tactical_learning.attack_width_delta_weight,
                                 previous_tactical_learning.attack_flank_lane_weight,
@@ -1460,13 +1552,21 @@ fn run() -> Result<(), Box<dyn Error>> {
                         return Ok(());
                     };
                     pg_completed_games_seen = pg_completed_games_seen.saturating_add(1);
-                    let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
+                    let (pg_batch_base_policy_version_id, pg_batch_base_policy_generation) =
+                        take_episode_starting_policy_version(
+                            &mut pg_episode_starting_policy_versions,
+                            game.episode,
+                            &pg_base_policy_version_id,
+                            pg_generation,
+                        );
                     let should_write_policy_version = policy_evolved_fitness.is_some()
                         || pg_policy_version_interval_games <= 1
                         || pg_completed_games_seen >= games
                         || pg_completed_games_seen % pg_policy_version_interval_games == 0;
                     let output_policy_version_id = if should_write_policy_version {
-                        let next_generation = pg_generation.saturating_add(1);
+                        let next_generation = pg_generation
+                            .max(pg_batch_base_policy_generation)
+                            .saturating_add(1);
                         let version_label = format!("{}-episode-{:06}", run_id, game.episode + 1);
                         let output_policy_version_id = Uuid::new_v4().to_string();
                         pg_policy_version_buffer.push(PendingPostgresPolicyVersion {
@@ -1502,6 +1602,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                         generation: pg_generation,
                     });
                     if pg_completed_buffer.len() >= pg_completed_run_batch_games {
+                        if soccer_should_flush_postgres_policy_versions_for_new_sim(
+                            pg_refresh_for_new_sims,
+                            pg_flush_policy_versions_before_new_sim,
+                            pg_policy_version_buffer.len(),
+                        ) {
+                            if let Some(store) = pg_store.as_mut() {
+                                flush_postgres_policy_versions_for_new_sims(
+                                    store,
+                                    experiment_id,
+                                    &run_id,
+                                    &mut pg_policy_version_buffer,
+                                )?;
+                            }
+                        }
                         pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
                             writer.enqueue(
                                 experiment_id,
@@ -1529,6 +1643,21 @@ fn run() -> Result<(), Box<dyn Error>> {
     .map_err(invalid_data)?;
 
     if let Some(experiment_id) = pg_experiment_id.as_deref() {
+        if soccer_should_flush_postgres_policy_versions_for_new_sim(
+            pg_refresh_for_new_sims,
+            pg_flush_policy_versions_before_new_sim,
+            pg_policy_version_buffer.len(),
+        ) {
+            if let Some(store) = pg_store.as_mut() {
+                flush_postgres_policy_versions_for_new_sims(
+                    store,
+                    experiment_id,
+                    &run_id,
+                    &mut pg_policy_version_buffer,
+                )
+                .map_err(invalid_data)?;
+            }
+        }
         pg_persisted_games += if let Some(writer) = pg_completed_writer.as_mut() {
             writer
                 .enqueue(
@@ -1639,6 +1768,39 @@ mod tests {
     #[test]
     fn default_queue_postgres_async_writer_waits_briefly_to_coalesce_io() {
         assert_eq!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS, 2);
+    }
+
+    #[test]
+    fn default_queue_postgres_tactical_learning_is_authoritative() {
+        assert!(DEFAULT_SOCCER_QUEUE_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE);
+    }
+
+    #[test]
+    fn default_queue_postgres_policy_heads_flush_before_new_sims() {
+        assert!(DEFAULT_SOCCER_QUEUE_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM);
+    }
+
+    #[test]
+    fn queue_completed_game_uses_episode_starting_policy_snapshot() {
+        let mut episode_versions = HashMap::new();
+        episode_versions.insert(7, (Some("episode-v7".to_string()), 4));
+        let current_policy_version_id = Some("current-v9".to_string());
+
+        let recorded = take_episode_starting_policy_version(
+            &mut episode_versions,
+            7,
+            &current_policy_version_id,
+            9,
+        );
+        let fallback = take_episode_starting_policy_version(
+            &mut episode_versions,
+            8,
+            &current_policy_version_id,
+            9,
+        );
+
+        assert_eq!(recorded, (Some("episode-v7".to_string()), 4));
+        assert_eq!(fallback, (Some("current-v9".to_string()), 9));
     }
 
     #[test]

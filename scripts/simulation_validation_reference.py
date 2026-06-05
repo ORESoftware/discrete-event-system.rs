@@ -11,8 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
-import sys
 from typing import Any
 
 
@@ -63,36 +61,15 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     )
 
 
-def rust_reference(payload: dict[str, Any], engine: str | None) -> dict[str, Any]:
+def exec_rust_reference(engine: str | None) -> None:
     command = rust_reference_command()
     args = []
     if engine:
         args.extend(["--engine", engine])
-    cwd = None
     if command[0] == "cargo":
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        cwd = os.path.dirname(script_dir)
-    completed = subprocess.run(
-        [*command, *args],
-        input=json.dumps(payload),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        check=False,
-    )
-    try:
-        parsed = json.loads(completed.stdout)
-    except Exception as exc:
-        return result(
-            "failed",
-            "failure",
-            "rust:simulation-validation-reference",
-            f"failed to parse Rust simulation validation output: {exc}; stderr={completed.stderr.strip()}",
-        )
-    if completed.returncode != 0 and not parsed.get("message"):
-        parsed["message"] = completed.stderr.strip()
-    return parsed
+        os.chdir(os.path.dirname(script_dir))
+    os.execvp(command[0], [*command, *args])
 
 
 def main() -> int:
@@ -100,10 +77,10 @@ def main() -> int:
     parser.add_argument("--engine")
     args = parser.parse_args()
     try:
-        payload = json.load(sys.stdin)
-        print(json.dumps(rust_reference(payload, args.engine)))
+        exec_rust_reference(args.engine)
     except Exception as exc:
         print(json.dumps(result("failed", "failure", args.engine or "simulation", str(exc))))
+        return 1
     return 0
 
 

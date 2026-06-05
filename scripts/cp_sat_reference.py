@@ -9,6 +9,7 @@ same JSON model contract.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -50,6 +51,18 @@ def exec_rust_reference(args: argparse.Namespace) -> None:
         "cargo",
         ["cargo", "run", "--quiet", "--bin", binary_name, "--", *command_args],
     )
+
+
+def package_available(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def external_rust_fallback_enabled() -> bool:
+    value = os.environ.get("CP_SAT_REFERENCE_EXTERNAL_FALLBACK", "")
+    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
 def objective_value(model: dict, assignment: Sequence[int]) -> Optional[int]:
@@ -543,6 +556,13 @@ def main() -> int:
             or args.enumerate_solutions is not None
             or args.assumption_core
         ):
+            exec_rust_reference(args)
+        if (
+            external_rust_fallback_enabled()
+            and args.solver in ("ortools", "ortools-cp-sat")
+            and not package_available("ortools")
+        ):
+            args.solver = "rust-enumeration"
             exec_rust_reference(args)
 
     model = json.load(sys.stdin)

@@ -187,10 +187,10 @@ impl ExternalQuadraticReferenceSolver {
                 "Use the native Rust reference by default; explicit solver ids opt into Python-backed external bridges."
             }
             ExternalQuadraticReferenceFamily::DirectPythonApi => {
-                "Direct Python package bridge; reports unavailable when the package is not installed."
+                "Direct Python package bridge; reports unavailable when the package is not installed unless the registered Rust fallback is enabled."
             }
             ExternalQuadraticReferenceFamily::Cvxpy => {
-                "CVXPY-dispatched solver; reports unavailable when CVXPY or the requested backend is not installed."
+                "CVXPY-dispatched solver; reports unavailable when CVXPY or the requested backend is not installed unless the registered Rust fallback is enabled."
             }
             ExternalQuadraticReferenceFamily::RegisteredConic => {
                 "Registered conic backend name with a checked-in fallback for deterministic validation coverage."
@@ -425,7 +425,51 @@ fn is_rust_quadratic_solver(opts: &ExternalQuadraticReferenceOptions) -> bool {
         ExternalQuadraticReferenceSolver::Auto
             | ExternalQuadraticReferenceSolver::RustInternal
             | ExternalQuadraticReferenceSolver::Fallback
-    )
+    ) || should_use_registered_quadratic_fallback(opts)
+}
+
+fn registered_quadratic_rust_fallback_enabled() -> bool {
+    std::env::var("QP_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("QUADRATIC_REFERENCE_REGISTERED_FALLBACK"))
+        .or_else(|_| std::env::var("QP_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_registered_quadratic_fallback(opts: &ExternalQuadraticReferenceOptions) -> bool {
+    registered_quadratic_rust_fallback_enabled()
+        && !matches!(
+            opts.solver,
+            ExternalQuadraticReferenceSolver::Auto
+                | ExternalQuadraticReferenceSolver::RustInternal
+                | ExternalQuadraticReferenceSolver::Fallback
+        )
+}
+
+fn relabel_registered_rust_fallback(
+    mut solution: ExternalQuadraticReferenceSolution,
+    opts: &ExternalQuadraticReferenceOptions,
+    fallback_kind: &str,
+) -> ExternalQuadraticReferenceSolution {
+    if should_use_registered_quadratic_fallback(opts) {
+        solution.solver = format!("builtin:{}-for-{}", fallback_kind, opts.solver.as_arg());
+        if solution.message.is_empty() {
+            solution.message = "registered external solver fallback".to_string();
+        } else if !solution
+            .message
+            .contains("registered external solver fallback")
+        {
+            solution
+                .message
+                .push_str("; registered external solver fallback");
+        }
+    }
+    solution
 }
 
 fn solve_qp_with_rust_reference(
@@ -1240,7 +1284,11 @@ pub fn solve_qp_with_external_reference(
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
     if is_rust_quadratic_solver(opts) {
-        return solve_qp_with_rust_reference(problem, opts);
+        return relabel_registered_rust_fallback(
+            solve_qp_with_rust_reference(problem, opts),
+            opts,
+            "qp-active-set",
+        );
     }
 
     run_quadratic_reference_json(quadratic_program_to_reference_json(problem), opts)
@@ -1251,7 +1299,11 @@ pub fn solve_miqp_with_external_reference(
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
     if is_rust_quadratic_solver(opts) {
-        return solve_miqp_with_rust_reference(problem, opts);
+        return relabel_registered_rust_fallback(
+            solve_miqp_with_rust_reference(problem, opts),
+            opts,
+            "miqp-enumeration",
+        );
     }
 
     let mut payload = quadratic_program_to_reference_json(&problem.qp);
@@ -1286,7 +1338,11 @@ pub fn solve_socp_with_external_reference(
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
     if is_rust_quadratic_solver(opts) {
-        return solve_socp_with_rust_reference(problem);
+        return relabel_registered_rust_fallback(
+            solve_socp_with_rust_reference(problem),
+            opts,
+            "socp-pattern-search",
+        );
     }
 
     run_quadratic_reference_json(second_order_cone_program_to_reference_json(problem), opts)
@@ -1297,7 +1353,11 @@ pub fn solve_misocp_with_external_reference(
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
     if is_rust_quadratic_solver(opts) {
-        return solve_misocp_with_rust_reference(problem, opts);
+        return relabel_registered_rust_fallback(
+            solve_misocp_with_rust_reference(problem, opts),
+            opts,
+            "misocp-enumeration",
+        );
     }
 
     let mut payload = second_order_cone_program_to_reference_json(&problem.socp);
@@ -1334,7 +1394,11 @@ pub fn solve_qcp_with_external_reference(
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
     if is_rust_quadratic_solver(opts) {
-        return solve_qcp_with_rust_reference(problem);
+        return relabel_registered_rust_fallback(
+            solve_qcp_with_rust_reference(problem),
+            opts,
+            "qcp-pattern-search",
+        );
     }
 
     run_quadratic_reference_json(
@@ -1348,7 +1412,11 @@ pub fn solve_miqcp_with_external_reference(
     opts: &ExternalQuadraticReferenceOptions,
 ) -> ExternalQuadraticReferenceSolution {
     if is_rust_quadratic_solver(opts) {
-        return solve_miqcp_with_rust_reference(problem, opts);
+        return relabel_registered_rust_fallback(
+            solve_miqcp_with_rust_reference(problem, opts),
+            opts,
+            "miqcp-enumeration",
+        );
     }
 
     let mut payload = quadratically_constrained_program_to_reference_json(&problem.qcp);
@@ -1367,12 +1435,38 @@ mod tests {
 
     use crate::des::general::external_quadratic_reference::{
         external_quadratic_reference_solver_manifest, external_quadratic_reference_solver_specs,
-        solve_miqcp_with_external_reference, solve_misocp_with_external_reference,
-        solve_qp_with_external_reference, ExternalQuadraticReferenceFamily,
-        ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceSolution,
-        ExternalQuadraticReferenceSolver, ExternalQuadraticReferenceStatus,
+        solve_miqcp_with_external_reference, solve_miqp_with_external_reference,
+        solve_misocp_with_external_reference, solve_qp_with_external_reference,
+        ExternalQuadraticReferenceFamily, ExternalQuadraticReferenceOptions,
+        ExternalQuadraticReferenceSolution, ExternalQuadraticReferenceSolver,
+        ExternalQuadraticReferenceStatus,
     };
     use std::process::{Command, Stdio};
+    use std::sync::Mutex;
+
+    static QUADRATIC_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn solver_args_cover_python_bridge_names() {
@@ -1547,6 +1641,67 @@ mod tests {
             .objective
             .is_some_and(|objective| { (objective - 9.0).abs() <= 1e-7 }));
         assert_eq!(miqcp_solution.enumerated, Some(21));
+    }
+
+    #[test]
+    fn registered_solver_aliases_use_rust_quadratic_reference_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("QP_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        for (solver, expected) in [
+            (
+                ExternalQuadraticReferenceSolver::Osqp,
+                "builtin:qp-active-set-for-osqp",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Cvxpy,
+                "builtin:qp-active-set-for-cvxpy",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Qpoases,
+                "builtin:qp-active-set-for-qpoases",
+            ),
+        ] {
+            let solution = solve_qp_with_external_reference(
+                &qp,
+                &ExternalQuadraticReferenceOptions {
+                    solver,
+                    ..Default::default()
+                },
+            );
+            assert_optimal(&solution);
+            assert_eq!(solution.solver, expected);
+            assert!(solution
+                .message
+                .contains("registered external solver fallback"));
+        }
+
+        let miqp = super::MixedIntegerQuadraticProgram {
+            qp: QuadraticProgram {
+                q: vec![vec![0.0]],
+                c: vec![1.0],
+                lb: Some(vec![Some(0.0)]),
+                ub: Some(vec![Some(1.0)]),
+                ..Default::default()
+            },
+            integer_vars: vec![true],
+        };
+        let miqp_solution = solve_miqp_with_external_reference(
+            &miqp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Highs,
+                ..Default::default()
+            },
+        );
+        assert_optimal(&miqp_solution);
+        assert_eq!(miqp_solution.solver, "builtin:miqp-enumeration-for-highs");
     }
 
     #[test]

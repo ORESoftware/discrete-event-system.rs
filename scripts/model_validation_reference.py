@@ -65,40 +65,33 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     )
 
 
-def rust_builtin_reference(payload: dict[str, Any], tool: str | None = None) -> dict[str, Any]:
+def exec_rust_builtin_reference(payload: dict[str, Any], tool: str | None = None) -> None:
     command = rust_reference_command()
     args = []
     if tool:
         args.extend(["--tool", tool])
-    cwd = None
+    stdin_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    with stdin_file:
+        json.dump(payload, stdin_file)
+        stdin_file.flush()
+        stdin_file.seek(0)
+        os.dup2(stdin_file.fileno(), sys.stdin.fileno())
     if command[0] == "cargo":
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        cwd = os.path.dirname(script_dir)
-    completed = subprocess.run(
-        [*command, *args],
-        input=json.dumps(payload),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        check=False,
-    )
-    try:
-        parsed = json.loads(completed.stdout)
-    except Exception as exc:
-        return result(
-            "failed",
-            "failure",
-            "rust:model-validation-reference",
-            f"failed to parse Rust model validation output: {exc}; stderr={completed.stderr.strip()}",
-        )
-    if completed.returncode != 0 and not parsed.get("message"):
-        parsed["message"] = completed.stderr.strip()
-    return parsed
+        os.chdir(os.path.dirname(script_dir))
+    os.execvp(command[0], [*command, *args])
 
 
 def normalize_tool_id(tool: str | None) -> str:
     return (tool or "auto").strip().lower().replace("_", "-")
+
+
+def rust_first_requested(tool: str | None) -> bool:
+    normalized = normalize_tool_id(tool)
+    if normalized in {"rust", "rust-reference", "rust-fallback", "fallback"}:
+        return True
+    value = os.environ.get("MODEL_VALIDATION_REFERENCE_RUST_FIRST", "")
+    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
 def command_from_env(tool: str) -> str | None:
@@ -199,7 +192,7 @@ def run_command(command: str, args: list[str], stdin_text: str = "") -> tuple[bo
 
 
 def brute_force_dimacs(text: str) -> dict[str, Any]:
-    return rust_builtin_reference({"kind": "dimacs-validation", "dimacs": text})
+    return exec_rust_builtin_reference({"kind": "dimacs-validation", "dimacs": text})
 
 
 def validate_dimacs(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -243,7 +236,7 @@ def validate_dimacs(payload: dict[str, Any], tool: str) -> dict[str, Any]:
 
 
 def brute_force_wcnf(text: str) -> dict[str, Any]:
-    return rust_builtin_reference({"kind": "wcnf-validation", "wcnf": text})
+    return exec_rust_builtin_reference({"kind": "wcnf-validation", "wcnf": text})
 
 
 def validate_wcnf(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -268,7 +261,7 @@ def validate_wcnf(payload: dict[str, Any], tool: str) -> dict[str, Any]:
 
 
 def brute_force_opb(text: str) -> dict[str, Any]:
-    return rust_builtin_reference({"kind": "opb-validation", "opb": text})
+    return exec_rust_builtin_reference({"kind": "opb-validation", "opb": text})
 
 
 def validate_opb(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -292,7 +285,7 @@ def validate_opb(payload: dict[str, Any], tool: str) -> dict[str, Any]:
 
 
 def builtin_smtlib(text: str) -> dict[str, Any]:
-    return rust_builtin_reference({"kind": "smtlib-validation", "script": text})
+    return exec_rust_builtin_reference({"kind": "smtlib-validation", "script": text})
 
 
 def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -355,7 +348,7 @@ def validate_smtlib(payload: dict[str, Any], tool: str) -> dict[str, Any]:
 
 
 def builtin_minizinc(model: str) -> dict[str, Any]:
-    return rust_builtin_reference({"kind": "minizinc-validation", "model": model})
+    return exec_rust_builtin_reference({"kind": "minizinc-validation", "model": model})
 
 
 def validate_minizinc(payload: dict[str, Any], tool: str) -> dict[str, Any]:
@@ -509,6 +502,8 @@ def main() -> int:
     args = parser.parse_args()
     try:
         payload = json.load(sys.stdin)
+        if rust_first_requested(args.tool):
+            exec_rust_builtin_reference(payload, args.tool)
         print(json.dumps(dispatch(payload, args.tool)))
     except Exception as exc:
         print(json.dumps(result("failed", "failure", args.tool or "model-validation", str(exc))))

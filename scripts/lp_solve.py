@@ -14,9 +14,19 @@ import argparse
 import json
 import math
 import os
-import subprocess
 import sys
+import tempfile
 from typing import List, Optional, Sequence, Tuple
+
+RUST_REFERENCE_METHODS = ("rust", "fallback", "internal", "internal-simplex", "rust-internal")
+
+
+def rust_first_requested(method: str) -> bool:
+    normalized = normalize_method(method)
+    if normalized in (*RUST_REFERENCE_METHODS, "auto", "rust-reference"):
+        return True
+    value = os.environ.get("LP_SOLVE_REFERENCE_RUST_FIRST", "")
+    return value.strip().lower() in ("1", "true", "yes", "on", "rust")
 
 
 def status_payload(status: str, solver: str, message: str = "") -> dict:
@@ -57,32 +67,21 @@ def rust_reference_command() -> list[str]:
     return ["cargo", "run", "--quiet", "--bin", binary_name, "--"]
 
 
-def rust_reference(lp: dict, method: str = "fallback") -> dict:
+def normalize_method(method: str) -> str:
+    return method.lower().replace("_", "-")
+
+
+def exec_rust_reference(raw_stdin: str, method: str) -> None:
     command = rust_reference_command()
-    cwd = None
     if command[0] == "cargo":
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        cwd = os.path.dirname(script_dir)
-    completed = subprocess.run(
-        [*command, "--method", method],
-        input=json.dumps({"lp": lp, "method": method}),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        check=False,
-    )
-    try:
-        parsed = json.loads(completed.stdout)
-    except Exception as exc:
-        return status_payload(
-            "numerical-error",
-            "rust:internal-simplex",
-            f"failed to parse Rust LP output: {exc}; stderr={completed.stderr.strip()}",
-        )
-    if completed.returncode != 0 and not parsed.get("message"):
-        parsed["message"] = completed.stderr.strip()
-    return parsed
+        os.chdir(os.path.dirname(script_dir))
+    with tempfile.TemporaryFile(mode="w+b") as stdin_file:
+        stdin_file.write(raw_stdin.encode("utf-8"))
+        stdin_file.flush()
+        stdin_file.seek(0)
+        os.dup2(stdin_file.fileno(), sys.stdin.fileno())
+        os.execvp(command[0], [*command, "--method", method])
 
 
 def objective_offset(lp: dict) -> float:
@@ -361,9 +360,9 @@ def ortools_linear_solver(lp: dict, backend: str) -> Optional[dict]:
 
 
 def solve_external(lp: dict, method: str) -> Optional[dict]:
-    normalized = method.lower().replace("_", "-")
-    if normalized in ("rust", "fallback", "internal", "internal-simplex", "rust-internal"):
-        return rust_reference(lp, method)
+    normalized = normalize_method(method)
+    if normalized in RUST_REFERENCE_METHODS:
+        return None
     if normalized in ("glop", "ortools-glop", "ortools:glop"):
         return ortools_linear_solver(lp, "glop")
     if normalized in ("pdlp", "ortools-pdlp", "ortools:pdlp"):
@@ -376,12 +375,15 @@ def main() -> int:
     parser.add_argument("--method", default="highs")
     args = parser.parse_args()
     try:
-        payload = json.load(sys.stdin)
+        raw_stdin = sys.stdin.read()
+        payload = json.loads(raw_stdin)
         lp = payload.get("lp", payload)
         method = payload.get("method", args.method)
+        if rust_first_requested(method):
+            exec_rust_reference(raw_stdin, "fallback")
         result = solve_external(lp, method)
         if result is None:
-            result = rust_reference(lp, "fallback")
+            exec_rust_reference(raw_stdin, "fallback")
         print(json.dumps(result, allow_nan=True))
         return 0
     except Exception as exc:

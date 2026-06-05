@@ -36,6 +36,39 @@ impl ExternalMinimumSpanningTreeReferenceSolver {
     }
 }
 
+fn registered_minimum_spanning_tree_rust_fallback_enabled() -> bool {
+    std::env::var("MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("MINIMUM_SPANNING_TREE_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_minimum_spanning_tree_reference(
+    opts: &ExternalMinimumSpanningTreeReferenceOptions,
+) -> bool {
+    matches!(
+        opts.solver,
+        ExternalMinimumSpanningTreeReferenceSolver::Auto
+            | ExternalMinimumSpanningTreeReferenceSolver::RustKruskal
+            | ExternalMinimumSpanningTreeReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_minimum_spanning_tree_fallback(
+    opts: &ExternalMinimumSpanningTreeReferenceOptions,
+) -> bool {
+    registered_minimum_spanning_tree_rust_fallback_enabled()
+        && matches!(
+            opts.solver,
+            ExternalMinimumSpanningTreeReferenceSolver::OrTools
+        )
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalMinimumSpanningTreeReferenceOptions {
     pub solver: ExternalMinimumSpanningTreeReferenceSolver,
@@ -238,6 +271,22 @@ fn minimum_spanning_tree_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_minimum_spanning_tree_fallback(
+    mut solution: ExternalMinimumSpanningTreeReferenceSolution,
+    opts: &ExternalMinimumSpanningTreeReferenceOptions,
+) -> ExternalMinimumSpanningTreeReferenceSolution {
+    if should_use_registered_minimum_spanning_tree_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-minimum-spanning-tree-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn solve_minimum_spanning_tree_with_rust_reference(
@@ -515,13 +564,13 @@ pub fn solve_minimum_spanning_tree_with_external_reference(
     problem: &MinimumSpanningTreeProblem,
     opts: &ExternalMinimumSpanningTreeReferenceOptions,
 ) -> ExternalMinimumSpanningTreeReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalMinimumSpanningTreeReferenceSolver::Auto
-            | ExternalMinimumSpanningTreeReferenceSolver::RustKruskal
-            | ExternalMinimumSpanningTreeReferenceSolver::Fallback
-    ) {
-        return solve_minimum_spanning_tree_with_rust_reference(problem);
+    if should_use_rust_minimum_spanning_tree_reference(opts)
+        || should_use_registered_minimum_spanning_tree_fallback(opts)
+    {
+        return relabel_registered_minimum_spanning_tree_fallback(
+            solve_minimum_spanning_tree_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_minimum_spanning_tree_reference_json(
@@ -544,6 +593,31 @@ mod tests {
     use crate::des::general::minimum_spanning_tree::{
         build_sample_minimum_spanning_tree_problem, MinimumSpanningTreeEdge,
     };
+    use std::sync::Mutex;
+
+    static MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn rust_reference_solves_sample_mst() {
@@ -610,6 +684,39 @@ mod tests {
         assert_eq!(solution.solver, "rust:kruskal-mst");
         assert_eq!(solution.objective, Some(6.0));
         assert_eq!(solution.selected_edge_ids, vec!["AB", "BC", "CD", "DE"]);
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set(
+            "MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK",
+            "rust",
+        );
+        let problem = build_sample_minimum_spanning_tree_problem();
+
+        let solution = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinimumSpanningTreeReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-minimum-spanning-tree-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(6.0));
+        assert_eq!(solution.selected_edge_ids, vec!["AB", "BC", "CD", "DE"]);
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

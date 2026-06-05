@@ -36,6 +36,32 @@ impl ExternalBinPackingReferenceSolver {
     }
 }
 
+fn registered_bin_packing_rust_fallback_enabled() -> bool {
+    std::env::var("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK")
+        .or_else(|_| std::env::var("BIN_PACKING_REFERENCE_EXTERNAL_FALLBACK"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_use_rust_bin_packing_reference(opts: &ExternalBinPackingReferenceOptions) -> bool {
+    matches!(
+        opts.solver,
+        ExternalBinPackingReferenceSolver::Auto
+            | ExternalBinPackingReferenceSolver::RustExact
+            | ExternalBinPackingReferenceSolver::Fallback
+    )
+}
+
+fn should_use_registered_bin_packing_fallback(opts: &ExternalBinPackingReferenceOptions) -> bool {
+    registered_bin_packing_rust_fallback_enabled()
+        && matches!(opts.solver, ExternalBinPackingReferenceSolver::OrTools)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExternalBinPackingReferenceOptions {
     pub solver: ExternalBinPackingReferenceSolver,
@@ -209,6 +235,22 @@ fn rust_bin_packing_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn relabel_registered_bin_packing_fallback(
+    mut solution: ExternalBinPackingReferenceSolution,
+    opts: &ExternalBinPackingReferenceOptions,
+) -> ExternalBinPackingReferenceSolution {
+    if should_use_registered_bin_packing_fallback(opts) {
+        let requested = opts.solver.as_arg();
+        let rust_solver = solution.solver;
+        solution.solver = format!("rust:registered-bin-packing-fallback-for-{requested}");
+        solution.message = format!(
+            "{}; requested solver '{requested}' was validated with Rust fallback '{rust_solver}'",
+            solution.message
+        );
+    }
+    solution
 }
 
 fn rust_bin_packing_unsupported_solution(
@@ -626,13 +668,13 @@ pub fn solve_bin_packing_with_external_reference(
     problem: &BinPackingProblem,
     opts: &ExternalBinPackingReferenceOptions,
 ) -> ExternalBinPackingReferenceSolution {
-    if matches!(
-        opts.solver,
-        ExternalBinPackingReferenceSolver::Auto
-            | ExternalBinPackingReferenceSolver::RustExact
-            | ExternalBinPackingReferenceSolver::Fallback
-    ) {
-        return solve_bin_packing_with_rust_reference(problem);
+    if should_use_rust_bin_packing_reference(opts)
+        || should_use_registered_bin_packing_fallback(opts)
+    {
+        return relabel_registered_bin_packing_fallback(
+            solve_bin_packing_with_rust_reference(problem),
+            opts,
+        );
     }
 
     run_bin_packing_reference_json(
@@ -653,6 +695,31 @@ mod tests {
     use crate::des::general::bin_packing::{
         bin_packing_problem_from_weights, build_sample_bin_packing_problem,
     };
+    use std::sync::Mutex;
+
+    static BIN_PACKING_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn packed_load_sum(bins: &[ExternalBinPackingReferenceBin]) -> f64 {
         bins.iter().map(|bin| bin.load).sum()
@@ -707,6 +774,34 @@ mod tests {
         assert_eq!(solution.solver, "rust:exact-bin-packing");
         assert_eq!(solution.objective, Some(3));
         assert_eq!(solution.total_weight, Some(30.0));
+    }
+
+    #[test]
+    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+        let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let problem = build_sample_bin_packing_problem();
+
+        let solution = solve_bin_packing_with_external_reference(
+            &problem,
+            &ExternalBinPackingReferenceOptions {
+                solver: ExternalBinPackingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalBinPackingReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-bin-packing-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(3));
+        assert_eq!(solution.total_weight, Some(30.0));
+        assert!((packed_load_sum(&solution.bins) - 30.0).abs() <= 1e-9);
+        assert!(solution
+            .message
+            .contains("requested solver 'ortools' was validated with Rust fallback"));
     }
 
     #[test]

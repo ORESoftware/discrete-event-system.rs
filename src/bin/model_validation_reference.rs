@@ -908,6 +908,23 @@ mod tests {
     }
 
     #[test]
+    fn cli_tool_rust_alias_uses_builtin_dispatch() {
+        let output = run(
+            vec![
+                "model_validation_reference".to_string(),
+                "--tool".to_string(),
+                "rust".to_string(),
+            ],
+            r#"{"kind":"dimacs-validation","dimacs":"p cnf 1 1\n1 0\n"}"#,
+        )
+        .expect("model validation output");
+
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["verdict"], "sat");
+        assert_eq!(output["validator"], "rust:dimacs-small-cnf");
+    }
+
+    #[test]
     fn wcnf_builtin_finds_optimum_cost() {
         let payload = json!({
             "kind": "wcnf-validation",

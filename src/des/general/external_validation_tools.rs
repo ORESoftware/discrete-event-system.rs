@@ -6,6 +6,99 @@
 //! but it does not vendor jars, native libraries, solver binaries, benchmark
 //! corpora, or simulator installations.
 
+use crate::des::general::bin_packing::{BinPackingItem, BinPackingProblem};
+use crate::des::general::classical_optimization_models::{
+    FlowShopJob, JobOperation, JobShopJob, Point, VRPCustomer,
+};
+use crate::des::general::external_assignment_reference::{
+    solve_assignment_with_external_reference, ExternalAssignmentReferenceOptions,
+    ExternalAssignmentReferenceSolver, ExternalAssignmentReferenceStatus,
+};
+use crate::des::general::external_bin_packing_reference::{
+    solve_bin_packing_with_external_reference, ExternalBinPackingReferenceOptions,
+    ExternalBinPackingReferenceSolver, ExternalBinPackingReferenceStatus,
+};
+use crate::des::general::external_facility_location_reference::{
+    solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
+    ExternalFacilityLocationReferenceSolver, ExternalFacilityLocationReferenceStatus,
+};
+use crate::des::general::external_graph_coloring_reference::{
+    solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
+    ExternalGraphColoringReferenceSolver, ExternalGraphColoringReferenceStatus,
+};
+use crate::des::general::external_knapsack_reference::{
+    solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
+    ExternalKnapsackReferenceSolver, ExternalKnapsackReferenceStatus,
+};
+use crate::des::general::external_max_flow_reference::{
+    solve_max_flow_with_external_reference, ExternalMaxFlowReferenceOptions,
+    ExternalMaxFlowReferenceSolver, ExternalMaxFlowReferenceStatus,
+};
+use crate::des::general::external_min_cost_flow_reference::{
+    solve_min_cost_flow_with_external_reference, ExternalMinCostFlowReferenceOptions,
+    ExternalMinCostFlowReferenceSolver, ExternalMinCostFlowReferenceStatus,
+};
+use crate::des::general::external_minimum_spanning_tree_reference::{
+    solve_minimum_spanning_tree_with_external_reference,
+    ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceSolver,
+    ExternalMinimumSpanningTreeReferenceStatus,
+};
+use crate::des::general::external_nonlinear_validation_reference::{
+    solve_nonlinear_validation_json_with_external_reference,
+    ExternalNonlinearValidationReferenceOptions, ExternalNonlinearValidationReferenceSolver,
+    ExternalNonlinearValidationReferenceStatus,
+};
+use crate::des::general::external_quadratic_reference::{
+    solve_miqp_with_external_reference, solve_qp_with_external_reference,
+    ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceSolver,
+    ExternalQuadraticReferenceStatus,
+};
+use crate::des::general::external_routing_reference::{
+    solve_cvrp_with_external_reference, ExternalRoutingReferenceOptions,
+    ExternalRoutingReferenceSolver, ExternalRoutingReferenceStatus,
+};
+use crate::des::general::external_scheduling_reference::{
+    solve_flow_shop_with_external_reference, solve_job_shop_with_external_reference,
+    ExternalSchedulingReferenceOptions, ExternalSchedulingReferenceSolver,
+    ExternalSchedulingReferenceStatus,
+};
+use crate::des::general::external_set_cover_reference::{
+    solve_set_cover_with_external_reference, ExternalSetCoverReferenceOptions,
+    ExternalSetCoverReferenceSolver, ExternalSetCoverReferenceStatus,
+};
+use crate::des::general::external_stochastic_lp_reference::{
+    solve_stochastic_lp_with_external_reference, ExternalStochasticLpReferenceOptions,
+    ExternalStochasticLpReferenceSolver, ExternalStochasticLpReferenceStatus,
+};
+use crate::des::general::external_tsp_reference::{
+    solve_euclidean_tsp_with_external_reference, solve_tsp_with_external_reference,
+    ExternalTspPoint, ExternalTspReferenceOptions, ExternalTspReferenceSolver,
+    ExternalTspReferenceStatus,
+};
+use crate::des::general::external_weighted_independent_set_reference::{
+    solve_weighted_independent_set_with_external_reference,
+    ExternalWeightedIndependentSetReferenceOptions, ExternalWeightedIndependentSetReferenceSolver,
+    ExternalWeightedIndependentSetReferenceStatus,
+};
+use crate::des::general::external_weighted_max_sat_reference::{
+    solve_weighted_max_sat_with_external_reference, ExternalWeightedMaxSatReferenceOptions,
+    ExternalWeightedMaxSatReferenceSolver, ExternalWeightedMaxSatReferenceStatus,
+};
+use crate::des::general::facility_location::FacilityLocationProblem;
+use crate::des::general::graph_coloring::GraphColoringProblem;
+use crate::des::general::knapsack::{KnapsackItem, KnapsackProblem};
+use crate::des::general::max_flow::{MaxFlowEdge, MaxFlowProblem};
+use crate::des::general::min_cost_flow::{MinCostFlowArc, MinCostFlowProblem};
+use crate::des::general::minimum_spanning_tree::{
+    MinimumSpanningTreeEdge, MinimumSpanningTreeProblem,
+};
+use crate::des::general::qp::{MixedIntegerQuadraticProgram, QuadraticProgram};
+use crate::des::general::set_cover::{SetCoverProblem, SetCoverSet};
+use crate::des::general::stochastic_lp::{SLPProblem, Scenario};
+use crate::des::general::weighted_independent_set::{
+    WeightedIndependentSetProblem, WeightedIndependentSetVertex,
+};
+use crate::des::general::weighted_max_sat::{WeightedMaxSatClause, WeightedMaxSatProblem};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -4616,6 +4709,573 @@ fn output_validation_table_reference(payload: &Value, validator: &str) -> Value 
     )
 }
 
+fn output_validation_has_data_package_payload(payload: &Value) -> bool {
+    payload.get("package").is_some()
+        || payload.get("datapackage").is_some()
+        || payload.get("data_package").is_some()
+        || payload.get("resources").is_some()
+        || payload
+            .get("profile")
+            .and_then(Value::as_str)
+            .is_some_and(|profile| profile.to_ascii_lowercase().contains("data-package"))
+        || payload.get("frictionless").is_some()
+}
+
+fn output_validation_data_package_root(payload: &Value) -> &Value {
+    payload
+        .get("package")
+        .or_else(|| payload.get("datapackage"))
+        .or_else(|| payload.get("data_package"))
+        .or_else(|| payload.get("frictionless"))
+        .unwrap_or(payload)
+}
+
+fn output_validation_data_package_type_known(kind: &str) -> bool {
+    matches!(
+        kind.trim().to_ascii_lowercase().as_str(),
+        "any"
+            | "array"
+            | "boolean"
+            | "date"
+            | "datetime"
+            | "duration"
+            | "geojson"
+            | "geopoint"
+            | "integer"
+            | "number"
+            | "object"
+            | "string"
+            | "time"
+            | "year"
+            | "yearmonth"
+    )
+}
+
+fn output_validation_data_package_table_type(kind: &str) -> &'static str {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "integer" | "year" => "integer",
+        "number" => "number",
+        "boolean" => "boolean",
+        _ => "string",
+    }
+}
+
+fn output_validation_data_package_resource_schema(
+    resource: &serde_json::Map<String, Value>,
+    resource_label: &str,
+) -> (serde_json::Map<String, Value>, Vec<String>) {
+    let Some(schema) = resource.get("schema") else {
+        return (serde_json::Map::new(), Vec::new());
+    };
+    let fields = schema
+        .get("fields")
+        .or_else(|| schema.get("columns"))
+        .unwrap_or(schema);
+    let mut columns = serde_json::Map::new();
+    let mut errors = Vec::new();
+    let mut seen = BTreeMap::<String, usize>::new();
+    let field_items: Vec<Value> = match fields {
+        Value::Array(items) => items.clone(),
+        Value::Object(obj) => obj
+            .iter()
+            .map(|(name, spec)| {
+                let mut item = match spec {
+                    Value::Object(spec_obj) => spec_obj.clone(),
+                    Value::String(kind) => {
+                        let mut spec_obj = serde_json::Map::new();
+                        spec_obj.insert("type".to_string(), Value::String(kind.clone()));
+                        spec_obj
+                    }
+                    _ => serde_json::Map::new(),
+                };
+                item.entry("name".to_string())
+                    .or_insert_with(|| Value::String(name.clone()));
+                Value::Object(item)
+            })
+            .collect(),
+        _ => {
+            errors.push(format!(
+                "{resource_label}: schema fields must be an array or object"
+            ));
+            Vec::new()
+        }
+    };
+    for (idx, field) in field_items.iter().enumerate() {
+        let Some(field_obj) = field.as_object() else {
+            errors.push(format!("{resource_label}: field {idx} must be an object"));
+            continue;
+        };
+        let name = field_obj
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if name.is_empty() {
+            errors.push(format!("{resource_label}: field {idx} is missing name"));
+            continue;
+        }
+        let count = seen.entry(name.to_string()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            errors.push(format!("{resource_label}: field '{name}' is duplicated"));
+        }
+        let kind = field_obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("string");
+        if !output_validation_data_package_type_known(kind) {
+            errors.push(format!(
+                "{resource_label}: field '{name}' has unknown Table Schema type {kind:?}"
+            ));
+        }
+        let mut column = serde_json::Map::new();
+        column.insert(
+            "type".to_string(),
+            Value::String(output_validation_data_package_table_type(kind).to_string()),
+        );
+        if let Some(constraints) = field_obj.get("constraints").and_then(Value::as_object) {
+            if constraints.get("required").and_then(Value::as_bool) == Some(true) {
+                column.insert("required".to_string(), Value::Bool(true));
+            }
+            for (source, target) in [
+                ("minimum", "minimum"),
+                ("maximum", "maximum"),
+                ("minLength", "minLength"),
+                ("maxLength", "maxLength"),
+                ("enum", "enum"),
+            ] {
+                if let Some(value) = constraints.get(source).cloned() {
+                    column.insert(target.to_string(), value);
+                }
+            }
+        }
+        columns.insert(name.to_string(), Value::Object(column));
+    }
+    if let Some(primary_key) = schema
+        .get("primaryKey")
+        .or_else(|| schema.get("primary_key"))
+    {
+        let keys: Vec<&str> = match primary_key {
+            Value::String(name) => vec![name.as_str()],
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        if keys.is_empty() {
+            errors.push(format!(
+                "{resource_label}: primaryKey must name at least one field"
+            ));
+        }
+        for key in keys {
+            if !columns.contains_key(key) {
+                errors.push(format!(
+                    "{resource_label}: primaryKey references missing field '{key}'"
+                ));
+            }
+        }
+    }
+    (columns, errors)
+}
+
+fn output_validation_data_package_reference(payload: &Value, validator: &str) -> Value {
+    let package = output_validation_data_package_root(payload);
+    let Some(package_obj) = package.as_object() else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "data package payload must be an object",
+            Vec::new(),
+        );
+    };
+    let mut errors = Vec::new();
+    if let Some(profile) = package_obj.get("profile").and_then(Value::as_str) {
+        let profile = profile.trim().to_ascii_lowercase();
+        if !matches!(
+            profile.as_str(),
+            "data-package" | "tabular-data-package" | "data-resource" | "tabular-data-resource"
+        ) {
+            errors.push(format!(
+                "data package profile {profile:?} is not recognized"
+            ));
+        }
+    }
+    for array_key in ["licenses", "sources", "contributors"] {
+        if let Some(value) = package_obj.get(array_key) {
+            if !value.is_array() {
+                errors.push(format!("data package {array_key} must be an array"));
+            }
+        }
+    }
+    let Some(resources) = package_obj.get("resources").and_then(Value::as_array) else {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "data package payload needs resources array",
+            Vec::new(),
+        );
+    };
+    if resources.is_empty() {
+        errors.push("data package must contain at least one resource".to_string());
+    }
+    let mut names = BTreeMap::<String, usize>::new();
+    for (idx, resource) in resources.iter().enumerate() {
+        let label = format!("resource {idx}");
+        let Some(resource_obj) = resource.as_object() else {
+            errors.push(format!("{label}: must be an object"));
+            continue;
+        };
+        let name = resource_obj
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if !name.is_empty() {
+            let count = names.entry(name.to_string()).or_insert(0);
+            *count += 1;
+            if *count > 1 {
+                errors.push(format!("{label}: duplicate resource name '{name}'"));
+            }
+        }
+        let has_path = resource_obj.get("path").is_some_and(|path| match path {
+            Value::String(text) => !text.trim().is_empty(),
+            Value::Array(paths) => paths
+                .iter()
+                .any(|path| path.as_str().is_some_and(|text| !text.trim().is_empty())),
+            _ => false,
+        });
+        let has_inline_data = resource_obj.get("data").is_some()
+            || resource_obj.get("rows").is_some()
+            || resource_obj.get("csv").is_some();
+        if !has_path && !has_inline_data {
+            errors.push(format!("{label}: needs path, data, rows, or csv"));
+        }
+        if let Some(format) = resource_obj.get("format").and_then(Value::as_str) {
+            if format.trim().is_empty() {
+                errors.push(format!("{label}: format must be non-empty when present"));
+            }
+        }
+        let (columns, schema_errors) =
+            output_validation_data_package_resource_schema(resource_obj, &label);
+        errors.extend(schema_errors);
+        let inline_rows = resource_obj
+            .get("rows")
+            .or_else(|| resource_obj.get("data"))
+            .filter(|value| value.is_array());
+        if !columns.is_empty() {
+            if let Some(rows) = inline_rows {
+                let table_payload = json!({
+                    "schema": {
+                        "columns": columns,
+                        "additionalColumns": false
+                    },
+                    "rows": rows
+                });
+                let run = output_validation_table_reference(&table_payload, validator);
+                if let Some(table_errors) = run.get("errors").and_then(Value::as_array) {
+                    for error in table_errors.iter().filter_map(Value::as_str) {
+                        errors.push(format!("{label}: {error}"));
+                    }
+                }
+            }
+        }
+    }
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
+    )
+}
+
+fn output_validation_has_openrefine_payload(payload: &Value) -> bool {
+    [
+        "operations",
+        "operationHistory",
+        "operation_history",
+        "history",
+        "reconciliation",
+        "reconcile",
+    ]
+    .iter()
+    .any(|key| payload.get(*key).is_some())
+}
+
+fn output_validation_openrefine_operation_values(payload: &Value) -> Option<Vec<Value>> {
+    for key in [
+        "operations",
+        "operationHistory",
+        "operation_history",
+        "history",
+    ] {
+        let Some(value) = payload.get(key) else {
+            continue;
+        };
+        match value {
+            Value::Array(items) => return Some(items.clone()),
+            Value::Object(obj) => {
+                if let Some(entries) = obj.get("entries").and_then(Value::as_array) {
+                    return Some(entries.clone());
+                }
+                if obj.get("op").is_some() {
+                    return Some(vec![Value::Object(obj.clone())]);
+                }
+            }
+            _ => return Some(vec![value.clone()]),
+        }
+    }
+    None
+}
+
+fn output_validation_openrefine_row_columns(payload: &Value) -> Vec<String> {
+    let rows = payload
+        .get("rows")
+        .or_else(|| payload.get("data"))
+        .and_then(Value::as_array);
+    let Some(first_row) = rows.and_then(|rows| rows.iter().find_map(Value::as_object)) else {
+        return Vec::new();
+    };
+    first_row.keys().cloned().collect()
+}
+
+fn output_validation_openrefine_column_name<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+) -> Option<&'a str> {
+    obj.get("columnName")
+        .or_else(|| obj.get("column"))
+        .or_else(|| obj.get("oldColumnName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn output_validation_openrefine_validate_reconciliation(
+    payload: &Value,
+    columns: &[String],
+    errors: &mut Vec<String>,
+) {
+    let Some(reconciliation) = payload
+        .get("reconciliation")
+        .or_else(|| payload.get("reconcile"))
+    else {
+        return;
+    };
+    let Some(recon_obj) = reconciliation.as_object() else {
+        errors.push("openrefine reconciliation must be an object".to_string());
+        return;
+    };
+    let column = output_validation_openrefine_column_name(recon_obj);
+    if column.is_none() {
+        errors.push("openrefine reconciliation needs column or columnName".to_string());
+    }
+    if let Some(column) = column {
+        if !columns.is_empty() && !columns.iter().any(|known| known == column) {
+            errors.push(format!(
+                "openrefine reconciliation references missing column '{column}'"
+            ));
+        }
+    }
+    let matched = output_validation_json_integer(recon_obj.get("matched").unwrap_or(&Value::Null));
+    let unmatched =
+        output_validation_json_integer(recon_obj.get("unmatched").unwrap_or(&Value::Null));
+    let total = output_validation_json_integer(
+        recon_obj
+            .get("total")
+            .or_else(|| recon_obj.get("rowCount"))
+            .or_else(|| recon_obj.get("rows"))
+            .unwrap_or(&Value::Null),
+    );
+    for (name, value) in [
+        ("matched", matched),
+        ("unmatched", unmatched),
+        ("total", total),
+    ] {
+        if let Some(value) = value {
+            if value < 0 {
+                errors.push(format!(
+                    "openrefine reconciliation {name} must be non-negative"
+                ));
+            }
+        }
+    }
+    if let (Some(matched), Some(unmatched), Some(total)) = (matched, unmatched, total) {
+        if matched + unmatched > total {
+            errors.push(format!(
+                "openrefine reconciliation matched+unmatched exceeds total ({matched}+{unmatched}>{total})"
+            ));
+        }
+    }
+    if let Some(candidates) = recon_obj.get("candidates").and_then(Value::as_array) {
+        for (idx, candidate) in candidates.iter().enumerate() {
+            let Some(candidate_obj) = candidate.as_object() else {
+                errors.push(format!("openrefine candidate {idx} must be an object"));
+                continue;
+            };
+            if !candidate_obj.contains_key("id") && !candidate_obj.contains_key("name") {
+                errors.push(format!("openrefine candidate {idx} needs id or name"));
+            }
+            if let Some(score) = candidate_obj
+                .get("score")
+                .and_then(output_validation_json_number)
+            {
+                if !(0.0..=100.0).contains(&score) {
+                    errors.push(format!(
+                        "openrefine candidate {idx} score {score} is outside 0..100"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn output_validation_openrefine_reference(payload: &Value, validator: &str) -> Value {
+    let columns = output_validation_openrefine_row_columns(payload);
+    let mut errors = Vec::new();
+    let operations = output_validation_openrefine_operation_values(payload);
+    if let Some(operations) = operations {
+        if operations.is_empty() {
+            errors.push("openrefine operation history must not be empty".to_string());
+        }
+        for (idx, operation) in operations.iter().enumerate() {
+            let Some(operation_obj) = operation.as_object() else {
+                errors.push(format!("openrefine operation {idx} must be an object"));
+                continue;
+            };
+            let op = operation_obj
+                .get("op")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if op.is_empty() {
+                errors.push(format!("openrefine operation {idx} is missing op"));
+                continue;
+            }
+            if !op.contains('/') {
+                errors.push(format!(
+                    "openrefine operation {idx} op {op:?} should include namespace"
+                ));
+            }
+            if let Some(description) = operation_obj.get("description") {
+                if !description.is_string() {
+                    errors.push(format!(
+                        "openrefine operation {idx} description must be a string"
+                    ));
+                }
+            }
+            let needs_column = op.contains("column")
+                || op.contains("text-transform")
+                || op.contains("mass-edit")
+                || op.contains("recon");
+            let column = output_validation_openrefine_column_name(operation_obj);
+            if needs_column && column.is_none() {
+                errors.push(format!("openrefine operation {idx} needs a column name"));
+            }
+            if let Some(column) = column {
+                if !columns.is_empty() && !columns.iter().any(|known| known == column) {
+                    errors.push(format!(
+                        "openrefine operation {idx} references missing column '{column}'"
+                    ));
+                }
+            }
+            if op == "core/column-rename" {
+                for key in ["oldColumnName", "newColumnName"] {
+                    if !operation_obj
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+                    {
+                        errors.push(format!("openrefine operation {idx} needs {key}"));
+                    }
+                }
+            }
+            if op.contains("text-transform") || op.contains("column-addition") {
+                if !operation_obj
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    errors.push(format!("openrefine operation {idx} needs expression"));
+                }
+            }
+            if op.contains("mass-edit") {
+                let edits = operation_obj.get("edits").and_then(Value::as_array);
+                if edits.is_none_or(Vec::is_empty) {
+                    errors.push(format!("openrefine operation {idx} needs non-empty edits"));
+                }
+                if let Some(edits) = edits {
+                    for (edit_idx, edit) in edits.iter().enumerate() {
+                        let Some(edit_obj) = edit.as_object() else {
+                            errors.push(format!(
+                                "openrefine operation {idx} edit {edit_idx} must be an object"
+                            ));
+                            continue;
+                        };
+                        if !edit_obj.contains_key("from")
+                            && !edit_obj.contains_key("fromBlank")
+                            && !edit_obj.contains_key("fromError")
+                        {
+                            errors.push(format!(
+                                "openrefine operation {idx} edit {edit_idx} needs from/fromBlank/fromError"
+                            ));
+                        }
+                        if !edit_obj.contains_key("to") {
+                            errors.push(format!(
+                                "openrefine operation {idx} edit {edit_idx} needs to"
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(on_error) = operation_obj.get("onError").and_then(Value::as_str) {
+                if !matches!(
+                    on_error,
+                    "keep-original" | "set-to-blank" | "store-error" | "repeat" | "fail"
+                ) {
+                    errors.push(format!(
+                        "openrefine operation {idx} onError {on_error:?} is not recognized"
+                    ));
+                }
+            }
+            if let Some(repeat_count) = operation_obj
+                .get("repeatCount")
+                .and_then(output_validation_json_integer)
+            {
+                if repeat_count < 0 {
+                    errors.push(format!(
+                        "openrefine operation {idx} repeatCount is negative"
+                    ));
+                }
+            }
+        }
+    }
+    output_validation_openrefine_validate_reconciliation(payload, &columns, &mut errors);
+    if !output_validation_has_openrefine_payload(payload) {
+        return output_validation_result(
+            "failed",
+            "failure",
+            validator,
+            "payload needs operations, operationHistory, history, reconciliation, or reconcile",
+            Vec::new(),
+        );
+    }
+    output_validation_result(
+        "ok",
+        if errors.is_empty() {
+            "valid"
+        } else {
+            "invalid"
+        },
+        validator,
+        errors.first().cloned().unwrap_or_default(),
+        errors,
+    )
+}
+
 fn output_validation_columnar_metadata<'a>(payload: &'a Value) -> &'a Value {
     payload.get("metadata").unwrap_or(payload)
 }
@@ -5925,6 +6585,113 @@ fn output_validation_xml_reference(payload: &Value, validator: &str) -> Value {
     )
 }
 
+fn output_validation_structured_type_name(raw: &str) -> &'static str {
+    let lower = raw
+        .trim()
+        .trim_start_matches("fields.")
+        .trim_start_matches("marshmallow.fields.")
+        .to_ascii_lowercase();
+    match lower.as_str() {
+        "int" | "integer" | "numberinteger" => "integer",
+        "float" | "double" | "decimal" | "number" | "numberfloat" => "number",
+        "bool" | "boolean" => "boolean",
+        "list" | "array" | "tuple" | "set" => "array",
+        "dict" | "mapping" | "object" | "nested" => "object",
+        "raw" | "any" => "object",
+        _ => "string",
+    }
+}
+
+fn output_validation_structured_fields<'a>(
+    model_obj: &'a serde_json::Map<String, Value>,
+    model: &'a Value,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    model_obj
+        .get("fields")
+        .or_else(|| model_obj.get("properties"))
+        .or_else(|| model_obj.get("schema"))
+        .and_then(Value::as_object)
+        .or_else(|| model.as_object())
+}
+
+fn output_validation_structured_field_spec(spec: &Value) -> serde_json::Map<String, Value> {
+    let mut field_spec = match spec {
+        Value::String(kind) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".to_string(), Value::String(kind.clone()));
+            obj
+        }
+        Value::Object(obj) => obj.clone(),
+        _ => serde_json::Map::new(),
+    };
+    let normalized_type = field_spec
+        .get("type")
+        .or_else(|| field_spec.get("field"))
+        .or_else(|| field_spec.get("kind"))
+        .or_else(|| field_spec.get("data_type"))
+        .or_else(|| field_spec.get("dataType"))
+        .and_then(Value::as_str)
+        .map(output_validation_structured_type_name)
+        .unwrap_or("string");
+    let nullable = field_spec
+        .get("nullable")
+        .or_else(|| field_spec.get("allow_none"))
+        .or_else(|| field_spec.get("allowNone"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if nullable {
+        field_spec.insert(
+            "type".to_string(),
+            Value::Array(vec![
+                Value::String(normalized_type.to_string()),
+                Value::String("null".to_string()),
+            ]),
+        );
+    } else {
+        field_spec.insert(
+            "type".to_string(),
+            Value::String(normalized_type.to_string()),
+        );
+    }
+    if let Some(allowed) = field_spec
+        .get("allowed")
+        .or_else(|| field_spec.get("choices"))
+        .cloned()
+    {
+        field_spec.entry("enum".to_string()).or_insert(allowed);
+    }
+    for (source, target) in [
+        ("min", "minimum"),
+        ("max", "maximum"),
+        ("min_value", "minimum"),
+        ("max_value", "maximum"),
+        ("minLength", "minLength"),
+        ("maxLength", "maxLength"),
+        ("minlength", "minLength"),
+        ("maxlength", "maxLength"),
+        ("min_length", "minLength"),
+        ("max_length", "maxLength"),
+    ] {
+        if let Some(value) = field_spec.get(source).cloned() {
+            field_spec.entry(target.to_string()).or_insert(value);
+        }
+    }
+    if field_spec.get("empty").and_then(Value::as_bool) == Some(false) {
+        field_spec
+            .entry("minLength".to_string())
+            .or_insert(Value::from(1_u64));
+    }
+    if normalized_type == "array" {
+        if let Some(item_schema) = field_spec.get("schema").cloned() {
+            let item_spec = output_validation_structured_field_spec(&item_schema);
+            field_spec
+                .entry("items".to_string())
+                .or_insert(Value::Object(item_spec));
+        }
+    }
+    field_spec
+}
+
 fn output_validation_pydantic_reference(payload: &Value, validator: &str) -> Value {
     let model = payload
         .get("model")
@@ -5952,11 +6719,7 @@ fn output_validation_pydantic_reference(payload: &Value, validator: &str) -> Val
             Vec::new(),
         );
     }
-    let fields = model_obj
-        .get("fields")
-        .or_else(|| model_obj.get("properties"))
-        .unwrap_or(model);
-    let Some(fields_obj) = fields.as_object() else {
+    let Some(fields_obj) = output_validation_structured_fields(model_obj, model) else {
         return output_validation_result(
             "failed",
             "invalid",
@@ -5968,36 +6731,10 @@ fn output_validation_pydantic_reference(payload: &Value, validator: &str) -> Val
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for (name, spec) in fields_obj {
-        let mut field_spec = match spec {
-            Value::String(kind) => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("type".to_string(), Value::String(kind.clone()));
-                obj
-            }
-            Value::Object(obj) => obj.clone(),
-            _ => serde_json::Map::new(),
-        };
+        let field_spec = output_validation_structured_field_spec(spec);
         if field_spec.get("required").and_then(Value::as_bool) == Some(true) {
             required.push(Value::String(name.clone()));
         }
-        let normalized_type = match field_spec
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("string")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "int" | "integer" => "integer",
-            "float" | "double" | "number" => "number",
-            "bool" | "boolean" => "boolean",
-            "list" | "array" => "array",
-            "dict" | "object" => "object",
-            _ => "string",
-        };
-        field_spec.insert(
-            "type".to_string(),
-            Value::String(normalized_type.to_string()),
-        );
         properties.insert(name.clone(), Value::Object(field_spec));
     }
     let schema = json!({
@@ -6784,6 +7521,27 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
             )
         }
         "frictionless"
+            if kind == "data-package-validation"
+                || kind == "frictionless-package-validation"
+                || output_validation_has_data_package_payload(payload) =>
+        {
+            output_validation_data_package_reference(
+                payload,
+                "builtin:frictionless-data-package-structural",
+            )
+        }
+        "openrefine" | "openrefine-adapter" | "refine"
+            if kind == "openrefine-validation"
+                || kind == "openrefine-history-validation"
+                || kind == "data-cleaning-validation"
+                || output_validation_has_openrefine_payload(payload) =>
+        {
+            output_validation_openrefine_reference(
+                payload,
+                &format!("builtin:openrefine-structural-for-{tool}"),
+            )
+        }
+        "frictionless"
         | "pandera"
         | "dbt"
         | "whylogs"
@@ -6796,6 +7554,8 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
         | "deequ"
         | "tensorflow-data-validation"
         | "openrefine"
+        | "openrefine-adapter"
+        | "refine"
             if kind == "table-validation" || output_validation_has_table_payload(payload) =>
         {
             output_validation_table_reference(
@@ -6833,6 +7593,18 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
             || kind == "drift-validation" =>
         {
             output_validation_profile_reference(payload, "builtin:data-profile-structural")
+        }
+        _ if kind == "data-package-validation" || kind == "frictionless-package-validation" => {
+            output_validation_data_package_reference(
+                payload,
+                "builtin:frictionless-data-package-structural",
+            )
+        }
+        _ if kind == "openrefine-validation"
+            || kind == "openrefine-history-validation"
+            || kind == "data-cleaning-validation" =>
+        {
+            output_validation_openrefine_reference(payload, "builtin:openrefine-structural")
         }
         _ if kind == "protobuf-validation" => output_validation_protobuf_reference(payload),
         _ if kind == "avro-validation" => output_validation_avro_reference(payload),
@@ -7138,6 +7910,4807 @@ fn model_validation_asp_reference(payload: &Value, tool: &str) -> Value {
         tool,
         format!("{tool} executable not found"),
         "",
+        "",
+    )
+}
+
+fn model_validation_payload_has_finite_domain_cp(payload: &Value) -> bool {
+    payload.get("variables").is_some()
+        || payload.get("domains").is_some()
+        || payload.get("constraints").is_some()
+        || payload.get("constraint_model").is_some()
+        || payload.get("cp_model").is_some()
+}
+
+fn model_validation_cp_integer(value: &Value) -> Option<i64> {
+    output_validation_json_integer(value).and_then(|integer| i64::try_from(integer).ok())
+}
+
+fn model_validation_cp_variable_domain(name: &str, spec: &Value) -> Result<Vec<i64>, String> {
+    let raw_domain = if let Some(obj) = spec.as_object() {
+        obj.get("domain")
+            .or_else(|| obj.get("values"))
+            .unwrap_or(spec)
+    } else {
+        spec
+    };
+    let mut values = Vec::new();
+    if let Some(items) = raw_domain.as_array() {
+        if items.len() == 2
+            && items
+                .iter()
+                .all(|item| model_validation_cp_integer(item).is_some())
+            && spec
+                .as_object()
+                .is_some_and(|obj| obj.get("interval").and_then(Value::as_bool) == Some(true))
+        {
+            let lower = model_validation_cp_integer(&items[0]).unwrap_or(0);
+            let upper = model_validation_cp_integer(&items[1]).unwrap_or(0);
+            if upper < lower {
+                return Err(format!(
+                    "variable {name}: domain upper bound is below lower bound"
+                ));
+            }
+            values.extend(lower..=upper);
+        } else {
+            for item in items {
+                let Some(value) = model_validation_cp_integer(item) else {
+                    return Err(format!("variable {name}: domain values must be integers"));
+                };
+                values.push(value);
+            }
+        }
+    } else if let Some(obj) = spec.as_object() {
+        let lower = obj
+            .get("lb")
+            .or_else(|| obj.get("lower"))
+            .or_else(|| obj.get("min"))
+            .and_then(model_validation_cp_integer);
+        let upper = obj
+            .get("ub")
+            .or_else(|| obj.get("upper"))
+            .or_else(|| obj.get("max"))
+            .and_then(model_validation_cp_integer);
+        match (lower, upper) {
+            (Some(lower), Some(upper)) if upper >= lower => values.extend(lower..=upper),
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "variable {name}: domain upper bound is below lower bound"
+                ));
+            }
+            _ => return Err(format!("variable {name}: unsupported domain shape")),
+        }
+    } else {
+        return Err(format!("variable {name}: unsupported domain shape"));
+    }
+    values.sort_unstable();
+    values.dedup();
+    if values.is_empty() {
+        return Err(format!("variable {name}: domain is empty"));
+    }
+    if values.len() > 101 {
+        return Err(format!(
+            "variable {name}: builtin CP fallback supports domains of size <= 101"
+        ));
+    }
+    Ok(values)
+}
+
+fn model_validation_cp_domains(payload: &Value) -> Result<BTreeMap<String, Vec<i64>>, String> {
+    let source = payload
+        .get("variables")
+        .or_else(|| payload.get("domains"))
+        .or_else(|| {
+            payload
+                .get("constraint_model")
+                .and_then(|model| model.get("variables"))
+        })
+        .or_else(|| {
+            payload
+                .get("cp_model")
+                .and_then(|model| model.get("variables"))
+        })
+        .ok_or_else(|| "payload needs variables or domains".to_string())?;
+    let mut domains = BTreeMap::new();
+    match source {
+        Value::Object(obj) => {
+            for (name, spec) in obj {
+                domains.insert(
+                    name.clone(),
+                    model_validation_cp_variable_domain(name, spec)?,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                let Some(obj) = item.as_object() else {
+                    return Err(format!("variable {idx}: must be an object"));
+                };
+                let name = obj
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("variable {idx}: missing name"))?;
+                domains.insert(
+                    name.to_string(),
+                    model_validation_cp_variable_domain(name, item)?,
+                );
+            }
+        }
+        _ => return Err("variables must be an object or array".to_string()),
+    }
+    if domains.is_empty() {
+        return Err("payload defines no variables".to_string());
+    }
+    Ok(domains)
+}
+
+fn model_validation_cp_constraints(payload: &Value) -> Vec<Value> {
+    payload
+        .get("constraints")
+        .or_else(|| {
+            payload
+                .get("constraint_model")
+                .and_then(|model| model.get("constraints"))
+        })
+        .or_else(|| {
+            payload
+                .get("cp_model")
+                .and_then(|model| model.get("constraints"))
+        })
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn model_validation_cp_scope(obj: &serde_json::Map<String, Value>) -> Vec<String> {
+    obj.get("vars")
+        .or_else(|| obj.get("variables"))
+        .or_else(|| obj.get("scope"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .or_else(|| {
+            obj.get("var")
+                .or_else(|| obj.get("variable"))
+                .and_then(Value::as_str)
+                .map(|name| vec![name.to_string()])
+        })
+        .unwrap_or_default()
+}
+
+fn model_validation_cp_constraint_holds(
+    constraint: &Value,
+    assignment: &BTreeMap<String, i64>,
+) -> Result<bool, String> {
+    let Some(obj) = constraint.as_object() else {
+        return Err("CP constraint must be an object".to_string());
+    };
+    let op = obj
+        .get("op")
+        .or_else(|| obj.get("operator"))
+        .or_else(|| obj.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("eq")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let scope = model_validation_cp_scope(obj);
+    let values = scope
+        .iter()
+        .map(|name| {
+            assignment
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("unknown CP variable {name:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let rhs = obj
+        .get("rhs")
+        .or_else(|| obj.get("value"))
+        .or_else(|| obj.get("target"))
+        .and_then(model_validation_cp_integer);
+    match op.as_str() {
+        "all-different" | "alldifferent" => {
+            let mut seen = BTreeMap::<i64, ()>::new();
+            Ok(values
+                .into_iter()
+                .all(|value| seen.insert(value, ()).is_none()))
+        }
+        "=" | "==" | "eq" => {
+            if let Some(rhs) = rhs {
+                Ok(values.iter().all(|value| *value == rhs))
+            } else if values.len() >= 2 {
+                Ok(values.windows(2).all(|pair| pair[0] == pair[1]))
+            } else {
+                Err("eq constraint needs rhs or at least two variables".to_string())
+            }
+        }
+        "!=" | "ne" | "not-equal" => {
+            if let Some(rhs) = rhs {
+                Ok(values.iter().all(|value| *value != rhs))
+            } else if values.len() == 2 {
+                Ok(values[0] != values[1])
+            } else {
+                Err("ne constraint needs rhs or exactly two variables".to_string())
+            }
+        }
+        "<" | "lt" | "<=" | "le" | "lte" | ">" | "gt" | ">=" | "ge" | "gte" => {
+            let lhs = values
+                .first()
+                .copied()
+                .ok_or_else(|| "comparison constraint needs a variable".to_string())?;
+            let rhs = if let Some(rhs) = rhs {
+                rhs
+            } else if values.len() == 2 {
+                values[1]
+            } else {
+                return Err("comparison constraint needs rhs or two variables".to_string());
+            };
+            Ok(match op.as_str() {
+                "<" | "lt" => lhs < rhs,
+                "<=" | "le" | "lte" => lhs <= rhs,
+                ">" | "gt" => lhs > rhs,
+                ">=" | "ge" | "gte" => lhs >= rhs,
+                _ => unreachable!(),
+            })
+        }
+        "sum-eq" | "sum-le" | "sum-lte" | "sum-ge" | "sum-gte" => {
+            let sum: i64 = values.iter().sum();
+            let rhs = rhs.ok_or_else(|| format!("{op} constraint needs rhs"))?;
+            Ok(match op.as_str() {
+                "sum-eq" => sum == rhs,
+                "sum-le" | "sum-lte" => sum <= rhs,
+                "sum-ge" | "sum-gte" => sum >= rhs,
+                _ => unreachable!(),
+            })
+        }
+        other => Err(format!("unsupported CP constraint op {other:?}")),
+    }
+}
+
+fn model_validation_cp_search(
+    names: &[String],
+    domains: &BTreeMap<String, Vec<i64>>,
+    constraints: &[Value],
+    idx: usize,
+    assignment: &mut BTreeMap<String, i64>,
+) -> Result<Option<BTreeMap<String, i64>>, String> {
+    if idx == names.len() {
+        for constraint in constraints {
+            if !model_validation_cp_constraint_holds(constraint, assignment)? {
+                return Ok(None);
+            }
+        }
+        return Ok(Some(assignment.clone()));
+    }
+    let name = &names[idx];
+    let domain = domains
+        .get(name)
+        .ok_or_else(|| format!("missing domain for CP variable {name}"))?;
+    for value in domain {
+        assignment.insert(name.clone(), *value);
+        if let Some(solution) =
+            model_validation_cp_search(names, domains, constraints, idx + 1, assignment)?
+        {
+            return Ok(Some(solution));
+        }
+    }
+    assignment.remove(name);
+    Ok(None)
+}
+
+fn model_validation_finite_domain_cp_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:finite-domain-cp-for-{tool}");
+    let domains = match model_validation_cp_domains(payload) {
+        Ok(domains) => domains,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let constraints = model_validation_cp_constraints(payload);
+    let total = domains
+        .values()
+        .try_fold(1_u128, |acc, domain| acc.checked_mul(domain.len() as u128))
+        .unwrap_or(u128::MAX);
+    if total > 250_000 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            &validator,
+            format!("search space too large: {total}"),
+            "",
+            "",
+        );
+    }
+    let names = domains.keys().cloned().collect::<Vec<_>>();
+    let mut assignment = BTreeMap::new();
+    match model_validation_cp_search(&names, &domains, &constraints, 0, &mut assignment) {
+        Ok(Some(solution)) => {
+            let stdout = names
+                .iter()
+                .filter_map(|name| solution.get(name).map(|value| format!("{name}={value}")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            model_validation_result(
+                "ok",
+                "sat",
+                &validator,
+                "satisfying assignment found",
+                stdout,
+                "",
+            )
+        }
+        Ok(None) => model_validation_result(
+            "ok",
+            "unsat",
+            &validator,
+            "all assignments exhausted",
+            "",
+            "",
+        ),
+        Err(message) => model_validation_result("failed", "failure", &validator, message, "", ""),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ModelValidationLinearConstraint {
+    coefs: Vec<f64>,
+    sense: String,
+    rhs: f64,
+}
+
+fn model_validation_linear_source(payload: &Value) -> &Value {
+    [
+        "linear_model",
+        "linearModel",
+        "mip_model",
+        "mipModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_linear_model(payload: &Value) -> bool {
+    let source = model_validation_linear_source(payload);
+    source.get("objective").is_some()
+        || source.get("objective_coefs").is_some()
+        || source.get("objectiveCoefficients").is_some()
+        || source.get("c").is_some()
+        || source
+            .get("constraints")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("coefs").is_some()
+                        || row.get("coefficients").is_some()
+                        || row.get("a").is_some()
+                        || row.get("lhs").is_some()
+                })
+            })
+}
+
+fn model_validation_linear_number(value: Option<&Value>) -> Option<f64> {
+    match value? {
+        Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        Value::Number(number) => number.as_f64(),
+        _ => None,
+    }
+}
+
+fn model_validation_linear_integer(value: &Value) -> Option<i64> {
+    output_validation_json_integer(value)
+        .and_then(|integer| i64::try_from(integer).ok())
+        .or_else(|| {
+            value.as_f64().and_then(|number| {
+                let rounded = number.round();
+                ((number - rounded).abs() <= 1e-9).then_some(rounded as i64)
+            })
+        })
+}
+
+fn model_validation_linear_vector(value: Option<&Value>) -> Option<Vec<f64>> {
+    value?.as_array().map(|items| {
+        items
+            .iter()
+            .map(|item| model_validation_linear_number(Some(item)).unwrap_or(0.0))
+            .collect()
+    })
+}
+
+fn model_validation_linear_variable_names(source: &Value, width: usize) -> Vec<String> {
+    let from_variables = source
+        .get("variables")
+        .and_then(|variables| match variables {
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, item)| {
+                        item.get("name")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("x{idx}"))
+                    })
+                    .take(width)
+                    .collect::<Vec<_>>(),
+            ),
+            Value::Object(obj) => Some(obj.keys().take(width).cloned().collect::<Vec<_>>()),
+            _ => None,
+        });
+    from_variables
+        .filter(|names| names.len() == width)
+        .unwrap_or_else(|| (0..width).map(|idx| format!("x{idx}")).collect())
+}
+
+fn model_validation_linear_objective_terms(
+    raw: Option<&Value>,
+) -> Result<Option<(Vec<String>, Vec<f64>)>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if let Some(coefs) = model_validation_linear_vector(Some(raw)) {
+        return Ok(Some((Vec::new(), coefs)));
+    }
+    let Some(obj) = raw.as_object() else {
+        return Err("objective must be an array or object".to_string());
+    };
+    for key in ["coefs", "coefficients", "linear", "values"] {
+        if let Some(coefs) = model_validation_linear_vector(obj.get(key)) {
+            return Ok(Some((Vec::new(), coefs)));
+        }
+    }
+    let terms = obj.get("terms").and_then(Value::as_object).unwrap_or(obj);
+    let mut entries = terms
+        .iter()
+        .filter_map(|(name, value)| {
+            model_validation_linear_number(Some(value)).map(|coef| (name.clone(), coef))
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Err("objective object needs numeric terms or coefficients".to_string());
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let names = entries
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let coefs = entries
+        .into_iter()
+        .map(|(_, coef)| coef)
+        .collect::<Vec<_>>();
+    Ok(Some((names, coefs)))
+}
+
+fn model_validation_linear_objective(
+    source: &Value,
+    width: usize,
+) -> Result<(Vec<String>, Vec<f64>, bool), String> {
+    let raw = source
+        .get("objective")
+        .or_else(|| source.get("objective_coefs"))
+        .or_else(|| source.get("objectiveCoefficients"))
+        .or_else(|| source.get("c"));
+    let Some((names, coefs)) = model_validation_linear_objective_terms(raw)? else {
+        return Ok((
+            model_validation_linear_variable_names(source, width),
+            vec![0.0; width],
+            false,
+        ));
+    };
+    if coefs.is_empty() {
+        return Err("objective vector is empty".to_string());
+    }
+    let names = if names.len() == coefs.len() {
+        names
+    } else {
+        model_validation_linear_variable_names(source, coefs.len())
+    };
+    Ok((names, coefs, true))
+}
+
+fn model_validation_linear_constraint_width(source: &Value) -> Option<usize> {
+    source
+        .get("constraints")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    model_validation_linear_vector(
+                        row.get("coefs")
+                            .or_else(|| row.get("coefficients"))
+                            .or_else(|| row.get("a"))
+                            .or_else(|| row.get("lhs")),
+                    )
+                    .map(|coefs| coefs.len())
+                })
+                .max()
+        })
+}
+
+fn model_validation_linear_variable_width(source: &Value) -> Option<usize> {
+    source
+        .get("variables")
+        .and_then(|variables| match variables {
+            Value::Array(items) => Some(items.len()),
+            Value::Object(obj) => Some(obj.len()),
+            _ => None,
+        })
+}
+
+fn model_validation_linear_domain_width(source: &Value) -> Option<usize> {
+    source
+        .get("domains")
+        .or_else(|| source.get("bounds"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .or_else(|| {
+            source
+                .get("lower_bounds")
+                .or_else(|| source.get("lowerBounds"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+}
+
+fn model_validation_linear_width(source: &Value) -> Result<usize, String> {
+    let objective_width = model_validation_linear_objective_terms(
+        source
+            .get("objective")
+            .or_else(|| source.get("objective_coefs"))
+            .or_else(|| source.get("objectiveCoefficients"))
+            .or_else(|| source.get("c")),
+    )?
+    .map(|(_, coefs)| coefs.len());
+    objective_width
+        .or_else(|| model_validation_linear_constraint_width(source))
+        .or_else(|| model_validation_linear_domain_width(source))
+        .or_else(|| model_validation_linear_variable_width(source))
+        .filter(|width| *width > 0)
+        .ok_or_else(|| {
+            "linear model needs objective, constraints, domains, or variables".to_string()
+        })
+}
+
+fn model_validation_linear_domain_from_spec(name: &str, spec: &Value) -> Result<Vec<i64>, String> {
+    let raw_domain = if let Some(obj) = spec.as_object() {
+        if obj
+            .get("binary")
+            .or_else(|| obj.get("is_binary"))
+            .or_else(|| obj.get("isBinary"))
+            .and_then(Value::as_bool)
+            == Some(true)
+            || obj
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("binary"))
+        {
+            return Ok(vec![0, 1]);
+        }
+        obj.get("domain")
+            .or_else(|| obj.get("values"))
+            .unwrap_or(spec)
+    } else {
+        spec
+    };
+    let mut values = Vec::new();
+    if let Some(items) = raw_domain.as_array() {
+        if items.len() == 2
+            && items
+                .iter()
+                .all(|item| model_validation_linear_integer(item).is_some())
+        {
+            let lower = model_validation_linear_integer(&items[0]).unwrap_or(0);
+            let upper = model_validation_linear_integer(&items[1]).unwrap_or(0);
+            if upper < lower {
+                return Err(format!(
+                    "variable {name}: domain upper bound is below lower bound"
+                ));
+            }
+            values.extend(lower..=upper);
+        } else {
+            for item in items {
+                let Some(value) = model_validation_linear_integer(item) else {
+                    return Err(format!("variable {name}: domain values must be integers"));
+                };
+                values.push(value);
+            }
+        }
+    } else if let Some(obj) = spec.as_object() {
+        let lower = obj
+            .get("lb")
+            .or_else(|| obj.get("lower"))
+            .or_else(|| obj.get("min"))
+            .and_then(model_validation_linear_integer);
+        let upper = obj
+            .get("ub")
+            .or_else(|| obj.get("upper"))
+            .or_else(|| obj.get("max"))
+            .and_then(model_validation_linear_integer);
+        match (lower, upper) {
+            (Some(lower), Some(upper)) if upper >= lower => values.extend(lower..=upper),
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "variable {name}: domain upper bound is below lower bound"
+                ));
+            }
+            _ => return Err(format!("variable {name}: unsupported domain shape")),
+        }
+    } else {
+        return Err(format!("variable {name}: unsupported domain shape"));
+    }
+    values.sort_unstable();
+    values.dedup();
+    if values.is_empty() {
+        return Err(format!("variable {name}: domain is empty"));
+    }
+    if values.len() > 101 {
+        return Err(format!(
+            "variable {name}: builtin linear fallback supports domains of size <= 101"
+        ));
+    }
+    Ok(values)
+}
+
+fn model_validation_linear_variable_spec<'a>(
+    source: &'a Value,
+    names: &[String],
+    idx: usize,
+) -> Option<&'a Value> {
+    source
+        .get("variables")
+        .and_then(|variables| match variables {
+            Value::Array(items) => items.get(idx),
+            Value::Object(obj) => obj.get(&names[idx]),
+            _ => None,
+        })
+}
+
+fn model_validation_linear_domain_spec<'a>(source: &'a Value, idx: usize) -> Option<&'a Value> {
+    source
+        .get("domains")
+        .or_else(|| source.get("bounds"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.get(idx))
+}
+
+fn model_validation_linear_domains(
+    source: &Value,
+    names: &[String],
+) -> Result<Vec<Vec<i64>>, String> {
+    let lower_bounds = source
+        .get("lower_bounds")
+        .or_else(|| source.get("lowerBounds"))
+        .and_then(Value::as_array);
+    let upper_bounds = source
+        .get("upper_bounds")
+        .or_else(|| source.get("upperBounds"))
+        .and_then(Value::as_array);
+    let mut domains = Vec::with_capacity(names.len());
+    for (idx, name) in names.iter().enumerate() {
+        let domain = if let Some(spec) = model_validation_linear_domain_spec(source, idx) {
+            model_validation_linear_domain_from_spec(name, spec)?
+        } else if let Some(spec) = model_validation_linear_variable_spec(source, names, idx) {
+            model_validation_linear_domain_from_spec(name, spec)?
+        } else if let (Some(lowers), Some(uppers)) = (lower_bounds, upper_bounds) {
+            let lower = lowers
+                .get(idx)
+                .and_then(model_validation_linear_integer)
+                .ok_or_else(|| format!("variable {name}: missing integer lower bound"))?;
+            let upper = uppers
+                .get(idx)
+                .and_then(model_validation_linear_integer)
+                .ok_or_else(|| format!("variable {name}: missing integer upper bound"))?;
+            if upper < lower {
+                return Err(format!(
+                    "variable {name}: domain upper bound is below lower bound"
+                ));
+            }
+            (lower..=upper).collect()
+        } else {
+            vec![0, 1]
+        };
+        domains.push(domain);
+    }
+    Ok(domains)
+}
+
+fn model_validation_linear_constraints(
+    source: &Value,
+    width: usize,
+) -> Result<Vec<ModelValidationLinearConstraint>, String> {
+    let rows = source
+        .get("constraints")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let coefs = model_validation_linear_vector(
+                row.get("coefs")
+                    .or_else(|| row.get("coefficients"))
+                    .or_else(|| row.get("a"))
+                    .or_else(|| row.get("lhs")),
+            )
+            .ok_or_else(|| format!("constraint {idx}: missing coefficient vector"))?;
+            if coefs.len() != width {
+                return Err(format!(
+                    "constraint {idx}: coefficient length {} does not match width {width}",
+                    coefs.len()
+                ));
+            }
+            let sense = row
+                .get("sense")
+                .or_else(|| row.get("op"))
+                .or_else(|| row.get("operator"))
+                .or_else(|| row.get("relation"))
+                .and_then(Value::as_str)
+                .unwrap_or("<=")
+                .trim()
+                .to_ascii_lowercase();
+            let rhs = model_validation_linear_number(
+                row.get("rhs")
+                    .or_else(|| row.get("bound"))
+                    .or_else(|| row.get("value")),
+            )
+            .ok_or_else(|| format!("constraint {idx}: missing numeric rhs"))?;
+            Ok(ModelValidationLinearConstraint { coefs, sense, rhs })
+        })
+        .collect()
+}
+
+fn model_validation_linear_row_feasible(lhs: f64, sense: &str, rhs: f64) -> Result<bool, String> {
+    Ok(match sense {
+        "<=" | "le" | "less-equal" | "lte" => lhs <= rhs + 1e-9,
+        ">=" | "ge" | "greater-equal" | "gte" => lhs + 1e-9 >= rhs,
+        "=" | "==" | "eq" | "equal" => (lhs - rhs).abs() <= 1e-9,
+        "<" | "lt" => lhs < rhs + 1e-9,
+        ">" | "gt" => lhs + 1e-9 > rhs,
+        other => return Err(format!("unsupported linear row sense {other:?}")),
+    })
+}
+
+fn model_validation_linear_better(candidate: f64, incumbent: Option<f64>, sense: &str) -> bool {
+    match incumbent {
+        None => true,
+        Some(incumbent) if sense == "max" || sense == "maximize" => candidate > incumbent + 1e-12,
+        Some(incumbent) => candidate < incumbent - 1e-12,
+    }
+}
+
+fn model_validation_linear_search(
+    domains: &[Vec<i64>],
+    objective: &[f64],
+    constraints: &[ModelValidationLinearConstraint],
+    sense: &str,
+    idx: usize,
+    assignment: &mut Vec<i64>,
+    best: &mut Option<(f64, Vec<i64>)>,
+) -> Result<(), String> {
+    if idx == domains.len() {
+        for row in constraints {
+            let lhs = row
+                .coefs
+                .iter()
+                .zip(assignment.iter())
+                .map(|(coef, value)| coef * *value as f64)
+                .sum::<f64>();
+            if !model_validation_linear_row_feasible(lhs, &row.sense, row.rhs)? {
+                return Ok(());
+            }
+        }
+        let value = objective
+            .iter()
+            .zip(assignment.iter())
+            .map(|(coef, value)| coef * *value as f64)
+            .sum::<f64>();
+        if model_validation_linear_better(value, best.as_ref().map(|(value, _)| *value), sense) {
+            *best = Some((value, assignment.clone()));
+        }
+        return Ok(());
+    }
+    for value in &domains[idx] {
+        assignment.push(*value);
+        model_validation_linear_search(
+            domains,
+            objective,
+            constraints,
+            sense,
+            idx + 1,
+            assignment,
+            best,
+        )?;
+        assignment.pop();
+    }
+    Ok(())
+}
+
+fn model_validation_linear_mip_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:linear-mip-small-for-{tool}");
+    let source = model_validation_linear_source(payload);
+    let width = match model_validation_linear_width(source) {
+        Ok(width) => width,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let (names, objective, has_objective) = match model_validation_linear_objective(source, width) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    if objective.len() != width {
+        return model_validation_result(
+            "failed",
+            "failure",
+            &validator,
+            format!(
+                "objective length {} does not match width {width}",
+                objective.len()
+            ),
+            "",
+            "",
+        );
+    }
+    let domains = match model_validation_linear_domains(source, &names) {
+        Ok(domains) => domains,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let total = domains
+        .iter()
+        .try_fold(1_u128, |acc, domain| acc.checked_mul(domain.len() as u128))
+        .unwrap_or(u128::MAX);
+    if total > 250_000 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            &validator,
+            format!("search space too large: {total}"),
+            "",
+            "",
+        );
+    }
+    let constraints = match model_validation_linear_constraints(source, width) {
+        Ok(constraints) => constraints,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let sense = source
+        .get("sense")
+        .or_else(|| source.get("objective_sense"))
+        .or_else(|| source.get("objectiveSense"))
+        .and_then(Value::as_str)
+        .unwrap_or("min")
+        .trim()
+        .to_ascii_lowercase();
+    let mut assignment = Vec::with_capacity(width);
+    let mut best = None::<(f64, Vec<i64>)>;
+    if let Err(message) = model_validation_linear_search(
+        &domains,
+        &objective,
+        &constraints,
+        &sense,
+        0,
+        &mut assignment,
+        &mut best,
+    ) {
+        return model_validation_result("failed", "failure", &validator, message, "", "");
+    }
+    let Some((objective_value, solution)) = best else {
+        return model_validation_result(
+            "ok",
+            "infeasible",
+            &validator,
+            "no feasible assignment",
+            "",
+            "",
+        );
+    };
+    let mut stdout = names
+        .iter()
+        .zip(solution.iter())
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>();
+    stdout.push(format!("objective={objective_value}"));
+    model_validation_result(
+        "ok",
+        if has_objective { "optimal" } else { "sat" },
+        &validator,
+        if has_objective {
+            "optimal assignment found"
+        } else {
+            "feasible assignment found"
+        },
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_payload_has_nonlinear_model(payload: &Value) -> bool {
+    payload.get("objective").is_some()
+        || payload.get("variables").is_some()
+        || payload.get("constraints").is_some()
+        || payload.get("dimension").is_some()
+}
+
+fn model_validation_nonlinear_solver_for_tool(
+    tool: &str,
+) -> ExternalNonlinearValidationReferenceSolver {
+    match tool {
+        "scipy-optimize" | "scipy-optimize-adapter" | "scipy-adapter" => {
+            ExternalNonlinearValidationReferenceSolver::Scipy
+        }
+        "argmin" | "argmin-adapter" | "ores-argmin-adapter" => {
+            ExternalNonlinearValidationReferenceSolver::Fallback
+        }
+        "nlopt" | "nlopt-adapter" => ExternalNonlinearValidationReferenceSolver::Nlopt,
+        "nlopt-rs" | "nlopt-rs-adapter" => ExternalNonlinearValidationReferenceSolver::Nlopt,
+        "nlopt-cli" => ExternalNonlinearValidationReferenceSolver::NloptCli,
+        "ipopt" | "ipopt-adapter" | "ipopt-rust" | "ipopt-rust-adapter" => {
+            ExternalNonlinearValidationReferenceSolver::Ipopt
+        }
+        "casadi" | "casadi-adapter" => ExternalNonlinearValidationReferenceSolver::Casadi,
+        "mosek" | "mosek-adapter" => ExternalNonlinearValidationReferenceSolver::Mosek,
+        "copt" | "copt-adapter" => ExternalNonlinearValidationReferenceSolver::Copt,
+        "cvxpy" | "cvxpy-adapter" | "cvxopt" | "cvxopt-adapter" | "osqp" | "osqp-adapter"
+        | "scs" | "scs-adapter" | "clarabel" | "clarabel-adapter" | "ecos" | "ecos-adapter" => {
+            ExternalNonlinearValidationReferenceSolver::Fallback
+        }
+        _ => ExternalNonlinearValidationReferenceSolver::Auto,
+    }
+}
+
+fn model_validation_nonlinear_payload_for_bridge(payload: &Value) -> Value {
+    let mut payload = payload.clone();
+    if let Some(obj) = payload.as_object_mut() {
+        let kind = obj
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(model_validation_normalized_tool)
+            .unwrap_or_else(|| "nonlinear-validation".to_string());
+        if !matches!(kind.as_str(), "nonlinear-validation" | "nlp-validation") {
+            obj.insert(
+                "kind".to_string(),
+                Value::String("nonlinear-validation".to_string()),
+            );
+        }
+        obj.entry("constraints".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+    payload
+}
+
+fn model_validation_nonlinear_variable_names(payload: &Value, width: usize) -> Vec<String> {
+    payload
+        .get("variables")
+        .and_then(Value::as_array)
+        .map(|variables| {
+            variables
+                .iter()
+                .enumerate()
+                .map(|(idx, variable)| {
+                    variable
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("x{idx}"))
+                })
+                .take(width)
+                .collect::<Vec<_>>()
+        })
+        .filter(|names| names.len() == width)
+        .unwrap_or_else(|| (0..width).map(|idx| format!("x{idx}")).collect())
+}
+
+fn model_validation_nonlinear_reference(payload: &Value, tool: &str) -> Value {
+    let solver = model_validation_nonlinear_solver_for_tool(tool);
+    let bridge_payload = model_validation_nonlinear_payload_for_bridge(payload);
+    let solution = solve_nonlinear_validation_json_with_external_reference(
+        bridge_payload.clone(),
+        &ExternalNonlinearValidationReferenceOptions { solver },
+    );
+    let validator = format!("builtin:nonlinear-reference-for-{tool}");
+    let status = match solution.status {
+        ExternalNonlinearValidationReferenceStatus::Optimal
+        | ExternalNonlinearValidationReferenceStatus::Infeasible => "ok",
+        ExternalNonlinearValidationReferenceStatus::Failed
+        | ExternalNonlinearValidationReferenceStatus::NumericalError => "failed",
+    };
+    let verdict = match solution.status {
+        ExternalNonlinearValidationReferenceStatus::Optimal => "optimal",
+        ExternalNonlinearValidationReferenceStatus::Infeasible => "infeasible",
+        ExternalNonlinearValidationReferenceStatus::Failed => "failure",
+        ExternalNonlinearValidationReferenceStatus::NumericalError => "numerical-error",
+    };
+    let names = model_validation_nonlinear_variable_names(&bridge_payload, solution.x.len());
+    let mut stdout = names
+        .iter()
+        .zip(solution.x.iter())
+        .map(|(name, value)| format!("{name}={value:.9}"))
+        .collect::<Vec<_>>();
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(iterations) = solution.iterations {
+        stdout.push(format!("iterations={iterations}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_quadratic_source(payload: &Value) -> &Value {
+    [
+        "quadratic_model",
+        "quadraticModel",
+        "qp_model",
+        "qpModel",
+        "miqp_model",
+        "miqpModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_quadratic_model(payload: &Value) -> bool {
+    let source = model_validation_quadratic_source(payload);
+    source
+        .get("Q")
+        .or_else(|| source.get("q_matrix"))
+        .or_else(|| source.get("qMatrix"))
+        .or_else(|| source.get("quadratic"))
+        .and_then(Value::as_array)
+        .is_some()
+        && source
+            .get("c")
+            .or_else(|| source.get("linear"))
+            .or_else(|| source.get("objective"))
+            .and_then(Value::as_array)
+            .is_some()
+}
+
+fn model_validation_quadratic_bounds(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Option<Vec<Option<f64>>>, String> {
+    let Some(values) = keys
+        .iter()
+        .filter_map(|key| source.get(*key).and_then(Value::as_array))
+        .next()
+    else {
+        return Ok(None);
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                model_validation_routing_number(Some(value), &format!("{label}[{idx}]")).map(Some)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn model_validation_quadratic_bool_array(
+    source: &Value,
+    keys: &[&str],
+    width: usize,
+) -> Result<Vec<bool>, String> {
+    let Some(values) = keys
+        .iter()
+        .filter_map(|key| source.get(*key).and_then(Value::as_array))
+        .next()
+    else {
+        return Ok(vec![false; width]);
+    };
+    if values.len() != width {
+        return Err(format!(
+            "integer_vars length {} does not match variable count {width}",
+            values.len()
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            value
+                .as_bool()
+                .or_else(|| model_validation_linear_integer(value).map(|integer| integer != 0))
+                .ok_or_else(|| format!("integer_vars[{idx}] must be boolean"))
+        })
+        .collect()
+}
+
+fn model_validation_quadratic_program(source: &Value) -> Result<QuadraticProgram, String> {
+    let q_value = source
+        .get("Q")
+        .or_else(|| source.get("q_matrix"))
+        .or_else(|| source.get("qMatrix"))
+        .or_else(|| source.get("quadratic"))
+        .ok_or_else(|| "quadratic payload needs Q matrix".to_string())?;
+    let c_value = source
+        .get("c")
+        .or_else(|| source.get("linear"))
+        .or_else(|| source.get("objective"))
+        .ok_or_else(|| "quadratic payload needs c vector".to_string())?;
+    let q = model_validation_number_matrix_value(q_value, "Q")?;
+    let c = model_validation_number_vector_value(c_value, "c")?;
+    if q.len() != c.len() {
+        return Err(format!(
+            "Q row count {} does not match c length {}",
+            q.len(),
+            c.len()
+        ));
+    }
+    if q.iter().any(|row| row.len() != c.len()) {
+        return Err("Q must be square with width equal to c length".to_string());
+    }
+    Ok(QuadraticProgram {
+        q,
+        c,
+        a_ub: model_validation_optional_number_matrix(
+            source,
+            &["A_ub", "a_ub", "aUb", "Aub", "constraints"],
+            "A_ub",
+        )
+        .map(|matrix| (!matrix.is_empty()).then_some(matrix))?,
+        b_ub: model_validation_optional_number_vector(source, &["b_ub", "bUb", "Bub"], "b_ub")
+            .map(|vector| (!vector.is_empty()).then_some(vector))?,
+        a_eq: model_validation_optional_number_matrix(source, &["A_eq", "a_eq", "aEq"], "A_eq")
+            .map(|matrix| (!matrix.is_empty()).then_some(matrix))?,
+        b_eq: model_validation_optional_number_vector(source, &["b_eq", "bEq"], "b_eq")
+            .map(|vector| (!vector.is_empty()).then_some(vector))?,
+        lb: model_validation_quadratic_bounds(
+            source,
+            &["lb", "lower_bounds", "lowerBounds"],
+            "lb",
+        )?,
+        ub: model_validation_quadratic_bounds(
+            source,
+            &["ub", "upper_bounds", "upperBounds"],
+            "ub",
+        )?,
+        var_names: source
+            .get("var_names")
+            .or_else(|| source.get("varNames"))
+            .or_else(|| source.get("variables"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, value)| {
+                        model_validation_string_value(value, &format!("varNames[{idx}]"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+    })
+}
+
+fn model_validation_quadratic_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:quadratic-small-for-{tool}");
+    let source = model_validation_quadratic_source(payload);
+    let qp = match model_validation_quadratic_program(source) {
+        Ok(qp) => qp,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let integer_vars = match model_validation_quadratic_bool_array(
+        source,
+        &["integer_vars", "integerVars"],
+        qp.c.len(),
+    ) {
+        Ok(integer_vars) => integer_vars,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let has_integer_vars = integer_vars.iter().any(|value| *value);
+    let opts = ExternalQuadraticReferenceOptions {
+        solver: ExternalQuadraticReferenceSolver::RustInternal,
+        max_enumerations: Some(1_000_000),
+    };
+    let solution = if has_integer_vars {
+        solve_miqp_with_external_reference(
+            &MixedIntegerQuadraticProgram { qp, integer_vars },
+            &opts,
+        )
+    } else {
+        solve_qp_with_external_reference(&qp, &opts)
+    };
+    let (status, verdict) = match solution.status {
+        ExternalQuadraticReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalQuadraticReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalQuadraticReferenceStatus::Unbounded => ("ok", "unbounded"),
+        ExternalQuadraticReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalQuadraticReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = solution
+        .x
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| format!("x{idx}={value:.9}"))
+        .collect::<Vec<_>>();
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(iterations) = solution.iterations {
+        stdout.push(format!("iterations={iterations}"));
+    }
+    if let Some(enumerated) = solution.enumerated {
+        stdout.push(format!("enumerated={enumerated}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_stochastic_lp_source(payload: &Value) -> &Value {
+    [
+        "stochastic_lp_model",
+        "stochasticLpModel",
+        "slp_model",
+        "slpModel",
+        "two_stage_model",
+        "twoStageModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_stochastic_lp_model(payload: &Value) -> bool {
+    let source = model_validation_stochastic_lp_source(payload);
+    source
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .is_some_and(|scenarios| !scenarios.is_empty())
+        && source
+            .get("c_first")
+            .or_else(|| source.get("cFirst"))
+            .and_then(Value::as_array)
+            .is_some()
+        && source
+            .get("q_second")
+            .or_else(|| source.get("qSecond"))
+            .and_then(Value::as_array)
+            .is_some()
+        && source
+            .get("w_second")
+            .or_else(|| source.get("wSecond"))
+            .and_then(Value::as_array)
+            .is_some()
+}
+
+fn model_validation_number_vector_value(value: &Value, label: &str) -> Result<Vec<f64>, String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{label} must be an array"))?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            model_validation_routing_number(Some(value), &format!("{label}[{idx}]"))
+        })
+        .collect()
+}
+
+fn model_validation_number_matrix_value(
+    value: &Value,
+    label: &str,
+) -> Result<Vec<Vec<f64>>, String> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| format!("{label} must be an array"))?;
+    rows.iter()
+        .enumerate()
+        .map(|(row_idx, row)| {
+            model_validation_number_vector_value(row, &format!("{label}[{row_idx}]"))
+        })
+        .collect()
+}
+
+fn model_validation_required_number_vector(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Vec<f64>, String> {
+    let value = keys
+        .iter()
+        .filter_map(|key| source.get(*key))
+        .next()
+        .ok_or_else(|| format!("{label} is required"))?;
+    model_validation_number_vector_value(value, label)
+}
+
+fn model_validation_optional_number_vector(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Vec<f64>, String> {
+    match keys.iter().filter_map(|key| source.get(*key)).next() {
+        Some(value) => model_validation_number_vector_value(value, label),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn model_validation_optional_number_matrix(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Vec<Vec<f64>>, String> {
+    match keys.iter().filter_map(|key| source.get(*key)).next() {
+        Some(value) => model_validation_number_matrix_value(value, label),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn model_validation_required_number_matrix(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Vec<Vec<f64>>, String> {
+    let value = keys
+        .iter()
+        .filter_map(|key| source.get(*key))
+        .next()
+        .ok_or_else(|| format!("{label} is required"))?;
+    model_validation_number_matrix_value(value, label)
+}
+
+fn model_validation_optional_number_field(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Option<f64>, String> {
+    keys.iter()
+        .filter_map(|key| source.get(*key))
+        .next()
+        .map(|value| model_validation_routing_number(Some(value), label))
+        .transpose()
+}
+
+fn model_validation_stochastic_lp_scenario(value: &Value, idx: usize) -> Result<Scenario, String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("scenarios[{idx}] must be an object"))?;
+    let t_value = obj
+        .get("t")
+        .or_else(|| obj.get("T"))
+        .or_else(|| obj.get("technology"))
+        .ok_or_else(|| format!("scenarios[{idx}].t is required"))?;
+    let h_value = obj
+        .get("h")
+        .or_else(|| obj.get("rhs"))
+        .or_else(|| obj.get("demand"))
+        .ok_or_else(|| format!("scenarios[{idx}].h is required"))?;
+    Ok(Scenario {
+        t: model_validation_number_matrix_value(t_value, &format!("scenarios[{idx}].t"))?,
+        h: model_validation_number_vector_value(h_value, &format!("scenarios[{idx}].h"))?,
+        prob: model_validation_optional_number_field(
+            value,
+            &["prob", "probability", "p"],
+            &format!("scenarios[{idx}].prob"),
+        )?,
+        meta: None,
+    })
+}
+
+fn model_validation_stochastic_lp_problem(
+    source: &Value,
+) -> Result<(SLPProblem, Vec<Scenario>), String> {
+    let scenarios = source
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "stochastic LP payload needs scenarios array".to_string())?
+        .iter()
+        .enumerate()
+        .map(|(idx, scenario)| model_validation_stochastic_lp_scenario(scenario, idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let problem = SLPProblem {
+        c_first: model_validation_required_number_vector(
+            source,
+            &["c_first", "cFirst", "first_stage_costs", "firstStageCosts"],
+            "c_first",
+        )?,
+        a_first: model_validation_optional_number_matrix(
+            source,
+            &[
+                "a_first",
+                "aFirst",
+                "first_stage_matrix",
+                "firstStageMatrix",
+            ],
+            "a_first",
+        )?,
+        b_first: model_validation_optional_number_vector(
+            source,
+            &["b_first", "bFirst", "first_stage_rhs", "firstStageRhs"],
+            "b_first",
+        )?,
+        q_second: model_validation_required_number_vector(
+            source,
+            &["q_second", "qSecond", "recourse_costs", "recourseCosts"],
+            "q_second",
+        )?,
+        w_second: model_validation_required_number_matrix(
+            source,
+            &["w_second", "wSecond", "recourse_matrix", "recourseMatrix"],
+            "w_second",
+        )?,
+        theta_lower_bound: model_validation_optional_number_field(
+            source,
+            &["theta_lower_bound", "thetaLowerBound"],
+            "theta_lower_bound",
+        )?
+        .unwrap_or(0.0),
+        theta_upper_bound: model_validation_optional_number_field(
+            source,
+            &["theta_upper_bound", "thetaUpperBound"],
+            "theta_upper_bound",
+        )?
+        .unwrap_or(1.0e12),
+        var_names: source
+            .get("var_names")
+            .or_else(|| source.get("varNames"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, value)| {
+                        model_validation_string_value(value, &format!("varNames[{idx}]"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+    };
+    Ok((problem, scenarios))
+}
+
+fn model_validation_stochastic_lp_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:stochastic-lp-small-for-{tool}");
+    let source = model_validation_stochastic_lp_source(payload);
+    let (problem, scenarios) = match model_validation_stochastic_lp_problem(source) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_stochastic_lp_with_external_reference(
+        &problem,
+        &scenarios,
+        &ExternalStochasticLpReferenceOptions {
+            solver: ExternalStochasticLpReferenceSolver::RustMonolithic,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalStochasticLpReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalStochasticLpReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalStochasticLpReferenceStatus::Unbounded => ("ok", "unbounded"),
+        ExternalStochasticLpReferenceStatus::IterLimit => ("failed", "iteration-limit"),
+        ExternalStochasticLpReferenceStatus::Unsupported
+        | ExternalStochasticLpReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalStochasticLpReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = solution
+        .x
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| format!("x{idx}={value:.9}"))
+        .collect::<Vec<_>>();
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(expected_q) = solution.expected_q {
+        stdout.push(format!("expected_q={expected_q:.9}"));
+    }
+    stdout.push(format!("scenarios={}", solution.scenario_values.len()));
+    if let Some(iterations) = solution.iterations {
+        stdout.push(format!("iterations={iterations}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_routing_source(payload: &Value) -> &Value {
+    [
+        "routing_model",
+        "routingModel",
+        "vrp_model",
+        "vrpModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_routing_matrix_value(source: &Value) -> Option<&Value> {
+    [
+        "distance_matrix",
+        "distanceMatrix",
+        "cost_matrix",
+        "costMatrix",
+        "travel_time_matrix",
+        "travelTimeMatrix",
+        "distances",
+        "matrix",
+    ]
+    .iter()
+    .filter_map(|key| source.get(*key))
+    .find(|value| value.as_array().is_some())
+}
+
+fn model_validation_payload_has_routing_model(payload: &Value) -> bool {
+    let source = model_validation_routing_source(payload);
+    model_validation_routing_matrix_value(source).is_some()
+        || source
+            .get("customers")
+            .and_then(Value::as_array)
+            .is_some_and(|customers| !customers.is_empty())
+}
+
+fn model_validation_routing_number(value: Option<&Value>, label: &str) -> Result<f64, String> {
+    let number = value
+        .and_then(|value| model_validation_linear_number(Some(value)))
+        .ok_or_else(|| format!("{label} must be numeric"))?;
+    if !number.is_finite() {
+        return Err(format!("{label} must be finite"));
+    }
+    Ok(number)
+}
+
+fn model_validation_routing_optional_number(source: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .filter_map(|key| source.get(*key))
+        .find_map(|value| model_validation_linear_number(Some(value)).filter(|num| num.is_finite()))
+}
+
+fn model_validation_routing_index(
+    value: &Value,
+    limit: usize,
+    label: &str,
+) -> Result<usize, String> {
+    let index = model_validation_linear_integer(value)
+        .ok_or_else(|| format!("{label} must be an integer index"))?;
+    if index < 0 {
+        return Err(format!("{label} must be non-negative"));
+    }
+    let index = usize::try_from(index).map_err(|_| format!("{label} is too large"))?;
+    if index >= limit {
+        return Err(format!("{label} index {index} is outside 0..{limit}"));
+    }
+    Ok(index)
+}
+
+fn model_validation_routing_vehicle_count(source: &Value) -> Result<usize, String> {
+    for key in [
+        "vehicles",
+        "num_vehicles",
+        "numVehicles",
+        "vehicle_count",
+        "vehicleCount",
+    ] {
+        if let Some(value) = source.get(key) {
+            let count = model_validation_linear_integer(value)
+                .ok_or_else(|| format!("{key} must be an integer"))?;
+            if count <= 0 {
+                return Err(format!("{key} must be positive"));
+            }
+            return usize::try_from(count).map_err(|_| format!("{key} is too large"));
+        }
+    }
+    for key in ["starts", "start_indices", "startIndices"] {
+        if let Some(starts) = source.get(key).and_then(Value::as_array) {
+            return Ok(starts.len().max(1));
+        }
+    }
+    Ok(1)
+}
+
+fn model_validation_routing_first_index(
+    source: &Value,
+    array_keys: &[&str],
+    scalar_keys: &[&str],
+    limit: usize,
+    default: usize,
+) -> Result<usize, String> {
+    for key in array_keys {
+        if let Some(values) = source.get(*key).and_then(Value::as_array) {
+            if let Some(value) = values.first() {
+                return model_validation_routing_index(value, limit, key);
+            }
+        }
+    }
+    for key in scalar_keys {
+        if let Some(value) = source.get(*key) {
+            if value.is_number() || value.is_string() {
+                return model_validation_routing_index(value, limit, key);
+            }
+        }
+    }
+    Ok(default)
+}
+
+fn model_validation_routing_matrix(source: &Value) -> Result<Option<Vec<Vec<f64>>>, String> {
+    let Some(raw_matrix) = model_validation_routing_matrix_value(source) else {
+        return Ok(None);
+    };
+    let rows = raw_matrix
+        .as_array()
+        .ok_or_else(|| "routing matrix must be an array".to_string())?;
+    if rows.is_empty() {
+        return Err("routing matrix must not be empty".to_string());
+    }
+    let width = rows.len();
+    let mut matrix = Vec::with_capacity(width);
+    for (row_idx, row) in rows.iter().enumerate() {
+        let entries = row
+            .as_array()
+            .ok_or_else(|| format!("routing matrix row {row_idx} must be an array"))?;
+        if entries.len() != width {
+            return Err(format!(
+                "routing matrix row {row_idx} has length {}, expected {width}",
+                entries.len()
+            ));
+        }
+        let mut parsed_row = Vec::with_capacity(width);
+        for (col_idx, entry) in entries.iter().enumerate() {
+            let cost = model_validation_routing_number(
+                Some(entry),
+                &format!("routing matrix[{row_idx}][{col_idx}]"),
+            )?;
+            if cost < 0.0 {
+                return Err(format!(
+                    "routing matrix[{row_idx}][{col_idx}] must be non-negative"
+                ));
+            }
+            parsed_row.push(cost);
+        }
+        matrix.push(parsed_row);
+    }
+    Ok(Some(matrix))
+}
+
+fn model_validation_routing_matrix_customers(
+    source: &Value,
+    node_count: usize,
+    start: usize,
+    end: usize,
+) -> Result<Vec<usize>, String> {
+    for key in [
+        "customer_indices",
+        "customerIndices",
+        "visit_nodes",
+        "visitNodes",
+    ] {
+        if let Some(values) = source.get(key).and_then(Value::as_array) {
+            let mut customers = Vec::with_capacity(values.len());
+            for (idx, value) in values.iter().enumerate() {
+                let customer =
+                    model_validation_routing_index(value, node_count, &format!("{key}[{idx}]"))?;
+                if customer == start || customer == end {
+                    return Err(format!("{key}[{idx}] cannot be the start or end depot"));
+                }
+                if customers.contains(&customer) {
+                    return Err(format!("{key}[{idx}] duplicates node {customer}"));
+                }
+                customers.push(customer);
+            }
+            return Ok(customers);
+        }
+    }
+    if let Some(values) = source.get("customers").and_then(Value::as_array) {
+        if values
+            .iter()
+            .all(|value| model_validation_linear_integer(value).is_some())
+        {
+            let mut customers = Vec::with_capacity(values.len());
+            for (idx, value) in values.iter().enumerate() {
+                let customer = model_validation_routing_index(
+                    value,
+                    node_count,
+                    &format!("customers[{idx}]"),
+                )?;
+                if customer == start || customer == end {
+                    return Err(format!("customers[{idx}] cannot be the start or end depot"));
+                }
+                if customers.contains(&customer) {
+                    return Err(format!("customers[{idx}] duplicates node {customer}"));
+                }
+                customers.push(customer);
+            }
+            return Ok(customers);
+        }
+    }
+    Ok((0..node_count)
+        .filter(|node| *node != start && *node != end)
+        .collect())
+}
+
+fn model_validation_routing_matrix_demands(
+    source: &Value,
+    node_count: usize,
+) -> Result<Option<Vec<f64>>, String> {
+    let Some(values) = ["demands", "demand", "loads"]
+        .iter()
+        .filter_map(|key| source.get(*key).and_then(Value::as_array))
+        .next()
+    else {
+        return Ok(None);
+    };
+    if values.len() != node_count {
+        return Err(format!(
+            "routing demand vector has length {}, expected {node_count}",
+            values.len()
+        ));
+    }
+    let mut demands = Vec::with_capacity(node_count);
+    for (idx, value) in values.iter().enumerate() {
+        let demand = model_validation_routing_number(Some(value), &format!("demands[{idx}]"))?;
+        if demand < 0.0 {
+            return Err(format!("demands[{idx}] must be non-negative"));
+        }
+        demands.push(demand);
+    }
+    Ok(Some(demands))
+}
+
+fn model_validation_routing_matrix_capacity(source: &Value) -> Result<Option<f64>, String> {
+    if let Some(capacity) = model_validation_routing_optional_number(
+        source,
+        &["capacity", "vehicle_capacity", "vehicleCapacity"],
+    ) {
+        if capacity <= 0.0 {
+            return Err("vehicle capacity must be positive".to_string());
+        }
+        return Ok(Some(capacity));
+    }
+    for key in ["vehicle_capacities", "vehicleCapacities", "capacities"] {
+        if let Some(values) = source.get(key).and_then(Value::as_array) {
+            if let Some(value) = values.first() {
+                let capacity = model_validation_routing_number(Some(value), &format!("{key}[0]"))?;
+                if capacity <= 0.0 {
+                    return Err(format!("{key}[0] must be positive"));
+                }
+                return Ok(Some(capacity));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn model_validation_routing_search_matrix_route(
+    matrix: &[Vec<f64>],
+    end: usize,
+    current: usize,
+    remaining: &mut [usize],
+    depth: usize,
+    route: &mut Vec<usize>,
+    current_cost: f64,
+    best: &mut Option<(f64, Vec<usize>)>,
+) {
+    if depth == remaining.len() {
+        let total = current_cost + matrix[current][end];
+        if best
+            .as_ref()
+            .is_none_or(|(best_cost, _)| total < *best_cost - 1e-9)
+        {
+            let mut best_route = route.clone();
+            best_route.push(end);
+            *best = Some((total, best_route));
+        }
+        return;
+    }
+    for idx in depth..remaining.len() {
+        remaining.swap(depth, idx);
+        let next = remaining[depth];
+        let next_cost = current_cost + matrix[current][next];
+        if best
+            .as_ref()
+            .is_none_or(|(best_cost, _)| next_cost < *best_cost - 1e-9)
+        {
+            route.push(next);
+            model_validation_routing_search_matrix_route(
+                matrix,
+                end,
+                next,
+                remaining,
+                depth + 1,
+                route,
+                next_cost,
+                best,
+            );
+            route.pop();
+        }
+        remaining.swap(depth, idx);
+    }
+}
+
+fn model_validation_routing_matrix_reference(source: &Value, tool: &str, validator: &str) -> Value {
+    let matrix = match model_validation_routing_matrix(source) {
+        Ok(Some(matrix)) => matrix,
+        Ok(None) => {
+            return model_validation_result(
+                "failed",
+                "failure",
+                validator,
+                "routing payload needs a distance matrix or coordinate CVRP data",
+                "",
+                "",
+            );
+        }
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    let vehicle_count = match model_validation_routing_vehicle_count(source) {
+        Ok(vehicle_count) => vehicle_count,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    if vehicle_count != 1 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            validator,
+            format!("builtin routing matrix fallback supports one vehicle, got {vehicle_count}"),
+            "",
+            "",
+        );
+    }
+    let node_count = matrix.len();
+    if node_count > 10 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            validator,
+            format!("builtin routing matrix fallback supports at most 10 nodes, got {node_count}"),
+            "",
+            "",
+        );
+    }
+    let depot = match source.get("depot") {
+        Some(value) if value.is_number() || value.is_string() => {
+            match model_validation_routing_index(value, node_count, "depot") {
+                Ok(depot) => depot,
+                Err(message) => {
+                    return model_validation_result(
+                        "failed", "failure", validator, message, "", "",
+                    );
+                }
+            }
+        }
+        _ => 0,
+    };
+    let start = match model_validation_routing_first_index(
+        source,
+        &["starts", "start_indices", "startIndices"],
+        &["start", "start_index", "startIndex"],
+        node_count,
+        depot,
+    ) {
+        Ok(start) => start,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    let end = match model_validation_routing_first_index(
+        source,
+        &["ends", "end_indices", "endIndices"],
+        &["end", "end_index", "endIndex"],
+        node_count,
+        start,
+    ) {
+        Ok(end) => end,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    let customers = match model_validation_routing_matrix_customers(source, node_count, start, end)
+    {
+        Ok(customers) => customers,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    if customers.len() > 9 {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            validator,
+            format!(
+                "builtin routing matrix fallback supports at most 9 visited nodes, got {}",
+                customers.len()
+            ),
+            "",
+            "",
+        );
+    }
+    let demands = match model_validation_routing_matrix_demands(source, node_count) {
+        Ok(demands) => demands,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    let capacity = match model_validation_routing_matrix_capacity(source) {
+        Ok(capacity) => capacity,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    if let (Some(demands), Some(capacity)) = (&demands, capacity) {
+        let load = customers.iter().map(|node| demands[*node]).sum::<f64>();
+        if load > capacity + 1e-9 {
+            return model_validation_result(
+                "ok",
+                "infeasible",
+                validator,
+                "single-vehicle route demand exceeds vehicle capacity",
+                format!("load={load:.9} capacity={capacity:.9} solver=builtin:routing-matrix"),
+                "",
+            );
+        }
+    }
+
+    let mut remaining = customers.clone();
+    let mut route = vec![start];
+    let mut best = None::<(f64, Vec<usize>)>;
+    model_validation_routing_search_matrix_route(
+        &matrix,
+        end,
+        start,
+        &mut remaining,
+        0,
+        &mut route,
+        0.0,
+        &mut best,
+    );
+    let Some((objective, route)) = best else {
+        return model_validation_result(
+            "ok",
+            "infeasible",
+            validator,
+            "no feasible route",
+            format!("solver=builtin:routing-matrix-for-{tool}"),
+            "",
+        );
+    };
+    let route_text = route
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join("->");
+    model_validation_result(
+        "ok",
+        "optimal",
+        validator,
+        "optimal single-vehicle routing assignment found",
+        format!(
+            "route={route_text} objective={objective:.9} solver=builtin:routing-matrix-for-{tool}"
+        ),
+        "",
+    )
+}
+
+fn model_validation_routing_point(value: &Value, label: &str) -> Result<Point, String> {
+    if let Some(values) = value.as_array() {
+        if values.len() < 2 {
+            return Err(format!("{label} must have at least two coordinates"));
+        }
+        return Ok(Point {
+            x: model_validation_routing_number(values.first(), &format!("{label}.x"))?,
+            y: model_validation_routing_number(values.get(1), &format!("{label}.y"))?,
+        });
+    }
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("{label} must be an object or coordinate array"))?;
+    let x = obj
+        .get("x")
+        .or_else(|| obj.get("lon"))
+        .or_else(|| obj.get("longitude"));
+    let y = obj
+        .get("y")
+        .or_else(|| obj.get("lat"))
+        .or_else(|| obj.get("latitude"));
+    Ok(Point {
+        x: model_validation_routing_number(x, &format!("{label}.x"))?,
+        y: model_validation_routing_number(y, &format!("{label}.y"))?,
+    })
+}
+
+fn model_validation_routing_customer_point(value: &Value, idx: usize) -> Result<Point, String> {
+    if value.as_array().is_some() {
+        return model_validation_routing_point(value, &format!("customers[{idx}]"));
+    }
+    if let Some(obj) = value.as_object() {
+        for key in ["point", "location", "coordinates", "coord"] {
+            if let Some(point) = obj.get(key) {
+                return model_validation_routing_point(point, &format!("customers[{idx}].{key}"));
+            }
+        }
+    }
+    model_validation_routing_point(value, &format!("customers[{idx}]"))
+}
+
+fn model_validation_routing_customer_id(value: &Value, idx: usize) -> String {
+    value
+        .as_object()
+        .and_then(|obj| {
+            obj.get("id")
+                .or_else(|| obj.get("name"))
+                .or_else(|| obj.get("label"))
+        })
+        .and_then(|value| match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| format!("c{}", idx + 1))
+}
+
+fn model_validation_routing_customer_demand(
+    source: &Value,
+    value: &Value,
+    idx: usize,
+    customer_count: usize,
+) -> Result<f64, String> {
+    if let Some(obj) = value.as_object() {
+        if let Some(demand) = obj
+            .get("demand")
+            .or_else(|| obj.get("load"))
+            .or_else(|| obj.get("weight"))
+        {
+            return model_validation_routing_number(
+                Some(demand),
+                &format!("customers[{idx}].demand"),
+            );
+        }
+    }
+    if let Some(values) = value.as_array() {
+        if let Some(demand) = values.get(2) {
+            return model_validation_routing_number(
+                Some(demand),
+                &format!("customers[{idx}].demand"),
+            );
+        }
+    }
+    if let Some(demands) = source.get("demands").and_then(Value::as_array) {
+        let demand = if demands.len() == customer_count {
+            demands.get(idx)
+        } else if demands.len() == customer_count + 1 {
+            demands.get(idx + 1)
+        } else {
+            None
+        };
+        if let Some(demand) = demand {
+            return model_validation_routing_number(Some(demand), &format!("demands[{idx}]"));
+        }
+    }
+    Ok(1.0)
+}
+
+fn model_validation_routing_customers(source: &Value) -> Result<Vec<VRPCustomer>, String> {
+    let raw_customers = source
+        .get("customers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "coordinate CVRP payload needs customers array".to_string())?;
+    let mut customers = Vec::with_capacity(raw_customers.len());
+    for (idx, value) in raw_customers.iter().enumerate() {
+        let point = model_validation_routing_customer_point(value, idx)?;
+        let demand =
+            model_validation_routing_customer_demand(source, value, idx, raw_customers.len())?;
+        if demand < 0.0 {
+            return Err(format!("customers[{idx}].demand must be non-negative"));
+        }
+        customers.push(VRPCustomer {
+            id: model_validation_routing_customer_id(value, idx),
+            x: point.x,
+            y: point.y,
+            demand,
+        });
+    }
+    Ok(customers)
+}
+
+fn model_validation_routing_depot(source: &Value) -> Result<Point, String> {
+    for key in ["depot", "depot_location", "depotLocation"] {
+        if let Some(value) = source.get(key) {
+            if value.is_object() || value.is_array() {
+                return model_validation_routing_point(value, key);
+            }
+        }
+    }
+    Ok(Point { x: 0.0, y: 0.0 })
+}
+
+fn model_validation_routing_cvrp_capacity(
+    source: &Value,
+    customers: &[VRPCustomer],
+) -> Result<f64, String> {
+    if let Some(capacity) = model_validation_routing_optional_number(
+        source,
+        &["capacity", "vehicle_capacity", "vehicleCapacity"],
+    ) {
+        if capacity <= 0.0 {
+            return Err("vehicle capacity must be positive".to_string());
+        }
+        return Ok(capacity);
+    }
+    for key in ["vehicle_capacities", "vehicleCapacities", "capacities"] {
+        if let Some(values) = source.get(key).and_then(Value::as_array) {
+            if let Some(value) = values.first() {
+                let capacity = model_validation_routing_number(Some(value), &format!("{key}[0]"))?;
+                if capacity <= 0.0 {
+                    return Err(format!("{key}[0] must be positive"));
+                }
+                return Ok(capacity);
+            }
+        }
+    }
+    Ok(customers
+        .iter()
+        .map(|customer| customer.demand)
+        .sum::<f64>()
+        .max(1.0))
+}
+
+fn model_validation_routing_cvrp_reference(source: &Value, validator: &str) -> Value {
+    let depot = match model_validation_routing_depot(source) {
+        Ok(depot) => depot,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    let customers = match model_validation_routing_customers(source) {
+        Ok(customers) => customers,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    let capacity = match model_validation_routing_cvrp_capacity(source, &customers) {
+        Ok(capacity) => capacity,
+        Err(message) => {
+            return model_validation_result("failed", "failure", validator, message, "", "");
+        }
+    };
+    let solution = solve_cvrp_with_external_reference(
+        depot,
+        &customers,
+        capacity,
+        &ExternalRoutingReferenceOptions {
+            solver: ExternalRoutingReferenceSolver::RustExact,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalRoutingReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalRoutingReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalRoutingReferenceStatus::Unsupported
+        | ExternalRoutingReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalRoutingReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = solution
+        .routes
+        .iter()
+        .enumerate()
+        .map(|(idx, route)| {
+            format!(
+                "route{idx}={} load={:.9} distance={:.9}",
+                route.customers.join("->"),
+                route.load,
+                route.distance
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(route_masks) = solution.feasible_route_masks {
+        stdout.push(format!("feasible_route_masks={route_masks}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_routing_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:routing-small-for-{tool}");
+    let source = model_validation_routing_source(payload);
+    if model_validation_routing_matrix_value(source).is_some() {
+        return model_validation_routing_matrix_reference(source, tool, &validator);
+    }
+    model_validation_routing_cvrp_reference(source, &validator)
+}
+
+fn model_validation_tsp_source(payload: &Value) -> &Value {
+    [
+        "tsp_model",
+        "tspModel",
+        "traveling_salesman_model",
+        "travelingSalesmanModel",
+        "travelling_salesman_model",
+        "travellingSalesmanModel",
+        "routing_model",
+        "routingModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_tsp_points_value(source: &Value) -> Option<&Vec<Value>> {
+    [
+        "points",
+        "cities",
+        "nodes",
+        "locations",
+        "coordinates",
+        "coords",
+    ]
+    .iter()
+    .filter_map(|key| source.get(*key).and_then(Value::as_array))
+    .next()
+}
+
+fn model_validation_tsp_has_vrp_fields(source: &Value) -> bool {
+    [
+        "customers",
+        "demands",
+        "demand",
+        "capacity",
+        "vehicle_capacity",
+        "vehicleCapacity",
+        "vehicle_capacities",
+        "vehicleCapacities",
+        "vehicles",
+        "num_vehicles",
+        "numVehicles",
+        "starts",
+        "ends",
+    ]
+    .iter()
+    .any(|key| source.get(*key).is_some())
+}
+
+fn model_validation_payload_has_tsp_model(payload: &Value) -> bool {
+    let source = model_validation_tsp_source(payload);
+    model_validation_tsp_points_value(source).is_some()
+        || (model_validation_routing_matrix_value(source).is_some()
+            && !model_validation_tsp_has_vrp_fields(source))
+}
+
+fn model_validation_tsp_point(value: &Value, idx: usize) -> Result<ExternalTspPoint, String> {
+    if let Some(obj) = value.as_object() {
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("label"))
+            .map(|value| model_validation_string_value(value, &format!("points[{idx}].id")))
+            .transpose()?;
+        let point = model_validation_routing_point(value, &format!("points[{idx}]"))?;
+        return Ok(ExternalTspPoint {
+            id,
+            x: point.x,
+            y: point.y,
+        });
+    }
+    let point = model_validation_routing_point(value, &format!("points[{idx}]"))?;
+    Ok(ExternalTspPoint {
+        id: Some(format!("c{idx}")),
+        x: point.x,
+        y: point.y,
+    })
+}
+
+fn model_validation_tsp_points(source: &Value) -> Result<Option<Vec<ExternalTspPoint>>, String> {
+    let Some(points) = model_validation_tsp_points_value(source) else {
+        return Ok(None);
+    };
+    if points.len() < 2 {
+        return Err("TSP points must contain at least two cities".to_string());
+    }
+    points
+        .iter()
+        .enumerate()
+        .map(|(idx, point)| model_validation_tsp_point(point, idx))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn model_validation_tsp_matrix(source: &Value) -> Result<Vec<Vec<f64>>, String> {
+    model_validation_number_matrix(
+        source,
+        &[
+            "distance_matrix",
+            "distanceMatrix",
+            "cost_matrix",
+            "costMatrix",
+            "travel_time_matrix",
+            "travelTimeMatrix",
+            "distances",
+            "matrix",
+        ],
+        "distance_matrix",
+    )
+}
+
+fn model_validation_tsp_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:tsp-small-for-{tool}");
+    let source = model_validation_tsp_source(payload);
+    let solution = match model_validation_tsp_points(source) {
+        Ok(Some(points)) => solve_euclidean_tsp_with_external_reference(
+            &points,
+            &ExternalTspReferenceOptions {
+                solver: ExternalTspReferenceSolver::RustHeldKarp,
+            },
+        ),
+        Ok(None) => {
+            let matrix = match model_validation_tsp_matrix(source) {
+                Ok(matrix) => matrix,
+                Err(message) => {
+                    return model_validation_result(
+                        "failed", "failure", &validator, message, "", "",
+                    );
+                }
+            };
+            solve_tsp_with_external_reference(
+                &matrix,
+                &ExternalTspReferenceOptions {
+                    solver: ExternalTspReferenceSolver::RustHeldKarp,
+                },
+            )
+        }
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let (status, verdict) = match solution.status {
+        ExternalTspReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalTspReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalTspReferenceStatus::Unsupported | ExternalTspReferenceStatus::Unavailable => {
+            ("unavailable", "unknown")
+        }
+        ExternalTspReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut route = solution
+        .tour
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>();
+    if let Some(first) = solution.tour.first() {
+        route.push(first.to_string());
+    }
+    let mut stdout = vec![format!("tour={}", route.join("->"))];
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_assignment_source(payload: &Value) -> &Value {
+    [
+        "assignment_model",
+        "assignmentModel",
+        "linear_sum_assignment",
+        "linearSumAssignment",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_assignment_matrix_value(source: &Value) -> Option<&Value> {
+    [
+        "cost",
+        "costs",
+        "cost_matrix",
+        "costMatrix",
+        "costs_matrix",
+        "costsMatrix",
+        "matrix",
+    ]
+    .iter()
+    .filter_map(|key| source.get(*key))
+    .find(|value| value.as_array().is_some())
+}
+
+fn model_validation_payload_has_assignment_model(payload: &Value) -> bool {
+    let source = model_validation_assignment_source(payload);
+    source.get("cost").is_some()
+        || source.get("costs").is_some()
+        || (model_validation_assignment_matrix_value(source).is_some()
+            && [
+                "workers",
+                "agents",
+                "rows",
+                "tasks",
+                "jobs",
+                "columns",
+                "assignees",
+            ]
+            .iter()
+            .any(|key| source.get(*key).is_some()))
+}
+
+fn model_validation_assignment_cost_matrix(source: &Value) -> Result<Vec<Vec<f64>>, String> {
+    let raw_matrix = model_validation_assignment_matrix_value(source)
+        .ok_or_else(|| "assignment payload needs cost or cost_matrix".to_string())?;
+    let rows = raw_matrix
+        .as_array()
+        .ok_or_else(|| "assignment cost matrix must be an array".to_string())?;
+    if rows.is_empty() {
+        return Err("assignment cost matrix must not be empty".to_string());
+    }
+    let mut matrix = Vec::with_capacity(rows.len());
+    let mut width = None::<usize>;
+    for (row_idx, row) in rows.iter().enumerate() {
+        let entries = row
+            .as_array()
+            .ok_or_else(|| format!("assignment cost row {row_idx} must be an array"))?;
+        if entries.is_empty() {
+            return Err(format!("assignment cost row {row_idx} must not be empty"));
+        }
+        let expected_width = *width.get_or_insert(entries.len());
+        if entries.len() != expected_width {
+            return Err(format!(
+                "assignment cost row {row_idx} has length {}, expected {expected_width}",
+                entries.len()
+            ));
+        }
+        let mut parsed = Vec::with_capacity(entries.len());
+        for (col_idx, entry) in entries.iter().enumerate() {
+            parsed.push(model_validation_routing_number(
+                Some(entry),
+                &format!("assignment cost[{row_idx}][{col_idx}]"),
+            )?);
+        }
+        matrix.push(parsed);
+    }
+    Ok(matrix)
+}
+
+fn model_validation_assignment_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:assignment-small-for-{tool}");
+    let source = model_validation_assignment_source(payload);
+    let cost = match model_validation_assignment_cost_matrix(source) {
+        Ok(cost) => cost,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_assignment_with_external_reference(
+        &cost,
+        &ExternalAssignmentReferenceOptions {
+            solver: ExternalAssignmentReferenceSolver::RustDp,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalAssignmentReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalAssignmentReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalAssignmentReferenceStatus::Unsupported
+        | ExternalAssignmentReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalAssignmentReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = Vec::new();
+    if !solution.assignment.is_empty() {
+        stdout.push(format!(
+            "assignment={}",
+            solution
+                .assignment
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_knapsack_source(payload: &Value) -> &Value {
+    [
+        "knapsack_model",
+        "knapsackModel",
+        "binary_knapsack",
+        "binaryKnapsack",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_knapsack_model(payload: &Value) -> bool {
+    let source = model_validation_knapsack_source(payload);
+    let has_capacity = [
+        "capacity",
+        "max_weight",
+        "maxWeight",
+        "weight_capacity",
+        "weightCapacity",
+    ]
+    .iter()
+    .any(|key| source.get(*key).is_some());
+    has_capacity
+        && (source.get("items").and_then(Value::as_array).is_some()
+            || (source.get("weights").and_then(Value::as_array).is_some()
+                && source.get("values").and_then(Value::as_array).is_some()))
+}
+
+fn model_validation_knapsack_capacity(source: &Value) -> Result<f64, String> {
+    for key in [
+        "capacity",
+        "max_weight",
+        "maxWeight",
+        "weight_capacity",
+        "weightCapacity",
+    ] {
+        if let Some(value) = source.get(key) {
+            return model_validation_routing_number(Some(value), key);
+        }
+    }
+    Err("knapsack payload needs capacity".to_string())
+}
+
+fn model_validation_knapsack_item_id(value: &Value, idx: usize) -> String {
+    value
+        .as_object()
+        .and_then(|obj| {
+            obj.get("id")
+                .or_else(|| obj.get("name"))
+                .or_else(|| obj.get("label"))
+        })
+        .and_then(|value| match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| format!("item{idx}"))
+}
+
+fn model_validation_knapsack_item_from_value(
+    value: &Value,
+    idx: usize,
+) -> Result<KnapsackItem, String> {
+    if let Some(obj) = value.as_object() {
+        let weight = obj
+            .get("weight")
+            .or_else(|| obj.get("w"))
+            .or_else(|| obj.get("size"))
+            .or_else(|| obj.get("cost"));
+        let value_field = obj
+            .get("value")
+            .or_else(|| obj.get("v"))
+            .or_else(|| obj.get("profit"))
+            .or_else(|| obj.get("utility"));
+        return Ok(KnapsackItem {
+            id: model_validation_knapsack_item_id(value, idx),
+            weight: model_validation_routing_number(weight, &format!("items[{idx}].weight"))?,
+            value: model_validation_routing_number(value_field, &format!("items[{idx}].value"))?,
+        });
+    }
+    if let Some(values) = value.as_array() {
+        let (id, weight_idx, value_idx) = match values.first() {
+            Some(Value::String(id)) if values.len() >= 3 => (id.clone(), 1, 2),
+            Some(Value::Number(number)) if values.len() >= 3 => (number.to_string(), 1, 2),
+            _ => (format!("item{idx}"), 0, 1),
+        };
+        return Ok(KnapsackItem {
+            id,
+            weight: model_validation_routing_number(
+                values.get(weight_idx),
+                &format!("items[{idx}].weight"),
+            )?,
+            value: model_validation_routing_number(
+                values.get(value_idx),
+                &format!("items[{idx}].value"),
+            )?,
+        });
+    }
+    Err(format!("items[{idx}] must be an object or array"))
+}
+
+fn model_validation_knapsack_item_id_from_arrays(source: &Value, idx: usize) -> String {
+    for key in ["item_ids", "itemIds", "ids", "names"] {
+        if let Some(values) = source.get(key).and_then(Value::as_array) {
+            if let Some(value) = values.get(idx) {
+                match value {
+                    Value::String(text) if !text.trim().is_empty() => return text.clone(),
+                    Value::Number(number) => return number.to_string(),
+                    _ => {}
+                }
+            }
+        }
+    }
+    format!("item{idx}")
+}
+
+fn model_validation_knapsack_items(source: &Value) -> Result<Vec<KnapsackItem>, String> {
+    if let Some(items) = source.get("items").and_then(Value::as_array) {
+        return items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| model_validation_knapsack_item_from_value(item, idx))
+            .collect();
+    }
+    let weights = source
+        .get("weights")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "knapsack payload needs items or weights".to_string())?;
+    let values = source
+        .get("values")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "knapsack payload needs items or values".to_string())?;
+    if weights.len() != values.len() {
+        return Err(format!(
+            "knapsack weights length {} does not match values length {}",
+            weights.len(),
+            values.len()
+        ));
+    }
+    weights
+        .iter()
+        .zip(values.iter())
+        .enumerate()
+        .map(|(idx, (weight, value))| {
+            Ok(KnapsackItem {
+                id: model_validation_knapsack_item_id_from_arrays(source, idx),
+                weight: model_validation_routing_number(Some(weight), &format!("weights[{idx}]"))?,
+                value: model_validation_routing_number(Some(value), &format!("values[{idx}]"))?,
+            })
+        })
+        .collect()
+}
+
+fn model_validation_knapsack_problem(source: &Value) -> Result<KnapsackProblem, String> {
+    Ok(KnapsackProblem {
+        capacity: model_validation_knapsack_capacity(source)?,
+        items: model_validation_knapsack_items(source)?,
+    })
+}
+
+fn model_validation_knapsack_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:knapsack-small-for-{tool}");
+    let source = model_validation_knapsack_source(payload);
+    let problem = match model_validation_knapsack_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_knapsack_with_external_reference(
+        &problem,
+        &ExternalKnapsackReferenceOptions {
+            solver: ExternalKnapsackReferenceSolver::RustBranchAndBound,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalKnapsackReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalKnapsackReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalKnapsackReferenceStatus::Unsupported
+        | ExternalKnapsackReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalKnapsackReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = vec![format!("items={}", solution.selected_item_ids.join(","))];
+    if let Some(weight) = solution.total_weight {
+        stdout.push(format!("weight={weight:.9}"));
+    }
+    if let Some(value) = solution.total_value {
+        stdout.push(format!("value={value:.9}"));
+    }
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(upper_bound) = solution.upper_bound {
+        stdout.push(format!("upper_bound={upper_bound:.9}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_string_value(value: &Value, label: &str) -> Result<String, String> {
+    match value {
+        Value::String(text) if !text.trim().is_empty() => Ok(text.clone()),
+        Value::Number(number) => Ok(number.to_string()),
+        _ => Err(format!("{label} must be a non-empty string or number")),
+    }
+}
+
+fn model_validation_string_array(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Vec<String>, String> {
+    let values = keys
+        .iter()
+        .filter_map(|key| source.get(*key).and_then(Value::as_array))
+        .next()
+        .ok_or_else(|| format!("{label} array is required"))?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| model_validation_string_value(value, &format!("{label}[{idx}]")))
+        .collect()
+}
+
+fn model_validation_number_array(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Vec<f64>, String> {
+    let values = keys
+        .iter()
+        .filter_map(|key| source.get(*key).and_then(Value::as_array))
+        .next()
+        .ok_or_else(|| format!("{label} array is required"))?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            model_validation_routing_number(Some(value), &format!("{label}[{idx}]"))
+        })
+        .collect()
+}
+
+fn model_validation_number_matrix(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Vec<Vec<f64>>, String> {
+    let rows = keys
+        .iter()
+        .filter_map(|key| source.get(*key).and_then(Value::as_array))
+        .next()
+        .ok_or_else(|| format!("{label} matrix is required"))?;
+    if rows.is_empty() {
+        return Err(format!("{label} matrix must not be empty"));
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(row_idx, row)| {
+            let values = row
+                .as_array()
+                .ok_or_else(|| format!("{label}[{row_idx}] must be an array"))?;
+            values
+                .iter()
+                .enumerate()
+                .map(|(col_idx, value)| {
+                    model_validation_routing_number(
+                        Some(value),
+                        &format!("{label}[{row_idx}][{col_idx}]"),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn model_validation_bin_packing_source(payload: &Value) -> &Value {
+    [
+        "bin_packing_model",
+        "binPackingModel",
+        "packing_model",
+        "packingModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_bin_item_has_value(item: &Value) -> bool {
+    item.as_object().is_some_and(|obj| {
+        obj.get("value")
+            .or_else(|| obj.get("v"))
+            .or_else(|| obj.get("profit"))
+            .or_else(|| obj.get("utility"))
+            .is_some()
+    })
+}
+
+fn model_validation_payload_has_bin_packing_model(payload: &Value) -> bool {
+    let source = model_validation_bin_packing_source(payload);
+    let has_capacity = [
+        "capacity",
+        "bin_capacity",
+        "binCapacity",
+        "max_weight",
+        "maxWeight",
+    ]
+    .iter()
+    .any(|key| source.get(*key).is_some());
+    has_capacity
+        && (source.get("weights").and_then(Value::as_array).is_some()
+            || source
+                .get("items")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    !items.is_empty() && !items.iter().any(model_validation_bin_item_has_value)
+                }))
+        && source.get("values").is_none()
+}
+
+fn model_validation_bin_packing_capacity(source: &Value) -> Result<f64, String> {
+    for key in [
+        "capacity",
+        "bin_capacity",
+        "binCapacity",
+        "max_weight",
+        "maxWeight",
+    ] {
+        if let Some(value) = source.get(key) {
+            return model_validation_routing_number(Some(value), key);
+        }
+    }
+    Err("bin-packing payload needs capacity".to_string())
+}
+
+fn model_validation_bin_packing_item(value: &Value, idx: usize) -> Result<BinPackingItem, String> {
+    if let Some(obj) = value.as_object() {
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("label"))
+            .map(|value| model_validation_string_value(value, &format!("items[{idx}].id")))
+            .transpose()?
+            .unwrap_or_else(|| format!("item{idx}"));
+        let weight = obj
+            .get("weight")
+            .or_else(|| obj.get("w"))
+            .or_else(|| obj.get("size"))
+            .ok_or_else(|| format!("items[{idx}] needs weight"))?;
+        return Ok(BinPackingItem {
+            id,
+            weight: model_validation_routing_number(Some(weight), &format!("items[{idx}].weight"))?,
+        });
+    }
+    if let Some(values) = value.as_array() {
+        let (id, weight_idx) = match values.first() {
+            Some(Value::String(id)) if values.len() >= 2 => (id.clone(), 1),
+            Some(Value::Number(number)) if values.len() >= 2 => (number.to_string(), 1),
+            _ => (format!("item{idx}"), 0),
+        };
+        return Ok(BinPackingItem {
+            id,
+            weight: model_validation_routing_number(
+                values.get(weight_idx),
+                &format!("items[{idx}].weight"),
+            )?,
+        });
+    }
+    Ok(BinPackingItem {
+        id: format!("item{idx}"),
+        weight: model_validation_routing_number(Some(value), &format!("items[{idx}]"))?,
+    })
+}
+
+fn model_validation_bin_packing_items(source: &Value) -> Result<Vec<BinPackingItem>, String> {
+    if let Some(items) = source.get("items").and_then(Value::as_array) {
+        return items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| model_validation_bin_packing_item(item, idx))
+            .collect();
+    }
+    let weights = source
+        .get("weights")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bin-packing payload needs items or weights".to_string())?;
+    weights
+        .iter()
+        .enumerate()
+        .map(|(idx, weight)| {
+            Ok(BinPackingItem {
+                id: model_validation_knapsack_item_id_from_arrays(source, idx),
+                weight: model_validation_routing_number(Some(weight), &format!("weights[{idx}]"))?,
+            })
+        })
+        .collect()
+}
+
+fn model_validation_bin_packing_problem(source: &Value) -> Result<BinPackingProblem, String> {
+    Ok(BinPackingProblem {
+        capacity: model_validation_bin_packing_capacity(source)?,
+        items: model_validation_bin_packing_items(source)?,
+    })
+}
+
+fn model_validation_bin_packing_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:bin-packing-small-for-{tool}");
+    let source = model_validation_bin_packing_source(payload);
+    let problem = match model_validation_bin_packing_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_bin_packing_with_external_reference(
+        &problem,
+        &ExternalBinPackingReferenceOptions {
+            solver: ExternalBinPackingReferenceSolver::RustExact,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalBinPackingReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalBinPackingReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalBinPackingReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalBinPackingReferenceStatus::Unsupported
+        | ExternalBinPackingReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalBinPackingReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = Vec::new();
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("bins={objective}"));
+    }
+    if let Some(total_weight) = solution.total_weight {
+        stdout.push(format!("total_weight={total_weight:.9}"));
+    }
+    if let Some(lower_bound) = solution.lower_bound_bins {
+        stdout.push(format!("lower_bound_bins={lower_bound}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_facility_location_source(payload: &Value) -> &Value {
+    [
+        "facility_location_model",
+        "facilityLocationModel",
+        "location_model",
+        "locationModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_facility_location_model(payload: &Value) -> bool {
+    let source = model_validation_facility_location_source(payload);
+    (source.get("facilities").and_then(Value::as_array).is_some()
+        || source
+            .get("facility_ids")
+            .and_then(Value::as_array)
+            .is_some()
+        || source
+            .get("facilityIds")
+            .and_then(Value::as_array)
+            .is_some())
+        && (source.get("customers").and_then(Value::as_array).is_some()
+            || source
+                .get("customer_ids")
+                .and_then(Value::as_array)
+                .is_some()
+            || source
+                .get("customerIds")
+                .and_then(Value::as_array)
+                .is_some())
+        && (source
+            .get("fixed_costs")
+            .and_then(Value::as_array)
+            .is_some()
+            || source.get("fixedCosts").and_then(Value::as_array).is_some()
+            || source
+                .get("opening_costs")
+                .and_then(Value::as_array)
+                .is_some()
+            || source
+                .get("openingCosts")
+                .and_then(Value::as_array)
+                .is_some())
+        && (source
+            .get("service_costs")
+            .and_then(Value::as_array)
+            .is_some()
+            || source
+                .get("serviceCosts")
+                .and_then(Value::as_array)
+                .is_some()
+            || source
+                .get("assignment_costs")
+                .and_then(Value::as_array)
+                .is_some()
+            || source
+                .get("assignmentCosts")
+                .and_then(Value::as_array)
+                .is_some())
+}
+
+fn model_validation_facility_location_problem(
+    source: &Value,
+) -> Result<FacilityLocationProblem, String> {
+    Ok(FacilityLocationProblem {
+        facility_ids: model_validation_string_array(
+            source,
+            &["facilities", "facility_ids", "facilityIds"],
+            "facilities",
+        )?,
+        customer_ids: model_validation_string_array(
+            source,
+            &["customers", "customer_ids", "customerIds"],
+            "customers",
+        )?,
+        fixed_costs: model_validation_number_array(
+            source,
+            &["fixed_costs", "fixedCosts", "opening_costs", "openingCosts"],
+            "fixed_costs",
+        )?,
+        service_costs: model_validation_number_matrix(
+            source,
+            &[
+                "service_costs",
+                "serviceCosts",
+                "assignment_costs",
+                "assignmentCosts",
+            ],
+            "service_costs",
+        )?,
+    })
+}
+
+fn model_validation_facility_location_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:facility-location-small-for-{tool}");
+    let source = model_validation_facility_location_source(payload);
+    let problem = match model_validation_facility_location_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_facility_location_with_external_reference(
+        &problem,
+        &ExternalFacilityLocationReferenceOptions {
+            solver: ExternalFacilityLocationReferenceSolver::RustExact,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalFacilityLocationReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalFacilityLocationReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalFacilityLocationReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalFacilityLocationReferenceStatus::Unsupported
+        | ExternalFacilityLocationReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalFacilityLocationReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = vec![format!(
+        "open_facilities={}",
+        solution.open_facility_ids.join(",")
+    )];
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    stdout.push(format!("assignments={}", solution.assignments.len()));
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_min_cost_flow_source(payload: &Value) -> &Value {
+    [
+        "min_cost_flow_model",
+        "minCostFlowModel",
+        "minimum_cost_flow_model",
+        "minimumCostFlowModel",
+        "flow_model",
+        "flowModel",
+        "network",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_min_cost_flow_arc_has_cost(value: &Value) -> bool {
+    value.as_object().is_some_and(|obj| {
+        obj.get("cost")
+            .or_else(|| obj.get("unit_cost"))
+            .or_else(|| obj.get("unitCost"))
+            .or_else(|| obj.get("weight"))
+            .is_some()
+    }) || value.as_array().is_some_and(|items| items.len() >= 4)
+}
+
+fn model_validation_payload_has_min_cost_flow_model(payload: &Value) -> bool {
+    let source = model_validation_min_cost_flow_source(payload);
+    let has_arcs = source
+        .get("arcs")
+        .or_else(|| source.get("edges"))
+        .and_then(Value::as_array)
+        .is_some_and(|arcs| {
+            !arcs.is_empty() && arcs.iter().all(model_validation_min_cost_flow_arc_has_cost)
+        });
+    let has_balances = source
+        .get("supplies")
+        .or_else(|| source.get("balances"))
+        .or_else(|| source.get("node_balances"))
+        .or_else(|| source.get("nodeBalances"))
+        .and_then(Value::as_array)
+        .is_some();
+    has_arcs && has_balances
+}
+
+fn model_validation_optional_usize_field(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Option<usize>, String> {
+    keys.iter()
+        .filter_map(|key| source.get(*key))
+        .next()
+        .map(|value| {
+            let count = model_validation_linear_integer(value)
+                .ok_or_else(|| format!("{label} must be an integer"))?;
+            if count <= 0 {
+                return Err(format!("{label} must be positive"));
+            }
+            usize::try_from(count).map_err(|_| format!("{label} is too large"))
+        })
+        .transpose()
+}
+
+fn model_validation_min_cost_flow_arc(value: &Value, idx: usize) -> Result<MinCostFlowArc, String> {
+    if let Some(obj) = value.as_object() {
+        let from = model_validation_usize_field(
+            value,
+            &["from", "source", "u", "tail"],
+            &format!("arcs[{idx}].from"),
+        )?;
+        let to = model_validation_usize_field(
+            value,
+            &["to", "target", "v", "head"],
+            &format!("arcs[{idx}].to"),
+        )?;
+        let lower_bound = obj
+            .get("lower_bound")
+            .or_else(|| obj.get("lowerBound"))
+            .or_else(|| obj.get("lower"))
+            .or_else(|| obj.get("lb"))
+            .map(|value| {
+                model_validation_routing_number(Some(value), &format!("arcs[{idx}].lower_bound"))
+            })
+            .transpose()?
+            .unwrap_or(0.0);
+        let capacity = obj
+            .get("capacity")
+            .or_else(|| obj.get("cap"))
+            .or_else(|| obj.get("upper"))
+            .or_else(|| obj.get("upper_bound"))
+            .or_else(|| obj.get("upperBound"))
+            .map(|value| {
+                model_validation_routing_number(Some(value), &format!("arcs[{idx}].capacity"))
+            })
+            .transpose()?
+            .ok_or_else(|| format!("arcs[{idx}] needs capacity"))?;
+        let cost = obj
+            .get("cost")
+            .or_else(|| obj.get("unit_cost"))
+            .or_else(|| obj.get("unitCost"))
+            .or_else(|| obj.get("weight"))
+            .map(|value| model_validation_routing_number(Some(value), &format!("arcs[{idx}].cost")))
+            .transpose()?
+            .ok_or_else(|| format!("arcs[{idx}] needs cost"))?;
+        let name = obj.get("name").or_else(|| obj.get("id")).and_then(|value| {
+            model_validation_string_value(value, &format!("arcs[{idx}].name")).ok()
+        });
+        return Ok(MinCostFlowArc {
+            from,
+            to,
+            lower_bound,
+            capacity,
+            cost,
+            name,
+        });
+    }
+    if let Some(values) = value.as_array() {
+        let (name, offset) = match values.first() {
+            Some(Value::String(name)) => (Some(name.clone()), 1),
+            _ => (None, 0),
+        };
+        if values.len().saturating_sub(offset) < 4 {
+            return Err(format!(
+                "arcs[{idx}] must have from, to, capacity, and cost"
+            ));
+        }
+        let remaining = values.len() - offset;
+        let lower_idx = (remaining >= 5).then_some(offset + 2);
+        let capacity_idx = if remaining >= 5 {
+            offset + 3
+        } else {
+            offset + 2
+        };
+        let cost_idx = if remaining >= 5 {
+            offset + 4
+        } else {
+            offset + 3
+        };
+        return Ok(MinCostFlowArc {
+            from: model_validation_routing_index(
+                &values[offset],
+                usize::MAX,
+                &format!("arcs[{idx}][from]"),
+            )?,
+            to: model_validation_routing_index(
+                &values[offset + 1],
+                usize::MAX,
+                &format!("arcs[{idx}][to]"),
+            )?,
+            lower_bound: lower_idx
+                .map(|lower_idx| {
+                    model_validation_routing_number(
+                        values.get(lower_idx),
+                        &format!("arcs[{idx}][lower_bound]"),
+                    )
+                })
+                .transpose()?
+                .unwrap_or(0.0),
+            capacity: model_validation_routing_number(
+                values.get(capacity_idx),
+                &format!("arcs[{idx}][capacity]"),
+            )?,
+            cost: model_validation_routing_number(
+                values.get(cost_idx),
+                &format!("arcs[{idx}][cost]"),
+            )?,
+            name,
+        });
+    }
+    Err(format!("arcs[{idx}] must be an object or array"))
+}
+
+fn model_validation_min_cost_flow_problem(source: &Value) -> Result<MinCostFlowProblem, String> {
+    let raw_arcs = source
+        .get("arcs")
+        .or_else(|| source.get("edges"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "min-cost-flow payload needs arcs or edges array".to_string())?;
+    let arcs = raw_arcs
+        .iter()
+        .enumerate()
+        .map(|(idx, arc)| model_validation_min_cost_flow_arc(arc, idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let supplies = model_validation_number_array(
+        source,
+        &["supplies", "balances", "node_balances", "nodeBalances"],
+        "supplies",
+    )?;
+    let derived_nodes = arcs
+        .iter()
+        .flat_map(|arc| [arc.from, arc.to])
+        .max()
+        .map(|max_index| max_index.saturating_add(1))
+        .unwrap_or(0)
+        .max(supplies.len());
+    let num_nodes = model_validation_optional_usize_field(
+        source,
+        &["num_nodes", "numNodes", "node_count", "nodeCount"],
+        "num_nodes",
+    )?
+    .unwrap_or(derived_nodes);
+    Ok(MinCostFlowProblem {
+        num_nodes,
+        supplies,
+        arcs,
+    })
+}
+
+fn model_validation_min_cost_flow_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:min-cost-flow-small-for-{tool}");
+    let source = model_validation_min_cost_flow_source(payload);
+    let problem = match model_validation_min_cost_flow_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_min_cost_flow_with_external_reference(
+        &problem,
+        &ExternalMinCostFlowReferenceOptions {
+            solver: ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalMinCostFlowReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalMinCostFlowReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalMinCostFlowReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalMinCostFlowReferenceStatus::Unsupported
+        | ExternalMinCostFlowReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalMinCostFlowReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = Vec::new();
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    stdout.push(format!("arcs={}", solution.flows.len()));
+    if let Some(iterations) = solution.iterations {
+        stdout.push(format!("iterations={iterations}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_max_flow_source(payload: &Value) -> &Value {
+    [
+        "max_flow_model",
+        "maxFlowModel",
+        "flow_model",
+        "flowModel",
+        "network",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_max_flow_model(payload: &Value) -> bool {
+    let source = model_validation_max_flow_source(payload);
+    source.get("edges").and_then(Value::as_array).is_some()
+        && source
+            .get("source")
+            .or_else(|| source.get("source_node"))
+            .or_else(|| source.get("sourceNode"))
+            .is_some()
+        && source
+            .get("sink")
+            .or_else(|| source.get("sink_node"))
+            .or_else(|| source.get("sinkNode"))
+            .is_some()
+}
+
+fn model_validation_usize_field(
+    source: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<usize, String> {
+    let value = keys
+        .iter()
+        .filter_map(|key| source.get(*key))
+        .next()
+        .ok_or_else(|| format!("{label} is required"))?;
+    let number = model_validation_linear_integer(value)
+        .ok_or_else(|| format!("{label} must be an integer"))?;
+    if number < 0 {
+        return Err(format!("{label} must be non-negative"));
+    }
+    usize::try_from(number).map_err(|_| format!("{label} is too large"))
+}
+
+fn model_validation_max_flow_edge(value: &Value, idx: usize) -> Result<MaxFlowEdge, String> {
+    if let Some(obj) = value.as_object() {
+        let from = model_validation_usize_field(
+            value,
+            &["from", "source", "u", "tail"],
+            &format!("edges[{idx}].from"),
+        )?;
+        let to = model_validation_usize_field(
+            value,
+            &["to", "target", "v", "head"],
+            &format!("edges[{idx}].to"),
+        )?;
+        let capacity = obj
+            .get("capacity")
+            .or_else(|| obj.get("cap"))
+            .or_else(|| obj.get("upper"))
+            .or_else(|| obj.get("upper_bound"))
+            .or_else(|| obj.get("upperBound"))
+            .map(|value| {
+                model_validation_routing_number(Some(value), &format!("edges[{idx}].capacity"))
+            })
+            .transpose()?
+            .ok_or_else(|| format!("edges[{idx}] needs capacity"))?;
+        let name = obj.get("name").or_else(|| obj.get("id")).and_then(|value| {
+            model_validation_string_value(value, &format!("edges[{idx}].name")).ok()
+        });
+        return Ok(MaxFlowEdge {
+            from,
+            to,
+            capacity,
+            name,
+        });
+    }
+    if let Some(values) = value.as_array() {
+        if values.len() < 3 {
+            return Err(format!("edges[{idx}] must have from, to, and capacity"));
+        }
+        return Ok(MaxFlowEdge {
+            from: model_validation_routing_index(
+                &values[0],
+                usize::MAX,
+                &format!("edges[{idx}][0]"),
+            )?,
+            to: model_validation_routing_index(
+                &values[1],
+                usize::MAX,
+                &format!("edges[{idx}][1]"),
+            )?,
+            capacity: model_validation_routing_number(values.get(2), &format!("edges[{idx}][2]"))?,
+            name: None,
+        });
+    }
+    Err(format!("edges[{idx}] must be an object or array"))
+}
+
+fn model_validation_max_flow_problem(source: &Value) -> Result<MaxFlowProblem, String> {
+    let source_node =
+        model_validation_usize_field(source, &["source", "source_node", "sourceNode"], "source")?;
+    let sink = model_validation_usize_field(source, &["sink", "sink_node", "sinkNode"], "sink")?;
+    let raw_edges = source
+        .get("edges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "max-flow payload needs edges array".to_string())?;
+    let edges = raw_edges
+        .iter()
+        .enumerate()
+        .map(|(idx, edge)| model_validation_max_flow_edge(edge, idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let derived_nodes = edges
+        .iter()
+        .flat_map(|edge| [edge.from, edge.to])
+        .chain([source_node, sink])
+        .max()
+        .map(|max_index| max_index.saturating_add(1))
+        .unwrap_or(0);
+    let num_nodes = source
+        .get("num_nodes")
+        .or_else(|| source.get("numNodes"))
+        .or_else(|| source.get("node_count"))
+        .or_else(|| source.get("nodeCount"))
+        .map(|value| {
+            let count = model_validation_linear_integer(value)
+                .ok_or_else(|| "num_nodes must be an integer".to_string())?;
+            if count <= 0 {
+                return Err("num_nodes must be positive".to_string());
+            }
+            usize::try_from(count).map_err(|_| "num_nodes is too large".to_string())
+        })
+        .transpose()?
+        .unwrap_or(derived_nodes);
+    Ok(MaxFlowProblem {
+        num_nodes,
+        source: source_node,
+        sink,
+        edges,
+    })
+}
+
+fn model_validation_max_flow_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:max-flow-small-for-{tool}");
+    let source = model_validation_max_flow_source(payload);
+    let problem = match model_validation_max_flow_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_max_flow_with_external_reference(
+        &problem,
+        &ExternalMaxFlowReferenceOptions {
+            solver: ExternalMaxFlowReferenceSolver::RustEdmondsKarp,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalMaxFlowReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalMaxFlowReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalMaxFlowReferenceStatus::Unsupported
+        | ExternalMaxFlowReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalMaxFlowReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = Vec::new();
+    if let Some(max_flow) = solution.max_flow {
+        stdout.push(format!("max_flow={max_flow:.9}"));
+    }
+    stdout.push(format!("min_cut_capacity={:.9}", solution.min_cut.capacity));
+    if let Some(iterations) = solution.iterations {
+        stdout.push(format!("iterations={iterations}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_wis_source(payload: &Value) -> &Value {
+    [
+        "weighted_independent_set_model",
+        "weightedIndependentSetModel",
+        "maximum_weight_independent_set_model",
+        "maximumWeightIndependentSetModel",
+        "independent_set_model",
+        "independentSetModel",
+        "set_packing_model",
+        "setPackingModel",
+        "conflict_graph",
+        "conflictGraph",
+        "graph",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_wis_weight_values(source: &Value) -> Option<&Vec<Value>> {
+    [
+        "weights",
+        "vertex_weights",
+        "vertexWeights",
+        "node_weights",
+        "nodeWeights",
+        "profits",
+        "values",
+        "utilities",
+    ]
+    .iter()
+    .filter_map(|key| source.get(*key).and_then(Value::as_array))
+    .next()
+}
+
+fn model_validation_wis_vertex_has_weight(value: &Value) -> bool {
+    value.as_object().is_some_and(|obj| {
+        obj.get("weight")
+            .or_else(|| obj.get("w"))
+            .or_else(|| obj.get("value"))
+            .or_else(|| obj.get("profit"))
+            .or_else(|| obj.get("utility"))
+            .is_some()
+    }) || value.as_array().is_some_and(|items| {
+        if items.len() >= 2 {
+            model_validation_linear_number(items.get(1)).is_some()
+        } else {
+            items
+                .first()
+                .and_then(|item| model_validation_linear_number(Some(item)))
+                .is_some()
+        }
+    }) || value.as_number().is_some()
+}
+
+fn model_validation_payload_has_wis_model(payload: &Value) -> bool {
+    let source = model_validation_wis_source(payload);
+    let has_edges = source.get("edges").and_then(Value::as_array).is_some();
+    let has_weight_array = model_validation_wis_weight_values(source).is_some();
+    let has_weighted_vertices = source
+        .get("vertices")
+        .or_else(|| source.get("nodes"))
+        .and_then(Value::as_array)
+        .is_some_and(|vertices| {
+            !vertices.is_empty()
+                && (has_weight_array || vertices.iter().all(model_validation_wis_vertex_has_weight))
+        });
+    has_edges && (has_weight_array || has_weighted_vertices)
+}
+
+fn model_validation_wis_index_id(source: &Value, idx: usize) -> Result<Option<String>, String> {
+    for key in [
+        "ids",
+        "vertex_ids",
+        "vertexIds",
+        "node_ids",
+        "nodeIds",
+        "labels",
+    ] {
+        if let Some(values) = source.get(key).and_then(Value::as_array) {
+            return values
+                .get(idx)
+                .map(|value| model_validation_string_value(value, &format!("{key}[{idx}]")))
+                .transpose();
+        }
+    }
+    Ok(None)
+}
+
+fn model_validation_wis_index_weight(source: &Value, idx: usize) -> Result<Option<f64>, String> {
+    let Some(values) = model_validation_wis_weight_values(source) else {
+        return Ok(None);
+    };
+    let value = values
+        .get(idx)
+        .ok_or_else(|| format!("weights[{idx}] is required"))?;
+    model_validation_routing_number(Some(value), &format!("weights[{idx}]")).map(Some)
+}
+
+fn model_validation_wis_vertex(
+    value: &Value,
+    source: &Value,
+    idx: usize,
+) -> Result<WeightedIndependentSetVertex, String> {
+    if let Some(obj) = value.as_object() {
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("label"))
+            .or_else(|| obj.get("vertex"))
+            .or_else(|| obj.get("node"))
+            .map(|value| model_validation_string_value(value, &format!("vertices[{idx}].id")))
+            .transpose()?
+            .or(model_validation_wis_index_id(source, idx)?)
+            .unwrap_or_else(|| format!("v{idx}"));
+        let weight = obj
+            .get("weight")
+            .or_else(|| obj.get("w"))
+            .or_else(|| obj.get("value"))
+            .or_else(|| obj.get("profit"))
+            .or_else(|| obj.get("utility"))
+            .map(|value| {
+                model_validation_routing_number(Some(value), &format!("vertices[{idx}].weight"))
+            })
+            .transpose()?
+            .or(model_validation_wis_index_weight(source, idx)?)
+            .ok_or_else(|| format!("vertices[{idx}] needs weight"))?;
+        return Ok(WeightedIndependentSetVertex { id, weight });
+    }
+    if let Some(values) = value.as_array() {
+        if values.is_empty() {
+            return Err(format!("vertices[{idx}] must not be empty"));
+        }
+        let id = if values.len() >= 2 {
+            model_validation_string_value(&values[0], &format!("vertices[{idx}].id"))?
+        } else {
+            model_validation_wis_index_id(source, idx)?.unwrap_or_else(|| format!("v{idx}"))
+        };
+        let weight = if values.len() >= 2 {
+            model_validation_routing_number(values.get(1), &format!("vertices[{idx}].weight"))?
+        } else {
+            model_validation_wis_index_weight(source, idx)?.unwrap_or_else(|| {
+                model_validation_routing_number(values.first(), &format!("vertices[{idx}].weight"))
+                    .unwrap_or(f64::NAN)
+            })
+        };
+        if !weight.is_finite() {
+            return Err(format!("vertices[{idx}].weight must be finite"));
+        }
+        return Ok(WeightedIndependentSetVertex { id, weight });
+    }
+    if let Some(weight) = model_validation_wis_index_weight(source, idx)? {
+        return Ok(WeightedIndependentSetVertex {
+            id: model_validation_string_value(value, &format!("vertices[{idx}]"))?,
+            weight,
+        });
+    }
+    if let Some(weight) = model_validation_linear_number(Some(value)) {
+        return Ok(WeightedIndependentSetVertex {
+            id: model_validation_wis_index_id(source, idx)?.unwrap_or_else(|| format!("v{idx}")),
+            weight,
+        });
+    }
+    Ok(WeightedIndependentSetVertex {
+        id: model_validation_string_value(value, &format!("vertices[{idx}]"))?,
+        weight: model_validation_wis_index_weight(source, idx)?
+            .ok_or_else(|| format!("vertices[{idx}] needs weight"))?,
+    })
+}
+
+fn model_validation_wis_vertices(
+    source: &Value,
+) -> Result<Vec<WeightedIndependentSetVertex>, String> {
+    if let Some(vertices) = source
+        .get("vertices")
+        .or_else(|| source.get("nodes"))
+        .and_then(Value::as_array)
+    {
+        return vertices
+            .iter()
+            .enumerate()
+            .map(|(idx, vertex)| model_validation_wis_vertex(vertex, source, idx))
+            .collect();
+    }
+    let weights = model_validation_wis_weight_values(source)
+        .ok_or_else(|| "weighted-independent-set payload needs vertices or weights".to_string())?;
+    weights
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            Ok(WeightedIndependentSetVertex {
+                id: model_validation_wis_index_id(source, idx)?
+                    .unwrap_or_else(|| format!("v{idx}")),
+                weight: model_validation_routing_number(Some(value), &format!("weights[{idx}]"))?,
+            })
+        })
+        .collect()
+}
+
+fn model_validation_wis_edge_endpoint(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<String, String> {
+    value
+        .map(|value| model_validation_string_value(value, label))
+        .transpose()?
+        .ok_or_else(|| format!("{label} is required"))
+}
+
+fn model_validation_wis_edge(value: &Value, idx: usize) -> Result<(String, String), String> {
+    if let Some(obj) = value.as_object() {
+        let from = model_validation_wis_edge_endpoint(
+            obj.get("from")
+                .or_else(|| obj.get("source"))
+                .or_else(|| obj.get("u"))
+                .or_else(|| obj.get("tail"))
+                .or_else(|| obj.get("a"))
+                .or_else(|| obj.get("left")),
+            &format!("edges[{idx}].from"),
+        )?;
+        let to = model_validation_wis_edge_endpoint(
+            obj.get("to")
+                .or_else(|| obj.get("target"))
+                .or_else(|| obj.get("v"))
+                .or_else(|| obj.get("head"))
+                .or_else(|| obj.get("b"))
+                .or_else(|| obj.get("right")),
+            &format!("edges[{idx}].to"),
+        )?;
+        return Ok((from, to));
+    }
+    if let Some(values) = value.as_array() {
+        if values.len() < 2 {
+            return Err(format!("edges[{idx}] must have two endpoints"));
+        }
+        return Ok((
+            model_validation_string_value(&values[0], &format!("edges[{idx}][0]"))?,
+            model_validation_string_value(&values[1], &format!("edges[{idx}][1]"))?,
+        ));
+    }
+    Err(format!("edges[{idx}] must be an object or array"))
+}
+
+fn model_validation_wis_problem(source: &Value) -> Result<WeightedIndependentSetProblem, String> {
+    let raw_edges = source
+        .get("edges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "weighted-independent-set payload needs edges array".to_string())?;
+    Ok(WeightedIndependentSetProblem {
+        vertices: model_validation_wis_vertices(source)?,
+        edges: raw_edges
+            .iter()
+            .enumerate()
+            .map(|(idx, edge)| model_validation_wis_edge(edge, idx))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn model_validation_wis_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:weighted-independent-set-small-for-{tool}");
+    let source = model_validation_wis_source(payload);
+    let problem = match model_validation_wis_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_weighted_independent_set_with_external_reference(
+        &problem,
+        &ExternalWeightedIndependentSetReferenceOptions {
+            solver: ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalWeightedIndependentSetReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalWeightedIndependentSetReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalWeightedIndependentSetReferenceStatus::Unsupported
+        | ExternalWeightedIndependentSetReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalWeightedIndependentSetReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = vec![format!(
+        "selected={}",
+        solution.selected_vertex_ids.join(",")
+    )];
+    if let Some(total_weight) = solution.total_weight {
+        stdout.push(format!("weight={total_weight:.9}"));
+    }
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(upper_bound) = solution.upper_bound {
+        stdout.push(format!("upper_bound={upper_bound:.9}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_scheduling_source(payload: &Value) -> &Value {
+    [
+        "scheduling_model",
+        "schedulingModel",
+        "job_shop_model",
+        "jobShopModel",
+        "flow_shop_model",
+        "flowShopModel",
+        "schedule_model",
+        "scheduleModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_scheduling_job_has_operations(value: &Value) -> bool {
+    value.as_object().is_some_and(|obj| {
+        obj.get("operations")
+            .or_else(|| obj.get("ops"))
+            .or_else(|| obj.get("tasks"))
+            .and_then(Value::as_array)
+            .is_some()
+            || (obj.get("machines").and_then(Value::as_array).is_some()
+                && obj.get("durations").and_then(Value::as_array).is_some())
+    })
+}
+
+fn model_validation_scheduling_job_has_processing_times(value: &Value) -> bool {
+    value.as_object().is_some_and(|obj| {
+        obj.get("processing_times")
+            .or_else(|| obj.get("processingTimes"))
+            .or_else(|| obj.get("durations"))
+            .or_else(|| obj.get("times"))
+            .and_then(Value::as_array)
+            .is_some()
+    }) || value.as_array().is_some_and(|items| {
+        items.iter().any(|item| item.as_array().is_some())
+            || items
+                .iter()
+                .all(|item| model_validation_linear_number(Some(item)).is_some())
+    })
+}
+
+fn model_validation_payload_has_scheduling_model(payload: &Value) -> bool {
+    let source = model_validation_scheduling_source(payload);
+    source
+        .get("jobs")
+        .and_then(Value::as_array)
+        .is_some_and(|jobs| {
+            !jobs.is_empty()
+                && jobs.iter().any(|job| {
+                    model_validation_scheduling_job_has_operations(job)
+                        || model_validation_scheduling_job_has_processing_times(job)
+                })
+        })
+        || source
+            .get("processing_times")
+            .or_else(|| source.get("processingTimes"))
+            .and_then(Value::as_array)
+            .is_some()
+}
+
+fn model_validation_scheduling_kind(payload: &Value, source: &Value) -> String {
+    payload
+        .get("kind")
+        .or_else(|| source.get("kind"))
+        .and_then(Value::as_str)
+        .map(model_validation_normalized_tool)
+        .unwrap_or_default()
+}
+
+fn model_validation_scheduling_is_flow_shop(payload: &Value, source: &Value) -> bool {
+    let kind = model_validation_scheduling_kind(payload, source);
+    if matches!(
+        kind.as_str(),
+        "flow-shop-validation" | "flowshop-validation" | "flow-shop" | "flowshop"
+    ) {
+        return true;
+    }
+    if matches!(
+        kind.as_str(),
+        "job-shop-validation" | "jobshop-validation" | "job-shop" | "jobshop"
+    ) {
+        return false;
+    }
+    if source
+        .get("processing_times")
+        .or_else(|| source.get("processingTimes"))
+        .is_some()
+    {
+        return true;
+    }
+    source
+        .get("jobs")
+        .and_then(Value::as_array)
+        .is_some_and(|jobs| {
+            !jobs.is_empty()
+                && jobs
+                    .iter()
+                    .all(model_validation_scheduling_job_has_processing_times)
+                && !jobs
+                    .iter()
+                    .any(model_validation_scheduling_job_has_operations)
+        })
+}
+
+fn model_validation_scheduling_due(
+    obj: &serde_json::Map<String, Value>,
+    label: &str,
+) -> Result<Option<f64>, String> {
+    obj.get("due")
+        .or_else(|| obj.get("due_date"))
+        .or_else(|| obj.get("dueDate"))
+        .or_else(|| obj.get("deadline"))
+        .map(|value| model_validation_routing_number(Some(value), label))
+        .transpose()
+}
+
+fn model_validation_scheduling_job_id(
+    obj: Option<&serde_json::Map<String, Value>>,
+    idx: usize,
+) -> Result<String, String> {
+    obj.and_then(|obj| {
+        obj.get("id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("label"))
+            .or_else(|| obj.get("job"))
+    })
+    .map(|value| model_validation_string_value(value, &format!("jobs[{idx}].id")))
+    .transpose()
+    .map(|id| id.unwrap_or_else(|| format!("J{}", idx + 1)))
+}
+
+fn model_validation_job_operation(value: &Value, label: &str) -> Result<JobOperation, String> {
+    if let Some(obj) = value.as_object() {
+        let machine = model_validation_wis_edge_endpoint(
+            obj.get("machine")
+                .or_else(|| obj.get("machine_id"))
+                .or_else(|| obj.get("machineId"))
+                .or_else(|| obj.get("resource"))
+                .or_else(|| obj.get("station")),
+            &format!("{label}.machine"),
+        )?;
+        let duration = obj
+            .get("duration")
+            .or_else(|| obj.get("processing_time"))
+            .or_else(|| obj.get("processingTime"))
+            .or_else(|| obj.get("time"))
+            .or_else(|| obj.get("p"))
+            .map(|value| model_validation_routing_number(Some(value), &format!("{label}.duration")))
+            .transpose()?
+            .ok_or_else(|| format!("{label} needs duration"))?;
+        return Ok(JobOperation { machine, duration });
+    }
+    if let Some(values) = value.as_array() {
+        if values.len() < 2 {
+            return Err(format!("{label} must have machine and duration"));
+        }
+        return Ok(JobOperation {
+            machine: model_validation_string_value(&values[0], &format!("{label}[0]"))?,
+            duration: model_validation_routing_number(values.get(1), &format!("{label}[1]"))?,
+        });
+    }
+    Err(format!("{label} must be an object or array"))
+}
+
+fn model_validation_job_shop_operations(
+    obj: &serde_json::Map<String, Value>,
+    job_idx: usize,
+) -> Result<Vec<JobOperation>, String> {
+    if let Some(operations) = obj
+        .get("operations")
+        .or_else(|| obj.get("ops"))
+        .or_else(|| obj.get("tasks"))
+        .and_then(Value::as_array)
+    {
+        return operations
+            .iter()
+            .enumerate()
+            .map(|(op_idx, operation)| {
+                model_validation_job_operation(
+                    operation,
+                    &format!("jobs[{job_idx}].operations[{op_idx}]"),
+                )
+            })
+            .collect();
+    }
+    let machines = obj
+        .get("machines")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("jobs[{job_idx}] needs operations or machines"))?;
+    let durations = obj
+        .get("durations")
+        .or_else(|| obj.get("processing_times"))
+        .or_else(|| obj.get("processingTimes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("jobs[{job_idx}] needs durations"))?;
+    if machines.len() != durations.len() {
+        return Err(format!(
+            "jobs[{job_idx}] machines length {} does not match durations length {}",
+            machines.len(),
+            durations.len()
+        ));
+    }
+    machines
+        .iter()
+        .zip(durations.iter())
+        .enumerate()
+        .map(|(op_idx, (machine, duration))| {
+            Ok(JobOperation {
+                machine: model_validation_string_value(
+                    machine,
+                    &format!("jobs[{job_idx}].machines[{op_idx}]"),
+                )?,
+                duration: model_validation_routing_number(
+                    Some(duration),
+                    &format!("jobs[{job_idx}].durations[{op_idx}]"),
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn model_validation_job_shop_job(value: &Value, idx: usize) -> Result<JobShopJob, String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("jobs[{idx}] must be an object"))?;
+    Ok(JobShopJob {
+        id: model_validation_scheduling_job_id(Some(obj), idx)?,
+        due: model_validation_scheduling_due(obj, &format!("jobs[{idx}].due"))?,
+        operations: model_validation_job_shop_operations(obj, idx)?,
+    })
+}
+
+fn model_validation_job_shop_jobs(source: &Value) -> Result<Vec<JobShopJob>, String> {
+    let jobs = source
+        .get("jobs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "job-shop payload needs jobs array".to_string())?;
+    jobs.iter()
+        .enumerate()
+        .map(|(idx, job)| model_validation_job_shop_job(job, idx))
+        .collect()
+}
+
+fn model_validation_number_values(values: &[Value], label: &str) -> Result<Vec<f64>, String> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            model_validation_routing_number(Some(value), &format!("{label}[{idx}]"))
+        })
+        .collect()
+}
+
+fn model_validation_flow_shop_processing_times(
+    value: &Value,
+    label: &str,
+) -> Result<Vec<f64>, String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{label} must be an array"))?;
+    model_validation_number_values(values, label)
+}
+
+fn model_validation_flow_shop_job(value: &Value, idx: usize) -> Result<FlowShopJob, String> {
+    if let Some(obj) = value.as_object() {
+        let processing_times = obj
+            .get("processing_times")
+            .or_else(|| obj.get("processingTimes"))
+            .or_else(|| obj.get("durations"))
+            .or_else(|| obj.get("times"))
+            .ok_or_else(|| format!("jobs[{idx}] needs processingTimes"))?;
+        return Ok(FlowShopJob {
+            id: model_validation_scheduling_job_id(Some(obj), idx)?,
+            processing_times: model_validation_flow_shop_processing_times(
+                processing_times,
+                &format!("jobs[{idx}].processingTimes"),
+            )?,
+            due: model_validation_scheduling_due(obj, &format!("jobs[{idx}].due"))?,
+        });
+    }
+    if let Some(values) = value.as_array() {
+        if values.len() >= 2 && values[1].as_array().is_some() {
+            return Ok(FlowShopJob {
+                id: model_validation_string_value(&values[0], &format!("jobs[{idx}].id"))?,
+                processing_times: model_validation_flow_shop_processing_times(
+                    &values[1],
+                    &format!("jobs[{idx}].processingTimes"),
+                )?,
+                due: None,
+            });
+        }
+        return Ok(FlowShopJob {
+            id: format!("F{}", idx + 1),
+            processing_times: model_validation_number_values(values, &format!("jobs[{idx}]"))?,
+            due: None,
+        });
+    }
+    Err(format!("jobs[{idx}] must be an object or array"))
+}
+
+fn model_validation_flow_shop_jobs(source: &Value) -> Result<Vec<FlowShopJob>, String> {
+    if let Some(jobs) = source.get("jobs").and_then(Value::as_array) {
+        return jobs
+            .iter()
+            .enumerate()
+            .map(|(idx, job)| model_validation_flow_shop_job(job, idx))
+            .collect();
+    }
+    let matrix = source
+        .get("processing_times")
+        .or_else(|| source.get("processingTimes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "flow-shop payload needs jobs or processingTimes".to_string())?;
+    matrix
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            Ok(FlowShopJob {
+                id: model_validation_wis_index_id(source, idx)?
+                    .unwrap_or_else(|| format!("F{}", idx + 1)),
+                processing_times: model_validation_flow_shop_processing_times(
+                    row,
+                    &format!("processingTimes[{idx}]"),
+                )?,
+                due: None,
+            })
+        })
+        .collect()
+}
+
+fn model_validation_scheduling_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:scheduling-small-for-{tool}");
+    let source = model_validation_scheduling_source(payload);
+    let is_flow_shop = model_validation_scheduling_is_flow_shop(payload, source);
+    let (schedule_kind, solution) = if is_flow_shop {
+        let jobs = match model_validation_flow_shop_jobs(source) {
+            Ok(jobs) => jobs,
+            Err(message) => {
+                return model_validation_result("failed", "failure", &validator, message, "", "");
+            }
+        };
+        (
+            "flow-shop",
+            solve_flow_shop_with_external_reference(
+                &jobs,
+                &ExternalSchedulingReferenceOptions {
+                    solver: ExternalSchedulingReferenceSolver::RustExact,
+                },
+            ),
+        )
+    } else {
+        let jobs = match model_validation_job_shop_jobs(source) {
+            Ok(jobs) => jobs,
+            Err(message) => {
+                return model_validation_result("failed", "failure", &validator, message, "", "");
+            }
+        };
+        (
+            "job-shop",
+            solve_job_shop_with_external_reference(
+                &jobs,
+                &ExternalSchedulingReferenceOptions {
+                    solver: ExternalSchedulingReferenceSolver::RustExact,
+                },
+            ),
+        )
+    };
+    let (status, verdict) = match solution.status {
+        ExternalSchedulingReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalSchedulingReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalSchedulingReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalSchedulingReferenceStatus::Unsupported
+        | ExternalSchedulingReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalSchedulingReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = vec![
+        format!("kind={schedule_kind}"),
+        format!("schedule_ops={}", solution.schedule.len()),
+    ];
+    if !solution.sequence.is_empty() {
+        stdout.push(format!("sequence={}", solution.sequence.join(",")));
+    }
+    if let Some(makespan) = solution.makespan {
+        stdout.push(format!("makespan={makespan:.9}"));
+    }
+    if let Some(total_flow_time) = solution.total_flow_time {
+        stdout.push(format!("total_flow_time={total_flow_time:.9}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_mst_source(payload: &Value) -> &Value {
+    [
+        "mst_model",
+        "mstModel",
+        "minimum_spanning_tree_model",
+        "minimumSpanningTreeModel",
+        "spanning_tree_model",
+        "spanningTreeModel",
+        "graph",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_mst_edge_has_weight(value: &Value) -> bool {
+    value.as_object().is_some_and(|obj| {
+        obj.get("weight")
+            .or_else(|| obj.get("cost"))
+            .or_else(|| obj.get("distance"))
+            .is_some()
+    }) || value.as_array().is_some_and(|items| items.len() >= 3)
+}
+
+fn model_validation_payload_has_mst_model(payload: &Value) -> bool {
+    let source = model_validation_mst_source(payload);
+    source
+        .get("edges")
+        .and_then(Value::as_array)
+        .is_some_and(|edges| {
+            !edges.is_empty() && edges.iter().all(model_validation_mst_edge_has_weight)
+        })
+        && (source.get("vertices").and_then(Value::as_array).is_some()
+            || source.get("nodes").and_then(Value::as_array).is_some())
+}
+
+fn model_validation_mst_vertices(source: &Value) -> Result<Vec<String>, String> {
+    let values = source
+        .get("vertices")
+        .or_else(|| source.get("nodes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "MST payload needs vertices or nodes array".to_string())?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| model_validation_string_value(value, &format!("vertices[{idx}]")))
+        .collect()
+}
+
+fn model_validation_mst_edge(value: &Value, idx: usize) -> Result<MinimumSpanningTreeEdge, String> {
+    if let Some(obj) = value.as_object() {
+        let from = obj
+            .get("from")
+            .or_else(|| obj.get("source"))
+            .or_else(|| obj.get("u"))
+            .ok_or_else(|| format!("edges[{idx}] missing from/source/u"))?;
+        let to = obj
+            .get("to")
+            .or_else(|| obj.get("target"))
+            .or_else(|| obj.get("v"))
+            .ok_or_else(|| format!("edges[{idx}] missing to/target/v"))?;
+        let weight = obj
+            .get("weight")
+            .or_else(|| obj.get("cost"))
+            .or_else(|| obj.get("distance"))
+            .map(|value| {
+                model_validation_routing_number(Some(value), &format!("edges[{idx}].weight"))
+            })
+            .transpose()?
+            .ok_or_else(|| format!("edges[{idx}] needs weight"))?;
+        let from = model_validation_string_value(from, &format!("edges[{idx}].from"))?;
+        let to = model_validation_string_value(to, &format!("edges[{idx}].to"))?;
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("name"))
+            .map(|value| model_validation_string_value(value, &format!("edges[{idx}].id")))
+            .transpose()?
+            .unwrap_or_else(|| format!("{from}-{to}"));
+        return Ok(MinimumSpanningTreeEdge {
+            id,
+            from,
+            to,
+            weight,
+        });
+    }
+    if let Some(values) = value.as_array() {
+        let (id, from_idx, to_idx, weight_idx) = match values.first() {
+            Some(Value::String(id)) if values.len() >= 4 => (id.clone(), 1, 2, 3),
+            Some(Value::Number(number)) if values.len() >= 4 => (number.to_string(), 1, 2, 3),
+            _ => (format!("edge{idx}"), 0, 1, 2),
+        };
+        let from = model_validation_string_value(
+            values
+                .get(from_idx)
+                .ok_or_else(|| format!("edges[{idx}] missing from"))?,
+            &format!("edges[{idx}].from"),
+        )?;
+        let to = model_validation_string_value(
+            values
+                .get(to_idx)
+                .ok_or_else(|| format!("edges[{idx}] missing to"))?,
+            &format!("edges[{idx}].to"),
+        )?;
+        let weight = model_validation_routing_number(
+            values.get(weight_idx),
+            &format!("edges[{idx}].weight"),
+        )?;
+        return Ok(MinimumSpanningTreeEdge {
+            id,
+            from,
+            to,
+            weight,
+        });
+    }
+    Err(format!("edges[{idx}] must be an object or array"))
+}
+
+fn model_validation_mst_problem(source: &Value) -> Result<MinimumSpanningTreeProblem, String> {
+    let vertices = model_validation_mst_vertices(source)?;
+    let raw_edges = source
+        .get("edges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "MST payload needs edges array".to_string())?;
+    let edges = raw_edges
+        .iter()
+        .enumerate()
+        .map(|(idx, edge)| model_validation_mst_edge(edge, idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(MinimumSpanningTreeProblem { vertices, edges })
+}
+
+fn model_validation_mst_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:mst-small-for-{tool}");
+    let source = model_validation_mst_source(payload);
+    let problem = match model_validation_mst_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_minimum_spanning_tree_with_external_reference(
+        &problem,
+        &ExternalMinimumSpanningTreeReferenceOptions {
+            solver: ExternalMinimumSpanningTreeReferenceSolver::RustKruskal,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalMinimumSpanningTreeReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalMinimumSpanningTreeReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalMinimumSpanningTreeReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalMinimumSpanningTreeReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalMinimumSpanningTreeReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = vec![format!("edges={}", solution.selected_edge_ids.join(","))];
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(weight) = solution.total_weight {
+        stdout.push(format!("weight={weight:.9}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_graph_coloring_source(payload: &Value) -> &Value {
+    [
+        "graph_coloring_model",
+        "graphColoringModel",
+        "coloring_model",
+        "coloringModel",
+        "graph",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_graph_coloring_model(payload: &Value) -> bool {
+    let source = model_validation_graph_coloring_source(payload);
+    source.get("edges").and_then(Value::as_array).is_some()
+        && (source.get("vertices").and_then(Value::as_array).is_some()
+            || source.get("nodes").and_then(Value::as_array).is_some()
+            || source.get("vertex_count").is_some()
+            || source.get("vertexCount").is_some())
+}
+
+fn model_validation_graph_coloring_vertices(source: &Value) -> Result<Vec<String>, String> {
+    if let Some(values) = source
+        .get("vertices")
+        .or_else(|| source.get("nodes"))
+        .and_then(Value::as_array)
+    {
+        return values
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| model_validation_string_value(value, &format!("vertices[{idx}]")))
+            .collect();
+    }
+    for key in ["vertex_count", "vertexCount", "nodes_count", "nodeCount"] {
+        if let Some(value) = source.get(key) {
+            let count = model_validation_linear_integer(value)
+                .ok_or_else(|| format!("{key} must be an integer"))?;
+            if count <= 0 {
+                return Err(format!("{key} must be positive"));
+            }
+            let count = usize::try_from(count).map_err(|_| format!("{key} is too large"))?;
+            return Ok((0..count).map(|idx| idx.to_string()).collect());
+        }
+    }
+    Err("graph-coloring payload needs vertices, nodes, or vertex_count".to_string())
+}
+
+fn model_validation_graph_coloring_edge(
+    value: &Value,
+    idx: usize,
+) -> Result<(String, String), String> {
+    if let Some(values) = value.as_array() {
+        if values.len() < 2 {
+            return Err(format!("edges[{idx}] must have at least two endpoints"));
+        }
+        return Ok((
+            model_validation_string_value(&values[0], &format!("edges[{idx}][0]"))?,
+            model_validation_string_value(&values[1], &format!("edges[{idx}][1]"))?,
+        ));
+    }
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("edges[{idx}] must be an array or object"))?;
+    let left = obj
+        .get("source")
+        .or_else(|| obj.get("from"))
+        .or_else(|| obj.get("u"))
+        .or_else(|| obj.get("a"))
+        .ok_or_else(|| format!("edges[{idx}] missing source/from/u"))?;
+    let right = obj
+        .get("target")
+        .or_else(|| obj.get("to"))
+        .or_else(|| obj.get("v"))
+        .or_else(|| obj.get("b"))
+        .ok_or_else(|| format!("edges[{idx}] missing target/to/v"))?;
+    Ok((
+        model_validation_string_value(left, &format!("edges[{idx}].source"))?,
+        model_validation_string_value(right, &format!("edges[{idx}].target"))?,
+    ))
+}
+
+fn model_validation_graph_coloring_problem(source: &Value) -> Result<GraphColoringProblem, String> {
+    let vertices = model_validation_graph_coloring_vertices(source)?;
+    let raw_edges = source
+        .get("edges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "graph-coloring payload needs edges array".to_string())?;
+    let edges = raw_edges
+        .iter()
+        .enumerate()
+        .map(|(idx, edge)| model_validation_graph_coloring_edge(edge, idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(GraphColoringProblem { vertices, edges })
+}
+
+fn model_validation_graph_coloring_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:graph-coloring-small-for-{tool}");
+    let source = model_validation_graph_coloring_source(payload);
+    let problem = match model_validation_graph_coloring_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_graph_coloring_with_external_reference(
+        &problem,
+        &ExternalGraphColoringReferenceOptions {
+            solver: ExternalGraphColoringReferenceSolver::RustDsatur,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalGraphColoringReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalGraphColoringReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalGraphColoringReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalGraphColoringReferenceStatus::Unsupported
+        | ExternalGraphColoringReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalGraphColoringReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = Vec::new();
+    if !solution.color_indices.is_empty() {
+        stdout.push(format!(
+            "colors={}",
+            solution
+                .color_indices
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if let Some(used_colors) = solution.used_color_count {
+        stdout.push(format!("used_colors={used_colors}"));
+    }
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
+fn model_validation_set_cover_source(payload: &Value) -> &Value {
+    [
+        "set_cover_model",
+        "setCoverModel",
+        "cover_model",
+        "coverModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_set_cover_model(payload: &Value) -> bool {
+    let source = model_validation_set_cover_source(payload);
+    (source.get("universe").and_then(Value::as_array).is_some()
+        || source.get("elements").and_then(Value::as_array).is_some())
+        && (source.get("sets").and_then(Value::as_array).is_some()
+            || source.get("subsets").and_then(Value::as_array).is_some())
+}
+
+fn model_validation_set_cover_universe(source: &Value) -> Result<Vec<String>, String> {
+    let values = source
+        .get("universe")
+        .or_else(|| source.get("elements"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "set-cover payload needs universe or elements array".to_string())?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| model_validation_string_value(value, &format!("universe[{idx}]")))
+        .collect()
+}
+
+fn model_validation_set_cover_set(value: &Value, idx: usize) -> Result<SetCoverSet, String> {
+    if let Some(obj) = value.as_object() {
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("label"))
+            .map(|value| model_validation_string_value(value, &format!("sets[{idx}].id")))
+            .transpose()?
+            .unwrap_or_else(|| format!("set{idx}"));
+        let cost = obj
+            .get("cost")
+            .or_else(|| obj.get("weight"))
+            .or_else(|| obj.get("price"))
+            .map(|value| model_validation_routing_number(Some(value), &format!("sets[{idx}].cost")))
+            .transpose()?
+            .unwrap_or(1.0);
+        let elements = obj
+            .get("elements")
+            .or_else(|| obj.get("covers"))
+            .or_else(|| obj.get("items"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("sets[{idx}] needs elements array"))?
+            .iter()
+            .enumerate()
+            .map(|(elem_idx, value)| {
+                model_validation_string_value(value, &format!("sets[{idx}].elements[{elem_idx}]"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(SetCoverSet { id, cost, elements });
+    }
+    if let Some(values) = value.as_array() {
+        let (id, cost_idx, elements_idx) = match values.first() {
+            Some(Value::String(id)) if values.len() >= 3 => (id.clone(), 1, 2),
+            Some(Value::Number(number)) if values.len() >= 3 => (number.to_string(), 1, 2),
+            _ => (format!("set{idx}"), 0, 1),
+        };
+        let cost =
+            model_validation_routing_number(values.get(cost_idx), &format!("sets[{idx}].cost"))?;
+        let elements = values
+            .get(elements_idx)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("sets[{idx}] needs elements array"))?
+            .iter()
+            .enumerate()
+            .map(|(elem_idx, value)| {
+                model_validation_string_value(value, &format!("sets[{idx}].elements[{elem_idx}]"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(SetCoverSet { id, cost, elements });
+    }
+    Err(format!("sets[{idx}] must be an object or array"))
+}
+
+fn model_validation_set_cover_problem(source: &Value) -> Result<SetCoverProblem, String> {
+    let universe = model_validation_set_cover_universe(source)?;
+    let raw_sets = source
+        .get("sets")
+        .or_else(|| source.get("subsets"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "set-cover payload needs sets or subsets array".to_string())?;
+    let sets = raw_sets
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| model_validation_set_cover_set(value, idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SetCoverProblem { universe, sets })
+}
+
+fn model_validation_set_cover_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:set-cover-small-for-{tool}");
+    let source = model_validation_set_cover_source(payload);
+    let problem = match model_validation_set_cover_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_set_cover_with_external_reference(
+        &problem,
+        &ExternalSetCoverReferenceOptions {
+            solver: ExternalSetCoverReferenceSolver::RustExact,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalSetCoverReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalSetCoverReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalSetCoverReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalSetCoverReferenceStatus::Unsupported
+        | ExternalSetCoverReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalSetCoverReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let mut stdout = vec![format!("sets={}", solution.selected_set_ids.join(","))];
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if !solution.covered_elements.is_empty() {
+        stdout.push(format!("covered={}", solution.covered_elements.join(",")));
+    }
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
         "",
     )
 }
@@ -7677,6 +13250,269 @@ fn model_validation_wcnf_reference(payload: &Value) -> Value {
     )
 }
 
+fn model_validation_weighted_max_sat_source(payload: &Value) -> &Value {
+    [
+        "weighted_max_sat_model",
+        "weightedMaxSatModel",
+        "weighted_maxsat_model",
+        "weightedMaxsatModel",
+        "max_sat_model",
+        "maxSatModel",
+        "maxsat_model",
+        "maxsatModel",
+        "model",
+        "problem",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_weighted_max_sat_model(payload: &Value) -> bool {
+    let source = model_validation_weighted_max_sat_source(payload);
+    source
+        .get("clauses")
+        .or_else(|| source.get("soft_clauses"))
+        .or_else(|| source.get("softClauses"))
+        .and_then(Value::as_array)
+        .is_some_and(|clauses| {
+            !clauses.is_empty()
+                && clauses.iter().all(|clause| {
+                    clause.as_object().is_some_and(|obj| {
+                        obj.get("literals")
+                            .or_else(|| obj.get("lits"))
+                            .or_else(|| obj.get("clause"))
+                            .and_then(Value::as_array)
+                            .is_some()
+                    }) || clause.as_array().is_some()
+                })
+        })
+}
+
+fn model_validation_weighted_max_sat_literal(value: &Value, label: &str) -> Result<i64, String> {
+    let literal = model_validation_linear_integer(value)
+        .ok_or_else(|| format!("{label} must be an integer"))?;
+    if literal == 0 {
+        return Err(format!("{label} must be non-zero"));
+    }
+    Ok(literal)
+}
+
+fn model_validation_weighted_max_sat_literals(
+    value: &Value,
+    label: &str,
+) -> Result<Vec<i64>, String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{label} must be an array"))?;
+    if values.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            model_validation_weighted_max_sat_literal(value, &format!("{label}[{idx}]"))
+        })
+        .collect()
+}
+
+fn model_validation_weighted_max_sat_bool(value: &Value) -> Option<bool> {
+    if let Some(value) = value.as_bool() {
+        return Some(value);
+    }
+    value
+        .as_str()
+        .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "hard" | "required" | "mandatory" => Some(true),
+            "false" | "soft" | "optional" => Some(false),
+            _ => None,
+        })
+}
+
+fn model_validation_weighted_max_sat_hard(obj: &serde_json::Map<String, Value>) -> bool {
+    obj.get("hard")
+        .or_else(|| obj.get("required"))
+        .or_else(|| obj.get("mandatory"))
+        .or_else(|| obj.get("type"))
+        .and_then(model_validation_weighted_max_sat_bool)
+        .unwrap_or(false)
+}
+
+fn model_validation_weighted_max_sat_clause(
+    value: &Value,
+    idx: usize,
+) -> Result<WeightedMaxSatClause, String> {
+    if let Some(obj) = value.as_object() {
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("name"))
+            .or_else(|| obj.get("label"))
+            .map(|value| model_validation_string_value(value, &format!("clauses[{idx}].id")))
+            .transpose()?
+            .unwrap_or_else(|| format!("C{}", idx + 1));
+        let literals_value = obj
+            .get("literals")
+            .or_else(|| obj.get("lits"))
+            .or_else(|| obj.get("clause"))
+            .ok_or_else(|| format!("clauses[{idx}] needs literals"))?;
+        let hard = model_validation_weighted_max_sat_hard(obj);
+        let weight = obj
+            .get("weight")
+            .or_else(|| obj.get("cost"))
+            .or_else(|| obj.get("reward"))
+            .map(|value| {
+                model_validation_routing_number(Some(value), &format!("clauses[{idx}].weight"))
+            })
+            .transpose()?
+            .unwrap_or(if hard { 0.0 } else { 1.0 });
+        return Ok(WeightedMaxSatClause {
+            id,
+            literals: model_validation_weighted_max_sat_literals(
+                literals_value,
+                &format!("clauses[{idx}].literals"),
+            )?,
+            weight,
+            hard,
+        });
+    }
+    if let Some(values) = value.as_array() {
+        if values.is_empty() {
+            return Err(format!("clauses[{idx}] must not be empty"));
+        }
+        if values.first().is_some_and(Value::is_array) {
+            let weight = values
+                .get(1)
+                .map(|value| {
+                    model_validation_routing_number(Some(value), &format!("clauses[{idx}].weight"))
+                })
+                .transpose()?
+                .unwrap_or(1.0);
+            let hard = values
+                .get(2)
+                .and_then(model_validation_weighted_max_sat_bool)
+                .unwrap_or(false);
+            return Ok(WeightedMaxSatClause {
+                id: format!("C{}", idx + 1),
+                literals: model_validation_weighted_max_sat_literals(
+                    &values[0],
+                    &format!("clauses[{idx}].literals"),
+                )?,
+                weight,
+                hard,
+            });
+        }
+        return Ok(WeightedMaxSatClause {
+            id: format!("C{}", idx + 1),
+            literals: model_validation_weighted_max_sat_literals(
+                value,
+                &format!("clauses[{idx}]"),
+            )?,
+            weight: 1.0,
+            hard: false,
+        });
+    }
+    Err(format!("clauses[{idx}] must be an object or array"))
+}
+
+fn model_validation_weighted_max_sat_problem(
+    source: &Value,
+) -> Result<WeightedMaxSatProblem, String> {
+    let raw_clauses = source
+        .get("clauses")
+        .or_else(|| source.get("soft_clauses"))
+        .or_else(|| source.get("softClauses"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "weighted MaxSAT payload needs clauses array".to_string())?;
+    let clauses = raw_clauses
+        .iter()
+        .enumerate()
+        .map(|(idx, clause)| model_validation_weighted_max_sat_clause(clause, idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let derived_vars = clauses
+        .iter()
+        .flat_map(|clause| clause.literals.iter())
+        .map(|literal| literal.unsigned_abs() as usize)
+        .max()
+        .unwrap_or(0);
+    let variable_array_count = source
+        .get("variables")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    let num_vars = model_validation_optional_usize_field(
+        source,
+        &[
+            "num_vars",
+            "numVars",
+            "variable_count",
+            "variableCount",
+            "n_vars",
+            "nVars",
+        ],
+        "num_vars",
+    )?
+    .or(variable_array_count)
+    .unwrap_or(derived_vars);
+    if num_vars == 0 {
+        return Err("num_vars must be positive".to_string());
+    }
+    Ok(WeightedMaxSatProblem { num_vars, clauses })
+}
+
+fn model_validation_weighted_max_sat_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:weighted-max-sat-small-for-{tool}");
+    let source = model_validation_weighted_max_sat_source(payload);
+    let problem = match model_validation_weighted_max_sat_problem(source) {
+        Ok(problem) => problem,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let solution = solve_weighted_max_sat_with_external_reference(
+        &problem,
+        &ExternalWeightedMaxSatReferenceOptions {
+            solver: ExternalWeightedMaxSatReferenceSolver::RustEnumeration,
+        },
+    );
+    let (status, verdict) = match solution.status {
+        ExternalWeightedMaxSatReferenceStatus::Optimal => ("ok", "optimal"),
+        ExternalWeightedMaxSatReferenceStatus::Feasible => ("ok", "feasible"),
+        ExternalWeightedMaxSatReferenceStatus::Infeasible => ("ok", "infeasible"),
+        ExternalWeightedMaxSatReferenceStatus::Unsupported
+        | ExternalWeightedMaxSatReferenceStatus::Unavailable => ("unavailable", "unknown"),
+        ExternalWeightedMaxSatReferenceStatus::NumericalError => ("failed", "failure"),
+    };
+    let assignment = solution
+        .assignment
+        .iter()
+        .map(|value| if *value { '1' } else { '0' })
+        .collect::<String>();
+    let mut stdout = vec![format!("assignment={assignment}")];
+    if let Some(objective) = solution.objective {
+        stdout.push(format!("objective={objective:.9}"));
+    }
+    if let Some(satisfied) = solution.satisfied_soft_weight {
+        stdout.push(format!("satisfied_soft={satisfied:.9}"));
+    }
+    if let Some(unsatisfied) = solution.unsatisfied_soft_weight {
+        stdout.push(format!("unsatisfied_soft={unsatisfied:.9}"));
+    }
+    stdout.push(format!(
+        "violated_hard={}",
+        solution.violated_hard_clause_ids.len()
+    ));
+    stdout.push(format!("solver={}", solution.solver));
+    model_validation_result(
+        status,
+        verdict,
+        &validator,
+        solution.message,
+        stdout.join(" "),
+        "",
+    )
+}
+
 fn model_validation_parse_opb(
     text: &str,
 ) -> Result<(Vec<String>, Vec<(Vec<(i64, String)>, String, i64)>), String> {
@@ -7899,6 +13735,376 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "enhsp",
         "enhsp.jar",
     ];
+    let assignment_tools = [
+        "scipy-optimize",
+        "scipy-optimize-adapter",
+        "scipy-adapter",
+        "scipy-linear-sum-assignment",
+        "linear-sum-assignment",
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+    ];
+    let bin_packing_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "cpmpy",
+        "cpmpy-adapter",
+        "pycsp3",
+        "pycsp3-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+    ];
+    let facility_location_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "good-lp",
+        "lp-modeler",
+    ];
+    let knapsack_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "good-lp",
+        "lp-modeler",
+    ];
+    let graph_coloring_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "cpmpy",
+        "cpmpy-adapter",
+        "pycsp3",
+        "pycsp3-adapter",
+        "choco-solver",
+        "jacop",
+    ];
+    let weighted_independent_set_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-cp-sat",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "cpmpy",
+        "cpmpy-adapter",
+        "pycsp3",
+        "pycsp3-adapter",
+        "choco-solver",
+        "jacop",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "networkx",
+        "good-lp",
+        "lp-modeler",
+    ];
+    let scheduling_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-cp-sat",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "cpmpy",
+        "cpmpy-adapter",
+        "pycsp3",
+        "pycsp3-adapter",
+        "choco-solver",
+        "jacop",
+        "ibm-cp-optimizer",
+        "cp-optimizer",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "optaplanner",
+        "optaplanner-adapter",
+        "timefold",
+        "timefold-adapter",
+    ];
+    let set_cover_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "good-lp",
+        "lp-modeler",
+    ];
+    let min_cost_flow_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "networkx",
+        "good-lp",
+        "lp-modeler",
+    ];
+    let max_flow_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "networkx",
+    ];
+    let mst_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "cpmpy",
+        "cpmpy-adapter",
+        "pycsp3",
+        "pycsp3-adapter",
+        "networkx",
+    ];
+    let routing_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "optaplanner",
+        "optaplanner-adapter",
+        "ores-optaplanner-adapter",
+        "timefold",
+        "timefold-adapter",
+        "ores-timefold-adapter",
+        "hexaly",
+        "localsolver",
+        "localsolver-studio",
+    ];
+    let tsp_tools = [
+        "ortools-python",
+        "ortools-python-adapter",
+        "ortools-adapter",
+        "ortools-java",
+        "ortools-java-adapter",
+        "ores-ortools-java-adapter",
+        "optaplanner",
+        "optaplanner-adapter",
+        "ores-optaplanner-adapter",
+        "timefold",
+        "timefold-adapter",
+        "ores-timefold-adapter",
+        "hexaly",
+        "localsolver",
+        "localsolver-studio",
+        "networkx",
+    ];
+    let finite_domain_cp_tools = [
+        "cpmpy",
+        "cpmpy-adapter",
+        "cpm-py-adapter",
+        "pycsp3",
+        "pycsp3-adapter",
+        "choco-solver",
+        "jacop",
+        "ortools-java",
+    ];
+    let linear_modeling_tools = [
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "gurobipy",
+        "gurobipy-adapter",
+        "cplex-python",
+        "cplex-python-adapter",
+        "xpress-python",
+        "xpress-python-adapter",
+        "docplex",
+        "docplex-adapter",
+        "ortools-glop",
+        "ortools-pdlp",
+        "good-lp",
+        "lp-modeler",
+        "rust-linprog",
+    ];
+    let stochastic_lp_tools = [
+        "pyomo",
+        "pyomo-adapter",
+        "pulp",
+        "pulp-adapter",
+        "python-mip",
+        "python-mip-adapter",
+        "mip-adapter",
+        "scipy-optimize",
+        "scipy-optimize-adapter",
+        "scipy-adapter",
+        "highs",
+        "highs-adapter",
+        "gurobipy",
+        "gurobipy-adapter",
+        "cplex-python",
+        "cplex-python-adapter",
+        "docplex",
+        "docplex-adapter",
+        "jump",
+        "jump-adapter",
+        "good-lp",
+        "lp-modeler",
+    ];
+    let quadratic_modeling_tools = [
+        "osqp",
+        "osqp-adapter",
+        "highs",
+        "highs-adapter",
+        "scipy-optimize",
+        "scipy-optimize-adapter",
+        "scipy-adapter",
+        "cvxpy",
+        "cvxpy-adapter",
+        "cvxopt",
+        "cvxopt-adapter",
+        "scs",
+        "scs-adapter",
+        "clarabel",
+        "clarabel-adapter",
+        "ecos",
+        "ecos-adapter",
+        "mosek",
+        "mosek-adapter",
+        "copt",
+        "copt-adapter",
+        "qpoases",
+        "qpoases-adapter",
+        "proxqp",
+        "proxqp-adapter",
+        "cosmo",
+        "cosmo-adapter",
+        "pyomo",
+        "pyomo-adapter",
+        "gurobipy",
+        "gurobipy-adapter",
+        "cplex-python",
+        "cplex-python-adapter",
+    ];
+    let nonlinear_modeling_tools = [
+        "scipy-optimize",
+        "scipy-optimize-adapter",
+        "scipy-adapter",
+        "argmin",
+        "argmin-adapter",
+        "nlopt",
+        "nlopt-adapter",
+        "nlopt-rs",
+        "nlopt-rs-adapter",
+        "nlopt-cli",
+        "ipopt",
+        "ipopt-adapter",
+        "ipopt-rust",
+        "ipopt-rust-adapter",
+        "casadi",
+        "casadi-adapter",
+        "mosek",
+        "mosek-adapter",
+        "copt",
+        "copt-adapter",
+        "cvxpy",
+        "cvxpy-adapter",
+        "cvxopt",
+        "cvxopt-adapter",
+        "osqp",
+        "osqp-adapter",
+        "scs",
+        "scs-adapter",
+        "clarabel",
+        "clarabel-adapter",
+        "ecos",
+        "ecos-adapter",
+    ];
+    if matches!(
+        kind.as_str(),
+        "scheduling-validation"
+            | "schedule-validation"
+            | "job-shop-validation"
+            | "jobshop-validation"
+            | "flow-shop-validation"
+            | "flowshop-validation"
+    ) || (scheduling_tools.contains(&tool.as_str())
+        && model_validation_payload_has_scheduling_model(payload))
+    {
+        return model_validation_scheduling_reference(payload, &tool);
+    }
     if kind == "minizinc-validation" || minizinc_tools.contains(&tool.as_str()) {
         return model_validation_minizinc_reference(payload);
     }
@@ -7926,6 +14132,20 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         }
         return model_validation_infer_smtlib(text);
     }
+    if matches!(
+        kind.as_str(),
+        "weighted-max-sat-validation"
+            | "weighted-maxsat-validation"
+            | "partial-max-sat-validation"
+            | "partial-maxsat-validation"
+            | "maxsat-json-validation"
+            | "maxsat-validation"
+    ) && model_validation_payload_has_weighted_max_sat_model(payload)
+        || (maxsat_tools.contains(&tool.as_str())
+            && model_validation_payload_has_weighted_max_sat_model(payload))
+    {
+        return model_validation_weighted_max_sat_reference(payload, &tool);
+    }
     if kind == "wcnf-validation"
         || kind == "dimacs-wcnf-validation"
         || kind == "maxsat-validation"
@@ -7950,6 +14170,189 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
     ) || (pddl_tools.contains(&tool.as_str()) && model_validation_payload_has_pddl(payload))
     {
         return model_validation_pddl_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "assignment-validation"
+            | "linear-sum-assignment-validation"
+            | "bipartite-assignment-validation"
+            | "matching-validation"
+    ) || (assignment_tools.contains(&tool.as_str())
+        && model_validation_payload_has_assignment_model(payload))
+    {
+        return model_validation_assignment_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "bin-packing-validation" | "binpacking-validation" | "packing-validation"
+    ) || (bin_packing_tools.contains(&tool.as_str())
+        && model_validation_payload_has_bin_packing_model(payload))
+    {
+        return model_validation_bin_packing_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "facility-location-validation"
+            | "uncapacitated-facility-location-validation"
+            | "ufl-validation"
+            | "location-allocation-validation"
+    ) || (facility_location_tools.contains(&tool.as_str())
+        && model_validation_payload_has_facility_location_model(payload))
+    {
+        return model_validation_facility_location_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "knapsack-validation"
+            | "binary-knapsack-validation"
+            | "zero-one-knapsack-validation"
+            | "0-1-knapsack-validation"
+    ) || (knapsack_tools.contains(&tool.as_str())
+        && model_validation_payload_has_knapsack_model(payload))
+    {
+        return model_validation_knapsack_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "min-cost-flow-validation"
+            | "minimum-cost-flow-validation"
+            | "transportation-validation"
+            | "transshipment-validation"
+    ) || (min_cost_flow_tools.contains(&tool.as_str())
+        && model_validation_payload_has_min_cost_flow_model(payload))
+    {
+        return model_validation_min_cost_flow_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "max-flow-validation" | "maximum-flow-validation" | "min-cut-validation"
+    ) || (max_flow_tools.contains(&tool.as_str())
+        && model_validation_payload_has_max_flow_model(payload))
+    {
+        return model_validation_max_flow_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "weighted-independent-set-validation"
+            | "maximum-weight-independent-set-validation"
+            | "max-weight-independent-set-validation"
+            | "independent-set-validation"
+            | "set-packing-validation"
+            | "conflict-graph-validation"
+    ) || (weighted_independent_set_tools.contains(&tool.as_str())
+        && model_validation_payload_has_wis_model(payload))
+    {
+        return model_validation_wis_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "mst-validation"
+            | "minimum-spanning-tree-validation"
+            | "spanning-tree-validation"
+            | "minimum-spanning-forest-validation"
+    ) || (mst_tools.contains(&tool.as_str()) && model_validation_payload_has_mst_model(payload))
+    {
+        return model_validation_mst_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "graph-coloring-validation"
+            | "graph-colouring-validation"
+            | "coloring-validation"
+            | "colouring-validation"
+    ) || (graph_coloring_tools.contains(&tool.as_str())
+        && model_validation_payload_has_graph_coloring_model(payload))
+    {
+        return model_validation_graph_coloring_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "set-cover-validation" | "set-covering-validation" | "covering-validation"
+    ) || (set_cover_tools.contains(&tool.as_str())
+        && model_validation_payload_has_set_cover_model(payload))
+    {
+        return model_validation_set_cover_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "tsp-validation"
+            | "traveling-salesman-validation"
+            | "travelling-salesman-validation"
+            | "traveling-salesperson-validation"
+            | "travelling-salesperson-validation"
+    ) || (tsp_tools.contains(&tool.as_str()) && model_validation_payload_has_tsp_model(payload))
+    {
+        return model_validation_tsp_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "routing-validation"
+            | "vehicle-routing-validation"
+            | "vrp-validation"
+            | "cvrp-validation"
+            | "tsp-validation"
+            | "ortools-routing-validation"
+    ) || (routing_tools.contains(&tool.as_str())
+        && model_validation_payload_has_routing_model(payload))
+    {
+        return model_validation_routing_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "stochastic-lp-validation"
+            | "stochastic-linear-program-validation"
+            | "two-stage-stochastic-lp-validation"
+            | "saa-validation"
+    ) || (stochastic_lp_tools.contains(&tool.as_str())
+        && model_validation_payload_has_stochastic_lp_model(payload))
+    {
+        return model_validation_stochastic_lp_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "quadratic-validation"
+            | "quadratic-program-validation"
+            | "quadratic-model-validation"
+            | "qp-validation"
+            | "miqp-validation"
+    ) || (quadratic_modeling_tools.contains(&tool.as_str())
+        && model_validation_payload_has_quadratic_model(payload))
+    {
+        return model_validation_quadratic_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "linear-validation"
+            | "linear-mip-validation"
+            | "mip-validation"
+            | "lp-validation"
+            | "algebraic-model-validation"
+            | "linear-model-validation"
+    ) || (linear_modeling_tools.contains(&tool.as_str())
+        && model_validation_payload_has_linear_model(payload))
+    {
+        return model_validation_linear_mip_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "nonlinear-validation"
+            | "nlp-validation"
+            | "nonlinear-model-validation"
+            | "convex-validation"
+            | "convex-model-validation"
+            | "qp-validation"
+    ) || (nonlinear_modeling_tools.contains(&tool.as_str())
+        && model_validation_payload_has_nonlinear_model(payload))
+    {
+        return model_validation_nonlinear_reference(payload, &tool);
+    }
+    if matches!(
+        kind.as_str(),
+        "cp-validation" | "finite-domain-cp-validation" | "constraint-model-validation"
+    ) || (finite_domain_cp_tools.contains(&tool.as_str())
+        && model_validation_payload_has_finite_domain_cp(payload))
+    {
+        return model_validation_finite_domain_cp_reference(payload, &tool);
     }
     if kind == "dimacs-validation"
         || kind == "dimacs-cnf-validation"
@@ -13212,6 +19615,67 @@ mod tests {
     }
 
     #[test]
+    fn python_schema_dialects_use_rust_structured_constraints() {
+        let cerberus_valid = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "name": {"type": "string", "required": true, "empty": false, "minlength": 3},
+                    "age": {"type": "integer", "min": 0, "max": 120},
+                    "status": {"type": "string", "allowed": ["ok", "warn"]},
+                    "note": {"type": "string", "nullable": true}
+                },
+                "data": {"name": "Alex", "age": 42, "status": "ok", "note": null}
+            }),
+            "cerberus",
+        );
+        assert_eq!(cerberus_valid["status"].as_str(), Some("ok"));
+        assert_eq!(cerberus_valid["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            cerberus_valid["validator"].as_str(),
+            Some("builtin:pydantic-model-subset-for-cerberus")
+        );
+
+        let cerberus_invalid = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "name": {"type": "string", "required": true, "empty": false, "minlength": 3},
+                    "age": {"type": "integer", "min": 0, "max": 120},
+                    "status": {"type": "string", "allowed": ["ok", "warn"]}
+                },
+                "instance": {"name": "", "age": -1, "status": "bad"}
+            }),
+            "cerberus",
+        );
+        assert_eq!(cerberus_invalid["status"].as_str(), Some("ok"));
+        assert_eq!(cerberus_invalid["verdict"].as_str(), Some("invalid"));
+        assert!(
+            cerberus_invalid["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.len() >= 3),
+            "{cerberus_invalid:?}"
+        );
+
+        let marshmallow = run_output_validation_json_with_rust_reference(
+            &json!({
+                "model": {
+                    "fields": {
+                        "score": {"type": "fields.Float", "required": true, "min_value": 0.0, "max_value": 10.0},
+                        "tags": {"type": "List", "schema": {"type": "String"}, "minLength": 1}
+                    }
+                },
+                "instance": {"score": 8.5, "tags": ["left", "press"]}
+            }),
+            "marshmallow",
+        );
+        assert_eq!(marshmallow["status"].as_str(), Some("ok"));
+        assert_eq!(marshmallow["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            marshmallow["validator"].as_str(),
+            Some("builtin:pydantic-model-subset-for-marshmallow")
+        );
+    }
+
+    #[test]
     fn table_package_tools_use_rust_csv_fallback_when_payload_is_table_shaped() {
         let valid = run_output_validation_json_with_rust_reference(
             &json!({
@@ -13252,6 +19716,175 @@ mod tests {
         assert_eq!(
             invalid["validator"].as_str(),
             Some("builtin:table-schema-subset-for-great-expectations")
+        );
+    }
+
+    #[test]
+    fn frictionless_data_packages_use_rust_structural_fallbacks() {
+        let package = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "data-package-validation",
+                "package": {
+                    "profile": "tabular-data-package",
+                    "resources": [
+                        {
+                            "name": "episodes",
+                            "path": "episodes.csv",
+                            "schema": {
+                                "fields": [
+                                    {"name": "episode", "type": "integer", "constraints": {"required": true, "minimum": 1}},
+                                    {"name": "score", "type": "number", "constraints": {"minimum": 0}},
+                                    {"name": "status", "type": "string", "constraints": {"enum": ["ok", "warn"]}}
+                                ],
+                                "primaryKey": "episode"
+                            },
+                            "rows": [
+                                {"episode": 1, "score": 3.5, "status": "ok"},
+                                {"episode": 2, "score": 2.0, "status": "warn"}
+                            ]
+                        }
+                    ]
+                }
+            }),
+            "frictionless",
+        );
+        assert_eq!(package["status"].as_str(), Some("ok"));
+        assert_eq!(package["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            package["validator"].as_str(),
+            Some("builtin:frictionless-data-package-structural")
+        );
+
+        let invalid = run_output_validation_json_with_rust_reference(
+            &json!({
+                "resources": [
+                    {
+                        "name": "episodes",
+                        "schema": {
+                            "fields": [
+                                {"name": "episode", "type": "integer"},
+                                {"name": "episode", "type": "integer"},
+                                {"name": "score", "type": "mystery", "constraints": {"minimum": 0}}
+                            ],
+                            "primaryKey": "missing_id"
+                        },
+                        "rows": [{"episode": "one", "score": -1.0}]
+                    },
+                    {"name": "episodes", "path": ""}
+                ]
+            }),
+            "frictionless",
+        );
+        assert_eq!(invalid["status"].as_str(), Some("ok"));
+        assert_eq!(invalid["verdict"].as_str(), Some("invalid"));
+        assert!(
+            invalid["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.len() >= 5),
+            "{invalid:?}"
+        );
+
+        let table = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "columns": {"episode": {"type": "integer", "required": true}},
+                    "minRows": 1
+                },
+                "rows": [{"episode": 1}]
+            }),
+            "frictionless",
+        );
+        assert_eq!(table["status"].as_str(), Some("ok"));
+        assert_eq!(table["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            table["validator"].as_str(),
+            Some("builtin:table-schema-subset-for-frictionless")
+        );
+    }
+
+    #[test]
+    fn openrefine_histories_use_rust_structural_fallbacks() {
+        let history = run_output_validation_json_with_rust_reference(
+            &json!({
+                "kind": "openrefine-history-validation",
+                "rows": [{"name": " Alpha ", "entity": "Alpha"}],
+                "operations": [
+                    {
+                        "op": "core/text-transform",
+                        "description": "trim names",
+                        "columnName": "name",
+                        "expression": "value.trim()",
+                        "onError": "keep-original"
+                    },
+                    {
+                        "op": "core/mass-edit",
+                        "columnName": "entity",
+                        "edits": [{"from": ["Alpha"], "to": "Alpha FC"}]
+                    }
+                ],
+                "reconciliation": {
+                    "column": "entity",
+                    "matched": 1,
+                    "unmatched": 0,
+                    "total": 1,
+                    "candidates": [{"id": "Q1", "name": "Alpha FC", "score": 98.0}]
+                }
+            }),
+            "openrefine",
+        );
+        assert_eq!(history["status"].as_str(), Some("ok"));
+        assert_eq!(history["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            history["validator"].as_str(),
+            Some("builtin:openrefine-structural-for-openrefine")
+        );
+
+        let invalid = run_output_validation_json_with_rust_reference(
+            &json!({
+                "rows": [{"name": "Alpha"}],
+                "operations": [
+                    {"description": 7},
+                    {"op": "core/text-transform", "columnName": "missing", "onError": "explode", "repeatCount": -1},
+                    {"op": "core/mass-edit", "columnName": "name", "edits": [{}]}
+                ],
+                "reconciliation": {
+                    "column": "missing",
+                    "matched": 3,
+                    "unmatched": 2,
+                    "total": 4,
+                    "candidates": [{"score": 120.0}, "bad"]
+                }
+            }),
+            "openrefine_adapter",
+        );
+        assert_eq!(invalid["status"].as_str(), Some("ok"));
+        assert_eq!(invalid["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            invalid["validator"].as_str(),
+            Some("builtin:openrefine-structural-for-openrefine-adapter")
+        );
+        assert!(
+            invalid["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.len() >= 8),
+            "{invalid:?}"
+        );
+
+        let table = run_output_validation_json_with_rust_reference(
+            &json!({
+                "schema": {
+                    "columns": {"name": {"type": "string", "required": true}},
+                    "minRows": 1
+                },
+                "rows": [{"name": "Alpha"}]
+            }),
+            "refine",
+        );
+        assert_eq!(table["status"].as_str(), Some("ok"));
+        assert_eq!(table["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            table["validator"].as_str(),
+            Some("builtin:table-schema-subset-for-refine")
         );
     }
 
@@ -13595,6 +20228,921 @@ mod tests {
         assert_eq!(
             pysat_opb["validator"].as_str(),
             Some("builtin:opb-small-pb")
+        );
+    }
+
+    #[test]
+    fn cp_python_modeling_adapters_use_rust_finite_domain_fallbacks() {
+        let cpmpy = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "finite-domain-cp-validation",
+                "variables": {
+                    "left": [0, 1, 2],
+                    "right": [0, 1, 2]
+                },
+                "constraints": [
+                    {"op": "all_different", "vars": ["left", "right"]},
+                    {"op": "sum_le", "vars": ["left", "right"], "rhs": 1}
+                ]
+            }),
+            "cpmpy",
+        );
+        assert_eq!(cpmpy["status"].as_str(), Some("ok"));
+        assert_eq!(cpmpy["verdict"].as_str(), Some("sat"));
+        assert_eq!(
+            cpmpy["validator"].as_str(),
+            Some("builtin:finite-domain-cp-for-cpmpy")
+        );
+        assert!(
+            cpmpy["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("left=") && stdout.contains("right=")),
+            "{cpmpy:?}"
+        );
+
+        let pycsp3 = run_model_validation_json_with_rust_reference(
+            &json!({
+                "variables": [
+                    {"name": "a", "domain": [0]},
+                    {"name": "b", "domain": [0]}
+                ],
+                "constraints": [
+                    {"op": "all-different", "scope": ["a", "b"]}
+                ]
+            }),
+            "pycsp3",
+        );
+        assert_eq!(pycsp3["status"].as_str(), Some("ok"));
+        assert_eq!(pycsp3["verdict"].as_str(), Some("unsat"));
+        assert_eq!(
+            pycsp3["validator"].as_str(),
+            Some("builtin:finite-domain-cp-for-pycsp3")
+        );
+    }
+
+    #[test]
+    fn quadratic_adapters_use_rust_reference_fallbacks() {
+        let qp = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "qp-validation",
+                "Q": [
+                    [2, 0],
+                    [0, 2]
+                ],
+                "c": [-2, -4],
+                "lb": [0, 0],
+                "ub": [5, 5]
+            }),
+            "osqp_adapter",
+        );
+        assert_eq!(qp["status"].as_str(), Some("ok"));
+        assert_eq!(qp["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            qp["validator"].as_str(),
+            Some("builtin:quadratic-small-for-osqp-adapter")
+        );
+        assert!(
+            qp["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("x0=1.000")
+                    && stdout.contains("x1=2.000")
+                    && stdout.contains("objective=-5.000")
+                    && stdout.contains("solver=rust:qp-active-set")
+            }),
+            "{qp:?}"
+        );
+
+        let miqp = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "miqp-validation",
+                "Q": [
+                    [2, 0],
+                    [0, 2]
+                ],
+                "c": [-2, -4],
+                "lb": [0, 0],
+                "ub": [5, 5],
+                "integerVars": [true, true]
+            }),
+            "gurobipy_adapter",
+        );
+        assert_eq!(miqp["status"].as_str(), Some("ok"));
+        assert_eq!(miqp["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            miqp["validator"].as_str(),
+            Some("builtin:quadratic-small-for-gurobipy-adapter")
+        );
+        assert!(
+            miqp["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("x0=1.000")
+                    && stdout.contains("x1=2.000")
+                    && stdout.contains("objective=-5.000")
+                    && stdout.contains("solver=rust:miqp-enumeration")
+            }),
+            "{miqp:?}"
+        );
+    }
+
+    #[test]
+    fn stochastic_lp_adapters_use_rust_monolithic_reference_fallbacks() {
+        let slp = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "stochastic-lp-validation",
+                "cFirst": [-1],
+                "aFirst": [[1]],
+                "bFirst": [20],
+                "qSecond": [3],
+                "wSecond": [[1], [1]],
+                "scenarios": [
+                    {
+                        "t": [[-1], [0]],
+                        "h": [0, 5],
+                        "prob": 0.5
+                    },
+                    {
+                        "t": [[-1], [0]],
+                        "h": [0, 15],
+                        "prob": 0.5
+                    }
+                ]
+            }),
+            "pyomo_adapter",
+        );
+        assert_eq!(slp["status"].as_str(), Some("ok"));
+        assert_eq!(slp["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            slp["validator"].as_str(),
+            Some("builtin:stochastic-lp-small-for-pyomo-adapter")
+        );
+        assert!(
+            slp["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("x0=15.000")
+                    && stdout.contains("objective=15.000")
+                    && stdout.contains("scenarios=2")
+                    && stdout.contains("solver=rust:monolithic-slp")
+            }),
+            "{slp:?}"
+        );
+    }
+
+    #[test]
+    fn python_linear_modeling_adapters_use_rust_mip_fallbacks() {
+        let pyomo = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "linear-mip-validation",
+                "sense": "max",
+                "objective": [3, 2],
+                "constraints": [
+                    {"coefs": [1, 1], "sense": "<=", "rhs": 1}
+                ],
+                "domains": [[0, 1], [0, 1]]
+            }),
+            "pyomo",
+        );
+        assert_eq!(pyomo["status"].as_str(), Some("ok"));
+        assert_eq!(pyomo["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            pyomo["validator"].as_str(),
+            Some("builtin:linear-mip-small-for-pyomo")
+        );
+        assert!(
+            pyomo["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("x0=1") && stdout.contains("objective=3")),
+            "{pyomo:?}"
+        );
+
+        let python_mip = run_model_validation_json_with_rust_reference(
+            &json!({
+                "sense": "max",
+                "objective": {"x": 4, "y": 1},
+                "variables": {
+                    "x": {"binary": true},
+                    "y": {"binary": true}
+                },
+                "constraints": [
+                    {"coefficients": [1, 1], "operator": "<=", "rhs": 1}
+                ]
+            }),
+            "python_mip_adapter",
+        );
+        assert_eq!(python_mip["status"].as_str(), Some("ok"));
+        assert_eq!(python_mip["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            python_mip["validator"].as_str(),
+            Some("builtin:linear-mip-small-for-python-mip-adapter")
+        );
+        assert!(
+            python_mip["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("x=1") && stdout.contains("objective=4")),
+            "{python_mip:?}"
+        );
+
+        let docplex = run_model_validation_json_with_rust_reference(
+            &json!({
+                "objective": [1],
+                "constraints": [
+                    {"coefs": [1], "sense": "<=", "rhs": 0},
+                    {"coefs": [1], "sense": ">=", "rhs": 1}
+                ],
+                "domains": [[0, 1]]
+            }),
+            "docplex-adapter",
+        );
+        assert_eq!(docplex["status"].as_str(), Some("ok"));
+        assert_eq!(docplex["verdict"].as_str(), Some("infeasible"));
+        assert_eq!(
+            docplex["validator"].as_str(),
+            Some("builtin:linear-mip-small-for-docplex-adapter")
+        );
+    }
+
+    #[test]
+    fn assignment_and_knapsack_adapters_use_rust_reference_fallbacks() {
+        let assignment = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "assignment-validation",
+                "cost": [
+                    [8, 2, 5, 9],
+                    [6, 4, 7, 3],
+                    [5, 8, 1, 6],
+                    [7, 3, 4, 2]
+                ]
+            }),
+            "scipy_adapter",
+        );
+        assert_eq!(assignment["status"].as_str(), Some("ok"));
+        assert_eq!(assignment["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            assignment["validator"].as_str(),
+            Some("builtin:assignment-small-for-scipy-adapter")
+        );
+        assert!(
+            assignment["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("assignment=1,0,2,3")
+                    && stdout.contains("objective=11.000")
+                    && stdout.contains("solver=rust:assignment-dp")
+            }),
+            "{assignment:?}"
+        );
+
+        let knapsack = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "knapsack-validation",
+                "capacity": 10,
+                "items": [
+                    {"id": "A", "weight": 5, "value": 10},
+                    {"id": "B", "weight": 4, "value": 40},
+                    {"id": "C", "weight": 6, "value": 30},
+                    {"id": "D", "weight": 3, "value": 50}
+                ]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(knapsack["status"].as_str(), Some("ok"));
+        assert_eq!(knapsack["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            knapsack["validator"].as_str(),
+            Some("builtin:knapsack-small-for-ortools-python-adapter")
+        );
+        assert!(
+            knapsack["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("items=B,D")
+                    && stdout.contains("objective=90.000")
+                    && stdout.contains("solver=rust:branch-and-bound-knapsack")
+            }),
+            "{knapsack:?}"
+        );
+
+        let vector_knapsack = run_model_validation_json_with_rust_reference(
+            &json!({
+                "capacity": 5,
+                "weights": [5, 4, 1],
+                "values": [10, 10, 0],
+                "item_ids": ["A", "B", "C"]
+            }),
+            "python_mip_adapter",
+        );
+        assert_eq!(vector_knapsack["status"].as_str(), Some("ok"));
+        assert_eq!(vector_knapsack["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            vector_knapsack["validator"].as_str(),
+            Some("builtin:knapsack-small-for-python-mip-adapter")
+        );
+        assert!(
+            vector_knapsack["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("items=B")),
+            "{vector_knapsack:?}"
+        );
+    }
+
+    #[test]
+    fn bin_packing_and_facility_location_adapters_use_rust_reference_fallbacks() {
+        let bin_packing = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "bin-packing-validation",
+                "capacity": 10,
+                "items": [
+                    {"id": "A", "weight": 6},
+                    {"id": "B", "weight": 4},
+                    {"id": "C", "weight": 5},
+                    {"id": "D", "weight": 5}
+                ]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(bin_packing["status"].as_str(), Some("ok"));
+        assert_eq!(bin_packing["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            bin_packing["validator"].as_str(),
+            Some("builtin:bin-packing-small-for-ortools-python-adapter")
+        );
+        assert!(
+            bin_packing["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("bins=2")
+                    && stdout.contains("total_weight=20.000")
+                    && stdout.contains("solver=rust:exact-bin-packing")
+            }),
+            "{bin_packing:?}"
+        );
+
+        let facility = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "facility-location-validation",
+                "facilities": ["A", "B"],
+                "customers": ["C"],
+                "fixedCosts": [1, 1],
+                "serviceCosts": [[1], [1]]
+            }),
+            "python_mip_adapter",
+        );
+        assert_eq!(facility["status"].as_str(), Some("ok"));
+        assert_eq!(facility["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            facility["validator"].as_str(),
+            Some("builtin:facility-location-small-for-python-mip-adapter")
+        );
+        assert!(
+            facility["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("open_facilities=A")
+                    && stdout.contains("objective=2.000")
+                    && stdout.contains("solver=rust:exact-facility-location")
+            }),
+            "{facility:?}"
+        );
+    }
+
+    #[test]
+    fn graph_coloring_and_set_cover_adapters_use_rust_reference_fallbacks() {
+        let coloring = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "graph-coloring-validation",
+                "vertices": ["A", "B", "C"],
+                "edges": [["A", "B"], ["B", "C"], ["A", "C"]]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(coloring["status"].as_str(), Some("ok"));
+        assert_eq!(coloring["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            coloring["validator"].as_str(),
+            Some("builtin:graph-coloring-small-for-ortools-python-adapter")
+        );
+        assert!(
+            coloring["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("used_colors=3")
+                    && stdout.contains("objective=3.000")
+                    && stdout.contains("solver=rust:dsatur-graph-coloring")
+            }),
+            "{coloring:?}"
+        );
+
+        let set_cover = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "set-cover-validation",
+                "universe": ["A", "B", "C", "D"],
+                "sets": [
+                    {"id": "AB", "cost": 2, "elements": ["A", "B"]},
+                    {"id": "CD", "cost": 2, "elements": ["C", "D"]},
+                    {"id": "ALL", "cost": 5, "elements": ["A", "B", "C", "D"]}
+                ]
+            }),
+            "python_mip_adapter",
+        );
+        assert_eq!(set_cover["status"].as_str(), Some("ok"));
+        assert_eq!(set_cover["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            set_cover["validator"].as_str(),
+            Some("builtin:set-cover-small-for-python-mip-adapter")
+        );
+        assert!(
+            set_cover["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("sets=AB,CD")
+                    && stdout.contains("objective=4.000")
+                    && stdout.contains("solver=rust:exact-set-cover")
+            }),
+            "{set_cover:?}"
+        );
+    }
+
+    #[test]
+    fn weighted_max_sat_adapters_use_rust_reference_fallbacks() {
+        let weighted_max_sat = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "weighted-max-sat-validation",
+                "numVars": 3,
+                "clauses": [
+                    {"id": "H_cover", "literals": [1, 2], "hard": true},
+                    {"id": "H_implication", "literals": [-2, 3], "hard": true},
+                    {"id": "S_pick_x1", "literals": [1], "weight": 6},
+                    {"id": "S_pick_x2", "literals": [2], "weight": 6},
+                    {"id": "S_not_both_x1_x2", "literals": [-1, -2], "weight": 5},
+                    {"id": "S_pick_x3", "literals": [3], "weight": 4},
+                    {"id": "S_skip_x3", "literals": [-3], "weight": 3}
+                ]
+            }),
+            "open_wbo_static",
+        );
+        assert_eq!(weighted_max_sat["status"].as_str(), Some("ok"));
+        assert_eq!(weighted_max_sat["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            weighted_max_sat["validator"].as_str(),
+            Some("builtin:weighted-max-sat-small-for-open-wbo-static")
+        );
+        assert!(
+            weighted_max_sat["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("assignment=111")
+                    && stdout.contains("objective=16.000")
+                    && stdout.contains("violated_hard=0")
+                    && stdout.contains("solver=rust:exact-weighted-max-sat")
+            }),
+            "{weighted_max_sat:?}"
+        );
+    }
+
+    #[test]
+    fn scheduling_adapters_use_rust_reference_fallbacks() {
+        let job_shop = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "job-shop-validation",
+                "jobs": [
+                    {
+                        "id": "J1",
+                        "due": 10,
+                        "operations": [
+                            {"machine": "M1", "duration": 3},
+                            {"machine": "M2", "duration": 2}
+                        ]
+                    },
+                    {
+                        "id": "J2",
+                        "due": 8,
+                        "operations": [
+                            {"machine": "M2", "duration": 2},
+                            {"machine": "M1", "duration": 4}
+                        ]
+                    },
+                    {
+                        "id": "J3",
+                        "due": 12,
+                        "operations": [
+                            {"machine": "M1", "duration": 2},
+                            {"machine": "M2", "duration": 3}
+                        ]
+                    }
+                ]
+            }),
+            "choco_solver",
+        );
+        assert_eq!(job_shop["status"].as_str(), Some("ok"));
+        assert_eq!(job_shop["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            job_shop["validator"].as_str(),
+            Some("builtin:scheduling-small-for-choco-solver")
+        );
+        assert!(
+            job_shop["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("kind=job-shop")
+                    && stdout.contains("schedule_ops=6")
+                    && stdout.contains("makespan=9.000")
+                    && stdout.contains("solver=rust:exact-job-shop")
+            }),
+            "{job_shop:?}"
+        );
+
+        let flow_shop = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "flow-shop-validation",
+                "jobs": [
+                    {"id": "F1", "processingTimes": [2, 3, 2]},
+                    {"id": "F2", "processingTimes": [4, 1, 3]},
+                    {"id": "F3", "processingTimes": [3, 2, 4]},
+                    {"id": "F4", "processingTimes": [2, 5, 1]}
+                ]
+            }),
+            "ortools_cp_sat",
+        );
+        assert_eq!(flow_shop["status"].as_str(), Some("ok"));
+        assert_eq!(flow_shop["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            flow_shop["validator"].as_str(),
+            Some("builtin:scheduling-small-for-ortools-cp-sat")
+        );
+        assert!(
+            flow_shop["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("kind=flow-shop")
+                    && stdout.contains("schedule_ops=12")
+                    && stdout.contains("sequence=")
+                    && stdout.contains("solver=rust:exact-flow-shop")
+            }),
+            "{flow_shop:?}"
+        );
+    }
+
+    #[test]
+    fn weighted_independent_set_adapters_use_rust_reference_fallbacks() {
+        let weighted_independent_set = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "weighted-independent-set-validation",
+                "vertices": [
+                    {"id": "A", "weight": 8},
+                    {"id": "B", "weight": 7},
+                    {"id": "C", "weight": 6},
+                    {"id": "D", "weight": 6},
+                    {"id": "E", "weight": 5},
+                    {"id": "F", "weight": 4},
+                    {"id": "G", "weight": 3}
+                ],
+                "edges": [
+                    ["A", "B"],
+                    ["A", "C"],
+                    ["A", "D"],
+                    ["B", "C"],
+                    ["B", "E"],
+                    ["C", "D"],
+                    ["C", "F"],
+                    ["D", "E"],
+                    ["D", "F"],
+                    ["E", "F"],
+                    ["E", "G"],
+                    ["F", "G"]
+                ]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(weighted_independent_set["status"].as_str(), Some("ok"));
+        assert_eq!(
+            weighted_independent_set["verdict"].as_str(),
+            Some("optimal")
+        );
+        assert_eq!(
+            weighted_independent_set["validator"].as_str(),
+            Some("builtin:weighted-independent-set-small-for-ortools-python-adapter")
+        );
+        assert!(
+            weighted_independent_set["stdout"]
+                .as_str()
+                .is_some_and(|stdout| {
+                    stdout.contains("selected=B,D,G")
+                        && stdout.contains("objective=16.000")
+                        && stdout.contains("solver=rust:branch-and-bound-weighted-independent-set")
+                }),
+            "{weighted_independent_set:?}"
+        );
+    }
+
+    #[test]
+    fn min_cost_flow_adapters_use_rust_reference_fallbacks() {
+        let min_cost_flow = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "min-cost-flow-validation",
+                "numNodes": 4,
+                "supplies": [5, 7, -6, -6],
+                "arcs": [
+                    {"from": 0, "to": 2, "capacity": 5, "cost": 2, "name": "s0_d0"},
+                    {"from": 0, "to": 3, "capacity": 5, "cost": 4, "name": "s0_d1"},
+                    {"from": 1, "to": 2, "capacity": 6, "cost": 5, "name": "s1_d0"},
+                    {"from": 1, "to": 3, "capacity": 8, "cost": 1, "name": "s1_d1"}
+                ]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(min_cost_flow["status"].as_str(), Some("ok"));
+        assert_eq!(min_cost_flow["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            min_cost_flow["validator"].as_str(),
+            Some("builtin:min-cost-flow-small-for-ortools-python-adapter")
+        );
+        assert!(
+            min_cost_flow["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("objective=21.000")
+                    && stdout.contains("arcs=4")
+                    && stdout.contains("solver=rust:ssp-min-cost-flow")
+            }),
+            "{min_cost_flow:?}"
+        );
+    }
+
+    #[test]
+    fn network_flow_and_mst_adapters_use_rust_reference_fallbacks() {
+        let max_flow = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "max-flow-validation",
+                "numNodes": 4,
+                "source": 0,
+                "sink": 3,
+                "edges": [
+                    {"from": 0, "to": 1, "capacity": 3},
+                    {"from": 0, "to": 2, "capacity": 2},
+                    {"from": 1, "to": 3, "capacity": 2},
+                    {"from": 2, "to": 3, "capacity": 3},
+                    {"from": 1, "to": 2, "capacity": 1}
+                ]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(max_flow["status"].as_str(), Some("ok"));
+        assert_eq!(max_flow["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            max_flow["validator"].as_str(),
+            Some("builtin:max-flow-small-for-ortools-python-adapter")
+        );
+        assert!(
+            max_flow["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("max_flow=5.000")
+                    && stdout.contains("min_cut_capacity=5.000")
+                    && stdout.contains("solver=rust:edmonds-karp-max-flow")
+            }),
+            "{max_flow:?}"
+        );
+
+        let mst = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "mst-validation",
+                "vertices": ["A", "B", "C"],
+                "edges": [
+                    {"id": "AB", "from": "A", "to": "B", "weight": 1},
+                    {"id": "BC", "from": "B", "to": "C", "weight": 2},
+                    {"id": "AC", "from": "A", "to": "C", "weight": 4}
+                ]
+            }),
+            "ortools_java_adapter",
+        );
+        assert_eq!(mst["status"].as_str(), Some("ok"));
+        assert_eq!(mst["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            mst["validator"].as_str(),
+            Some("builtin:mst-small-for-ortools-java-adapter")
+        );
+        assert!(
+            mst["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("edges=AB,BC")
+                    && stdout.contains("objective=3.000")
+                    && stdout.contains("solver=rust:kruskal-mst")
+            }),
+            "{mst:?}"
+        );
+    }
+
+    #[test]
+    fn tsp_adapters_use_rust_held_karp_reference_fallbacks() {
+        let matrix = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "tsp-validation",
+                "distanceMatrix": [
+                    [0, 1, 1.4142135623730951, 1],
+                    [1, 0, 1, 1.4142135623730951],
+                    [1.4142135623730951, 1, 0, 1],
+                    [1, 1.4142135623730951, 1, 0]
+                ]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(matrix["status"].as_str(), Some("ok"));
+        assert_eq!(matrix["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            matrix["validator"].as_str(),
+            Some("builtin:tsp-small-for-ortools-python-adapter")
+        );
+        assert!(
+            matrix["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("tour=0->1->2->3->0")
+                    && stdout.contains("objective=4.000")
+                    && stdout.contains("solver=rust:held-karp-tsp")
+            }),
+            "{matrix:?}"
+        );
+
+        let points = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "traveling-salesman-validation",
+                "points": [
+                    {"id": "A", "x": 0, "y": 0},
+                    {"id": "B", "x": 1, "y": 0},
+                    {"id": "C", "x": 1, "y": 1},
+                    {"id": "D", "x": 0, "y": 1}
+                ]
+            }),
+            "optaplanner_adapter",
+        );
+        assert_eq!(points["status"].as_str(), Some("ok"));
+        assert_eq!(points["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            points["validator"].as_str(),
+            Some("builtin:tsp-small-for-optaplanner-adapter")
+        );
+        assert!(
+            points["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("tour=0->1->2->3->0")
+                    && stdout.contains("objective=4.000")
+                    && stdout.contains("solver=rust:held-karp-tsp")
+            }),
+            "{points:?}"
+        );
+
+        let vrp_shaped_matrix = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "routing-validation",
+                "distance_matrix": [
+                    [0, 2, 9, 10],
+                    [2, 0, 4, 6],
+                    [9, 4, 0, 3],
+                    [10, 6, 3, 0]
+                ],
+                "starts": [0],
+                "ends": [0],
+                "vehicles": 1,
+                "customers": [1, 2, 3]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(
+            vrp_shaped_matrix["validator"].as_str(),
+            Some("builtin:routing-small-for-ortools-python-adapter")
+        );
+    }
+
+    #[test]
+    fn routing_adapters_use_rust_small_vrp_fallbacks() {
+        let matrix = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "routing-validation",
+                "distance_matrix": [
+                    [0, 2, 9, 10],
+                    [2, 0, 4, 6],
+                    [9, 4, 0, 3],
+                    [10, 6, 3, 0]
+                ],
+                "starts": [0],
+                "ends": [0],
+                "vehicles": 1,
+                "customers": [1, 2, 3]
+            }),
+            "ortools_python_adapter",
+        );
+        assert_eq!(matrix["status"].as_str(), Some("ok"));
+        assert_eq!(matrix["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            matrix["validator"].as_str(),
+            Some("builtin:routing-small-for-ortools-python-adapter")
+        );
+        assert!(
+            matrix["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("route=0->1->2->3->0") && stdout.contains("objective=19.000")
+            }),
+            "{matrix:?}"
+        );
+
+        let capacity = run_model_validation_json_with_rust_reference(
+            &json!({
+                "distanceMatrix": [
+                    [0, 1, 1],
+                    [1, 0, 1],
+                    [1, 1, 0]
+                ],
+                "customers": [1, 2],
+                "demands": [0, 5, 5],
+                "vehicle_capacity": 6
+            }),
+            "ortools-adapter",
+        );
+        assert_eq!(capacity["status"].as_str(), Some("ok"));
+        assert_eq!(capacity["verdict"].as_str(), Some("infeasible"));
+        assert_eq!(
+            capacity["validator"].as_str(),
+            Some("builtin:routing-small-for-ortools-adapter")
+        );
+
+        let cvrp = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "cvrp-validation",
+                "depot": {"x": 0.0, "y": 0.0},
+                "customers": [
+                    {"id": "A", "x": 1.0, "y": 0.0, "demand": 1.0},
+                    {"id": "B", "x": 2.0, "y": 0.0, "demand": 1.0}
+                ],
+                "vehicle_capacity": 2.0
+            }),
+            "ortools-java-adapter",
+        );
+        assert_eq!(cvrp["status"].as_str(), Some("ok"));
+        assert_eq!(cvrp["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            cvrp["validator"].as_str(),
+            Some("builtin:routing-small-for-ortools-java-adapter")
+        );
+        assert!(
+            cvrp["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("solver=rust:exact-cvrp")),
+            "{cvrp:?}"
+        );
+    }
+
+    #[test]
+    fn nonlinear_python_and_rust_adapters_use_rust_reference_fallbacks() {
+        let scipy = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "nonlinear-validation",
+                "variables": [
+                    {"name": "x", "lb": 0.0, "ub": 3.0, "start": 0.2},
+                    {"name": "y", "lb": 0.0, "ub": 3.0, "start": 0.2}
+                ],
+                "objective": "(x - 1)**2 + (y - 2)**2",
+                "constraints": [
+                    {"expr": "x + y", "sense": ">=", "rhs": 1.0}
+                ],
+                "sense": "min"
+            }),
+            "scipy_optimize_adapter",
+        );
+        assert_eq!(scipy["status"].as_str(), Some("ok"));
+        assert_eq!(scipy["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            scipy["validator"].as_str(),
+            Some("builtin:nonlinear-reference-for-scipy-optimize-adapter")
+        );
+        assert!(
+            scipy["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("x=1.000")
+                    && stdout.contains("y=2.000")
+                    && stdout.contains("solver=builtin:nlp-pattern-search-for-scipy")
+            }),
+            "{scipy:?}"
+        );
+
+        let cvxpy = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "convex-validation",
+                "variables": [
+                    {"name": "x", "lb": -2.0, "ub": 2.0, "start": 0.0}
+                ],
+                "objective": "x**2",
+                "constraints": [],
+                "sense": "min"
+            }),
+            "cvxpy-adapter",
+        );
+        assert_eq!(cvxpy["status"].as_str(), Some("ok"));
+        assert_eq!(cvxpy["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            cvxpy["validator"].as_str(),
+            Some("builtin:nonlinear-reference-for-cvxpy-adapter")
+        );
+        assert!(
+            cvxpy["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("objective=0.000")),
+            "{cvxpy:?}"
+        );
+
+        let nlopt = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "nlp-validation",
+                "variables": [
+                    {"name": "x0", "lb": 0.0, "ub": 1.0},
+                    {"name": "x1", "lb": 0.0, "ub": 1.0}
+                ],
+                "objective": "x0**2 + x1**2",
+                "constraints": [
+                    {"expr": "x0 + x1", "sense": ">=", "rhs": 3.0}
+                ],
+                "sense": "min"
+            }),
+            "nlopt_adapter",
+        );
+        assert_eq!(nlopt["status"].as_str(), Some("ok"));
+        assert_eq!(nlopt["verdict"].as_str(), Some("infeasible"));
+        assert_eq!(
+            nlopt["validator"].as_str(),
+            Some("builtin:nonlinear-reference-for-nlopt-adapter")
+        );
+        assert!(
+            nlopt["stdout"].as_str().is_some_and(
+                |stdout| stdout.contains("solver=builtin:nlp-pattern-search-for-nlopt")
+            ),
+            "{nlopt:?}"
         );
     }
 

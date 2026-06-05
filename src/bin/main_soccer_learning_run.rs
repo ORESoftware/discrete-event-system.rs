@@ -30,6 +30,7 @@ const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 0;
 const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE: usize = 4;
+const DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES: usize = 8;
 const DEFAULT_SOCCER_MAX_AUTO_PARALLEL_GAMES: usize = 10;
 const DEFAULT_SOCCER_WRITE_GAME_ARTIFACTS: bool = false;
 const DEFAULT_SOCCER_WRITE_FINAL_POLICY_ARTIFACT: bool = true;
@@ -647,41 +648,92 @@ struct PostgresCompletedRunBatch {
     shard_count: usize,
 }
 
+impl PostgresCompletedRunBatch {
+    fn can_absorb(&self, other: &Self) -> bool {
+        self.experiment_id == other.experiment_id
+            && self.runner_id == other.runner_id
+            && self.shard_index == other.shard_index
+            && self.shard_count == other.shard_count
+    }
+
+    fn absorb(&mut self, mut other: Self) {
+        self.pending_policy_versions
+            .append(&mut other.pending_policy_versions);
+        self.pending_runs.append(&mut other.pending_runs);
+    }
+}
+
+struct PostgresCompletedRunWriteResult {
+    queue_batches: usize,
+    result: Result<usize, String>,
+}
+
 struct AsyncPostgresCompletedRunWriter {
     sender: Option<mpsc::SyncSender<PostgresCompletedRunBatch>>,
-    receiver: mpsc::Receiver<Result<usize, String>>,
+    receiver: mpsc::Receiver<PostgresCompletedRunWriteResult>,
     handle: Option<thread::JoinHandle<()>>,
     pending_batches: usize,
 }
 
 impl AsyncPostgresCompletedRunWriter {
-    fn start(queue_batches: usize) -> Self {
+    fn start(queue_batches: usize, coalesce_batches: usize) -> Self {
         let (sender, receiver) =
             mpsc::sync_channel::<PostgresCompletedRunBatch>(queue_batches.max(1));
-        let (result_sender, result_receiver) = mpsc::channel::<Result<usize, String>>();
+        let (result_sender, result_receiver) = mpsc::channel::<PostgresCompletedRunWriteResult>();
+        let coalesce_batches = coalesce_batches.max(1);
         let handle = thread::spawn(move || {
             let mut store = match SoccerLearningPgStore::connect_from_env() {
                 Ok(Some(store)) => store,
                 Ok(None) => {
                     while receiver.recv().is_ok() {
-                        let _ = result_sender.send(Err(
-                            "postgres completed-run writer could not find a database URL"
-                                .to_string(),
-                        ));
+                        let _ = result_sender.send(PostgresCompletedRunWriteResult {
+                            queue_batches: 1,
+                            result: Err(
+                                "postgres completed-run writer could not find a database URL"
+                                    .to_string(),
+                            ),
+                        });
                     }
                     return;
                 }
                 Err(error) => {
                     while receiver.recv().is_ok() {
-                        let _ = result_sender.send(Err(format!(
-                            "postgres completed-run writer connect failed: {error}"
-                        )));
+                        let _ = result_sender.send(PostgresCompletedRunWriteResult {
+                            queue_batches: 1,
+                            result: Err(format!(
+                                "postgres completed-run writer connect failed: {error}"
+                            )),
+                        });
                     }
                     return;
                 }
             };
 
-            while let Ok(mut batch) = receiver.recv() {
+            let mut deferred_batch = None::<PostgresCompletedRunBatch>;
+            loop {
+                let mut batch = match deferred_batch.take() {
+                    Some(batch) => batch,
+                    None => match receiver.recv() {
+                        Ok(batch) => batch,
+                        Err(_) => break,
+                    },
+                };
+                let mut queue_batches = 1usize;
+                while queue_batches < coalesce_batches {
+                    match receiver.try_recv() {
+                        Ok(next_batch) => {
+                            if batch.can_absorb(&next_batch) {
+                                batch.absorb(next_batch);
+                                queue_batches = queue_batches.saturating_add(1);
+                            } else {
+                                deferred_batch = Some(next_batch);
+                                break;
+                            }
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
                 let result = flush_postgres_completed_runs(
                     &mut store,
                     &batch.experiment_id,
@@ -692,7 +744,10 @@ impl AsyncPostgresCompletedRunWriter {
                     batch.shard_count,
                 )
                 .map_err(|err| err.to_string());
-                let _ = result_sender.send(result);
+                let _ = result_sender.send(PostgresCompletedRunWriteResult {
+                    queue_batches,
+                    result,
+                });
             }
         });
 
@@ -708,9 +763,11 @@ impl AsyncPostgresCompletedRunWriter {
         let mut persisted = 0usize;
         loop {
             match self.receiver.try_recv() {
-                Ok(result) => {
-                    self.pending_batches = self.pending_batches.saturating_sub(1);
-                    persisted = persisted.saturating_add(result?);
+                Ok(write_result) => {
+                    self.pending_batches = self
+                        .pending_batches
+                        .saturating_sub(write_result.queue_batches);
+                    persisted = persisted.saturating_add(write_result.result?);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -765,9 +822,11 @@ impl AsyncPostgresCompletedRunWriter {
 
         while self.pending_batches > 0 {
             match self.receiver.recv() {
-                Ok(result) => {
-                    self.pending_batches = self.pending_batches.saturating_sub(1);
-                    match result {
+                Ok(write_result) => {
+                    self.pending_batches = self
+                        .pending_batches
+                        .saturating_sub(write_result.queue_batches);
+                    match write_result.result {
                         Ok(count) => persisted = persisted.saturating_add(count),
                         Err(error) => {
                             if first_error.is_none() {
@@ -1447,6 +1506,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE,
     )?
     .max(1);
+    let pg_completed_run_async_coalesce_batches = env_usize(
+        "SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES",
+        DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES,
+    )?
+    .max(1);
     let neural_drain_timeout_ms = env_usize(
         "SOCCER_NEURAL_DRAIN_TIMEOUT_MS",
         DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS,
@@ -1610,6 +1674,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_completed_writer = if pg_store.is_some() {
         Some(AsyncPostgresCompletedRunWriter::start(
             pg_completed_run_async_queue_batches,
+            pg_completed_run_async_coalesce_batches,
         ))
     } else {
         None
@@ -1641,7 +1706,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
+        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
         run_id,
         games,
         parallel_games,
@@ -1664,6 +1729,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         pg_completed_run_batch_games,
         pg_completed_writer.is_some(),
         pg_completed_run_async_queue_batches,
+        pg_completed_run_async_coalesce_batches,
         neural_drain_timeout_ms,
         game_artifact_mode,
         checkpoint_interval_games,
@@ -2189,6 +2255,22 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn empty_pg_batch(
+        experiment_id: &str,
+        runner_id: &str,
+        shard_index: usize,
+        shard_count: usize,
+    ) -> PostgresCompletedRunBatch {
+        PostgresCompletedRunBatch {
+            experiment_id: experiment_id.to_string(),
+            runner_id: runner_id.to_string(),
+            pending_policy_versions: Vec::new(),
+            pending_runs: Vec::new(),
+            shard_index,
+            shard_count,
+        }
+    }
+
     #[test]
     fn default_postgres_policy_versions_are_batched_for_single_game_workers() {
         assert_eq!(default_postgres_policy_version_interval_games(0), 10);
@@ -2223,6 +2305,26 @@ mod tests {
     #[test]
     fn default_postgres_async_writer_stays_bounded() {
         assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE, 4);
+    }
+
+    #[test]
+    fn default_postgres_async_writer_coalesces_io_batches() {
+        assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES, 8);
+    }
+
+    #[test]
+    fn postgres_batches_only_coalesce_for_same_run_and_shard() {
+        let mut batch = empty_pg_batch("experiment-a", "runner-a", 0, 2);
+
+        assert!(batch.can_absorb(&empty_pg_batch("experiment-a", "runner-a", 0, 2)));
+        assert!(!batch.can_absorb(&empty_pg_batch("experiment-b", "runner-a", 0, 2)));
+        assert!(!batch.can_absorb(&empty_pg_batch("experiment-a", "runner-b", 0, 2)));
+        assert!(!batch.can_absorb(&empty_pg_batch("experiment-a", "runner-a", 1, 2)));
+        assert!(!batch.can_absorb(&empty_pg_batch("experiment-a", "runner-a", 0, 3)));
+
+        batch.absorb(empty_pg_batch("experiment-a", "runner-a", 0, 2));
+        assert!(batch.pending_policy_versions.is_empty());
+        assert!(batch.pending_runs.is_empty());
     }
 
     #[test]

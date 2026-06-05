@@ -17555,9 +17555,11 @@ struct SoccerNeuralTrainingSample {
 
 #[derive(Clone, Debug)]
 struct SoccerNeuralTrainingResult {
+    batches: usize,
     samples: usize,
     loss: f64,
     parameter_count: usize,
+    failed_batches: usize,
 }
 
 enum SoccerNeuralLearningWorkerCommand {
@@ -17589,17 +17591,25 @@ struct SoccerNeuralLearningStatsState {
 
 impl SoccerNeuralLearningStatsState {
     fn record_result(&mut self, result: SoccerNeuralTrainingResult) {
-        self.pending_batches = self.pending_batches.saturating_sub(1);
-        if !result.loss.is_finite() {
-            self.dropped_batches = self.dropped_batches.saturating_add(1);
+        let completed_batches = result.batches.saturating_add(result.failed_batches).max(1);
+        self.pending_batches = self.pending_batches.saturating_sub(completed_batches);
+        self.dropped_batches = self.dropped_batches.saturating_add(result.failed_batches);
+        if result.batches == 0 {
+            if result.failed_batches == 0 {
+                self.dropped_batches = self.dropped_batches.saturating_add(1);
+            }
             return;
         }
-        self.training_steps = self.training_steps.saturating_add(1);
+        if !result.loss.is_finite() {
+            self.dropped_batches = self.dropped_batches.saturating_add(result.batches);
+            return;
+        }
+        self.training_steps = self.training_steps.saturating_add(result.batches);
         self.samples = self.samples.saturating_add(result.samples);
         self.parameter_count = result.parameter_count;
         self.last_loss = Some(result.loss);
-        self.loss_sum += result.loss;
-        self.loss_count = self.loss_count.saturating_add(1);
+        self.loss_sum += result.loss * result.batches as f64;
+        self.loss_count = self.loss_count.saturating_add(result.batches);
     }
 
     fn average_loss(&self) -> Option<f64> {
@@ -17858,9 +17868,11 @@ impl SoccerNeuralLearner {
                             learning_rate,
                         );
                         self.stats.record_result(SoccerNeuralTrainingResult {
+                            batches: 1,
                             samples: batch.len(),
                             loss,
                             parameter_count: network.num_parameters(),
+                            failed_batches: 0,
                         });
                     }
                     self.last_network_snapshot = Some(soccer_neural_network_snapshot(network));
@@ -17959,27 +17971,47 @@ fn spawn_soccer_neural_learning_worker(
                     batches,
                     snapshot_after_train,
                 } => {
-                    let mut trained_any = false;
+                    let mut processed_any = false;
+                    let mut trained_batches = 0usize;
+                    let mut failed_batches = 0usize;
+                    let mut trained_samples = 0usize;
+                    let mut loss_sum = 0.0;
                     for samples in batches {
                         if samples.is_empty() {
                             continue;
                         }
-                        trained_any = true;
+                        processed_any = true;
                         let loss = network.train_batch_slices(
                             samples.iter().map(|sample| {
                                 (&sample.input[..], std::slice::from_ref(&sample.target))
                             }),
                             learning_rate,
                         );
+                        if loss.is_finite() {
+                            trained_batches = trained_batches.saturating_add(1);
+                            trained_samples = trained_samples.saturating_add(samples.len());
+                            loss_sum += loss;
+                        } else {
+                            failed_batches = failed_batches.saturating_add(1);
+                        }
+                    }
+                    if trained_batches > 0 || failed_batches > 0 {
+                        let loss = if trained_batches > 0 {
+                            loss_sum / trained_batches as f64
+                        } else {
+                            f64::NAN
+                        };
                         let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Trained(
                             SoccerNeuralTrainingResult {
-                                samples: samples.len(),
+                                batches: trained_batches,
+                                samples: trained_samples,
                                 loss,
                                 parameter_count: network.num_parameters(),
+                                failed_batches,
                             },
                         ));
                     }
-                    if snapshot_after_train && trained_any {
+                    if snapshot_after_train && processed_any {
                         let _ = result_tx.send(SoccerNeuralLearningWorkerResult::Snapshot(
                             soccer_neural_network_snapshot(&network),
                         ));
@@ -35930,6 +35962,30 @@ mod tests {
         assert_eq!(batches[1].len(), 3);
         assert_eq!(batches[0][0].target, 0.0);
         assert_eq!(batches[1][2].target, 5.0);
+    }
+
+    #[test]
+    fn neural_threaded_stats_account_for_coalesced_worker_results() {
+        let mut stats = SoccerNeuralLearningStatsState {
+            pending_batches: 3,
+            ..SoccerNeuralLearningStatsState::default()
+        };
+
+        stats.record_result(SoccerNeuralTrainingResult {
+            batches: 2,
+            samples: 16,
+            loss: 0.25,
+            parameter_count: 42,
+            failed_batches: 1,
+        });
+
+        assert_eq!(stats.pending_batches, 0);
+        assert_eq!(stats.training_steps, 2);
+        assert_eq!(stats.samples, 16);
+        assert_eq!(stats.dropped_batches, 1);
+        assert_eq!(stats.parameter_count, 42);
+        assert_eq!(stats.last_loss, Some(0.25));
+        assert_eq!(stats.average_loss(), Some(0.25));
     }
 
     #[test]

@@ -1704,7 +1704,10 @@ fn native_external_optimization_ecosystem_family(
         ExternalOptimizationTool::PyScipOpt
         | ExternalOptimizationTool::GurobiPy
         | ExternalOptimizationTool::CplexPython
-        | ExternalOptimizationTool::XpressPython => Some("native-solver-binding"),
+        | ExternalOptimizationTool::XpressPython
+        | ExternalOptimizationTool::GurobiRust
+        | ExternalOptimizationTool::CplexRust => Some("native-solver-binding"),
+        ExternalOptimizationTool::MosekPython => Some("convex-optimization"),
         ExternalOptimizationTool::Hexaly => Some("hybrid-optimization"),
         ExternalOptimizationTool::Argmin
         | ExternalOptimizationTool::Nlopt
@@ -1734,6 +1737,7 @@ fn native_external_optimization_ecosystem_family(
         | ExternalOptimizationTool::CbcCli
         | ExternalOptimizationTool::ClpCli
         | ExternalOptimizationTool::SoplexCli
+        | ExternalOptimizationTool::QsoptExCli
         | ExternalOptimizationTool::LpSolveCli
         | ExternalOptimizationTool::GurobiCli
         | ExternalOptimizationTool::CplexCli
@@ -1751,18 +1755,6 @@ fn native_external_optimization_ecosystem_family(
                 Some("linear-mip")
             }
         }
-        _ if matches!(
-            payload_kind,
-            "ecosystem-linear-binary"
-                | "linear-binary"
-                | "ecosystem-planning-assignment"
-                | "planning-assignment"
-        ) =>
-        {
-            Some("linear-mip")
-        }
-        _ if native_ecosystem_kind_is_nonlinear(payload_kind) => Some("nonlinear-optimization"),
-        _ => None,
     }
 }
 
@@ -5188,6 +5180,52 @@ mod tests {
                     .and_then(|output| output.get("backend"))
                     .and_then(Value::as_str),
                 Some("builtin-rust:linear-mip")
+            );
+            let normalized = run.output.as_ref().map_or_else(
+                ExternalOptimizationNormalizedResult::default,
+                external_optimization_normalized_result_from_value,
+            );
+            assert_eq!(normalized.status.as_deref(), Some("optimal"));
+            assert_eq!(normalized.objective, Some(3.0));
+            assert_eq!(normalized.solution, Some(vec![1.0, 0.0]));
+        }
+    }
+
+    #[test]
+    fn ecosystem_reference_helper_runs_solver_bindings_and_qsopt_in_rust() {
+        let linear_payload = json!({
+            "kind": "ecosystem-linear-binary",
+            "sense": "max",
+            "objective": [3, 2],
+            "constraints": [{"coefs": [1, 1], "sense": "<=", "rhs": 1}],
+            "domains": [[0, 1], [0, 1]]
+        });
+        for (tool, backend) in [
+            (
+                ExternalOptimizationTool::MosekPython,
+                "builtin-rust:convex-optimization",
+            ),
+            (
+                ExternalOptimizationTool::GurobiRust,
+                "builtin-rust:native-solver-binding",
+            ),
+            (
+                ExternalOptimizationTool::CplexRust,
+                "builtin-rust:native-solver-binding",
+            ),
+            (
+                ExternalOptimizationTool::QsoptExCli,
+                "builtin-rust:linear-mip",
+            ),
+        ] {
+            let run = run_external_optimization_ecosystem_reference(&linear_payload, tool);
+            assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+            assert_eq!(
+                run.output
+                    .as_ref()
+                    .and_then(|output| output.get("backend"))
+                    .and_then(Value::as_str),
+                Some(backend)
             );
             let normalized = run.output.as_ref().map_or_else(
                 ExternalOptimizationNormalizedResult::default,

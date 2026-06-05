@@ -4977,9 +4977,7 @@ impl PlayerAgent {
             };
         } else if has_ball && striker_shot_window_is_qualified(&observation, self.role) {
             let striker_shot_bonus = striker_legal_shot_attempt_bonus(&observation, self.role);
-            let window_shot_chance = (0.66
-                + shooting_skill * 0.14
-                + striker_shot_bonus * 0.18
+            let window_shot_chance = (0.66 + shooting_skill * 0.14 + striker_shot_bonus * 0.18
                 - observation.shot_block_probability.clamp(0.0, 1.0) * 0.08)
                 .clamp(0.68, 0.94);
             if rng.next_float() < window_shot_chance {
@@ -43710,6 +43708,47 @@ mod tests {
     }
 
     #[test]
+    fn shot_crossing_outside_posts_is_not_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 2.0,
+            duration_seconds: 2.0,
+            seed: 165,
+            ..Default::default()
+        });
+        if let Some(keeper_id) = sim.goalkeeper_for(Team::Away) {
+            sim.players[keeper_id].role = PlayerRole::Defender;
+        }
+        let goal_center_x = sim.config.field_width_yards * 0.5;
+        let outside_post_x = goal_center_x + sim.config.goal_width_yards * 0.5 + 0.75;
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(outside_post_x, 100.0);
+        sim.ball.velocity = (Vec2::new(outside_post_x, sim.config.field_length_yards + 8.0)
+            - sim.ball.position)
+            .normalized()
+            * 44.0;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.pending_shot = Some(PendingShot {
+            team: Team::Home,
+            shooter: 9,
+            origin: sim.ball.position,
+        });
+
+        sim.integrate_ball();
+
+        assert_eq!(sim.score_home, 0);
+        assert_eq!(sim.score_away, 0);
+        assert_eq!(sim.stats.shots_on_target_home, 0);
+        assert!(sim
+            .events
+            .iter()
+            .any(|event| event.kind == "miss" && event.team == Some(Team::Home)));
+        assert!(sim
+            .events
+            .iter()
+            .any(|event| event.kind == "goal-kick" && event.team == Some(Team::Away)));
+    }
+
+    #[test]
     fn tackle_resolution_is_probabilistic_between_dribbling_and_defense() {
         let mut tackle_wins = 0;
         let mut dribble_survives = 0;
@@ -45849,6 +45888,53 @@ mod tests {
             shoot_count == trials,
             "clear striker inside 25 yards should shoot every time, got {shoot_count}/{trials}"
         );
+    }
+
+    #[test]
+    fn any_field_teammate_shoots_inside_twenty_five_yards() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2225,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 96.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+        sim.players[attacker].skills.shooting = 7.8;
+        sim.players[attacker].skills.right_foot_shot_power = 8.0;
+        sim.players[attacker].skills.left_foot_shot_power = 7.2;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.80;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 1.0;
+        sim.players[keeper].position = Vec2::new(38.5, 116.0);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(observation.yards_to_goal <= TEAMMATE_MUST_SHOOT_YARDS);
+        assert!(must_shoot_near_goal(
+            &observation,
+            sim.players[attacker].role
+        ));
+
+        for seed in 0..80 {
+            let mut player = sim.players[attacker].clone();
+            let mut rng = mulberry32(23_000 + seed);
+            let intent = player.run_time_step(&snapshot, None, None, &mut rng);
+            assert!(
+                matches!(intent.action, SoccerAction::Shoot { .. }),
+                "field teammate inside 25 should shoot, seed {seed}, got {:?}",
+                intent.action
+            );
+        }
     }
 
     #[test]

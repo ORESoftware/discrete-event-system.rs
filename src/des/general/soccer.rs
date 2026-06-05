@@ -4955,13 +4955,34 @@ impl PlayerAgent {
             };
         }
 
-        if has_ball && striker_must_shoot(&observation, self.role) {
-            let obvious_shot_chance = (0.66
-                + shooting_skill * 0.18
-                + striker_legal_shot_attempt_bonus(&observation, self.role) * 0.16)
-                .clamp(0.70, 0.94);
-            if rng.next_float() < time_window_probability(obvious_shot_chance, snapshot.dt_seconds)
-            {
+        if has_ball && must_shoot_near_goal(&observation, self.role) {
+            let action = SoccerAction::Shoot {
+                power: shot_power_for_skill(shooting_skill),
+            };
+            let action_label = action.label();
+            self.last_decision = Some(self.decision_trace(
+                snapshot,
+                mdp_state,
+                observation,
+                belief,
+                vec!["goalmouth-window".to_string(), "must-shoot".to_string()],
+                single_action_option("shoot"),
+                &action,
+                action_label,
+            ));
+            return PlayerIntent {
+                player_id: self.id,
+                action,
+                sprint: false,
+            };
+        } else if has_ball && striker_shot_window_is_qualified(&observation, self.role) {
+            let striker_shot_bonus = striker_legal_shot_attempt_bonus(&observation, self.role);
+            let window_shot_chance = (0.66
+                + shooting_skill * 0.14
+                + striker_shot_bonus * 0.18
+                - observation.shot_block_probability.clamp(0.0, 1.0) * 0.08)
+                .clamp(0.68, 0.94);
+            if rng.next_float() < window_shot_chance {
                 let action = SoccerAction::Shoot {
                     power: shot_power_for_skill(shooting_skill),
                 };
@@ -5097,7 +5118,7 @@ impl PlayerAgent {
                             shooting_skill,
                         ))
                         .max(striker_shot_bonus);
-                    if !striker_must_shoot(&observation, self.role)
+                    if !must_shoot_near_goal(&observation, self.role)
                         && rng.next_float()
                             >= time_window_probability(learned_shot_chance, snapshot.dt_seconds)
                     {

@@ -33,6 +33,7 @@ pub const DEFAULT_DURATION_SECONDS: f64 = 10.0 * 60.0;
 pub const DEFAULT_MATCH_HALVES: u8 = 1;
 pub const DEFAULT_HALF_DURATION_SECONDS: f64 = 0.0;
 pub const DEFAULT_HALFTIME_FATIGUE_RECOVERY: f64 = 0.0;
+const SITE_PLAYBACK_RECORD_EVERY_TICKS: u64 = 5;
 pub const DEFAULT_FIELD_LENGTH_YARDS: f64 = 120.0;
 pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 80.0;
 pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 8.0;
@@ -9391,7 +9392,10 @@ impl WorldSnapshot {
     }
 
     pub fn set_player_position(&mut self, player_id: usize, position: Vec2) {
-        let player_index = self.players.iter().position(|player| player.id == player_id);
+        let player_index = self
+            .players
+            .iter()
+            .position(|player| player.id == player_id);
         let mut sample = player_index
             .map(|index| {
                 let player = &self.players[index];
@@ -9431,7 +9435,11 @@ impl WorldSnapshot {
             self.shared_positions.latest.push(sample.clone());
         }
 
-        let history = self.shared_positions.histories.entry(player_id).or_default();
+        let history = self
+            .shared_positions
+            .histories
+            .entry(player_id)
+            .or_default();
         if let Some(last) = history.last_mut() {
             *last = sample;
         } else {
@@ -26912,8 +26920,16 @@ pub fn run_default_simulation() -> SimulationTrace {
     run_simulation(MatchConfig::playback_trace(DEFAULT_DURATION_SECONDS), 5)
 }
 
+fn site_playback_trace_config() -> (MatchConfig, u64) {
+    (
+        MatchConfig::playback_trace(DEFAULT_DURATION_SECONDS),
+        SITE_PLAYBACK_RECORD_EVERY_TICKS,
+    )
+}
+
 fn run_site_simulation() -> SimulationTrace {
-    run_simulation(MatchConfig::playback_trace(60.0), 2)
+    let (config, record_every_ticks) = site_playback_trace_config();
+    run_simulation(config, record_every_ticks)
 }
 
 pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> SimulationTrace {
@@ -34425,6 +34441,25 @@ mod tests {
             .iter()
             .flat_map(|frame| frame.players.iter())
             .all(|player| player.controller_slot.is_none()));
+    }
+
+    #[test]
+    fn static_site_playback_uses_full_ten_minute_stream_config() {
+        let (config, record_every_ticks) = site_playback_trace_config();
+
+        assert_eq!(config.dt_seconds, 0.1);
+        assert_eq!(
+            config.effective_duration_seconds(),
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(config.total_ticks(), 6_000);
+        assert_eq!(record_every_ticks, SITE_PLAYBACK_RECORD_EVERY_TICKS);
+        assert_eq!(record_every_ticks, 5);
+        assert!(!config.learning_enabled);
+        assert!(!config.learning_logging_enabled);
+        assert!(!config.full_game_learning_enabled);
+        assert!(!config.neural_learning.enabled);
+        assert_eq!(config.max_human_players, 0);
     }
 
     #[test]

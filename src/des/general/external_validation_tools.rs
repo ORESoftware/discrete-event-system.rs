@@ -26,6 +26,9 @@ use crate::des::general::external_facility_location_reference::{
     solve_facility_location_with_external_reference, ExternalFacilityLocationReferenceOptions,
     ExternalFacilityLocationReferenceSolver, ExternalFacilityLocationReferenceStatus,
 };
+use crate::des::general::external_gams_solver_probe::{
+    probe_external_gams_solver, ExternalGamsSolver,
+};
 use crate::des::general::external_graph_coloring_reference::{
     solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
     ExternalGraphColoringReferenceSolver, ExternalGraphColoringReferenceStatus,
@@ -33,6 +36,10 @@ use crate::des::general::external_graph_coloring_reference::{
 use crate::des::general::external_knapsack_reference::{
     solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
     ExternalKnapsackReferenceSolver, ExternalKnapsackReferenceStatus,
+};
+use crate::des::general::external_linear_cli::{
+    probe_external_linear_cli_solver, ExternalLinearCliKind, ExternalLinearCliOptions,
+    ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
 };
 use crate::des::general::external_max_flow_reference::{
     solve_max_flow_with_external_reference, ExternalMaxFlowReferenceOptions,
@@ -19257,6 +19264,43 @@ pub fn probe_external_validation_tool(
                 tool.display_name
             ),
         };
+    }
+
+    if tool.id == "lindo-cli" {
+        let probe = probe_external_linear_cli_solver(
+            ExternalLinearCliKind::Lp,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Lindo,
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+        if probe.status == ExternalLinearCliProbeStatus::Ready {
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::Ready,
+                command: probe.command.clone(),
+                message: format!(
+                    "{} via external_linear_cli ready probe: {}",
+                    tool.display_name, probe.message
+                ),
+            };
+        }
+    }
+
+    if tool.id == "knitro" {
+        let probe = probe_external_gams_solver(ExternalGamsSolver::Knitro, 10_000);
+        if probe.ready {
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::Ready,
+                command: probe.command,
+                message: format!(
+                    "{} via GAMS ready probe: {}",
+                    tool.display_name, probe.message
+                ),
+            };
+        }
     }
 
     let artifact = first_configured_env_value(&external_validation_artifact_env_names(tool));

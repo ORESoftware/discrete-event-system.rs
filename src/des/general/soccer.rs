@@ -6073,6 +6073,16 @@ impl SharedHumanInputStore {
         self.pending = retained;
         latest
     }
+
+    fn pending_len_for_slots(&self, controller_slots: &[usize]) -> usize {
+        if controller_slots.is_empty() {
+            return 0;
+        }
+        self.pending
+            .iter()
+            .filter(|input| controller_slots.contains(&input.controller_slot))
+            .count()
+    }
 }
 
 #[derive(Clone)]
@@ -6183,12 +6193,82 @@ impl SharedHumanInputs {
         }
     }
 
+    pub fn wait_for_pending_input_for_slots_result(
+        &self,
+        controller_slots: &[usize],
+        timeout: Duration,
+    ) -> HumanInputWaitResult {
+        let version = self.notification_version();
+        let queued_before = self.queued_len_for_slots(controller_slots);
+        if queued_before > 0 || controller_slots.is_empty() {
+            return HumanInputWaitResult {
+                version_before: version,
+                version_after: version,
+                queued_before,
+                queued_after: queued_before,
+                immediate_pending: queued_before > 0,
+                notified: false,
+            };
+        }
+
+        let deadline = Instant::now() + timeout;
+        let mut observed_version = version;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let next_version = self
+                .wait_for_change_since(observed_version, deadline.saturating_duration_since(now));
+            let queued_after = self.queued_len_for_slots(controller_slots);
+            if queued_after > 0 {
+                return HumanInputWaitResult {
+                    version_before: version,
+                    version_after: next_version,
+                    queued_before,
+                    queued_after,
+                    immediate_pending: false,
+                    notified: next_version > version,
+                };
+            }
+            if next_version <= observed_version {
+                return HumanInputWaitResult {
+                    version_before: version,
+                    version_after: next_version,
+                    queued_before,
+                    queued_after,
+                    immediate_pending: false,
+                    notified: false,
+                };
+            }
+            observed_version = next_version;
+        }
+
+        let version_after = self.notification_version();
+        let queued_after = self.queued_len_for_slots(controller_slots);
+        HumanInputWaitResult {
+            version_before: version,
+            version_after,
+            queued_before,
+            queued_after,
+            immediate_pending: false,
+            notified: queued_after > 0 && version_after > version,
+        }
+    }
+
     pub fn queued_len(&self) -> usize {
         self.inner
             .read()
             .expect("human input queue lock poisoned")
             .pending
             .len()
+    }
+
+    pub fn queued_len_for_slots(&self, controller_slots: &[usize]) -> usize {
+        self.inner
+            .read()
+            .expect("human input queue lock poisoned")
+            .pending_len_for_slots(controller_slots)
     }
 
     pub fn last_seq_for_slot(&self, controller_slot: usize) -> Option<u64> {
@@ -20342,9 +20422,17 @@ impl SoccerMatch {
             );
             return;
         }
-        let result = self
-            .human_inputs
-            .wait_for_pending_input_result(Duration::from_millis(CONTROLLER_INPUT_YIELD_MS));
+        let mut assigned_slots = self
+            .players
+            .iter()
+            .filter_map(|player| player.controller_slot)
+            .collect::<Vec<_>>();
+        assigned_slots.sort_unstable();
+        assigned_slots.dedup();
+        let result = self.human_inputs.wait_for_pending_input_for_slots_result(
+            &assigned_slots,
+            Duration::from_millis(CONTROLLER_INPUT_YIELD_MS),
+        );
         self.controller_yield_stats
             .record_wait(assigned_players, result);
         thread::yield_now();
@@ -29106,7 +29194,12 @@ fn tracking_action_target_trace(
                     .find(|p| p.id == holder && p.team == player.team && p.id != player.id)
                     .map(|p| (p.position, Some(p.id)))
             });
-            holder_teammate.unwrap_or((after.ball.position, after.ball.holder))
+            holder_teammate.unwrap_or_else(|| {
+                (
+                    after.ball.position,
+                    infer_tracking_pass_receiver(player, before, after),
+                )
+            })
         }
         "clearance" | "route-one" => (after.ball.position, None),
         "shoot" => (goal, None),
@@ -29148,6 +29241,63 @@ fn tracking_action_target_trace(
         facing: facing_bucket_from_vector(point - player.position),
         dribble_touch: None,
     })
+}
+
+fn infer_tracking_pass_receiver(
+    player: &PlayerSnapshot,
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+) -> Option<usize> {
+    let pass_vector = after.ball.position - before.ball.position;
+    if pass_vector.len() < 1.0 {
+        return None;
+    }
+    let pass_dir = pass_vector.normalized();
+    let mut candidates = after
+        .players
+        .iter()
+        .filter(|candidate| candidate.team == player.team && candidate.id != player.id)
+        .filter_map(|candidate| {
+            let position = after
+                .player_position(candidate.id)
+                .unwrap_or(candidate.position);
+            let distance_to_ball = position.distance(after.ball.position);
+            let lane_distance =
+                distance_to_segment(position, before.ball.position, after.ball.position);
+            if distance_to_ball > 18.0 && lane_distance > 5.5 {
+                return None;
+            }
+            let velocity = after
+                .player_velocity(candidate.id)
+                .or_else(|| before.player_velocity(candidate.id))
+                .unwrap_or(candidate.velocity);
+            let to_ball = after.ball.position - position;
+            let closing_speed = if to_ball.len() > 1e-6 {
+                velocity.dot(to_ball.normalized()).max(0.0)
+            } else {
+                0.0
+            };
+            let stride_speed = velocity.dot(pass_dir).max(0.0);
+            let forward_ball = pass_vector.y * player.team.attack_dir();
+            let candidate_forward = (position.y - player.position.y) * player.team.attack_dir();
+            let forward_fit = if forward_ball > 0.5 && candidate_forward > -2.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let score = distance_to_ball + lane_distance * 0.38
+                - closing_speed * 0.58
+                - stride_speed * 0.34
+                - forward_fit * 0.65;
+            Some((score, candidate.id))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    candidates.first().map(|(_, id)| *id)
 }
 
 fn tracking_team_scored(team: Team, before: &WorldSnapshot, after: &WorldSnapshot) -> bool {
@@ -33934,6 +34084,67 @@ mod tests {
     }
 
     #[test]
+    fn shared_human_inputs_wait_for_assigned_slots_ignores_unassigned_pending_frames() {
+        let q = SharedHumanInputs::new();
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 1,
+            player_id: Some(1),
+            seq: 1,
+            axis: Vec2::new(0.0, 1.0),
+            sprint: false,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let waiter_queue = q.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_queue.wait_for_pending_input_for_slots_result(&[0], Duration::from_millis(200))
+        });
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 1,
+            player_id: Some(1),
+            seq: 2,
+            axis: Vec2::new(0.0, -1.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 1,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let wait_result = waiter.join().expect("waiter joins");
+        assert!(!wait_result.immediate_pending);
+        assert!(wait_result.notified);
+        assert_eq!(wait_result.queued_before, 0);
+        assert_eq!(wait_result.queued_after, 1);
+
+        let assigned = q.drain_latest_for_slot(0).expect("assigned slot input");
+        assert_eq!(assigned.seq, 1);
+        let unassigned = q
+            .drain_latest_for_slot(1)
+            .expect("unassigned slot remains queued");
+        assert_eq!(unassigned.seq, 2);
+    }
+
+    #[test]
     fn native_controller_threads_debounce_and_cap_at_four_slots() {
         let q = SharedHumanInputs::new();
         let controllers = spawn_human_controller_threads(q.clone(), 6, Duration::from_millis(1))
@@ -34247,6 +34458,48 @@ mod tests {
                 .map(String::as_str),
             Some("human-input")
         );
+    }
+
+    #[test]
+    fn controller_yield_waits_for_assigned_slots_not_unassigned_backlog() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 782,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0");
+        let input_queue = sim.human_inputs.clone();
+        assert!(input_queue.push(HumanInputFrame {
+            controller_slot: 1,
+            player_id: Some(1),
+            seq: 1,
+            axis: Vec2::new(0.0, 1.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        sim.run_time_step();
+
+        let stats = sim.controller_yield_stats();
+        assert_eq!(stats.assigned_players, 1);
+        assert_eq!(stats.wait_attempts, 1);
+        assert_eq!(stats.immediate_pending_waits, 0);
+        assert_eq!(stats.notified_waits, 0);
+        assert_eq!(stats.timed_out_waits, 1);
+        assert!(!stats.last_immediate_pending);
+        assert_eq!(stats.last_queued_before, 0);
+        assert_eq!(stats.last_queued_after, 0);
+
+        let remaining = input_queue.drain_latest_by_slot();
+        assert_eq!(remaining.get(&1).expect("unassigned slot remains").seq, 1);
+        assert!(!remaining.contains_key(&0));
     }
 
     #[test]
@@ -38882,6 +39135,68 @@ mod tests {
         assert_eq!(
             restored.target_entries().len(),
             artifact.target_entries.len()
+        );
+    }
+
+    #[test]
+    fn tracking_dataset_infers_inflight_pass_receiver_for_stride_learning() {
+        let mut tracking = sample_tracking_pass_dataset();
+        tracking.source = "unit-inflight-stride-pass".to_string();
+        tracking.frames[1].ball_holder = None;
+        tracking.frames[1].ball_position = Vec2::new(45.2, 85.8);
+        tracking.frames[1].ball_velocity = Some(Vec2::new(10.4, 20.8));
+        tracking.frames[1].players[1].position = Vec2::new(44.6, 83.0);
+        tracking.frames[1].players[2].position = Vec2::new(56.5, 78.5);
+
+        let dataset = tracking.to_learning_dataset().expect("tracking conversion");
+        let passer = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("passer transition");
+
+        assert_eq!(passer.action, "pass");
+        let action_target = passer
+            .action_target
+            .as_ref()
+            .expect("tracking pass target trace");
+        assert_eq!(action_target.player_id, Some(1));
+        assert_eq!(action_target.point, Some(tracking.frames[1].ball_position));
+        assert_eq!(
+            action_target.grid.expect("tracking target grid").fine.id,
+            pitch_grid_address(
+                tracking.frames[1].ball_position,
+                tracking.config.field_width_yards,
+                tracking.config.field_length_yards
+            )
+            .fine
+            .id
+        );
+        assert!(passer.decision_context.target_player_position.is_some());
+        assert!(
+            passer
+                .decision_context
+                .target_player_velocity
+                .expect("target velocity")
+                .y
+                > 0.0
+        );
+        assert!(
+            pass_into_stride_fit_for_context(&passer.decision_context, Team::Home) > 0.25,
+            "in-flight tracking pass should retain receiver velocity for stride reward"
+        );
+
+        let policy =
+            train_soccer_q_policy_from_tracking(&tracking, SoccerQPolicyOptions::default())
+                .expect("tracking policy");
+        let state = SoccerQStateKey::from_transition(passer);
+        assert!(policy.q_value(&state, "pass").is_some());
+        let learned_target = policy
+            .best_target_grid_for_state_action(&state, "pass")
+            .expect("learned in-flight pass target grid");
+        assert_eq!(
+            learned_target.target_fine_cell_id,
+            action_target.grid.expect("tracking target grid").fine.id
         );
     }
 

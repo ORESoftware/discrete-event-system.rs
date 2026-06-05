@@ -11730,6 +11730,16 @@ impl WorldSnapshot {
         let forward_bonus = forward_component.max(0.0) * (0.55 + open_grass * 0.95);
         let backward_penalty = (-forward_component).max(0.0) * 0.48;
         let kind_bonus = match dribble_final_cut_kind(kind) {
+            DribbleMoveKind::CarryForward => {
+                forward_component.max(0.0) * (0.42 + open_grass * 0.48)
+                    + (1.0 - pressure) * 0.18
+            }
+            DribbleMoveKind::CarryOut => {
+                lateral_component.abs() * 0.34
+                    + forward_component.max(0.0) * 0.24
+                    + (1.0 - pressure) * 0.14
+            }
+            DribbleMoveKind::ProtectBall => pressure * 0.26 - forward_component.max(0.0) * 0.18,
             DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => {
                 lateral_component.abs() * 0.42
                     + pressure * 0.18
@@ -11774,6 +11784,15 @@ impl WorldSnapshot {
         } else {
             3.80
         };
+        if kind == DribbleMoveKind::ProtectBall {
+            return distance.clamp(0.62, 1.45);
+        }
+        if kind == DribbleMoveKind::CarryForward {
+            return distance.clamp(1.05, cap.max(3.2).min(DRIBBLE_MAX_TOUCH_YARDS));
+        }
+        if kind == DribbleMoveKind::CarryOut {
+            return distance.clamp(0.95, cap.max(2.8).min(4.35));
+        }
         distance.clamp(DRIBBLE_MIN_TOUCH_YARDS, cap)
     }
 
@@ -11789,7 +11808,20 @@ impl WorldSnapshot {
         };
         let current = self.player_position(me.id).unwrap_or(me.position);
         let nearest_defender = self.nearest_opponent_at(me.team, current);
-        let direction = touch.direction_for_team(me.team);
+        let direction = match kind {
+            DribbleMoveKind::CarryForward => Vec2::new(0.0, me.team.attack_dir()),
+            DribbleMoveKind::CarryOut => {
+                let outward_x = if current.x >= self.field_width * 0.5 { 1.0 } else { -1.0 };
+                Vec2::new(outward_x * 0.52, me.team.attack_dir() * 0.78).normalized()
+            }
+            DribbleMoveKind::ProtectBall => nearest_defender
+                .map(|(_, defender_position, _)| {
+                    let away = (current - defender_position).normalized();
+                    (away * 0.86 + Vec2::new(0.0, me.team.attack_dir()) * 0.18).normalized()
+                })
+                .unwrap_or_else(|| Vec2::new(0.0, me.team.attack_dir())),
+            _ => touch.direction_for_team(me.team),
+        };
         let mut target = current + direction * touch.distance_yards;
         if let Some((_, defender_position, defender_distance)) = nearest_defender {
             if kind == DribbleMoveKind::Nutmeg && defender_distance <= 5.6 {
@@ -11811,6 +11843,9 @@ impl WorldSnapshot {
     pub fn side_step_dribble_target_for(&self, player_id: usize, home: Vec2) -> Vec2 {
         let kind = self.side_step_dribble_kind_for(player_id);
         let bucket = match dribble_final_cut_kind(kind) {
+            DribbleMoveKind::CarryForward
+            | DribbleMoveKind::CarryOut
+            | DribbleMoveKind::ProtectBall => 0,
             DribbleMoveKind::LeftCut => 9,
             DribbleMoveKind::RightCut => 3,
             DribbleMoveKind::Nutmeg => 0,
@@ -22435,6 +22470,9 @@ impl SoccerMatch {
         self.move_player_towards(player_id, target, sprint);
         if self.ball.holder == Some(player_id) {
             let kind_touch_multiplier = match kind {
+                Some(DribbleMoveKind::CarryForward) => 0.78,
+                Some(DribbleMoveKind::CarryOut) => 0.86,
+                Some(DribbleMoveKind::ProtectBall) => 0.48,
                 Some(DribbleMoveKind::Nutmeg) => 1.18,
                 Some(DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut) => 1.04,
                 Some(DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft) => 1.10,
@@ -22627,18 +22665,20 @@ impl SoccerMatch {
             return;
         };
 
-        let dispossession_probability = dribble_dispossession_probability(
+        let dispossession_probability = (dribble_dispossession_probability(
             &self.players[defender_id].skills,
             &self.players[attacker_id].skills,
             DefenderDribbleResponse::HoldUp,
-        );
+        ) * dribble_dispossession_kind_multiplier(kind))
+        .clamp(0.02, 0.82);
         if self.rng.next_float() < dispossession_probability {
             self.complete_defensive_dispossession(
                 defender_id,
                 attacker_id,
                 "hold-up-dispossession",
             );
-        } else if self.rng.next_float()
+        } else if kind != DribbleMoveKind::ProtectBall
+            && self.rng.next_float()
             < dribble_beat_probability(
                 kind,
                 &self.players[attacker_id].skills,
@@ -30529,6 +30569,9 @@ fn dribble_beat_probability(
     let defender_balance =
         ability01(defender.defending) * 0.68 + ability01(defender.aggression) * 0.32;
     let kind_multiplier = match kind {
+        DribbleMoveKind::CarryForward => 0.72,
+        DribbleMoveKind::CarryOut => 0.84,
+        DribbleMoveKind::ProtectBall => 0.46,
         DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => 1.0,
         DribbleMoveKind::Nutmeg => 0.82,
         DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft => 1.05,
@@ -30539,6 +30582,17 @@ fn dribble_beat_probability(
     };
     let raw = attacker_evasion / (attacker_evasion + defender_balance * 0.94);
     (raw * kind_multiplier * response_multiplier).clamp(0.10, 0.88)
+}
+
+fn dribble_dispossession_kind_multiplier(kind: DribbleMoveKind) -> f64 {
+    match kind {
+        DribbleMoveKind::ProtectBall => 0.58,
+        DribbleMoveKind::CarryForward => 0.86,
+        DribbleMoveKind::CarryOut => 0.78,
+        DribbleMoveKind::FakeLeftCutRight | DribbleMoveKind::FakeRightCutLeft => 0.92,
+        DribbleMoveKind::LeftCut | DribbleMoveKind::RightCut => 1.0,
+        DribbleMoveKind::Nutmeg => 1.12,
+    }
 }
 
 fn tackle_success_probability(defender: &SkillProfile, attacker: &SkillProfile) -> f64 {

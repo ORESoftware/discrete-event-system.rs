@@ -77,7 +77,7 @@ pub fn probe_external_gams_solver(
     solver: ExternalGamsSolver,
     timeout_ms: u64,
 ) -> ExternalGamsSolverProbe {
-    let Some(command) = find_gams_command() else {
+    let Some(command) = find_external_gams_command() else {
         return ExternalGamsSolverProbe {
             solver,
             command: None,
@@ -116,7 +116,7 @@ pub fn probe_external_gams_solver(
     }
 
     let output = match process.spawn() {
-        Ok(child) => wait_for_gams_probe_output(child, timeout_ms),
+        Ok(child) => wait_for_external_gams_output(child, timeout_ms),
         Err(err) => Err(format!("failed to start GAMS executable: {err}")),
     };
     let output = match output {
@@ -146,7 +146,7 @@ pub fn probe_external_gams_solver(
     let listing = fs::read_to_string(&listing_path).unwrap_or_default();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let ready = output.status.success() && gams_listing_confirms_solver(solver, &listing);
+    let ready = output.status.success() && external_gams_listing_confirms_solver(solver, &listing);
     let message = if ready {
         format!(
             "{} solved the local GAMS {} smoke model",
@@ -271,10 +271,7 @@ pub fn wait_for_external_gams_output(
         .map_err(|err| format!("failed to wait for GAMS probe: {err}"))
 }
 
-pub fn external_gams_listing_confirms_solver(
-    solver: ExternalGamsSolver,
-    listing: &str,
-) -> bool {
+pub fn external_gams_listing_confirms_solver(solver: ExternalGamsSolver, listing: &str) -> bool {
     let upper = listing.to_ascii_uppercase();
     let (_, solver_option) = solver.option_pair();
     let solver_selected = upper

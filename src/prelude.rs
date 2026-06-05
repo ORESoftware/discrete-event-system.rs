@@ -30,12 +30,15 @@
 
 // First-class model contract (English → JSON spec → run → artifact).
 pub use crate::des::model::{
-    generate_model_graph_rust_code, model_authoring_json_schema, model_graph_json_schema,
+    build_track3t_animation, generate_model_graph_rust_code, model_authoring_json_schema,
+    model_graph_json_schema, parse_track3t_spec, run_comparison_from_spec,
     starter_information_physics_spec, starter_partial_differential_equations_spec, with_builtins,
-    CitizenError, CitizenRegistry, EquationCitizen, InformationPhysicsCitizen, ModelAuthoringSpec,
-    ModelCitizen, ModelDescriptor, ModelGraphKind, ModelGraphSpec,
-    PartialDifferentialEquationsCitizen, RunArtifact, EQUATION_SCHEMA, INFORMATION_PHYSICS_SCHEMA,
-    MODEL_GRAPH_SCHEMA, PARTIAL_DIFFERENTIAL_EQUATIONS_SCHEMA,
+    write_track3t_outputs, CitizenError, CitizenRegistry, EquationCitizen,
+    InformationPhysicsCitizen, ModelAuthoringSpec, ModelCitizen, ModelDescriptor, ModelGraphKind,
+    ModelGraphSpec, PartialDifferentialEquationsCitizen, RunArtifact, Track3tAnimation,
+    Track3tRenderOptions, Track3tWarehouseCitizen, Track3tWarehouseSpec, EQUATION_SCHEMA,
+    INFORMATION_PHYSICS_SCHEMA, MODEL_GRAPH_SCHEMA, PARTIAL_DIFFERENTIAL_EQUATIONS_SCHEMA,
+    TRACK3T_WAREHOUSE_SCHEMA,
 };
 
 // Acausal/equation-based modeling surface.

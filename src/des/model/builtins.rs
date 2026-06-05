@@ -16,6 +16,7 @@ use crate::des::hybrid::{
 };
 use crate::des::model::information_physics::InformationPhysicsCitizen;
 use crate::des::model::partial_differential_equations::PartialDifferentialEquationsCitizen;
+use crate::des::model::track3t_warehouse::Track3tWarehouseCitizen;
 use crate::des::plugin::UiControl;
 use crate::des::studio::StudioCitizen;
 
@@ -154,7 +155,8 @@ impl ModelCitizen for HybridCitizen {
 /// A registry pre-loaded with the built-in first-class citizens: acausal
 /// equation models, MDP, POMDP, schema-backed authoring, the hybrid
 /// block-diagram engine, equation specs, information-physics models, PDE domain
-/// models, and the visual-block studio - peers under one contract.
+/// models, Track3t warehouse/factory-floor comparison, and the visual-block
+/// studio - peers under one contract.
 pub fn with_builtins() -> CitizenRegistry {
     let mut reg = CitizenRegistry::new();
     reg.register(Box::new(AcausalCitizen));
@@ -165,6 +167,7 @@ pub fn with_builtins() -> CitizenRegistry {
     reg.register(Box::new(EquationCitizen));
     reg.register(Box::new(InformationPhysicsCitizen));
     reg.register(Box::new(PartialDifferentialEquationsCitizen));
+    reg.register(Box::new(Track3tWarehouseCitizen));
     reg.register(Box::new(StudioCitizen));
     reg
 }
@@ -185,6 +188,7 @@ mod tests {
         assert!(kinds.contains(&"equation".to_string()));
         assert!(kinds.contains(&"information-physics".to_string()));
         assert!(kinds.contains(&"partial-differential-equations".to_string()));
+        assert!(kinds.contains(&"track3t-warehouse".to_string()));
         assert!(kinds.contains(&"studio".to_string()));
     }
 

@@ -13,8 +13,8 @@
 //! * [`CitizenRegistry`] — discovery + run-from-JSON across all citizens.
 //!
 //! [`with_builtins`] returns a registry pre-loaded with acausal, MDP, POMDP,
-//! authoring, hybrid, equation, and studio citizens, demonstrating the contract
-//! across paradigms.
+//! authoring, hybrid, equation, Track3t warehouse, and studio citizens,
+//! demonstrating the contract across paradigms.
 //!
 //! Purely additive: it composes [`crate::des::plugin`],
 //! [`crate::des::acausal`], [`crate::des::decision`], and
@@ -28,6 +28,7 @@ pub mod graph;
 pub mod information_physics;
 pub mod partial_differential_equations;
 pub mod registry;
+pub mod track3t_warehouse;
 
 pub use crate::des::equation::{EquationCitizen, EQUATION_SCHEMA};
 pub use artifact::RunArtifact;
@@ -45,3 +46,8 @@ pub use partial_differential_equations::{
     PARTIAL_DIFFERENTIAL_EQUATIONS_SCHEMA,
 };
 pub use registry::{CitizenError, CitizenRegistry, ModelCitizen, ModelDescriptor};
+pub use track3t_warehouse::{
+    build_track3t_animation, parse_track3t_spec, run_comparison_from_spec, write_track3t_outputs,
+    Track3tAnimation, Track3tRenderOptions, Track3tWarehouseCitizen, Track3tWarehouseSpec,
+    TRACK3T_WAREHOUSE_SCHEMA,
+};

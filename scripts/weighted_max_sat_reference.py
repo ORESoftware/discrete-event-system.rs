@@ -12,12 +12,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
-MAX_EXACT_VARS = 26
 OBJECTIVE_SCALE = 1_000_000
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "weighted_max_sat_reference"
+    explicit = os.environ.get("WEIGHTED_MAX_SAT_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if os.path.exists(local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -107,43 +124,6 @@ def output(
     }
 
 
-def exact_weighted_max_sat(problem: dict) -> dict:
-    n = problem["numVars"]
-    if n > MAX_EXACT_VARS:
-        return output(
-            "unsupported",
-            "python:exact-weighted-max-sat",
-            None,
-            None,
-            f"exact weighted Max-SAT only practical for <= {MAX_EXACT_VARS} variables, got {n}",
-        )
-    best_assignment = None
-    best_eval = None
-    for mask in range(1 << n):
-        assignment = [bool((mask >> var) & 1) for var in range(n)]
-        evaluation = evaluate(problem, assignment)
-        if evaluation["violatedHardClauseIds"]:
-            continue
-        if best_eval is None or evaluation["satisfiedSoftWeight"] > best_eval["satisfiedSoftWeight"] + 1e-9:
-            best_assignment = assignment
-            best_eval = evaluation
-    if best_assignment is None or best_eval is None:
-        return output(
-            "infeasible",
-            "python:exact-weighted-max-sat",
-            None,
-            None,
-            "no assignment satisfies all hard clauses",
-        )
-    return output(
-        "optimal",
-        "python:exact-weighted-max-sat",
-        best_assignment,
-        best_eval,
-        "exact weighted Max-SAT enumeration",
-    )
-
-
 def ortools_weighted_max_sat(problem: dict) -> dict:
     try:
         from ortools.sat.python import cp_model  # type: ignore
@@ -196,38 +176,20 @@ def ortools_weighted_max_sat(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-enumeration", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-enumeration", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        exact = exact_weighted_max_sat(problem)
-        if args.solver == "fallback":
-            print(json.dumps(exact))
-            return 0 if exact["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
-
         ortools = ortools_weighted_max_sat(problem)
-        if args.solver == "ortools":
-            print(json.dumps(ortools))
-            return 0 if ortools["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
-
-        result = dict(exact)
-        result["solver"] = (
-            "ortools:cp-sat-weighted-max-sat+python:exact-weighted-max-sat"
-            if ortools.get("status") != "unavailable"
-            else "python:exact-weighted-max-sat"
-        )
-        result["ortoolsStatus"] = ortools.get("status")
-        result["ortoolsAssignment"] = ortools.get("assignment", [])
-        result["ortoolsObjective"] = ortools.get("objective")
-        result["ortoolsSatisfiedSoftWeight"] = ortools.get("satisfiedSoftWeight")
-        result["ortoolsUnsatisfiedSoftWeight"] = ortools.get("unsatisfiedSoftWeight")
-        result["ortoolsSatisfiedClauseIds"] = ortools.get("satisfiedClauseIds", [])
-        result["ortoolsViolatedHardClauseIds"] = ortools.get("violatedHardClauseIds", [])
-        result["ortoolsMessage"] = ortools.get("message")
-        result["ortoolsObjectiveBound"] = ortools.get("objectiveBound")
-        print(json.dumps(result))
-        return 0 if result["status"] in ("optimal", "feasible", "infeasible", "unsupported") else 1
+        print(json.dumps(ortools))
+        return 0 if ortools["status"] in ("optimal", "feasible", "infeasible", "unavailable", "unsupported") else 1
     except Exception as exc:
         print(
             json.dumps(

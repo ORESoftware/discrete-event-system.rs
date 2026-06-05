@@ -155,6 +155,18 @@ pub struct SoccerLearningQueueReport {
     pub latest_neural_network: Option<SoccerNeuralNetworkSnapshot>,
 }
 
+pub enum SoccerLearningQueueEvent<'a> {
+    StartingBatch {
+        next_episode: usize,
+        policies: &'a mut SoccerTeamQPolicies,
+        neural_network: &'a mut Option<SoccerNeuralNetworkSnapshot>,
+    },
+    CompletedGame {
+        game: &'a SoccerLearningCompletedGame,
+        merged_policies: &'a SoccerTeamQPolicies,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerEvolutionOptions {
@@ -507,6 +519,26 @@ pub fn run_soccer_learning_queue_with_observer<F>(
 where
     F: FnMut(&SoccerLearningCompletedGame, &SoccerTeamQPolicies) -> Result<(), String>,
 {
+    run_soccer_learning_queue_with_events(config, initial_policies, |event| {
+        if let SoccerLearningQueueEvent::CompletedGame {
+            game,
+            merged_policies,
+        } = event
+        {
+            on_completed_game(game, merged_policies)?;
+        }
+        Ok(())
+    })
+}
+
+pub fn run_soccer_learning_queue_with_events<F>(
+    config: SoccerLearningQueueRunnerConfig,
+    initial_policies: SoccerTeamQPolicies,
+    mut on_event: F,
+) -> Result<SoccerLearningQueueReport, String>
+where
+    F: for<'a> FnMut(SoccerLearningQueueEvent<'a>) -> Result<(), String>,
+{
     let started = Instant::now();
     let parallel_games = config.parallel_games.clamp(1, 100);
     let (task_tx, task_rx) = mpsc::sync_channel::<SoccerLearningQueueTask>(parallel_games);
@@ -552,6 +584,14 @@ where
 
     while completed_games + failed_games < config.games && first_error.is_none() {
         if active < parallel_games && next_episode < config.games {
+            if let Err(err) = on_event(SoccerLearningQueueEvent::StartingBatch {
+                next_episode,
+                policies: &mut policies,
+                neural_network: &mut latest_neural_network,
+            }) {
+                first_error = Some(err);
+                break;
+            }
             let starting_policies = Arc::new(policies.clone());
             let starting_neural_network = latest_neural_network.clone().map(Arc::new);
             while active < parallel_games && next_episode < config.games {
@@ -608,7 +648,10 @@ where
                     config.prune_target_entries_per_team,
                     config.min_policy_visits,
                 );
-                if let Err(err) = on_completed_game(&game, &policies) {
+                if let Err(err) = on_event(SoccerLearningQueueEvent::CompletedGame {
+                    game: &game,
+                    merged_policies: &policies,
+                }) {
                     first_error = Some(err);
                     break;
                 }

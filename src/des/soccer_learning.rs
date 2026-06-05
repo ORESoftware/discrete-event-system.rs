@@ -131,6 +131,8 @@ pub struct SoccerLearningQueueRunnerConfig {
     pub parallel_games: usize,
     pub base_seed: u32,
     pub match_config: MatchConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_neural_network: Option<SoccerNeuralNetworkSnapshot>,
     pub neural_drain_timeout: Duration,
     pub options: SoccerQPolicyOptions,
     pub prune_action_entries_per_team: usize,
@@ -421,6 +423,7 @@ pub fn run_soccer_learning_game(
         episode,
         config,
         Arc::new(starting_policies),
+        None,
         neural_drain_timeout,
     )
 }
@@ -429,6 +432,7 @@ fn run_soccer_learning_game_from_snapshot(
     episode: usize,
     mut config: MatchConfig,
     starting_policies: Arc<SoccerTeamQPolicies>,
+    initial_neural_network: Option<Arc<SoccerNeuralNetworkSnapshot>>,
     neural_drain_timeout: Duration,
 ) -> Result<SoccerLearningCompletedGame, String> {
     let started = Instant::now();
@@ -437,6 +441,9 @@ fn run_soccer_learning_game_from_snapshot(
     let total_ticks = config.total_ticks();
     let mut sim =
         SoccerMatch::default_11v11(config).with_team_policies((*starting_policies).clone());
+    if let Some(snapshot) = initial_neural_network.as_ref() {
+        sim.set_neural_network_snapshot((**snapshot).clone())?;
+    }
 
     for _ in 0..total_ticks {
         sim.run_time_step();
@@ -488,6 +495,7 @@ struct SoccerLearningQueueTask {
     episode: usize,
     match_config: MatchConfig,
     starting_policies: Arc<SoccerTeamQPolicies>,
+    initial_neural_network: Option<Arc<SoccerNeuralNetworkSnapshot>>,
     neural_drain_timeout: Duration,
 }
 
@@ -522,6 +530,7 @@ where
                 task.episode,
                 task.match_config,
                 task.starting_policies,
+                task.initial_neural_network,
                 task.neural_drain_timeout,
             );
             let _ = result_tx.send((task.episode, result));
@@ -538,12 +547,13 @@ where
     let mut tactical_summary = SoccerTacticalLearningSummary::default();
     let mut total_home_goals = 0u32;
     let mut total_away_goals = 0u32;
-    let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
+    let mut latest_neural_network = config.initial_neural_network.clone();
     let mut first_error = None::<String>;
 
     while completed_games + failed_games < config.games && first_error.is_none() {
         if active < parallel_games && next_episode < config.games {
             let starting_policies = Arc::new(policies.clone());
+            let starting_neural_network = latest_neural_network.clone().map(Arc::new);
             while active < parallel_games && next_episode < config.games {
                 let episode = next_episode;
                 let mut match_config = config.match_config.clone();
@@ -553,6 +563,7 @@ where
                     episode,
                     match_config,
                     starting_policies: Arc::clone(&starting_policies),
+                    initial_neural_network: starting_neural_network.as_ref().map(Arc::clone),
                     neural_drain_timeout,
                 }) {
                     first_error = Some(format!("soccer learning queue task send failed: {err}"));
@@ -1123,6 +1134,7 @@ mod tests {
                     max_human_players: 0,
                     ..Default::default()
                 },
+                initial_neural_network: None,
                 neural_drain_timeout: Duration::from_millis(0),
                 options: options.clone(),
                 prune_action_entries_per_team: 0,

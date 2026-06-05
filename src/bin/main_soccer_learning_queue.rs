@@ -13,9 +13,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
-    MatchConfig, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig, SoccerQPolicyOptions,
-    SoccerSelfPlayLearnedParams, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights,
-    SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
+    MatchConfig, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
+    SoccerNeuralNetworkSnapshot, SoccerQPolicyOptions, SoccerSelfPlayLearnedParams,
+    SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningWeights, SoccerTeamPolicyArtifact,
+    SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
     run_soccer_learning_queue_with_observer, soccer_self_play_artifact_from_queue_report,
@@ -55,6 +56,7 @@ struct PendingPostgresPolicyVersion {
     away_options: SoccerQPolicyOptions,
     policies: SoccerTeamQPolicies,
     fitness: f64,
+    neural_network: Option<SoccerNeuralNetworkSnapshot>,
 }
 
 struct PostgresCompletedRunBatch {
@@ -364,7 +366,7 @@ fn flush_postgres_completed_runs(
     }
     let policy_versions_written = pending_policy_versions.len();
     for policy_version in pending_policy_versions.iter() {
-        store.insert_policy_version_with_id(
+        store.insert_policy_version_with_id_and_neural_network(
             &policy_version.id,
             experiment_id,
             policy_version.parent_policy_version_id.as_deref(),
@@ -377,6 +379,7 @@ fn flush_postgres_completed_runs(
             policy_version.away_options.clone(),
             &policy_version.policies,
             policy_version.fitness,
+            policy_version.neural_network.as_ref(),
         )?;
     }
     if pending_runs.is_empty() {
@@ -852,6 +855,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_persisted_games = 0usize;
 
     let mut initial_policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
+    let mut initial_neural_network = None::<SoccerNeuralNetworkSnapshot>;
     if let Some(store) = pg_store.as_mut() {
         let experiment_slug =
             env_value("SOCCER_EXPERIMENT_SLUG").unwrap_or_else(|| "soccer-self-play".to_string());
@@ -866,10 +870,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .map_err(invalid_data)?
             {
                 println!(
-                    "postgres_resume_policy experiment={} policy_version={} generation={}",
-                    experiment_slug, version.id, version.generation
+                    "postgres_resume_policy experiment={} policy_version={} generation={} neural_network={}",
+                    experiment_slug,
+                    version.id,
+                    version.generation,
+                    version.neural_network.is_some()
                 );
                 initial_policies = version.policies;
+                initial_neural_network = version.neural_network;
                 pg_base_policy_version_id = Some(version.id.clone());
                 pg_last_policy_version_id = Some(version.id);
                 pg_generation = version.generation;
@@ -917,6 +925,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             parallel_games,
             base_seed: seed,
             match_config: config.clone(),
+            initial_neural_network: initial_neural_network.clone(),
             neural_drain_timeout,
             options: options.clone(),
             prune_action_entries_per_team: env_usize("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM", 0)?,
@@ -952,6 +961,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     away_options: options.clone(),
                     policies: merged_policies.clone(),
                     fitness: game.score.match_fitness,
+                    neural_network: game.neural_network.clone(),
                 });
                 pg_base_policy_version_id = Some(output_policy_version_id.clone());
                 pg_last_policy_version_id = Some(output_policy_version_id.clone());

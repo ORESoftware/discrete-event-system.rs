@@ -5196,9 +5196,8 @@ impl PlayerAgent {
         let press = directive.press_intensity.clamp(0.0, 1.0);
         let shape_score =
             (0.44 + defensive_mindedness * 0.46 + (1.0 - press) * 0.18).clamp(0.10, 1.18);
-        let roam_score =
-            (0.08 + offensive_mindedness * 0.22 + aggression * 0.14 + press * 0.30)
-                .clamp(0.04, 0.82);
+        let roam_score = (0.08 + offensive_mindedness * 0.22 + aggression * 0.14 + press * 0.30)
+            .clamp(0.04, 0.82);
         let mut options = normalize_action_options(vec![
             AgentActionOptionTrace::new("tackle", tackle_score, tackle_legal),
             AgentActionOptionTrace::new("defend-shape", shape_score, true),

@@ -262,6 +262,11 @@ fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Er
             "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
             default.target_clip,
         )?,
+        snapshot_every_batches: env_usize_alias(
+            "SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES",
+            "SOCCER_NEURAL_LEARNING_SNAPSHOT_EVERY_BATCHES",
+            default.snapshot_every_batches,
+        )?,
     })
 }
 
@@ -883,7 +888,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     println!(
-        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_drain_timeout_ms={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={}",
+        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_snapshot_every_batches={} neural_drain_timeout_ms={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={}",
         run_id,
         games,
         parallel_games,
@@ -893,6 +898,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         seed,
         neural_learning.enabled,
         neural_learning.backend,
+        neural_learning.snapshot_every_batches,
         neural_drain_timeout_ms,
         pg_policy_version_interval_games,
         pg_completed_run_batch_games,

@@ -1,12 +1,11 @@
 //! Rust-facing bridge for external/reference set-cover solvers.
 //!
 //! The native Rust reference computes an exact small-instance check without
-//! Python startup. The Python bridge (`scripts/set_cover_reference.py`) remains
-//! available for OR-Tools CP-SAT.
+//! Python startup. Explicit OR-Tools CP-SAT validation is launched from Rust
+//! with a tiny Python adapter over an integer-scaled copy of the same model.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -138,6 +137,8 @@ struct SetCoverReferencePayload {
     ortools_covered_elements: Option<Vec<String>>,
     #[serde(rename = "ortoolsObjectiveBound")]
     ortools_objective_bound: Option<f64>,
+    #[serde(rename = "objectiveBound")]
+    objective_bound: Option<f64>,
     message: Option<String>,
 }
 
@@ -155,6 +156,113 @@ fn status_from_str(status: &str) -> ExternalSetCoverReferenceStatus {
 const RUST_SET_COVER_EPS: f64 = 1e-9;
 const RUST_SET_COVER_MAX_EXACT_SETS: usize = 32;
 const RUST_SET_COVER_MAX_EXACT_ELEMENTS: usize = 128;
+const ORTOOLS_COST_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_SET_COVER_SOLVER: &str = "ortools:cp-sat-set-cover";
+
+const ORTOOLS_SET_COVER_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:cp-sat-set-cover"
+
+
+def output(status, problem, selected_indices=None, objective_bound=None, message=""):
+    if selected_indices is None:
+        selected = []
+        selected_ids = []
+        objective = None
+        covered_elements = []
+    else:
+        selected = sorted(set(int(index) for index in selected_indices))
+        selected_ids = [problem["sets"][index]["id"] for index in selected]
+        objective = float(sum(float(problem["sets"][index]["cost"]) for index in selected))
+        covered = {
+            element
+            for index in selected
+            for element in problem["sets"][index]["elements"]
+        }
+        covered_elements = [element for element in problem["universe"] if element in covered]
+    result = {
+        "status": status,
+        "solver": SOLVER,
+        "selectedSetIndices": selected,
+        "selectedSets": selected_ids,
+        "objective": objective,
+        "coveredElements": covered_elements,
+        "message": message,
+    }
+    if objective_bound is not None:
+        result["objectiveBound"] = objective_bound
+    return result
+
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    print(json.dumps(output("unavailable", {"sets": [], "universe": []}, None, None, str(exc))))
+    sys.exit(0)
+
+
+try:
+    problem = json.load(sys.stdin)
+    model = cp_model.CpModel()
+    x = [model.NewBoolVar(f"x_s{index}") for index in range(len(problem["sets"]))]
+    for element in problem["universe"]:
+        covering = [
+            x[index]
+            for index, set_ in enumerate(problem["sets"])
+            if element in set_["elements"]
+        ]
+        if not covering:
+            print(json.dumps(output(
+                "infeasible",
+                problem,
+                None,
+                None,
+                f"element {element!r} is uncovered by all sets",
+            )))
+            sys.exit(0)
+        model.Add(sum(covering) >= 1)
+
+    model.Minimize(sum(
+        int(set_["scaledCost"]) * x[index]
+        for index, set_ in enumerate(problem["sets"])
+    ))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(json.dumps(output(
+            "infeasible" if status_name == "infeasible" else status_name,
+            problem,
+            None,
+            None,
+            f"OR-Tools CP-SAT status {status_name}",
+        )))
+        sys.exit(0)
+    selected = [index for index, var in enumerate(x) if solver.BooleanValue(var)]
+    print(json.dumps(output(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        problem,
+        selected,
+        solver.BestObjectiveBound() / float(problem["costScale"]),
+        f"OR-Tools CP-SAT status {status_name}",
+    )))
+except Exception as exc:
+    print(json.dumps({
+        "status": "error",
+        "solver": SOLVER,
+        "selectedSetIndices": [],
+        "selectedSets": [],
+        "objective": None,
+        "coveredElements": [],
+        "message": str(exc),
+    }))
+    sys.exit(1)
+"#;
 
 fn validate_rust_set_cover_problem(
     problem: &SetCoverProblem,
@@ -228,6 +336,53 @@ fn rust_set_cover_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn ortools_set_cover_empty_solution(
+    status: ExternalSetCoverReferenceStatus,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalSetCoverReferenceSolution {
+    rust_set_cover_empty_solution(status, ORTOOLS_SET_COVER_SOLVER, message, elapsed_ms)
+}
+
+fn scaled_ortools_cost(value: f64, scale: i64) -> Option<i64> {
+    if !value.is_finite() || scale <= 0 {
+        return None;
+    }
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (scaled - rounded).abs() > 1e-6 {
+        return None;
+    }
+    Some(rounded as i64)
+}
+
+fn choose_ortools_cost_scale(problem: &SetCoverProblem) -> Option<i64> {
+    ORTOOLS_COST_SCALES.iter().copied().find(|&scale| {
+        problem
+            .sets
+            .iter()
+            .all(|set| scaled_ortools_cost(set.cost, scale).is_some())
+    })
+}
+
+fn ortools_set_cover_payload(problem: &SetCoverProblem, cost_scale: i64) -> Value {
+    json!({
+        "universe": &problem.universe,
+        "costScale": cost_scale,
+        "sets": problem.sets.iter().enumerate().map(|(index, set)| json!({
+            "index": index,
+            "id": &set.id,
+            "cost": set.cost,
+            "scaledCost": scaled_ortools_cost(set.cost, cost_scale)
+                .expect("selected OR-Tools scale must scale every set cost"),
+            "elements": &set.elements,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn relabel_registered_set_cover_fallback(
@@ -515,54 +670,6 @@ fn solve_set_cover_with_rust_reference(
     )
 }
 
-fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalSetCoverReferenceSolution {
-    ExternalSetCoverReferenceSolution {
-        status: ExternalSetCoverReferenceStatus::Unavailable,
-        solver: "external-set-cover-reference".to_string(),
-        selected_set_indices: Vec::new(),
-        selected_set_ids: Vec::new(),
-        objective: None,
-        covered_elements: Vec::new(),
-        ortools_status: None,
-        ortools_selected_set_indices: Vec::new(),
-        ortools_selected_set_ids: Vec::new(),
-        ortools_objective: None,
-        ortools_covered_elements: Vec::new(),
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn numerical_error(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalSetCoverReferenceSolution {
-    ExternalSetCoverReferenceSolution {
-        status: ExternalSetCoverReferenceStatus::NumericalError,
-        solver: "external-set-cover-reference".to_string(),
-        selected_set_indices: Vec::new(),
-        selected_set_ids: Vec::new(),
-        objective: None,
-        covered_elements: Vec::new(),
-        ortools_status: None,
-        ortools_selected_set_indices: Vec::new(),
-        ortools_selected_set_ids: Vec::new(),
-        ortools_objective: None,
-        ortools_covered_elements: Vec::new(),
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("set_cover_reference.py")
-}
-
 fn set_cover_reference_timeout_ms() -> u64 {
     std::env::var("SET_COVER_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -590,26 +697,35 @@ fn wait_for_set_cover_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll set_cover_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll OR-Tools set-cover adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for set_cover_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools set-cover adapter: {err}"))
 }
 
-fn run_set_cover_reference_json(
-    payload: Value,
-    opts: &ExternalSetCoverReferenceOptions,
-) -> ExternalSetCoverReferenceSolution {
+fn run_ortools_set_cover_reference(problem: &SetCoverProblem) -> ExternalSetCoverReferenceSolution {
     let started = Instant::now();
+    if let Err(message) = validate_rust_set_cover_problem(problem) {
+        return ortools_set_cover_empty_solution(
+            ExternalSetCoverReferenceStatus::NumericalError,
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let Some(cost_scale) = choose_ortools_cost_scale(problem) else {
+        return ortools_set_cover_empty_solution(
+            ExternalSetCoverReferenceStatus::Unsupported,
+            "OR-Tools CP-SAT set-cover bridge requires integer-scalable costs",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let payload = ortools_set_cover_payload(problem, cost_scale);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_SET_COVER_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -618,16 +734,18 @@ fn run_set_cover_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return unavailable(
-                format!("failed to start set_cover_reference.py with {python}: {err}"),
+            return ortools_set_cover_empty_solution(
+                ExternalSetCoverReferenceStatus::Unavailable,
+                format!("failed to start OR-Tools set-cover adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write set_cover_reference.py stdin: {err}"),
+            return ortools_set_cover_empty_solution(
+                ExternalSetCoverReferenceStatus::NumericalError,
+                format!("failed to write OR-Tools set-cover adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -635,15 +753,21 @@ fn run_set_cover_reference_json(
     let timeout_ms = set_cover_reference_timeout_ms();
     let (output, timed_out) = match wait_for_set_cover_reference_output(child, timeout_ms) {
         Ok(output) => output,
-        Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
+        Err(err) => {
+            return ortools_set_cover_empty_solution(
+                ExternalSetCoverReferenceStatus::NumericalError,
+                err,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("set_cover_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools set-cover adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; set_cover_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools set-cover adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -663,7 +787,7 @@ fn run_set_cover_reference_json(
             ortools_selected_set_ids: parsed.ortools_selected_sets.unwrap_or_default(),
             ortools_objective: parsed.ortools_objective,
             ortools_covered_elements: parsed.ortools_covered_elements.unwrap_or_default(),
-            ortools_objective_bound: parsed.ortools_objective_bound,
+            ortools_objective_bound: parsed.ortools_objective_bound.or(parsed.objective_bound),
             message: parsed.message.unwrap_or_else(|| {
                 if output.status.success() {
                     "ok".to_string()
@@ -673,11 +797,9 @@ fn run_set_cover_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
-            format!(
-                "failed to parse set_cover_reference.py output: {err}; stderr={}",
-                stderr
-            ),
+        Err(err) => ortools_set_cover_empty_solution(
+            ExternalSetCoverReferenceStatus::NumericalError,
+            format!("failed to parse OR-Tools set-cover adapter output: {err}; stderr={stderr}"),
             elapsed_ms,
         ),
     }
@@ -694,17 +816,7 @@ pub fn solve_set_cover_with_external_reference(
         );
     }
 
-    run_set_cover_reference_json(
-        json!({
-            "universe": &problem.universe,
-            "sets": problem.sets.iter().map(|set| json!({
-                "id": &set.id,
-                "cost": set.cost,
-                "elements": &set.elements,
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_set_cover_reference(problem)
 }
 
 #[cfg(test)]
@@ -823,7 +935,59 @@ mod tests {
     }
 
     #[test]
-    fn set_cover_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_costs_without_python() {
+        let _lock = SET_COVER_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("SET_COVER_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = SetCoverProblem {
+            universe: vec!["A".to_string()],
+            sets: vec![SetCoverSet {
+                id: "S".to_string(),
+                cost: 1.0 / 3.0,
+                elements: vec!["A".to_string()],
+            }],
+        };
+
+        let solution = solve_set_cover_with_external_reference(
+            &problem,
+            &ExternalSetCoverReferenceOptions {
+                solver: ExternalSetCoverReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalSetCoverReferenceStatus::Unsupported
+        );
+        assert_eq!(solution.solver, ORTOOLS_SET_COVER_SOLVER);
+        assert!(solution.message.contains("integer-scalable costs"));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = SET_COVER_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("SET_COVER_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = build_sample_set_cover_problem();
+
+        let solution = solve_set_cover_with_external_reference(
+            &problem,
+            &ExternalSetCoverReferenceOptions {
+                solver: ExternalSetCoverReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalSetCoverReferenceStatus::Unavailable
+        );
+        assert_eq!(solution.solver, ORTOOLS_SET_COVER_SOLVER);
+        assert!(solution.message.contains("OR-Tools set-cover adapter"));
+        assert!(!solution.message.contains("set_cover_reference.py"));
+    }
+
+    #[test]
+    fn set_cover_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -839,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn set_cover_python_bridge_wait_observes_closed_stdin() {
+    fn set_cover_adapter_wait_observes_closed_stdin() {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("cat >/dev/null; printf done")

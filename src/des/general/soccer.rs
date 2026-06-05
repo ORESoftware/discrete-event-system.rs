@@ -87,6 +87,12 @@ const SHOT_KEEPER_BEAT_MIN_PROBABILITY: f64 = 0.30;
 const SHOT_BAILOUT_NEAR_GOAL_YARDS: f64 = 12.0;
 const SHOT_BAILOUT_DISPOSSESSION_RISK: f64 = 0.80;
 const SHOT_BAILOUT_ON_FRAME_PROBABILITY: f64 = 0.20;
+const STRIKER_SHOT_WINDOW_YARDS: f64 = 30.0;
+const TEAMMATE_MUST_SHOOT_YARDS: f64 = 25.0;
+const STRIKER_MUST_SHOOT_YARDS: f64 = TEAMMATE_MUST_SHOOT_YARDS;
+const STRIKER_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.72;
+const STRIKER_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.12;
+const STRIKER_SHOT_MIN_KEEPER_BEAT_PROBABILITY: f64 = 0.06;
 const SHOT_BLOCK_DIRECT_PROBABILITY: f64 = 0.80;
 const SHOT_BLOCK_LANE_RADIUS_YARDS: f64 = 3.25;
 const SHOT_BLOCK_DECISION_MAX_PROBABILITY: f64 = 0.58;
@@ -4205,7 +4211,7 @@ impl PlayerAgent {
         let offensive_urgency = observation.offensive_urgency.clamp(0.0, 1.0);
         let defensive_urgency = observation.defensive_urgency.clamp(0.0, 1.0);
         let decision_urgency = observation.decision_urgency.clamp(0.0, 1.0);
-        let shot_legal = shot_decision_is_qualified(observation);
+        let shot_legal = shot_decision_is_qualified_for_role(observation, self.role);
         let shot_quality_weight = (observation.shot_on_frame_probability * 0.72
             + observation.shot_beat_goalkeeper_probability * 0.48
             + observation.shot_curl_probability * 0.12)
@@ -4214,6 +4220,7 @@ impl PlayerAgent {
             (1.0 - observation.shot_block_probability.clamp(0.0, 1.0) * 0.58).clamp(0.30, 1.0);
         let close_shot_attempt =
             close_clear_shot_attempt_probability(observation, self.role, shooting);
+        let striker_shot_bonus = striker_legal_shot_attempt_bonus(observation, self.role);
         let shot_score = (self.preferences.shoot_bias
             * (0.52 + shooting * 0.62)
             * (1.0 + directive.risk_tolerance * 0.35)
@@ -4221,9 +4228,14 @@ impl PlayerAgent {
             * (0.34 + shot_quality_weight)
             * shot_block_penalty
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
+            * (1.0 + striker_shot_bonus * 1.35)
             * 0.042)
-            .clamp(0.004, 0.12 + offensive_urgency * 0.30)
-            .max(close_shot_attempt);
+            .clamp(
+                0.004,
+                0.12 + offensive_urgency * 0.30 + striker_shot_bonus * 0.18,
+            )
+            .max(close_shot_attempt)
+            .max(striker_shot_bonus);
         let fatigue_dribble = fatigue_dribble_multiplier(observation);
         let shot_creation_carry = shot_creation_carry_multiplier(observation);
         let striker_carry_boost = if self.role == PlayerRole::Forward && pass_target_count == 0 {
@@ -4405,7 +4417,7 @@ impl PlayerAgent {
         } else {
             "control-touch"
         };
-        let shot_legal = first_time_shot_decision_is_qualified(observation);
+        let shot_legal = first_time_shot_decision_is_qualified_for_role(observation, self.role);
         let pass_legal = pass_target_count > 0;
         let quick_pressure_bonus = 1.0
             + observation.perceived_pressure.clamp(0.0, 1.0) * 0.24
@@ -4611,12 +4623,12 @@ impl PlayerAgent {
         let passing_skill = ability01(self.skills.passing_completion_rate);
         let crossing_skill = ability01(self.skills.crossing_left.max(self.skills.crossing_right));
         if restart_label == "free-kick"
-            && shot_decision_is_qualified(observation)
+            && shot_decision_is_qualified_for_role(observation, self.role)
             && observation.yards_to_goal <= 32.0
         {
             return Some((
                 SoccerAction::Shoot {
-                    power: 0.76 + 0.22 * ability01(self.skills.shooting),
+                    power: shot_power_for_skill(ability01(self.skills.shooting)),
                 },
                 restart_label.to_string(),
             ));
@@ -4869,7 +4881,10 @@ impl PlayerAgent {
                 order_names.push(op.clone());
                 match normalize_soccer_action_label(&op) {
                     "first-time-shot" | "first-time-header"
-                        if first_time_shot_decision_is_qualified(&observation) =>
+                        if first_time_shot_decision_is_qualified_for_role(
+                            &observation,
+                            self.role,
+                        ) =>
                     {
                         let finish_skill = if matches!(
                             observation.incoming_ball_kind,
@@ -4885,7 +4900,7 @@ impl PlayerAgent {
                         };
                         chosen = Some((
                             SoccerAction::Shoot {
-                                power: 0.68 + 0.28 * finish_skill,
+                                power: shot_power_for_finish_skill(finish_skill),
                             },
                             normalize_soccer_action_label(&op).to_string(),
                         ));
@@ -4940,23 +4955,53 @@ impl PlayerAgent {
             };
         }
 
-        if has_ball && shot_decision_is_qualified(&observation) {
+        if has_ball && striker_must_shoot(&observation, self.role) {
+            let obvious_shot_chance = (0.66
+                + shooting_skill * 0.18
+                + striker_legal_shot_attempt_bonus(&observation, self.role) * 0.16)
+                .clamp(0.70, 0.94);
+            if rng.next_float() < time_window_probability(obvious_shot_chance, snapshot.dt_seconds)
+            {
+                let action = SoccerAction::Shoot {
+                    power: shot_power_for_skill(shooting_skill),
+                };
+                let action_label = action.label();
+                self.last_decision = Some(self.decision_trace(
+                    snapshot,
+                    mdp_state,
+                    observation,
+                    belief,
+                    vec!["striker-window".to_string(), "shoot".to_string()],
+                    single_action_option("shoot"),
+                    &action,
+                    action_label,
+                ));
+                return PlayerIntent {
+                    player_id: self.id,
+                    action,
+                    sprint: false,
+                };
+            }
+        } else if has_ball && shot_decision_is_qualified_for_role(&observation, self.role) {
+            let striker_shot_bonus = striker_legal_shot_attempt_bonus(&observation, self.role);
             let finish_chance = (0.018
                 + shooting_skill * 0.050
                 + observation.shot_on_frame_probability * 0.060
                 + observation.shot_beat_goalkeeper_probability * 0.034
                 + observation.shot_curl_probability * 0.012
+                + striker_shot_bonus * 0.46
                 - observation.shot_block_probability * 0.030
                 - self.skills.decision_noise * 0.12)
-                .clamp(0.012, 0.12)
+                .clamp(0.012, 0.12 + striker_shot_bonus * 0.34)
                 .max(close_clear_shot_attempt_probability(
                     &observation,
                     self.role,
                     shooting_skill,
-                ));
+                ))
+                .max(striker_shot_bonus);
             if rng.next_float() < time_window_probability(finish_chance, snapshot.dt_seconds) {
                 let action = SoccerAction::Shoot {
-                    power: 0.72 + 0.28 * shooting_skill,
+                    power: shot_power_for_skill(shooting_skill),
                 };
                 let action_label = action.label();
                 self.last_decision = Some(self.decision_trace(
@@ -5037,19 +5082,24 @@ impl PlayerAgent {
                 self.action_from_learned_plan(plan, snapshot, &observation)
             {
                 if matches!(action, SoccerAction::Shoot { .. }) {
+                    let striker_shot_bonus =
+                        striker_legal_shot_attempt_bonus(&observation, self.role);
                     let learned_shot_chance = (0.025
                         + shooting_skill * 0.050
                         + observation.shot_curl_probability * 0.010
+                        + striker_shot_bonus * 0.42
                         - observation.shot_block_probability * 0.026
                         - self.skills.decision_noise * 0.10)
-                        .clamp(0.008, 0.08)
+                        .clamp(0.008, 0.08 + striker_shot_bonus * 0.30)
                         .max(close_clear_shot_attempt_probability(
                             &observation,
                             self.role,
                             shooting_skill,
-                        ));
-                    if rng.next_float()
-                        >= time_window_probability(learned_shot_chance, snapshot.dt_seconds)
+                        ))
+                        .max(striker_shot_bonus);
+                    if !striker_must_shoot(&observation, self.role)
+                        && rng.next_float()
+                            >= time_window_probability(learned_shot_chance, snapshot.dt_seconds)
                     {
                         let kind = deterministic_dribble_move_kind(snapshot.tick, self.id);
                         let touch =
@@ -5165,13 +5215,13 @@ impl PlayerAgent {
                     "shoot" => {
                         order_names.push("shoot".to_string());
                         let shot_chance = action_option_score(&action_options, "shoot");
-                        if shot_decision_is_qualified(&observation)
+                        if shot_decision_is_qualified_for_role(&observation, self.role)
                             && rng.next_float()
                                 < time_window_probability(shot_chance, snapshot.dt_seconds)
                         {
                             chosen = Some((
                                 SoccerAction::Shoot {
-                                    power: 0.72 + 0.28 * shooting_skill,
+                                    power: shot_power_for_skill(shooting_skill),
                                 },
                                 "shoot".to_string(),
                             ));
@@ -5690,12 +5740,17 @@ impl PlayerAgent {
     ) -> Option<(SoccerAction, String)> {
         let label = normalize_soccer_action_label(&plan.action);
         match label {
-            "shoot" if observation.has_ball && shot_decision_is_qualified(observation) => Some((
-                SoccerAction::Shoot {
-                    power: 0.72 + 0.28 * ability01(self.skills.shooting),
-                },
-                "shoot".to_string(),
-            )),
+            "shoot"
+                if observation.has_ball
+                    && shot_decision_is_qualified_for_role(observation, self.role) =>
+            {
+                Some((
+                    SoccerAction::Shoot {
+                        power: shot_power_for_skill(ability01(self.skills.shooting)),
+                    },
+                    "shoot".to_string(),
+                ))
+            }
             "pass" if observation.has_ball => {
                 let visible_targets = snapshot.ranked_visible_pass_targets(self.id, 11);
                 let target = plan
@@ -5754,7 +5809,7 @@ impl PlayerAgent {
             "first-time-shot" | "first-time-header"
                 if observation.has_ball
                     && observation.first_touch_available
-                    && first_time_shot_decision_is_qualified(observation) =>
+                    && first_time_shot_decision_is_qualified_for_role(observation, self.role) =>
             {
                 let finish_skill = if label == "first-time-header" {
                     aerial_duel_skill_from_agent(self)
@@ -5767,7 +5822,7 @@ impl PlayerAgent {
                 };
                 Some((
                     SoccerAction::Shoot {
-                        power: 0.68 + 0.28 * finish_skill,
+                        power: shot_power_for_finish_skill(finish_skill),
                     },
                     label.to_string(),
                 ))
@@ -10039,7 +10094,7 @@ impl WorldSnapshot {
             perceived_pressure_for_player(me, real_pressure, visible_opponents);
         let real_time_on_ball_seconds = time_on_ball_seconds(real_pressure);
         let perceived_time_on_ball_seconds = time_on_ball_seconds(perceived_pressure);
-        let expected_shot_power = 0.72 + 0.28 * ability01(me.skills.shooting);
+        let expected_shot_power = shot_power_for_skill(ability01(me.skills.shooting));
         let expected_shot_speed_yps = shot_speed_yps_from_power(expected_shot_power, &me.skills);
         let shot_block_assessment = shot_block_assessment_for_snapshot(
             self,
@@ -11713,7 +11768,7 @@ impl WorldSnapshot {
             player.team.goal_y(self.field_length),
         );
         let shot_speed = shot_speed_yps_from_power(
-            0.72 + 0.28 * ability01(player.skills.shooting),
+            shot_power_for_skill(ability01(player.skills.shooting)),
             &player.skills,
         );
         let shot_block_probability =
@@ -30429,15 +30484,85 @@ fn shot_decision_is_qualified(observation: &SoccerPomdpObservation) -> bool {
     quality_shot || pressure_bailout || goal_urgency_bailout
 }
 
+fn shot_decision_is_qualified_for_role(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> bool {
+    shot_decision_is_qualified(observation) || striker_shot_window_is_qualified(observation, role)
+}
+
+fn striker_shot_window_is_qualified(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> bool {
+    if role != PlayerRole::Forward || !observation.shot_lane_open {
+        return false;
+    }
+    let block_risk = observation.shot_block_probability.clamp(0.0, 1.0);
+    observation.yards_to_goal <= STRIKER_SHOT_WINDOW_YARDS
+        && block_risk <= STRIKER_SHOT_MAX_BLOCK_PROBABILITY
+        && observation.shot_on_frame_probability >= STRIKER_SHOT_MIN_ON_FRAME_PROBABILITY
+        && observation.shot_beat_goalkeeper_probability >= STRIKER_SHOT_MIN_KEEPER_BEAT_PROBABILITY
+}
+
+fn striker_must_shoot(observation: &SoccerPomdpObservation, role: PlayerRole) -> bool {
+    role == PlayerRole::Forward
+        && observation.yards_to_goal <= STRIKER_MUST_SHOOT_YARDS
+        && striker_shot_window_is_qualified(observation, role)
+}
+
+fn striker_legal_shot_attempt_bonus(observation: &SoccerPomdpObservation, role: PlayerRole) -> f64 {
+    if !striker_shot_window_is_qualified(observation, role) {
+        return 0.0;
+    }
+    let range_fit = ((STRIKER_SHOT_WINDOW_YARDS - observation.yards_to_goal)
+        / STRIKER_SHOT_WINDOW_YARDS)
+        .clamp(0.0, 1.0);
+    let lane_fit = (1.0
+        - observation.shot_block_probability.clamp(0.0, 1.0)
+            / STRIKER_SHOT_MAX_BLOCK_PROBABILITY.max(1e-6))
+    .clamp(0.0, 1.0);
+    let on_frame_fit = (observation.shot_on_frame_probability
+        / SHOT_ON_FRAME_MIN_PROBABILITY.max(1e-6))
+    .clamp(0.0, 1.4);
+    let keeper_fit = (observation.shot_beat_goalkeeper_probability
+        / SHOT_KEEPER_BEAT_MIN_PROBABILITY.max(1e-6))
+    .clamp(0.0, 1.4);
+    let space_fit = (observation.forward_dribble_space_yards / 12.0).clamp(0.0, 1.0);
+    let urgency = observation
+        .offensive_urgency
+        .max(observation.decision_urgency)
+        .max(observation.pressure_urgency * 0.75)
+        .clamp(0.0, 1.0);
+    (0.08
+        + range_fit * 0.14
+        + lane_fit * 0.06
+        + on_frame_fit * 0.05
+        + keeper_fit * 0.04
+        + space_fit * 0.04
+        + urgency * 0.06)
+        .clamp(0.0, 0.34)
+}
+
 fn close_clear_shot_attempt_probability(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
     shooting_skill: f64,
 ) -> f64 {
-    if !shot_decision_is_qualified(observation) {
+    if !shot_decision_is_qualified_for_role(observation, role) {
         return 0.0;
     }
-    let close_fit = ((22.0 - observation.yards_to_goal) / 14.0).clamp(0.0, 1.0);
+    let (window_yards, ramp_yards) = match role {
+        PlayerRole::Forward => (STRIKER_SHOT_WINDOW_YARDS, 18.0),
+        _ => (22.0, 14.0),
+    };
+    let mut close_fit = ((window_yards - observation.yards_to_goal) / ramp_yards).clamp(0.0, 1.0);
+    if role == PlayerRole::Forward && observation.yards_to_goal <= STRIKER_SHOT_WINDOW_YARDS {
+        close_fit = close_fit.max(0.24);
+    }
+    if striker_must_shoot(observation, role) {
+        close_fit = close_fit.max(0.88);
+    }
     if close_fit <= 0.0 {
         return 0.0;
     }
@@ -30455,10 +30580,18 @@ fn close_clear_shot_attempt_probability(
         .max(observation.decision_urgency)
         .clamp(0.0, 1.0);
     let role_bonus = match role {
-        PlayerRole::Forward => 0.15,
+        PlayerRole::Forward => 0.24,
         PlayerRole::Midfielder => 0.08,
         PlayerRole::Defender => 0.02,
         PlayerRole::Goalkeeper => 0.0,
+    };
+    let striker_window_bonus = if role == PlayerRole::Forward {
+        let window_fit = ((STRIKER_SHOT_WINDOW_YARDS - observation.yards_to_goal)
+            / (STRIKER_SHOT_WINDOW_YARDS - STRIKER_MUST_SHOOT_YARDS).max(1e-6))
+        .clamp(0.0, 1.0);
+        0.18 + window_fit * 0.22
+    } else {
+        0.0
     };
 
     (0.22
@@ -30468,12 +30601,28 @@ fn close_clear_shot_attempt_probability(
         + keeper_fit * 0.11
         + shooting_skill.clamp(0.0, 1.0) * 0.10
         + urgency * 0.10
-        + role_bonus)
-        .clamp(0.30, 0.92)
+        + role_bonus
+        + striker_window_bonus)
+        .clamp(
+            0.30,
+            if role == PlayerRole::Forward {
+                0.99
+            } else {
+                0.92
+            },
+        )
 }
 
 fn first_time_shot_decision_is_qualified(observation: &SoccerPomdpObservation) -> bool {
     observation.first_time_shot_score > 0.0 && shot_decision_is_qualified(observation)
+}
+
+fn first_time_shot_decision_is_qualified_for_role(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> bool {
+    observation.first_time_shot_score > 0.0
+        && shot_decision_is_qualified_for_role(observation, role)
 }
 
 fn aerial_duel_skill_from_snapshot(player: &PlayerSnapshot) -> f64 {
@@ -31313,6 +31462,14 @@ fn mph_to_yps(mph: f64) -> f64 {
     mph.max(0.0) * 1760.0 / 3600.0
 }
 
+fn shot_power_for_skill(shooting_skill: f64) -> f64 {
+    (0.82 + shooting_skill.clamp(0.0, 1.0) * 0.18).clamp(0.82, 1.0)
+}
+
+fn shot_power_for_finish_skill(finish_skill: f64) -> f64 {
+    (0.78 + finish_skill.clamp(0.0, 1.0) * 0.20).clamp(0.78, 0.98)
+}
+
 fn shot_speed_yps_from_power(power: f64, skills: &SkillProfile) -> f64 {
     let shooting = ability01(skills.shooting);
     let foot_power = ability01(
@@ -31322,7 +31479,7 @@ fn shot_speed_yps_from_power(power: f64, skills: &SkillProfile) -> f64 {
     );
     let strength = ability01(skills.strength);
     let technique_power = (shooting * 0.42 + foot_power * 0.40 + strength * 0.18).clamp(0.0, 1.0);
-    let mph = 30.0 + power.clamp(0.0, 1.0) * (18.0 + technique_power * 12.0);
+    let mph = 32.0 + power.clamp(0.0, 1.0) * (20.0 + technique_power * 10.0);
     mph_to_yps(mph.clamp(18.0, 60.0))
 }
 
@@ -32013,7 +32170,7 @@ fn shot_beat_goalkeeper_probability_for_snapshot(
             .right_foot_shot_power
             .max(player.skills.left_foot_shot_power),
     );
-    let shot_power = 0.72 + 0.28 * (shooting_skill * 0.72 + foot_power * 0.28);
+    let shot_power = shot_power_for_skill(shooting_skill * 0.72 + foot_power * 0.28);
     let shot_speed = shot_speed_yps_from_power(shot_power.clamp(0.0, 1.0), &player.skills);
     let save_probability = goalkeeper_save_probability_from_traits(
         &keeper.skills,
@@ -32265,7 +32422,9 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
         };
     }
     match action {
-        "shoot" => observation.has_ball && shot_decision_is_qualified(&observation),
+        "shoot" => {
+            observation.has_ball && shot_decision_is_qualified_for_role(&observation, player.role)
+        }
         "pass" => observation.has_ball && snapshot.best_visible_pass_target(player_id).is_some(),
         "aerial-pass" => {
             observation.has_ball && snapshot.best_aerial_pass_target(player_id).is_some()
@@ -32277,7 +32436,7 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
         "first-time-shot" | "first-time-header" => {
             observation.has_ball
                 && observation.first_touch_available
-                && first_time_shot_decision_is_qualified(&observation)
+                && first_time_shot_decision_is_qualified_for_role(&observation, player.role)
         }
         "first-time-pass" => {
             observation.has_ball
@@ -37477,6 +37636,60 @@ mod tests {
         observation.shot_beat_goalkeeper_probability = SHOT_KEEPER_BEAT_MIN_PROBABILITY + 0.20;
         observation.immediate_dispossession_risk = SHOT_BAILOUT_DISPOSSESSION_RISK + 0.20;
         assert!(!shot_decision_is_qualified(&observation));
+    }
+
+    #[test]
+    fn striker_shot_window_extends_to_thirty_yards() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1416,
+            ..Default::default()
+        });
+        let attacker = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].position = Vec2::new(40.0, 90.5);
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(attacker);
+        observation.shot_lane_open = true;
+        observation.yards_to_goal = STRIKER_SHOT_WINDOW_YARDS - 0.5;
+        observation.shot_block_probability = 0.20;
+        observation.shot_on_frame_probability = STRIKER_SHOT_MIN_ON_FRAME_PROBABILITY + 0.02;
+        observation.shot_beat_goalkeeper_probability =
+            STRIKER_SHOT_MIN_KEEPER_BEAT_PROBABILITY + 0.02;
+
+        assert!(!shot_decision_is_qualified(&observation));
+        assert!(shot_decision_is_qualified_for_role(
+            &observation,
+            PlayerRole::Forward
+        ));
+        assert!(!shot_decision_is_qualified_for_role(
+            &observation,
+            PlayerRole::Midfielder
+        ));
+        assert!(
+            close_clear_shot_attempt_probability(&observation, PlayerRole::Forward, 0.85) >= 0.55
+        );
+    }
+
+    #[test]
+    fn elite_shot_speed_can_reach_sixty_mph_cap() {
+        let skills = SkillProfile {
+            shooting: 10.0,
+            right_foot_shot_power: 10.0,
+            left_foot_shot_power: 10.0,
+            strength: 10.0,
+            ..SkillProfile::default()
+        };
+
+        let speed = shot_speed_yps_from_power(shot_power_for_skill(1.0), &skills);
+
+        assert!(speed <= mph_to_yps(60.0) + 1e-9);
+        assert!(speed >= mph_to_yps(59.0));
     }
 
     #[test]
@@ -45548,7 +45761,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_close_striker_shoots_decisively_but_still_probabilistically() {
+    fn clear_close_striker_shoots_definitely_inside_twenty_five_yards() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
             seed: 2223,
@@ -45580,13 +45793,7 @@ mod tests {
             observation.yards_to_goal <= 20.0,
             "test scenario should be inside the explicit close-shot window"
         );
-        assert!(
-            close_clear_shot_attempt_probability(
-                &observation,
-                sim.players[attacker].role,
-                ability01(sim.players[attacker].skills.shooting),
-            ) >= 0.82
-        );
+        assert!(striker_must_shoot(&observation, sim.players[attacker].role));
 
         let mut shoot_count = 0;
         let trials = 120;
@@ -45600,12 +45807,61 @@ mod tests {
         }
 
         assert!(
-            shoot_count >= 25,
-            "clear close striker should shoot often, got {shoot_count}/{trials}"
+            shoot_count == trials,
+            "clear striker inside 25 yards should shoot every time, got {shoot_count}/{trials}"
         );
+    }
+
+    #[test]
+    fn clear_striker_takes_attempts_from_thirty_yard_window() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            dt_seconds: 1.0,
+            seed: 2224,
+            ..Default::default()
+        });
+        let attacker = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].position = Vec2::new(40.0, 91.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+        sim.players[attacker].skills.shooting = 9.2;
+        sim.players[attacker].skills.right_foot_shot_power = 9.4;
+        sim.players[attacker].skills.left_foot_shot_power = 8.8;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.98;
+        sim.players[attacker].preferences.pass_bias = 0.02;
+        sim.players[attacker].preferences.dribble_bias = 0.04;
+        sim.players[keeper].position = Vec2::new(38.5, 116.0);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(observation.yards_to_goal > STRIKER_MUST_SHOOT_YARDS);
+        assert!(observation.yards_to_goal <= STRIKER_SHOT_WINDOW_YARDS);
+        assert!(shot_decision_is_qualified_for_role(
+            &observation,
+            sim.players[attacker].role
+        ));
+
+        let mut shoot_count = 0;
+        let trials = 120;
+        for seed in 0..trials {
+            let mut player = sim.players[attacker].clone();
+            let mut rng = mulberry32(22_000 + seed);
+            let intent = player.run_time_step(&snapshot, None, None, &mut rng);
+            if matches!(intent.action, SoccerAction::Shoot { .. }) {
+                shoot_count += 1;
+            }
+        }
+
         assert!(
-            shoot_count < trials,
-            "shot choice should remain probabilistic, got {shoot_count}/{trials}"
+            shoot_count >= 80,
+            "clear striker in 25-30 yard window should shoot often, got {shoot_count}/{trials}"
         );
     }
 

@@ -1618,8 +1618,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         default_evolution_interval_games(parallel_games),
     )?
     .max(1);
-    let evolution_elite_games =
-        env_usize("SOCCER_EVOLUTION_ELITE_GAMES", DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES)?.max(1);
+    let evolution_elite_games = env_usize(
+        "SOCCER_EVOLUTION_ELITE_GAMES",
+        DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES,
+    )?
+    .max(1);
     let default_evolution_options = SoccerEvolutionOptions::default();
     let evolution_options = SoccerEvolutionOptions {
         mutation_rate: env_f64(
@@ -1634,7 +1637,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             "SOCCER_EVOLUTION_ELITE_WEIGHT_FLOOR",
             default_evolution_options.elite_weight_floor,
         )?,
-        seed: env_u32("SOCCER_EVOLUTION_SEED", default_evolution_options.seed as u32)? as u64,
+        seed: env_u32(
+            "SOCCER_EVOLUTION_SEED",
+            default_evolution_options.seed as u32,
+        )? as u64,
     };
     let neural_drain_timeout_ms = env_usize(
         "SOCCER_NEURAL_DRAIN_TIMEOUT_MS",
@@ -2182,9 +2188,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let version_label = format!(
                     "{}-mutation",
                     soccer_learning_pg_version_label(
-                    &run_id,
-                    shard_index,
-                    completed_after_batch.saturating_sub(1),
+                        &run_id,
+                        shard_index,
+                        completed_after_batch.saturating_sub(1),
                     )
                 );
                 pg_policy_version_buffer.push(PendingPostgresPolicyVersion {

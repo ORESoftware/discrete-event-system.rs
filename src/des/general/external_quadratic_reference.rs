@@ -5,16 +5,21 @@
 //! (`scripts/qp_reference.py`) remains available for installed open-source
 //! solvers such as HiGHS/highspy, SciPy, OSQP, and CVXPY backends.
 
+use std::fs;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::des::general::external_gams_solver_probe::{
+    external_gams_listing_confirms_solver, find_external_gams_command,
+    wait_for_external_gams_output, ExternalGamsSolver,
+};
 use crate::des::general::qp::{
     solve_miqp_enumeration, solve_qcp_pattern_search, solve_qp_active_set,
     solve_socp_pattern_search, MIQPOptions, MixedIntegerQuadraticProgram,
@@ -517,6 +522,535 @@ fn solve_qp_with_rust_reference(
             .unwrap_or_else(|| "Rust QP active-set enumeration".to_string()),
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     }
+}
+
+const GAMS_QP_COEFF_EPS: f64 = 1e-12;
+
+fn solve_qp_with_gams_mosek_reference(
+    problem: &QuadraticProgram,
+) -> Option<ExternalQuadraticReferenceSolution> {
+    let command = find_external_gams_command()?;
+    let started = Instant::now();
+    let stem = gams_mosek_qp_temp_stem();
+    let model_path = std::env::temp_dir().join(format!("{stem}.gms"));
+    let listing_path = std::env::temp_dir().join(format!("{stem}.lst"));
+    let solution_path = std::env::temp_dir().join(format!("{stem}.sol"));
+    let cleanup_paths = [
+        model_path.clone(),
+        listing_path.clone(),
+        solution_path.clone(),
+    ];
+
+    let model_text = match gams_mosek_qp_model_text(problem, &solution_path) {
+        Ok(model_text) => model_text,
+        Err(message) => {
+            cleanup_quadratic_reference_files(&cleanup_paths);
+            return Some(gams_mosek_qp_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ));
+        }
+    };
+    if let Err(err) = fs::write(&model_path, model_text) {
+        cleanup_quadratic_reference_files(&cleanup_paths);
+        return Some(gams_mosek_qp_empty_solution(
+            ExternalQuadraticReferenceStatus::NumericalError,
+            format!("failed to write GAMS/MOSEK QP model: {err}"),
+            started.elapsed().as_secs_f64() * 1000.0,
+        ));
+    }
+
+    let mut process = Command::new(&command);
+    process
+        .arg(&model_path)
+        .arg("qcp=mosek")
+        .arg("lo=0")
+        .arg(format!("o={}", listing_path.display()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(parent) = command.parent() {
+        process.current_dir(parent);
+    }
+
+    let child = match process.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            cleanup_quadratic_reference_files(&cleanup_paths);
+            return Some(gams_mosek_qp_empty_solution(
+                ExternalQuadraticReferenceStatus::Unavailable,
+                format!("failed to start GAMS/MOSEK QP solve: {err}"),
+                started.elapsed().as_secs_f64() * 1000.0,
+            ));
+        }
+    };
+    let timeout_ms = quadratic_reference_timeout_ms();
+    let (output, timed_out) = match wait_for_external_gams_output(child, timeout_ms) {
+        Ok(output) => output,
+        Err(message) => {
+            cleanup_quadratic_reference_files(&cleanup_paths);
+            return Some(gams_mosek_qp_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ));
+        }
+    };
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let listing = fs::read_to_string(&listing_path).unwrap_or_default();
+    let solution_text = fs::read_to_string(&solution_path);
+    cleanup_quadratic_reference_files(&cleanup_paths);
+
+    if timed_out {
+        return Some(gams_mosek_qp_empty_solution(
+            ExternalQuadraticReferenceStatus::NumericalError,
+            format!("GAMS/MOSEK QP solve timed out after {timeout_ms}ms"),
+            elapsed_ms,
+        ));
+    }
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Some(gams_mosek_qp_empty_solution(
+            ExternalQuadraticReferenceStatus::NumericalError,
+            format!(
+                "GAMS/MOSEK QP solve failed: {}",
+                first_non_empty_quadratic_detail(&[&listing, &stderr, &stdout])
+            ),
+            elapsed_ms,
+        ));
+    }
+    if !external_gams_listing_confirms_solver(ExternalGamsSolver::Mosek, &listing) {
+        return Some(gams_mosek_qp_empty_solution(
+            ExternalQuadraticReferenceStatus::NumericalError,
+            "GAMS QCP listing did not confirm MOSEK optimal completion",
+            elapsed_ms,
+        ));
+    }
+
+    let parsed = match solution_text {
+        Ok(solution_text) => match parse_gams_mosek_qp_solution(&solution_text, problem.c.len()) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return Some(gams_mosek_qp_empty_solution(
+                    ExternalQuadraticReferenceStatus::NumericalError,
+                    message,
+                    elapsed_ms,
+                ))
+            }
+        },
+        Err(err) => {
+            return Some(gams_mosek_qp_empty_solution(
+                ExternalQuadraticReferenceStatus::NumericalError,
+                format!("failed to read GAMS/MOSEK QP solution file: {err}"),
+                elapsed_ms,
+            ))
+        }
+    };
+    let status = gams_mosek_qp_status(parsed.modelstat, parsed.solvestat);
+    ExternalQuadraticReferenceSolution {
+        status,
+        solver: "mosek:gams".to_string(),
+        x: (status == ExternalQuadraticReferenceStatus::Optimal)
+            .then_some(parsed.x)
+            .unwrap_or_default(),
+        objective: (status == ExternalQuadraticReferenceStatus::Optimal)
+            .then_some(parsed.objective),
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: None,
+        enumerated: None,
+        message: format!("GAMS/MOSEK QP solve via {}", command.display()),
+        elapsed_ms,
+    }
+    .into()
+}
+
+fn gams_mosek_qp_empty_solution(
+    status: ExternalQuadraticReferenceStatus,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalQuadraticReferenceSolution {
+    ExternalQuadraticReferenceSolution {
+        status,
+        solver: "mosek:gams".to_string(),
+        x: Vec::new(),
+        objective: None,
+        dual_ub: None,
+        dual_eq: None,
+        dual_lower_bounds: None,
+        dual_upper_bounds: None,
+        reduced_gradient: None,
+        iterations: None,
+        enumerated: None,
+        message: message.into(),
+        elapsed_ms,
+    }
+}
+
+fn gams_mosek_qp_model_text(
+    problem: &QuadraticProgram,
+    solution_path: &Path,
+) -> Result<String, String> {
+    let n = problem.c.len();
+    if n == 0 {
+        return Err("GAMS/MOSEK QP bridge requires at least one variable".to_string());
+    }
+    if !problem.q.is_empty() {
+        if problem.q.len() != n {
+            return Err(format!(
+                "GAMS/MOSEK QP bridge expected Q rows {} to match variable count {n}",
+                problem.q.len()
+            ));
+        }
+        for (row_index, row) in problem.q.iter().enumerate() {
+            if row.len() != n {
+                return Err(format!(
+                    "GAMS/MOSEK QP bridge expected Q row {row_index} length {} to match variable count {n}",
+                    row.len()
+                ));
+            }
+        }
+    }
+
+    let a_ub: &[Vec<f64>] = problem.a_ub.as_deref().unwrap_or(&[]);
+    let b_ub: &[f64] = problem.b_ub.as_deref().unwrap_or(&[]);
+    let a_eq: &[Vec<f64>] = problem.a_eq.as_deref().unwrap_or(&[]);
+    let b_eq: &[f64] = problem.b_eq.as_deref().unwrap_or(&[]);
+    validate_gams_qp_rows("A_ub", a_ub, b_ub, n)?;
+    validate_gams_qp_rows("A_eq", a_eq, b_eq, n)?;
+    validate_gams_qp_bounds("lb", &problem.lb, n)?;
+    validate_gams_qp_bounds("ub", &problem.ub, n)?;
+
+    let vars: Vec<String> = (1..=n).map(|idx| format!("x{idx}")).collect();
+    let mut equations = vec!["obj".to_string()];
+    equations.extend((1..=a_ub.len()).map(|idx| format!("ub{idx}")));
+    equations.extend((1..=a_eq.len()).map(|idx| format!("eq{idx}")));
+
+    let mut text = String::new();
+    text.push_str("Variables ");
+    text.push_str(&vars.join(", "));
+    text.push_str(", objvar;\n");
+    text.push_str("Equations ");
+    text.push_str(&equations.join(", "));
+    text.push_str(";\n");
+    text.push_str("obj.. objvar =e= ");
+    text.push_str(&gams_qp_objective_expr(problem, &vars)?);
+    text.push_str(";\n");
+    for (idx, (row, rhs)) in a_ub.iter().zip(b_ub.iter()).enumerate() {
+        text.push_str(&format!(
+            "ub{}.. {} =l= {};\n",
+            idx + 1,
+            gams_linear_expr(row, &vars)?,
+            format_gams_number(*rhs)
+        ));
+    }
+    for (idx, (row, rhs)) in a_eq.iter().zip(b_eq.iter()).enumerate() {
+        text.push_str(&format!(
+            "eq{}.. {} =e= {};\n",
+            idx + 1,
+            gams_linear_expr(row, &vars)?,
+            format_gams_number(*rhs)
+        ));
+    }
+    if let Some(lower_bounds) = &problem.lb {
+        for (idx, bound) in lower_bounds.iter().enumerate() {
+            if let Some(value) = *bound {
+                if !value.is_finite() {
+                    continue;
+                }
+                text.push_str(&format!(
+                    "{}.lo = {};\n",
+                    vars[idx],
+                    format_gams_number(value)
+                ));
+            }
+        }
+    }
+    if let Some(upper_bounds) = &problem.ub {
+        for (idx, bound) in upper_bounds.iter().enumerate() {
+            if let Some(value) = *bound {
+                if !value.is_finite() {
+                    continue;
+                }
+                text.push_str(&format!(
+                    "{}.up = {};\n",
+                    vars[idx],
+                    format_gams_number(value)
+                ));
+            }
+        }
+    }
+    text.push_str("Model m /all/;\n");
+    text.push_str("Solve m using QCP minimizing objvar;\n");
+    text.push_str(&format!(
+        "File sol /'{}/';\n",
+        gams_single_quoted_path(solution_path)
+    ));
+    text.push_str("put sol;\n");
+    text.push_str("put 'modelstat ', m.modelstat:0:0 /;\n");
+    text.push_str("put 'solvestat ', m.solvestat:0:0 /;\n");
+    text.push_str("put 'objective ', objvar.l:24:16 /;\n");
+    for var in &vars {
+        text.push_str(&format!("put '{var} ', {var}.l:24:16 /;\n"));
+    }
+    Ok(text)
+}
+
+fn validate_gams_qp_rows(
+    name: &str,
+    rows: &[Vec<f64>],
+    rhs: &[f64],
+    n: usize,
+) -> Result<(), String> {
+    if rows.len() != rhs.len() {
+        return Err(format!(
+            "GAMS/MOSEK QP bridge expected {name} rows {} to match rhs length {}",
+            rows.len(),
+            rhs.len()
+        ));
+    }
+    for (row_index, row) in rows.iter().enumerate() {
+        if row.len() != n {
+            return Err(format!(
+                "GAMS/MOSEK QP bridge expected {name} row {row_index} length {} to match variable count {n}",
+                row.len()
+            ));
+        }
+        if !row.iter().all(|value| value.is_finite()) {
+            return Err(format!(
+                "GAMS/MOSEK QP bridge found non-finite coefficient in {name} row {row_index}"
+            ));
+        }
+    }
+    if !rhs.iter().all(|value| value.is_finite()) {
+        return Err(format!(
+            "GAMS/MOSEK QP bridge found non-finite rhs in {name}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gams_qp_bounds(
+    name: &str,
+    bounds: &Option<Vec<Option<f64>>>,
+    n: usize,
+) -> Result<(), String> {
+    let Some(bounds) = bounds else {
+        return Ok(());
+    };
+    if bounds.len() != n {
+        return Err(format!(
+            "GAMS/MOSEK QP bridge expected {name} length {} to match variable count {n}",
+            bounds.len()
+        ));
+    }
+    if bounds.iter().flatten().any(|value| value.is_nan()) {
+        return Err(format!("GAMS/MOSEK QP bridge found NaN value in {name}"));
+    }
+    Ok(())
+}
+
+fn gams_qp_objective_expr(problem: &QuadraticProgram, vars: &[String]) -> Result<String, String> {
+    let mut terms = Vec::new();
+    if !problem.q.is_empty() {
+        for (row_index, row) in problem.q.iter().enumerate() {
+            for (col_index, coefficient) in row.iter().enumerate() {
+                let factor = if row_index == col_index {
+                    format!("sqr({})", vars[row_index])
+                } else {
+                    format!("{}*{}", vars[row_index], vars[col_index])
+                };
+                push_gams_qp_term(&mut terms, 0.5 * *coefficient, factor)?;
+            }
+        }
+    }
+    for (idx, coefficient) in problem.c.iter().enumerate() {
+        push_gams_qp_term(&mut terms, *coefficient, vars[idx].clone())?;
+    }
+    Ok(gams_qp_terms_to_expr(&terms))
+}
+
+fn gams_linear_expr(coefficients: &[f64], vars: &[String]) -> Result<String, String> {
+    let mut terms = Vec::new();
+    for (idx, coefficient) in coefficients.iter().enumerate() {
+        push_gams_qp_term(&mut terms, *coefficient, vars[idx].clone())?;
+    }
+    Ok(gams_qp_terms_to_expr(&terms))
+}
+
+fn push_gams_qp_term(
+    terms: &mut Vec<(f64, String)>,
+    coefficient: f64,
+    factor: String,
+) -> Result<(), String> {
+    if !coefficient.is_finite() {
+        return Err("GAMS/MOSEK QP bridge found non-finite objective coefficient".to_string());
+    }
+    if coefficient.abs() > GAMS_QP_COEFF_EPS {
+        terms.push((coefficient, factor));
+    }
+    Ok(())
+}
+
+fn gams_qp_terms_to_expr(terms: &[(f64, String)]) -> String {
+    if terms.is_empty() {
+        return "0".to_string();
+    }
+    let mut expr = String::new();
+    for (idx, (coefficient, factor)) in terms.iter().enumerate() {
+        let sign = if *coefficient < 0.0 {
+            if idx == 0 {
+                "-"
+            } else {
+                " - "
+            }
+        } else if idx == 0 {
+            ""
+        } else {
+            " + "
+        };
+        expr.push_str(sign);
+        let magnitude = coefficient.abs();
+        if (magnitude - 1.0).abs() <= GAMS_QP_COEFF_EPS {
+            expr.push_str(factor);
+        } else {
+            expr.push_str(&format!("{}*{}", format_gams_number(magnitude), factor));
+        }
+    }
+    expr
+}
+
+fn format_gams_number(value: f64) -> String {
+    let mut text = format!("{value:.15}");
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    if text == "-0" {
+        "0".to_string()
+    } else {
+        text
+    }
+}
+
+fn gams_single_quoted_path(path: &Path) -> String {
+    path.display().to_string().replace('\'', "''")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GamsMosekQpSolution {
+    modelstat: i64,
+    solvestat: i64,
+    objective: f64,
+    x: Vec<f64>,
+}
+
+fn parse_gams_mosek_qp_solution(text: &str, n: usize) -> Result<GamsMosekQpSolution, String> {
+    let mut modelstat = None;
+    let mut solvestat = None;
+    let mut objective = None;
+    let mut x = vec![None; n];
+
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        let Some(value) = parts.next() else {
+            continue;
+        };
+        match key {
+            "modelstat" => {
+                modelstat =
+                    Some(value.parse::<i64>().map_err(|err| {
+                        format!("failed to parse GAMS/MOSEK QP modelstat: {err}")
+                    })?);
+            }
+            "solvestat" => {
+                solvestat =
+                    Some(value.parse::<i64>().map_err(|err| {
+                        format!("failed to parse GAMS/MOSEK QP solvestat: {err}")
+                    })?);
+            }
+            "objective" => {
+                objective =
+                    Some(value.parse::<f64>().map_err(|err| {
+                        format!("failed to parse GAMS/MOSEK QP objective: {err}")
+                    })?);
+            }
+            key if key.starts_with('x') => {
+                let idx = key[1..].parse::<usize>().map_err(|err| {
+                    format!("failed to parse GAMS/MOSEK QP variable name {key}: {err}")
+                })?;
+                if idx == 0 || idx > n {
+                    return Err(format!(
+                        "GAMS/MOSEK QP solution variable {key} is outside 1..={n}"
+                    ));
+                }
+                x[idx - 1] = Some(value.parse::<f64>().map_err(|err| {
+                    format!("failed to parse GAMS/MOSEK QP variable {key}: {err}")
+                })?);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(GamsMosekQpSolution {
+        modelstat: modelstat
+            .ok_or_else(|| "GAMS/MOSEK QP solution missing modelstat".to_string())?,
+        solvestat: solvestat
+            .ok_or_else(|| "GAMS/MOSEK QP solution missing solvestat".to_string())?,
+        objective: objective
+            .ok_or_else(|| "GAMS/MOSEK QP solution missing objective".to_string())?,
+        x: x.into_iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                value.ok_or_else(|| format!("GAMS/MOSEK QP solution missing x{}", idx + 1))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn gams_mosek_qp_status(modelstat: i64, solvestat: i64) -> ExternalQuadraticReferenceStatus {
+    if solvestat == 1 && matches!(modelstat, 1 | 2) {
+        ExternalQuadraticReferenceStatus::Optimal
+    } else if matches!(modelstat, 3) {
+        ExternalQuadraticReferenceStatus::Unbounded
+    } else if matches!(modelstat, 4 | 5 | 10 | 19) {
+        ExternalQuadraticReferenceStatus::Infeasible
+    } else {
+        ExternalQuadraticReferenceStatus::NumericalError
+    }
+}
+
+fn gams_mosek_qp_temp_stem() -> String {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("des-rs-gams-mosek-qp-{}-{suffix}", std::process::id())
+}
+
+fn cleanup_quadratic_reference_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn first_non_empty_quadratic_detail(texts: &[&str]) -> String {
+    texts
+        .iter()
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(240).collect())
+        .unwrap_or_else(|| "no process output".to_string())
 }
 
 fn solve_miqp_with_rust_reference(
@@ -1291,7 +1825,22 @@ pub fn solve_qp_with_external_reference(
         );
     }
 
-    run_quadratic_reference_json(quadratic_program_to_reference_json(problem), opts)
+    let solution = run_quadratic_reference_json(quadratic_program_to_reference_json(problem), opts);
+    if opts.solver == ExternalQuadraticReferenceSolver::Mosek
+        && !matches!(
+            solution.status,
+            ExternalQuadraticReferenceStatus::Optimal
+                | ExternalQuadraticReferenceStatus::Infeasible
+                | ExternalQuadraticReferenceStatus::Unbounded
+        )
+    {
+        if let Some(gams_solution) = solve_qp_with_gams_mosek_reference(problem) {
+            if gams_solution.status == ExternalQuadraticReferenceStatus::Optimal {
+                return gams_solution;
+            }
+        }
+    }
+    solution
 }
 
 pub fn solve_miqp_with_external_reference(

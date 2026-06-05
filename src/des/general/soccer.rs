@@ -253,7 +253,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 61;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 65;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -269,6 +269,12 @@ const SOCCER_NEURAL_FEATURE_STRENGTH_TO_WEIGHT: usize = 57;
 const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_ANGLE: usize = 58;
 const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_DISTANCE: usize = 59;
 const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_FORWARD_CLASS: usize = 60;
+const SOCCER_NEURAL_FEATURE_TEAM_CENTROID_BALL_DISTANCE: usize = 61;
+const SOCCER_NEURAL_FEATURE_TEAM_SPREAD: usize = 62;
+const SOCCER_NEURAL_FEATURE_TEAM_PLAYERS_NEAR_BALL: usize = 63;
+const SOCCER_NEURAL_FEATURE_TEAM_FORWARD_VELOCITY: usize = 64;
+const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61];
+const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
 const DEFAULT_SOCCER_NEURAL_TRAIN_EVERY_TICKS: usize = 4;
@@ -1169,6 +1175,14 @@ pub struct SoccerPomdpObservation {
     #[serde(default)]
     pub team_brain_defensive_cover_actual: usize,
     #[serde(default)]
+    pub team_centroid_to_ball_yards: f64,
+    #[serde(default)]
+    pub team_spread_yards: f64,
+    #[serde(default)]
+    pub team_players_near_ball: usize,
+    #[serde(default)]
+    pub team_forward_velocity_yps: f64,
+    #[serde(default)]
     pub attacking_overload_attackers: usize,
     #[serde(default)]
     pub attacking_overload_defenders: usize,
@@ -2007,6 +2021,14 @@ pub struct SoccerQStateKey {
     pub team_brain_cover_target_bin: u8,
     #[serde(default)]
     pub team_brain_cover_actual_bin: u8,
+    #[serde(default)]
+    pub team_centroid_ball_distance_bin: u8,
+    #[serde(default)]
+    pub team_spread_bin: u8,
+    #[serde(default)]
+    pub team_players_near_ball_bin: u8,
+    #[serde(default)]
+    pub team_forward_velocity_bin: u8,
     pub has_ball: bool,
     pub visible_ball: bool,
     pub shot_lane_open: bool,
@@ -2213,6 +2235,19 @@ impl SoccerQStateKey {
             ),
             team_brain_cover_target_bin: observation.team_brain_defensive_cover_target.min(4) as u8,
             team_brain_cover_actual_bin: observation.team_brain_defensive_cover_actual.min(4) as u8,
+            team_centroid_ball_distance_bin: distance_bucket(
+                observation.team_centroid_to_ball_yards,
+                &[8.0, 16.0, 28.0, 42.0],
+            ),
+            team_spread_bin: distance_bucket(
+                observation.team_spread_yards,
+                &[8.0, 14.0, 22.0, 34.0],
+            ),
+            team_players_near_ball_bin: observation.team_players_near_ball.min(5) as u8,
+            team_forward_velocity_bin: distance_bucket(
+                observation.team_forward_velocity_yps,
+                &[-2.0, 0.0, 2.0, 5.0],
+            ),
             has_ball: observation.has_ball,
             visible_ball: observation.visible_ball,
             shot_lane_open: observation.shot_lane_open,
@@ -2463,6 +2498,10 @@ impl SoccerQStateKey {
             && self.team_brain_risk_bin == other.team_brain_risk_bin
             && self.team_brain_cover_target_bin == other.team_brain_cover_target_bin
             && self.team_brain_cover_actual_bin == other.team_brain_cover_actual_bin
+            && self.team_centroid_ball_distance_bin == other.team_centroid_ball_distance_bin
+            && self.team_spread_bin == other.team_spread_bin
+            && self.team_players_near_ball_bin == other.team_players_near_ball_bin
+            && self.team_forward_velocity_bin == other.team_forward_velocity_bin
             && self.has_ball == other.has_ball
             && self.visible_ball == other.visible_ball
             && self.shot_lane_open == other.shot_lane_open
@@ -11745,6 +11784,10 @@ impl WorldSnapshot {
                 team_brain_risk_tolerance: 0.0,
                 team_brain_defensive_cover_target: 0,
                 team_brain_defensive_cover_actual: 0,
+                team_centroid_to_ball_yards: 0.0,
+                team_spread_yards: 0.0,
+                team_players_near_ball: 0,
+                team_forward_velocity_yps: 0.0,
                 attacking_overload_attackers: 0,
                 attacking_overload_defenders: 0,
                 attacking_numbers_advantage: 0,
@@ -11857,6 +11900,7 @@ impl WorldSnapshot {
             .unwrap_or((0.0, 0.0));
         let team_directive = self.tactical_directive(me.team);
         let team_brain_mode = team_brain_mode_for(me.team, self.phase, self.possession_team());
+        let team_shape = team_shape_observation_from_snapshot(self, me.team, self.ball.position);
         let goal = Vec2::new(self.field_width * 0.5, me.team.goal_y(self.field_length));
         let own_goal = Vec2::new(
             self.field_width * 0.5,
@@ -12288,6 +12332,10 @@ impl WorldSnapshot {
             team_brain_risk_tolerance: team_directive.risk_tolerance,
             team_brain_defensive_cover_target: team_directive.defensive_cover_target,
             team_brain_defensive_cover_actual: team_directive.defensive_cover_actual,
+            team_centroid_to_ball_yards: team_shape.centroid_to_ball_yards,
+            team_spread_yards: team_shape.spread_yards,
+            team_players_near_ball: team_shape.players_near_ball,
+            team_forward_velocity_yps: team_shape.forward_velocity_yps,
             attacking_overload_attackers: team_directive.attacking_overload_attackers,
             attacking_overload_defenders: team_directive.attacking_overload_defenders,
             attacking_numbers_advantage: team_directive.attacking_numbers_advantage,
@@ -17575,7 +17623,7 @@ fn team_brain_shape_from_awareness(
         count += 1;
         position_sum += player.position;
         velocity_sum += player.velocity;
-        if player.position.distance(ball_position) <= 18.0 {
+        if player.position.distance(ball_position) <= TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS {
             players_near_ball += 1;
         }
     }
@@ -17592,6 +17640,64 @@ fn team_brain_shape_from_awareness(
         .sum::<f64>()
         / count_f;
     (centroid, average_velocity, spread, players_near_ball)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TeamShapeObservation {
+    centroid_to_ball_yards: f64,
+    spread_yards: f64,
+    players_near_ball: usize,
+    forward_velocity_yps: f64,
+}
+
+fn team_shape_observation_from_snapshot(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    ball_position: Vec2,
+) -> TeamShapeObservation {
+    let mut count = 0_usize;
+    let mut position_sum = Vec2::zero();
+    let mut velocity_sum = Vec2::zero();
+    let mut players_near_ball = 0_usize;
+
+    for player in snapshot.players.iter().filter(|player| player.team == team) {
+        let position = snapshot
+            .player_position(player.id)
+            .unwrap_or(player.position);
+        count += 1;
+        position_sum += position;
+        velocity_sum += player.velocity;
+        if position.distance(ball_position) <= TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS {
+            players_near_ball += 1;
+        }
+    }
+
+    if count == 0 {
+        return TeamShapeObservation::default();
+    }
+
+    let count_f = count as f64;
+    let centroid = position_sum / count_f;
+    let average_velocity = velocity_sum / count_f;
+    let spread_yards = snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team)
+        .map(|player| {
+            snapshot
+                .player_position(player.id)
+                .unwrap_or(player.position)
+                .distance(centroid)
+        })
+        .sum::<f64>()
+        / count_f;
+
+    TeamShapeObservation {
+        centroid_to_ball_yards: centroid.distance(ball_position),
+        spread_yards,
+        players_near_ball,
+        forward_velocity_yps: average_velocity.y * team.attack_dir(),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23216,7 +23322,10 @@ fn build_soccer_neural_network(
 fn build_soccer_neural_network_from_snapshot(
     snapshot: &SoccerNeuralNetworkSnapshot,
 ) -> Result<FeedForwardNetwork, String> {
-    if snapshot.input_dim != SOCCER_NEURAL_FEATURE_DIM {
+    let migrates_legacy_input = snapshot.input_dim != SOCCER_NEURAL_FEATURE_DIM
+        && SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&snapshot.input_dim)
+        && snapshot.input_dim < SOCCER_NEURAL_FEATURE_DIM;
+    if snapshot.input_dim != SOCCER_NEURAL_FEATURE_DIM && !migrates_legacy_input {
         return Err(format!(
             "soccer neural snapshot input_dim {} does not match expected {}",
             snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM
@@ -23267,8 +23376,14 @@ fn build_soccer_neural_network_from_snapshot(
                 "soccer neural snapshot layer {layer_index} has non-finite biases"
             ));
         }
+        let mut weights = layer.weights.clone();
+        if layer_index == 0 && migrates_legacy_input {
+            for row in &mut weights {
+                row.resize(SOCCER_NEURAL_FEATURE_DIM, 0.0);
+            }
+        }
         layers.push(DenseLayerConfig {
-            weights: layer.weights.clone(),
+            weights,
             biases: layer.biases.clone(),
             activation: soccer_neural_activation_from_label(&layer.activation)?,
         });
@@ -23282,7 +23397,10 @@ fn build_soccer_neural_network_from_snapshot(
     }
 
     let network = FeedForwardNetwork::new(layers);
-    if snapshot.parameter_count != 0 && snapshot.parameter_count != network.num_parameters() {
+    if !migrates_legacy_input
+        && snapshot.parameter_count != 0
+        && snapshot.parameter_count != network.num_parameters()
+    {
         return Err(format!(
             "soccer neural snapshot parameter_count {} does not match decoded {}",
             snapshot.parameter_count,
@@ -23565,6 +23683,10 @@ fn soccer_neural_transition_features(
             .unwrap_or(0.0),
         soccer_neural_bin(context.dribble_touch_distance_bin, 5.0),
         f64::from(context.dribble_touch_forward_class).clamp(-1.0, 1.0),
+        soccer_neural_bin(state.team_centroid_ball_distance_bin, 5.0),
+        soccer_neural_bin(state.team_spread_bin, 5.0),
+        soccer_neural_bin(state.team_players_near_ball_bin, 5.0),
+        soccer_neural_bin(state.team_forward_velocity_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -40828,6 +40950,123 @@ mod tests {
     }
 
     #[test]
+    fn pomdp_q_state_and_neural_features_track_team_shape_context() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14231,
+            ..Default::default()
+        });
+        let holder = 5;
+        let ball_position = Vec2::new(40.0, 62.0);
+        for player in &mut sim.players {
+            player.velocity = Vec2::zero();
+            player.position = match player.team {
+                Team::Home => {
+                    ball_position
+                        + Vec2::new((player.id % 3) as f64 - 1.0, (player.id % 4) as f64 - 1.5)
+                }
+                Team::Away => Vec2::new(72.0, 94.0),
+            };
+            player.home_position = player.position;
+        }
+        for player in sim
+            .players
+            .iter_mut()
+            .filter(|player| player.team == Team::Home)
+        {
+            player.velocity = Vec2::new(0.0, 3.4);
+        }
+        sim.players[holder].position = ball_position;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = ball_position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let compact_snapshot = WorldSnapshot::from_match(&sim);
+        let compact_observation = compact_snapshot.observation_for(holder);
+        let mdp_state = compact_snapshot.mdp_state_for_player(holder);
+        let compact_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &compact_observation,
+            Team::Home,
+            sim.players[holder].role,
+        );
+
+        for player in sim
+            .players
+            .iter_mut()
+            .filter(|player| player.team == Team::Home)
+        {
+            player.position = Vec2::new(8.0 + player.id as f64 * 6.0, 20.0 + player.id as f64);
+            player.home_position = player.position;
+            player.velocity = Vec2::new(0.0, -3.2);
+        }
+        sim.players[holder].position = ball_position;
+        sim.players[holder].home_position = ball_position;
+        sim.players[holder].velocity = Vec2::new(0.0, -3.2);
+        sim.ball.position = ball_position;
+
+        let stretched_snapshot = WorldSnapshot::from_match(&sim);
+        let stretched_observation = stretched_snapshot.observation_for(holder);
+        let stretched_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &stretched_observation,
+            Team::Home,
+            sim.players[holder].role,
+        );
+
+        assert!(compact_observation.team_centroid_to_ball_yards < 3.0);
+        assert!(stretched_observation.team_centroid_to_ball_yards > 20.0);
+        assert!(compact_observation.team_spread_yards < 4.0);
+        assert!(stretched_observation.team_spread_yards > compact_observation.team_spread_yards);
+        assert_eq!(compact_observation.team_players_near_ball, 11);
+        assert_eq!(stretched_observation.team_players_near_ball, 1);
+        assert!(compact_observation.team_forward_velocity_yps > 3.0);
+        assert!(stretched_observation.team_forward_velocity_yps < -3.0);
+        assert!(
+            compact_key.team_centroid_ball_distance_bin
+                < stretched_key.team_centroid_ball_distance_bin
+        );
+        assert!(compact_key.team_spread_bin < stretched_key.team_spread_bin);
+        assert!(compact_key.team_players_near_ball_bin > stretched_key.team_players_near_ball_bin);
+        assert!(compact_key.team_forward_velocity_bin > stretched_key.team_forward_velocity_bin);
+        assert_ne!(compact_key, stretched_key);
+
+        let decision = test_decision_trace(&compact_snapshot, holder, "carry-forward");
+        let transition = SoccerLearningTransition {
+            tick: compact_snapshot.tick,
+            player_id: holder,
+            team: Team::Home,
+            role: sim.players[holder].role,
+            state: decision.mdp_state.clone(),
+            observation: compact_observation,
+            belief: decision.belief.clone(),
+            action: decision.action.clone(),
+            action_target: decision.action_target.clone(),
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 1.0,
+            next_state: compact_snapshot.mdp_state_for_player(holder),
+            next_observation: compact_snapshot.observation_for(holder),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
+        assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_TEAM_CENTROID_BALL_DISTANCE],
+            0.0
+        );
+        assert_eq!(features[SOCCER_NEURAL_FEATURE_TEAM_SPREAD], 0.0);
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_TEAM_PLAYERS_NEAR_BALL] >= 1.0,
+            "all nearby teammates should produce maxed near-ball support feature"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_TEAM_FORWARD_VELOCITY] > 0.50,
+            "team forward velocity should be visible to the neural learner"
+        );
+    }
+
+    #[test]
     fn q_policy_keys_separate_same_action_by_team_brain_directive() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -47273,6 +47512,60 @@ mod tests {
             snapshot.layers[0].biases[0]
         );
         assert_eq!(resumed_snapshot.parameter_count, snapshot.parameter_count);
+    }
+
+    #[test]
+    fn neural_learning_pads_legacy_snapshot_team_shape_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15078,
+            ..Default::default()
+        };
+        let mut legacy_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let legacy_dim = SOCCER_NEURAL_LEGACY_FEATURE_DIMS[0];
+        let removed_weights = legacy_snapshot.layers[0]
+            .weights
+            .len()
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - legacy_dim);
+        legacy_snapshot.input_dim = legacy_dim;
+        legacy_snapshot.parameter_count = legacy_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut legacy_snapshot.layers[0].weights {
+            row.truncate(legacy_dim);
+        }
+        legacy_snapshot.layers[0].weights[0][0] = 0.123_456;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(legacy_snapshot)
+            .expect("resume legacy neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        assert_eq!(resumed_snapshot.layers[0].weights[0][0], 0.123_456);
+        for index in legacy_dim..SOCCER_NEURAL_FEATURE_DIM {
+            assert_eq!(
+                resumed_snapshot.layers[0].weights[0][index], 0.0,
+                "new team-shape input weights should start neutral"
+            );
+        }
     }
 
     #[test]

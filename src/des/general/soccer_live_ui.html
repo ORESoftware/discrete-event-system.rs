@@ -189,6 +189,13 @@
   .slot label { color: var(--muted); }
   .slot select { width: 100%; max-width: none; }
   .slot button { min-width: 0; padding: 0 8px; }
+  .slot .keymap {
+    grid-column: 2 / 4;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
   .surface-control {
     display: grid;
     grid-template-columns: 42px minmax(0, 1fr) 78px;
@@ -672,6 +679,20 @@ const CONTROLLER_CODES = new Set(CONTROLLER_KEYMAPS.flatMap(map => [
   map.sprint,
   map.action,
 ]));
+function keyName(code) {
+  return String(code || "")
+    .replace(/^Arrow/, "")
+    .replace(/^Key/, "")
+    .replace(/^Numpad/, "Num ")
+    .replace(/^ShiftRight$/, "R Shift")
+    .replace(/^ShiftLeft$/, "L Shift")
+    .replace(/^Space$/, "Space")
+    .replace(/^Enter$/, "Enter");
+}
+function controllerKeymapLabel(slot) {
+  const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
+  return `Move ${keyName(map.up)}/${keyName(map.left)}/${keyName(map.down)}/${keyName(map.right)} · Sprint ${keyName(map.sprint)} · Action ${keyName(map.action)}`;
+}
 const SURFACE_PRESETS = {
   short: {ballDragPerTick: 0.010, ballAirResistance: 0.0045, ballGrassResistanceYps2: 0.32, ballStopSpeedYps: 0.28},
   standard: {ballDragPerTick: 0.028, ballAirResistance: 0.0085, ballGrassResistanceYps2: 0.88, ballStopSpeedYps: 0.55},
@@ -2221,9 +2242,13 @@ function rebuildControls(assignments) {
     activeButton.textContent = "Use";
     activeButton.className = slot === activeSlot ? "active" : "";
     activeButton.addEventListener("click", () => setActiveSlot(slot));
+    const keymap = document.createElement("div");
+    keymap.className = "keymap";
+    keymap.textContent = controllerKeymapLabel(slot);
     row.appendChild(label);
     row.appendChild(pick);
     row.appendChild(activeButton);
+    row.appendChild(keymap);
     slots.appendChild(row);
   }
   if (Array.from(slotPick.options).some(o => o.value === existing)) {

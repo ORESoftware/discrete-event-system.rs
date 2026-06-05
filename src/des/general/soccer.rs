@@ -4180,6 +4180,8 @@ impl PlayerAgent {
             .clamp(0.0, 1.25);
         let shot_block_penalty =
             (1.0 - observation.shot_block_probability.clamp(0.0, 1.0) * 0.58).clamp(0.30, 1.0);
+        let close_shot_attempt =
+            close_clear_shot_attempt_probability(observation, self.role, shooting);
         let shot_score = (self.preferences.shoot_bias
             * (0.52 + shooting * 0.62)
             * (1.0 + directive.risk_tolerance * 0.35)
@@ -4188,7 +4190,8 @@ impl PlayerAgent {
             * shot_block_penalty
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
             * 0.042)
-            .clamp(0.004, 0.12 + offensive_urgency * 0.30);
+            .clamp(0.004, 0.12 + offensive_urgency * 0.30)
+            .max(close_shot_attempt);
         let fatigue_dribble = fatigue_dribble_multiplier(observation);
         let shot_creation_carry = shot_creation_carry_multiplier(observation);
         let striker_carry_boost = if self.role == PlayerRole::Forward && pass_target_count == 0 {
@@ -4903,7 +4906,12 @@ impl PlayerAgent {
                 + observation.shot_curl_probability * 0.012
                 - observation.shot_block_probability * 0.030
                 - self.skills.decision_noise * 0.12)
-                .clamp(0.012, 0.12);
+                .clamp(0.012, 0.12)
+                .max(close_clear_shot_attempt_probability(
+                    &observation,
+                    self.role,
+                    shooting_skill,
+                ));
             if rng.next_float() < time_window_probability(finish_chance, snapshot.dt_seconds) {
                 let action = SoccerAction::Shoot {
                     power: 0.72 + 0.28 * shooting_skill,
@@ -4992,7 +5000,12 @@ impl PlayerAgent {
                         + observation.shot_curl_probability * 0.010
                         - observation.shot_block_probability * 0.026
                         - self.skills.decision_noise * 0.10)
-                        .clamp(0.008, 0.08);
+                        .clamp(0.008, 0.08)
+                        .max(close_clear_shot_attempt_probability(
+                            &observation,
+                            self.role,
+                            shooting_skill,
+                        ));
                     if rng.next_float()
                         >= time_window_probability(learned_shot_chance, snapshot.dt_seconds)
                     {
@@ -8208,6 +8221,9 @@ struct PendingPass {
     distance_yards: f64,
     receiver_openness: f64,
     passer_skill: f64,
+    launch_speed_yps: f64,
+    receiver_position_at_launch: Option<Vec2>,
+    receiver_velocity_at_launch: Option<Vec2>,
     offside: Option<PendingOffside>,
 }
 
@@ -8267,6 +8283,12 @@ pub struct PendingPassSnapshot {
     pub distance_yards: f64,
     pub receiver_openness: f64,
     pub passer_skill: f64,
+    #[serde(default)]
+    pub launch_speed_yps: f64,
+    #[serde(default)]
+    pub receiver_position_at_launch: Option<Vec2>,
+    #[serde(default)]
+    pub receiver_velocity_at_launch: Option<Vec2>,
     pub off_target_yards: f64,
     pub receiver_urgency: f64,
     pub nearest_receiver: Option<usize>,
@@ -9186,6 +9208,9 @@ fn pending_pass_snapshot_from(
         distance_yards: pass.distance_yards,
         receiver_openness,
         passer_skill: pass.passer_skill,
+        launch_speed_yps: pass.launch_speed_yps,
+        receiver_position_at_launch: pass.receiver_position_at_launch,
+        receiver_velocity_at_launch: pass.receiver_velocity_at_launch,
         off_target_yards,
         receiver_urgency,
         nearest_receiver,
@@ -12407,6 +12432,62 @@ fn completed_pass_reward(team: Team, origin: Vec2, target: Vec2, field_length: f
     }
 }
 
+fn pass_stride_anticipation_reward_from_fit(
+    stride_fit: f64,
+    target_forward_yards: f64,
+    receiver_openness: f64,
+) -> f64 {
+    if !stride_fit.is_finite() {
+        return 0.0;
+    }
+    let directional_weight = if target_forward_yards > 2.0 {
+        1.0 + (target_forward_yards / 32.0).clamp(0.0, 0.35)
+    } else if target_forward_yards >= -1.25 {
+        0.62
+    } else {
+        0.18
+    };
+    let openness_weight = 0.78 + receiver_openness.clamp(0.0, 1.0) * 0.34;
+    let fit = ((stride_fit.clamp(0.0, 1.0) - 0.32) / 0.68).clamp(0.0, 1.0);
+    (fit * 2.55 * directional_weight * openness_weight).clamp(0.0, 3.2)
+}
+
+fn completed_pass_stride_anticipation_fit(pass: &PendingPass) -> f64 {
+    let Some(receiver_position) = pass.receiver_position_at_launch else {
+        return 0.0;
+    };
+    let receiver_velocity = pass.receiver_velocity_at_launch.unwrap_or_else(Vec2::zero);
+    pass_into_stride_fit(
+        pass.origin,
+        receiver_position,
+        receiver_velocity,
+        pass.intended_target,
+        pass.launch_speed_yps,
+        pass.team,
+    )
+}
+
+fn completed_pass_anticipation_reward(pass: &PendingPass) -> f64 {
+    let target_forward = (pass.intended_target.y - pass.origin.y) * pass.team.attack_dir();
+    pass_stride_anticipation_reward_from_fit(
+        completed_pass_stride_anticipation_fit(pass),
+        target_forward,
+        pass.receiver_openness,
+    )
+}
+
+fn completed_pass_anticipation_reward_from_context(
+    context: &SoccerDecisionContext,
+    team: Team,
+    receiver_openness: f64,
+) -> f64 {
+    pass_stride_anticipation_reward_from_fit(
+        pass_into_stride_fit_for_context(context, team),
+        context.target_forward_yards,
+        receiver_openness,
+    )
+}
+
 fn pass_chain_link_reward(direction: PassDirectionBucket, depth: usize) -> f64 {
     let base = match direction {
         PassDirectionBucket::Forward => 2.40,
@@ -13572,6 +13653,21 @@ fn soccer_transition_reward_with_tactics(
                     .player_position(player.id)
                     .unwrap_or(before.ball.position);
                 reward += completed_pass_reward(player.team, origin, target, before.field_length);
+                let action_context = soccer_decision_context_for(
+                    player.id,
+                    player.team,
+                    &decision.action,
+                    decision.action_target.as_ref(),
+                    before,
+                    after,
+                );
+                let receiver_openness =
+                    pass_receiver_openness_for_snapshots(&after.players, player.team, target);
+                reward += completed_pass_anticipation_reward_from_context(
+                    &action_context,
+                    player.team,
+                    receiver_openness,
+                );
             }
         }
     }
@@ -21024,7 +21120,7 @@ impl SoccerMatch {
             pass.origin,
             pass.intended_target,
             self.config.field_length_yards,
-        );
+        ) + completed_pass_anticipation_reward(pass);
         self.record_reward_event(pass.from, amount);
         self.record_possession_touch(pass.from);
         self.record_possession_touch(receiver);
@@ -22263,6 +22359,22 @@ impl SoccerMatch {
                     self.players[player_id].incoming_ball = None;
                     let offside = target_id
                         .and_then(|target| snapshot.pending_offside_for_pass(player_id, target));
+                    let receiver_position_at_launch = target_id.and_then(|target| {
+                        snapshot.player_position(target).or_else(|| {
+                            self.players
+                                .iter()
+                                .find(|player| player.id == target)
+                                .map(|player| player.position)
+                        })
+                    });
+                    let receiver_velocity_at_launch = target_id.and_then(|target| {
+                        snapshot.player_velocity(target).or_else(|| {
+                            self.players
+                                .iter()
+                                .find(|player| player.id == target)
+                                .map(|player| player.velocity)
+                        })
+                    });
                     self.pending_pass = Some(PendingPass {
                         team: player_team,
                         from: player_id,
@@ -22275,6 +22387,9 @@ impl SoccerMatch {
                         distance_yards: distance,
                         receiver_openness,
                         passer_skill: pass_skill,
+                        launch_speed_yps: speed,
+                        receiver_position_at_launch,
+                        receiver_velocity_at_launch,
                         offside,
                     });
                     self.pending_shot = None;
@@ -29995,6 +30110,49 @@ fn shot_decision_is_qualified(observation: &SoccerPomdpObservation) -> bool {
     quality_shot || pressure_bailout || goal_urgency_bailout
 }
 
+fn close_clear_shot_attempt_probability(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+    shooting_skill: f64,
+) -> f64 {
+    if !shot_decision_is_qualified(observation) {
+        return 0.0;
+    }
+    let close_fit = ((22.0 - observation.yards_to_goal) / 14.0).clamp(0.0, 1.0);
+    if close_fit <= 0.0 {
+        return 0.0;
+    }
+    let lane_fit = (1.0
+        - observation.shot_block_probability.clamp(0.0, 1.0)
+            / SHOT_BLOCK_DECISION_MAX_PROBABILITY.max(1e-6))
+    .clamp(0.0, 1.0);
+    let on_frame_fit =
+        (observation.shot_on_frame_probability / SHOT_ON_FRAME_MIN_PROBABILITY).clamp(0.0, 1.35);
+    let keeper_fit = (observation.shot_beat_goalkeeper_probability
+        / SHOT_KEEPER_BEAT_MIN_PROBABILITY)
+        .clamp(0.0, 1.35);
+    let urgency = observation
+        .offensive_urgency
+        .max(observation.decision_urgency)
+        .clamp(0.0, 1.0);
+    let role_bonus = match role {
+        PlayerRole::Forward => 0.15,
+        PlayerRole::Midfielder => 0.08,
+        PlayerRole::Defender => 0.02,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+
+    (0.22
+        + close_fit * 0.32
+        + lane_fit * 0.16
+        + on_frame_fit * 0.13
+        + keeper_fit * 0.11
+        + shooting_skill.clamp(0.0, 1.0) * 0.10
+        + urgency * 0.10
+        + role_bonus)
+        .clamp(0.30, 0.92)
+}
+
 fn first_time_shot_decision_is_qualified(observation: &SoccerPomdpObservation) -> bool {
     observation.first_time_shot_score > 0.0 && shot_decision_is_qualified(observation)
 }
@@ -32348,6 +32506,9 @@ mod tests {
             distance_yards: origin.distance(intended_target),
             receiver_openness: 1.0,
             passer_skill: 1.0,
+            launch_speed_yps: 18.0,
+            receiver_position_at_launch: Some(intended_target),
+            receiver_velocity_at_launch: Some(Vec2::zero()),
             offside: None,
         }
     }
@@ -36025,6 +36186,9 @@ mod tests {
             distance_yards: sim.players[5].position.distance(sim.players[9].position),
             receiver_openness: 0.8,
             passer_skill: 0.7,
+            launch_speed_yps: 18.0,
+            receiver_position_at_launch: Some(sim.players[9].position),
+            receiver_velocity_at_launch: Some(sim.players[9].velocity),
             offside: None,
         });
         sim.pending_shot = Some(PendingShot {
@@ -37207,6 +37371,9 @@ mod tests {
             distance_yards: 38.0,
             receiver_openness: 0.50,
             passer_skill: 0.80,
+            launch_speed_yps: 22.0,
+            receiver_position_at_launch: Some(Vec2::new(40.0, 104.0)),
+            receiver_velocity_at_launch: Some(Vec2::zero()),
             offside: None,
         };
         let aerial = PendingPass {
@@ -37260,6 +37427,9 @@ mod tests {
                 sim.players[receiver].position,
             ),
             passer_skill: ability01(sim.players[passer].skills.passing_completion_rate),
+            launch_speed_yps: 24.0,
+            receiver_position_at_launch: Some(sim.players[receiver].position),
+            receiver_velocity_at_launch: Some(sim.players[receiver].velocity),
             offside: None,
         });
 
@@ -41657,6 +41827,147 @@ mod tests {
     }
 
     #[test]
+    fn completed_pass_reward_reinforces_passer_anticipating_receiver_stride() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].position = Vec2::new(40.0, 48.0);
+        sim.players[receiver].position = Vec2::new(45.0, 66.0);
+        sim.players[receiver].velocity = Vec2::new(0.8, 3.2);
+
+        let origin = sim.players[passer].position;
+        let receiver_position = sim.players[receiver].position;
+        let receiver_velocity = sim.players[receiver].velocity;
+        let stride_target = led_pass_target_for_receiver(
+            origin,
+            receiver_position,
+            receiver_velocity,
+            18.0,
+            0.86,
+            0.90,
+            Team::Home,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let pending_for_target = |intended_target: Vec2| PendingPass {
+            team: Team::Home,
+            from: passer,
+            target: Some(receiver),
+            flight: PassFlight::Floor,
+            is_cross: false,
+            launch_tick: sim.tick,
+            origin,
+            intended_target,
+            distance_yards: origin.distance(intended_target),
+            receiver_openness: 0.90,
+            passer_skill: 0.86,
+            launch_speed_yps: 18.0,
+            receiver_position_at_launch: Some(receiver_position),
+            receiver_velocity_at_launch: Some(receiver_velocity),
+            offside: None,
+        };
+        let feet_pass = pending_for_target(receiver_position);
+        let stride_pass = pending_for_target(stride_target);
+
+        assert!(
+            completed_pass_stride_anticipation_fit(&stride_pass)
+                > completed_pass_stride_anticipation_fit(&feet_pass) + 0.20,
+            "passer should score the led ball higher than static feet"
+        );
+        assert!(
+            completed_pass_anticipation_reward(&stride_pass)
+                > completed_pass_anticipation_reward(&feet_pass) + 0.85,
+            "completed pass reward should reinforce anticipating the receiver's run"
+        );
+
+        let event_start = sim.reward_events.len();
+        sim.record_completed_pass_reward(&stride_pass, receiver);
+        let passer_reward = sim.reward_events[event_start..]
+            .iter()
+            .find(|event| event.player_id == passer)
+            .expect("passer reward event")
+            .amount;
+        let base_reward = completed_pass_reward(
+            Team::Home,
+            origin,
+            stride_target,
+            sim.config.field_length_yards,
+        );
+        assert!(
+            passer_reward > base_reward + 0.85,
+            "passer event should include stride anticipation bonus: reward={passer_reward}, base={base_reward}"
+        );
+    }
+
+    #[test]
+    fn transition_reward_reinforces_completed_pass_into_future_stride() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let runner = 9;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 48.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        park_players_except(&mut sim, &[passer, runner]);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[runner].position = Vec2::new(45.0, 66.0);
+        sim.players[runner].velocity = Vec2::new(0.8, 3.2);
+
+        let before = WorldSnapshot::from_match(&sim);
+        let origin = before.player_position(passer).expect("passer position");
+        let receiver_position = before.player_position(runner).expect("runner position");
+        let stride_target = before
+            .anticipated_pass_reception_point(passer, runner, PassFlight::Floor, 18.0)
+            .expect("anticipated runner target");
+        let reward_for_target = |target: Vec2| {
+            let mut after = before.clone();
+            after.ball.holder = Some(runner);
+            after.ball.position = target;
+            after.ball.velocity = (target - origin).normalized() * 18.0;
+            after.set_player_position(runner, target);
+            let action_target = AgentActionTargetTrace {
+                point: Some(target),
+                player_id: Some(runner),
+                grid: Some(pitch_grid_address(
+                    target,
+                    before.field_width,
+                    before.field_length,
+                )),
+                facing: facing_bucket_from_vector(target - origin),
+                dribble_touch: None,
+            };
+            let observation = before.observation_for(passer);
+            let decision = AgentDecisionTrace {
+                mdp_state: before.mdp_state_for_player(passer),
+                belief: belief_from_observation(&observation),
+                observation,
+                operation_order: vec!["unit-pass".to_string()],
+                action_options: single_action_option("pass"),
+                action_target: Some(action_target),
+                action: "pass".to_string(),
+            };
+            soccer_transition_reward(
+                &sim.players[passer],
+                &decision,
+                &before,
+                &after,
+                before.score_home,
+                before.score_away,
+                after.score_home,
+                after.score_away,
+                true,
+            )
+        };
+
+        let stride_reward = reward_for_target(stride_target);
+        let feet_reward = reward_for_target(receiver_position);
+        assert!(
+            stride_reward > feet_reward + 0.65,
+            "transition reward should teach passer anticipation: stride={stride_reward}, feet={feet_reward}"
+        );
+    }
+
+    #[test]
     fn own_half_possession_pushes_support_upfield() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 6;
@@ -41754,6 +42065,9 @@ mod tests {
                 sim.players[receiver].position,
             ),
             passer_skill: ability01(sim.players[passer].skills.passing_completion_rate),
+            launch_speed_yps: 18.0,
+            receiver_position_at_launch: Some(sim.players[receiver].position),
+            receiver_velocity_at_launch: Some(sim.players[receiver].velocity),
             offside: None,
         });
         sim.players[12].position = Vec2::new(36.0, 64.0);
@@ -41824,6 +42138,9 @@ mod tests {
                 sim.players[receiver].position,
             ),
             passer_skill: ability01(sim.players[passer].skills.passing_completion_rate),
+            launch_speed_yps: 18.0,
+            receiver_position_at_launch: Some(sim.players[receiver].position),
+            receiver_velocity_at_launch: Some(sim.players[receiver].velocity),
             offside: None,
         });
 
@@ -44660,11 +44977,81 @@ mod tests {
             .expect("shoot option");
         assert!(clear_shot.legal);
         assert!(clear_shot.probability > 0.0);
+        assert!(
+            clear_shot.score
+                >= close_clear_shot_attempt_probability(
+                    &clear_observation,
+                    sim.players[attacker].role,
+                    ability01(sim.players[attacker].skills.shooting),
+                )
+        );
         assert!(learned_action_label_is_legal(
             "shoot",
             &clear_snapshot,
             attacker
         ));
+    }
+
+    #[test]
+    fn clear_close_striker_shoots_decisively_but_still_probabilistically() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2223,
+            ..Default::default()
+        });
+        let attacker = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].position = Vec2::new(40.0, 104.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 5.0);
+        sim.players[attacker].skills.shooting = 9.4;
+        sim.players[attacker].skills.right_foot_shot_power = 9.2;
+        sim.players[attacker].skills.left_foot_shot_power = 8.6;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.95;
+        sim.players[attacker].preferences.pass_bias = 0.04;
+        sim.players[attacker].preferences.dribble_bias = 0.08;
+        sim.players[keeper].position = Vec2::new(38.5, 116.0);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(shot_decision_is_qualified(&observation));
+        assert!(
+            observation.yards_to_goal <= 20.0,
+            "test scenario should be inside the explicit close-shot window"
+        );
+        assert!(
+            close_clear_shot_attempt_probability(
+                &observation,
+                sim.players[attacker].role,
+                ability01(sim.players[attacker].skills.shooting),
+            ) >= 0.82
+        );
+
+        let mut shoot_count = 0;
+        let trials = 120;
+        for seed in 0..trials {
+            let mut player = sim.players[attacker].clone();
+            let mut rng = mulberry32(21_000 + seed);
+            let intent = player.run_time_step(&snapshot, None, None, &mut rng);
+            if matches!(intent.action, SoccerAction::Shoot { .. }) {
+                shoot_count += 1;
+            }
+        }
+
+        assert!(
+            shoot_count >= 25,
+            "clear close striker should shoot often, got {shoot_count}/{trials}"
+        );
+        assert!(
+            shoot_count < trials,
+            "shot choice should remain probabilistic, got {shoot_count}/{trials}"
+        );
     }
 
     fn sample_tracking_pass_dataset() -> SoccerTrackingDataset {
@@ -44844,6 +45231,9 @@ mod tests {
         assert!(html.contains("CONTROLLER_KEYMAPS"));
         assert!(html.contains("action: \"Enter\""));
         assert!(html.contains("queueSlotAction"));
+        assert!(html.contains("controllerKeymapLabel"));
+        assert!(html.contains("keymap.textContent"));
+        assert!(html.contains("Move ${keyName(map.up)}"));
     }
 
     #[test]

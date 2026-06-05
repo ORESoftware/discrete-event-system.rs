@@ -338,6 +338,12 @@
       <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Episode</span><b id="episode">#0</b></div>
+      <div class="metric"><span>Seed</span><b id="seed">2026</b></div>
+      <div class="policy-control">
+        <label for="seedInput">Replay</label>
+        <input id="seedInput" type="number" min="1" max="4294967295" step="1" value="2026">
+        <button id="replaySeed" type="button">Replay</button>
+      </div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Step</span><b id="matchStep">dt 0.1s 10:00</b></div>
       <div class="metric"><span>Speed</span><b id="simSpeed">20x 20t</b></div>
@@ -523,6 +529,9 @@ const offsideLine = document.getElementById("offsideLine");
 const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const episode = document.getElementById("episode");
+const seed = document.getElementById("seed");
+const seedInput = document.getElementById("seedInput");
+const replaySeedButton = document.getElementById("replaySeed");
 const ticks = document.getElementById("ticks");
 const matchStep = document.getElementById("matchStep");
 const simSpeed = document.getElementById("simSpeed");
@@ -1184,6 +1193,18 @@ function episodeLabel() {
   const current = Number(state?.episodeIndex ?? 0);
   const completed = Array.isArray(state?.completedEpisodes) ? state.completedEpisodes.length : 0;
   return `#${current} ${completed} done`;
+}
+function syncSeedInput() {
+  if (!state?.config || document.activeElement === seedInput) return;
+  const currentSeed = Number(state.config.seed ?? 0);
+  seedInput.value = Number.isFinite(currentSeed) && currentSeed > 0 ? String(currentSeed) : "";
+}
+function seedResetValue() {
+  const value = Number(seedInput.value);
+  if (!Number.isFinite(value) || value < 1 || value > 4294967295) {
+    throw new Error("seed must be 1..4294967295");
+  }
+  return Math.floor(value);
 }
 function matchStepLabel(config = state?.config) {
   if (!config) return "dt 0.1s 10:00";
@@ -2315,6 +2336,8 @@ function render() {
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
   episode.textContent = episodeLabel();
+  seed.textContent = state.config.seed ?? "-";
+  syncSeedInput();
   ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
   matchStep.textContent = matchStepLabel();
   simSpeed.textContent = simSpeedLabel();
@@ -3073,11 +3096,13 @@ async function resetMatch(options = {}) {
   updateRunButton();
   const previousPolicyHistory = state?.policyHistory || null;
   try {
-    const response = await postJson("/api/reset", {
+    const body = {
       preserveTeamPolicy: true,
       preserveSharedPolicy: true,
       keepControllerAssignments: true
-    });
+    };
+    if (options.seed != null) body.seed = options.seed;
+    const response = await postJson("/api/reset", body);
     state = response.state;
     state.policyHistory = previousPolicyHistory;
     eventLog = [];
@@ -3096,11 +3121,13 @@ async function resetMatch(options = {}) {
     running = Boolean(options.keepRunning);
     const previousTicks = Number(response.previousSummary?.ticks ?? 0);
     const checkpoint = response.episodePolicyCheckpoint ? " policy saved" : "";
-    statusEl.textContent = options.freshLoad
-      ? `fresh match after ${previousTicks} ticks${checkpoint}`
-      : options.auto
-        ? `episode #${state.episodeIndex} after ${previousTicks} ticks${checkpoint}`
-        : `new match after ${previousTicks} ticks${checkpoint}`;
+    statusEl.textContent = options.seed != null
+      ? `replay seed ${state.config.seed} after ${previousTicks} ticks${checkpoint}`
+      : options.freshLoad
+        ? `fresh match after ${previousTicks} ticks${checkpoint}`
+        : options.auto
+          ? `episode #${state.episodeIndex} after ${previousTicks} ticks${checkpoint}`
+          : `new match after ${previousTicks} ticks${checkpoint}`;
     if (response.episodePolicyCheckpoint?.path) {
       await refreshPolicyHistory(response.episodePolicyCheckpoint.path, {quiet: true, render: false});
     }
@@ -3405,6 +3432,18 @@ runButton.addEventListener("click", () => {
   updateRunButton();
 });
 resetMatchButton.addEventListener("click", () => resetMatch().catch(e => statusEl.textContent = e.message));
+replaySeedButton.addEventListener("click", () => {
+  try {
+    resetMatch({seed: seedResetValue()}).catch(e => statusEl.textContent = e.message);
+  } catch (e) {
+    statusEl.textContent = e.message;
+  }
+});
+seedInput.addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  replaySeedButton.click();
+});
 document.getElementById("step").addEventListener("click", () => stepOnce({manual: true}).catch(e => statusEl.textContent = e.message));
 document.getElementById("pass").addEventListener("click", () => submitInputOnly(true, false).catch(e => statusEl.textContent = e.message));
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));

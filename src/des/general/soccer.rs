@@ -14,7 +14,7 @@ use std::io::{BufWriter, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Condvar, Mutex, RwLock,
 };
 use std::thread;
@@ -305,6 +305,7 @@ const SOCCER_COMPUTATION_HEAVY_RECORD_MS: f64 = 16.0;
 const SOCCER_COMPUTATION_MAX_RECORD_MS: f64 = 250.0;
 const SOCCER_COMPUTATION_MAX_TOTAL_MS: f64 = 600_000.0;
 const SOCCER_COMPUTATION_MAX_RECORDS: usize = 1_000_000;
+static SOCCER_FRESH_SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
 const GOAL_URGENCY_MAX_YARDS: f64 = 30.0;
 const GOAL_URGENCY_KEEPER_CROWD_YARDS: f64 = 6.0;
 const SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD: f64 = 0.10;
@@ -29959,7 +29960,9 @@ impl SoccerRealtimeSession {
         let preserved_shared_policy = learned_policy.is_some();
 
         let mut config = self.sim.config.clone();
-        config.seed = request.seed.unwrap_or_else(|| config.seed.wrapping_add(1));
+        config.seed = request
+            .seed
+            .unwrap_or_else(|| fresh_soccer_seed_excluding(config.seed));
 
         let mut next_match =
             SoccerMatch::default_11v11(config).with_human_inputs(self.input_queue.clone());
@@ -32218,21 +32221,40 @@ pub fn run_default_simulation() -> SimulationTrace {
     )
 }
 
+fn fresh_soccer_seed_from_entropy() -> u32 {
+    let count = u128::from(
+        SOCCER_FRESH_SEED_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1),
+    );
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let pid = u128::from(std::process::id());
+    let mixed = nanos ^ nanos.rotate_left(37) ^ count.rotate_left(19) ^ (pid << 32) ^ (count << 57);
+    let seed = (mixed % u128::from(u32::MAX)) as u32;
+    seed.max(1)
+}
+
+fn fresh_soccer_seed_excluding(previous_seed: u32) -> u32 {
+    let seed = fresh_soccer_seed_from_entropy();
+    if seed != previous_seed {
+        seed
+    } else if previous_seed == u32::MAX {
+        1
+    } else {
+        previous_seed + 1
+    }
+}
+
 fn fresh_site_playback_seed() -> u32 {
     if let Ok(raw) = std::env::var("SOCCER_SITE_SEED") {
         if let Ok(seed) = raw.trim().parse::<u32>() {
             return seed;
         }
     }
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let pid = u128::from(std::process::id());
-    let mixed = nanos ^ (nanos.rotate_left(37)) ^ (pid << 32);
-    let seed = (mixed % u128::from(u32::MAX)) as u32;
-    seed.max(1)
+    fresh_soccer_seed_from_entropy()
 }
 
 fn site_playback_trace_config() -> (MatchConfig, u64) {
@@ -41832,6 +41854,7 @@ mod tests {
         assert_eq!(session.owned_controller_thread_count(), 4);
 
         let initial = session.state_response();
+        let initial_seed = initial.config.seed;
         assert_eq!(initial.config.dt_seconds, DEFAULT_DT_SECONDS);
         assert_eq!(
             initial.config.effective_duration_seconds(),
@@ -41925,6 +41948,7 @@ mod tests {
             DEFAULT_DURATION_SECONDS
         );
         assert_eq!(reset.state.config.total_ticks(), 6_000);
+        assert_ne!(reset.state.config.seed, initial_seed);
         assert_eq!(reset.state.controller_threads.len(), 4);
         assert_eq!(reset.state.frame.players.len(), 22);
         assert_eq!(reset.state.frame.officials.len(), 3);
@@ -55178,6 +55202,12 @@ mod tests {
         );
         assert_eq!(html.status, 200);
         assert!(html.body.contains("id=\"ballAction\""));
+        assert!(html.body.contains("id=\"seed\""));
+        assert!(html.body.contains("id=\"seedInput\""));
+        assert!(html.body.contains("id=\"replaySeed\""));
+        assert!(html.body.contains("state.config.seed"));
+        assert!(html.body.contains("function seedResetValue"));
+        assert!(html.body.contains("resetMatch({seed: seedResetValue()})"));
         assert!(html.body.contains("semanticBallActionLabel"));
         assert!(html.body.contains("function scheduleSlotLabel"));
         assert!(html.body.contains("scheduleSlotLabel(ball?.scheduledIndex"));
@@ -55258,6 +55288,7 @@ mod tests {
         assert!(state.body.contains("\"controllerAssignments\""));
         let state_value: serde_json::Value = serde_json::from_str(&state.body).expect("state json");
         assert_eq!(state_value["learning"]["teamPoliciesEnabled"], true);
+        assert_eq!(state_value["config"]["seed"], 55);
         assert_eq!(state_value["learning"]["totalTransitions"], 0);
         assert!(state_value["recentMoments"].as_array().unwrap().is_empty());
         assert_eq!(state_value["momentStorage"]["backend"], "jsonl-disk");
@@ -56589,6 +56620,10 @@ mod tests {
         assert_eq!(reset_value["previousEpisode"]["episodeIndex"], 0);
         assert_eq!(reset_value["previousEpisode"]["summary"]["ticks"], 2);
         assert_eq!(reset_value["state"]["episodeIndex"], 1);
+        assert_ne!(
+            reset_value["state"]["config"]["seed"],
+            serde_json::json!(160)
+        );
         assert_eq!(
             reset_value["state"]["completedEpisodes"]
                 .as_array()
@@ -56627,6 +56662,21 @@ mod tests {
             serde_json::from_str(&tracking.body).expect("post-reset tracking json");
         assert_eq!(tracking_value["frames"].as_array().unwrap().len(), 1);
         assert_eq!(tracking_value["frames"][0]["tick"], 0);
+
+        let seeded_reset_body = r#"{"seed":4242,"preserveTeamPolicy":true,"preserveSharedPolicy":true,"keepControllerAssignments":true}"#;
+        let seeded_reset = handle_live_soccer_request(
+            &format!(
+                "POST /api/reset HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                seeded_reset_body.len(),
+                seeded_reset_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(seeded_reset.status, 200);
+        let seeded_reset_value: serde_json::Value =
+            serde_json::from_str(&seeded_reset.body).expect("seeded reset json");
+        assert_eq!(seeded_reset_value["state"]["config"]["seed"], 4242);
     }
 
     #[test]
@@ -58567,6 +58617,8 @@ mod tests {
         assert!(html.contains("../simulations/main_soccer/run?exact=1"));
         assert!(html.contains("cacheBustUrl"));
         assert!(html.contains("runNewSimulation"));
+        assert!(html.contains("id=\"seed\""));
+        assert!(html.contains("trace.config?.seed"));
         assert!(html.contains("response.body.getReader"));
         assert!(html.contains("JSON.parse(raw)"));
         assert!(html.contains("expectedFrameCount"));

@@ -978,6 +978,70 @@ fn clamp_qcp_bounds(p: &QuadraticallyConstrainedProgram, x: &mut [f64]) {
     }
 }
 
+fn push_bounded_candidate(
+    values: &mut Vec<f64>,
+    value: f64,
+    lower: Option<f64>,
+    upper: Option<f64>,
+    tol: f64,
+) {
+    if !value.is_finite() {
+        return;
+    }
+    let mut value = value;
+    if let Some(l) = lower {
+        if value < l - tol {
+            return;
+        }
+        value = value.max(l);
+    }
+    if let Some(u) = upper {
+        if value > u + tol {
+            return;
+        }
+        value = value.min(u);
+    }
+    values.push(value);
+}
+
+fn add_single_linear_row_candidates(
+    values: &mut [Vec<f64>],
+    rows: &Option<Matrix>,
+    rhs: &Option<Vector>,
+    lb: &[Option<f64>],
+    ub: &[Option<f64>],
+    tol: f64,
+) {
+    let (Some(rows), Some(rhs)) = (rows, rhs) else {
+        return;
+    };
+    for (row, &rhs_i) in rows.iter().zip(rhs) {
+        let mut single = None;
+        let mut nonzero_count = 0usize;
+        for (j, &coef) in row.iter().enumerate() {
+            if coef.abs() <= tol {
+                continue;
+            }
+            single = Some((j, coef));
+            nonzero_count += 1;
+            if nonzero_count > 1 {
+                break;
+            }
+        }
+        if nonzero_count == 1 {
+            let (j, coef) = single.expect("single nonzero coefficient");
+            push_bounded_candidate(&mut values[j], rhs_i / coef, lb[j], ub[j], tol);
+        }
+    }
+}
+
+fn normalize_candidate_values(values: &mut [Vec<f64>], tol: f64) {
+    for vals in values {
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vals.dedup_by(|a, b| (*a - *b).abs() <= tol);
+    }
+}
+
 fn initial_qcp_point(p: &QuadraticallyConstrainedProgram, tol: f64) -> Option<Vector> {
     let n = p.c.len();
     let (lb, ub) = qcp_bounds(p);
@@ -995,20 +1059,21 @@ fn initial_qcp_point(p: &QuadraticallyConstrainedProgram, tol: f64) -> Option<Ve
     }
     let mut values: Vec<Vec<f64>> = Vec::new();
     for i in 0..n {
-        let mut vals = vec![0.0];
+        let mut vals = Vec::new();
+        push_bounded_candidate(&mut vals, 0.0, lb[i], ub[i], tol);
         if let Some(l) = lb[i] {
-            vals.push(l);
+            push_bounded_candidate(&mut vals, l, lb[i], ub[i], tol);
         }
         if let Some(u) = ub[i] {
-            vals.push(u);
+            push_bounded_candidate(&mut vals, u, lb[i], ub[i], tol);
         }
         if let (Some(l), Some(u)) = (lb[i], ub[i]) {
-            vals.push(0.5 * (l + u));
+            push_bounded_candidate(&mut vals, 0.5 * (l + u), lb[i], ub[i], tol);
         }
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        vals.dedup_by(|a, b| (*a - *b).abs() <= tol);
         values.push(vals);
     }
+    add_single_linear_row_candidates(&mut values, &p.a_eq, &p.b_eq, &lb, &ub, tol);
+    normalize_candidate_values(&mut values, tol);
     fn search(
         p: &QuadraticallyConstrainedProgram,
         values: &[Vec<f64>],
@@ -1292,20 +1357,21 @@ fn initial_socp_point(p: &SecondOrderConeProgram, tol: f64) -> Option<Vector> {
     }
     let mut values: Vec<Vec<f64>> = Vec::new();
     for i in 0..n {
-        let mut vals = vec![0.0];
+        let mut vals = Vec::new();
+        push_bounded_candidate(&mut vals, 0.0, lb[i], ub[i], tol);
         if let Some(l) = lb[i] {
-            vals.push(l);
+            push_bounded_candidate(&mut vals, l, lb[i], ub[i], tol);
         }
         if let Some(u) = ub[i] {
-            vals.push(u);
+            push_bounded_candidate(&mut vals, u, lb[i], ub[i], tol);
         }
         if let (Some(l), Some(u)) = (lb[i], ub[i]) {
-            vals.push(0.5 * (l + u));
+            push_bounded_candidate(&mut vals, 0.5 * (l + u), lb[i], ub[i], tol);
         }
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        vals.dedup_by(|a, b| (*a - *b).abs() <= tol);
         values.push(vals);
     }
+    add_single_linear_row_candidates(&mut values, &p.a_eq, &p.b_eq, &lb, &ub, tol);
+    normalize_candidate_values(&mut values, tol);
     fn search(
         p: &SecondOrderConeProgram,
         values: &[Vec<f64>],
@@ -1527,5 +1593,56 @@ mod tests {
         assert!((sol.objective + 1.0).abs() < 1e-6, "{sol:?}");
         assert!((sol.x[0] + 1.0).abs() < 1e-6, "{sol:?}");
         assert!(sol.x[1].abs() < 1e-6, "{sol:?}");
+    }
+
+    #[test]
+    fn solves_rotated_socp_with_fixed_affine_variables() {
+        let socp = SecondOrderConeProgram {
+            c: vec![0.0, 1.0, 0.0],
+            a_eq: Some(vec![vec![1.0, 0.0, 0.0], vec![0.0, 0.0, 1.0]]),
+            b_eq: Some(vec![2.0, 4.0]),
+            lb: Some(vec![Some(0.0), Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(10.0), Some(4.0)]),
+            cones: vec![SecondOrderCone {
+                a: vec![vec![0.0, 0.0, 2.0_f64.sqrt()], vec![1.0, -1.0, 0.0]],
+                b: vec![0.0, 0.0],
+                c: vec![1.0, 1.0, 0.0],
+                d: 0.0,
+                name: Some("rotated-as-standard-soc".to_string()),
+            }],
+            var_names: Some(vec!["u".to_string(), "v".to_string(), "z".to_string()]),
+            ..Default::default()
+        };
+        let sol = solve_socp_pattern_search(&socp, SocpOptions::default());
+        assert_eq!(sol.status, SocpStatus::Optimal, "{sol:?}");
+        assert!((sol.x[0] - 2.0).abs() < 1e-7, "{sol:?}");
+        assert!((sol.x[1] - 4.0).abs() < 1e-6, "{sol:?}");
+        assert!((sol.x[2] - 4.0).abs() < 1e-7, "{sol:?}");
+        assert!((sol.objective - 4.0).abs() < 1e-6, "{sol:?}");
+    }
+
+    #[test]
+    fn solves_qcp_epigraph_with_fixed_affine_variable() {
+        let qcp = QuadraticallyConstrainedProgram {
+            q: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+            c: vec![0.0, 1.0],
+            a_eq: Some(vec![vec![1.0, 0.0]]),
+            b_eq: Some(vec![3.0]),
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(20.0)]),
+            quadratic_constraints: vec![QuadraticConstraint {
+                q: vec![vec![1.0, 0.0], vec![0.0, 0.0]],
+                c: vec![0.0, -1.0],
+                rhs: 0.0,
+                name: Some("square-epigraph".to_string()),
+            }],
+            var_names: Some(vec!["x".to_string(), "y".to_string()]),
+            ..Default::default()
+        };
+        let sol = solve_qcp_pattern_search(&qcp, QcpOptions::default());
+        assert_eq!(sol.status, QcpStatus::Optimal, "{sol:?}");
+        assert!((sol.x[0] - 3.0).abs() < 1e-7, "{sol:?}");
+        assert!((sol.x[1] - 9.0).abs() < 1e-6, "{sol:?}");
+        assert!((sol.objective - 9.0).abs() < 1e-6, "{sol:?}");
     }
 }

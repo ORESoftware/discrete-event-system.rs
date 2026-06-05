@@ -41069,16 +41069,20 @@ mod tests {
                     && player.position.distance(frame.central_brain.ball_position) <= 18.0
             })
             .count();
-        assert!(frame
-            .home_brain
-            .team_centroid
-            .distance(expected_home_centroid)
-            < 1e-9);
-        assert!(frame
-            .home_brain
-            .team_average_velocity
-            .distance(expected_home_average_velocity)
-            < 1e-9);
+        assert!(
+            frame
+                .home_brain
+                .team_centroid
+                .distance(expected_home_centroid)
+                < 1e-9
+        );
+        assert!(
+            frame
+                .home_brain
+                .team_average_velocity
+                .distance(expected_home_average_velocity)
+                < 1e-9
+        );
         assert!((frame.home_brain.team_spread_yards - expected_home_spread).abs() < 1e-9);
         assert_eq!(frame.home_brain.players_near_ball, expected_home_near_ball);
         assert_eq!(
@@ -58735,6 +58739,8 @@ mod tests {
         assert!(html.contains("b.ballAcceleration"));
         assert!(html.contains("b.ballAltitudeYards"));
         assert!(html.contains("B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}"));
+        assert!(html.contains("brain.teamCentroid"));
+        assert!(html.contains("playersNearBall"));
         assert!(html.contains("id=\"ballKinematics\""));
         assert!(html.contains("playbackBallHistoryForFrame"));
         assert!(html.contains("ballHistoryKinematicsLabel"));

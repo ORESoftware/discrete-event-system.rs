@@ -11582,10 +11582,10 @@ mod tests {
         {
             assert!(
                 !external_validation_python_modules(tool).is_empty(),
-            "{} is declared as a Python package but has no probe module",
-            tool.id
-        );
-    }
+                "{} is declared as a Python package but has no probe module",
+                tool.id
+            );
+        }
 
         let expected_pysat_backends = [
             ("kissat", "pysat.solvers:kissat"),

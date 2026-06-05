@@ -1,12 +1,11 @@
 //! Rust-facing bridge for external/reference graph-coloring solvers.
 //!
 //! The native Rust reference computes an exact DSATUR check without Python
-//! startup. The Python bridge (`scripts/graph_coloring_reference.py`) remains
-//! available for OR-Tools CP-SAT.
+//! startup. Explicit OR-Tools CP-SAT validation is launched from Rust with a
+//! tiny Python adapter over a normalized copy of the same graph.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -140,6 +139,8 @@ struct GraphColoringReferencePayload {
     ortools_objective: Option<f64>,
     #[serde(rename = "ortoolsObjectiveBound")]
     ortools_objective_bound: Option<f64>,
+    #[serde(rename = "objectiveBound")]
+    objective_bound: Option<f64>,
     message: Option<String>,
 }
 
@@ -156,6 +157,96 @@ fn status_from_str(status: &str) -> ExternalGraphColoringReferenceStatus {
 
 const RUST_GRAPH_COLORING_UNCOLORED: usize = usize::MAX;
 const RUST_GRAPH_COLORING_MAX_EXACT_VERTICES: usize = 40;
+const ORTOOLS_GRAPH_COLORING_SOLVER: &str = "ortools:cp-sat-graph-coloring";
+
+const ORTOOLS_GRAPH_COLORING_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:cp-sat-graph-coloring"
+
+
+def color_names(count):
+    return [f"C{index + 1}" for index in range(count)]
+
+
+def output(status, problem, colors=None, objective_bound=None, message=""):
+    if colors is None:
+        used = None
+        names = []
+        objective = None
+        color_indices = []
+    else:
+        color_indices = [int(color) for color in colors]
+        used = max(color_indices) + 1 if color_indices else 0
+        names = color_names(used)
+        objective = float(used)
+    result = {
+        "status": status,
+        "solver": SOLVER,
+        "colorIndices": color_indices,
+        "colorNames": names,
+        "usedColorCount": used,
+        "objective": objective,
+        "message": message,
+    }
+    if objective_bound is not None:
+        result["objectiveBound"] = objective_bound
+    return result
+
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    print(json.dumps(output("unavailable", {"numVertices": 0}, None, None, str(exc))))
+    sys.exit(0)
+
+
+try:
+    problem = json.load(sys.stdin)
+    n = int(problem["numVertices"])
+    model = cp_model.CpModel()
+    colors = [model.NewIntVar(0, max(0, n - 1), f"color_v{index}") for index in range(n)]
+    for ai, bi in problem["edges"]:
+        model.Add(colors[int(ai)] != colors[int(bi)])
+    max_color = model.NewIntVar(0, max(0, n - 1), "max_color")
+    model.AddMaxEquality(max_color, colors)
+    model.Minimize(max_color)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(json.dumps(output(
+            "infeasible" if status_name == "infeasible" else status_name,
+            problem,
+            None,
+            None,
+            f"OR-Tools CP-SAT status {status_name}",
+        )))
+        sys.exit(0)
+    assignment = [int(solver.Value(var)) for var in colors]
+    print(json.dumps(output(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        problem,
+        assignment,
+        solver.BestObjectiveBound() + 1.0,
+        f"OR-Tools CP-SAT status {status_name}",
+    )))
+except Exception as exc:
+    print(json.dumps({
+        "status": "error",
+        "solver": SOLVER,
+        "colorIndices": [],
+        "colorNames": [],
+        "usedColorCount": None,
+        "objective": None,
+        "message": str(exc),
+    }))
+    sys.exit(1)
+"#;
 
 fn validate_rust_graph_coloring_problem(
     problem: &GraphColoringProblem,
@@ -223,6 +314,28 @@ fn rust_graph_coloring_empty_solution(
         message: message.into(),
         elapsed_ms,
     }
+}
+
+fn ortools_graph_coloring_empty_solution(
+    status: ExternalGraphColoringReferenceStatus,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalGraphColoringReferenceSolution {
+    rust_graph_coloring_empty_solution(status, ORTOOLS_GRAPH_COLORING_SOLVER, message, elapsed_ms)
+}
+
+fn ortools_graph_coloring_payload(
+    problem: &GraphColoringProblem,
+    vertex_index: &HashMap<String, usize>,
+) -> Value {
+    json!({
+        "numVertices": problem.vertices.len(),
+        "vertices": &problem.vertices,
+        "edges": problem.edges.iter().map(|(a, b)| json!([
+            vertex_index[a],
+            vertex_index[b],
+        ])).collect::<Vec<_>>(),
+    })
 }
 
 fn relabel_registered_graph_coloring_fallback(
@@ -442,57 +555,6 @@ fn solve_graph_coloring_with_rust_reference(
     )
 }
 
-fn unavailable(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalGraphColoringReferenceSolution {
-    ExternalGraphColoringReferenceSolution {
-        status: ExternalGraphColoringReferenceStatus::Unavailable,
-        solver: "external-graph-coloring-reference".to_string(),
-        color_indices: Vec::new(),
-        color_names: Vec::new(),
-        used_color_count: None,
-        objective: None,
-        ortools_status: None,
-        ortools_color_indices: Vec::new(),
-        ortools_color_names: Vec::new(),
-        ortools_used_color_count: None,
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn numerical_error(
-    message: impl Into<String>,
-    elapsed_ms: f64,
-) -> ExternalGraphColoringReferenceSolution {
-    ExternalGraphColoringReferenceSolution {
-        status: ExternalGraphColoringReferenceStatus::NumericalError,
-        solver: "external-graph-coloring-reference".to_string(),
-        color_indices: Vec::new(),
-        color_names: Vec::new(),
-        used_color_count: None,
-        objective: None,
-        ortools_status: None,
-        ortools_color_indices: Vec::new(),
-        ortools_color_names: Vec::new(),
-        ortools_used_color_count: None,
-        ortools_objective: None,
-        ortools_objective_bound: None,
-        message: message.into(),
-        elapsed_ms,
-    }
-}
-
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("graph_coloring_reference.py")
-}
-
 fn graph_coloring_reference_timeout_ms() -> u64 {
     std::env::var("GRAPH_COLORING_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -520,26 +582,37 @@ fn wait_for_graph_coloring_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll graph_coloring_reference.py: {err}")),
+            Err(err) => {
+                return Err(format!(
+                    "failed to poll OR-Tools graph-coloring adapter: {err}"
+                ))
+            }
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for graph_coloring_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools graph-coloring adapter: {err}"))
 }
 
-fn run_graph_coloring_reference_json(
-    payload: Value,
-    opts: &ExternalGraphColoringReferenceOptions,
+fn run_ortools_graph_coloring_reference(
+    problem: &GraphColoringProblem,
 ) -> ExternalGraphColoringReferenceSolution {
     let started = Instant::now();
+    let vertex_index = match validate_rust_graph_coloring_problem(problem) {
+        Ok(vertex_index) => vertex_index,
+        Err(message) => {
+            return ortools_graph_coloring_empty_solution(
+                ExternalGraphColoringReferenceStatus::NumericalError,
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
+    let payload = ortools_graph_coloring_payload(problem, &vertex_index);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_GRAPH_COLORING_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -548,16 +621,18 @@ fn run_graph_coloring_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return unavailable(
-                format!("failed to start graph_coloring_reference.py with {python}: {err}"),
+            return ortools_graph_coloring_empty_solution(
+                ExternalGraphColoringReferenceStatus::Unavailable,
+                format!("failed to start OR-Tools graph-coloring adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return numerical_error(
-                format!("failed to write graph_coloring_reference.py stdin: {err}"),
+            return ortools_graph_coloring_empty_solution(
+                ExternalGraphColoringReferenceStatus::NumericalError,
+                format!("failed to write OR-Tools graph-coloring adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -565,15 +640,21 @@ fn run_graph_coloring_reference_json(
     let timeout_ms = graph_coloring_reference_timeout_ms();
     let (output, timed_out) = match wait_for_graph_coloring_reference_output(child, timeout_ms) {
         Ok(output) => output,
-        Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
+        Err(err) => {
+            return ortools_graph_coloring_empty_solution(
+                ExternalGraphColoringReferenceStatus::NumericalError,
+                err,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
     };
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("graph_coloring_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools graph-coloring adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; graph_coloring_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools graph-coloring adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -593,7 +674,7 @@ fn run_graph_coloring_reference_json(
             ortools_color_names: parsed.ortools_color_names.unwrap_or_default(),
             ortools_used_color_count: parsed.ortools_used_color_count,
             ortools_objective: parsed.ortools_objective,
-            ortools_objective_bound: parsed.ortools_objective_bound,
+            ortools_objective_bound: parsed.ortools_objective_bound.or(parsed.objective_bound),
             message: parsed.message.unwrap_or_else(|| {
                 if output.status.success() {
                     "ok".to_string()
@@ -603,10 +684,10 @@ fn run_graph_coloring_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => numerical_error(
+        Err(err) => ortools_graph_coloring_empty_solution(
+            ExternalGraphColoringReferenceStatus::NumericalError,
             format!(
-                "failed to parse graph_coloring_reference.py output: {err}; stderr={}",
-                stderr
+                "failed to parse OR-Tools graph-coloring adapter output: {err}; stderr={stderr}"
             ),
             elapsed_ms,
         ),
@@ -626,13 +707,7 @@ pub fn solve_graph_coloring_with_external_reference(
         );
     }
 
-    run_graph_coloring_reference_json(
-        json!({
-            "vertices": &problem.vertices,
-            "edges": problem.edges.iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_graph_coloring_reference(problem)
 }
 
 #[cfg(test)]
@@ -764,7 +839,32 @@ mod tests {
     }
 
     #[test]
-    fn graph_coloring_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = GRAPH_COLORING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("GRAPH_COLORING_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = build_sample_graph_coloring_problem();
+
+        let solution = solve_graph_coloring_with_external_reference(
+            &problem,
+            &ExternalGraphColoringReferenceOptions {
+                solver: ExternalGraphColoringReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalGraphColoringReferenceStatus::Unavailable
+        );
+        assert_eq!(solution.solver, ORTOOLS_GRAPH_COLORING_SOLVER);
+        assert!(solution.message.contains("OR-Tools graph-coloring adapter"));
+        assert!(!solution.message.contains("graph_coloring_reference.py"));
+    }
+
+    #[test]
+    fn graph_coloring_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())

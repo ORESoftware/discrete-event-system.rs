@@ -31127,6 +31127,16 @@ fn low_pressure_patient_carry_preferred(observation: &SoccerPomdpObservation) ->
         && observation.forward_dribble_space_yards >= 2.0
 }
 
+fn goal_approach_carry_preferred(observation: &SoccerPomdpObservation, role: PlayerRole) -> bool {
+    observation.has_ball
+        && !must_shoot_near_goal(observation, role)
+        && observation.yards_to_goal <= GOAL_APPROACH_CARRY_YARDS
+        && observation.forward_dribble_space_yards >= 1.2
+        && (role == PlayerRole::Forward
+            || observation.offensive_urgency >= 0.24
+            || shot_creation_carry_multiplier(observation) >= 1.10)
+}
+
 fn close_clear_shot_attempt_probability(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,

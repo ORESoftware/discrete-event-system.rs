@@ -41924,7 +41924,9 @@ mod tests {
             after.ball.holder = Some(runner);
             after.ball.position = target;
             after.ball.velocity = (target - origin).normalized() * 18.0;
-            after.set_player_position(runner, target);
+            if let Some(player) = after.players.iter_mut().find(|player| player.id == runner) {
+                player.position = target;
+            }
             let action_target = AgentActionTargetTrace {
                 point: Some(target),
                 player_id: Some(runner),

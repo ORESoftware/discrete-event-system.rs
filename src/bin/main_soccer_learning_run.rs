@@ -552,6 +552,7 @@ struct CompletedGame {
     episode_summary: SoccerSelfPlayEpisodeSummary,
     artifact: SoccerTeamPolicyArtifact,
     policies: SoccerTeamQPolicies,
+    neural_network: Option<SoccerNeuralNetworkSnapshot>,
     elapsed_seconds: f64,
 }
 
@@ -1145,7 +1146,8 @@ fn run_game(
         .team_policies()
         .cloned()
         .ok_or_else(|| "soccer learning produced no team policies".to_string())?;
-    let artifact = sim.team_policy_artifact();
+    let mut artifact = sim.team_policy_artifact();
+    let neural_network = artifact.learning.neural_network.take();
     let episode_summary = SoccerSelfPlayEpisodeSummary {
         episode,
         seed: episode_seed,
@@ -1161,6 +1163,7 @@ fn run_game(
         episode_summary,
         artifact,
         policies,
+        neural_network,
         elapsed_seconds: started.elapsed().as_secs_f64(),
     })
 }
@@ -1232,7 +1235,7 @@ fn soccer_learning_completed_game_from_completed(
         policies: game.policies.clone(),
         score,
         delta,
-        neural_network: game.artifact.learning.neural_network.clone(),
+        neural_network: game.neural_network.clone(),
         elapsed_seconds: game.elapsed_seconds,
     }
 }
@@ -1943,7 +1946,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         let merge_deltas = completed_games.len() > 1;
         let pg_batch_base_policy_version_id = pg_base_policy_version_id.clone();
         for game in completed_games {
-            if let Some(snapshot) = game.artifact.learning.neural_network.clone() {
+            if let Some(snapshot) = game.neural_network.clone() {
                 latest_neural_network = Some(snapshot);
             }
             let completed_learning_game =

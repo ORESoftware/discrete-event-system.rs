@@ -447,7 +447,8 @@ fn run_soccer_learning_game_from_snapshot(
         .team_policies()
         .cloned()
         .ok_or_else(|| "soccer learning produced no team policies".to_string())?;
-    let artifact = sim.team_policy_artifact();
+    let mut artifact = sim.team_policy_artifact();
+    let neural_network = artifact.learning.neural_network.take();
     let summary = artifact.summary.clone();
     let score = soccer_learning_run_score(&summary);
     let delta = soccer_policy_delta_entries(starting_policies.as_ref(), &policies, &score);
@@ -471,7 +472,7 @@ fn run_soccer_learning_game_from_snapshot(
         policies,
         score,
         delta,
-        neural_network: artifact.learning.neural_network.clone(),
+        neural_network,
         elapsed_seconds: started.elapsed().as_secs_f64(),
     })
 }

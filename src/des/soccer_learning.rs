@@ -2289,6 +2289,28 @@ mod tests {
     }
 
     #[test]
+    fn postgres_policy_refresh_picks_up_durable_pending_evolved_head() {
+        let durable_pending_head =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("local-mutation-v2"),
+                current_generation: 5,
+                current_updated_at_micros: 0,
+                current_neural_network_present: true,
+                latest_policy_version_id: "local-mutation-v2",
+                latest_generation: 5,
+                latest_updated_at_micros: 250,
+                latest_neural_network_present: true,
+                local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: true,
+            });
+
+        assert!(durable_pending_head.refresh_policy);
+        assert!(durable_pending_head.apply_tactical_learning);
+        assert!(durable_pending_head.same_policy_version);
+        assert!(durable_pending_head.same_policy_newer_revision);
+    }
+
+    #[test]
     fn postgres_policy_refresh_preserves_local_tactical_search_without_new_pg_head() {
         let unchanged = soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
             current_policy_version_id: Some("v1"),

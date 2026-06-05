@@ -1,13 +1,12 @@
 //! Rust-facing bridge for external/reference max-flow solvers.
 //!
 //! The native Rust reference computes an independent Edmonds-Karp check without
-//! Python startup. The checked-in Python bridge (`scripts/max_flow_reference.py`)
-//! remains available for OR-Tools SimpleMaxFlow when installed and when
-//! capacities can be integer-scaled.
+//! Python startup. Explicit OR-Tools SimpleMaxFlow validation is launched from
+//! Rust with a tiny Python adapter so the checked-in Python script can remain
+//! launcher glue only.
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -210,6 +209,98 @@ struct RustForwardRef {
 }
 
 const RUST_MAX_FLOW_EPS: f64 = 1e-12;
+const ORTOOLS_INTEGER_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+
+const ORTOOLS_MAX_FLOW_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:simple-max-flow"
+
+
+def result(status, max_flow=None, edge_flows=None, min_cut=None, node_balance=None, message=""):
+    return {
+        "status": status,
+        "solver": SOLVER,
+        "maxFlow": max_flow,
+        "edgeFlows": [] if edge_flows is None else edge_flows,
+        "minCut": {} if min_cut is None else min_cut,
+        "nodeBalance": [] if node_balance is None else node_balance,
+        "iterations": None,
+        "trace": [],
+        "message": message,
+    }
+
+
+try:
+    from ortools.graph.python import max_flow
+except Exception as exc:
+    print(json.dumps(result("unavailable", message=str(exc))))
+    sys.exit(0)
+
+
+def status_name(status):
+    return str(status).split(".")[-1].lower()
+
+
+try:
+    problem = json.load(sys.stdin)
+    scale = float(problem["scale"])
+    solver = max_flow.SimpleMaxFlow()
+    for edge in problem["edges"]:
+        solver.add_arc_with_capacity(
+            int(edge["from"]),
+            int(edge["to"]),
+            int(edge["scaledCapacity"]),
+        )
+    status = solver.solve(int(problem["source"]), int(problem["sink"]))
+    if status != solver.OPTIMAL:
+        mapped = status_name(status)
+        print(json.dumps(result(
+            "infeasible" if mapped == "bad_input" else mapped,
+            message=f"OR-Tools SimpleMaxFlow status {mapped}",
+        )))
+        sys.exit(0)
+
+    edge_flows = []
+    for index, edge in enumerate(problem["edges"]):
+        edge_flows.append({
+            "from": int(edge["from"]),
+            "to": int(edge["to"]),
+            "capacity": float(edge["capacity"]),
+            "name": edge.get("name"),
+            "flow": solver.flow(index) / scale,
+        })
+    source_side = [int(node) for node in solver.get_source_side_min_cut()]
+    source_set = set(source_side)
+    sink_side = [
+        node for node in range(int(problem["numNodes"])) if node not in source_set
+    ]
+    cut_edges = [
+        edge for edge in edge_flows
+        if edge["from"] in source_set and edge["to"] not in source_set
+    ]
+    node_balance = [0.0 for _ in range(int(problem["numNodes"]))]
+    for edge in edge_flows:
+        node_balance[edge["from"]] -= edge["flow"]
+        node_balance[edge["to"]] += edge["flow"]
+    print(json.dumps(result(
+        "optimal",
+        max_flow=solver.optimal_flow() / scale,
+        edge_flows=edge_flows,
+        min_cut={
+            "sourceSide": source_side,
+            "sinkSide": sink_side,
+            "cutEdges": cut_edges,
+            "capacity": sum(edge["capacity"] for edge in cut_edges),
+        },
+        node_balance=node_balance,
+        message="OR-Tools SimpleMaxFlow",
+    )))
+except Exception as exc:
+    print(json.dumps(result("error", message=str(exc))))
+    sys.exit(1)
+"#;
 
 fn status_from_str(status: &str) -> ExternalMaxFlowReferenceStatus {
     match status {
@@ -448,6 +539,16 @@ fn empty_solution(
     }
 }
 
+fn empty_ortools_solution(
+    status: ExternalMaxFlowReferenceStatus,
+    message: impl Into<String>,
+    elapsed_ms: f64,
+) -> ExternalMaxFlowReferenceSolution {
+    let mut solution = empty_solution(status, message, elapsed_ms);
+    solution.solver = "ortools:simple-max-flow".to_string();
+    solution
+}
+
 fn relabel_registered_max_flow_fallback(
     mut solution: ExternalMaxFlowReferenceSolution,
     opts: &ExternalMaxFlowReferenceOptions,
@@ -464,11 +565,45 @@ fn relabel_registered_max_flow_fallback(
     solution
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("max_flow_reference.py")
+fn scaled_ortools_capacity(capacity: f64, scale: i64) -> Option<i64> {
+    let scaled = capacity * scale as f64;
+    if !scaled.is_finite() || scaled < 0.0 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (rounded - scaled).abs() <= 1e-6 {
+        Some(rounded as i64)
+    } else {
+        None
+    }
+}
+
+fn choose_ortools_integer_scale(problem: &MaxFlowProblem) -> Option<i64> {
+    ORTOOLS_INTEGER_SCALES.into_iter().find(|scale| {
+        problem
+            .edges
+            .iter()
+            .all(|edge| scaled_ortools_capacity(edge.capacity, *scale).is_some())
+    })
+}
+
+fn ortools_adapter_payload(problem: &MaxFlowProblem, scale: i64) -> Value {
+    json!({
+        "numNodes": problem.num_nodes,
+        "source": problem.source,
+        "sink": problem.sink,
+        "scale": scale,
+        "edges": problem.edges.iter().map(|edge| {
+            json!({
+                "from": edge.from,
+                "to": edge.to,
+                "capacity": edge.capacity,
+                "scaledCapacity": scaled_ortools_capacity(edge.capacity, scale)
+                    .expect("scale chosen for all edge capacities"),
+                "name": edge.name,
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn max_flow_reference_timeout_ms() -> u64 {
@@ -498,26 +633,35 @@ fn wait_for_max_flow_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll max_flow_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll OR-Tools max-flow adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for max_flow_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools max-flow adapter: {err}"))
 }
 
-fn run_max_flow_reference_json(
-    payload: Value,
-    opts: &ExternalMaxFlowReferenceOptions,
-) -> ExternalMaxFlowReferenceSolution {
+fn run_ortools_max_flow_reference(problem: &MaxFlowProblem) -> ExternalMaxFlowReferenceSolution {
     let started = Instant::now();
+    if let Err(message) = validate_rust_max_flow_problem(problem) {
+        return empty_ortools_solution(
+            ExternalMaxFlowReferenceStatus::NumericalError,
+            message,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let Some(scale) = choose_ortools_integer_scale(problem) else {
+        return empty_ortools_solution(
+            ExternalMaxFlowReferenceStatus::Unsupported,
+            "OR-Tools SimpleMaxFlow requires integer-scalable capacities",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let payload = ortools_adapter_payload(problem, scale);
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_MAX_FLOW_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -526,18 +670,18 @@ fn run_max_flow_reference_json(
     {
         Ok(child) => child,
         Err(err) => {
-            return empty_solution(
+            return empty_ortools_solution(
                 ExternalMaxFlowReferenceStatus::Unavailable,
-                format!("failed to start max_flow_reference.py with {python}: {err}"),
+                format!("failed to start OR-Tools max-flow adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
-            return empty_solution(
+            return empty_ortools_solution(
                 ExternalMaxFlowReferenceStatus::NumericalError,
-                format!("failed to write max_flow_reference.py stdin: {err}"),
+                format!("failed to write OR-Tools max-flow adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -546,7 +690,7 @@ fn run_max_flow_reference_json(
     let (output, timed_out) = match wait_for_max_flow_reference_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => {
-            return empty_solution(
+            return empty_ortools_solution(
                 ExternalMaxFlowReferenceStatus::NumericalError,
                 err,
                 started.elapsed().as_secs_f64() * 1000.0,
@@ -557,9 +701,9 @@ fn run_max_flow_reference_json(
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("max_flow_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools max-flow adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; max_flow_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools max-flow adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -599,10 +743,10 @@ fn run_max_flow_reference_json(
             }),
             elapsed_ms,
         },
-        Err(err) => empty_solution(
+        Err(err) => empty_ortools_solution(
             ExternalMaxFlowReferenceStatus::NumericalError,
             format!(
-                "failed to parse max_flow_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools max-flow adapter output: {err}; stderr={}",
                 stderr
             ),
             elapsed_ms,
@@ -621,22 +765,7 @@ pub fn solve_max_flow_with_external_reference(
         );
     }
 
-    run_max_flow_reference_json(
-        json!({
-            "numNodes": problem.num_nodes,
-            "source": problem.source,
-            "sink": problem.sink,
-            "edges": problem.edges.iter().map(|edge| {
-                json!({
-                    "from": edge.from,
-                    "to": edge.to,
-                    "capacity": edge.capacity,
-                    "name": edge.name,
-                })
-            }).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_max_flow_reference(problem)
 }
 
 #[cfg(test)]
@@ -780,7 +909,56 @@ mod tests {
     }
 
     #[test]
-    fn max_flow_python_bridge_wait_enforces_timeout() {
+    fn ortools_adapter_rejects_unscaled_capacities_without_python() {
+        let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = MaxFlowProblem {
+            num_nodes: 2,
+            source: 0,
+            sink: 1,
+            edges: vec![MaxFlowEdge {
+                from: 0,
+                to: 1,
+                capacity: 1.0 / 3.0,
+                name: None,
+            }],
+        };
+
+        let solution = solve_max_flow_with_external_reference(
+            &problem,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Unsupported);
+        assert!(solution
+            .message
+            .contains("requires integer-scalable capacities"));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _fallback_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
+        let problem = build_textbook_max_flow_problem();
+
+        let solution = solve_max_flow_with_external_reference(
+            &problem,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Unavailable);
+        assert!(solution.message.contains("OR-Tools max-flow adapter"));
+        assert!(!solution.message.contains("max_flow_reference.py"));
+    }
+
+    #[test]
+    fn max_flow_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())

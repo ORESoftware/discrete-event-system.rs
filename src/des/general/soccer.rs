@@ -10714,6 +10714,10 @@ impl CentralBrain {
             .collect::<Vec<_>>();
         let tracked_officials = tracked_official_awareness.len();
         let center_of_play = center_of_play_centroids(snapshot);
+        let ball_scheduled_index = snapshot
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
         CentralBrainSnapshot {
             phase: self.phase,
             possession_team: self.possession_team.or_else(|| snapshot.possession_team()),
@@ -10722,6 +10726,12 @@ impl CentralBrain {
             ball_acceleration: snapshot.ball.acceleration,
             ball_altitude_yards: snapshot.ball.altitude_yards,
             ball_holder: snapshot.ball.holder,
+            ball_scheduled_index,
+            ball_last_action: snapshot
+                .ball
+                .last_decision
+                .as_ref()
+                .map(|decision| decision.action.clone()),
             player_centroid: center_of_play.player_centroid,
             live_play_centroid: center_of_play.live_play_centroid,
             center_of_play: center_of_play.center_of_play,
@@ -17876,6 +17886,10 @@ pub struct CentralBrainSnapshot {
     #[serde(default)]
     pub ball_altitude_yards: f64,
     pub ball_holder: Option<usize>,
+    #[serde(default)]
+    pub ball_scheduled_index: Option<usize>,
+    #[serde(default)]
+    pub ball_last_action: Option<String>,
     #[serde(default)]
     pub player_centroid: Vec2,
     #[serde(default)]
@@ -31296,7 +31310,15 @@ fn handle_live_soccer_request_inner(
     let path = req.path.split('?').next().unwrap_or(req.path);
     match (req.method, path) {
         ("OPTIONS", _) => LiveHttpResponse::options(),
-        ("GET", "/") | ("GET", "/soccer/live") => LiveHttpResponse::html(soccer_live_page_html()),
+        ("GET", "/")
+        | ("GET", "/soccer/live")
+        | ("GET", "/fresh")
+        | ("GET", "/new-match")
+        | ("GET", "/new_match")
+        | ("GET", "/reset")
+        | ("GET", "/soccer/live/fresh")
+        | ("GET", "/soccer/live/new-match")
+        | ("GET", "/soccer/live/new_match") => LiveHttpResponse::html(soccer_live_page_html()),
         ("GET", "/api/state") => {
             let state = {
                 let guard = match session.lock() {
@@ -54958,6 +54980,8 @@ mod tests {
         assert!(html.body.contains("semanticBallActionLabel"));
         assert!(html.body.contains("function scheduleSlotLabel"));
         assert!(html.body.contains("scheduleSlotLabel(ball?.scheduledIndex"));
+        assert!(html.body.contains("scheduleSlotLabel(b.ballScheduledIndex"));
+        assert!(html.body.contains("ballLastAction"));
         assert!(html.body.contains("drawGoalPosts"));
         assert!(html.body.contains("id=\"clearanceAction\""));
         assert!(html.body.contains("id=\"routeOneAction\""));
@@ -54983,13 +55007,38 @@ mod tests {
         assert!(html.body.contains("humanSlotCount() <= 0"));
         assert!(html.body.contains("e.shiftKey || e.altKey || e.metaKey"));
         assert!(html.body.contains("<button id=\"run\">Run</button>"));
+        assert!(html
+            .body
+            .contains("<a id=\"freshMatchLink\" class=\"control-link\" href=\"/fresh\">Fresh</a>"));
         assert!(html.body.contains("let resetting = false;"));
         assert!(html.body.contains("freshMatchRequestedOnLoad"));
+        assert!(html.body.contains("freshMatchPathAlias"));
+        assert!(html.body.contains("canonicalFreshMatchPath"));
+        assert!(html.body.contains("\"/soccer/live/fresh\""));
         assert!(html
             .body
             .contains("resetMatch({freshLoad: true, clearFreshUrl: true})"));
         assert!(html.body.contains("if (stepping || resetting) return;"));
         assert!(html.body.contains("if (running && !resetting)"));
+
+        let fresh_html = handle_live_soccer_request(
+            "GET /fresh HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(fresh_html.status, 200);
+        assert!(fresh_html
+            .body
+            .contains("<title>Live Soccer Simulation</title>"));
+        assert!(fresh_html.body.contains("freshMatchRequestedOnLoad"));
+
+        let nested_fresh_html = handle_live_soccer_request(
+            "GET /soccer/live/fresh HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(nested_fresh_html.status, 200);
+        assert!(nested_fresh_html.body.contains("canonicalFreshMatchPath"));
 
         let state = handle_live_soccer_request(
             "GET /api/state HTTP/1.1\r\nHost: local\r\n\r\n",
@@ -55389,6 +55438,14 @@ mod tests {
         assert_eq!(
             value["frame"]["centralBrain"]["ballAltitudeYards"],
             value["frame"]["ball"]["altitudeYards"]
+        );
+        assert_eq!(
+            value["frame"]["centralBrain"]["ballScheduledIndex"],
+            value["frame"]["ball"]["scheduledIndex"]
+        );
+        assert_eq!(
+            value["frame"]["centralBrain"]["ballLastAction"],
+            value["frame"]["ball"]["lastDecision"]["action"]
         );
         let brain_player0 = value["frame"]["centralBrain"]["trackedPlayers"]
             .as_array()

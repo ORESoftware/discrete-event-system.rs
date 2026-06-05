@@ -91,7 +91,7 @@
     margin-bottom: 10px;
     flex-wrap: wrap;
   }
-  button, select, input {
+  button, select, input, .control-link {
     min-height: 32px;
     border: 1px solid var(--line);
     background: #fff;
@@ -102,6 +102,14 @@
   button { min-width: 38px; padding: 0 10px; cursor: pointer; }
   button:hover { background: #f0f4f7; }
   button.active { background: #172026; color: #fff; }
+  .control-link {
+    display: inline-flex;
+    align-items: center;
+    min-width: 38px;
+    padding: 0 10px;
+    text-decoration: none;
+  }
+  .control-link:hover { background: #f0f4f7; }
   select { padding: 0 8px; max-width: 190px; }
   input[type="number"] { width: 76px; padding: 0 7px; font-variant-numeric: tabular-nums; }
   input[type="text"] { min-width: 0; padding: 0 7px; }
@@ -285,6 +293,7 @@
         <button id="run">Run</button>
         <button id="step">Step</button>
         <button id="resetMatch">New Match</button>
+        <a id="freshMatchLink" class="control-link" href="/fresh">Fresh</a>
         <button id="exportPolicy">Export Policy</button>
         <button id="exportPostgresPolicy">Export PG Tip</button>
         <button id="exportPostgresPolicyJsonl">Export PG JSONL</button>
@@ -816,7 +825,9 @@ function centralBrainLabel(b) {
   const ballSpeed = vecLen(b.ballVelocity || {x: 0, y: 0});
   const ballAccel = vecLen(b.ballAcceleration || {x: 0, y: 0});
   const ballZ = Number(b.ballAltitudeYards ?? 0);
-  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)} z${ballZ.toFixed(1)}`;
+  const ballSchedule = scheduleSlotLabel(b.ballScheduledIndex);
+  const ballAction = b.ballLastAction ? ` ${b.ballLastAction}` : "";
+  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)} z${ballZ.toFixed(1)}${ballSchedule}${ballAction}`;
   return `${players}p ${officials}o ${possession}${holder}${centerText}${ballText}`;
 }
 function agentScheduleGlyph(entry) {
@@ -3225,12 +3236,36 @@ function freshMatchRequestedOnLoad() {
   const params = new URLSearchParams(window.location.search);
   const normalizedReset = String(params.get("reset") || "").toLowerCase();
   const normalizedNewMatch = String(params.get("newMatch") || params.get("new-match") || "").toLowerCase();
-  return params.has("fresh")
+  const path = normalizedFreshMatchPath(window.location.pathname);
+  return freshMatchPathAlias(path)
+    || params.has("fresh")
     || ["1", "true", "yes"].includes(normalizedReset)
     || ["1", "true", "yes"].includes(normalizedNewMatch);
 }
+function normalizedFreshMatchPath(pathname) {
+  const path = String(pathname || "/").replace(/\/+$/, "").toLowerCase();
+  return path || "/";
+}
+function freshMatchPathAlias(path) {
+  return [
+    "/fresh",
+    "/new-match",
+    "/new_match",
+    "/reset",
+    "/soccer/live/fresh",
+    "/soccer/live/new-match",
+    "/soccer/live/new_match"
+  ].includes(path);
+}
+function canonicalFreshMatchPath(pathname) {
+  const path = normalizedFreshMatchPath(pathname);
+  if (path.startsWith("/soccer/live/")) return "/soccer/live";
+  if (freshMatchPathAlias(path)) return "/";
+  return pathname || "/";
+}
 function clearFreshMatchUrl() {
   const url = new URL(window.location.href);
+  url.pathname = canonicalFreshMatchPath(url.pathname);
   url.searchParams.delete("fresh");
   url.searchParams.delete("reset");
   url.searchParams.delete("newMatch");

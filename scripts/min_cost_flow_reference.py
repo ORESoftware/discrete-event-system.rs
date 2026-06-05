@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Reference bridge for small minimum-cost-flow instances.
 
-The bridge always computes a deterministic successive-shortest-path reference
-with lower-bound normalization. When OR-Tools is installed and the numeric data
-can be safely integer-scaled, it also calls OR-Tools SimpleMinCostFlow on the
-same normalized network so the Rust validator can compare against a specialized
-external network optimizer.
+The deterministic successive-shortest-path reference lives in Rust. This
+Python bridge remains as thin adapter glue for explicit OR-Tools
+SimpleMinCostFlow checks when installed and when numeric data can be safely
+integer-scaled.
 """
 
 from __future__ import annotations
@@ -13,12 +12,30 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from typing import Optional
 
 
 EPS = 1e-9
 SCALES = (1, 10, 100, 1000, 10000, 100000, 1000000)
+
+
+def exec_rust_reference(solver: str) -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    binary_name = "min_cost_flow_reference"
+    explicit = os.environ.get("MIN_COST_FLOW_REFERENCE_RUST_BIN")
+    if explicit:
+        os.execv(explicit, [explicit, "--solver", solver])
+    local_binary = os.path.join(repo_root, "target", "debug", binary_name)
+    if os.path.exists(local_binary):
+        os.execv(local_binary, [local_binary, "--solver", solver])
+    os.chdir(repo_root)
+    os.execvp(
+        "cargo",
+        ["cargo", "run", "--quiet", "--bin", binary_name, "--", "--solver", solver],
+    )
 
 
 def normalize(raw: dict) -> dict:
@@ -87,164 +104,6 @@ def node_balance(problem: dict, flows: list[float]) -> list[float]:
     return balance
 
 
-def add_residual_arc(
-    residual: list[list[dict]],
-    from_node: int,
-    to_node: int,
-    capacity: float,
-    cost: float,
-    original: Optional[int],
-) -> None:
-    forward_index = len(residual[from_node])
-    reverse_index = len(residual[to_node])
-    residual[from_node].append(
-        {
-            "to": to_node,
-            "rev": reverse_index,
-            "cap": capacity,
-            "cost": cost,
-            "original": original,
-            "direction": 1.0,
-        }
-    )
-    residual[to_node].append(
-        {
-            "to": from_node,
-            "rev": forward_index,
-            "cap": 0.0,
-            "cost": -cost,
-            "original": original,
-            "direction": -1.0,
-        }
-    )
-
-
-def shortest_path(residual: list[list[dict]], source: int, sink: int) -> Optional[tuple[list[int], list[int], float]]:
-    n = len(residual)
-    dist = [math.inf for _ in range(n)]
-    prev_node = [-1 for _ in range(n)]
-    prev_edge = [-1 for _ in range(n)]
-    dist[source] = 0.0
-    for _ in range(max(0, n - 1)):
-        changed = False
-        for node, edges in enumerate(residual):
-            if not math.isfinite(dist[node]):
-                continue
-            for edge_index, edge in enumerate(edges):
-                if edge["cap"] <= EPS:
-                    continue
-                candidate = dist[node] + edge["cost"]
-                if candidate < dist[edge["to"]] - EPS:
-                    dist[edge["to"]] = candidate
-                    prev_node[edge["to"]] = node
-                    prev_edge[edge["to"]] = edge_index
-                    changed = True
-        if not changed:
-            break
-    if not math.isfinite(dist[sink]):
-        return None
-    return prev_node, prev_edge, dist[sink]
-
-
-def path_nodes(prev_node: list[int], source: int, sink: int) -> list[int]:
-    out = [sink]
-    node = sink
-    while node != source:
-        node = prev_node[node]
-        out.append(node)
-    out.reverse()
-    return out
-
-
-def exact_min_cost_flow(problem: dict) -> dict:
-    num_nodes = problem["numNodes"]
-    source = num_nodes
-    sink = num_nodes + 1
-    residual: list[list[dict]] = [[] for _ in range(num_nodes + 2)]
-    adjusted_supply = list(problem["supplies"])
-    flows = [arc["lowerBound"] for arc in problem["arcs"]]
-    total_cost = 0.0
-
-    for index, arc in enumerate(problem["arcs"]):
-        adjusted_supply[arc["from"]] -= arc["lowerBound"]
-        adjusted_supply[arc["to"]] += arc["lowerBound"]
-        total_cost += arc["lowerBound"] * arc["cost"]
-        add_residual_arc(
-            residual,
-            arc["from"],
-            arc["to"],
-            arc["capacity"] - arc["lowerBound"],
-            arc["cost"],
-            index,
-        )
-
-    required = 0.0
-    for node, supply in enumerate(adjusted_supply):
-        if supply > EPS:
-            add_residual_arc(residual, source, node, supply, 0.0, None)
-            required += supply
-        elif supply < -EPS:
-            add_residual_arc(residual, node, sink, -supply, 0.0, None)
-
-    sent = 0.0
-    trace = []
-    while sent < required - EPS:
-        path = shortest_path(residual, source, sink)
-        if path is None:
-            return {
-                "status": "infeasible",
-                "solver": "python:ssp-min-cost-flow",
-                "objective": None,
-                "flows": arc_payload(problem, flows),
-                "nodeBalance": node_balance(problem, flows),
-                "iterations": len(trace),
-                "message": "not enough residual capacity to satisfy demands",
-            }
-        prev_node, prev_edge, unit_cost = path
-        bottleneck = required - sent
-        node = sink
-        while node != source:
-            parent = prev_node[node]
-            edge_index = prev_edge[node]
-            bottleneck = min(bottleneck, residual[parent][edge_index]["cap"])
-            node = parent
-
-        node = sink
-        while node != source:
-            parent = prev_node[node]
-            edge_index = prev_edge[node]
-            edge = residual[parent][edge_index]
-            to_node = edge["to"]
-            reverse_index = edge["rev"]
-            edge["cap"] -= bottleneck
-            residual[to_node][reverse_index]["cap"] += bottleneck
-            if edge["original"] is not None:
-                flows[edge["original"]] += edge["direction"] * bottleneck
-            node = parent
-
-        sent += bottleneck
-        total_cost += bottleneck * unit_cost
-        trace.append(
-            {
-                "iter": len(trace),
-                "path": path_nodes(prev_node, source, sink),
-                "bottleneck": float(bottleneck),
-                "unitCost": float(unit_cost),
-                "totalCost": float(total_cost),
-            }
-        )
-
-    return {
-        "status": "optimal",
-        "solver": "python:ssp-min-cost-flow",
-        "objective": float(total_cost),
-        "flows": arc_payload(problem, flows),
-        "nodeBalance": node_balance(problem, flows),
-        "iterations": len(trace),
-        "message": "successive shortest augmenting path reference",
-    }
-
-
 def choose_scale(values: list[float]) -> Optional[int]:
     for scale in SCALES:
         if all(abs(round(value * scale) - value * scale) <= 1e-6 for value in values):
@@ -309,41 +168,24 @@ def ortools_min_cost_flow(problem: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--solver", choices=["auto", "ortools", "fallback"], default="auto")
+    parser.add_argument(
+        "--solver",
+        choices=["auto", "ortools", "fallback", "rust-ssp", "rust-exact"],
+        default="auto",
+    )
     args = parser.parse_args()
+    if args.solver in ("auto", "fallback", "rust-ssp", "rust-exact"):
+        exec_rust_reference(args.solver)
 
     try:
         problem = normalize(json.load(sys.stdin))
-        reference = exact_min_cost_flow(problem)
-        if args.solver == "fallback":
-            print(json.dumps(reference))
-            return 0 if reference["status"] in ("optimal", "infeasible") else 1
-
-        ortools = ortools_min_cost_flow(problem)
-        if args.solver == "ortools":
-            output = dict(ortools)
-            output.setdefault("solver", "ortools:simple-min-cost-flow")
-            output.setdefault("objective", None)
-            output.setdefault("flows", [])
-            output.setdefault("nodeBalance", [])
-            output["referenceStatus"] = reference.get("status")
-            output["referenceObjective"] = reference.get("objective")
-            print(json.dumps(output))
-            return 0 if output["status"] in ("optimal", "infeasible", "unavailable", "unsupported") else 1
-
-        output = dict(reference)
-        output["solver"] = (
-            "ortools:simple-min-cost-flow+python:ssp"
-            if ortools.get("status") != "unavailable"
-            else "python:ssp-min-cost-flow"
-        )
-        output["ortoolsStatus"] = ortools.get("status")
-        output["ortoolsObjective"] = ortools.get("objective")
-        output["ortoolsFlows"] = ortools.get("flows", [])
-        output["ortoolsNodeBalance"] = ortools.get("nodeBalance", [])
-        output["ortoolsMessage"] = ortools.get("message", "")
+        output = dict(ortools_min_cost_flow(problem))
+        output.setdefault("solver", "ortools:simple-min-cost-flow")
+        output.setdefault("objective", None)
+        output.setdefault("flows", [])
+        output.setdefault("nodeBalance", [])
         print(json.dumps(output))
-        return 0 if output["status"] in ("optimal", "infeasible") else 1
+        return 0 if output["status"] in ("optimal", "infeasible", "unavailable", "unsupported") else 1
     except Exception as exc:
         print(
             json.dumps(

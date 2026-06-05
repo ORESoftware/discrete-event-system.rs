@@ -45288,6 +45288,55 @@ mod tests {
     }
 
     #[test]
+    fn carry_forward_in_goal_approach_bends_toward_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 2265,
+            ..Default::default()
+        });
+        let holder = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[holder, keeper]);
+        sim.players[holder].position = Vec2::new(69.0, 78.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].velocity = Vec2::new(0.0, 4.0);
+        sim.players[holder].skills.dribbling = 8.2;
+        sim.players[holder].skills.acceleration = 8.0;
+        sim.players[keeper].position = Vec2::new(40.0, 116.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(holder);
+        let origin = sim.players[holder].position;
+        let goal_center_x = snapshot.field_width * 0.5;
+        let target = snapshot.dribble_move_target_for(
+            holder,
+            sim.players[holder].home_position,
+            DribbleMoveKind::CarryForward,
+        );
+
+        assert!(observation.yards_to_goal <= GOAL_APPROACH_CARRY_YARDS);
+        assert!(goal_approach_carry_preferred(
+            &observation,
+            sim.players[holder].role
+        ));
+        assert!(
+            (target.x - goal_center_x).abs() < (origin.x - goal_center_x).abs(),
+            "goal-approach carry should bend inside toward goal: origin={origin:?} target={target:?}"
+        );
+        assert!(
+            (target.y - origin.y) * Team::Home.attack_dir() > 0.8,
+            "goal-approach carry should still advance toward goal: origin={origin:?} target={target:?}"
+        );
+        assert!(
+            target.y < snapshot.field_length - 20.0,
+            "approach carry should create a shooting lane before the endline: target={target:?}"
+        );
+    }
+
+    #[test]
     fn carry_out_legality_uses_configured_pitch_width() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

@@ -17,9 +17,11 @@ dependency-free active-set enumeration for small dense QPs.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import itertools
 import json
 import math
+import os
 import sys
 from typing import List, Optional, Sequence, Tuple
 
@@ -36,6 +38,23 @@ CVXPY_SOLVER_ALIASES = {
 
 CVXPY_REFERENCE_SOLVERS = ("cvxpy", "scs", "clarabel", "ecos", "mosek", "copt")
 REGISTERED_CONIC_REFERENCE_SOLVERS = ("qpoases", "proxqp", "cosmo", "sdpa", "csdp")
+
+
+@contextlib.contextmanager
+def redirect_process_stdout_to_stderr():
+    """Keep native solver banners off the JSON stdout protocol."""
+    stdout_fd = sys.stdout.fileno()
+    saved_stdout_fd = os.dup(stdout_fd)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(sys.stderr.fileno(), stdout_fd)
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_stdout_fd, stdout_fd)
+        os.close(saved_stdout_fd)
 
 
 def dot(a: Sequence[float], b: Sequence[float]) -> float:
@@ -1025,7 +1044,8 @@ def cvxpy_reference(qp_raw: dict, requested_solver: str) -> Optional[dict]:
             constraints.append(x[idx] <= float(value))
     problem = cp.Problem(cp.Minimize(0.5 * cp.quad_form(x, q) + c @ x), constraints)
     try:
-        problem.solve(solver=solver_name, verbose=False)
+        with redirect_process_stdout_to_stderr():
+            problem.solve(solver=solver_name, verbose=False)
     except Exception as exc:
         return {
             "status": "numerical-error",
@@ -1118,7 +1138,8 @@ def cvxpy_socp_reference(raw: dict, requested_solver: str) -> Optional[dict]:
         )
     problem = cp.Problem(cp.Minimize(np.array(p["c"], dtype=float) @ x), constraints)
     try:
-        problem.solve(solver=solver_name, verbose=False)
+        with redirect_process_stdout_to_stderr():
+            problem.solve(solver=solver_name, verbose=False)
     except Exception as exc:
         return {
             "status": "numerical-error",
@@ -1213,7 +1234,8 @@ def cvxpy_qcp_reference(raw: dict, requested_solver: str) -> Optional[dict]:
         constraints,
     )
     try:
-        problem.solve(solver=solver_name, verbose=False)
+        with redirect_process_stdout_to_stderr():
+            problem.solve(solver=solver_name, verbose=False)
     except Exception as exc:
         return {
             "status": "numerical-error",

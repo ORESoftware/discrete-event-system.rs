@@ -478,6 +478,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Scs
             | ExternalOptimizationTool::Clarabel
             | ExternalOptimizationTool::Ecos
+            | ExternalOptimizationTool::Copt
             | ExternalOptimizationTool::Clingo
             | ExternalOptimizationTool::Cvc5
             | ExternalOptimizationTool::Proxqp
@@ -502,7 +503,6 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Knitro
             | ExternalOptimizationTool::Mosek
             | ExternalOptimizationTool::Baron
-            | ExternalOptimizationTool::Copt
             | ExternalOptimizationTool::Qpoases
             | ExternalOptimizationTool::Cosmo
             | ExternalOptimizationTool::Sdpa
@@ -596,7 +596,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Knitro => "KNITRO_HOME",
             ExternalOptimizationTool::Mosek => "MOSEK_HOME",
             ExternalOptimizationTool::Baron => "BARON_DIR",
-            ExternalOptimizationTool::Copt => "COPT_HOME",
+            ExternalOptimizationTool::Copt => "COPT_PYTHON",
             ExternalOptimizationTool::Casadi => "CASADI_PYTHON",
             ExternalOptimizationTool::Osqp => "OSQP_PYTHON",
             ExternalOptimizationTool::Scs => "SCS_PYTHON",
@@ -943,13 +943,16 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Cpmpy => &["cpmpy"],
             ExternalOptimizationTool::PyCsp3 => &["pycsp3"],
             ExternalOptimizationTool::PySat => &["pysat"],
+            ExternalOptimizationTool::Clingo => &["clingo"],
             ExternalOptimizationTool::Casadi => &["casadi"],
+            ExternalOptimizationTool::Copt => &["coptpy"],
             ExternalOptimizationTool::Osqp => &["osqp"],
             ExternalOptimizationTool::Scs => &["scs"],
             ExternalOptimizationTool::Clarabel => &["clarabel"],
             ExternalOptimizationTool::Ecos => &["ecos"],
             ExternalOptimizationTool::Cvc5 => &["cvc5"],
             ExternalOptimizationTool::Proxqp => &["proxsuite"],
+            ExternalOptimizationTool::Bitwuzla => &["bitwuzla"],
             _ => &[],
         }
     }
@@ -1977,6 +1980,7 @@ mod tests {
             ExternalOptimizationTool::MosekPython.env_var(),
             "MOSEK_PYTHON"
         );
+        assert_eq!(ExternalOptimizationTool::Copt.env_var(), "COPT_PYTHON");
         assert_eq!(
             ExternalOptimizationTool::GurobiRust.env_var(),
             "GUROBI_RUST_CARGO_MANIFEST"
@@ -2042,6 +2046,16 @@ mod tests {
         assert!(ExternalOptimizationTool::MosekPython
             .install_dir_env_vars()
             .contains(&"MOSEK_HOME"));
+        assert_eq!(
+            ExternalOptimizationTool::Copt.ecosystem(),
+            ExternalOptimizationEcosystem::Python
+        );
+        assert!(ExternalOptimizationTool::Copt
+            .python_modules()
+            .contains(&"coptpy"));
+        assert!(ExternalOptimizationTool::Copt
+            .install_dir_env_vars()
+            .contains(&"COPT_HOME"));
         assert!(ExternalOptimizationTool::OrToolsGlop
             .python_modules()
             .contains(&"ortools.linear_solver.pywraplp"));

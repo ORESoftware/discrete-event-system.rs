@@ -361,6 +361,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Scs
             | ExternalOptimizationTool::Clarabel
             | ExternalOptimizationTool::Ecos
+            | ExternalOptimizationTool::Copt
             | ExternalOptimizationTool::Clingo
             | ExternalOptimizationTool::Cvc5
             | ExternalOptimizationTool::Proxqp
@@ -382,7 +383,6 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::Knitro
             | ExternalOptimizationTool::Mosek
             | ExternalOptimizationTool::Baron
-            | ExternalOptimizationTool::Copt
             | ExternalOptimizationTool::Qpoases
             | ExternalOptimizationTool::Cosmo
             | ExternalOptimizationTool::Sdpa
@@ -871,6 +871,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Scs => &["scs"],
             ExternalOptimizationTool::Clarabel => &["clarabel"],
             ExternalOptimizationTool::Ecos => &["ecos"],
+            ExternalOptimizationTool::Copt => &["coptpy"],
             ExternalOptimizationTool::Proxqp => &["proxsuite"],
             ExternalOptimizationTool::Bitwuzla => &["bitwuzla"],
             _ => &[],
@@ -1041,7 +1042,7 @@ impl ExternalOptimizationTool {
                 "Commercial global optimization solver for nonlinear and mixed-integer nonlinear models"
             }
             ExternalOptimizationTool::Copt => {
-                "Commercial LP/QP/QCP/MIP and conic optimization solver"
+                "Commercial LP/QP/QCP/MIP and conic optimization solver via CLI or Python API"
             }
             ExternalOptimizationTool::Casadi => {
                 "Python symbolic/numeric optimization and automatic-differentiation modeling layer"
@@ -3154,6 +3155,7 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
             names.push("BARON_LICENSE".to_string());
         }
         ExternalOptimizationTool::Copt => {
+            names.push("COPT_PYTHON".to_string());
             names.push("COPT_HOME".to_string());
         }
         ExternalOptimizationTool::Casadi => {
@@ -4317,7 +4319,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
                 .count(),
-            27
+            28
         );
         assert_eq!(
             specs
@@ -4331,7 +4333,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            45
+            44
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -4446,6 +4448,14 @@ mod tests {
                 && spec.exactness == ExternalOptimizationExactness::Numerical
                 && spec.tool.python_modules().contains(&"mosek")
                 && spec.notes.contains("MOSEK Python API")
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::Copt
+                && spec.language == ExternalOptimizationLanguage::Python
+                && spec.family == ExternalOptimizationFamily::ConvexOptimization
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec.tool.python_modules().contains(&"coptpy")
+                && spec.notes.contains("Python API")
         }));
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::Hexaly
@@ -4706,6 +4716,20 @@ mod tests {
         );
         assert!(artifact_env_names(ExternalOptimizationTool::MosekPython)
             .contains(&"MOSEKLM_LICENSE_FILE".to_string()));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::Copt)[0],
+            "ORES_COPT_PYTHON"
+        );
+        assert!(ExternalOptimizationTool::Copt
+            .python_modules()
+            .contains(&"coptpy"));
+        assert!(
+            artifact_env_names(ExternalOptimizationTool::Copt).contains(&"COPT_HOME".to_string())
+        );
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Copt)
+                .contains(&"COPT_HOME".to_string())
+        );
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Jump)[0],
             "ORES_JUMP_JULIA"

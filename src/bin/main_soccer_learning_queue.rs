@@ -20,13 +20,14 @@ use des_engine::des::general::soccer::{
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
 use des_engine::des::soccer_learning::{
-    evolve_soccer_tactical_learning_weights, evolve_soccer_team_policies,
+    evolve_soccer_tactical_learning_weights_from_genomes, evolve_soccer_team_policies,
     run_soccer_learning_queue_with_events, soccer_policy_version_insert_status_after_active_head,
     soccer_postgres_policy_refresh_decision, soccer_self_play_artifact_from_queue_report,
     soccer_should_flush_postgres_policy_versions_for_new_sim,
     soccer_should_refresh_postgres_for_new_sim, SoccerEvolutionOptions,
     SoccerLearningCompletedGame, SoccerLearningQueueEvent, SoccerLearningQueueRunnerConfig,
-    SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
+    SoccerPostgresPolicyRefreshCheck, SoccerTacticalLearningGenomeParent,
+    SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -49,6 +50,7 @@ const DEFAULT_SOCCER_QUEUE_EVOLUTION_ELITE_GAMES: usize = 4;
 #[derive(Clone, Debug)]
 struct TacticalEvolutionSample {
     summary: SoccerTacticalLearningSummary,
+    weights: SoccerTacticalLearningWeights,
     fitness: f64,
 }
 
@@ -1209,6 +1211,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_policy_version_buffer = Vec::<PendingPostgresPolicyVersion>::new();
     let mut pg_completed_buffer = Vec::<PendingPostgresCompletedRun>::new();
     let mut pg_episode_starting_policy_versions = HashMap::<usize, (Option<String>, i32)>::new();
+    let mut episode_starting_tactical_weights =
+        HashMap::<usize, SoccerTacticalLearningWeights>::new();
     let mut pg_persisted_games = 0usize;
 
     let mut initial_policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
@@ -1446,6 +1450,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                         match_config.tactical_learning = tactical_learning.clone();
                         active_config = match_config.clone();
                     }
+                    episode_starting_tactical_weights
+                        .insert(next_episode, match_config.tactical_learning.clone());
                     if pg_experiment_id.is_some() {
                         pg_episode_starting_policy_versions.insert(
                             next_episode,
@@ -1460,8 +1466,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                 } => {
                     queue_completed_games_seen = queue_completed_games_seen.saturating_add(1);
                     let game_fitness = game.score.match_fitness;
+                    let game_tactical_weights = episode_starting_tactical_weights
+                        .remove(&game.episode)
+                        .unwrap_or_else(|| active_config.tactical_learning.clone());
                     tactical_evolution_samples.push_back(TacticalEvolutionSample {
                         summary: game.tactical_summary.clone(),
+                        weights: game_tactical_weights,
                         fitness: game_fitness,
                     });
                     policy_evolution_samples.push_back(PolicyEvolutionSample {
@@ -1558,7 +1568,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 .iter()
                                 .take(elite_count)
                                 .map(|(sample_index, fitness)| {
-                                    (&tactical_evolution_samples[*sample_index].summary, *fitness)
+                                    let sample = &tactical_evolution_samples[*sample_index];
+                                    SoccerTacticalLearningGenomeParent {
+                                        summary: &sample.summary,
+                                        weights: &sample.weights,
+                                        fitness: *fitness,
+                                    }
                                 })
                                 .collect::<Vec<_>>();
                             let mut queue_evolution_options = evolution_options;
@@ -1567,7 +1582,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 .wrapping_add(queue_completed_games_seen as u64)
                                 .wrapping_add((game.episode as u64) << 32);
                             let previous_tactical_learning = tactical_learning.clone();
-                            tactical_learning = evolve_soccer_tactical_learning_weights(
+                            tactical_learning = evolve_soccer_tactical_learning_weights_from_genomes(
                                 &tactical_learning,
                                 &tactical_parents,
                                 queue_evolution_options,

@@ -6371,11 +6371,13 @@ fn solve_native_xpress_cli_model(
     };
     let model_path = native_xpress_temp_path("model", extension);
     let solution_path = native_xpress_temp_path("solution", "sol");
+    let solution_data_path = native_xpress_solution_data_path(&solution_path);
     let script_path = native_xpress_temp_path("commands", "txt");
     let header_path = native_xpress_header_path(&solution_path);
     let cleanup_paths = vec![
         model_path.clone(),
         solution_path.clone(),
+        solution_data_path.clone(),
         script_path.clone(),
         header_path,
     ];
@@ -6435,7 +6437,7 @@ fn solve_native_xpress_cli_model(
     let stderr = String::from_utf8_lossy(&output.stderr);
     let solver_version = parse_xpress_solver_version(&format!("{stdout}\n{stderr}"));
 
-    if !solution_path.exists() {
+    if !solution_path.exists() && !solution_data_path.exists() {
         let status = classify_native_linear_status("", &stdout, &stderr);
         cleanup_native_xpress_temp_files(&cleanup_paths);
         let mut failure = external_cli_failure(
@@ -7138,9 +7140,17 @@ fn native_lindo_temp_path(stem: &str, extension: &str) -> PathBuf {
 }
 
 fn native_xpress_header_path(solution_path: &Path) -> PathBuf {
-    let mut path = solution_path.to_path_buf();
-    path.set_extension("hdr");
-    path
+    native_xpress_companion_path(solution_path, ".hdr")
+}
+
+fn native_xpress_solution_data_path(solution_path: &Path) -> PathBuf {
+    native_xpress_companion_path(solution_path, ".asc")
+}
+
+fn native_xpress_companion_path(solution_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = solution_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
 }
 
 fn native_lindo_solution_path(model_path: &Path) -> PathBuf {
@@ -8718,10 +8728,20 @@ fn parse_native_xpress_solution_file(
     path: &Path,
     variable_count: usize,
 ) -> Result<ParsedNativeNamedSolution, String> {
-    let text = fs::read_to_string(path).map_err(|err| {
+    let data_path = if path.exists() {
+        path.to_path_buf()
+    } else {
+        let companion = native_xpress_solution_data_path(path);
+        if companion.exists() {
+            companion
+        } else {
+            path.to_path_buf()
+        }
+    };
+    let text = fs::read_to_string(&data_path).map_err(|err| {
         format!(
             "failed to read Xpress solution file '{}': {err}",
-            path.display()
+            data_path.display()
         )
     })?;
     let header_path = native_xpress_header_path(path);
@@ -11892,6 +11912,32 @@ x9; 99
             super::parse_xpress_solver_version("FICO Xpress Optimizer 9.4.0"),
             Some("Xpress 9.4.0".to_string())
         );
+    }
+
+    #[test]
+    fn native_xpress_solution_file_parser_reads_asc_companion() {
+        let base_path = std::env::temp_dir().join(format!(
+            "des-rs-xpress-solution-parser-{}.sol",
+            std::process::id()
+        ));
+        let data_path = super::native_xpress_solution_data_path(&base_path);
+        let header_path = super::native_xpress_header_path(&base_path);
+        std::fs::write(&data_path, "x0 1\nx1 0\n").unwrap();
+        std::fs::write(
+            &header_path,
+            "Global search complete: optimal solution found",
+        )
+        .unwrap();
+
+        let parsed = super::parse_native_xpress_solution_file(&base_path, 2).unwrap();
+
+        assert_eq!(data_path, base_path.with_extension("sol.asc"));
+        assert_eq!(header_path, base_path.with_extension("sol.hdr"));
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![1.0, 0.0]);
+
+        let _ = std::fs::remove_file(&data_path);
+        let _ = std::fs::remove_file(&header_path);
     }
 
     #[test]

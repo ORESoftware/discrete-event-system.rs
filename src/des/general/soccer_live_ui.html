@@ -282,7 +282,7 @@
     <div class="stage"><canvas id="pitch" width="1280" height="820"></canvas></div>
     <aside>
       <div class="row">
-        <button id="run" class="active">Run</button>
+        <button id="run">Run</button>
         <button id="step">Step</button>
         <button id="resetMatch">New Match</button>
         <button id="exportPolicy">Export Policy</button>
@@ -433,6 +433,7 @@
       </div>
       <div class="section">Human Controller</div>
       <div class="metric"><span>Workers</span><b id="controllerThreads">0 native</b></div>
+      <div class="metric"><span>HTTP</span><b id="liveHttp">pool 0</b></div>
       <div class="metric"><span>Main Loop</span><b id="controllerYield">idle</b></div>
       <div class="metric"><span>Input Queue</span><b id="inputQueue">0 pending</b></div>
       <div id="slots"></div>
@@ -521,6 +522,7 @@ const tickReward = document.getElementById("tickReward");
 const recentActions = document.getElementById("recentActions");
 const recentMoments = document.getElementById("recentMoments");
 const controllerThreads = document.getElementById("controllerThreads");
+const liveHttp = document.getElementById("liveHttp");
 const controllerYield = document.getElementById("controllerYield");
 const inputQueue = document.getElementById("inputQueue");
 const learningEnabled = document.getElementById("learningEnabled");
@@ -608,6 +610,7 @@ let queuedInputs = [];
 let eventLog = [];
 let recentLearningTransitions = [];
 let stepping = false;
+let resetting = false;
 let surfaceTimer = null;
 let syncingSurface = false;
 let syncingLearning = false;
@@ -1062,6 +1065,15 @@ function controllerThreadLabel(threads = state?.controllerThreads || []) {
   const closed = threads.filter(thread => thread.closed).length;
   const closedSuffix = closed ? ` ${closed} closed` : "";
   return `${threads.length} native P${pending} A${accepted} D${pushed} S${stale}${closedSuffix}`;
+}
+function liveHttpLabel(http = state?.liveHttp) {
+  if (!http) return "pool ?";
+  const workers = Number(http.workerThreads ?? 0);
+  const model = String(http.workerModel || "worker-pool").replace(/-/g, " ");
+  const reuse = http.reusesWorkers === false ? "new" : "reuse";
+  const stepBatch = http.batchesStepTicks === false ? "" : " batch";
+  const spawn = http.spawnsPerRequest ? " spawn/request" : "";
+  return `${model} ${workers} ${reuse}${stepBatch}${spawn}`;
 }
 function controllerYieldLabel(stats = state?.controllerYield) {
   if (!stats) return "idle";
@@ -2203,6 +2215,7 @@ function render() {
   policyStorage.textContent = policyStorageLabel(state.policyStorage);
   policyProbability.textContent = policyProbabilityLabel();
   controllerThreads.textContent = controllerThreadLabel();
+  liveHttp.textContent = liveHttpLabel();
   controllerYield.textContent = controllerYieldLabel();
   inputQueue.textContent = queuedHumanInputsLabel();
   tickReward.textContent = tickRewardLabel();
@@ -2903,33 +2916,44 @@ async function loadTeamPolicySnapshot() {
   render();
 }
 async function resetMatch(options = {}) {
+  resetting = true;
+  running = false;
+  updateRunButton();
   const previousPolicyHistory = state?.policyHistory || null;
-  const response = await postJson("/api/reset", {
-    preserveTeamPolicy: true,
-    preserveSharedPolicy: true,
-    keepControllerAssignments: true
-  });
-  state = response.state;
-  state.policyHistory = previousPolicyHistory;
-  eventLog = [];
-  recentLearningTransitions = [];
-  lastSemanticBallAction = null;
-  queuedInputs = [];
-  keys.clear();
-  rememberSemanticBallActionsFromFrames([state.frame]);
-  applyAssignmentsToFrame(state.controllerAssignments);
-  syncSurfaceControls();
-  rebuildControls(state.controllerAssignments);
-  running = options.keepRunning ?? false;
-  const previousTicks = Number(response.previousSummary?.ticks ?? 0);
-  const checkpoint = response.episodePolicyCheckpoint ? " policy saved" : "";
-  statusEl.textContent = options.auto
-    ? `episode #${state.episodeIndex} after ${previousTicks} ticks${checkpoint}`
-    : `new match after ${previousTicks} ticks${checkpoint}`;
-  if (response.episodePolicyCheckpoint?.path) {
-    await refreshPolicyHistory(response.episodePolicyCheckpoint.path, {quiet: true, render: false});
+  try {
+    const response = await postJson("/api/reset", {
+      preserveTeamPolicy: true,
+      preserveSharedPolicy: true,
+      keepControllerAssignments: true
+    });
+    state = response.state;
+    state.policyHistory = previousPolicyHistory;
+    eventLog = [];
+    recentLearningTransitions = [];
+    lastSemanticBallAction = null;
+    queuedInputs = [];
+    keys.clear();
+    rememberSemanticBallActionsFromFrames([state.frame]);
+    applyAssignmentsToFrame(state.controllerAssignments);
+    syncSurfaceControls();
+    rebuildControls(state.controllerAssignments);
+    running = Boolean(options.keepRunning);
+    const previousTicks = Number(response.previousSummary?.ticks ?? 0);
+    const checkpoint = response.episodePolicyCheckpoint ? " policy saved" : "";
+    statusEl.textContent = options.freshLoad
+      ? `fresh match after ${previousTicks} ticks${checkpoint}`
+      : options.auto
+        ? `episode #${state.episodeIndex} after ${previousTicks} ticks${checkpoint}`
+        : `new match after ${previousTicks} ticks${checkpoint}`;
+    if (response.episodePolicyCheckpoint?.path) {
+      await refreshPolicyHistory(response.episodePolicyCheckpoint.path, {quiet: true, render: false});
+    }
+    if (options.clearFreshUrl) clearFreshMatchUrl();
+    render();
+  } finally {
+    resetting = false;
+    updateRunButton();
   }
-  render();
 }
 function downloadTextFile(filename, content, type) {
   const blob = new Blob([content], {type});
@@ -3063,9 +3087,32 @@ async function loadState() {
   }
   render();
 }
+function freshMatchRequestedOnLoad() {
+  const params = new URLSearchParams(window.location.search);
+  const normalizedReset = String(params.get("reset") || "").toLowerCase();
+  const normalizedNewMatch = String(params.get("newMatch") || params.get("new-match") || "").toLowerCase();
+  return params.has("fresh")
+    || ["1", "true", "yes"].includes(normalizedReset)
+    || ["1", "true", "yes"].includes(normalizedNewMatch);
+}
+function clearFreshMatchUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("fresh");
+  url.searchParams.delete("reset");
+  url.searchParams.delete("newMatch");
+  url.searchParams.delete("new-match");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+async function bootLivePage() {
+  if (freshMatchRequestedOnLoad()) {
+    await resetMatch({freshLoad: true, clearFreshUrl: true});
+    return;
+  }
+  await loadState();
+}
 async function stepOnce(options = {}) {
   if (!state) return;
-  if (stepping) return;
+  if (stepping || resetting) return;
   stepping = true;
   try {
     if (state.done) {
@@ -3311,9 +3358,9 @@ window.addEventListener("keyup", e => {
   }
 });
 setInterval(() => {
-  if (running) stepOnce().catch(e => statusEl.textContent = e.message);
+  if (running && !resetting) stepOnce().catch(e => statusEl.textContent = e.message);
 }, LIVE_STEP_INTERVAL_MS);
-loadState().catch(e => statusEl.textContent = e.message);
+bootLivePage().catch(e => statusEl.textContent = e.message);
 </script>
 </body>
 </html>

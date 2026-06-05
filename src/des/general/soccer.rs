@@ -20255,6 +20255,8 @@ pub struct SoccerStepResponse {
     pub controller_yield: ControllerYieldStats,
     #[serde(default)]
     pub queued_human_inputs: usize,
+    #[serde(default)]
+    pub live_http: SoccerLiveHttpStatus,
     pub accepted_inputs: usize,
     pub done: bool,
 }
@@ -20289,6 +20291,8 @@ pub struct SoccerLiveStateResponse {
     pub controller_yield: ControllerYieldStats,
     #[serde(default)]
     pub queued_human_inputs: usize,
+    #[serde(default)]
+    pub live_http: SoccerLiveHttpStatus,
     pub done: bool,
 }
 
@@ -21352,6 +21356,34 @@ pub struct SoccerInputAck {
     pub queued: bool,
     #[serde(default)]
     pub queued_human_inputs: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerLiveHttpStatus {
+    pub worker_model: String,
+    pub worker_threads: usize,
+    pub reuses_workers: bool,
+    pub spawns_per_request: bool,
+    pub batches_step_ticks: bool,
+}
+
+impl SoccerLiveHttpStatus {
+    fn worker_pool(worker_threads: usize) -> Self {
+        SoccerLiveHttpStatus {
+            worker_model: "worker-pool".to_string(),
+            worker_threads: worker_threads.max(1),
+            reuses_workers: true,
+            spawns_per_request: false,
+            batches_step_ticks: true,
+        }
+    }
+}
+
+impl Default for SoccerLiveHttpStatus {
+    fn default() -> Self {
+        SoccerLiveHttpStatus::worker_pool(default_live_http_worker_threads())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28532,6 +28564,7 @@ pub struct SoccerRealtimeSession {
     next_moment_id: u64,
     moment_storage: SoccerMomentStorageState,
     policy_autosave: SoccerPolicyAutosaveState,
+    live_http: SoccerLiveHttpStatus,
     episode_index: usize,
     completed_episodes: VecDeque<SoccerLiveEpisodeSummary>,
 }
@@ -28573,6 +28606,7 @@ impl SoccerRealtimeSession {
             next_moment_id: 0,
             moment_storage: SoccerMomentStorageState::default(),
             policy_autosave: SoccerPolicyAutosaveState::default(),
+            live_http: SoccerLiveHttpStatus::default(),
             episode_index: 0,
             completed_episodes: VecDeque::new(),
         }
@@ -28610,6 +28644,7 @@ impl SoccerRealtimeSession {
             next_moment_id: 0,
             moment_storage: SoccerMomentStorageState::default(),
             policy_autosave: SoccerPolicyAutosaveState::default(),
+            live_http: SoccerLiveHttpStatus::default(),
             episode_index: 0,
             completed_episodes: VecDeque::new(),
         }
@@ -28643,6 +28678,10 @@ impl SoccerRealtimeSession {
 
     pub fn queued_human_input_count(&self) -> usize {
         self.input_queue.queued_len()
+    }
+
+    pub fn set_live_http_worker_threads(&mut self, worker_threads: usize) {
+        self.live_http = SoccerLiveHttpStatus::worker_pool(worker_threads);
     }
 
     pub fn shared_positions(&self) -> SharedPlayerPositions {
@@ -29117,6 +29156,7 @@ impl SoccerRealtimeSession {
             controller_threads: self.controller_thread_stats(),
             controller_yield: self.sim.controller_yield_stats(),
             queued_human_inputs: self.queued_human_input_count(),
+            live_http: self.live_http.clone(),
             accepted_inputs,
             done: self.sim.is_done(),
         }
@@ -29160,6 +29200,7 @@ impl SoccerRealtimeSession {
             controller_threads: self.controller_thread_stats(),
             controller_yield: self.sim.controller_yield_stats(),
             queued_human_inputs: self.queued_human_input_count(),
+            live_http: self.live_http.clone(),
             accepted_inputs,
             done: self.sim.is_done(),
         }
@@ -29698,6 +29739,7 @@ impl SoccerRealtimeSession {
             controller_threads: self.controller_thread_stats(),
             controller_yield: self.sim.controller_yield_stats(),
             queued_human_inputs: self.queued_human_input_count(),
+            live_http: self.live_http.clone(),
             done: self.sim.is_done(),
         }
     }
@@ -30025,6 +30067,7 @@ pub struct SoccerLiveServer {
 impl SoccerLiveServer {
     pub fn new(config: SoccerLiveServerConfig) -> Self {
         let mut session = SoccerRealtimeSession::new(config.match_config.clone());
+        session.set_live_http_worker_threads(config.http_worker_threads);
         let policy_path = PathBuf::from(config.policy_disk_path.trim());
         let policy_path = if policy_path.as_os_str().is_empty() {
             PathBuf::from(DEFAULT_LIVE_TEAM_POLICY_PATH)
@@ -53265,6 +53308,16 @@ mod tests {
         assert!(html.body.contains("exportPostgresTeamPolicy"));
         assert!(html.body.contains("id=\"exportPostgresPolicyJsonl\""));
         assert!(html.body.contains("exportPostgresTeamPolicyJsonl"));
+        assert!(html.body.contains("id=\"liveHttp\""));
+        assert!(html.body.contains("function liveHttpLabel"));
+        assert!(html.body.contains("<button id=\"run\">Run</button>"));
+        assert!(html.body.contains("let resetting = false;"));
+        assert!(html.body.contains("freshMatchRequestedOnLoad"));
+        assert!(html
+            .body
+            .contains("resetMatch({freshLoad: true, clearFreshUrl: true})"));
+        assert!(html.body.contains("if (stepping || resetting) return;"));
+        assert!(html.body.contains("if (running && !resetting)"));
 
         let state = handle_live_soccer_request(
             "GET /api/state HTTP/1.1\r\nHost: local\r\n\r\n",
@@ -53336,6 +53389,14 @@ mod tests {
             2
         );
         assert_eq!(state_value["controllerThreads"][0]["controllerSlot"], 0);
+        assert_eq!(state_value["liveHttp"]["workerModel"], "worker-pool");
+        assert_eq!(
+            state_value["liveHttp"]["workerThreads"].as_u64().unwrap(),
+            default_live_http_worker_threads() as u64
+        );
+        assert_eq!(state_value["liveHttp"]["reusesWorkers"], true);
+        assert_eq!(state_value["liveHttp"]["spawnsPerRequest"], false);
+        assert_eq!(state_value["liveHttp"]["batchesStepTicks"], true);
         assert_eq!(state_value["queuedHumanInputs"], 0);
         assert_eq!(state_value["episodeIndex"], 0);
         assert!(state_value["completedEpisodes"]
@@ -53359,6 +53420,9 @@ mod tests {
         assert_eq!(value["episodeIndex"], 0);
         assert!(value["completedEpisodes"].as_array().unwrap().is_empty());
         assert_eq!(value["controllerThreads"].as_array().unwrap().len(), 2);
+        assert_eq!(value["liveHttp"]["workerModel"], "worker-pool");
+        assert_eq!(value["liveHttp"]["spawnsPerRequest"], false);
+        assert_eq!(value["liveHttp"]["batchesStepTicks"], true);
         assert_eq!(value["queuedHumanInputs"], 0);
         assert_eq!(value["controllerYield"]["assignedPlayers"], 0);
         assert_eq!(value["controllerYield"]["waitAttempts"], 0);
@@ -54563,6 +54627,7 @@ mod tests {
                 seed: 159,
                 ..Default::default()
             },
+            http_worker_threads: 2,
             policy_disk_path: policy_path.display().to_string(),
             autoload_team_policy: true,
             autosave_team_policy: true,
@@ -54626,6 +54691,11 @@ mod tests {
         );
         assert!(state.policy_probability.home_states > 0);
         assert!(state.policy_probability.away_states > 0);
+        assert_eq!(state.live_http.worker_model, "worker-pool");
+        assert_eq!(state.live_http.worker_threads, 2);
+        assert!(state.live_http.reuses_workers);
+        assert!(!state.live_http.spawns_per_request);
+        assert!(state.live_http.batches_step_ticks);
 
         let _ = std::fs::remove_file(policy_path);
     }

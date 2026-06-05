@@ -4606,12 +4606,6 @@ impl Driver {
                 ExternalLinearCliStatus::from_str(expected_status.as_str());
             for solver in ExternalLinearCliSolver::open_source_lp().iter().copied() {
                 let solver_name = solver.as_str();
-                if case_name == "unbounded" && solver == ExternalLinearCliSolver::LpSolve {
-                    println!(
-                        "  SKIP  LP {case_name} {solver_name}: lp_solve reports the smoke unbounded LP as optimal"
-                    );
-                    continue;
-                }
                 let reference = solve_lp_with_external_cli(
                     &status_lp,
                     &ExternalLinearCliOptions {
@@ -6143,12 +6137,6 @@ impl Driver {
                 ExternalLinearCliStatus::from_str(expected_status.as_str());
             for solver in ExternalLinearCliSolver::open_source_mip().iter().copied() {
                 let solver_name = solver.as_str();
-                if case_name == "unbounded" && solver == ExternalLinearCliSolver::LpSolve {
-                    println!(
-                        "  SKIP  IP/MIP {case_name} {solver_name}: lp_solve reports the smoke unbounded model as optimal"
-                    );
-                    continue;
-                }
                 let reference = solve_ipmip_with_external_cli(
                     &status_mip,
                     &ExternalLinearCliOptions {

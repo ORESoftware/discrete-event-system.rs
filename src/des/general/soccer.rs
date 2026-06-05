@@ -213,11 +213,11 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 48;
-const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 36;
-const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 37;
-const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 40;
-const SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING: usize = 43;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 50;
+const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
+const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
+const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
+const SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING: usize = 45;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
 const DEFAULT_SOCCER_NEURAL_TRAIN_EVERY_TICKS: usize = 4;
@@ -1005,6 +1005,10 @@ pub struct SoccerPomdpObservation {
     pub best_pass_receiver_openness: f64,
     #[serde(default)]
     pub best_aerial_pass_receiver_openness: f64,
+    #[serde(default)]
+    pub best_pass_stride_fit: f64,
+    #[serde(default)]
+    pub best_aerial_pass_stride_fit: f64,
     #[serde(default)]
     pub expected_pass_completion: f64,
     #[serde(default)]
@@ -1842,6 +1846,10 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub best_aerial_pass_receiver_openness_bin: u8,
     #[serde(default)]
+    pub best_pass_stride_fit_bin: u8,
+    #[serde(default)]
+    pub best_aerial_pass_stride_fit_bin: u8,
+    #[serde(default)]
     pub expected_pass_completion_bin: u8,
     #[serde(default)]
     pub expected_aerial_pass_completion_bin: u8,
@@ -2036,6 +2044,14 @@ impl SoccerQStateKey {
                 observation.best_aerial_pass_receiver_openness,
                 &[0.20, 0.40, 0.62, 0.82],
             ),
+            best_pass_stride_fit_bin: distance_bucket(
+                observation.best_pass_stride_fit,
+                &[0.20, 0.40, 0.62, 0.82],
+            ),
+            best_aerial_pass_stride_fit_bin: distance_bucket(
+                observation.best_aerial_pass_stride_fit,
+                &[0.20, 0.40, 0.62, 0.82],
+            ),
             expected_pass_completion_bin: distance_bucket(
                 observation.expected_pass_completion,
                 &[0.35, 0.55, 0.72, 0.86],
@@ -2225,6 +2241,8 @@ impl SoccerQStateKey {
             && self.best_pass_receiver_openness_bin == other.best_pass_receiver_openness_bin
             && self.best_aerial_pass_receiver_openness_bin
                 == other.best_aerial_pass_receiver_openness_bin
+            && self.best_pass_stride_fit_bin == other.best_pass_stride_fit_bin
+            && self.best_aerial_pass_stride_fit_bin == other.best_aerial_pass_stride_fit_bin
             && self.expected_pass_completion_bin == other.expected_pass_completion_bin
             && self.expected_aerial_pass_completion_bin == other.expected_aerial_pass_completion_bin
             && self.aerial_pass_bypass_score_bin == other.aerial_pass_bypass_score_bin
@@ -7973,6 +7991,26 @@ impl Default for MatchConfig {
 }
 
 impl MatchConfig {
+    pub fn playback_trace(duration_seconds: f64) -> Self {
+        let duration_seconds = duration_seconds.max(0.0);
+        MatchConfig {
+            duration_seconds,
+            half_duration_seconds: 0.0,
+            period_count: 1,
+            period_break_recovery_seconds: 0.0,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            full_game_learning_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            adversarial_embedding_exploitation_enabled: false,
+            max_human_players: 0,
+            ..MatchConfig::default()
+        }
+    }
+
     pub fn live_gameplay() -> Self {
         MatchConfig {
             learning_enabled: false,
@@ -8966,6 +9004,8 @@ pub struct PlayerSnapshot {
     pub home_position: Vec2,
     pub controller_slot: Option<usize>,
     #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    #[serde(default)]
     pub preferences: AgentPreferences,
     #[serde(default)]
     pub vision_range_yards: f64,
@@ -9180,6 +9220,7 @@ impl WorldSnapshot {
                 fatigue: p.fatigue,
                 home_position: p.home_position,
                 controller_slot: p.controller_slot,
+                scheduled_index: None,
                 preferences: p.preferences.clone(),
                 vision_range_yards: vision_range_yards(p.skills.vision),
                 field_of_view_degrees: field_of_view_degrees(p.skills.vision),
@@ -9669,6 +9710,8 @@ impl WorldSnapshot {
                 floor_pass_lane_score: 0.0,
                 best_pass_receiver_openness: 0.0,
                 best_aerial_pass_receiver_openness: 0.0,
+                best_pass_stride_fit: 0.0,
+                best_aerial_pass_stride_fit: 0.0,
                 expected_pass_completion: 0.0,
                 expected_aerial_pass_completion: 0.0,
                 aerial_pass_bypass_score: 0.0,
@@ -10098,6 +10141,8 @@ impl WorldSnapshot {
             floor_pass_lane_score,
             best_pass_receiver_openness: best_floor_pass_quality.receiver_openness,
             best_aerial_pass_receiver_openness: best_aerial_pass_quality.receiver_openness,
+            best_pass_stride_fit: best_floor_pass_quality.stride_fit,
+            best_aerial_pass_stride_fit: best_aerial_pass_quality.stride_fit,
             expected_pass_completion: best_floor_pass_quality.expected_completion,
             expected_aerial_pass_completion: best_aerial_pass_quality.expected_completion,
             aerial_pass_bypass_score,
@@ -14437,6 +14482,8 @@ pub struct OfficialSnapshot {
     pub acceleration: Vec2,
     pub jerk: Vec2,
     #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    #[serde(default)]
     pub offside_line: Option<AssistantOffsideLineSnapshot>,
 }
 
@@ -14468,6 +14515,8 @@ pub struct SoccerPlaybackPlayerFrame {
     pub action_facing: FacingBucket,
     #[serde(default)]
     pub controller_slot: Option<usize>,
+    #[serde(default)]
+    pub scheduled_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -14479,6 +14528,8 @@ pub struct SoccerPlaybackOfficialFrame {
     pub velocity: Vec2,
     pub acceleration: Vec2,
     pub jerk: Vec2,
+    #[serde(default)]
+    pub scheduled_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -14651,6 +14702,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     receive_facing: player.receive_facing,
                     action_facing: player.action_facing,
                     controller_slot: player.controller_slot,
+                    scheduled_index: player.scheduled_index,
                 })
                 .collect(),
             officials: frame
@@ -14663,6 +14715,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     velocity: official.velocity,
                     acceleration: official.acceleration,
                     jerk: official.jerk,
+                    scheduled_index: official.scheduled_index,
                 })
                 .collect(),
             score_home: frame.score_home,
@@ -18790,12 +18843,11 @@ impl SoccerNeuralLearner {
                     if pending_batches == 0 {
                         return;
                     }
-                    let snapshot_after_train =
-                        should_snapshot_after_threaded_neural_train(
-                            &self.stats,
-                            pending_batches,
-                            config,
-                        );
+                    let snapshot_after_train = should_snapshot_after_threaded_neural_train(
+                        &self.stats,
+                        pending_batches,
+                        config,
+                    );
                     let pending_limit = config.sanitized_max_pending_batches();
                     if self.stats.pending_batches.saturating_add(pending_batches) > pending_limit {
                         self.stats.dropped_batches =
@@ -19191,6 +19243,8 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.visible_aerial_pass_options_bin, 5.0),
         soccer_neural_bin(state.expected_pass_completion_bin, 5.0),
         soccer_neural_bin(state.expected_aerial_pass_completion_bin, 5.0),
+        soccer_neural_bin(state.best_pass_stride_fit_bin, 5.0),
+        soccer_neural_bin(state.best_aerial_pass_stride_fit_bin, 5.0),
         soccer_neural_bin(state.shot_on_frame_probability_bin, 5.0),
         soccer_neural_bin(state.shot_beat_goalkeeper_probability_bin, 5.0),
         soccer_neural_bin(state.shot_block_probability_bin, 5.0),
@@ -20715,6 +20769,10 @@ impl SoccerMatch {
         let mut players = snapshot.players.clone();
         for player in &mut players {
             player.learned_policy = self.learned_policy_trace_for_player(&snapshot, player.id);
+            player.scheduled_index = self
+                .last_agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id);
         }
         let officials = self
             .officials
@@ -20727,6 +20785,9 @@ impl SoccerMatch {
                 velocity: o.velocity,
                 acceleration: o.acceleration,
                 jerk: o.jerk,
+                scheduled_index: self.last_agent_schedule.iter().position(|entry| {
+                    entry.kind == AgentScheduleKind::Official && entry.id == o.id
+                }),
                 offside_line: assistant_offside_line_snapshot(&snapshot, o.kind),
             })
             .collect();
@@ -26670,19 +26731,11 @@ fn parse_human_input_payload(body: &str) -> Result<Vec<HumanInputFrame>, String>
 }
 
 pub fn run_default_simulation() -> SimulationTrace {
-    run_simulation(MatchConfig::default(), 5)
+    run_simulation(MatchConfig::playback_trace(DEFAULT_DURATION_SECONDS), 5)
 }
 
 fn run_site_simulation() -> SimulationTrace {
-    run_simulation(
-        MatchConfig {
-            duration_seconds: 60.0,
-            learning_enabled: false,
-            learning_logging_enabled: false,
-            ..MatchConfig::default()
-        },
-        2,
-    )
+    run_simulation(MatchConfig::playback_trace(60.0), 2)
 }
 
 pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> SimulationTrace {
@@ -29010,6 +29063,7 @@ fn tracking_frame_to_world_snapshot(
                     .copied()
                     .unwrap_or(p.home_position.unwrap_or(p.position)),
                 controller_slot: None,
+                scheduled_index: None,
                 preferences: AgentPreferences::default(),
                 acceleration: p.motion_acceleration.unwrap_or_default(),
                 jerk: p.motion_jerk.unwrap_or_default(),
@@ -33023,6 +33077,14 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         let expected_player_ids = (0..22).collect::<std::collections::BTreeSet<_>>();
         assert_eq!(scheduled_player_ids, expected_player_ids);
+        for player in &frame.players {
+            let expected_index = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id)
+                .expect("player scheduled");
+            assert_eq!(player.scheduled_index, Some(expected_index));
+        }
         let scheduled_official_ids = frame
             .agent_schedule
             .iter()
@@ -33035,6 +33097,16 @@ mod tests {
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
         );
+        for official in &frame.officials {
+            let expected_index = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| {
+                    entry.kind == AgentScheduleKind::Official && entry.id == official.id
+                })
+                .expect("official scheduled");
+            assert_eq!(official.scheduled_index, Some(expected_index));
+        }
     }
 
     #[test]
@@ -34076,15 +34148,15 @@ mod tests {
 
     #[test]
     fn short_simulation_advances_ticks_and_records_frames() {
-        let trace = run_simulation(
-            MatchConfig {
-                duration_seconds: 3.0,
-                seed: 99,
-                ..Default::default()
-            },
-            2,
-        );
+        let mut config = MatchConfig::playback_trace(3.0);
+        config.seed = 99;
+        let trace = run_simulation(config, 2);
         assert_eq!(trace.summary.ticks, 30);
+        assert!(!trace.config.learning_enabled);
+        assert!(!trace.config.learning_logging_enabled);
+        assert!(!trace.config.full_game_learning_enabled);
+        assert!(!trace.config.neural_learning.enabled);
+        assert_eq!(trace.config.max_human_players, 0);
         assert!(trace.frames.len() >= 15);
         assert_eq!(trace.frames[0].players.len(), 22);
         assert!(trace
@@ -34101,6 +34173,29 @@ mod tests {
             .central_brain
             .tracked_players
             .iter()
+            .all(|player| player.controller_slot.is_none()));
+    }
+
+    #[test]
+    fn playback_trace_config_disables_learning_and_human_waits() {
+        let config = MatchConfig::playback_trace(12.0);
+
+        assert_eq!(config.effective_duration_seconds(), 12.0);
+        assert_eq!(config.total_ticks(), 120);
+        assert!(!config.learning_enabled);
+        assert!(!config.learning_logging_enabled);
+        assert!(!config.full_game_learning_enabled);
+        assert!(!config.neural_learning.enabled);
+        assert!(!config.adversarial_embedding_exploitation_enabled);
+        assert_eq!(config.max_human_players, 0);
+
+        let trace = run_simulation(config, 60);
+        assert_eq!(trace.summary.ticks, 120);
+        assert!(trace.events.iter().all(|event| event.tick <= 120));
+        assert!(trace
+            .frames
+            .iter()
+            .flat_map(|frame| frame.players.iter())
             .all(|player| player.controller_slot.is_none()));
     }
 
@@ -41392,6 +41487,31 @@ mod tests {
             snapshot.ranked_visible_pass_targets(passer, 1),
             vec![runner]
         );
+        let observation = snapshot.observation_for(passer);
+        assert!(
+            observation.best_pass_stride_fit > static_quality.stride_fit + 0.12,
+            "POMDP observation should expose the passer's best anticipation fit: observation={:.3}, static={:.3}",
+            observation.best_pass_stride_fit,
+            static_quality.stride_fit
+        );
+
+        let state = snapshot.mdp_state_for_player(passer);
+        let stride_key =
+            SoccerQStateKey::from_parts(&state, &observation, Team::Home, PlayerRole::Midfielder);
+        let mut static_observation = observation.clone();
+        static_observation.best_pass_stride_fit = static_quality.stride_fit;
+        let static_key = SoccerQStateKey::from_parts(
+            &state,
+            &static_observation,
+            Team::Home,
+            PlayerRole::Midfielder,
+        );
+        assert!(
+            stride_key.best_pass_stride_fit_bin > static_key.best_pass_stride_fit_bin,
+            "Q-state should bin pass anticipation separately from completion: stride={}, static={}",
+            stride_key.best_pass_stride_fit_bin,
+            static_key.best_pass_stride_fit_bin
+        );
     }
 
     #[test]
@@ -44706,6 +44826,26 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("playback json"))
             .collect::<Vec<_>>();
+        let scheduled_frame = frames
+            .iter()
+            .find(|frame| frame["tick"].as_u64().unwrap_or(0) > 0)
+            .expect("scheduled playback frame");
+        assert!(scheduled_frame["players"][0]
+            .get("scheduledIndex")
+            .is_some());
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["scheduledIndex"].as_u64().is_some()));
+        assert!(scheduled_frame["officials"][0]
+            .get("scheduledIndex")
+            .is_some());
+        assert!(scheduled_frame["officials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|official| official["scheduledIndex"].as_u64().is_some()));
         let intent_frame = frames
             .iter()
             .find(|frame| {

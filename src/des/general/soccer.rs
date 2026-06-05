@@ -19699,6 +19699,17 @@ impl SoccerMatch {
     }
 
     pub fn learning_snapshot(&self) -> SoccerLearningSnapshot {
+        self.learning_snapshot_with_neural_network(true)
+    }
+
+    pub fn learning_stats_snapshot(&self) -> SoccerLearningSnapshot {
+        self.learning_snapshot_with_neural_network(false)
+    }
+
+    fn learning_snapshot_with_neural_network(
+        &self,
+        include_neural_network: bool,
+    ) -> SoccerLearningSnapshot {
         let (
             shared_policy_entries,
             shared_policy_visits,
@@ -19799,10 +19810,13 @@ impl SoccerMatch {
                 .sanitized_snapshot_every_batches(),
             neural_learning_last_loss: neural_stats.and_then(|stats| stats.last_loss),
             neural_learning_average_loss: neural_stats.and_then(|stats| stats.average_loss()),
-            neural_network: self
-                .neural_learner
-                .as_ref()
-                .and_then(|learner| learner.last_network_snapshot.clone()),
+            neural_network: if include_neural_network {
+                self.neural_learner
+                    .as_ref()
+                    .and_then(|learner| learner.last_network_snapshot.clone())
+            } else {
+                None
+            },
         }
     }
 
@@ -20043,7 +20057,7 @@ impl SoccerMatch {
         let imported_away_entries = policies.away.q_values.len();
         let imported_home_target_entries = policies.home.target_values.len();
         let imported_away_target_entries = policies.away.target_values.len();
-        let learning = self.learning_snapshot();
+        let learning = self.learning_stats_snapshot();
 
         Ok(SoccerTrackingImportResponse {
             learning,
@@ -20088,7 +20102,7 @@ impl SoccerMatch {
         let imported_away_entries = policies.away.q_values.len();
         let imported_home_target_entries = policies.home.target_values.len();
         let imported_away_target_entries = policies.away.target_values.len();
-        let learning = self.learning_snapshot();
+        let learning = self.learning_stats_snapshot();
 
         Ok(SoccerMomentReplayImportResponse {
             learning,
@@ -20266,7 +20280,7 @@ impl SoccerMatch {
         self.disable_learning_for_human_gameplay();
         SoccerLearningRuntimeResponse {
             config: self.config.clone(),
-            learning: self.learning_snapshot(),
+            learning: self.learning_stats_snapshot(),
         }
     }
 
@@ -24597,7 +24611,7 @@ impl SoccerRealtimeSession {
         SoccerLiveEpisodeSummary {
             episode_index: self.episode_index,
             summary: self.sim.summary(),
-            learning: self.sim.learning_snapshot(),
+            learning: self.sim.learning_stats_snapshot(),
         }
     }
 
@@ -24989,7 +25003,7 @@ impl SoccerRealtimeSession {
             learning_transitions,
             recent_moments: self.recent_moment_summaries(),
             moment_storage: self.moment_storage_status(),
-            learning: self.sim.learning_snapshot(),
+            learning: self.sim.learning_stats_snapshot(),
             policy_autosave: self.policy_autosave.status(),
             policy_storage: self.policy_storage_status(),
             policy_probability: self.sim.team_policy_probability_summary(),
@@ -25148,7 +25162,7 @@ impl SoccerRealtimeSession {
             None
         };
         SoccerPolicyPruneResponse {
-            learning: self.sim.learning_snapshot(),
+            learning: self.sim.learning_stats_snapshot(),
             recent_moments: self.recent_moment_summaries(),
             policy_probability: self.sim.team_policy_probability_summary(),
             policy_autosave: self.policy_autosave.status(),
@@ -25205,7 +25219,7 @@ impl SoccerRealtimeSession {
     }
 
     fn current_policy_visit_count(&self) -> u64 {
-        let learning = self.sim.learning_snapshot();
+        let learning = self.sim.learning_stats_snapshot();
         learning.home_policy_visits
             + learning.home_policy_target_visits
             + learning.away_policy_visits
@@ -25478,7 +25492,7 @@ impl SoccerRealtimeSession {
                     import.learning,
                 )
             } else {
-                (0, 0, self.sim.learning_snapshot())
+                (0, 0, self.sim.learning_stats_snapshot())
             };
 
         Ok(SoccerSelfPlayTrainingResponse {
@@ -25496,7 +25510,7 @@ impl SoccerRealtimeSession {
         SoccerLiveStateResponse {
             config: self.sim.config.clone(),
             frame: self.sim.to_frame(),
-            learning: self.sim.learning_snapshot(),
+            learning: self.sim.learning_stats_snapshot(),
             recent_moments: self.recent_moment_summaries(),
             moment_storage: self.moment_storage_status(),
             policy_autosave: self.policy_autosave.status(),
@@ -27031,7 +27045,11 @@ pub fn train_soccer_set_play_restarts_with_initial_policies(
             goals = goals.saturating_add(1);
         }
 
-        let learning = sim.learning_snapshot();
+        let learning = if episode + 1 == request.episodes {
+            sim.learning_snapshot()
+        } else {
+            sim.learning_stats_snapshot()
+        };
         policies = sim
             .team_policies
             .take()
@@ -38085,6 +38103,48 @@ mod tests {
         assert!(learning.neural_learning_replay_samples <= 32);
         assert_eq!(learning.neural_learning_replay_capacity, 32);
         assert_eq!(learning.neural_learning_target_clip, 0.5);
+    }
+
+    #[test]
+    fn learning_stats_snapshot_omits_neural_weights_without_losing_counters() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.4,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                train_every_ticks: 1,
+                batch_size: 4,
+                max_batches_per_tick: 1,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15075,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+
+        for _ in 0..4 {
+            sim.run_time_step();
+        }
+
+        let full = sim.learning_snapshot();
+        let stats = sim.learning_stats_snapshot();
+        assert!(full.neural_network.is_some());
+        assert!(stats.neural_network.is_none());
+        assert_eq!(
+            stats.neural_learning_training_steps,
+            full.neural_learning_training_steps
+        );
+        assert_eq!(stats.neural_learning_samples, full.neural_learning_samples);
+        assert_eq!(
+            stats.neural_learning_parameter_count,
+            full.neural_learning_parameter_count
+        );
+        assert_eq!(
+            stats.home_policy_visits + stats.away_policy_visits,
+            full.home_policy_visits + full.away_policy_visits
+        );
     }
 
     #[test]

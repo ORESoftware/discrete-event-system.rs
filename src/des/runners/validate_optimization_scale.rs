@@ -584,21 +584,24 @@ impl Driver {
 }
 
 fn external_solver_from_name(name: &str) -> Option<ExternalLinearCliSolver> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "highs" => Some(ExternalLinearCliSolver::Highs),
-        "glpk" | "glpsol" => Some(ExternalLinearCliSolver::Glpk),
-        "scip" => Some(ExternalLinearCliSolver::Scip),
-        "cbc" => Some(ExternalLinearCliSolver::Cbc),
-        "clp" => Some(ExternalLinearCliSolver::Clp),
-        "soplex" => Some(ExternalLinearCliSolver::Soplex),
-        "qsopt-ex" | "qsopt_ex" | "qsopt" | "esolver" => Some(ExternalLinearCliSolver::QsoptEx),
-        "lp-solve" | "lp_solve" | "lpsolve" => Some(ExternalLinearCliSolver::LpSolve),
-        "gurobi" | "gurobi_cl" => Some(ExternalLinearCliSolver::Gurobi),
-        "cplex" => Some(ExternalLinearCliSolver::Cplex),
-        "xpress" | "optimizer" => Some(ExternalLinearCliSolver::Xpress),
-        "lindo" | "runlindo" | "lindoapi" => Some(ExternalLinearCliSolver::Lindo),
-        _ => None,
+    let normalized = name.trim().to_ascii_lowercase().replace('_', "-");
+    let base = normalized
+        .strip_suffix("-cli")
+        .unwrap_or(normalized.as_str());
+    match base {
+        "coin-cbc" | "coin-or-cbc" => return Some(ExternalLinearCliSolver::Cbc),
+        _ => {}
     }
+    ExternalLinearCliSolver::all()
+        .iter()
+        .copied()
+        .find(|candidate| {
+            candidate.as_str() == base
+                || candidate
+                    .command_aliases()
+                    .iter()
+                    .any(|alias| alias.to_ascii_lowercase().replace('_', "-") == base)
+        })
 }
 
 fn parse_external_solver_list(
@@ -964,6 +967,23 @@ mod tests {
                 Some(ExternalCpSatReferenceSolver::PythonEnumeration),
                 "{alias}"
             );
+        }
+    }
+
+    #[test]
+    fn external_scale_solver_aliases_accept_cli_names() {
+        for (alias, solver) in [
+            ("highs-cli", ExternalLinearCliSolver::Highs),
+            ("glpsol-cli", ExternalLinearCliSolver::Glpk),
+            ("scip_cli", ExternalLinearCliSolver::Scip),
+            ("coin-or-cbc", ExternalLinearCliSolver::Cbc),
+            ("gurobi-cli", ExternalLinearCliSolver::Gurobi),
+            ("gurobi_cl", ExternalLinearCliSolver::Gurobi),
+            ("cplex-cli", ExternalLinearCliSolver::Cplex),
+            ("xpress-cli", ExternalLinearCliSolver::Xpress),
+            ("lindo-cli", ExternalLinearCliSolver::Lindo),
+        ] {
+            assert_eq!(external_solver_from_name(alias), Some(solver), "{alias}");
         }
     }
 }

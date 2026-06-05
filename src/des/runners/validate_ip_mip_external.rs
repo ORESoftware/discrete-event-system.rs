@@ -855,7 +855,18 @@ fn force_python_reference_value(value: &str) -> bool {
 }
 
 fn is_auto_solver_request(value: &str) -> bool {
-    value.trim().eq_ignore_ascii_case("auto")
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "auto"
+            | "native"
+            | "rust"
+            | "rust-cli"
+            | "cli"
+            | "open-source"
+            | "opensource"
+            | "open-source-cli"
+    )
 }
 
 fn select_cli_solver(requested: &str) -> Option<(ExternalLinearCliSolver, PathBuf)> {
@@ -1021,6 +1032,33 @@ mod tests {
             assert!(
                 !force_python_reference_value(value),
                 "{value:?} should keep the Rust CLI-first bridge"
+            );
+        }
+    }
+
+    #[test]
+    fn ip_mip_external_solver_aliases_keep_native_cli_auto_path() {
+        for value in [
+            "auto",
+            "native",
+            "Native",
+            " rust ",
+            "rust_cli",
+            "cli",
+            "open-source",
+            "opensource",
+            "open_source_cli",
+        ] {
+            assert!(
+                is_auto_solver_request(value),
+                "{value:?} should use the Rust CLI auto-selection path"
+            );
+        }
+
+        for value in ["", "python", "highs", "cbc", "gurobi"] {
+            assert!(
+                !is_auto_solver_request(value),
+                "{value:?} should stay an explicit solver or bridge request"
             );
         }
     }

@@ -249,6 +249,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             "SOCCER_NEURAL_TARGET_CLIP",
             SoccerNeuralLearningConfig::default().target_clip,
         )?,
+        snapshot_every_batches: env_parse(
+            "SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES",
+            SoccerNeuralLearningConfig::default().snapshot_every_batches,
+        )?,
     };
     let options = SoccerQPolicyOptions {
         alpha: env_parse("SOCCER_Q_ALPHA", SoccerQPolicyOptions::default().alpha)?,

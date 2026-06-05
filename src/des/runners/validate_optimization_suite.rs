@@ -2982,15 +2982,21 @@ impl Driver {
 
     fn parse_external_linear_cli_solver(solver: &str) -> ExternalLinearCliSolver {
         let normalized = solver.trim().to_ascii_lowercase().replace('_', "-");
+        let base = normalized
+            .strip_suffix("-cli")
+            .unwrap_or(normalized.as_str());
+        if matches!(base, "coin-cbc" | "coin-or-cbc") {
+            return ExternalLinearCliSolver::Cbc;
+        }
         ExternalLinearCliSolver::all()
             .iter()
             .copied()
             .find(|candidate| {
-                candidate.as_str() == normalized
+                candidate.as_str() == base
                     || candidate
                         .command_aliases()
                         .iter()
-                        .any(|alias| alias.to_ascii_lowercase().replace('_', "-") == normalized)
+                        .any(|alias| alias.to_ascii_lowercase().replace('_', "-") == base)
             })
             .unwrap_or_else(|| panic!("unsupported linear CLI solver '{solver}'"))
     }
@@ -23825,6 +23831,23 @@ Objective value     : 8
 ";
 
         assert_eq!(highs_objective_from_text(output), Some(8.0));
+    }
+
+    #[test]
+    fn linear_cli_solver_parser_accepts_cli_aliases() {
+        for (alias, solver) in [
+            ("highs-cli", ExternalLinearCliSolver::Highs),
+            ("glpsol-cli", ExternalLinearCliSolver::Glpk),
+            ("scip_cli", ExternalLinearCliSolver::Scip),
+            ("coin-or-cbc", ExternalLinearCliSolver::Cbc),
+            ("gurobi-cli", ExternalLinearCliSolver::Gurobi),
+            ("gurobi_cl", ExternalLinearCliSolver::Gurobi),
+            ("cplex-cli", ExternalLinearCliSolver::Cplex),
+            ("xpress-cli", ExternalLinearCliSolver::Xpress),
+            ("lindo-cli", ExternalLinearCliSolver::Lindo),
+        ] {
+            assert_eq!(Driver::parse_external_linear_cli_solver(alias), solver, "{alias}");
+        }
     }
 }
 

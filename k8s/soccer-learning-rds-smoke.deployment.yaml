@@ -75,12 +75,20 @@ spec:
               value: "5"
             - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
               value: "4"
+            - name: SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE
+              value: "true"
+            - name: SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT
+              value: "true"
+            - name: SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM
+              value: "true"
             - name: SOCCER_EVOLUTION_ENABLED
               value: "true"
             - name: SOCCER_EVOLUTION_INTERVAL_GAMES
               value: "5"
             - name: SOCCER_EVOLUTION_ELITE_GAMES
               value: "4"
+            - name: SOCCER_EVOLUTION_POPULATION_SIZE
+              value: "8"
             - name: SOCCER_CHECKPOINT_INTERVAL_GAMES
               value: "0"
             - name: SOCCER_GAME_ARTIFACT_MODE

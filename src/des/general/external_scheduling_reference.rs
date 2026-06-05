@@ -1,13 +1,12 @@
 //! Rust-facing bridge for external/reference scheduling solvers.
 //!
 //! The native Rust reference computes deterministic exact small scheduling
-//! checks without Python startup. The checked-in Python bridge
-//! (`scripts/scheduling_reference.py`) remains available for OR-Tools CP-SAT
-//! using interval variables plus no-overlap machine resources.
+//! checks without Python startup. Explicit OR-Tools CP-SAT validation is
+//! launched from Rust through a tiny inline Python adapter, so the checked-in
+//! Python script can remain launcher glue.
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -40,15 +39,21 @@ impl ExternalSchedulingReferenceSolver {
 }
 
 fn registered_scheduling_rust_fallback_enabled() -> bool {
-    std::env::var("SCHEDULING_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("SCHEDULING_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "SCHEDULING_REFERENCE_REGISTERED_FALLBACK",
+        "SCHEDULING_REFERENCE_EXTERNAL_FALLBACK",
+        "SCHEDULING_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .find_map(|key| std::env::var(key).ok())
+    .map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+        )
+    })
+    .unwrap_or(false)
 }
 
 fn should_use_rust_scheduling_reference(opts: &ExternalSchedulingReferenceOptions) -> bool {
@@ -410,13 +415,6 @@ fn numerical_error(
     }
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("scheduling_reference.py")
-}
-
 fn scheduling_reference_timeout_ms() -> u64 {
     std::env::var("SCHEDULING_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -426,7 +424,7 @@ fn scheduling_reference_timeout_ms() -> u64 {
         .unwrap_or(120_000)
 }
 
-fn wait_for_scheduling_reference_output(
+fn wait_for_scheduling_adapter_output(
     mut child: std::process::Child,
     timeout_ms: u64,
 ) -> Result<(Output, bool), String> {
@@ -444,27 +442,314 @@ fn wait_for_scheduling_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll scheduling_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll OR-Tools scheduling adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for scheduling_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools scheduling adapter: {err}"))
 }
 
-fn run_scheduling_reference_json(
-    payload: Value,
-    opts: &ExternalSchedulingReferenceOptions,
-) -> ExternalJobShopReferenceSolution {
+const ORTOOLS_SCHEDULING_SCALE: i64 = 1_000;
+
+const ORTOOLS_SCHEDULING_ADAPTER: &str = r#"
+import json
+import sys
+
+JOB_SHOP_SOLVER = "ortools:cp-sat"
+FLOW_SHOP_SOLVER = "ortools:cp-sat-flow-shop"
+
+def emit(status, solver, message, schedule=None, sequence=None, makespan=None, total_flow_time=None, ortools_status=None):
+    schedule = [] if schedule is None else schedule
+    sequence = [] if sequence is None else sequence
+    payload = {
+        "status": status,
+        "solver": solver,
+        "sequence": sequence,
+        "schedule": schedule,
+        "makespan": makespan,
+        "totalFlowTime": total_flow_time,
+        "message": message,
+        "ortoolsStatus": ortools_status,
+        "ortoolsSequence": sequence,
+        "ortoolsMakespan": makespan,
+        "ortoolsTotalFlowTime": total_flow_time,
+        "ortoolsSchedule": schedule,
+    }
+    print(json.dumps(payload))
+
+try:
+    from ortools.sat.python import cp_model
+except Exception as exc:
+    emit("unavailable", JOB_SHOP_SOLVER, f"OR-Tools CP-SAT unavailable: {exc}", ortools_status="unavailable")
+    raise SystemExit(0)
+
+def schedule_result(schedule):
+    makespan = max((operation["finish"] for operation in schedule), default=0.0)
+    completions = {}
+    for operation in schedule:
+        job_id = operation["jobId"]
+        completions[job_id] = max(completions.get(job_id, 0.0), operation["finish"])
+    return float(makespan), float(sum(completions.values()))
+
+def solve_job_shop(data):
+    jobs = data["jobs"]
+    scale = int(data["scale"])
+    horizon = int(data["horizon"])
+    model = cp_model.CpModel()
+    operations = {}
+    machine_intervals = {}
+    last_ends = []
+
+    for job_index, job in enumerate(jobs):
+        previous_end = None
+        for op_index, operation in enumerate(job["operations"]):
+            duration = int(operation["scaledDuration"])
+            suffix = f"j{job_index}_o{op_index}"
+            start = model.NewIntVar(0, horizon, f"start_{suffix}")
+            end = model.NewIntVar(0, horizon, f"end_{suffix}")
+            interval = model.NewIntervalVar(start, duration, end, f"interval_{suffix}")
+            operations[(job_index, op_index)] = (start, end)
+            machine_intervals.setdefault(operation["machine"], []).append(interval)
+            if previous_end is not None:
+                model.Add(start >= previous_end)
+            previous_end = end
+        last_ends.append(previous_end)
+
+    for intervals in machine_intervals.values():
+        model.AddNoOverlap(intervals)
+
+    makespan = model.NewIntVar(0, horizon, "makespan")
+    model.AddMaxEquality(makespan, last_ends)
+    model.Minimize(makespan)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        mapped = "infeasible" if status_name == "infeasible" else status_name
+        emit(mapped, JOB_SHOP_SOLVER, f"OR-Tools CP-SAT status {status_name}", ortools_status=status_name)
+        return
+
+    schedule = []
+    for job_index, job in enumerate(jobs):
+        for op_index, operation in enumerate(job["operations"]):
+            start_var, end_var = operations[(job_index, op_index)]
+            schedule.append(
+                {
+                    "jobId": job["id"],
+                    "opIndex": op_index,
+                    "machine": operation["machine"],
+                    "start": float(solver.Value(start_var)) / scale,
+                    "finish": float(solver.Value(end_var)) / scale,
+                }
+            )
+    schedule.sort(key=lambda op: (op["start"], op["finish"], op["machine"], op["jobId"], op["opIndex"]))
+    makespan, total_flow_time = schedule_result(schedule)
+    emit(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        JOB_SHOP_SOLVER,
+        f"OR-Tools CP-SAT status {status_name}",
+        schedule=schedule,
+        makespan=makespan,
+        total_flow_time=total_flow_time,
+        ortools_status=status_name,
+    )
+
+def flow_shop_schedule(sequence):
+    if not sequence:
+        return []
+    machine_count = len(sequence[0]["processingTimes"])
+    machine_ready = [0.0 for _ in range(machine_count)]
+    schedule = []
+    for job in sequence:
+        job_ready = 0.0
+        for machine_index, duration in enumerate(job["processingTimes"]):
+            start = max(machine_ready[machine_index], job_ready)
+            finish = start + float(duration)
+            schedule.append(
+                {
+                    "jobId": job["id"],
+                    "opIndex": machine_index,
+                    "machine": f"M{machine_index + 1}",
+                    "start": float(start),
+                    "finish": float(finish),
+                }
+            )
+            machine_ready[machine_index] = finish
+            job_ready = finish
+    return schedule
+
+def solve_flow_shop(data):
+    jobs = data["jobs"]
+    scale = int(data["scale"])
+    n = len(jobs)
+    machine_count = int(data["machineCount"])
+    scaled = [[int(duration) for duration in job["scaledProcessingTimes"]] for job in jobs]
+    horizon = int(data["horizon"])
+    model = cp_model.CpModel()
+    assigned = {
+        (job, pos): model.NewBoolVar(f"assign_j{job}_p{pos}")
+        for job in range(n)
+        for pos in range(n)
+    }
+    for job in range(n):
+        model.AddExactlyOne(assigned[(job, pos)] for pos in range(n))
+    for pos in range(n):
+        model.AddExactlyOne(assigned[(job, pos)] for job in range(n))
+
+    completion = [
+        [model.NewIntVar(0, horizon, f"c_p{pos}_m{machine}") for machine in range(machine_count)]
+        for pos in range(n)
+    ]
+    for pos in range(n):
+        for machine in range(machine_count):
+            duration_expr = sum(assigned[(job, pos)] * scaled[job][machine] for job in range(n))
+            if pos == 0 and machine == 0:
+                model.Add(completion[pos][machine] >= duration_expr)
+            elif pos == 0:
+                model.Add(completion[pos][machine] >= completion[pos][machine - 1] + duration_expr)
+            elif machine == 0:
+                model.Add(completion[pos][machine] >= completion[pos - 1][machine] + duration_expr)
+            else:
+                model.Add(completion[pos][machine] >= completion[pos - 1][machine] + duration_expr)
+                model.Add(completion[pos][machine] >= completion[pos][machine - 1] + duration_expr)
+
+    makespan = completion[n - 1][machine_count - 1]
+    model.Minimize(makespan)
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.num_search_workers = 1
+    status_code = solver.Solve(model)
+    status_name = solver.StatusName(status_code).lower()
+    if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        mapped = "infeasible" if status_name == "infeasible" else status_name
+        emit(mapped, FLOW_SHOP_SOLVER, f"OR-Tools CP-SAT status {status_name}", ortools_status=status_name)
+        return
+
+    sequence = []
+    for pos in range(n):
+        job_index = next(job for job in range(n) if solver.BooleanValue(assigned[(job, pos)]))
+        sequence.append(jobs[job_index])
+    schedule = flow_shop_schedule(sequence)
+    makespan, total_flow_time = schedule_result(schedule)
+    emit(
+        "optimal" if status_code == cp_model.OPTIMAL else "feasible",
+        FLOW_SHOP_SOLVER,
+        f"OR-Tools CP-SAT status {status_name}",
+        schedule=schedule,
+        sequence=[job["id"] for job in sequence],
+        makespan=makespan,
+        total_flow_time=total_flow_time,
+        ortools_status=status_name,
+    )
+
+try:
+    data = json.load(sys.stdin)
+    if data.get("kind") == "flow-shop":
+        solve_flow_shop(data)
+    else:
+        solve_job_shop(data)
+except Exception as exc:
+    solver = FLOW_SHOP_SOLVER
+    try:
+        if data.get("kind") != "flow-shop":
+            solver = JOB_SHOP_SOLVER
+    except Exception:
+        solver = JOB_SHOP_SOLVER
+    emit("numerical-error", solver, str(exc), ortools_status="error")
+    raise SystemExit(1)
+"#;
+
+fn scaled_ortools_scheduling_duration(duration: f64) -> Option<i64> {
+    if !duration.is_finite() || duration < 0.0 {
+        return None;
+    }
+    let scaled = (duration * ORTOOLS_SCHEDULING_SCALE as f64).round();
+    if !scaled.is_finite() || scaled < 0.0 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    Some(scaled as i64)
+}
+
+fn checked_scaled_duration_sum(total: &mut i64, duration: i64) -> Result<(), String> {
+    *total = total
+        .checked_add(duration)
+        .ok_or_else(|| "OR-Tools CP-SAT bridge duration scaling overflow".to_string())?;
+    Ok(())
+}
+
+fn ortools_job_shop_payload(jobs: &[JobShopJob]) -> Result<Value, String> {
+    validate_rust_job_shop_jobs(jobs)?;
+    let mut horizon = 0_i64;
+    let mut job_payloads = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let mut operation_payloads = Vec::with_capacity(job.operations.len());
+        for operation in &job.operations {
+            let scaled_duration = scaled_ortools_scheduling_duration(operation.duration)
+                .ok_or_else(|| {
+                    "OR-Tools CP-SAT bridge requires finite non-negative durations".to_string()
+                })?;
+            checked_scaled_duration_sum(&mut horizon, scaled_duration)?;
+            operation_payloads.push(json!({
+                "machine": &operation.machine,
+                "duration": operation.duration,
+                "scaledDuration": scaled_duration,
+            }));
+        }
+        job_payloads.push(json!({
+            "id": &job.id,
+            "due": job.due,
+            "operations": operation_payloads,
+        }));
+    }
+    Ok(json!({
+        "kind": "job-shop",
+        "scale": ORTOOLS_SCHEDULING_SCALE,
+        "horizon": horizon,
+        "jobs": job_payloads,
+    }))
+}
+
+fn ortools_flow_shop_payload(jobs: &[FlowShopJob]) -> Result<Value, String> {
+    validate_rust_flow_shop_jobs(jobs)?;
+    let machine_count = jobs[0].processing_times.len();
+    let mut horizon = 0_i64;
+    let mut job_payloads = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let mut scaled_processing_times = Vec::with_capacity(job.processing_times.len());
+        for &duration in &job.processing_times {
+            let scaled_duration =
+                scaled_ortools_scheduling_duration(duration).ok_or_else(|| {
+                    "OR-Tools CP-SAT bridge requires finite non-negative durations".to_string()
+                })?;
+            checked_scaled_duration_sum(&mut horizon, scaled_duration)?;
+            scaled_processing_times.push(scaled_duration);
+        }
+        job_payloads.push(json!({
+            "id": &job.id,
+            "due": job.due,
+            "processingTimes": &job.processing_times,
+            "scaledProcessingTimes": scaled_processing_times,
+        }));
+    }
+    Ok(json!({
+        "kind": "flow-shop",
+        "scale": ORTOOLS_SCHEDULING_SCALE,
+        "horizon": horizon,
+        "machineCount": machine_count,
+        "jobs": job_payloads,
+    }))
+}
+
+fn run_ortools_scheduling_reference(payload: Value) -> ExternalJobShopReferenceSolution {
     let started = Instant::now();
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg())
-        .env("SCHEDULING_REFERENCE_RUST_REFERENCE_EMBEDDED", "1");
+    command.arg("-c").arg(ORTOOLS_SCHEDULING_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -474,7 +759,7 @@ fn run_scheduling_reference_json(
         Ok(child) => child,
         Err(err) => {
             return unavailable(
-                format!("failed to start scheduling_reference.py with {python}: {err}"),
+                format!("failed to start OR-Tools scheduling adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
@@ -482,13 +767,13 @@ fn run_scheduling_reference_json(
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return numerical_error(
-                format!("failed to write scheduling_reference.py stdin: {err}"),
+                format!("failed to write OR-Tools scheduling adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
     }
     let timeout_ms = scheduling_reference_timeout_ms();
-    let (output, timed_out) = match wait_for_scheduling_reference_output(child, timeout_ms) {
+    let (output, timed_out) = match wait_for_scheduling_adapter_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
     };
@@ -496,9 +781,9 @@ fn run_scheduling_reference_json(
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("scheduling_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools scheduling adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; scheduling_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools scheduling adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -539,11 +824,27 @@ fn run_scheduling_reference_json(
         },
         Err(err) => numerical_error(
             format!(
-                "failed to parse scheduling_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools scheduling adapter output: {err}; stderr={}",
                 stderr
             ),
             elapsed_ms,
         ),
+    }
+}
+
+fn run_ortools_job_shop_reference(jobs: &[JobShopJob]) -> ExternalJobShopReferenceSolution {
+    let started = Instant::now();
+    match ortools_job_shop_payload(jobs) {
+        Ok(payload) => run_ortools_scheduling_reference(payload),
+        Err(message) => numerical_error(message, started.elapsed().as_secs_f64() * 1000.0),
+    }
+}
+
+fn run_ortools_flow_shop_reference(jobs: &[FlowShopJob]) -> ExternalJobShopReferenceSolution {
+    let started = Instant::now();
+    match ortools_flow_shop_payload(jobs) {
+        Ok(payload) => run_ortools_scheduling_reference(payload),
+        Err(message) => numerical_error(message, started.elapsed().as_secs_f64() * 1000.0),
     }
 }
 
@@ -559,20 +860,7 @@ pub fn solve_job_shop_with_external_reference(
         );
     }
 
-    run_scheduling_reference_json(
-        json!({
-            "kind": "job-shop",
-            "jobs": jobs.iter().map(|job| json!({
-                "id": &job.id,
-                "due": job.due,
-                "operations": job.operations.iter().map(|op| json!({
-                    "machine": &op.machine,
-                    "duration": op.duration,
-                })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_job_shop_reference(jobs)
 }
 
 pub fn solve_flow_shop_with_external_reference(
@@ -587,17 +875,7 @@ pub fn solve_flow_shop_with_external_reference(
         );
     }
 
-    run_scheduling_reference_json(
-        json!({
-            "kind": "flow-shop",
-            "jobs": jobs.iter().map(|job| json!({
-                "id": &job.id,
-                "due": job.due,
-                "processingTimes": &job.processing_times,
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_ortools_flow_shop_reference(jobs)
 }
 
 #[cfg(test)]
@@ -818,7 +1096,60 @@ mod tests {
     }
 
     #[test]
-    fn scheduling_python_bridge_wait_enforces_timeout() {
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = SCHEDULING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("SCHEDULING_REFERENCE_RUST_FIRST", "1");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-scheduling");
+        let opts = ExternalSchedulingReferenceOptions {
+            solver: ExternalSchedulingReferenceSolver::OrTools,
+        };
+
+        let job_shop = solve_job_shop_with_external_reference(&sample_job_shop_jobs(), &opts);
+        assert_eq!(job_shop.status, ExternalSchedulingReferenceStatus::Optimal);
+        assert_eq!(
+            job_shop.solver,
+            "rust:registered-scheduling-fallback-for-ortools"
+        );
+        assert_eq!(job_shop.makespan, Some(9.0));
+
+        let flow_shop = solve_flow_shop_with_external_reference(&sample_flow_shop_jobs(), &opts);
+        assert_eq!(flow_shop.status, ExternalSchedulingReferenceStatus::Optimal);
+        assert_eq!(
+            flow_shop.solver,
+            "rust:registered-scheduling-fallback-for-ortools"
+        );
+        assert_eq!(flow_shop.sequence.len(), 4);
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = SCHEDULING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-scheduling-ortools",
+        );
+
+        let solution = solve_job_shop_with_external_reference(
+            &sample_job_shop_jobs(),
+            &ExternalSchedulingReferenceOptions {
+                solver: ExternalSchedulingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalSchedulingReferenceStatus::Unavailable
+        );
+        assert!(solution.message.contains("OR-Tools scheduling adapter"));
+        assert!(!solution.message.contains("scheduling_reference.py"));
+    }
+
+    #[test]
+    fn scheduling_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -827,7 +1158,7 @@ mod tests {
             .expect("spawn sleep");
 
         let (output, timed_out) =
-            wait_for_scheduling_reference_output(child, 10).expect("timeout output");
+            wait_for_scheduling_adapter_output(child, 10).expect("timeout output");
 
         assert!(timed_out);
         assert!(!output.status.success());

@@ -1840,6 +1840,27 @@ mod tests {
     }
 
     #[test]
+    fn default_queue_postgres_refreshes_before_new_sims_even_with_resume_artifacts() {
+        assert!(DEFAULT_SOCCER_QUEUE_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT);
+        assert!(soccer_should_refresh_postgres_for_new_sim(
+            true,
+            DEFAULT_SOCCER_QUEUE_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT
+        ));
+    }
+
+    #[test]
+    fn default_queue_evolutionary_search_stays_enabled_for_new_sims() {
+        let options = SoccerEvolutionOptions::default();
+
+        assert!(DEFAULT_SOCCER_QUEUE_EVOLUTION_ENABLED);
+        assert!(DEFAULT_SOCCER_QUEUE_EVOLUTION_ELITE_GAMES >= 1);
+        assert!(options.population_size > 1);
+        assert!(options.mutation_rate > 0.0);
+        assert!(options.mutation_scale > 0.0);
+        assert!(options.crossover_rate > 0.0);
+    }
+
+    #[test]
     fn queue_completed_game_uses_episode_starting_policy_snapshot() {
         let mut episode_versions = HashMap::new();
         episode_versions.insert(7, (Some("episode-v7".to_string()), 4));

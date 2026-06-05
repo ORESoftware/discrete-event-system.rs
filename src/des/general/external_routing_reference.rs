@@ -1,12 +1,11 @@
 //! Rust-facing bridge for external/reference vehicle-routing solvers.
 //!
 //! The native Rust reference computes an exact small CVRP route-cover check
-//! without Python startup. The checked-in Python bridge
-//! (`scripts/routing_reference.py`) remains available for OR-Tools Routing on
-//! the same input.
+//! without Python startup. Explicit OR-Tools Routing validation is launched
+//! from Rust through a tiny inline Python adapter, so the checked-in Python
+//! script stays compatibility glue instead of carrying reusable modeling logic.
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,15 +37,23 @@ impl ExternalRoutingReferenceSolver {
 }
 
 fn registered_routing_rust_fallback_enabled() -> bool {
-    std::env::var("ROUTING_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("ROUTING_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "ROUTING_REFERENCE_REGISTERED_FALLBACK",
+        "ROUTING_REFERENCE_EXTERNAL_FALLBACK",
+        "ROUTING_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_routing_reference(opts: &ExternalRoutingReferenceOptions) -> bool {
@@ -159,6 +166,123 @@ fn status_from_str(status: &str) -> ExternalRoutingReferenceStatus {
 }
 
 const RUST_CVRP_MAX_EXACT_CUSTOMERS: usize = 16;
+const ORTOOLS_ROUTING_DISTANCE_SCALE: i64 = 1_000_000;
+const ORTOOLS_ROUTING_DEMAND_SCALES: [i64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+const ORTOOLS_ROUTING_ADAPTER: &str = r#"
+import json
+import math
+import sys
+
+SOLVER = "ortools:routing"
+
+def emit(status, message, routes=None, objective=None, ortools_status=None):
+    routes = routes or []
+    print(json.dumps({
+        "status": status,
+        "solver": SOLVER,
+        "routes": routes,
+        "objective": objective,
+        "ortoolsStatus": ortools_status,
+        "ortoolsRoutes": routes,
+        "ortoolsObjective": objective,
+        "message": message,
+        "ortoolsMessage": message,
+    }))
+
+try:
+    from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+except Exception as exc:
+    emit("unavailable", f"OR-Tools Routing unavailable: {exc}", ortools_status="unavailable")
+    raise SystemExit(0)
+
+def distance(a, b):
+    return math.hypot(float(a["x"]) - float(b["x"]), float(a["y"]) - float(b["y"]))
+
+def route_distance(depot, route):
+    if not route:
+        return 0.0
+    total = distance(depot, route[0])
+    for left, right in zip(route, route[1:]):
+        total += distance(left, right)
+    return total + distance(route[-1], depot)
+
+try:
+    payload = json.load(sys.stdin)
+    depot = payload["depot"]
+    customers = payload.get("customers") or []
+    scaled_capacity = int(payload["scaledCapacity"])
+    distance_scale = int(payload.get("distanceScale", 1000000))
+    n = len(customers)
+    if n == 0:
+        emit("optimal", "empty instance", routes=[], objective=0.0, ortools_status="optimal")
+        raise SystemExit(0)
+
+    points = [depot] + customers
+    manager = pywrapcp.RoutingIndexManager(n + 1, n, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    def distance_callback(from_index, to_index):
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return int(round(distance(points[from_node], points[to_node]) * distance_scale))
+
+    transit = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit)
+
+    scaled_demands = [0] + [int(customer["scaledDemand"]) for customer in customers]
+
+    def demand_callback(index):
+        return scaled_demands[manager.IndexToNode(index)]
+
+    demand = routing.RegisterUnaryTransitCallback(demand_callback)
+    routing.AddDimensionWithVehicleCapacity(
+        demand,
+        0,
+        [scaled_capacity for _ in range(n)],
+        True,
+        "Capacity",
+    )
+
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.FromSeconds(int(payload.get("timeLimitSeconds", 5)))
+
+    solution = routing.SolveWithParameters(params)
+    if solution is None:
+        emit("infeasible", "OR-Tools Routing found no solution", ortools_status="infeasible")
+        raise SystemExit(0)
+
+    routes = []
+    for vehicle in range(n):
+        index = routing.Start(vehicle)
+        ids = []
+        route_customers = []
+        while not routing.IsEnd(index):
+            node = manager.IndexToNode(index)
+            if node != 0:
+                customer = customers[node - 1]
+                ids.append(customer["id"])
+                route_customers.append(customer)
+            index = solution.Value(routing.NextVar(index))
+        if ids:
+            routes.append({
+                "customers": ids,
+                "load": sum(float(customer["demand"]) for customer in route_customers),
+                "distance": route_distance(depot, route_customers),
+            })
+    routes.sort(key=lambda route: route["customers"])
+    emit(
+        "optimal",
+        "OR-Tools Routing local-search solution",
+        routes=routes,
+        objective=sum(float(route["distance"]) for route in routes),
+        ortools_status="optimal",
+    )
+except Exception as exc:
+    emit("numerical-error", str(exc), routes=[], objective=None, ortools_status="error")
+    raise SystemExit(1)
+"#;
 
 fn rust_routing_empty_solution(
     status: ExternalRoutingReferenceStatus,
@@ -303,7 +427,7 @@ fn solve_cvrp_with_rust_reference(
 fn unavailable(message: impl Into<String>, elapsed_ms: f64) -> ExternalRoutingReferenceSolution {
     ExternalRoutingReferenceSolution {
         status: ExternalRoutingReferenceStatus::Unavailable,
-        solver: "external-routing-reference".to_string(),
+        solver: "ortools:routing".to_string(),
         routes: Vec::new(),
         objective: None,
         feasible_route_masks: None,
@@ -322,7 +446,7 @@ fn numerical_error(
 ) -> ExternalRoutingReferenceSolution {
     ExternalRoutingReferenceSolution {
         status: ExternalRoutingReferenceStatus::NumericalError,
-        solver: "external-routing-reference".to_string(),
+        solver: "ortools:routing".to_string(),
         routes: Vec::new(),
         objective: None,
         feasible_route_masks: None,
@@ -333,13 +457,6 @@ fn numerical_error(
         ortools_message: String::new(),
         elapsed_ms,
     }
-}
-
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("routing_reference.py")
 }
 
 fn routing_reference_timeout_ms() -> u64 {
@@ -369,26 +486,118 @@ fn wait_for_routing_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll routing_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll OR-Tools Routing adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for routing_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools Routing adapter: {err}"))
 }
 
-fn run_routing_reference_json(
-    payload: Value,
-    opts: &ExternalRoutingReferenceOptions,
+fn scaled_ortools_routing_value(value: f64, scale: i64, name: &str) -> Result<i64, String> {
+    if !value.is_finite() {
+        return Err(format!("{name} must be finite"));
+    }
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled.abs() > i64::MAX as f64 {
+        return Err(format!("{name} is too large for OR-Tools integer scaling"));
+    }
+    let rounded = scaled.round();
+    if (scaled - rounded).abs() > 1e-6 {
+        return Err(format!(
+            "{name}={value} cannot be represented with OR-Tools demand scale {scale}"
+        ));
+    }
+    Ok(rounded as i64)
+}
+
+fn choose_ortools_routing_demand_scale(
+    customers: &[VRPCustomer],
+    vehicle_capacity: f64,
+) -> Result<i64, String> {
+    for scale in ORTOOLS_ROUTING_DEMAND_SCALES {
+        if scaled_ortools_routing_value(vehicle_capacity, scale, "vehicle_capacity").is_ok()
+            && customers.iter().enumerate().all(|(index, customer)| {
+                scaled_ortools_routing_value(
+                    customer.demand,
+                    scale,
+                    &format!("customers[{index}].demand"),
+                )
+                .is_ok()
+            })
+        {
+            return Ok(scale);
+        }
+    }
+    Err(format!(
+        "OR-Tools Routing integer demand scaling supports at most {} decimal places",
+        ORTOOLS_ROUTING_DEMAND_SCALES
+            .last()
+            .copied()
+            .unwrap_or(1)
+            .ilog10()
+    ))
+}
+
+fn ortools_routing_payload(
+    depot: Point,
+    customers: &[VRPCustomer],
+    vehicle_capacity: f64,
+) -> Result<Value, String> {
+    validate_rust_cvrp_inputs(depot, customers, vehicle_capacity)?;
+    let demand_scale = choose_ortools_routing_demand_scale(customers, vehicle_capacity)?;
+    let scaled_capacity =
+        scaled_ortools_routing_value(vehicle_capacity, demand_scale, "vehicle_capacity")?;
+    let customers = customers
+        .iter()
+        .enumerate()
+        .map(|(index, customer)| {
+            Ok(json!({
+                "id": &customer.id,
+                "x": customer.x,
+                "y": customer.y,
+                "demand": customer.demand,
+                "scaledDemand": scaled_ortools_routing_value(
+                    customer.demand,
+                    demand_scale,
+                    &format!("customers[{index}].demand"),
+                )?,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(json!({
+        "depot": {
+            "x": depot.x,
+            "y": depot.y,
+        },
+        "customers": customers,
+        "scaledCapacity": scaled_capacity,
+        "demandScale": demand_scale,
+        "distanceScale": ORTOOLS_ROUTING_DISTANCE_SCALE,
+    }))
+}
+
+fn run_ortools_routing_reference(
+    depot: Point,
+    customers: &[VRPCustomer],
+    vehicle_capacity: f64,
 ) -> ExternalRoutingReferenceSolution {
     let started = Instant::now();
+    let payload = match ortools_routing_payload(depot, customers, vehicle_capacity) {
+        Ok(payload) => payload,
+        Err(message) => {
+            return rust_routing_empty_solution(
+                ExternalRoutingReferenceStatus::NumericalError,
+                "ortools:routing",
+                message,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    };
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_ROUTING_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -398,7 +607,7 @@ fn run_routing_reference_json(
         Ok(child) => child,
         Err(err) => {
             return unavailable(
-                format!("failed to start routing_reference.py with {python}: {err}"),
+                format!("failed to start OR-Tools Routing adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
@@ -406,7 +615,7 @@ fn run_routing_reference_json(
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return numerical_error(
-                format!("failed to write routing_reference.py stdin: {err}"),
+                format!("failed to write OR-Tools Routing adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -420,9 +629,9 @@ fn run_routing_reference_json(
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("routing_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools Routing adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; routing_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools Routing adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -461,7 +670,7 @@ fn run_routing_reference_json(
         },
         Err(err) => numerical_error(
             format!(
-                "failed to parse routing_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools Routing adapter output: {err}; stderr={}",
                 stderr
             ),
             elapsed_ms,
@@ -482,22 +691,7 @@ pub fn solve_cvrp_with_external_reference(
         );
     }
 
-    run_routing_reference_json(
-        json!({
-            "depot": {
-                "x": depot.x,
-                "y": depot.y,
-            },
-            "customers": customers.iter().map(|customer| json!({
-                "id": &customer.id,
-                "x": customer.x,
-                "y": customer.y,
-                "demand": customer.demand,
-            })).collect::<Vec<_>>(),
-            "vehicle_capacity": vehicle_capacity,
-        }),
-        opts,
-    )
+    run_ortools_routing_reference(depot, customers, vehicle_capacity)
 }
 
 #[cfg(test)]
@@ -667,7 +861,28 @@ mod tests {
     }
 
     #[test]
-    fn routing_python_bridge_wait_enforces_timeout() {
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_RUST_FIRST", "true");
+        let solution = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &sample_customers(),
+            5.0,
+            &ExternalRoutingReferenceOptions {
+                solver: ExternalRoutingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-routing-fallback-for-ortools"
+        );
+        assert!(solution.objective.is_some());
+    }
+
+    #[test]
+    fn routing_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -680,5 +895,24 @@ mod tests {
 
         assert!(timed_out);
         assert!(!output.status.success());
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-a-python-for-routing-ortools");
+        let solution = solve_cvrp_with_external_reference(
+            Point { x: 0.0, y: 0.0 },
+            &sample_customers(),
+            5.0,
+            &ExternalRoutingReferenceOptions {
+                solver: ExternalRoutingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Unavailable);
+        assert_eq!(solution.solver, "ortools:routing");
+        assert!(solution.message.contains("OR-Tools Routing adapter"));
+        assert!(!solution.message.contains("routing_reference.py"));
     }
 }

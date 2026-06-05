@@ -1611,10 +1611,7 @@ pub fn solve_source_ipmip_with_external_cli(
 }
 
 fn should_use_rust_linearized_source_cli(opts: &ExternalLinearCliOptions) -> bool {
-    opts.python.is_none()
-        && opts.script_path.is_none()
-        && opts.branch_priorities.is_none()
-        && opts.mip_start.is_none()
+    opts.script_path.is_none() && opts.branch_priorities.is_none() && opts.mip_start.is_none()
 }
 
 fn should_use_rust_lower_bounded_source_cli(opts: &ExternalLinearCliOptions) -> bool {
@@ -2310,8 +2307,8 @@ fn should_use_native_highs_cli(
     if opts.solver != ExternalLinearCliSolver::Highs
         || opts.script_path.is_some()
         || opts.solution_pool_size.is_some()
-        || opts.cuts.is_some()
-        || opts.heuristics.is_some()
+        || !mip_switch_is_none_or_auto(opts.cuts)
+        || !mip_switch_is_none_or_auto(opts.heuristics)
         || opts.branch_rule.is_some()
         || opts.branch_priorities.is_some()
         || opts.node_selection.is_some()
@@ -2324,6 +2321,10 @@ fn should_use_native_highs_cli(
         return true;
     }
     true
+}
+
+fn mip_switch_is_none_or_auto(value: Option<ExternalLinearCliMipSwitch>) -> bool {
+    matches!(value, None | Some(ExternalLinearCliMipSwitch::Auto))
 }
 
 fn solve_lp_with_native_highs_cli(
@@ -2650,7 +2651,6 @@ fn should_use_native_glpk_cli(
         || opts.branch_priorities.is_some()
         || opts.mip_start.is_some()
         || opts.random_seed.is_some_and(|seed| seed > i32::MAX as u64)
-        || matches!(opts.presolve, Some(ExternalLinearCliPresolve::Auto))
     {
         return false;
     }
@@ -2661,8 +2661,8 @@ fn should_use_native_glpk_cli(
                 && opts.node_limit.is_none()
                 && opts.relative_gap.is_none()
                 && opts.threads.is_none()
-                && opts.cuts.is_none()
-                && opts.heuristics.is_none()
+                && mip_switch_is_none_or_auto(opts.cuts)
+                && mip_switch_is_none_or_auto(opts.heuristics)
                 && opts.branch_rule.is_none()
                 && opts.node_selection.is_none()
         }
@@ -2670,10 +2670,9 @@ fn should_use_native_glpk_cli(
             opts.lp_algorithm.is_none()
                 && opts.max_nodes.is_none()
                 && opts.node_limit.is_none()
-                && opts.heuristics.is_none()
-                && !matches!(
-                    opts.cuts,
-                    Some(ExternalLinearCliMipSwitch::Auto | ExternalLinearCliMipSwitch::Off)
+                && matches!(
+                    opts.heuristics,
+                    None | Some(ExternalLinearCliMipSwitch::Auto)
                 )
         }
     }
@@ -2735,11 +2734,9 @@ fn should_use_native_scip_cli(
         || (kind == ExternalLinearCliKind::Lp && opts.branch_priorities.is_some())
         || opts.node_selection.is_some()
         || (kind == ExternalLinearCliKind::Lp && opts.mip_start.is_some())
-        || matches!(opts.presolve, Some(ExternalLinearCliPresolve::Auto))
-        || matches!(opts.cuts, Some(ExternalLinearCliMipSwitch::Auto))
         || !matches!(
             opts.heuristics,
-            None | Some(ExternalLinearCliMipSwitch::Off)
+            None | Some(ExternalLinearCliMipSwitch::Auto | ExternalLinearCliMipSwitch::Off)
         )
     {
         return false;
@@ -2753,8 +2750,8 @@ fn should_use_native_scip_cli(
             && opts.relative_gap.is_none()
             && opts.absolute_gap.is_none()
             && opts.objective_limit.is_none()
-            && opts.cuts.is_none()
-            && opts.heuristics.is_none();
+            && mip_switch_is_none_or_auto(opts.cuts)
+            && mip_switch_is_none_or_auto(opts.heuristics);
     }
 
     true
@@ -3262,9 +3259,6 @@ fn should_use_native_cbc_cli(kind: ExternalLinearCliKind, opts: &ExternalLinearC
         || opts.objective_limit.is_some()
         || opts.branch_rule.is_some()
         || opts.random_seed.is_some_and(|seed| seed > i32::MAX as u64)
-        || matches!(opts.presolve, Some(ExternalLinearCliPresolve::Auto))
-        || matches!(opts.cuts, Some(ExternalLinearCliMipSwitch::Auto))
-        || matches!(opts.heuristics, Some(ExternalLinearCliMipSwitch::Auto))
     {
         return false;
     }
@@ -3279,9 +3273,9 @@ fn should_use_native_cbc_cli(kind: ExternalLinearCliKind, opts: &ExternalLinearC
             && opts.integer_feasibility_tolerance.is_none()
             && opts.threads.is_none()
             && opts.random_seed.is_none()
-            && opts.presolve.is_none()
-            && opts.cuts.is_none()
-            && opts.heuristics.is_none()
+            && matches!(opts.presolve, None | Some(ExternalLinearCliPresolve::Auto))
+            && mip_switch_is_none_or_auto(opts.cuts)
+            && mip_switch_is_none_or_auto(opts.heuristics)
             && opts.branch_priorities.is_none()
             && opts.node_selection.is_none()
             && opts.mip_start.is_none();
@@ -5130,10 +5124,20 @@ fn solve_native_cbc_cli_model(
     }
     if kind == ExternalLinearCliKind::Mip {
         if let Some(cuts) = opts.cuts {
-            command.arg("-cuts").arg(cuts.as_str());
+            match cuts {
+                ExternalLinearCliMipSwitch::On | ExternalLinearCliMipSwitch::Off => {
+                    command.arg("-cuts").arg(cuts.as_str());
+                }
+                ExternalLinearCliMipSwitch::Auto => {}
+            }
         }
         if let Some(heuristics) = opts.heuristics {
-            command.arg("-heuristicsOnOff").arg(heuristics.as_str());
+            match heuristics {
+                ExternalLinearCliMipSwitch::On | ExternalLinearCliMipSwitch::Off => {
+                    command.arg("-heuristicsOnOff").arg(heuristics.as_str());
+                }
+                ExternalLinearCliMipSwitch::Auto => {}
+            }
         }
         if let Some(priority_path) = &priority_path {
             command.arg("-priorityIn").arg(priority_path);
@@ -11412,7 +11416,8 @@ mod tests {
         quadratic_objective_ipmip_problem_to_cli_json, semi_ipmip_problem_to_cli_json,
         solve_ipmip_with_external_cli, solve_lower_bounded_ipmip_with_external_cli,
         solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
-        solver_command_env_var, sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json,
+        solve_source_ipmip_with_external_cli, solver_command_env_var,
+        sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json,
         ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliLicenseClass,
         ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat,
         ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
@@ -13869,6 +13874,121 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(
             !solution.message.to_ascii_lowercase().contains("python"),
             "{}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn native_open_source_json_auto_mip_controls_stay_off_python_bridge() {
+        for (solver, command_path) in [
+            (
+                ExternalLinearCliSolver::Highs,
+                "/definitely/not-a-highs-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                "/definitely/not-a-glpsol-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Scip,
+                "/definitely/not-a-scip-binary",
+            ),
+            (ExternalLinearCliSolver::Cbc, "/definitely/not-a-cbc-binary"),
+        ] {
+            let payload = ipmip_problem_to_cli_json(&super::external_linear_cli_smoke_mip());
+            let solution = super::solve_linear_cli_json(
+                ExternalLinearCliKind::Mip,
+                payload,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(PathBuf::from(command_path)),
+                    python: Some(format!(
+                        "/definitely/not-a-python-for-{}-auto-controls",
+                        solver.as_str()
+                    )),
+                    time_limit_secs: Some(2.0),
+                    presolve: Some(ExternalLinearCliPresolve::Auto),
+                    cuts: Some(ExternalLinearCliMipSwitch::Auto),
+                    heuristics: Some(ExternalLinearCliMipSwitch::Auto),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert!(
+                !solution.message.to_ascii_lowercase().contains("python"),
+                "{} auto controls unexpectedly used Python bridge: {}",
+                solver.as_str(),
+                solution.message
+            );
+        }
+    }
+
+    #[test]
+    fn native_open_source_json_auto_lp_controls_stay_off_python_bridge() {
+        for (solver, command_path) in [
+            (
+                ExternalLinearCliSolver::Highs,
+                "/definitely/not-a-highs-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Glpk,
+                "/definitely/not-a-glpsol-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Scip,
+                "/definitely/not-a-scip-binary",
+            ),
+            (ExternalLinearCliSolver::Cbc, "/definitely/not-a-cbc-binary"),
+        ] {
+            let payload = lp_problem_to_cli_json(&super::external_linear_cli_smoke_lp());
+            let solution = super::solve_linear_cli_json(
+                ExternalLinearCliKind::Lp,
+                payload,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(PathBuf::from(command_path)),
+                    python: Some(format!(
+                        "/definitely/not-a-python-for-{}-auto-lp-controls",
+                        solver.as_str()
+                    )),
+                    time_limit_secs: Some(2.0),
+                    presolve: Some(ExternalLinearCliPresolve::Auto),
+                    cuts: Some(ExternalLinearCliMipSwitch::Auto),
+                    heuristics: Some(ExternalLinearCliMipSwitch::Auto),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert!(
+                !solution.message.to_ascii_lowercase().contains("python"),
+                "{} LP auto controls unexpectedly used Python bridge: {}",
+                solver.as_str(),
+                solution.message
+            );
+        }
+    }
+
+    #[test]
+    fn source_feature_model_uses_rust_linearization_with_python_override() {
+        let problem = build_source_feature_mix_ip();
+        let solution = solve_source_ipmip_with_external_cli(
+            &problem,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from("/definitely/not-a-highs-source-binary")),
+                python: Some("/definitely/not-a-python-for-source-linearization".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "source linearization unexpectedly used Python bridge: {}",
             solution.message
         );
     }

@@ -1,12 +1,11 @@
 //! Rust-facing bridge for external/reference TSP solvers.
 //!
 //! The native Rust reference computes an exact Held-Karp check without Python
-//! startup. The checked-in Python bridge (`scripts/tsp_reference.py`) remains
-//! available for OR-Tools Routing's one-vehicle TSP result when OR-Tools is
-//! available locally.
+//! startup. Explicit OR-Tools Routing validation is launched from Rust through
+//! a tiny inline Python adapter, so the checked-in Python script can remain
+//! launcher glue instead of owning solver-model construction.
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,15 +33,21 @@ impl ExternalTspReferenceSolver {
 }
 
 fn registered_tsp_rust_fallback_enabled() -> bool {
-    std::env::var("TSP_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("TSP_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "TSP_REFERENCE_REGISTERED_FALLBACK",
+        "TSP_REFERENCE_EXTERNAL_FALLBACK",
+        "TSP_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .find_map(|key| std::env::var(key).ok())
+    .map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+        )
+    })
+    .unwrap_or(false)
 }
 
 fn should_use_rust_tsp_reference(opts: &ExternalTspReferenceOptions) -> bool {
@@ -365,13 +370,6 @@ fn numerical_error(message: impl Into<String>, elapsed_ms: f64) -> ExternalTspRe
     }
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("tsp_reference.py")
-}
-
 fn tsp_reference_timeout_ms() -> u64 {
     std::env::var("TSP_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -381,7 +379,7 @@ fn tsp_reference_timeout_ms() -> u64 {
         .unwrap_or(120_000)
 }
 
-fn wait_for_tsp_reference_output(
+fn wait_for_tsp_adapter_output(
     mut child: std::process::Child,
     timeout_ms: u64,
 ) -> Result<(Output, bool), String> {
@@ -399,26 +397,170 @@ fn wait_for_tsp_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll tsp_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll OR-Tools TSP adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for tsp_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for OR-Tools TSP adapter: {err}"))
 }
 
-fn run_tsp_reference_json(
-    payload: Value,
-    opts: &ExternalTspReferenceOptions,
+const ORTOOLS_TSP_DISTANCE_SCALE: i64 = 1_000_000;
+
+const ORTOOLS_TSP_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "ortools:routing-tsp"
+
+def emit(status, message, tour=None, ortools_status=None):
+    payload = {
+        "status": status,
+        "solver": SOLVER,
+        "tour": [] if tour is None else [int(v) for v in tour],
+        "objective": None,
+        "message": message,
+        "ortoolsStatus": ortools_status,
+        "ortoolsTour": [] if tour is None else [int(v) for v in tour],
+        "ortoolsObjective": None,
+    }
+    print(json.dumps(payload))
+
+try:
+    from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+except Exception as exc:
+    emit("unavailable", f"OR-Tools Routing unavailable: {exc}", ortools_status="unavailable")
+    raise SystemExit(0)
+
+try:
+    data = json.load(sys.stdin)
+    matrix = data["scaledDistanceMatrix"]
+    n = len(matrix)
+    if n < 2:
+        emit("numerical-error", "TSP requires at least two cities", tour=[], ortools_status="error")
+        raise SystemExit(1)
+
+    manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    def distance_callback(from_index, to_index):
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return int(matrix[from_node][to_node])
+
+    transit = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit)
+
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.FromSeconds(5)
+
+    solution = routing.SolveWithParameters(params)
+    if solution is None:
+        emit("infeasible", "OR-Tools Routing found no tour", tour=[], ortools_status="infeasible")
+        raise SystemExit(0)
+
+    tour = []
+    index = routing.Start(0)
+    while not routing.IsEnd(index):
+        tour.append(manager.IndexToNode(index))
+        index = solution.Value(routing.NextVar(index))
+    emit("optimal", "OR-Tools Routing one-vehicle TSP", tour=tour, ortools_status="optimal")
+except Exception as exc:
+    emit("numerical-error", str(exc), tour=[], ortools_status="error")
+    raise SystemExit(1)
+"#;
+
+fn scaled_ortools_tsp_distance(value: f64, row: usize, column: usize) -> Result<i64, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!(
+            "distance[{row}][{column}] must be finite and non-negative"
+        ));
+    }
+    let scaled = (value * ORTOOLS_TSP_DISTANCE_SCALE as f64).round();
+    if !scaled.is_finite() || scaled < 0.0 || scaled > i64::MAX as f64 {
+        return Err(format!(
+            "distance[{row}][{column}] cannot be represented as a scaled OR-Tools integer"
+        ));
+    }
+    Ok(scaled as i64)
+}
+
+fn ortools_tsp_payload(distance_matrix: &[Vec<f64>]) -> Result<Value, String> {
+    validate_rust_tsp_distance_matrix(distance_matrix)?;
+    let scaled_distance_matrix = distance_matrix
+        .iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            row.iter()
+                .enumerate()
+                .map(|(column_index, &value)| {
+                    scaled_ortools_tsp_distance(value, row_index, column_index)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({
+        "scale": ORTOOLS_TSP_DISTANCE_SCALE,
+        "scaledDistanceMatrix": scaled_distance_matrix,
+    }))
+}
+
+fn parsed_ortools_tsp_solution(
+    parsed: TspReferencePayload,
+    distance_matrix: &[Vec<f64>],
+    output_success: bool,
+    stderr: String,
+    elapsed_ms: f64,
 ) -> ExternalTspReferenceSolution {
+    let status = status_from_str(&parsed.status);
+    let tour = parsed.tour.unwrap_or_default();
+    let objective = if status == ExternalTspReferenceStatus::Optimal && !tour.is_empty() {
+        Some(rust_tsp_tour_length(distance_matrix, &tour))
+    } else {
+        parsed.objective
+    };
+    let ortools_tour = parsed.ortools_tour.unwrap_or_else(|| tour.clone());
+    let ortools_objective =
+        if status == ExternalTspReferenceStatus::Optimal && !ortools_tour.is_empty() {
+            Some(rust_tsp_tour_length(distance_matrix, &ortools_tour))
+        } else {
+            parsed.ortools_objective
+        };
+    ExternalTspReferenceSolution {
+        status,
+        solver: parsed
+            .solver
+            .unwrap_or_else(|| "ortools:routing-tsp".to_string()),
+        tour,
+        objective,
+        ortools_status: parsed.ortools_status,
+        ortools_tour,
+        ortools_objective,
+        message: parsed.message.unwrap_or_else(|| {
+            if output_success {
+                "ok".to_string()
+            } else {
+                stderr
+            }
+        }),
+        elapsed_ms,
+    }
+}
+
+fn run_ortools_tsp_reference(distance_matrix: &[Vec<f64>]) -> ExternalTspReferenceSolution {
     let started = Instant::now();
+    let payload = match ortools_tsp_payload(distance_matrix) {
+        Ok(payload) => payload,
+        Err(message) => {
+            return numerical_error(message, started.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(ORTOOLS_TSP_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -428,7 +570,7 @@ fn run_tsp_reference_json(
         Ok(child) => child,
         Err(err) => {
             return unavailable(
-                format!("failed to start tsp_reference.py with {python}: {err}"),
+                format!("failed to start OR-Tools TSP adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
@@ -436,13 +578,13 @@ fn run_tsp_reference_json(
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return numerical_error(
-                format!("failed to write tsp_reference.py stdin: {err}"),
+                format!("failed to write OR-Tools TSP adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
     }
     let timeout_ms = tsp_reference_timeout_ms();
-    let (output, timed_out) = match wait_for_tsp_reference_output(child, timeout_ms) {
+    let (output, timed_out) = match wait_for_tsp_adapter_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
     };
@@ -450,36 +592,24 @@ fn run_tsp_reference_json(
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("tsp_reference.py timed out after {timeout_ms}ms")
+            format!("OR-Tools TSP adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; tsp_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; OR-Tools TSP adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
     };
     match serde_json::from_slice::<TspReferencePayload>(&output.stdout) {
-        Ok(parsed) => ExternalTspReferenceSolution {
-            status: status_from_str(&parsed.status),
-            solver: parsed
-                .solver
-                .unwrap_or_else(|| "external-tsp-reference".to_string()),
-            tour: parsed.tour.unwrap_or_default(),
-            objective: parsed.objective,
-            ortools_status: parsed.ortools_status,
-            ortools_tour: parsed.ortools_tour.unwrap_or_default(),
-            ortools_objective: parsed.ortools_objective,
-            message: parsed.message.unwrap_or_else(|| {
-                if output.status.success() {
-                    "ok".to_string()
-                } else {
-                    stderr.clone()
-                }
-            }),
+        Ok(parsed) => parsed_ortools_tsp_solution(
+            parsed,
+            distance_matrix,
+            output.status.success(),
+            stderr,
             elapsed_ms,
-        },
+        ),
         Err(err) => numerical_error(
             format!(
-                "failed to parse tsp_reference.py output: {err}; stderr={}",
+                "failed to parse OR-Tools TSP adapter output: {err}; stderr={}",
                 stderr
             ),
             elapsed_ms,
@@ -498,12 +628,7 @@ pub fn solve_tsp_with_external_reference(
         );
     }
 
-    run_tsp_reference_json(
-        json!({
-            "distanceMatrix": distance_matrix,
-        }),
-        opts,
-    )
+    run_ortools_tsp_reference(distance_matrix)
 }
 
 pub fn solve_euclidean_tsp_with_external_reference(
@@ -518,23 +643,8 @@ pub fn solve_euclidean_tsp_with_external_reference(
         );
     }
 
-    let points_json: Vec<Value> = points
-        .iter()
-        .enumerate()
-        .map(|(idx, point)| {
-            json!({
-                "id": point.id.clone().unwrap_or_else(|| idx.to_string()),
-                "x": point.x,
-                "y": point.y,
-            })
-        })
-        .collect();
-    run_tsp_reference_json(
-        json!({
-            "points": points_json,
-        }),
-        opts,
-    )
+    let distance_matrix = rust_tsp_points_to_distance_matrix(points);
+    run_ortools_tsp_reference(&distance_matrix)
 }
 
 #[cfg(test)]
@@ -695,7 +805,43 @@ mod tests {
     }
 
     #[test]
-    fn tsp_python_bridge_wait_enforces_timeout() {
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = TSP_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("TSP_REFERENCE_RUST_FIRST", "1");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-tsp");
+
+        let solution = solve_tsp_with_external_reference(
+            &unit_square_matrix(),
+            &ExternalTspReferenceOptions {
+                solver: ExternalTspReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalTspReferenceStatus::Optimal);
+        assert_eq!(solution.solver, "rust:registered-tsp-fallback-for-ortools");
+        assert_eq!(solution.tour, vec![0, 1, 2, 3]);
+        assert_eq!(solution.objective, Some(4.0));
+    }
+
+    #[test]
+    fn ortools_adapter_reports_startup_without_repo_script() {
+        let _lock = TSP_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-a-python-for-tsp-ortools");
+
+        let solution = solve_tsp_with_external_reference(
+            &unit_square_matrix(),
+            &ExternalTspReferenceOptions {
+                solver: ExternalTspReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalTspReferenceStatus::Unavailable);
+        assert!(solution.message.contains("OR-Tools TSP adapter"));
+        assert!(!solution.message.contains("tsp_reference.py"));
+    }
+
+    #[test]
+    fn tsp_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -703,7 +849,7 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
 
-        let (output, timed_out) = wait_for_tsp_reference_output(child, 10).expect("timeout output");
+        let (output, timed_out) = wait_for_tsp_adapter_output(child, 10).expect("timeout output");
 
         assert!(timed_out);
         assert!(!output.status.success());

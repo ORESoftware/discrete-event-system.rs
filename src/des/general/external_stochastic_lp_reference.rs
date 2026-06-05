@@ -1,12 +1,11 @@
 //! Rust-facing bridge for external/reference stochastic LP solvers.
 //!
 //! The native Rust reference builds the extensive-form sample-average LP and
-//! solves it through the Rust LP stack without Python startup. The checked-in
-//! Python bridge (`scripts/stochastic_lp_reference.py`) remains available for
-//! SciPy/HiGHS when a true external open-source comparison is requested.
+//! solves it through the Rust LP stack without Python startup. Explicit
+//! SciPy/HiGHS validation is launched from Rust through a tiny inline Python
+//! adapter, so the checked-in Python script can remain launcher glue.
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,15 +35,21 @@ impl ExternalStochasticLpReferenceSolver {
 }
 
 fn registered_stochastic_lp_rust_fallback_enabled() -> bool {
-    std::env::var("STOCHASTIC_LP_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("STOCHASTIC_LP_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "STOCHASTIC_LP_REFERENCE_REGISTERED_FALLBACK",
+        "STOCHASTIC_LP_REFERENCE_EXTERNAL_FALLBACK",
+        "STOCHASTIC_LP_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .find_map(|key| std::env::var(key).ok())
+    .map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+        )
+    })
+    .unwrap_or(false)
 }
 
 fn should_use_rust_stochastic_lp_reference(opts: &ExternalStochasticLpReferenceOptions) -> bool {
@@ -368,13 +373,6 @@ fn numerical_error(
     }
 }
 
-fn reference_script() -> PathBuf {
-    let root = std::env::var("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts").join("stochastic_lp_reference.py")
-}
-
 fn stochastic_lp_reference_timeout_ms() -> u64 {
     std::env::var("STOCHASTIC_LP_REFERENCE_TIMEOUT_MS")
         .or_else(|_| std::env::var("EXTERNAL_REFERENCE_TIMEOUT_MS"))
@@ -384,7 +382,7 @@ fn stochastic_lp_reference_timeout_ms() -> u64 {
         .unwrap_or(120_000)
 }
 
-fn wait_for_stochastic_lp_reference_output(
+fn wait_for_stochastic_lp_adapter_output(
     mut child: std::process::Child,
     timeout_ms: u64,
 ) -> Result<(Output, bool), String> {
@@ -402,26 +400,166 @@ fn wait_for_stochastic_lp_reference_output(
                 }
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(err) => return Err(format!("failed to poll stochastic_lp_reference.py: {err}")),
+            Err(err) => return Err(format!("failed to poll SciPy stochastic LP adapter: {err}")),
         }
     }
     child
         .wait_with_output()
         .map(|output| (output, timed_out))
-        .map_err(|err| format!("failed to wait for stochastic_lp_reference.py: {err}"))
+        .map_err(|err| format!("failed to wait for SciPy stochastic LP adapter: {err}"))
 }
 
-fn run_stochastic_lp_reference_json(
-    payload: Value,
-    opts: &ExternalStochasticLpReferenceOptions,
+const SCIPY_STOCHASTIC_LP_ADAPTER: &str = r#"
+import json
+import sys
+
+SOLVER = "scipy:highs-slp"
+
+def emit(status, message, x=None, objective=None, c_first_x=None, expected_q=None, y_by_scenario=None, scenario_values=None, iterations=None):
+    payload = {
+        "status": status,
+        "solver": SOLVER,
+        "x": [] if x is None else x,
+        "objective": objective,
+        "cFirstX": c_first_x,
+        "expectedQ": expected_q,
+        "yByScenario": [] if y_by_scenario is None else y_by_scenario,
+        "scenarioValues": [] if scenario_values is None else scenario_values,
+        "iterations": iterations,
+        "message": message,
+    }
+    print(json.dumps(payload, sort_keys=True))
+
+try:
+    from scipy import optimize
+except Exception as exc:
+    emit("unavailable", f"SciPy unavailable: {exc}")
+    raise SystemExit(0)
+
+def scipy_status(code):
+    if code == 0:
+        return "optimal"
+    if code == 1:
+        return "iteration-limit"
+    if code == 2:
+        return "infeasible"
+    if code == 3:
+        return "unbounded"
+    return "numerical-error"
+
+try:
+    data = json.load(sys.stdin)
+    c_first = [float(value) for value in data["cFirst"]]
+    a_first = [[float(value) for value in row] for row in data.get("aFirst", [])]
+    b_first = [float(value) for value in data.get("bFirst", [])]
+    q_second = [float(value) for value in data["qSecond"]]
+    w_second = [[float(value) for value in row] for row in data["wSecond"]]
+    scenarios = data["scenarios"]
+    n_first = len(c_first)
+    n_second = len(q_second)
+    total_vars = n_first + len(scenarios) * n_second
+
+    c = [0.0 for _ in range(total_vars)]
+    for j, value in enumerate(c_first):
+        c[j] = -value
+    default_prob = 1.0 / len(scenarios)
+    for s, scenario in enumerate(scenarios):
+        probability = float(scenario.get("prob", default_prob))
+        for j, value in enumerate(q_second):
+            c[n_first + s * n_second + j] = -probability * value
+
+    a_ub = []
+    b_ub = []
+    for row, rhs in zip(a_first, b_first):
+        out = [0.0 for _ in range(total_vars)]
+        out[:n_first] = row
+        a_ub.append(out)
+        b_ub.append(rhs)
+
+    for s, scenario in enumerate(scenarios):
+        y_offset = n_first + s * n_second
+        t_rows = [[float(value) for value in row] for row in scenario["t"]]
+        h_values = [float(value) for value in scenario["h"]]
+        for t_row, w_row, rhs in zip(t_rows, w_second, h_values):
+            out = [0.0 for _ in range(total_vars)]
+            out[:n_first] = t_row
+            out[y_offset:y_offset + n_second] = w_row
+            a_ub.append(out)
+            b_ub.append(rhs)
+
+    solution = optimize.linprog(
+        c,
+        A_ub=a_ub if a_ub else None,
+        b_ub=b_ub if b_ub else None,
+        bounds=[(0.0, None) for _ in range(total_vars)],
+        method="highs",
+    )
+    status = scipy_status(int(solution.status))
+    iterations = getattr(solution, "nit", None)
+    if status != "optimal":
+        emit(status, str(solution.message), iterations=iterations)
+        raise SystemExit(0)
+
+    values = [float(value) for value in solution.x]
+    x = values[:n_first]
+    y_by_scenario = []
+    scenario_values = []
+    for s in range(len(scenarios)):
+        lo = n_first + s * n_second
+        y = values[lo:lo + n_second]
+        y_by_scenario.append(y)
+        scenario_values.append(sum(q * yj for q, yj in zip(q_second, y)))
+
+    c_first_x = sum(cj * xj for cj, xj in zip(c_first, x))
+    expected_q = 0.0
+    for scenario, value in zip(scenarios, scenario_values):
+        expected_q += float(scenario.get("prob", default_prob)) * value
+    emit(
+        "optimal",
+        str(solution.message),
+        x=x,
+        objective=c_first_x + expected_q,
+        c_first_x=c_first_x,
+        expected_q=expected_q,
+        y_by_scenario=y_by_scenario,
+        scenario_values=scenario_values,
+        iterations=iterations,
+    )
+except Exception as exc:
+    emit("numerical-error", str(exc))
+    raise SystemExit(1)
+"#;
+
+fn stochastic_lp_payload(problem: &SLPProblem, scenarios: &[Scenario]) -> Result<Value, String> {
+    validate_rust_stochastic_lp_problem(problem, scenarios)?;
+    Ok(json!({
+        "cFirst": &problem.c_first,
+        "aFirst": &problem.a_first,
+        "bFirst": &problem.b_first,
+        "qSecond": &problem.q_second,
+        "wSecond": &problem.w_second,
+        "thetaLowerBound": problem.theta_lower_bound,
+        "thetaUpperBound": problem.theta_upper_bound,
+        "scenarios": scenarios.iter().map(|scenario| json!({
+            "t": &scenario.t,
+            "h": &scenario.h,
+            "prob": scenario.prob,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+fn run_scipy_stochastic_lp_reference(
+    problem: &SLPProblem,
+    scenarios: &[Scenario],
 ) -> ExternalStochasticLpReferenceSolution {
     let started = Instant::now();
+    let payload = match stochastic_lp_payload(problem, scenarios) {
+        Ok(payload) => payload,
+        Err(message) => return numerical_error(message, started.elapsed().as_secs_f64() * 1000.0),
+    };
     let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
-    command
-        .arg(reference_script())
-        .arg("--solver")
-        .arg(opts.solver.as_arg());
+    command.arg("-c").arg(SCIPY_STOCHASTIC_LP_ADAPTER);
     let mut child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -431,7 +569,7 @@ fn run_stochastic_lp_reference_json(
         Ok(child) => child,
         Err(err) => {
             return unavailable(
-                format!("failed to start stochastic_lp_reference.py with {python}: {err}"),
+                format!("failed to start SciPy stochastic LP adapter with {python}: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             )
         }
@@ -439,13 +577,13 @@ fn run_stochastic_lp_reference_json(
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(payload.to_string().as_bytes()) {
             return numerical_error(
-                format!("failed to write stochastic_lp_reference.py stdin: {err}"),
+                format!("failed to write SciPy stochastic LP adapter stdin: {err}"),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
     }
     let timeout_ms = stochastic_lp_reference_timeout_ms();
-    let (output, timed_out) = match wait_for_stochastic_lp_reference_output(child, timeout_ms) {
+    let (output, timed_out) = match wait_for_stochastic_lp_adapter_output(child, timeout_ms) {
         Ok(output) => output,
         Err(err) => return numerical_error(err, started.elapsed().as_secs_f64() * 1000.0),
     };
@@ -453,9 +591,9 @@ fn run_stochastic_lp_reference_json(
     let stderr = if timed_out {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            format!("stochastic_lp_reference.py timed out after {timeout_ms}ms")
+            format!("SciPy stochastic LP adapter timed out after {timeout_ms}ms")
         } else {
-            format!("{stderr}; stochastic_lp_reference.py timed out after {timeout_ms}ms")
+            format!("{stderr}; SciPy stochastic LP adapter timed out after {timeout_ms}ms")
         }
     } else {
         String::from_utf8_lossy(&output.stderr).trim().to_string()
@@ -484,7 +622,7 @@ fn run_stochastic_lp_reference_json(
         },
         Err(err) => numerical_error(
             format!(
-                "failed to parse stochastic_lp_reference.py output: {err}; stderr={}",
+                "failed to parse SciPy stochastic LP adapter output: {err}; stderr={}",
                 stderr
             ),
             elapsed_ms,
@@ -506,23 +644,7 @@ pub fn solve_stochastic_lp_with_external_reference(
         );
     }
 
-    run_stochastic_lp_reference_json(
-        json!({
-            "cFirst": &problem.c_first,
-            "aFirst": &problem.a_first,
-            "bFirst": &problem.b_first,
-            "qSecond": &problem.q_second,
-            "wSecond": &problem.w_second,
-            "thetaLowerBound": problem.theta_lower_bound,
-            "thetaUpperBound": problem.theta_upper_bound,
-            "scenarios": scenarios.iter().map(|scenario| json!({
-                "t": &scenario.t,
-                "h": &scenario.h,
-                "prob": scenario.prob,
-            })).collect::<Vec<_>>(),
-        }),
-        opts,
-    )
+    run_scipy_stochastic_lp_reference(problem, scenarios)
 }
 
 #[cfg(test)]
@@ -656,6 +778,77 @@ mod tests {
     }
 
     #[test]
+    fn rust_first_env_forces_scipy_to_rust_reference_without_python() {
+        let _lock = STOCHASTIC_LP_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("STOCHASTIC_LP_REFERENCE_RUST_FIRST", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-stochastic-lp");
+        let problem = build_production_slp(vec![1.0], vec![3.0], None);
+        let scenarios = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: vec![(5.0, 15.0)],
+                seed: 13,
+            },
+            5,
+        );
+
+        let solution = solve_stochastic_lp_with_external_reference(
+            &problem,
+            &scenarios,
+            &ExternalStochasticLpReferenceOptions {
+                solver: ExternalStochasticLpReferenceSolver::Scipy,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalStochasticLpReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-stochastic-lp-fallback-for-scipy"
+        );
+        assert_eq!(solution.x.len(), 1);
+        assert_eq!(solution.y_by_scenario.len(), scenarios.len());
+    }
+
+    #[test]
+    fn scipy_adapter_reports_startup_without_repo_script() {
+        let _lock = STOCHASTIC_LP_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-stochastic-lp-scipy",
+        );
+        let problem = build_production_slp(vec![1.0], vec![3.0], None);
+        let scenarios = build_production_scenarios(
+            UniformDemandSpec {
+                ranges: vec![(5.0, 15.0)],
+                seed: 15,
+            },
+            5,
+        );
+
+        let solution = solve_stochastic_lp_with_external_reference(
+            &problem,
+            &scenarios,
+            &ExternalStochasticLpReferenceOptions {
+                solver: ExternalStochasticLpReferenceSolver::Scipy,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalStochasticLpReferenceStatus::Unavailable
+        );
+        assert!(solution.message.contains("SciPy stochastic LP adapter"));
+        assert!(!solution.message.contains("stochastic_lp_reference.py"));
+    }
+
+    #[test]
     fn auto_prefers_rust_reference_without_python() {
         let problem = build_production_slp(vec![1.0], vec![3.0], None);
         let scenarios = build_production_scenarios(
@@ -682,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn stochastic_lp_python_bridge_wait_enforces_timeout() {
+    fn stochastic_lp_adapter_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
             .stdout(Stdio::piped())
@@ -691,7 +884,7 @@ mod tests {
             .expect("spawn sleep");
 
         let (output, timed_out) =
-            wait_for_stochastic_lp_reference_output(child, 10).expect("timeout output");
+            wait_for_stochastic_lp_adapter_output(child, 10).expect("timeout output");
 
         assert!(timed_out);
         assert!(!output.status.success());

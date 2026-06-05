@@ -23846,7 +23846,11 @@ Objective value     : 8
             ("xpress-cli", ExternalLinearCliSolver::Xpress),
             ("lindo-cli", ExternalLinearCliSolver::Lindo),
         ] {
-            assert_eq!(Driver::parse_external_linear_cli_solver(alias), solver, "{alias}");
+            assert_eq!(
+                Driver::parse_external_linear_cli_solver(alias),
+                solver,
+                "{alias}"
+            );
         }
     }
 }

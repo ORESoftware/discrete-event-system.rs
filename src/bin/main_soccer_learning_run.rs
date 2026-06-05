@@ -230,6 +230,11 @@ fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Er
             "SOCCER_NEURAL_LEARNING_TARGET_CLIP",
             default.target_clip,
         )?,
+        snapshot_every_batches: env_usize_alias(
+            "SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES",
+            "SOCCER_NEURAL_LEARNING_SNAPSHOT_EVERY_BATCHES",
+            default.snapshot_every_batches,
+        )?,
     })
 }
 
@@ -1828,7 +1833,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         tactical_learning.defense_compactness_score_weight,
     );
     println!(
-        "neural_learning enabled={} backend={} learning_rate={:.5} batch_size={} train_every_ticks={} max_batches_per_tick={} hidden_units={} target_scale={:.3} max_pending_batches={} replay_capacity={} replay_samples_per_tick={} target_clip={:.3}",
+        "neural_learning enabled={} backend={} learning_rate={:.5} batch_size={} train_every_ticks={} max_batches_per_tick={} hidden_units={} target_scale={:.3} max_pending_batches={} replay_capacity={} replay_samples_per_tick={} target_clip={:.3} snapshot_every_batches={}",
         neural_learning.enabled,
         neural_backend_label(neural_learning.backend),
         neural_learning.learning_rate,
@@ -1841,6 +1846,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         neural_learning.replay_capacity,
         neural_learning.replay_samples_per_tick,
         neural_learning.target_clip,
+        neural_learning.snapshot_every_batches,
     );
     println!(
         "adversarial_embedding enabled={} memory_limit={} preloaded_windows={}",

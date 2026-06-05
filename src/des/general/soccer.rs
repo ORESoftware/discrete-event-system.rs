@@ -1136,6 +1136,20 @@ pub struct SoccerPomdpObservation {
     pub opponent_position_confidence: f64,
     #[serde(default)]
     pub player_position_confidences: Vec<PlayerPositionConfidence>,
+    #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    #[serde(default)]
+    pub ball_scheduled_index: Option<usize>,
+    #[serde(default)]
+    pub ball_schedule_order: i8,
+    #[serde(default)]
+    pub controller_slot: Option<usize>,
+    #[serde(default)]
+    pub human_controlled: bool,
+    #[serde(default)]
+    pub human_input_present: bool,
+    #[serde(default)]
+    pub human_input_seq: Option<u64>,
     pub ball_distance: f64,
     pub nearest_opponent_distance: f64,
     pub nearest_teammate_distance: f64,
@@ -1915,6 +1929,30 @@ fn finite_metric(value: f64) -> f64 {
     }
 }
 
+fn schedule_order_relative_to_ball(
+    scheduled_index: Option<usize>,
+    ball_scheduled_index: Option<usize>,
+) -> i8 {
+    match (scheduled_index, ball_scheduled_index) {
+        (Some(player), Some(ball)) if player < ball => -1,
+        (Some(player), Some(ball)) if player > ball => 1,
+        _ => 0,
+    }
+}
+
+fn annotate_human_control_observation(
+    observation: &mut SoccerPomdpObservation,
+    controller_slot: Option<usize>,
+    human_input: Option<&HumanInputFrame>,
+) {
+    observation.controller_slot = controller_slot.or(observation.controller_slot);
+    observation.human_controlled = observation.controller_slot.is_some();
+    if let Some(input) = human_input {
+        observation.human_input_present = true;
+        observation.human_input_seq = Some(input.seq);
+    }
+}
+
 fn record_running_mean(mean: &mut f64, count: usize, value: f64) {
     if count == 0 {
         return;
@@ -1949,6 +1987,8 @@ pub struct SoccerQStateKey {
     pub player_macro_cell_id: usize,
     #[serde(default)]
     pub player_root_cell_id: usize,
+    #[serde(default)]
+    pub ball_schedule_order: i8,
     #[serde(default)]
     pub receive_facing: FacingBucket,
     #[serde(default)]
@@ -2155,6 +2195,7 @@ impl SoccerQStateKey {
             player_tactical_cell_id: player_grid.tactical.id,
             player_macro_cell_id: player_grid.macro_zone.id,
             player_root_cell_id: player_grid.whole_pitch.id,
+            ball_schedule_order: observation.ball_schedule_order.clamp(-1, 1),
             receive_facing,
             action_facing,
             score_diff_bucket: score_diff_for_team.clamp(-2, 2) as i8,
@@ -2412,6 +2453,7 @@ impl SoccerQStateKey {
             && self.possession_relative == other.possession_relative
             && self.ball_zone_x == other.ball_zone_x
             && self.ball_zone_y == other.ball_zone_y
+            && self.ball_schedule_order == other.ball_schedule_order
             && self.score_diff_bucket == other.score_diff_bucket
             && self.team_brain_mode == other.team_brain_mode
             && self.team_brain_press_bin == other.team_brain_press_bin
@@ -5531,11 +5573,12 @@ impl PlayerAgent {
         &mut self,
         snapshot: &WorldSnapshot,
         mdp_state: SoccerMdpState,
-        observation: SoccerPomdpObservation,
+        mut observation: SoccerPomdpObservation,
         human_input: Option<&HumanInputFrame>,
         learned_plan: Option<&SoccerLearnedPlan>,
         rng: &mut SeededRandom,
     ) -> PlayerIntent {
+        annotate_human_control_observation(&mut observation, self.controller_slot, human_input);
         let belief = belief_from_observation(&observation);
         let directive = snapshot.tactical_directive(self.team);
         let has_ball = observation.has_ball;
@@ -11682,6 +11725,13 @@ impl WorldSnapshot {
                 teammate_position_confidence: 0.0,
                 opponent_position_confidence: 0.0,
                 player_position_confidences: Vec::new(),
+                scheduled_index: None,
+                ball_scheduled_index: None,
+                ball_schedule_order: 0,
+                controller_slot: None,
+                human_controlled: false,
+                human_input_present: false,
+                human_input_seq: None,
                 ball_distance: 0.0,
                 nearest_opponent_distance: 0.0,
                 nearest_teammate_distance: 0.0,
@@ -11827,6 +11877,16 @@ impl WorldSnapshot {
             .filter(|player| player.id != me.id)
             .filter_map(|player| self.player_position_confidence_entry(me.id, player))
             .collect::<Vec<_>>();
+        let scheduled_index = self
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player_id);
+        let ball_scheduled_index = self
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        let ball_schedule_order =
+            schedule_order_relative_to_ball(scheduled_index, ball_scheduled_index);
         let visibility_elapsed = phase_started.elapsed();
         let phase_started = Instant::now();
         let visible_pass_targets = if has_ball {
@@ -12204,6 +12264,13 @@ impl WorldSnapshot {
             teammate_position_confidence,
             opponent_position_confidence,
             player_position_confidences,
+            scheduled_index,
+            ball_scheduled_index,
+            ball_schedule_order,
+            controller_slot: me.controller_slot,
+            human_controlled: me.controller_slot.is_some(),
+            human_input_present: false,
+            human_input_seq: None,
             ball_distance: if visible_ball {
                 me_position.distance(self.ball.position)
             } else {
@@ -17397,6 +17464,18 @@ pub struct TeamBrainSnapshot {
     pub possession_team: Option<Team>,
     pub in_possession: bool,
     pub ball_holder: Option<usize>,
+    #[serde(default)]
+    pub ball_position: Vec2,
+    #[serde(default)]
+    pub ball_velocity: Vec2,
+    #[serde(default)]
+    pub ball_acceleration: Vec2,
+    #[serde(default)]
+    pub ball_altitude_yards: f64,
+    #[serde(default)]
+    pub ball_scheduled_index: Option<usize>,
+    #[serde(default)]
+    pub ball_last_action: Option<String>,
     pub tracked_team_players: usize,
     pub controlled_human_players: usize,
     pub directive: TeamTacticalDirective,
@@ -17420,6 +17499,12 @@ fn default_team_brain_snapshot(team: Team) -> TeamBrainSnapshot {
         possession_team: None,
         in_possession: false,
         ball_holder: None,
+        ball_position: Vec2::zero(),
+        ball_velocity: Vec2::zero(),
+        ball_acceleration: Vec2::zero(),
+        ball_altitude_yards: 0.0,
+        ball_scheduled_index: None,
+        ball_last_action: None,
         tracked_team_players: 0,
         controlled_human_players: 0,
         policy_action_entries: 0,
@@ -25469,6 +25554,12 @@ impl SoccerMatch {
             possession_team: central_brain.possession_team,
             in_possession: central_brain.possession_team == Some(team),
             ball_holder: central_brain.ball_holder,
+            ball_position: central_brain.ball_position,
+            ball_velocity: central_brain.ball_velocity,
+            ball_acceleration: central_brain.ball_acceleration,
+            ball_altitude_yards: central_brain.ball_altitude_yards,
+            ball_scheduled_index: central_brain.ball_scheduled_index,
+            ball_last_action: central_brain.ball_last_action.clone(),
             tracked_team_players,
             controlled_human_players,
             policy_action_entries,
@@ -39963,6 +40054,69 @@ mod tests {
     }
 
     #[test]
+    fn pomdp_and_q_state_encode_relative_ball_agent_schedule() {
+        let player_id = 5;
+        let mut saw_pre_ball = false;
+        let mut saw_post_ball = false;
+
+        for seed in 460..620 {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig {
+                duration_seconds: 0.2,
+                seed,
+                ..Default::default()
+            });
+            sim.run_time_step();
+            let frame = sim.to_frame();
+            let player_slot = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player_id)
+                .expect("player scheduled");
+            let ball_slot = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| {
+                    entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID
+                })
+                .expect("ball scheduled");
+            let expected_order =
+                schedule_order_relative_to_ball(Some(player_slot), Some(ball_slot));
+            if expected_order == 0 {
+                continue;
+            }
+            let player = frame
+                .players
+                .iter()
+                .find(|player| player.id == player_id)
+                .expect("scheduled player");
+            let decision = player.last_decision.as_ref().expect("player decision");
+
+            assert_eq!(decision.observation.scheduled_index, Some(player_slot));
+            assert_eq!(decision.observation.ball_scheduled_index, Some(ball_slot));
+            assert_eq!(decision.observation.ball_schedule_order, expected_order);
+
+            let q_key = SoccerQStateKey::from_parts(
+                &decision.mdp_state,
+                &decision.observation,
+                player.team,
+                player.role,
+            );
+            assert_eq!(q_key.ball_schedule_order, expected_order);
+
+            if expected_order < 0 {
+                saw_pre_ball = true;
+            } else {
+                saw_post_ball = true;
+            }
+            if saw_pre_ball && saw_post_ball {
+                return;
+            }
+        }
+
+        panic!("expected seeds to cover player decisions both before and after the ball agent");
+    }
+
+    #[test]
     fn scheduled_player_intent_before_ball_moves_pass_same_tick() {
         let passer = 5;
         let receiver = 9;
@@ -42323,6 +42477,15 @@ mod tests {
                 .map(String::as_str),
             Some("human-input")
         );
+        let observation = &sim.players[0]
+            .last_decision
+            .as_ref()
+            .expect("controlled player decision")
+            .observation;
+        assert_eq!(observation.controller_slot, Some(0));
+        assert!(observation.human_controlled);
+        assert!(observation.human_input_present);
+        assert_eq!(observation.human_input_seq, Some(1));
     }
 
     #[test]
@@ -42361,6 +42524,16 @@ mod tests {
         assert!(!stats.last_immediate_pending);
         assert_eq!(stats.last_queued_before, 0);
         assert_eq!(stats.last_queued_after, 0);
+
+        let observation = &sim.players[0]
+            .last_decision
+            .as_ref()
+            .expect("assigned player decision")
+            .observation;
+        assert_eq!(observation.controller_slot, Some(0));
+        assert!(observation.human_controlled);
+        assert!(!observation.human_input_present);
+        assert_eq!(observation.human_input_seq, None);
 
         let remaining = input_queue.drain_latest_by_slot();
         assert_eq!(remaining.get(&1).expect("unassigned slot remains").seq, 1);
@@ -42416,6 +42589,15 @@ mod tests {
                 .map(String::as_str),
             Some("human-input")
         );
+        let observation = &sim.players[0]
+            .last_decision
+            .as_ref()
+            .expect("controlled player decision")
+            .observation;
+        assert_eq!(observation.controller_slot, Some(0));
+        assert!(observation.human_controlled);
+        assert!(observation.human_input_present);
+        assert_eq!(observation.human_input_seq, Some(1));
         let remaining = input_queue.drain_latest_by_slot();
         assert!(!remaining.contains_key(&0));
         assert_eq!(remaining.get(&1).expect("unassigned slot remains").seq, 1);
@@ -54981,7 +55163,15 @@ mod tests {
         assert!(html.body.contains("function scheduleSlotLabel"));
         assert!(html.body.contains("scheduleSlotLabel(ball?.scheduledIndex"));
         assert!(html.body.contains("scheduleSlotLabel(b.ballScheduledIndex"));
+        assert!(html
+            .body
+            .contains("scheduleSlotLabel(brain.ballScheduledIndex"));
+        assert!(html.body.contains("ballScheduleOrder"));
+        assert!(html.body.contains("preB"));
+        assert!(html.body.contains("humanInputPresent"));
+        assert!(html.body.contains("controllerSlot"));
         assert!(html.body.contains("ballLastAction"));
+        assert!(html.body.contains("brain.ballLastAction"));
         assert!(html.body.contains("drawGoalPosts"));
         assert!(html.body.contains("id=\"clearanceAction\""));
         assert!(html.body.contains("id=\"routeOneAction\""));
@@ -55353,6 +55543,12 @@ mod tests {
                 entry["kind"] == "player" && entry["id"].as_u64() == Some(holder_id as u64)
             })
             .expect("holder schedule index");
+        let ball_schedule_index = agent_schedule
+            .iter()
+            .position(|entry| entry["kind"] == "ball" && entry["id"] == BALL_AGENT_ID)
+            .expect("ball schedule index");
+        let holder_ball_schedule_order =
+            schedule_order_relative_to_ball(Some(holder_schedule_index), Some(ball_schedule_index));
         assert_eq!(
             holder_player["scheduledIndex"].as_u64(),
             Some(holder_schedule_index as u64)
@@ -55360,6 +55556,18 @@ mod tests {
         assert_eq!(
             holder_player["lastDecision"]["scheduledIndex"].as_u64(),
             Some(holder_schedule_index as u64)
+        );
+        assert_eq!(
+            holder_player["lastDecision"]["observation"]["scheduledIndex"].as_u64(),
+            Some(holder_schedule_index as u64)
+        );
+        assert_eq!(
+            holder_player["lastDecision"]["observation"]["ballScheduledIndex"].as_u64(),
+            Some(ball_schedule_index as u64)
+        );
+        assert_eq!(
+            holder_player["lastDecision"]["observation"]["ballScheduleOrder"].as_i64(),
+            Some(holder_ball_schedule_order as i64)
         );
         let compacted_autonomous_non_holder = frame_players
             .iter()
@@ -55417,8 +55625,56 @@ mod tests {
         assert!(value["frame"]["homeBrain"]
             .get("policyTargetEntries")
             .is_some());
+        assert_eq!(
+            value["frame"]["homeBrain"]["ballPosition"],
+            value["frame"]["ball"]["position"]
+        );
+        assert_eq!(
+            value["frame"]["homeBrain"]["ballVelocity"],
+            value["frame"]["ball"]["velocity"]
+        );
+        assert_eq!(
+            value["frame"]["homeBrain"]["ballAcceleration"],
+            value["frame"]["ball"]["acceleration"]
+        );
+        assert_eq!(
+            value["frame"]["homeBrain"]["ballAltitudeYards"],
+            value["frame"]["ball"]["altitudeYards"]
+        );
+        assert_eq!(
+            value["frame"]["homeBrain"]["ballScheduledIndex"],
+            value["frame"]["ball"]["scheduledIndex"]
+        );
+        assert_eq!(
+            value["frame"]["homeBrain"]["ballLastAction"],
+            value["frame"]["ball"]["lastDecision"]["action"]
+        );
         assert_eq!(value["frame"]["awayBrain"]["team"], "Away");
         assert_eq!(value["frame"]["awayBrain"]["trackedTeamPlayers"], 11);
+        assert_eq!(
+            value["frame"]["awayBrain"]["ballPosition"],
+            value["frame"]["ball"]["position"]
+        );
+        assert_eq!(
+            value["frame"]["awayBrain"]["ballVelocity"],
+            value["frame"]["ball"]["velocity"]
+        );
+        assert_eq!(
+            value["frame"]["awayBrain"]["ballAcceleration"],
+            value["frame"]["ball"]["acceleration"]
+        );
+        assert_eq!(
+            value["frame"]["awayBrain"]["ballAltitudeYards"],
+            value["frame"]["ball"]["altitudeYards"]
+        );
+        assert_eq!(
+            value["frame"]["awayBrain"]["ballScheduledIndex"],
+            value["frame"]["ball"]["scheduledIndex"]
+        );
+        assert_eq!(
+            value["frame"]["awayBrain"]["ballLastAction"],
+            value["frame"]["ball"]["lastDecision"]["action"]
+        );
         assert_eq!(
             value["frame"]["centralBrain"]["trackedOfficialAwareness"]
                 .as_array()
@@ -56504,6 +56760,18 @@ mod tests {
             &input_queue,
         );
         assert_eq!(step.status, 200);
+        let step_value: serde_json::Value = serde_json::from_str(&step.body).expect("step json");
+        let controlled_player = step_value["frame"]["players"]
+            .as_array()
+            .expect("frame players")
+            .iter()
+            .find(|player| player["id"] == 5)
+            .expect("controlled player");
+        let observation = &controlled_player["lastDecision"]["observation"];
+        assert_eq!(observation["controllerSlot"].as_u64(), Some(0));
+        assert_eq!(observation["humanControlled"], true);
+        assert_eq!(observation["humanInputPresent"], true);
+        assert_eq!(observation["humanInputSeq"].as_u64(), Some(1));
         assert!(session.lock().unwrap().match_ref().players[5].position.x > start_x);
     }
 

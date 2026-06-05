@@ -810,7 +810,12 @@ function teamBrainLabel(brain, fallbackDirective) {
   const numbersUp = advantage > 0 ? ` N+${advantage}/${overload.toFixed(2)}` : "";
   const humans = Number(brain.controlledHumanPlayers ?? 0);
   const humanText = humans > 0 ? ` H${humans}` : "";
-  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)} ${cover} Q${actions}/${targets}${numbersUp}${humanText}`;
+  const ballSpeed = vecLen(brain.ballVelocity || {x: 0, y: 0});
+  const ballZ = Number(brain.ballAltitudeYards ?? 0);
+  const ballSchedule = scheduleSlotLabel(brain.ballScheduledIndex);
+  const ballAction = brain.ballLastAction ? ` ${brain.ballLastAction}` : "";
+  const ballText = ` B${ballSpeed.toFixed(0)} z${ballZ.toFixed(1)}${ballSchedule}${ballAction}`;
+  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)} ${cover} Q${actions}/${targets}${numbersUp}${humanText}${ballText}`;
 }
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
@@ -1374,10 +1379,16 @@ function agentPomdpLabel(d) {
   if (!o) return "-";
   const lane = o.shotLaneOpen ? "lane" : "blocked";
   const ball = o.visibleBall ? "see" : "blind";
+  const scheduleOrder = Number(o.ballScheduleOrder ?? 0);
+  const scheduleText = scheduleOrder < 0 ? "preB" : scheduleOrder > 0 ? "postB" : "syncB";
+  const controllerSlot = o.controllerSlot ?? null;
+  const controlText = controllerSlot == null
+    ? "AI"
+    : `H${controllerSlot}${o.humanInputPresent ? `!${o.humanInputSeq ?? ""}` : ""}`;
   const options = Number(o.visiblePassOptions ?? 0);
   const passQ = Number(o.expectedPassCompletion ?? 0);
   const goalWindow = Number(o.goalAttackWindowScore ?? 0);
-  return `${ball} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} ${lane}`;
+  return `${ball} ${scheduleText} ${controlText} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} ${lane}`;
 }
 function agentBeliefLabel(d) {
   const b = d?.belief;

@@ -579,7 +579,7 @@ where
         active = active.saturating_sub(1);
 
         match game_result {
-            Ok(game) => {
+            Ok(mut game) => {
                 let merged = match merge_soccer_policy_deltas(
                     &policies,
                     std::slice::from_ref(&game.delta),
@@ -601,7 +601,7 @@ where
                     first_error = Some(err);
                     break;
                 }
-                if let Some(snapshot) = game.neural_network.clone() {
+                if let Some(snapshot) = game.neural_network.take() {
                     latest_neural_network = Some(snapshot);
                 }
                 total_home_goals = total_home_goals.saturating_add(game.summary.score_home);

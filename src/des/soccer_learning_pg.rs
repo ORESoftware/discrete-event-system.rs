@@ -1078,50 +1078,25 @@ fn insert_completed_run_headers_in_transaction(
     Ok(batch_rows.into_iter().map(|row| row.run_id).collect())
 }
 
-#[derive(Clone, Debug)]
-struct SoccerRunDeltaEntryInsert {
+#[derive(Clone, Copy, Debug)]
+struct SoccerRunDeltaBatchEntryInsert<'a> {
+    run_index: usize,
+    delta: &'a SoccerLearningPolicyDeltaEntry,
     team: &'static str,
     entry_kind: &'static str,
-    state_hash: String,
-    state_json: Value,
-    action: String,
-    target_fine_cell_id: i32,
-    target_tactical_cell_id: i32,
-    target_macro_cell_id: i32,
-    target_root_cell_id: i32,
-    before_value_micros: i64,
-    after_value_micros: i64,
-    value_delta_micros: i64,
     visit_delta: i32,
-    merge_weight_micros: i64,
-    effective_visit_micros: i64,
 }
 
-#[derive(Clone, Debug)]
-struct SoccerRunDeltaBatchEntryInsert {
+fn soccer_run_delta_batch_entry_insert(
     run_index: usize,
-    row: SoccerRunDeltaEntryInsert,
-}
-
-fn soccer_run_delta_entry_insert(
     delta: &SoccerLearningPolicyDeltaEntry,
-) -> SoccerRunDeltaEntryInsert {
-    SoccerRunDeltaEntryInsert {
+) -> SoccerRunDeltaBatchEntryInsert<'_> {
+    SoccerRunDeltaBatchEntryInsert {
+        run_index,
+        delta,
         team: soccer_team_label(delta.team),
         entry_kind: delta.entry_kind.as_str(),
-        state_hash: delta.state_hash.clone(),
-        state_json: delta.state_json.clone(),
-        action: delta.action.clone(),
-        target_fine_cell_id: delta.target_fine_cell_id,
-        target_tactical_cell_id: delta.target_tactical_cell_id,
-        target_macro_cell_id: delta.target_macro_cell_id,
-        target_root_cell_id: delta.target_root_cell_id,
-        before_value_micros: delta.before_value_micros,
-        after_value_micros: delta.after_value_micros,
-        value_delta_micros: delta.value_delta_micros,
         visit_delta: checked_i32(delta.visit_delta),
-        merge_weight_micros: delta.merge_weight_micros,
-        effective_visit_micros: delta.effective_visit_micros,
     }
 }
 
@@ -1133,10 +1108,7 @@ fn insert_run_delta_rows(
     let run_ids = [run_id.to_string()];
     let mut batch_rows = Vec::with_capacity(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE);
     for delta in rows {
-        batch_rows.push(SoccerRunDeltaBatchEntryInsert {
-            run_index: 0,
-            row: soccer_run_delta_entry_insert(delta),
-        });
+        batch_rows.push(soccer_run_delta_batch_entry_insert(0, delta));
         if batch_rows.len() == SOCCER_RUN_DELTA_INSERT_BATCH_SIZE {
             insert_run_delta_batch_rows(tx, &run_ids, &batch_rows)?;
             batch_rows.clear();
@@ -1163,10 +1135,7 @@ fn insert_completed_run_delta_rows_in_transaction(
     let mut batch_rows = Vec::with_capacity(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE);
     for (run_index, run) in runs.iter().enumerate() {
         for delta in &run.game.delta.entries {
-            batch_rows.push(SoccerRunDeltaBatchEntryInsert {
-                run_index,
-                row: soccer_run_delta_entry_insert(delta),
-            });
+            batch_rows.push(soccer_run_delta_batch_entry_insert(run_index, delta));
             if batch_rows.len() == SOCCER_RUN_DELTA_INSERT_BATCH_SIZE {
                 insert_run_delta_batch_rows(tx, run_ids, &batch_rows)?;
                 batch_rows.clear();
@@ -1182,7 +1151,7 @@ fn insert_completed_run_delta_rows_in_transaction(
 fn insert_run_delta_batch_rows(
     tx: &mut postgres::Transaction<'_>,
     run_ids: &[String],
-    rows: &[SoccerRunDeltaBatchEntryInsert],
+    rows: &[SoccerRunDeltaBatchEntryInsert<'_>],
 ) -> Result<(), String> {
     for chunk in rows.chunks(SOCCER_RUN_DELTA_INSERT_BATCH_SIZE) {
         let sql_prefix = r#"
@@ -1212,7 +1181,7 @@ fn insert_run_delta_batch_rows(
         let mut params: Vec<&(dyn ToSql + Sync)> =
             Vec::with_capacity(chunk.len() * SOCCER_RUN_DELTA_PARAMETER_COUNT);
         for (idx, batch_row) in chunk.iter().enumerate() {
-            let row = &batch_row.row;
+            let delta = batch_row.delta;
             let run_id = run_ids.get(batch_row.run_index).ok_or_else(|| {
                 format!(
                     "insert soccer learning run delta batch has row for missing run index {}",
@@ -1224,21 +1193,21 @@ fn insert_run_delta_batch_rows(
             }
             append_run_delta_value_tuple(&mut sql, idx * SOCCER_RUN_DELTA_PARAMETER_COUNT + 1);
             params.push(run_id);
-            params.push(&row.team);
-            params.push(&row.entry_kind);
-            params.push(&row.state_hash);
-            params.push(&row.state_json);
-            params.push(&row.action);
-            params.push(&row.target_fine_cell_id);
-            params.push(&row.target_tactical_cell_id);
-            params.push(&row.target_macro_cell_id);
-            params.push(&row.target_root_cell_id);
-            params.push(&row.before_value_micros);
-            params.push(&row.after_value_micros);
-            params.push(&row.value_delta_micros);
-            params.push(&row.visit_delta);
-            params.push(&row.merge_weight_micros);
-            params.push(&row.effective_visit_micros);
+            params.push(&batch_row.team);
+            params.push(&batch_row.entry_kind);
+            params.push(&delta.state_hash);
+            params.push(&delta.state_json);
+            params.push(&delta.action);
+            params.push(&delta.target_fine_cell_id);
+            params.push(&delta.target_tactical_cell_id);
+            params.push(&delta.target_macro_cell_id);
+            params.push(&delta.target_root_cell_id);
+            params.push(&delta.before_value_micros);
+            params.push(&delta.after_value_micros);
+            params.push(&delta.value_delta_micros);
+            params.push(&batch_row.visit_delta);
+            params.push(&delta.merge_weight_micros);
+            params.push(&delta.effective_visit_micros);
         }
         tx.execute(&sql, &params)
             .map_err(|err| format!("insert soccer learning run delta batch: {err}"))?;

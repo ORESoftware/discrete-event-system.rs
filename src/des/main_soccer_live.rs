@@ -97,6 +97,11 @@ where
     {
         cfg.port = port;
     }
+    if let Some(workers) =
+        env_positive_usize(&lookup, "SOCCER_LIVE_HTTP_WORKERS", "SOCCER_HTTP_WORKERS")
+    {
+        cfg.http_worker_threads = workers;
+    }
     if let Some(duration) = env_positive_f64(
         &lookup,
         "SOCCER_MATCH_DURATION_SECONDS",
@@ -215,6 +220,7 @@ mod tests {
         let cfg = live_server_config_from_lookup(|_| None);
 
         assert_eq!(cfg.match_config.human_slots(), 4);
+        assert_eq!(cfg.http_worker_threads, 4);
         assert!(!cfg.match_config.learning_enabled);
         assert!(!cfg.match_config.learning_logging_enabled);
         assert!(!cfg.match_config.neural_learning.enabled);
@@ -229,6 +235,7 @@ mod tests {
             ("SOCCER_LIVE_LEARNING_LOGGING_ENABLED", "on"),
             ("SOCCER_LIVE_LEARNING_INTERVAL_TICKS", "7"),
             ("SOCCER_LIVE_FULL_GAME_LEARNING_ENABLED", "true"),
+            ("SOCCER_LIVE_HTTP_WORKERS", "6"),
             ("SOCCER_LIVE_NEURAL_LEARNING_ENABLED", "1"),
             ("SOCCER_LIVE_NEURAL_LEARNING_BACKEND", "threaded"),
             ("SOCCER_LIVE_ADVERSARIAL_EMBEDDING_ENABLED", "yes"),
@@ -239,6 +246,7 @@ mod tests {
 
         assert!(cfg.match_config.learning_enabled);
         assert!(cfg.match_config.learning_logging_enabled);
+        assert_eq!(cfg.http_worker_threads, 6);
         assert_eq!(cfg.match_config.learning_interval_ticks, 7);
         assert!(cfg.match_config.full_game_learning_enabled);
         assert!(cfg.match_config.neural_learning.enabled);

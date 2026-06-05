@@ -18,3 +18,11 @@
   - Prefer profile-based commands: `AWS_PROFILE=dd-codex aws sts get-caller-identity`.
   - If a tool needs environment variables, export from the profile with AWS CLI v2: `aws configure export-credentials --profile dd-codex --format env`, then source the output in the current shell.
   - If `export-credentials` is unavailable, read values with `aws configure get aws_access_key_id --profile dd-codex`, `aws configure get aws_secret_access_key --profile dd-codex`, and `aws configure get aws_session_token --profile dd-codex` when present; keep those values local and out of git.
+- Soccer learning persistence is AWS RDS Postgres, not Neon. Use the AWS RDS
+  schema/table definitions under `~/codes/ores/k8s-cluster/remote/libs/pg-defs`
+  for declarative Postgres migrations and do not use Neon tooling for this
+  project unless the user explicitly reverses this decision.
+- For soccer-learning Postgres work, use the AWS RDS Postgres database for the
+  `dd-codex` project via the local AWS profile/config. Do not use Neon, Supabase,
+  or any other Postgres connector for this repository's soccer-learning storage
+  unless the user explicitly asks for that different database.

@@ -19,7 +19,7 @@ use std::sync::{
 };
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -32218,11 +32218,27 @@ pub fn run_default_simulation() -> SimulationTrace {
     )
 }
 
+fn fresh_site_playback_seed() -> u32 {
+    if let Ok(raw) = std::env::var("SOCCER_SITE_SEED") {
+        if let Ok(seed) = raw.trim().parse::<u32>() {
+            return seed;
+        }
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let pid = u128::from(std::process::id());
+    let mixed = nanos ^ (nanos.rotate_left(37)) ^ (pid << 32);
+    let seed = (mixed % u128::from(u32::MAX)) as u32;
+    seed.max(1)
+}
+
 fn site_playback_trace_config() -> (MatchConfig, u64) {
-    (
-        MatchConfig::playback_trace(DEFAULT_DURATION_SECONDS),
-        SITE_PLAYBACK_RECORD_EVERY_TICKS,
-    )
+    let mut config = MatchConfig::playback_trace(DEFAULT_DURATION_SECONDS);
+    config.seed = fresh_site_playback_seed();
+    (config, SITE_PLAYBACK_RECORD_EVERY_TICKS)
 }
 
 fn run_site_simulation() -> SimulationTrace {
@@ -41767,6 +41783,7 @@ mod tests {
         assert_eq!(record_every_ticks, SITE_PLAYBACK_RECORD_EVERY_TICKS);
         assert_eq!(record_every_ticks, 1);
         assert_eq!(1 + config.total_ticks().div_ceil(record_every_ticks), 6_001);
+        assert_ne!(config.seed, 0);
         assert!(!config.learning_enabled);
         assert!(!config.learning_logging_enabled);
         assert!(!config.full_game_learning_enabled);
@@ -58545,6 +58562,11 @@ mod tests {
         assert!(html.contains("soccer-sim.meta.json"));
         assert!(html.contains("soccer-sim.frames.jsonl"));
         assert!(html.contains("Loading match data"));
+        assert!(html.contains("id=\"runNewSim\""));
+        assert!(html.contains("Run New Sim"));
+        assert!(html.contains("../simulations/main_soccer/run?exact=1"));
+        assert!(html.contains("cacheBustUrl"));
+        assert!(html.contains("runNewSimulation"));
         assert!(html.contains("response.body.getReader"));
         assert!(html.contains("JSON.parse(raw)"));
         assert!(html.contains("expectedFrameCount"));

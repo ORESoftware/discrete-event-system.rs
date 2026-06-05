@@ -7470,18 +7470,37 @@ pub fn run_output_validation_json_with_rust_reference(payload: &Value, tool: &st
             };
             output_validation_openapi_reference(payload, &validator)
         }
-        "xml" | "xmllint" | "xml-schema" | "xsd" | "python-xmlschema" => {
+        "xml" | "xmllint" | "xml-schema" | "xsd" | "xmlschema" | "xmlschema-validate"
+        | "xsd-validator" | "python-xmlschema" | "xmlschema-adapter" => {
             let validator = match tool.as_str() {
                 "xmllint" => "builtin:xml-schema-structural-for-xmllint",
+                "xmlschema" => "builtin:xml-schema-structural-for-xmlschema",
+                "xmlschema-validate" => "builtin:xml-schema-structural-for-xmlschema-validate",
+                "xsd-validator" => "builtin:xml-schema-structural-for-xsd-validator",
                 "python-xmlschema" => "builtin:xml-schema-structural-for-python-xmlschema",
+                "xmlschema-adapter" => "builtin:xml-schema-structural-for-xmlschema-adapter",
                 _ => "builtin:xml-schema-structural",
             };
             output_validation_xml_reference(payload, validator)
         }
-        "schematron" | "jing" | "saxon" => {
-            output_validation_xml_reference(payload, "builtin:schematron-structural")
+        "schematron" | "schematron-adapter" | "jing" | "saxon" | "saxon-he" | "saxon9he" => {
+            let validator = if tool == "schematron" {
+                "builtin:schematron-structural".to_string()
+            } else {
+                format!("builtin:schematron-structural-for-{tool}")
+            };
+            output_validation_xml_reference(payload, &validator)
         }
-        "pydantic" | "zod" | "valibot" | "marshmallow" | "cerberus" => {
+        "pydantic"
+        | "pydantic-adapter"
+        | "zod"
+        | "zod-adapter"
+        | "valibot"
+        | "valibot-adapter"
+        | "marshmallow"
+        | "marshmallow-adapter"
+        | "cerberus"
+        | "cerberus-adapter" => {
             let validator = if tool == "pydantic" {
                 "builtin:pydantic-model-subset".to_string()
             } else {
@@ -19909,6 +19928,65 @@ mod tests {
     }
 
     #[test]
+    fn xml_schema_command_aliases_use_rust_structural_fallbacks() {
+        let payload = json!({
+            "kind": "xsd-validation",
+            "xml": "<match><score home=\"1\" away=\"0\"/></match>",
+            "requiredElements": ["match", "score"],
+        });
+        for (alias, expected_validator) in [
+            ("xmlschema", "builtin:xml-schema-structural-for-xmlschema"),
+            (
+                "xmlschema-validate",
+                "builtin:xml-schema-structural-for-xmlschema-validate",
+            ),
+            (
+                "xsd-validator",
+                "builtin:xml-schema-structural-for-xsd-validator",
+            ),
+            (
+                "xmlschema-adapter",
+                "builtin:xml-schema-structural-for-xmlschema-adapter",
+            ),
+        ] {
+            let run = run_output_validation_json_with_rust_reference(&payload, alias);
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn xml_rule_command_aliases_use_rust_structural_fallbacks() {
+        let payload = json!({
+            "kind": "schematron-validation",
+            "xml": "<match><score home=\"1\" away=\"0\"/></match>",
+            "requiredElements": ["match", "score"],
+        });
+        for (alias, expected_validator) in [
+            (
+                "schematron-adapter",
+                "builtin:schematron-structural-for-schematron-adapter",
+            ),
+            ("saxon-he", "builtin:schematron-structural-for-saxon-he"),
+            ("saxon9he", "builtin:schematron-structural-for-saxon9he"),
+        ] {
+            let run = run_output_validation_json_with_rust_reference(&payload, alias);
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+        }
+    }
+
+    #[test]
     fn cue_payloads_use_rust_structural_fallback_without_breaking_json_schema_alias() {
         let cue = run_output_validation_json_with_rust_reference(
             &json!({
@@ -20014,6 +20092,46 @@ mod tests {
             marshmallow["validator"].as_str(),
             Some("builtin:pydantic-model-subset-for-marshmallow")
         );
+
+        for (alias, expected_validator) in [
+            (
+                "pydantic-adapter",
+                "builtin:pydantic-model-subset-for-pydantic-adapter",
+            ),
+            (
+                "zod-adapter",
+                "builtin:pydantic-model-subset-for-zod-adapter",
+            ),
+            (
+                "valibot-adapter",
+                "builtin:pydantic-model-subset-for-valibot-adapter",
+            ),
+            (
+                "marshmallow-adapter",
+                "builtin:pydantic-model-subset-for-marshmallow-adapter",
+            ),
+            (
+                "cerberus-adapter",
+                "builtin:pydantic-model-subset-for-cerberus-adapter",
+            ),
+        ] {
+            let run = run_output_validation_json_with_rust_reference(
+                &json!({
+                    "schema": {
+                        "score": {"type": "number", "required": true, "min": 0.0},
+                    },
+                    "instance": {"score": 1.0}
+                }),
+                alias,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{alias}: {run:?}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{alias}: {run:?}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(expected_validator),
+                "{alias}: {run:?}"
+            );
+        }
     }
 
     #[test]

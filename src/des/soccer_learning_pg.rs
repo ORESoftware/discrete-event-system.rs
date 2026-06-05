@@ -8,6 +8,7 @@ use postgres::types::ToSql;
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
 use serde_json::{json, Value};
+use std::fmt::Write as _;
 use uuid::Uuid;
 
 use crate::des::general::soccer::{
@@ -33,8 +34,14 @@ pub struct SoccerLearningPgCompletedRunInsert<'a> {
     pub game: &'a SoccerLearningCompletedGame,
 }
 
-const SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE: usize = 256;
-const SOCCER_RUN_DELTA_INSERT_BATCH_SIZE: usize = 256;
+const POSTGRES_MAX_QUERY_PARAMETERS: usize = 65_535;
+const SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT: usize = 22;
+const SOCCER_RUN_DELTA_PARAMETER_COUNT: usize = 16;
+const SOCCER_POLICY_ACTION_ENTRY_PARAMETER_COUNT: usize = 9;
+const SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT: usize = 13;
+
+const SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE: usize = 1024;
+const SOCCER_RUN_DELTA_INSERT_BATCH_SIZE: usize = 1024;
 const SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE: usize = 512;
 
 pub struct SoccerLearningPgStore {
@@ -993,12 +1000,16 @@ fn insert_completed_run_headers_in_transaction(
         values
         "#,
     );
-    let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(batch_rows.len() * 22);
+    let mut params: Vec<&(dyn ToSql + Sync)> =
+        Vec::with_capacity(batch_rows.len() * SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT);
     for (idx, row) in batch_rows.iter().enumerate() {
         if idx > 0 {
             sql.push_str(", ");
         }
-        append_completed_run_header_value_tuple(&mut sql, idx * 22 + 1);
+        append_completed_run_header_value_tuple(
+            &mut sql,
+            idx * SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT + 1,
+        );
         params.push(&row.run_id);
         params.push(&experiment_id);
         params.push(&row.base_policy_version_id);
@@ -1165,7 +1176,8 @@ fn insert_run_delta_batch_rows(
             values
             "#,
         );
-        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 16);
+        let mut params: Vec<&(dyn ToSql + Sync)> =
+            Vec::with_capacity(chunk.len() * SOCCER_RUN_DELTA_PARAMETER_COUNT);
         for (idx, batch_row) in chunk.iter().enumerate() {
             let row = &batch_row.row;
             let run_id = run_ids.get(batch_row.run_index).ok_or_else(|| {
@@ -1177,7 +1189,10 @@ fn insert_run_delta_batch_rows(
             if idx > 0 {
                 sql.push_str(", ");
             }
-            append_run_delta_value_tuple(&mut sql, idx * 16 + 1);
+            append_run_delta_value_tuple(
+                &mut sql,
+                idx * SOCCER_RUN_DELTA_PARAMETER_COUNT + 1,
+            );
             params.push(run_id);
             params.push(&row.team);
             params.push(&row.entry_kind);
@@ -1302,12 +1317,17 @@ fn insert_policy_action_entry_rows(
             values
             "#,
         );
-        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 9);
+        let mut params: Vec<&(dyn ToSql + Sync)> =
+            Vec::with_capacity(chunk.len() * SOCCER_POLICY_ACTION_ENTRY_PARAMETER_COUNT);
         for (idx, row) in chunk.iter().enumerate() {
             if idx > 0 {
                 sql.push_str(", ");
             }
-            append_policy_entry_value_tuple(&mut sql, idx * 9 + 1, false);
+            append_policy_entry_value_tuple(
+                &mut sql,
+                idx * SOCCER_POLICY_ACTION_ENTRY_PARAMETER_COUNT + 1,
+                false,
+            );
             params.push(&policy_version_id);
             params.push(&team_label);
             params.push(&entry_kind);
@@ -1354,12 +1374,17 @@ fn insert_policy_target_entry_rows(
             values
             "#,
         );
-        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * 13);
+        let mut params: Vec<&(dyn ToSql + Sync)> =
+            Vec::with_capacity(chunk.len() * SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT);
         for (idx, row) in chunk.iter().enumerate() {
             if idx > 0 {
                 sql.push_str(", ");
             }
-            append_policy_entry_value_tuple(&mut sql, idx * 13 + 1, true);
+            append_policy_entry_value_tuple(
+                &mut sql,
+                idx * SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT + 1,
+                true,
+            );
             params.push(&policy_version_id);
             params.push(&team_label);
             params.push(&entry_kind);
@@ -1381,7 +1406,8 @@ fn insert_policy_target_entry_rows(
 }
 
 fn append_completed_run_header_value_tuple(sql: &mut String, first_param: usize) {
-    sql.push_str(&format!(
+    write!(
+        sql,
         "(${}::text::uuid, ${}::text::uuid, ${}::text::uuid, ${}::text::uuid, ${}, ${}, ${}, 'completed', ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
         first_param,
         first_param + 1,
@@ -1405,11 +1431,13 @@ fn append_completed_run_header_value_tuple(sql: &mut String, first_param: usize)
         first_param + 19,
         first_param + 20,
         first_param + 21
-    ));
+    )
+    .expect("write completed run header tuple");
 }
 
 fn append_run_delta_value_tuple(sql: &mut String, first_param: usize) {
-    sql.push_str(&format!(
+    write!(
+        sql,
         "(${}::text::uuid, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
         first_param,
         first_param + 1,
@@ -1427,7 +1455,8 @@ fn append_run_delta_value_tuple(sql: &mut String, first_param: usize) {
         first_param + 13,
         first_param + 14,
         first_param + 15
-    ));
+    )
+    .expect("write run delta tuple");
 }
 
 fn append_policy_entry_value_tuple(
@@ -1436,7 +1465,8 @@ fn append_policy_entry_value_tuple(
     include_target_cells: bool,
 ) {
     if include_target_cells {
-        sql.push_str(&format!(
+        write!(
+            sql,
             "(${}::text::uuid, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::text::uuid)",
             first_param,
             first_param + 1,
@@ -1451,9 +1481,11 @@ fn append_policy_entry_value_tuple(
             first_param + 10,
             first_param + 11,
             first_param + 12
-        ));
+        )
+        .expect("write target policy entry tuple");
     } else {
-        sql.push_str(&format!(
+        write!(
+            sql,
             "(${}::text::uuid, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::text::uuid)",
             first_param,
             first_param + 1,
@@ -1464,7 +1496,8 @@ fn append_policy_entry_value_tuple(
             first_param + 6,
             first_param + 7,
             first_param + 8
-        ));
+        )
+        .expect("write action policy entry tuple");
     }
 }
 
@@ -1959,6 +1992,27 @@ mod tests {
         assert_eq!(
             target_sql,
             "($1::text::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::uuid), ($14::text::uuid, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::text::uuid)"
+        );
+    }
+
+    #[test]
+    fn soccer_learning_pg_batch_sizes_stay_under_postgres_parameter_limit() {
+        assert!(
+            SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE
+                * SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT
+                <= POSTGRES_MAX_QUERY_PARAMETERS
+        );
+        assert!(
+            SOCCER_RUN_DELTA_INSERT_BATCH_SIZE * SOCCER_RUN_DELTA_PARAMETER_COUNT
+                <= POSTGRES_MAX_QUERY_PARAMETERS
+        );
+        assert!(
+            SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE * SOCCER_POLICY_ACTION_ENTRY_PARAMETER_COUNT
+                <= POSTGRES_MAX_QUERY_PARAMETERS
+        );
+        assert!(
+            SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE * SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT
+                <= POSTGRES_MAX_QUERY_PARAMETERS
         );
     }
 }

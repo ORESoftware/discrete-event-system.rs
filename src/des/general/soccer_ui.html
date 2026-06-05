@@ -294,6 +294,7 @@
       <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
+      <div class="metric"><span>Seed</span><b id="seed">-</b></div>
       <div class="section">Controller Slots</div>
       <div id="slots"></div>
       <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
@@ -389,6 +390,7 @@ const offsides = document.getElementById("offsides");
 const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
+const seed = document.getElementById("seed");
 const scrub = document.getElementById("scrub");
 const play = document.getElementById("play");
 const runNewSimButton = document.getElementById("runNewSim");
@@ -957,6 +959,7 @@ function updateMetrics() {
   const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
+  seed.textContent = trace.config?.seed ?? "-";
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function tick(ts) {

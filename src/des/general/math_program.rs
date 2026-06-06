@@ -21730,8 +21730,12 @@ mod tests {
     #[test]
     fn external_math_program_default_continuous_qp_uses_rust_reference_without_python() {
         let mut qp = MathProgram::new(ObjectiveSense::Min);
-        let x = qp.add_continuous_var("x", 0.0, Some(0.0), Some(5.0)).unwrap();
-        let y = qp.add_continuous_var("y", 0.0, Some(0.0), Some(5.0)).unwrap();
+        let x = qp
+            .add_continuous_var("x", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let y = qp
+            .add_continuous_var("y", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
         qp.add_quadratic_objective_term(x, x, 2.0).unwrap();
         qp.add_quadratic_objective_term(y, y, 2.0).unwrap();
         qp.add_linear_objective_term(x, -2.0).unwrap();

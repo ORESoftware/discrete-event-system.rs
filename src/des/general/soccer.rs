@@ -14894,6 +14894,18 @@ impl WorldSnapshot {
             || self.team_speed_surge_active(team.other())
     }
 
+    fn player_snapshot_position(&self, player: &PlayerSnapshot) -> Vec2 {
+        if let Some(sample) = self.shared_positions.latest.get(player.id) {
+            if sample.player_id == player.id {
+                return sample.position;
+            }
+        }
+        self.shared_positions
+            .latest_for(player.id)
+            .map(|sample| sample.position)
+            .unwrap_or(player.position)
+    }
+
     pub fn player_position(&self, player_id: usize) -> Option<Vec2> {
         self.shared_positions
             .latest_for(player_id)
@@ -15097,7 +15109,7 @@ impl WorldSnapshot {
             .filter(|player| player.team == team.other())
             .filter_map(|player| {
                 let player_position = finite_pitch_point(
-                    self.player_position(player.id).unwrap_or(player.position),
+                    self.player_snapshot_position(player),
                     width,
                     length,
                     player.home_position,
@@ -15136,7 +15148,7 @@ impl WorldSnapshot {
             .filter(|player| exclude_player_id != Some(player.id))
             .map(|player| {
                 finite_pitch_point(
-                    self.player_position(player.id).unwrap_or(player.position),
+                    self.player_snapshot_position(player),
                     width,
                     length,
                     player.home_position,
@@ -15291,7 +15303,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return state;
         };
-        let position = self.player_position(me.id).unwrap_or(me.position);
+        let position = self.player_snapshot_position(me);
         state.player_grid = pitch_grid_address(position, self.field_width, self.field_length);
         state.receive_facing = me.receive_facing;
         state.action_facing = self.player_state_action_facing(me);
@@ -15435,7 +15447,7 @@ impl WorldSnapshot {
                 open_space_score: 0.0,
             };
         };
-        let me_position = self.player_position(me.id).unwrap_or(me.position);
+        let me_position = self.player_snapshot_position(me);
         let observation_started = Instant::now();
         let phase_started = Instant::now();
         let opponents = self
@@ -15456,7 +15468,7 @@ impl WorldSnapshot {
                 continue;
             }
             visible_opponents += 1;
-            let position = self.player_position(p.id).unwrap_or(p.position);
+            let position = self.player_snapshot_position(p);
             nearest_opponent_distance =
                 nearest_opponent_distance.min(position.distance(me_position));
         }
@@ -15469,7 +15481,7 @@ impl WorldSnapshot {
                 continue;
             }
             visible_teammates += 1;
-            let position = self.player_position(p.id).unwrap_or(p.position);
+            let position = self.player_snapshot_position(p);
             nearest_teammate_distance =
                 nearest_teammate_distance.min(position.distance(me_position));
         }
@@ -15649,7 +15661,7 @@ impl WorldSnapshot {
         let nearest_defender = opponents
             .iter()
             .filter_map(|p| {
-                let position = self.player_position(p.id).unwrap_or(p.position);
+                let position = self.player_snapshot_position(p);
                 Some((*p, position, position.distance(me_position)))
             })
             .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
@@ -16079,7 +16091,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return Vec::new();
         };
-        let me_position = self.player_position(me.id).unwrap_or(me.position);
+        let me_position = self.player_snapshot_position(me);
         let directive = self.tactical_directive(me.team);
         let no_pressure = self.no_pressure_at(me.team, me_position);
         let keeper_pressure = if me.role == PlayerRole::Goalkeeper {
@@ -16092,7 +16104,7 @@ impl WorldSnapshot {
             .iter()
             .filter(|p| p.team == me.team && p.id != me.id)
             .filter_map(|p| {
-                let position = self.player_position(p.id).unwrap_or(p.position);
+                let position = self.player_snapshot_position(p);
                 let initial_is_cross = pass_would_be_cross(
                     me_position,
                     position,
@@ -16221,7 +16233,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return Vec::new();
         };
-        let me_position = self.player_position(me.id).unwrap_or(me.position);
+        let me_position = self.player_snapshot_position(me);
         let directive = self.tactical_directive(me.team);
         let no_pressure = self.no_pressure_at(me.team, me_position);
         let keeper_pressure = if me.role == PlayerRole::Goalkeeper {
@@ -16235,7 +16247,7 @@ impl WorldSnapshot {
             .iter()
             .filter(|p| p.team == me.team && p.id != me.id)
             .filter_map(|p| {
-                let position = self.player_position(p.id).unwrap_or(p.position);
+                let position = self.player_snapshot_position(p);
                 let initial_is_cross = pass_would_be_cross(
                     me_position,
                     position,
@@ -16462,7 +16474,7 @@ impl WorldSnapshot {
         let observer_position = self
             .player_position(observer.id)
             .unwrap_or(observer.position);
-        let target_position = self.player_position(target.id).unwrap_or(target.position);
+        let target_position = self.player_snapshot_position(target);
         let to_target = target_position - observer_position;
         let facing = self.player_facing_direction(observer);
         let in_front = facing
@@ -16491,7 +16503,7 @@ impl WorldSnapshot {
         if self.ball.holder == Some(player.id) {
             return Some(Vec2::new(0.0, player.team.attack_dir()));
         }
-        let player_position = self.player_position(player.id).unwrap_or(player.position);
+        let player_position = self.player_snapshot_position(player);
         let to_ball = self.ball.position - player_position;
         if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS {
             Some(to_ball.normalized())
@@ -16527,7 +16539,7 @@ impl WorldSnapshot {
         if passer.team != target.team || passer.id == target.id {
             return None;
         }
-        let target_position = self.player_position(target.id).unwrap_or(target.position);
+        let target_position = self.player_snapshot_position(target);
         let half_line = self.field_length * 0.5;
         match passer.team {
             Team::Home if target_position.y <= half_line => return None,
@@ -16619,7 +16631,7 @@ impl WorldSnapshot {
         if cadence > 5 {
             return None;
         }
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let line_y = self.second_last_defender_line_for(me.team)?;
         let staging_y = line_y - me.team.attack_dir() * 20.0;
         if (current.y - staging_y).abs() > 14.0 {
@@ -16651,7 +16663,7 @@ impl WorldSnapshot {
         {
             return None;
         }
-        let target_position = self.player_position(target.id).unwrap_or(target.position);
+        let target_position = self.player_snapshot_position(target);
         let line_y = self.second_last_defender_line_for(passer.team)?;
         let staging_y = line_y - passer.team.attack_dir() * 20.0;
         if (target_position.y - staging_y).abs() > 16.0 {
@@ -16669,7 +16681,7 @@ impl WorldSnapshot {
         if seconds <= 0.0 {
             return 0.0;
         }
-        let current = self.player_position(player.id).unwrap_or(player.position);
+        let current = self.player_snapshot_position(player);
         let attack_dir = player.team.attack_dir();
         let dt = self.dt_seconds.max(0.0);
         if dt > 0.0 {
@@ -16737,14 +16749,14 @@ impl WorldSnapshot {
         {
             return None;
         }
-        let passer_position = self.player_position(passer.id).unwrap_or(passer.position);
+        let passer_position = self.player_snapshot_position(passer);
         self.players
             .iter()
             .filter(|p| p.team == passer.team && p.id != passer.id)
             .filter(|p| matches!(p.role, PlayerRole::Forward | PlayerRole::Midfielder))
             .filter_map(|target| {
                 let pass_point = self.projected_in_behind_pass_point(passer.id, target.id)?;
-                let target_position = self.player_position(target.id).unwrap_or(target.position);
+                let target_position = self.player_snapshot_position(target);
                 let forward = (pass_point.y - passer_position.y) * passer.team.attack_dir();
                 if forward <= 12.0 {
                     return None;
@@ -16776,7 +16788,7 @@ impl WorldSnapshot {
         {
             return None;
         }
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let marker = self.nearest_opponent_at(me.team, current)?;
         if marker.2 > 4.5 {
             return None;
@@ -16814,7 +16826,7 @@ impl WorldSnapshot {
         {
             return None;
         }
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let distance_to_ball = current.distance(self.ball.position);
         if distance_to_ball > 42.0 {
             return None;
@@ -16936,7 +16948,7 @@ impl WorldSnapshot {
         {
             return None;
         }
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let center_x = self.field_width * 0.5;
         let touchline_x = if home.x <= center_x {
             WIDE_OUTLET_TOUCHLINE_BUFFER_YARDS
@@ -16990,7 +17002,7 @@ impl WorldSnapshot {
             .filter(|player| player.team == team && player.role == PlayerRole::Defender)
             .filter(|player| !self.is_wide_defender(player))
         {
-            total += self.player_position(player.id).unwrap_or(player.position).y;
+            total += self.player_snapshot_position(player).y;
             count += 1;
         }
         if count == 0 {
@@ -17013,7 +17025,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return home;
         };
-        let me_position = self.player_position(me.id).unwrap_or(me.position);
+        let me_position = self.player_snapshot_position(me);
         let directive = self.tactical_directive(me.team);
         let spread_draw = deterministic_unit_draw(self.tick, player_id, 83) * 2.0 - 1.0;
         let width_scale = (directive.width_yards / (self.field_width * 0.62)
@@ -17151,7 +17163,7 @@ impl WorldSnapshot {
                 nearest_forward_teammate_distance_yards: 0.0,
             };
         };
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let mut teammates_ahead = 0usize;
         let mut nearest_forward_teammate_distance_yards = f64::INFINITY;
         for player in self
@@ -17160,7 +17172,7 @@ impl WorldSnapshot {
             .filter(|player| player.team == me.team && player.id != me.id)
             .filter(|player| player.role != PlayerRole::Goalkeeper)
         {
-            let position = self.player_position(player.id).unwrap_or(player.position);
+            let position = self.player_snapshot_position(player);
             let forward = (position.y - current.y) * me.team.attack_dir();
             if forward > 1.25 {
                 teammates_ahead += 1;
@@ -17175,7 +17187,7 @@ impl WorldSnapshot {
             let Some(target) = self.players.iter().find(|player| player.id == *target_id) else {
                 continue;
             };
-            let target_position = self.player_position(target.id).unwrap_or(target.position);
+            let target_position = self.player_snapshot_position(target);
             let forward = (target_position.y - current.y) * me.team.attack_dir();
             if forward <= 1.25 {
                 continue;
@@ -17217,7 +17229,7 @@ impl WorldSnapshot {
         if self.ball.holder != Some(player_id) || me.role != PlayerRole::Forward {
             return None;
         }
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let yards_to_goal = (me.team.goal_y(self.field_length) - current.y).abs();
         if yards_to_goal <= STRIKER_HOLD_UP_MIN_GOAL_DISTANCE_YARDS {
             return None;
@@ -17264,7 +17276,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return home;
         };
-        let me_position = self.player_position(me.id).unwrap_or(me.position);
+        let me_position = self.player_snapshot_position(me);
         let ahead = Vec2::new(
             me_position.x + (self.field_width * 0.5 - me_position.x) * 0.08,
             me_position.y + 9.0 * me.team.attack_dir(),
@@ -17277,7 +17289,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return home;
         };
-        let me_position = self.player_position(me.id).unwrap_or(me.position);
+        let me_position = self.player_snapshot_position(me);
         let center_x = self.field_width * 0.5;
         let dir = me.team.attack_dir();
         let base = self.forward_space_for(player_id, home);
@@ -17311,7 +17323,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return DribbleMoveKind::LeftCut;
         };
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let Some((_, defender_position, _)) = self.nearest_opponent_at(me.team, current) else {
             return DribbleMoveKind::LeftCut;
         };
@@ -17377,7 +17389,7 @@ impl WorldSnapshot {
         bucket: u8,
         draw01: f64,
     ) -> f64 {
-        let position = self.player_position(player.id).unwrap_or(player.position);
+        let position = self.player_snapshot_position(player);
         let nearest_opponent_distance = self
             .nearest_opponent_at(player.team, position)
             .map(|(_, _, distance)| distance)
@@ -17495,7 +17507,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return home;
         };
-        let current = self.player_position(me.id).unwrap_or(me.position);
+        let current = self.player_snapshot_position(me);
         let nearest_defender = self.nearest_opponent_at(me.team, current);
         let direction = match kind {
             DribbleMoveKind::CarryForward => self.carry_forward_direction_for(me, current),
@@ -17744,8 +17756,8 @@ impl WorldSnapshot {
         if passer.team != target.team {
             return None;
         }
-        let passer_position = self.player_position(passer.id).unwrap_or(passer.position);
-        let target_position = self.player_position(target.id).unwrap_or(target.position);
+        let passer_position = self.player_snapshot_position(passer);
+        let target_position = self.player_snapshot_position(target);
         let pass_distance = passer_position.distance(target_position);
         let flight_time = (pass_distance / speed_yps.max(1.0)).clamp(0.18, 2.6);
         let anticipation_skill = (ability01(passer.skills.passing_completion_rate) * 0.48
@@ -17827,7 +17839,7 @@ impl WorldSnapshot {
         candidate: Vec2,
         home: Vec2,
     ) -> f64 {
-        let current = self.player_position(player.id).unwrap_or(player.position);
+        let current = self.player_snapshot_position(player);
         let forward = (candidate.y - current.y) * player.team.attack_dir();
         let pass_lane = if self.clear_line(self.ball.position, candidate, player.team.other(), 2.2)
         {
@@ -17873,11 +17885,7 @@ impl WorldSnapshot {
             .players
             .iter()
             .filter(|other| other.team == player.team.other())
-            .map(|other| {
-                self.player_position(other.id)
-                    .unwrap_or(other.position)
-                    .distance(position)
-            })
+            .map(|other| self.player_snapshot_position(other).distance(position))
             .fold(36.0, f64::min)
             .min(36.0);
         let pressure = pressure_from_nearest_distance(nearest_opponent_distance);
@@ -17903,7 +17911,7 @@ impl WorldSnapshot {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return 0.0;
         };
-        let start = self.player_position(me.id).unwrap_or(me.position);
+        let start = self.player_snapshot_position(me);
         let dir = Vec2::new(0.0, me.team.attack_dir());
         let max_space = 30.0_f64
             .min(match me.team {
@@ -17913,9 +17921,7 @@ impl WorldSnapshot {
             .max(0.0);
         let mut nearest_block = max_space;
         for opponent in self.players.iter().filter(|p| p.team == me.team.other()) {
-            let position = self
-                .player_position(opponent.id)
-                .unwrap_or(opponent.position);
+            let position = self.player_snapshot_position(opponent);
             let to_opponent = position - start;
             let forward = to_opponent.dot(dir);
             if forward <= 0.0 || forward > max_space {
@@ -17982,7 +17988,7 @@ impl WorldSnapshot {
                 };
             }
             let striker_attack = self.striker_holder_in_opponent_half(me.team).is_some();
-            let current = self.player_position(me.id).unwrap_or(me.position);
+            let current = self.player_snapshot_position(me);
             let current_wide =
                 current.x < self.field_width * 0.30 || current.x > self.field_width * 0.70;
             let overlap_run_preferred = striker_attack
@@ -18053,7 +18059,7 @@ impl WorldSnapshot {
                         return None;
                     }
                     let mid_x = self.field_width * 0.5;
-                    let current = self.player_position(me.id).unwrap_or(me.position);
+                    let current = self.player_snapshot_position(me);
                     let current_x = current.x.clamp(0.0, self.field_width);
                     let wide =
                         current_x < self.field_width * 0.30 || current_x > self.field_width * 0.70;
@@ -18184,7 +18190,7 @@ impl WorldSnapshot {
             .iter()
             .filter(|player| player.team == team && player.role != PlayerRole::Goalkeeper)
         {
-            let position = self.player_position(player.id).unwrap_or(player.position);
+            let position = self.player_snapshot_position(player);
             min_x = min_x.min(position.x);
             max_x = max_x.max(position.x);
             count += 1;
@@ -18289,29 +18295,18 @@ impl WorldSnapshot {
     }
 
     fn space_score_at(&self, p: Vec2, team: Team) -> f64 {
-        let opponent_dist = self
-            .players
-            .iter()
-            .filter(|other| other.team != team)
-            .map(|other| {
-                self.player_position(other.id)
-                    .unwrap_or(other.position)
-                    .distance(p)
-            })
-            .fold(35.0, f64::min)
-            .min(35.0);
-        let teammate_crowding = self
-            .players
-            .iter()
-            .filter(|other| other.team == team)
-            .map(|other| {
-                self.player_position(other.id)
-                    .unwrap_or(other.position)
-                    .distance(p)
-            })
-            .filter(|&d| d > 0.1)
-            .fold(25.0, f64::min)
-            .min(25.0);
+        let mut opponent_dist: f64 = 35.0;
+        let mut teammate_crowding: f64 = 25.0;
+        for other in &self.players {
+            let distance = self.player_snapshot_position(other).distance(p);
+            if other.team != team {
+                opponent_dist = opponent_dist.min(distance);
+            } else if distance > 0.1 {
+                teammate_crowding = teammate_crowding.min(distance);
+            }
+        }
+        let opponent_dist = opponent_dist.min(35.0);
+        let teammate_crowding = teammate_crowding.min(25.0);
         opponent_dist * 0.75 + teammate_crowding * 0.25
     }
 
@@ -18320,7 +18315,7 @@ impl WorldSnapshot {
             .iter()
             .filter(|p| p.team == defending_team)
             .all(|p| {
-                let position = self.player_position(p.id).unwrap_or(p.position);
+                let position = self.player_snapshot_position(p);
                 segment_distance_to_point(from, to, position) > radius
             })
     }

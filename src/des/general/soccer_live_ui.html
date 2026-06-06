@@ -2003,6 +2003,57 @@ function receiverOpennessAt(team, position) {
   if (!Number.isFinite(nearest)) return 1;
   return clamp((nearest - 2.5) / 7.5, 0, 1);
 }
+function teamAttackDir(team) {
+  return team === "Home" ? 1 : -1;
+}
+function teamGoalY(team) {
+  const length = Number(state?.config?.fieldLengthYards || 120);
+  return team === "Home" ? length : 0;
+}
+function fieldWidthYards() {
+  return Number(state?.config?.fieldWidthYards || 80);
+}
+function clampFieldPoint(point) {
+  const width = fieldWidthYards();
+  const length = Number(state?.config?.fieldLengthYards || 120);
+  return {
+    x: clamp(Number(point?.x || 0), 0, width),
+    y: clamp(Number(point?.y || 0), 0, length)
+  };
+}
+function directiveForTeam(team, frame = state?.frame) {
+  return team === "Home" ? frame?.homeDirective : frame?.awayDirective;
+}
+function flankPolicyKind(directive) {
+  const policy = String(directive?.flankAttackPolicy || "none");
+  if (policy === "playDownFlankLowCross") return "low";
+  if (policy === "playDownFlankHighCross") return "high";
+  return "";
+}
+function flankLaneTargetsForDirective(team, crosserPosition, directive) {
+  const kind = flankPolicyKind(directive);
+  if (!kind || !crosserPosition) return [];
+  const width = fieldWidthYards();
+  const centerX = width * 0.5;
+  const dir = teamAttackDir(team);
+  const goalY = teamGoalY(team);
+  const sourceSide = Number(crosserPosition.x || 0) >= centerX ? 1 : -1;
+  const lowTargets = [
+    {point: {x: centerX + sourceSide * 2.8, y: goalY - dir * 7.0}, weight: 0.95},
+    {point: {x: centerX - sourceSide * 1.5, y: goalY - dir * 14.0}, weight: 0.72},
+    {point: {x: centerX, y: goalY - dir * 11.5}, weight: 0.62}
+  ];
+  const highTargets = [
+    {point: {x: centerX - sourceSide * 3.8, y: goalY - dir * 4.8}, weight: 0.98},
+    {point: {x: centerX - sourceSide * 5.2, y: goalY - dir * 8.2}, weight: 0.82},
+    {point: {x: centerX, y: goalY - dir * 11.5}, weight: 0.56}
+  ];
+  return (kind === "high" ? highTargets : lowTargets).map(target => ({
+    ...target,
+    kind,
+    point: clampFieldPoint(target.point)
+  }));
+}
 function passQualityForTarget(p, target, aerial = false) {
   const dist = Math.hypot(Number(target.position?.x || 0) - Number(p.position?.x || 0), Number(target.position?.y || 0) - Number(p.position?.y || 0));
   const openness = receiverOpennessAt(p.team, target.position);
@@ -2167,6 +2218,66 @@ function drawAssistantOffsideLines(r) {
     ctx.setLineDash([]);
   }
 }
+function drawFlankPolicyLanes(r) {
+  const frame = state?.frame;
+  const holderId = frame?.ball?.holder;
+  if (holderId == null) return;
+  const holder = frame.players?.find(player => player.id === holderId);
+  if (!holder) return;
+  const directive = directiveForTeam(holder.team, frame);
+  const kind = flankPolicyKind(directive);
+  if (!kind) return;
+  const width = fieldWidthYards();
+  const flankFit = Math.abs(Number(holder.position?.x || 0) - width * 0.5) / Math.max(1, width * 0.5);
+  const dir = teamAttackDir(holder.team);
+  const attackingDepth = (Number(holder.position?.y || 0) - Number(state.config.fieldLengthYards || 120) * 0.5) * dir;
+  if (flankFit < 0.48 || attackingDepth < -12) return;
+  const origin = mapPoint(holder.position, r);
+  const targets = flankLaneTargetsForDirective(holder.team, holder.position, directive);
+  if (!targets.length) return;
+  const overlap = clamp(Number(directive?.flankOverlapRunProbability ?? 0), 0, 1);
+  const baseColor = holder.team === "Home" ? "137,205,255" : "255,164,164";
+  ctx.save();
+  for (const target of targets) {
+    const to = mapPoint(target.point, r);
+    const alpha = (kind === "high" ? 0.26 : 0.22) * target.weight + overlap * 0.10;
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    if (kind === "high") {
+      const mid = {x: (origin.x + to.x) * 0.5, y: Math.min(origin.y, to.y) - 22};
+      ctx.quadraticCurveTo(mid.x, mid.y, to.x, to.y);
+      ctx.setLineDash([10, 7]);
+    } else {
+      ctx.lineTo(to.x, to.y);
+      ctx.setLineDash(target.weight < 0.8 ? [6, 5] : []);
+    }
+    ctx.strokeStyle = `rgba(${baseColor},${alpha})`;
+    ctx.lineWidth = 2.2 + target.weight * 1.7;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(to.x, to.y, kind === "high" ? 9 : 7, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${baseColor},${Math.min(0.84, alpha + 0.28)})`;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+  }
+  if (overlap > 0) {
+    const side = Number(holder.position?.x || 0) >= width * 0.5 ? 1 : -1;
+    const overlapPoint = clampFieldPoint({
+      x: holder.position.x + side * 8,
+      y: holder.position.y + dir * (10 + overlap * 12)
+    });
+    drawIntentArrow(
+      origin,
+      mapPoint(overlapPoint, r),
+      holder.team === "Home" ? "rgba(246,201,68,.62)" : "rgba(255,215,128,.62)",
+      2.4,
+      true
+    );
+  }
+  ctx.restore();
+}
 function drawSelectedVision(p, r) {
   if (!p) return;
   const origin = mapPoint(p.position, r);
@@ -2291,14 +2402,17 @@ function drawDecisionIntentTraces(r) {
     const to = mapPoint(intent.targetPoint, r);
     const isHolder = player.id === frame?.ball?.holder;
     const isSupport = intent.action === "space";
+    const isOverlap = intent.action === "overlap-run";
+    const isCross = intent.action === "flank-low-cross" || intent.action === "flank-high-cross";
     const isAerial = intent.flight === "aerial";
     const color = isHolder
-      ? (isAerial ? "rgba(246,201,68,.92)" : "rgba(255,255,255,.86)")
+      ? (isCross ? "rgba(246,201,68,.96)" : isAerial ? "rgba(246,201,68,.88)" : "rgba(255,255,255,.86)")
+      : isOverlap ? "rgba(246,201,68,.78)"
       : (player.team === "Home" ? "rgba(137,205,255,.58)" : "rgba(255,164,164,.58)");
-    drawIntentArrow(from, to, color, isHolder ? 3.2 : 2, isSupport);
-    if (intent.targetPlayer != null || isAerial) {
+    drawIntentArrow(from, to, color, isHolder ? 3.2 : isOverlap ? 2.8 : 2, isSupport || isOverlap || isAerial);
+    if (intent.targetPlayer != null || isAerial || isCross || isOverlap) {
       ctx.beginPath();
-      ctx.arc(to.x, to.y, isHolder ? 7 : 5, 0, Math.PI * 2);
+      ctx.arc(to.x, to.y, isHolder || isCross ? 7 : isOverlap ? 6 : 5, 0, Math.PI * 2);
       ctx.strokeStyle = color;
       ctx.lineWidth = isHolder ? 2.5 : 1.5;
       ctx.stroke();
@@ -2434,6 +2548,7 @@ function render() {
   drawPitch(r);
   drawPitchGridOverlay(r);
   drawAssistantOffsideLines(r);
+  drawFlankPolicyLanes(r);
   drawMovementTrails(r);
   drawSelectedVision(inspectedPlayer(), r);
   drawDecisionIntentTraces(r);

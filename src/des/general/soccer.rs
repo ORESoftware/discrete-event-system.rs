@@ -65825,6 +65825,9 @@ mod tests {
         assert!(html.body.contains("function flankPolicyLabel"));
         assert!(html.body.contains("playDownFlankLowCross"));
         assert!(html.body.contains("playDownFlankHighCross"));
+        assert!(html.body.contains("function flankLaneTargetsForDirective"));
+        assert!(html.body.contains("function drawFlankPolicyLanes"));
+        assert!(html.body.contains("drawFlankPolicyLanes(r)"));
         assert!(html.body.contains("LowX"));
         assert!(html.body.contains("HighX"));
         assert!(html.body.contains("id=\"liveHttp\""));
@@ -69723,6 +69726,12 @@ mod tests {
         assert!(html.contains("Wt${weight.toFixed(0)}"));
         assert!(html.contains("\"flank-low-cross\""));
         assert!(html.contains("\"flank-high-cross\""));
+        assert!(html.contains("function flankLaneTargetsForDirective"));
+        assert!(html.contains("function drawFlankPolicyLanes"));
+        assert!(html.contains("drawFlankPolicyLanes(r)"));
+        assert!(html.contains("intent.action === \"overlap-run\""));
+        assert!(html.contains("intent.action === \"flank-low-cross\""));
+        assert!(html.contains("intent.action === \"flank-high-cross\""));
         assert!(html.contains(
             "[\"aerial-pass\", \"flank-high-cross\", \"clearance\", \"route-one\"].includes(action)"
         ));

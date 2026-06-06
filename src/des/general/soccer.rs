@@ -38882,6 +38882,9 @@ fn tracking_import_format(request: &SoccerTrackingImportRequest) -> String {
 /// `player_id`, `team`, `role`, and player position columns. Position can be
 /// provided as pitch yards (`x`, `y`), normalized footage coordinates
 /// (`x_norm`, `y_norm`), or pixels (`pixel_x`, `pixel_y`) with image dimensions.
+/// Footage coordinates can be mirrored before conversion with optional
+/// `flip_x`/`flip_y` calibration columns when a source feed uses the opposite
+/// sideline or goal-line origin.
 /// Optional columns include `source_frame_id`, `frame_id`, `clock_seconds`, `name`, `shirt`, `vx`, `vy`,
 /// `ax`, `ay`, `jx`, `jy`, `facing`, `receive_facing`, `action_facing`,
 /// `home_x`, `home_y`, `home_x_norm`, `home_y_norm`, skill columns such as
@@ -40489,6 +40492,25 @@ fn csv_optional_u8(
         .map_err(|e| format!("csv line {line_no} parse {}={raw}: {e}", aliases[0]))
 }
 
+fn csv_optional_bool(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    aliases: &[&str],
+    line_no: usize,
+) -> Result<Option<bool>, String> {
+    let Some(raw) = csv_optional(row, header, aliases) else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "t" | "yes" | "y" | "on" => Ok(Some(true)),
+        "0" | "false" | "f" | "no" | "n" | "off" => Ok(Some(false)),
+        _ => Err(format!(
+            "csv line {line_no} parse {}={raw}: expected boolean true/false",
+            aliases[0]
+        )),
+    }
+}
+
 fn csv_optional_facing_bucket(
     row: &[String],
     header: &HashMap<String, usize>,
@@ -40530,6 +40552,94 @@ struct TrackingCsvPitchPointAliases {
     normalized_y: &'static [&'static str],
     pixel_x: &'static [&'static str],
     pixel_y: &'static [&'static str],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TrackingCsvCoordinateCalibration {
+    flip_x: bool,
+    flip_y: bool,
+}
+
+impl TrackingCsvCoordinateCalibration {
+    fn from_row(
+        row: &[String],
+        header: &HashMap<String, usize>,
+        line_no: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            flip_x: csv_optional_bool(
+                row,
+                header,
+                &[
+                    "flip_x",
+                    "flipx",
+                    "invert_x",
+                    "invertx",
+                    "mirror_x",
+                    "mirrorx",
+                    "reverse_x",
+                    "reversex",
+                    "coordinate_flip_x",
+                    "coordinateflipx",
+                    "tracking_flip_x",
+                    "trackingflipx",
+                    "footage_flip_x",
+                    "footageflipx",
+                    "x_flipped",
+                    "xflipped",
+                    "x_inverted",
+                    "xinverted",
+                ],
+                line_no,
+            )?
+            .unwrap_or(false),
+            flip_y: csv_optional_bool(
+                row,
+                header,
+                &[
+                    "flip_y",
+                    "flipy",
+                    "invert_y",
+                    "inverty",
+                    "mirror_y",
+                    "mirrory",
+                    "reverse_y",
+                    "reversey",
+                    "coordinate_flip_y",
+                    "coordinateflipy",
+                    "tracking_flip_y",
+                    "trackingflipy",
+                    "footage_flip_y",
+                    "footageflipy",
+                    "vertical_flip",
+                    "verticalflip",
+                    "y_flipped",
+                    "yflipped",
+                    "y_inverted",
+                    "yinverted",
+                ],
+                line_no,
+            )?
+            .unwrap_or(false),
+        })
+    }
+
+    fn map_normalized(self, point: Vec2, config: &MatchConfig) -> Vec2 {
+        let x_norm = if self.flip_x { 1.0 - point.x } else { point.x };
+        let y_norm = if self.flip_y { 1.0 - point.y } else { point.y };
+        Vec2::new(
+            x_norm * config.field_width_yards,
+            y_norm * config.field_length_yards,
+        )
+        .clamp_to_pitch(config.field_width_yards, config.field_length_yards)
+    }
+
+    fn map_pixel(self, pixel: Vec2, image_dimensions: Vec2, config: &MatchConfig) -> Vec2 {
+        self.map_normalized(
+            Vec2::new(pixel.x / image_dimensions.x, pixel.y / image_dimensions.y),
+            config,
+        )
+    }
 }
 
 const PLAYER_PITCH_POINT_ALIASES: TrackingCsvPitchPointAliases = TrackingCsvPitchPointAliases {
@@ -40736,6 +40846,7 @@ fn csv_optional_pitch_point(
     {
         return Ok(Some(point));
     }
+    let calibration = TrackingCsvCoordinateCalibration::from_row(row, header, line_no)?;
     if let Some(point) = csv_optional_vec2(
         row,
         header,
@@ -40743,13 +40854,7 @@ fn csv_optional_pitch_point(
         aliases.normalized_y,
         line_no,
     )? {
-        return Ok(Some(
-            Vec2::new(
-                point.x * config.field_width_yards,
-                point.y * config.field_length_yards,
-            )
-            .clamp_to_pitch(config.field_width_yards, config.field_length_yards),
-        ));
+        return Ok(Some(calibration.map_normalized(point, config)));
     }
 
     let pixel = csv_optional_vec2(row, header, aliases.pixel_x, aliases.pixel_y, line_no)?;
@@ -40757,13 +40862,7 @@ fn csv_optional_pitch_point(
         return Ok(None);
     };
     let image_dimensions = csv_required_image_dimensions(row, header, line_no)?;
-    Ok(Some(
-        Vec2::new(
-            pixel.x / image_dimensions.x * config.field_width_yards,
-            pixel.y / image_dimensions.y * config.field_length_yards,
-        )
-        .clamp_to_pitch(config.field_width_yards, config.field_length_yards),
-    ))
+    Ok(Some(calibration.map_pixel(pixel, image_dimensions, config)))
 }
 
 fn csv_required_image_dimensions(
@@ -58780,6 +58879,35 @@ mod tests {
             .find(|transition| transition.player_id == 0)
             .expect("passer transition");
         assert_eq!(passer.action, "pass");
+    }
+
+    #[test]
+    fn tracking_dataset_csv_flips_footage_axes_before_learning() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 111,
+            ..Default::default()
+        };
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x_norm,y_norm,home_x_norm,home_y_norm,ball_pixel_x,ball_pixel_y,image_width,image_height,footage_flip_x,vertical_flip,ball_holder,last_touch_team
+0,0.0,0,Home carrier,Home,Midfielder,8,0.250000,0.200000,0.300000,0.250000,200,240,800,1200,true,yes,0,Home
+1,0.1,0,Home carrier,Home,Midfielder,8,0.200000,0.150000,0.300000,0.250000,160,180,800,1200,true,yes,0,Home
+"#;
+
+        let tracking = soccer_tracking_dataset_from_csv(raw, config, "unit-csv-flipped-footage")
+            .expect("flipped footage csv tracking");
+        let first = &tracking.frames[0];
+        assert_eq!(first.players[0].position, Vec2::new(60.0, 96.0));
+        assert_eq!(first.players[0].home_position, Some(Vec2::new(56.0, 90.0)));
+        assert_eq!(first.ball_position, Vec2::new(60.0, 96.0));
+        let second = &tracking.frames[1];
+        assert_eq!(second.players[0].position, Vec2::new(64.0, 102.0));
+        assert_eq!(second.ball_position, Vec2::new(64.0, 102.0));
+
+        let dataset = tracking.to_learning_dataset().expect("learning dataset");
+        assert!(
+            !dataset.transitions.is_empty(),
+            "flipped footage should still train into learning transitions"
+        );
     }
 
     #[test]

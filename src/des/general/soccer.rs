@@ -19639,22 +19639,41 @@ impl WorldSnapshot {
                 action_label: "support-shape",
             };
         };
+        let open = self.open_space_for(player_id, home);
         if self.possession_team() == Some(me.team) && !roam {
             if let Some(target) = special_targets.check_to_ball {
                 return SupportMovementTarget {
-                    point: target,
+                    point: self.shape_guarded_support_point(
+                        player_id,
+                        target,
+                        &[open, home],
+                        home,
+                        roam,
+                    ),
                     action_label: "check-to-ball",
                 };
             }
             if let Some(target) = special_targets.in_behind {
                 return SupportMovementTarget {
-                    point: self.clamp_to_role_position(player_id, target, home, false),
+                    point: self.shape_guarded_support_point(
+                        player_id,
+                        target,
+                        &[open, home],
+                        home,
+                        roam,
+                    ),
                     action_label: "run-in-behind",
                 };
             }
             if let Some(target) = special_targets.flank_cross_arrival {
                 return SupportMovementTarget {
-                    point: target,
+                    point: self.shape_guarded_support_point(
+                        player_id,
+                        target,
+                        &[open, home],
+                        home,
+                        roam,
+                    ),
                     action_label: "shot-creation-run",
                 };
             }
@@ -19669,16 +19688,21 @@ impl WorldSnapshot {
             if !overlap_run_preferred {
                 if let Some(target) = special_targets.wide_outlet {
                     return SupportMovementTarget {
-                        point: target,
+                        point: self.shape_guarded_support_point(
+                            player_id,
+                            target,
+                            &[open, home],
+                            home,
+                            roam,
+                        ),
                         action_label: "wide-outlet",
                     };
                 }
             }
         }
-        let open = self.open_space_for(player_id, home);
         if roam {
             return SupportMovementTarget {
-                point: open,
+                point: self.shape_guarded_support_point(player_id, open, &[home], home, roam),
                 action_label: "support-roam",
             };
         }
@@ -19756,13 +19780,25 @@ impl WorldSnapshot {
         if self.possession_team() == Some(me.team) && !roam && striker_overlap_target.is_none() {
             if let Some(target) = special_targets.flank_cross_arrival {
                 return SupportMovementTarget {
-                    point: target,
+                    point: self.shape_guarded_support_point(
+                        player_id,
+                        target,
+                        &[open, shape, home],
+                        home,
+                        roam,
+                    ),
                     action_label: "shot-creation-run",
                 };
             }
             if let Some(target) = special_targets.wide_outlet {
                 return SupportMovementTarget {
-                    point: target,
+                    point: self.shape_guarded_support_point(
+                        player_id,
+                        target,
+                        &[open, shape, home],
+                        home,
+                        roam,
+                    ),
                     action_label: "wide-outlet",
                 };
             }
@@ -19794,7 +19830,13 @@ impl WorldSnapshot {
             (open * 0.55 + shape * 0.30 + home * 0.15, "support-shape")
         };
         SupportMovementTarget {
-            point: self.clamp_to_role_position(player_id, target, home, false),
+            point: self.shape_guarded_support_point(
+                player_id,
+                target,
+                &[open, shape, home],
+                home,
+                roam,
+            ),
             action_label,
         }
     }
@@ -19949,7 +19991,7 @@ impl WorldSnapshot {
                 }
             }
         }
-        self.clamp_to_role_position(player_id, best, home, roam)
+        self.shape_guarded_movement_point(player_id, best, &[mark, zone, home], home, roam)
     }
 
     fn clamp_to_role_position(
@@ -20006,7 +20048,7 @@ impl WorldSnapshot {
         }
     }
 
-    fn support_target_shape_score(&self, player: &PlayerSnapshot, target: Vec2) -> f64 {
+    fn movement_target_shape_score(&self, player: &PlayerSnapshot, target: Vec2) -> f64 {
         let possession = self
             .controlled_possession_team()
             .or_else(|| self.possession_team());
@@ -20049,15 +20091,56 @@ impl WorldSnapshot {
         fallback: Vec2,
         home: Vec2,
     ) -> Vec2 {
-        let proposed = self.clamp_to_role_position(player_id, proposed, home, false);
-        let fallback = self.clamp_to_role_position(player_id, fallback, home, false);
-        let Some(player) = self.players.iter().find(|p| p.id == player_id) else {
-            return fallback;
+        self.shape_guarded_support_point(player_id, proposed, &[fallback], home, false)
+    }
+
+    fn shape_guarded_support_point(
+        &self,
+        player_id: usize,
+        proposed: Vec2,
+        fallback_candidates: &[Vec2],
+        home: Vec2,
+        roam: bool,
+    ) -> Vec2 {
+        self.shape_guarded_movement_point(player_id, proposed, fallback_candidates, home, roam)
+    }
+
+    fn shape_guarded_movement_point(
+        &self,
+        player_id: usize,
+        proposed: Vec2,
+        fallback_candidates: &[Vec2],
+        home: Vec2,
+        roam: bool,
+    ) -> Vec2 {
+        let clamp = |snapshot: &WorldSnapshot, target: Vec2| {
+            if roam {
+                target.clamp_to_pitch(snapshot.field_width, snapshot.field_length)
+            } else {
+                snapshot.clamp_to_role_position(player_id, target, home, false)
+            }
         };
-        let proposed_score = self.support_target_shape_score(player, proposed);
-        let fallback_score = self.support_target_shape_score(player, fallback);
-        if proposed_score + 0.10 < fallback_score {
-            fallback
+        let proposed = clamp(self, proposed);
+        let Some(player) = self.players.iter().find(|p| p.id == player_id) else {
+            return fallback_candidates
+                .first()
+                .copied()
+                .map(|candidate| clamp(self, candidate))
+                .unwrap_or(proposed);
+        };
+        let proposed_score = self.movement_target_shape_score(player, proposed);
+        let mut best = proposed;
+        let mut best_score = proposed_score;
+        for candidate in fallback_candidates {
+            let candidate = clamp(self, *candidate);
+            let candidate_score = self.movement_target_shape_score(player, candidate);
+            if candidate_score > best_score {
+                best = candidate;
+                best_score = candidate_score;
+            }
+        }
+        if best_score > proposed_score + 0.10 {
+            best
         } else {
             proposed
         }
@@ -49442,11 +49525,9 @@ mod tests {
 
     #[test]
     fn agent_schedule_reshuffles_field_entities_each_tick() {
-        let mut sim = SoccerMatch::default_11v11(MatchConfig {
-            duration_seconds: 0.6,
-            seed: 308,
-            ..Default::default()
-        });
+        let mut config = MatchConfig::playback_trace(0.6);
+        config.seed = 308;
+        let mut sim = SoccerMatch::default_11v11(config);
         let mut field_orders = std::collections::BTreeSet::new();
 
         for _ in 0..5 {
@@ -49502,11 +49583,9 @@ mod tests {
 
     #[test]
     fn ball_decision_trace_records_shuffled_schedule_slot() {
-        let mut sim = SoccerMatch::default_11v11(MatchConfig {
-            duration_seconds: 0.2,
-            seed: 307,
-            ..Default::default()
-        });
+        let mut config = MatchConfig::playback_trace(0.2);
+        config.seed = 307;
+        let mut sim = SoccerMatch::default_11v11(config);
 
         sim.run_time_step();
         let frame = sim.to_frame();
@@ -64593,8 +64672,8 @@ mod tests {
         );
 
         assert!(
-            snapshot.support_target_shape_score(runner_snapshot, guarded)
-                > snapshot.support_target_shape_score(runner_snapshot, clamped_bad) + 0.10,
+            snapshot.movement_target_shape_score(runner_snapshot, guarded)
+                > snapshot.movement_target_shape_score(runner_snapshot, clamped_bad) + 0.10,
             "shape guard should prefer the safe support point over teammate-occupied learned target: guarded={guarded:?} bad={clamped_bad:?}"
         );
         assert!(
@@ -64871,6 +64950,110 @@ mod tests {
             overlap_obs.effective_teammate_spacing_pressure
                 < overlap_obs.teammate_occupied_space_pressure * 0.78,
             "attacking overlap relief should soften, not erase, close-spacing pressure"
+        );
+    }
+
+    #[test]
+    fn support_target_guard_rejects_teammate_occupied_final_space() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 7;
+        let runner = 6;
+        let occupied_teammate = 8;
+        park_players_except(&mut sim, &[holder, runner, occupied_teammate]);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 58.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        let home = sim.players[runner].home_position;
+        let occupied = Vec2::new(home.x, home.y + 5.0);
+        let fallback = Vec2::new(home.x, home.y + 13.0);
+        sim.players[runner].position = home;
+        sim.players[occupied_teammate].position = occupied;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let proposed_pressure =
+            snapshot.teammate_occupied_space_pressure_at(Team::Home, occupied, Some(runner));
+        let fallback_pressure =
+            snapshot.teammate_occupied_space_pressure_at(Team::Home, fallback, Some(runner));
+        let guarded =
+            snapshot.shape_guarded_support_point(runner, occupied, &[fallback], home, false);
+
+        assert!(
+            proposed_pressure > 0.90,
+            "test setup should put proposed run in teammate-occupied space"
+        );
+        assert!(
+            fallback_pressure < 0.05,
+            "fallback should be clear of teammate-occupied space"
+        );
+        assert!(
+            guarded.distance(occupied) > TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS,
+            "guarded support target must not land on a teammate: guarded={guarded:?} occupied={occupied:?}"
+        );
+        assert!(
+            guarded.distance(fallback) < 0.5,
+            "guard should prefer the clear fallback over occupied proposed target: guarded={guarded:?} fallback={fallback:?}"
+        );
+    }
+
+    #[test]
+    fn defensive_target_guard_rejects_static_teammate_occupied_final_space() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let away_holder = 17;
+        let defender = 6;
+        let occupied_teammate = 8;
+        park_players_except(&mut sim, &[away_holder, defender, occupied_teammate]);
+        sim.ball.holder = Some(away_holder);
+        sim.ball.position = Vec2::new(40.0, 76.0);
+        sim.ball.last_touch_team = Some(Team::Away);
+        sim.players[away_holder].position = sim.ball.position;
+        let home = sim.players[defender].home_position;
+        let occupied = Vec2::new(home.x, home.y + 5.0);
+        let fallback = Vec2::new(home.x - 9.0, home.y - 8.0);
+        sim.players[defender].position = home;
+        sim.players[occupied_teammate].position = occupied;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let clamped_occupied = snapshot.clamp_to_role_position(defender, occupied, home, false);
+        let clamped_fallback = snapshot.clamp_to_role_position(defender, fallback, home, false);
+        let proposed_pressure = snapshot.teammate_occupied_space_pressure_at(
+            Team::Home,
+            clamped_occupied,
+            Some(defender),
+        );
+        let fallback_pressure = snapshot.teammate_occupied_space_pressure_at(
+            Team::Home,
+            clamped_fallback,
+            Some(defender),
+        );
+        let defender_snapshot = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == defender)
+            .expect("defender snapshot");
+        let guarded =
+            snapshot.shape_guarded_movement_point(defender, occupied, &[fallback], home, false);
+
+        assert!(
+            proposed_pressure > 0.90,
+            "test setup should put proposed defensive target in teammate-occupied space"
+        );
+        assert!(
+            fallback_pressure < 0.05,
+            "defensive fallback should stay clear after final role/goal-line clamps: fallback_pressure={fallback_pressure:.3} clamped_fallback={clamped_fallback:?} clamped_occupied={clamped_occupied:?}"
+        );
+        assert!(
+            snapshot.movement_target_shape_score(defender_snapshot, guarded)
+                > snapshot.movement_target_shape_score(defender_snapshot, clamped_occupied) + 0.10,
+            "defensive guard should prefer the clear fallback over static bunching: guarded={guarded:?} occupied={clamped_occupied:?}"
+        );
+        assert!(
+            guarded.distance(clamped_occupied) > TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS,
+            "defensive target guard must not accept static teammate-occupied space: guarded={guarded:?} occupied={clamped_occupied:?}"
+        );
+        assert!(
+            guarded.distance(clamped_fallback) < 0.5,
+            "defensive guard should settle on the clear fallback: guarded={guarded:?} fallback={clamped_fallback:?}"
         );
     }
 

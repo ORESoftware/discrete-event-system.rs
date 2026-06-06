@@ -2061,6 +2061,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         "SOCCER_ADVERSARIAL_MOMENT_MEMORY_LIMIT",
         default_config.adversarial_embedding_memory_limit,
     )?;
+    let formation_lp_enabled = env_bool(
+        "SOCCER_FORMATION_LP_ENABLED",
+        default_config.formation_lp_enabled,
+    )?;
     let mut config = MatchConfig {
         dt_seconds,
         duration_seconds: minutes * 60.0,
@@ -2072,6 +2076,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         learning_enabled: true,
         learning_logging_enabled,
         learning_interval_ticks,
+        formation_lp_enabled,
         tactical_learning: tactical_learning.clone(),
         neural_learning: neural_learning.clone(),
         adversarial_embedding_exploitation_enabled,
@@ -3208,6 +3213,7 @@ mod tests {
         let mut postgres_weights = SoccerTacticalLearningWeights::default();
         postgres_weights.attack_flank_lane_weight = 1.42;
         postgres_weights.defense_contract_delta_weight = 1.17;
+        postgres_weights.formation_lp_alignment_weight = 0.37;
 
         let applied = maybe_apply_postgres_tactical_learning(
             "test_postgres_tactical_learning",
@@ -3237,6 +3243,21 @@ mod tests {
                 .defense_contract_delta_weight,
             postgres_weights.defense_contract_delta_weight
         );
+        assert_eq!(
+            episode_config
+                .tactical_learning
+                .formation_lp_alignment_weight,
+            postgres_weights.formation_lp_alignment_weight
+        );
+    }
+
+    #[test]
+    fn tactical_learning_match_detects_formation_lp_alignment_weight() {
+        let left = SoccerTacticalLearningWeights::default();
+        let mut right = left.clone();
+        right.formation_lp_alignment_weight += 0.05;
+
+        assert!(!tactical_learning_weights_match(&left, &right));
     }
 
     #[test]

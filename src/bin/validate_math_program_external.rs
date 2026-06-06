@@ -9,12 +9,13 @@ use des_engine::des::general::math_program::{
     cross_check_math_program_conflict_with_external,
     cross_check_math_program_feas_relaxation_with_external,
     cross_check_math_program_solution_pool_with_external, cross_check_math_program_with_external,
-    AffineTerm, ExternalMathProgramOptions, MathProgram, MathProgramAssumptionCoreCrossCheck,
-    MathProgramAssumptionCoreOptions, MathProgramConflictCrossCheck, MathProgramConflictOptions,
-    MathProgramCrossCheck, MathProgramFeasRelaxCrossCheck, MathProgramFeasRelaxOptions,
-    MathProgramFeasRelaxViolation, MathProgramLpBackend, MathProgramSolution,
-    MathProgramSolutionPoolCrossCheck, MathProgramSolutionPoolOptions, MathProgramSolveOptions,
-    MathProgramStatus, ObjectiveSense, RowSense,
+    AffineTerm, ExternalMathProgramOptions, GlobalCardinalityCount, MathProgram,
+    MathProgramAssumptionCoreCrossCheck, MathProgramAssumptionCoreOptions,
+    MathProgramConflictCrossCheck, MathProgramConflictOptions, MathProgramCrossCheck,
+    MathProgramFeasRelaxCrossCheck, MathProgramFeasRelaxOptions, MathProgramFeasRelaxViolation,
+    MathProgramLpBackend, MathProgramSolution, MathProgramSolutionPoolCrossCheck,
+    MathProgramSolutionPoolOptions, MathProgramSolveOptions, MathProgramStatus, ObjectiveSense,
+    RowSense,
 };
 
 fn main() {
@@ -72,8 +73,15 @@ fn main() {
         ("integer-l2-norm", build_integer_l2_norm_case()),
         ("piecewise-linear", build_piecewise_linear_case()),
         ("all-different", build_all_different_case()),
+        ("global-cardinality", build_global_cardinality_case()),
+        ("value-count", build_value_count_case()),
+        ("linear-domain", build_linear_domain_case()),
+        ("linear-disequality", build_linear_disequality_case()),
+        ("reified-linear-domain", build_reified_linear_domain_case()),
+        ("map-domain", build_map_domain_case()),
         ("allowed-assignments", build_allowed_assignments_case()),
         ("forbidden-assignments", build_forbidden_assignments_case()),
+        ("enforced-table", build_enforced_table_case()),
         ("bin-packing", build_bin_packing_case()),
         ("element", build_element_case()),
         ("variable-element", build_variable_element_case()),
@@ -1754,6 +1762,83 @@ fn build_all_different_case() -> MathProgram {
     p
 }
 
+fn build_global_cardinality_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x0 = p
+        .add_integer_var("x0", 100.0, Some(0.0), Some(2.0))
+        .unwrap();
+    let x1 = p.add_integer_var("x1", 10.0, Some(0.0), Some(2.0)).unwrap();
+    let x2 = p.add_integer_var("x2", 1.0, Some(0.0), Some(2.0)).unwrap();
+    p.add_global_cardinality(
+        "one-of-each",
+        vec![x0, x1, x2],
+        vec![
+            GlobalCardinalityCount::exact(0, 1),
+            GlobalCardinalityCount::exact(1, 1),
+            GlobalCardinalityCount::exact(2, 1),
+        ],
+    )
+    .unwrap();
+    p
+}
+
+fn build_value_count_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x0 = p.add_integer_var("x0", 0.0, Some(0.0), Some(0.0)).unwrap();
+    let x1 = p.add_integer_var("x1", 0.0, Some(0.0), Some(2.0)).unwrap();
+    let x2 = p.add_integer_var("x2", 0.0, Some(0.0), Some(2.0)).unwrap();
+    let count_one = p
+        .add_integer_var("count_one", 10.0, Some(0.0), Some(3.0))
+        .unwrap();
+    p.add_value_count("count-ones", vec![x0, x1, x2], 1, count_one)
+        .unwrap();
+    p
+}
+
+fn build_linear_domain_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x = p.add_integer_var("x", 10.0, Some(0.0), Some(3.0)).unwrap();
+    let y = p.add_integer_var("y", 1.0, Some(0.0), Some(3.0)).unwrap();
+    p.add_linear_domain("sum-domain", vec![(x, 1.0), (y, 1.0)], vec![(1, 2), (4, 4)])
+        .unwrap();
+    p
+}
+
+fn build_linear_disequality_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x = p.add_integer_var("x", 1.0, Some(0.0), Some(4.0)).unwrap();
+    p.add_linear_not_equal("x-not-three", vec![(x, 1.0)], 3)
+        .unwrap();
+    p
+}
+
+fn build_reified_linear_domain_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let x = p.add_integer_var("x", 1.0, Some(0.0), Some(4.0)).unwrap();
+    let in_domain = p.add_binary_var("in-domain", 10.0).unwrap();
+    p.add_reified_linear_domain(
+        "x-in-small-domain",
+        MathProgram::bool_lit(in_domain),
+        vec![(x, 1.0)],
+        vec![(1, 2)],
+    )
+    .unwrap();
+    p
+}
+
+fn build_map_domain_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let mode = p
+        .add_integer_var("mode", 0.0, Some(5.0), Some(7.0))
+        .unwrap();
+    let is_five = p.add_binary_var("is_five", 1.0).unwrap();
+    let is_six = p.add_binary_var("is_six", 10.0).unwrap();
+    let is_seven = p.add_binary_var("is_seven", 3.0).unwrap();
+    p.add_map_domain("mode-selectors", mode, vec![is_five, is_six, is_seven], 5)
+        .unwrap();
+    p
+}
+
 fn build_allowed_assignments_case() -> MathProgram {
     let mut p = MathProgram::new(ObjectiveSense::Max);
     let x = p.add_integer_var("x", 10.0, Some(0.0), Some(2.0)).unwrap();
@@ -1769,6 +1854,30 @@ fn build_forbidden_assignments_case() -> MathProgram {
     let y = p.add_integer_var("y", 1.0, Some(0.0), Some(2.0)).unwrap();
     p.add_forbidden_assignments("forbidden-pairs", vec![x, y], vec![vec![2, 2]])
         .unwrap();
+    p
+}
+
+fn build_enforced_table_case() -> MathProgram {
+    let mut p = MathProgram::new(ObjectiveSense::Max);
+    let active = p.add_binary_var("active", 0.0).unwrap();
+    let x = p.add_integer_var("x", 10.0, Some(0.0), Some(2.0)).unwrap();
+    let y = p.add_integer_var("y", 1.0, Some(0.0), Some(2.0)).unwrap();
+    p.add_constraint("force-active", vec![(active, 1.0)], RowSense::Eq, 1.0)
+        .unwrap();
+    p.add_enforced_allowed_assignments(
+        "active-allowed-pairs",
+        vec![MathProgram::bool_lit(active)],
+        vec![x, y],
+        vec![vec![0, 2], vec![2, 1]],
+    )
+    .unwrap();
+    p.add_enforced_forbidden_assignments(
+        "active-forbidden-pairs",
+        vec![MathProgram::bool_lit(active)],
+        vec![x, y],
+        vec![vec![2, 2]],
+    )
+    .unwrap();
     p
 }
 

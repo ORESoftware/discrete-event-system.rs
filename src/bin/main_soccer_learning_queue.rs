@@ -1193,6 +1193,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let mut tactical_learning = env_tactical_learning_weights()?;
     validate_tactical_learning_weights(&tactical_learning)?;
+    let default_config = MatchConfig::default();
+    let formation_lp_enabled = env_bool(
+        "SOCCER_FORMATION_LP_ENABLED",
+        default_config.formation_lp_enabled,
+    )?;
     let half_duration_seconds = half_minutes * 60.0;
     let halftime_fatigue_recovery = if half_duration_seconds > 0.0 {
         (period_break_recovery_seconds / half_duration_seconds).clamp(0.0, 1.0)
@@ -1210,11 +1215,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         learning_enabled: true,
         learning_logging_enabled: env_bool("SOCCER_LEARNING_LOGGING", false)?,
         learning_interval_ticks,
+        formation_lp_enabled,
         tactical_learning: tactical_learning.clone(),
         neural_learning: neural_learning.clone(),
         max_human_players: 0,
         seed,
-        ..MatchConfig::default()
+        ..default_config
     };
     let resume_artifact =
         env_value("SOCCER_RESUME_ARTIFACT").or_else(|| env_value("SOCCER_RESUME_ARTIFACT_PATH"));
@@ -2003,6 +2009,7 @@ mod tests {
         pg_weights.attack_width_delta_weight = 1.05;
         pg_weights.defense_contract_delta_weight = 1.40;
         pg_weights.defense_compactness_score_weight = 0.95;
+        pg_weights.formation_lp_alignment_weight = 0.33;
         let mut episode_weights = HashMap::new();
         episode_weights.insert(3, pg_weights.clone());
         let summary = SoccerTacticalLearningSummary {
@@ -2043,6 +2050,15 @@ mod tests {
 
         assert!(evolved.attack_flank_lane_weight >= pg_weights.attack_flank_lane_weight);
         assert!(evolved.defense_contract_delta_weight >= pg_weights.defense_contract_delta_weight);
+    }
+
+    #[test]
+    fn queue_tactical_learning_match_detects_formation_lp_alignment_weight() {
+        let left = SoccerTacticalLearningWeights::default();
+        let mut right = left.clone();
+        right.formation_lp_alignment_weight += 0.05;
+
+        assert!(!tactical_learning_weights_match(&left, &right));
     }
 
     #[test]

@@ -368,6 +368,7 @@ fn payload_match_config(
     period_break_recovery_seconds: f64,
     dt_seconds: f64,
     learning_interval_ticks: usize,
+    formation_lp_enabled: bool,
     seed: u32,
     tactical_learning: SoccerTacticalLearningWeights,
 ) -> MatchConfig {
@@ -377,6 +378,7 @@ fn payload_match_config(
         period_break_recovery_seconds,
         dt_seconds,
         learning_interval_ticks,
+        formation_lp_enabled,
         seed,
         learning_enabled: true,
         learning_logging_enabled: false,
@@ -533,6 +535,11 @@ fn build_payload(
     let period_break_recovery_seconds = env_f64("SOCCER_PERIOD_BREAK_RECOVERY_SECONDS", 900.0)?;
     let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2)?;
     let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4)?;
+    let default_config = MatchConfig::default();
+    let formation_lp_enabled = env_bool(
+        "SOCCER_FORMATION_LP_ENABLED",
+        default_config.formation_lp_enabled,
+    )?;
     let seed = match seed_override {
         Some(seed) => seed,
         None => env_u32("SOCCER_SEED", 2026)?,
@@ -649,6 +656,7 @@ fn build_payload(
         period_break_recovery_seconds,
         dt_seconds,
         learning_interval_ticks,
+        formation_lp_enabled,
         seed,
         tactical_learning.clone(),
     );
@@ -660,6 +668,7 @@ fn build_payload(
         "periodBreakRecoverySeconds": period_break_recovery_seconds,
         "dtSeconds": dt_seconds,
         "learningIntervalTicks": learning_interval_ticks,
+        "formationLpEnabled": formation_lp_enabled,
         "seed": seed,
         "options": {
             "alpha": alpha,

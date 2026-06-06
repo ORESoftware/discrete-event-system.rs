@@ -7,7 +7,9 @@
 //! libraries, and generated executables out of version control.
 
 use super::external_gams_solver_probe::{probe_external_gams_solver, ExternalGamsSolver};
-use super::external_hexaly_probe::probe_external_hexaly_command;
+use super::external_hexaly_probe::{
+    hexaly_configuration_hint, hexaly_smoke_failure_message, probe_external_hexaly_command,
+};
 use super::external_linear_cli::{
     probe_external_linear_cli_solver, solve_ipmip_with_external_cli,
     solve_lower_bounded_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliKind,
@@ -758,7 +760,13 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::Jump => &["ores-jump-adapter", "jump-adapter"],
             ExternalOptimizationTool::Ampl => &["ores-ampl-adapter", "ampl-adapter"],
             ExternalOptimizationTool::Gams => &["ores-gams-adapter", "gams-adapter"],
-            ExternalOptimizationTool::Hexaly => &["ores-hexaly-adapter", "hexaly-adapter"],
+            ExternalOptimizationTool::Hexaly => &[
+                "ores-hexaly-adapter",
+                "hexaly-adapter",
+                "hexaly",
+                "localsolver",
+                "localsolver-studio",
+            ],
             ExternalOptimizationTool::Minotaur => &["ores-minotaur-adapter", "minotaur-adapter"],
             ExternalOptimizationTool::Symphony => &["ores-symphony-adapter", "symphony-adapter"],
             ExternalOptimizationTool::Ipopt => &["ores-ipopt-adapter", "ipopt-adapter"],
@@ -3260,6 +3268,7 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
         ExternalOptimizationTool::Hexaly => {
             names.push("HEXALY_HOME".to_string());
             names.push("LOCALSOLVER_HOME".to_string());
+            names.push("LOCALSOLVER_DIR".to_string());
         }
         ExternalOptimizationTool::Minotaur => {
             names.push("MINOTAUR_DIR".to_string());
@@ -3613,11 +3622,7 @@ pub fn probe_external_optimization_tool(
                     ExternalOptimizationProbeStatus::NotConfigured
                 },
                 command: Some(command),
-                message: format!(
-                    "{} command was found but the local HXM smoke solve did not succeed: {}",
-                    opts.tool.display_name(),
-                    probe.message
-                ),
+                message: hexaly_smoke_failure_message(opts.tool.display_name(), &probe.message),
             };
         }
         return ExternalOptimizationProbe {
@@ -4182,6 +4187,20 @@ fn probe_julia_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptimi
 
 fn probe_native_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptimizationProbe {
     if first_configured_env_value(&artifact_env_names(opts.tool)).is_some() {
+        if opts.tool == ExternalOptimizationTool::Hexaly {
+            return ExternalOptimizationProbe {
+                tool: opts.tool,
+                status: ExternalOptimizationProbeStatus::RuntimeMissing,
+                command: None,
+                message: format!(
+                    "{} installation was configured, but no Hexaly/LocalSolver executable was found under {}; set {} directly or point {} at the install directory",
+                    opts.tool.display_name(),
+                    external_optimization_command_dir_env_names(opts.tool).join(", "),
+                    adapter_env_names(opts.tool)[0],
+                    artifact_env_names(opts.tool)[0]
+                ),
+            };
+        }
         return ExternalOptimizationProbe {
             tool: opts.tool,
             status: ExternalOptimizationProbeStatus::Ready,
@@ -4192,15 +4211,26 @@ fn probe_native_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptim
             ),
         };
     }
+    let hint = if opts.tool == ExternalOptimizationTool::Hexaly {
+        hexaly_configuration_hint(
+            &adapter_env_names(opts.tool)[0],
+            &artifact_env_names(opts.tool)[0],
+        )
+    } else {
+        format!(
+            "{} or {}",
+            adapter_env_names(opts.tool)[0],
+            artifact_env_names(opts.tool)[0]
+        )
+    };
     ExternalOptimizationProbe {
         tool: opts.tool,
         status: ExternalOptimizationProbeStatus::NotConfigured,
         command: None,
         message: format!(
-            "{} needs a local adapter command or installation directory; set {} or {}",
+            "{} needs a local adapter command or installation directory; set {}",
             opts.tool.display_name(),
-            adapter_env_names(opts.tool)[0],
-            artifact_env_names(opts.tool)[0]
+            hint
         ),
     }
 }
@@ -5596,6 +5626,12 @@ mod tests {
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Ampl)[0],
             "ORES_AMPL_DIR"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::Hexaly)
+            .contains(&"LOCALSOLVER_DIR".to_string()));
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::Hexaly)
+                .contains(&"LOCALSOLVER_DIR".to_string())
         );
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::Ipopt)[0],

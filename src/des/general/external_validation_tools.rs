@@ -33,7 +33,9 @@ use crate::des::general::external_graph_coloring_reference::{
     solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
     ExternalGraphColoringReferenceSolver, ExternalGraphColoringReferenceStatus,
 };
-use crate::des::general::external_hexaly_probe::probe_external_hexaly_command;
+use crate::des::general::external_hexaly_probe::{
+    hexaly_configuration_hint, hexaly_smoke_failure_message, probe_external_hexaly_command,
+};
 use crate::des::general::external_knapsack_reference::{
     solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
     ExternalKnapsackReferenceSolver, ExternalKnapsackReferenceStatus,
@@ -55,6 +57,7 @@ use crate::des::general::external_minimum_spanning_tree_reference::{
     ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceSolver,
     ExternalMinimumSpanningTreeReferenceStatus,
 };
+use crate::des::general::external_neos_probe::probe_external_neos_server;
 use crate::des::general::external_nonlinear_validation_reference::{
     solve_nonlinear_validation_json_with_external_reference,
     ExternalNonlinearValidationReferenceOptions, ExternalNonlinearValidationReferenceSolver,
@@ -14224,6 +14227,7 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "good-lp",
         "lp-modeler",
         "rust-linprog",
+        "minilp",
     ];
     let stochastic_lp_tools = [
         "pyomo",
@@ -14261,6 +14265,9 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
     let quadratic_modeling_tools = [
         "osqp",
         "osqp-adapter",
+        "osqp-rust",
+        "osqp-rust-adapter",
+        "ores-osqp-rust-adapter",
         "highs",
         "highs-adapter",
         "scipy-optimize",
@@ -14274,6 +14281,9 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "scs-adapter",
         "clarabel",
         "clarabel-adapter",
+        "clarabel-rust",
+        "clarabel-rust-adapter",
+        "ores-clarabel-rust-adapter",
         "ecos",
         "ecos-adapter",
         "mosek",
@@ -19003,6 +19013,12 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
             | "cplex-python"
             | "xpress-python"
             | "docplex"
+            | "choco-solver"
+            | "jacop"
+            | "ibm-cp-optimizer"
+            | "ortools-java"
+            | "optaplanner"
+            | "timefold"
             | "ortools-python"
             | "ortools-glop"
             | "ortools-pdlp"
@@ -19018,6 +19034,20 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
             | "proxqp"
             | "cvxpy"
             | "cvxopt"
+            | "good-lp"
+            | "lp-modeler"
+            | "rust-linprog"
+            | "minilp"
+            | "argmin"
+            | "nlopt-rs"
+            | "osqp-rust"
+            | "clarabel-rust"
+            | "gurobi-rust"
+            | "cplex-rust"
+            | "ipopt-rust"
+            | "highs-rust"
+            | "scip-rust"
+            | "cbc-rust"
             | "kissat"
             | "cadical"
             | "minisat"
@@ -19051,6 +19081,8 @@ fn external_validation_output_tool_has_rust_reference(id: &str) -> bool {
             | "apache-avro"
             | "apache-arrow"
             | "tensorflow-data-validation"
+            | "zod"
+            | "valibot"
     )
 }
 
@@ -19179,7 +19211,11 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "lindo-cli" => names.push("LINDOAPI_CMD".to_string()),
         "ampl" => names.push("AMPL_HOME".to_string()),
         "gams" => names.push("GAMS_HOME".to_string()),
-        "hexaly" => names.push("HEXALY_HOME".to_string()),
+        "hexaly" => {
+            names.push("HEXALY_HOME".to_string());
+            names.push("LOCALSOLVER_HOME".to_string());
+            names.push("LOCALSOLVER_DIR".to_string());
+        }
         "jump" => names.push("JULIA_PROJECT".to_string()),
         "neos" => names.push("NEOS_EMAIL".to_string()),
         "pddl-val" => names.push("VAL_HOME".to_string()),
@@ -19304,7 +19340,12 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "lindo-cli" => &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"],
         "ampl" => &["AMPL_HOME", "AMPL_DIR"],
         "gams" => &["GAMS_HOME", "GAMS_DIR"],
-        "hexaly" => &["HEXALY_HOME", "HEXALY_DIR", "LOCALSOLVER_HOME"],
+        "hexaly" => &[
+            "HEXALY_HOME",
+            "HEXALY_DIR",
+            "LOCALSOLVER_HOME",
+            "LOCALSOLVER_DIR",
+        ],
         "jump" => &["JUMP_HOME", "JULIA_HOME", "JULIA_DIR"],
         "neos" => &["NEOS_HOME", "NEOS_DIR"],
         "pddl-val" => &["VAL_HOME", "VAL_DIR", "PDDL_VAL_HOME", "PDDL_VAL_DIR"],
@@ -19446,10 +19487,7 @@ pub fn probe_external_validation_tool(
                     ExternalValidationProbeStatus::NotConfigured
                 },
                 command: Some(command),
-                message: format!(
-                    "{} command was found but the local HXM smoke solve did not succeed: {}",
-                    tool.display_name, probe.message
-                ),
+                message: hexaly_smoke_failure_message(tool.display_name, &probe.message),
             };
         }
         return ExternalValidationProbe {
@@ -19540,7 +19578,55 @@ pub fn probe_external_validation_tool(
         };
     }
 
+    if tool.id == "neos" {
+        let probe = probe_external_neos_server(10_000);
+        if probe.ready {
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::Ready,
+                command: None,
+                message: format!(
+                    "{} service readiness probe passed: {}; set NEOS_EMAIL plus GAMS/Kestrel for job-submission validation",
+                    tool.display_name, probe.message
+                ),
+            };
+        }
+        return ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} is not configured and the read-only NEOS XML-RPC service probe did not succeed: {}; set {}, NEOS_EMAIL, or ORES_NEOS_XMLRPC_URL",
+                tool.display_name,
+                probe.message,
+                external_validation_adapter_env_names(tool)[0]
+            ),
+        };
+    }
+
     let artifact = first_configured_env_value(&external_validation_artifact_env_names(tool));
+    if tool.id == "hexaly" {
+        if let Some(value) = artifact.as_ref() {
+            let path = PathBuf::from(value);
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: if path.exists() {
+                    ExternalValidationProbeStatus::RuntimeMissing
+                } else {
+                    ExternalValidationProbeStatus::ArtifactMissing
+                },
+                command: None,
+                message: format!(
+                    "{} installation was configured at {}, but no Hexaly/LocalSolver executable was found under {}; set {} directly or point {} at the install directory",
+                    tool.display_name,
+                    path.display(),
+                    external_validation_command_dir_env_names(tool).join(", "),
+                    external_validation_adapter_env_names(tool)[0],
+                    external_validation_artifact_hint(tool)
+                ),
+            };
+        }
+    }
     if let Some(value) = artifact {
         return probe_configured_artifact(tool, value);
     }
@@ -19548,6 +19634,7 @@ pub fn probe_external_validation_tool(
         if let Some(classpath) = java_classpath_from_install_dirs(tool) {
             return probe_configured_artifact(tool, classpath.to_string_lossy().to_string());
         }
+        return probe_java_classpath_validation_tool(tool);
     }
     if tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage {
         return probe_python_validation_package(tool);
@@ -19555,17 +19642,27 @@ pub fn probe_external_validation_tool(
     if tool.artifact_kind == ExternalValidationArtifactKind::NodePackage {
         return probe_node_validation_package(tool, None);
     }
+    if tool.artifact_kind == ExternalValidationArtifactKind::RustCrate {
+        return probe_rust_crate_validation_tool(tool);
+    }
 
+    let hint = if tool.id == "hexaly" {
+        hexaly_configuration_hint(
+            &external_validation_adapter_env_names(tool)[0],
+            &external_validation_artifact_hint(tool),
+        )
+    } else {
+        format!(
+            "{} or {}",
+            external_validation_adapter_env_names(tool)[0],
+            external_validation_artifact_hint(tool)
+        )
+    };
     ExternalValidationProbe {
         tool_id: tool.id.to_string(),
         status: ExternalValidationProbeStatus::NotConfigured,
         command: None,
-        message: format!(
-            "{} is not configured; set {} or {}",
-            tool.display_name,
-            external_validation_adapter_env_names(tool)[0],
-            external_validation_artifact_hint(tool)
-        ),
+        message: format!("{} is not configured; set {}", tool.display_name, hint),
     }
 }
 
@@ -19910,17 +20007,29 @@ fn probe_node_validation_package(
     tool: &ExternalValidationToolSpec,
     node_path: Option<&str>,
 ) -> ExternalValidationProbe {
-    let Some(node) = default_node_probe_command() else {
-        return ExternalValidationProbe {
-            tool_id: tool.id.to_string(),
-            status: ExternalValidationProbeStatus::NotConfigured,
-            command: None,
-            message: format!(
-                "{} needs a local adapter command or Node.js env; set {} or {}",
-                tool.display_name,
-                external_validation_adapter_env_names(tool)[0],
-                external_validation_artifact_hint(tool)
-            ),
+    probe_node_validation_package_with_command(tool, node_path, default_node_probe_command())
+}
+
+fn probe_node_validation_package_with_command(
+    tool: &ExternalValidationToolSpec,
+    node_path: Option<&str>,
+    node: Option<PathBuf>,
+) -> ExternalValidationProbe {
+    let Some(node) = node else {
+        return if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+            rust_reference_node_probe(tool, kind)
+        } else {
+            ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::NotConfigured,
+                command: None,
+                message: format!(
+                    "{} needs a local adapter command or Node.js env; set {} or {}",
+                    tool.display_name,
+                    external_validation_adapter_env_names(tool)[0],
+                    external_validation_artifact_hint(tool)
+                ),
+            }
         };
     };
     if external_validation_node_modules(tool)
@@ -19934,6 +20043,9 @@ fn probe_node_validation_package(
             message: format!("{} Node package is importable", tool.display_name),
         };
     }
+    if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+        return rust_reference_node_probe(tool, kind);
+    }
     ExternalValidationProbe {
         tool_id: tool.id.to_string(),
         status: ExternalValidationProbeStatus::NotConfigured,
@@ -19944,6 +20056,75 @@ fn probe_node_validation_package(
             external_validation_adapter_env_names(tool)[0],
             external_validation_artifact_hint(tool)
         ),
+    }
+}
+
+fn rust_reference_node_probe(
+    tool: &ExternalValidationToolSpec,
+    kind: &'static str,
+) -> ExternalValidationProbe {
+    ExternalValidationProbe {
+        tool_id: tool.id.to_string(),
+        status: ExternalValidationProbeStatus::Ready,
+        command: None,
+        message: format!(
+            "{} Node package is unavailable, but Rust {kind} reference is available for the same validation contract",
+            tool.display_name
+        ),
+    }
+}
+
+fn probe_rust_crate_validation_tool(tool: &ExternalValidationToolSpec) -> ExternalValidationProbe {
+    if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::Ready,
+            command: None,
+            message: format!(
+                "{} Rust crate adapter is not configured, but Rust {kind} reference is available for the same validation contract",
+                tool.display_name
+            ),
+        }
+    } else {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} needs a local adapter command or crate marker; set {} or {}",
+                tool.display_name,
+                external_validation_adapter_env_names(tool)[0],
+                external_validation_artifact_hint(tool)
+            ),
+        }
+    }
+}
+
+fn probe_java_classpath_validation_tool(
+    tool: &ExternalValidationToolSpec,
+) -> ExternalValidationProbe {
+    if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::Ready,
+            command: None,
+            message: format!(
+                "{} Java classpath is not configured, but Rust {kind} reference is available for the same validation contract",
+                tool.display_name
+            ),
+        }
+    } else {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} needs a local adapter command or Java classpath; set {} or {}",
+                tool.display_name,
+                external_validation_adapter_env_names(tool)[0],
+                external_validation_artifact_hint(tool)
+            ),
+        }
     }
 }
 
@@ -20331,7 +20512,9 @@ fn resolve_command_path(command: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        probe_python_validation_package_with_command, wait_for_external_validation_output,
+        probe_java_classpath_validation_tool, probe_node_validation_package_with_command,
+        probe_python_validation_package_with_command, probe_rust_crate_validation_tool,
+        wait_for_external_validation_output,
     };
     use crate::des::general::external_validation_tools::{
         dimacs_cnf_to_string, dimacs_wcnf_to_string, external_benchmark_manifest_to_json,
@@ -20358,9 +20541,10 @@ mod tests {
         smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
         DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
         ExternalSimulationValidationReferenceOptions, ExternalSimulationValidationStatus,
-        ExternalSimulationValidationVerdict, ExternalValidationArtifact,
-        ExternalValidationArtifactCliOptions, ExternalValidationArtifactKind,
-        ExternalValidationCapability, ExternalValidationCliInvocation, ExternalValidationFamily,
+        ExternalSimulationValidationVerdict, ExternalValidationAdapterOptions,
+        ExternalValidationArtifact, ExternalValidationArtifactCliOptions,
+        ExternalValidationArtifactKind, ExternalValidationCapability,
+        ExternalValidationCliInvocation, ExternalValidationFamily,
         ExternalValidationFileCliOptions, ExternalValidationProbeStatus,
         ExternalValidationRunStatus, ExternalValidationRuntime, ExternalValidationTextCliOptions,
         ExternalValidationTextFormat, ExternalValidationTextVerdict, JsonSchemaValidationRequest,
@@ -20541,6 +20725,180 @@ mod tests {
     }
 
     #[test]
+    fn node_package_probe_uses_rust_reference_when_node_import_is_unavailable() {
+        let tool = find_external_validation_tool("zod").unwrap();
+        let probe =
+            probe_node_validation_package_with_command(tool, None, Some(PathBuf::from("/no/node")));
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust output-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_node_schema_reference_without_node_or_command() {
+        let tool = find_external_validation_tool("zod").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "schema": {
+                    "score": {"type": "number", "required": true, "min": 0.0},
+                },
+                "instance": {"score": 1.0}
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:pydantic-model-subset-for-zod")
+        );
+    }
+
+    #[test]
+    fn rust_crate_probe_uses_rust_reference_without_crate_marker() {
+        let tool = find_external_validation_tool("good-lp").unwrap();
+        let probe = probe_rust_crate_validation_tool(tool);
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust model-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_crate_linear_reference_without_crate_or_command() {
+        let tool = find_external_validation_tool("good-lp").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "linear-mip-validation",
+                "objective": [1],
+                "constraints": [
+                    {"coefs": [1], "sense": "<=", "rhs": 0},
+                    {"coefs": [1], "sense": ">=", "rhs": 1}
+                ],
+                "domains": [[0, 1]]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("infeasible"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:linear-mip-small-for-good-lp")
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_crate_quadratic_reference_without_crate_or_command() {
+        let tool = find_external_validation_tool("osqp-rust").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "qp-validation",
+                "Q": [
+                    [2, 0],
+                    [0, 2]
+                ],
+                "c": [-2, -4],
+                "lb": [0, 0],
+                "ub": [5, 5]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:quadratic-small-for-osqp-rust")
+        );
+    }
+
+    #[test]
+    fn java_classpath_probe_uses_rust_reference_without_java_artifact() {
+        let tool = find_external_validation_tool("choco-solver").unwrap();
+        let probe = probe_java_classpath_validation_tool(tool);
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust model-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_java_cp_reference_without_classpath_or_command() {
+        let tool = find_external_validation_tool("choco-solver").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "finite-domain-cp-validation",
+                "variables": {
+                    "left": [0, 1, 2],
+                    "right": [0, 1, 2]
+                },
+                "constraints": [
+                    {"op": "all_different", "vars": ["left", "right"]},
+                    {"op": "sum_le", "vars": ["left", "right"], "rhs": 1}
+                ]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("sat"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:finite-domain-cp-for-choco-solver")
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_java_planning_reference_without_classpath_or_command() {
+        let tool = find_external_validation_tool("optaplanner").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "traveling-salesman-validation",
+                "points": [
+                    {"id": "A", "x": 0, "y": 0},
+                    {"id": "B", "x": 1, "y": 0},
+                    {"id": "C", "x": 1, "y": 1},
+                    {"id": "D", "x": 0, "y": 1}
+                ]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:tsp-small-for-optaplanner")
+        );
+    }
+
+    #[test]
     fn generic_adapter_run_uses_rust_simulation_reference_without_python_or_command() {
         let tool = find_external_validation_tool("simpy").unwrap();
         let run = run_external_validation_adapter(
@@ -20580,8 +20938,25 @@ mod tests {
         for (tool_id, kind) in [
             ("clingo", "model-validation"),
             ("osqp", "model-validation"),
+            ("choco-solver", "model-validation"),
+            ("jacop", "model-validation"),
+            ("ibm-cp-optimizer", "model-validation"),
+            ("ortools-java", "model-validation"),
+            ("optaplanner", "model-validation"),
+            ("timefold", "model-validation"),
             ("json-schema", "output-validation"),
             ("csv-validator", "output-validation"),
+            ("zod", "output-validation"),
+            ("valibot", "output-validation"),
+            ("good-lp", "model-validation"),
+            ("minilp", "model-validation"),
+            ("argmin", "model-validation"),
+            ("nlopt-rs", "model-validation"),
+            ("osqp-rust", "model-validation"),
+            ("clarabel-rust", "model-validation"),
+            ("highs-rust", "model-validation"),
+            ("scip-rust", "model-validation"),
+            ("cbc-rust", "model-validation"),
             ("simpy", "simulation-validation"),
             ("mesa", "simulation-validation"),
             ("drat-trim", "proof-validation"),
@@ -23562,8 +23937,13 @@ mod tests {
         assert!(external_validation_command_dir_env_names(ampl).contains(&"AMPL_HOME".to_string()));
         let hexaly = find_external_validation_tool("hexaly").unwrap();
         assert!(
+            external_validation_artifact_env_names(hexaly).contains(&"LOCALSOLVER_DIR".to_string())
+        );
+        assert!(
             external_validation_command_dir_env_names(hexaly).contains(&"HEXALY_HOME".to_string())
         );
+        assert!(external_validation_command_dir_env_names(hexaly)
+            .contains(&"LOCALSOLVER_DIR".to_string()));
         let cvxopt = find_external_validation_tool("cvxopt").unwrap();
         assert_eq!(
             external_validation_artifact_env_names(cvxopt)[0],

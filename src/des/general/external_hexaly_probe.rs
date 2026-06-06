@@ -31,6 +31,18 @@ pub struct ExternalHexalyProbe {
     pub message: String,
 }
 
+pub fn hexaly_configuration_hint(adapter_env: &str, install_dir_env: &str) -> String {
+    format!(
+        "{adapter_env} or {install_dir_env}; also configure a valid Hexaly license via license.dat, HX_LICENSE_PATH, or HX_LICENSE_CONTENT"
+    )
+}
+
+pub fn hexaly_smoke_failure_message(display_name: &str, probe_message: &str) -> String {
+    format!(
+        "{display_name} command was found but the local HXM smoke solve did not succeed: {probe_message}; check license.dat, HX_LICENSE_PATH, or HX_LICENSE_CONTENT"
+    )
+}
+
 pub fn probe_external_hexaly_command(command: &Path, timeout_ms: u64) -> ExternalHexalyProbe {
     let probe_dir = unique_hexaly_probe_dir();
     let model_path = probe_dir.join("des_rs_hexaly_smoke.hxm");

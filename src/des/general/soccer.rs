@@ -36628,6 +36628,71 @@ pub struct SoccerLiveServer {
     controller_input_router: HumanControllerInputRouter,
 }
 
+#[derive(Clone)]
+pub struct SoccerLiveHttpBridge {
+    session: Arc<Mutex<SoccerRealtimeSession>>,
+    input_queue: SharedHumanInputs,
+    controller_input_router: HumanControllerInputRouter,
+}
+
+impl SoccerLiveHttpBridge {
+    pub fn new(config: SoccerLiveServerConfig) -> Self {
+        let server = SoccerLiveServer::new(config);
+        SoccerLiveHttpBridge {
+            session: server.session,
+            input_queue: server.input_queue,
+            controller_input_router: server.controller_input_router,
+        }
+    }
+
+    pub fn from_session(session: SoccerRealtimeSession) -> Self {
+        let input_queue = session.input_queue();
+        let controller_input_router = session.controller_input_router();
+        SoccerLiveHttpBridge {
+            session: Arc::new(Mutex::new(session)),
+            input_queue,
+            controller_input_router,
+        }
+    }
+
+    pub fn session(&self) -> Arc<Mutex<SoccerRealtimeSession>> {
+        Arc::clone(&self.session)
+    }
+
+    pub fn input_queue(&self) -> SharedHumanInputs {
+        self.input_queue.clone()
+    }
+
+    pub fn controller_input_router(&self) -> HumanControllerInputRouter {
+        self.controller_input_router.clone()
+    }
+
+    pub fn handle_request(&self, method: &str, path: &str, body: &str) -> SoccerLiveHttpReply {
+        if method.split_whitespace().count() != 1 || path.split_whitespace().count() != 1 {
+            return LiveHttpResponse::error(
+                400,
+                "Bad Request",
+                "method and path must be single HTTP request-line tokens",
+            )
+            .into();
+        }
+        let raw = format!(
+            "{} {} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+            method.trim(),
+            path.trim(),
+            body.as_bytes().len(),
+            body
+        );
+        handle_live_soccer_request_with_input_router(
+            &raw,
+            &self.session,
+            &self.input_queue,
+            &self.controller_input_router,
+        )
+        .into()
+    }
+}
+
 impl SoccerLiveServer {
     pub fn new(config: SoccerLiveServerConfig) -> Self {
         let mut session = SoccerRealtimeSession::new(config.match_config.clone());
@@ -36752,7 +36817,7 @@ fn write_live_soccer_streaming_response(
         Ok(req) => req,
         Err(_) => return Ok(false),
     };
-    let path = req.path.split('?').next().unwrap_or(req.path);
+    let path = normalize_live_http_path(req.path);
     match (req.method, path) {
         ("GET", "/api/tracking-dataset.jsonl") | ("GET", "/api/tracking-export.jsonl") => {
             let tracking = match session.lock() {
@@ -36906,6 +36971,25 @@ fn parse_live_http_request(raw: &str) -> Result<LiveHttpRequest<'_>, String> {
     Ok(LiveHttpRequest { method, path, body })
 }
 
+fn normalize_live_http_path(path: &str) -> &str {
+    let path = path.split('?').next().unwrap_or(path);
+    if path.is_empty() {
+        return "/";
+    }
+    if let Some(index) = path.find("/soccer/live") {
+        return &path[index..];
+    }
+    if let Some(index) = path.find("/api/") {
+        return &path[index..];
+    }
+    for alias in ["/fresh", "/new-match", "/new_match", "/reset"] {
+        if path.ends_with(alias) {
+            return alias;
+        }
+    }
+    path
+}
+
 fn parse_soccer_policy_postgres_export_request_body(
     body: &str,
 ) -> Result<SoccerPolicyPostgresBranchTipExportRequest, String> {
@@ -37012,6 +37096,31 @@ impl LiveHttpResponse {
         let mut out = headers.into_bytes();
         out.extend_from_slice(self.body.as_bytes());
         out
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoccerLiveHttpReply {
+    pub status: u16,
+    pub reason: String,
+    pub content_type: String,
+    pub body: String,
+}
+
+impl SoccerLiveHttpReply {
+    pub fn ok(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
+impl From<LiveHttpResponse> for SoccerLiveHttpReply {
+    fn from(response: LiveHttpResponse) -> Self {
+        SoccerLiveHttpReply {
+            status: response.status,
+            reason: response.reason.to_string(),
+            content_type: response.content_type.to_string(),
+            body: response.body,
+        }
     }
 }
 
@@ -37228,7 +37337,7 @@ fn handle_live_soccer_request_inner(
         Ok(req) => req,
         Err(e) => return LiveHttpResponse::error(400, "Bad Request", &e),
     };
-    let path = req.path.split('?').next().unwrap_or(req.path);
+    let path = normalize_live_http_path(req.path);
     match (req.method, path) {
         ("OPTIONS", _) => LiveHttpResponse::options(),
         ("GET", "/")
@@ -65523,6 +65632,112 @@ mod tests {
     }
 
     #[test]
+    fn live_http_routes_accept_mounted_prefix_paths() {
+        let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 67,
+            ..Default::default()
+        })));
+        let input_queue = session.lock().unwrap().input_queue();
+
+        assert_eq!(
+            normalize_live_http_path("/des-rs/soccer/live"),
+            "/soccer/live"
+        );
+        assert_eq!(
+            normalize_live_http_path("/des-rs/soccer/live/fresh?fresh=1"),
+            "/soccer/live/fresh"
+        );
+        assert_eq!(
+            normalize_live_http_path("/des-rs/api/step?pulse=1"),
+            "/api/step"
+        );
+        assert_eq!(normalize_live_http_path("/des-rs/fresh"), "/fresh");
+
+        let html = handle_live_soccer_request(
+            "GET /des-rs/soccer/live/fresh?fresh=1 HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(html.status, 200);
+        assert!(html.body.contains("<title>Live Soccer Simulation</title>"));
+        assert!(html.body.contains("function liveMountPrefix"));
+
+        let state = handle_live_soccer_request(
+            "GET /des-rs/api/state?mounted=1 HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(state.status, 200);
+        let state_value: serde_json::Value =
+            serde_json::from_str(&state.body).expect("mounted state json");
+        assert_eq!(state_value["config"]["seed"], 67);
+        assert_eq!(state_value["summary"]["ticks"], 0);
+
+        let body = r#"{"ticks":1,"recordEveryTicks":1}"#;
+        let step = handle_live_soccer_request(
+            &format!(
+                "POST /des-rs/api/step?mounted=1 HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(step.status, 200);
+        let step_value: serde_json::Value =
+            serde_json::from_str(&step.body).expect("mounted step json");
+        assert_eq!(step_value["summary"]["ticks"], 1);
+    }
+
+    #[test]
+    fn live_http_bridge_embeds_mounted_realtime_routes() {
+        let bridge = SoccerLiveHttpBridge::new(SoccerLiveServerConfig {
+            match_config: MatchConfig {
+                duration_seconds: 1.0,
+                max_human_players: 2,
+                seed: 71,
+                ..Default::default()
+            },
+            http_worker_threads: 3,
+            autoload_team_policy: false,
+            ..Default::default()
+        });
+
+        let html = bridge.handle_request("GET", "/des-rs/soccer/live", "");
+        assert!(html.ok());
+        assert_eq!(html.content_type, "text/html; charset=utf-8");
+        assert!(html.body.contains("<title>Live Soccer Simulation</title>"));
+        assert!(html.body.contains("function liveApiPath"));
+
+        let state = bridge.handle_request("GET", "/des-rs/api/state", "");
+        assert!(state.ok());
+        assert_eq!(state.content_type, "application/json; charset=utf-8");
+        let state_value: serde_json::Value =
+            serde_json::from_str(&state.body).expect("bridge mounted state json");
+        assert_eq!(state_value["config"]["seed"], 71);
+        assert_eq!(state_value["liveHttp"]["workerThreads"], 3);
+        assert_eq!(state_value["liveHttp"]["reusesWorkers"], true);
+        assert_eq!(state_value["liveHttp"]["spawnsPerRequest"], false);
+
+        let step = bridge.handle_request(
+            "POST",
+            "/des-rs/api/step?tick=1",
+            r#"{"ticks":1,"recordEveryTicks":1}"#,
+        );
+        assert!(step.ok());
+        let step_value: serde_json::Value =
+            serde_json::from_str(&step.body).expect("bridge mounted step json");
+        assert_eq!(step_value["summary"]["ticks"], 1);
+        assert_eq!(step_value["liveHttp"]["workerThreads"], 3);
+
+        let bad = bridge.handle_request("GET /oops", "/des-rs/api/state", "");
+        assert_eq!(bad.status, 400);
+        assert!(bad.body.contains("single HTTP request-line tokens"));
+    }
+
+    #[test]
     fn live_http_routes_state_and_step_json() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
@@ -65591,6 +65806,15 @@ mod tests {
         assert!(html.body.contains("function applyInputAck"));
         assert!(html.body.contains("input rejected"));
         assert!(html.body.contains("input accepted"));
+        assert!(html
+            .body
+            .contains("const LIVE_ROUTE_MARKER = \"/soccer/live\""));
+        assert!(html.body.contains("function liveMountPrefix"));
+        assert!(html.body.contains("function liveApiPath"));
+        assert!(html.body.contains("function fetchLive"));
+        assert!(html.body.contains("fetch(liveApiPath(path), options)"));
+        assert!(html.body.contains("syncLiveRouteLinks"));
+        assert!(html.body.contains("liveRoutePath(\"/fresh\")"));
         assert!(html.body.contains("postgresContract"));
         assert!(html.body.contains("id=\"exportPostgresPolicy\""));
         assert!(html.body.contains("exportPostgresTeamPolicy"));

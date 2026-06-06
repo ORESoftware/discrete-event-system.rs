@@ -628,6 +628,7 @@ const events = document.getElementById("events");
 const statusEl = document.getElementById("status");
 const runButton = document.getElementById("run");
 const resetMatchButton = document.getElementById("resetMatch");
+const freshMatchLink = document.getElementById("freshMatchLink");
 const exportPolicyButton = document.getElementById("exportPolicy");
 const exportPostgresPolicyButton = document.getElementById("exportPostgresPolicy");
 const exportPostgresPolicyJsonlButton = document.getElementById("exportPostgresPolicyJsonl");
@@ -667,6 +668,16 @@ let inspectedPlayerId = null;
 let lastSemanticBallAction = null;
 const LIVE_STEP_INTERVAL_MS = 100;
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
+const LIVE_ROUTE_MARKER = "/soccer/live";
+const LIVE_FRESH_MATCH_ALIASES = [
+  "/fresh",
+  "/new-match",
+  "/new_match",
+  "/reset",
+  "/soccer/live/fresh",
+  "/soccer/live/new-match",
+  "/soccer/live/new_match"
+];
 const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
 const SEMANTIC_BALL_ACTIONS = new Set([
   "pass",
@@ -2984,8 +2995,39 @@ function isFormEditingTarget(target) {
   const tag = String(target?.tagName || "").toLowerCase();
   return tag === "input" || tag === "select" || tag === "textarea" || tag === "button";
 }
+function normalizedPathname(pathname = window.location.pathname) {
+  const path = String(pathname || "/").replace(/\/+$/, "");
+  return path || "/";
+}
+function liveMountPrefix(pathname = window.location.pathname) {
+  const path = normalizedPathname(pathname);
+  const lower = path.toLowerCase();
+  const markerIndex = lower.indexOf(LIVE_ROUTE_MARKER);
+  if (markerIndex >= 0) return path.slice(0, markerIndex);
+  for (const alias of LIVE_FRESH_MATCH_ALIASES) {
+    if (lower.endsWith(alias)) return path.slice(0, path.length - alias.length);
+  }
+  return "";
+}
+function livePathWithMount(path, pathname = window.location.pathname) {
+  const raw = String(path || "");
+  if (!raw.startsWith("/")) return raw;
+  const prefix = liveMountPrefix(pathname);
+  if (!prefix) return raw;
+  if (raw === "/") return `${prefix}/`;
+  return `${prefix}${raw}`;
+}
+function liveApiPath(path) {
+  return livePathWithMount(path);
+}
+function liveRoutePath(path, pathname = window.location.pathname) {
+  return livePathWithMount(path, pathname);
+}
+async function fetchLive(path, options) {
+  return fetch(liveApiPath(path), options);
+}
 async function postJson(path, body) {
-  const res = await fetch(path, {
+  const res = await fetchLive(path, {
     method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify(body)
@@ -3137,7 +3179,7 @@ async function replayMomentPolicy() {
   render();
 }
 async function exportTeamPolicy() {
-  const res = await fetch("/api/team-policy");
+  const res = await fetchLive("/api/team-policy");
   if (!res.ok) throw new Error(await res.text());
   const artifact = await res.json();
   const tick = Number(artifact.summary?.ticks ?? state?.summary?.ticks ?? 0);
@@ -3183,7 +3225,7 @@ async function exportPostgresTeamPolicyJsonl() {
     sourceKind: "import",
     status: "candidate"
   };
-  const res = await fetch("/api/team-policy/postgres-export.jsonl", {
+  const res = await fetchLive("/api/team-policy/postgres-export.jsonl", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(body)
@@ -3202,7 +3244,7 @@ async function saveTeamPolicyToDisk() {
     state.learning = response.learning;
     if (response.policyProbability) state.policyProbability = response.policyProbability;
   }
-  const autosave = await fetch("/api/team-policy/autosave").then(res => res.ok ? res.json() : null);
+  const autosave = await fetchLive("/api/team-policy/autosave").then(res => res.ok ? res.json() : null);
   if (state && autosave?.autosave) state.policyAutosave = autosave.autosave;
   await refreshPolicyHistory(response.path, {quiet: true, render: false});
   statusEl.textContent = `policy saved ${response.path} history ${response.historyPath}`;
@@ -3297,7 +3339,7 @@ function downloadTextFile(filename, content, type) {
   URL.revokeObjectURL(url);
 }
 async function exportTrackingDataset() {
-  const res = await fetch("/api/tracking-dataset");
+  const res = await fetchLive("/api/tracking-dataset");
   if (!res.ok) throw new Error(await res.text());
   const dataset = await res.json();
   const lastFrame = Array.isArray(dataset.frames) && dataset.frames.length
@@ -3316,7 +3358,7 @@ async function exportTrackingDataset() {
   statusEl.textContent = `tracking exported ${dataset.frames?.length ?? 0} frames`;
 }
 async function exportTrackingJsonlDataset() {
-  const res = await fetch("/api/tracking-dataset.jsonl");
+  const res = await fetchLive("/api/tracking-dataset.jsonl");
   if (!res.ok) throw new Error(await res.text());
   const jsonl = await res.text();
   const meta = JSON.parse((jsonl.split(/\n/, 1)[0] || "{}"));
@@ -3325,7 +3367,7 @@ async function exportTrackingJsonlDataset() {
   statusEl.textContent = `tracking jsonl exported ${Number(meta.frames ?? 0)} frames`;
 }
 async function exportTrackingTemplate() {
-  const res = await fetch("/api/tracking-template");
+  const res = await fetchLive("/api/tracking-template");
   if (!res.ok) throw new Error(await res.text());
   const dataset = await res.json();
   const blob = new Blob([JSON.stringify(dataset, null, 2)], {type: "application/json"});
@@ -3340,7 +3382,7 @@ async function exportTrackingTemplate() {
   statusEl.textContent = `tracking template ${dataset.frames?.length ?? 0} frames`;
 }
 async function exportTrackingJsonlTemplate() {
-  const res = await fetch("/api/tracking-template.jsonl");
+  const res = await fetchLive("/api/tracking-template.jsonl");
   if (!res.ok) throw new Error(await res.text());
   const jsonl = await res.text();
   const meta = JSON.parse((jsonl.split(/\n/, 1)[0] || "{}"));
@@ -3401,7 +3443,7 @@ async function importTrackingFile(file) {
   render();
 }
 async function loadState() {
-  const res = await fetch("/api/state");
+  const res = await fetchLive("/api/state");
   state = await res.json();
   recentLearningTransitions = [];
   lastSemanticBallAction = null;
@@ -3428,24 +3470,20 @@ function freshMatchRequestedOnLoad() {
     || ["1", "true", "yes"].includes(normalizedNewMatch);
 }
 function normalizedFreshMatchPath(pathname) {
-  const path = String(pathname || "/").replace(/\/+$/, "").toLowerCase();
-  return path || "/";
+  const path = normalizedPathname(pathname);
+  const prefix = liveMountPrefix(pathname);
+  const unmounted = prefix && path.toLowerCase().startsWith(prefix.toLowerCase())
+    ? path.slice(prefix.length)
+    : path;
+  return (unmounted || "/").toLowerCase();
 }
 function freshMatchPathAlias(path) {
-  return [
-    "/fresh",
-    "/new-match",
-    "/new_match",
-    "/reset",
-    "/soccer/live/fresh",
-    "/soccer/live/new-match",
-    "/soccer/live/new_match"
-  ].includes(path);
+  return LIVE_FRESH_MATCH_ALIASES.includes(path);
 }
 function canonicalFreshMatchPath(pathname) {
   const path = normalizedFreshMatchPath(pathname);
-  if (path.startsWith("/soccer/live/")) return "/soccer/live";
-  if (freshMatchPathAlias(path)) return "/";
+  if (path.startsWith("/soccer/live/")) return liveRoutePath("/soccer/live", pathname);
+  if (freshMatchPathAlias(path)) return liveRoutePath("/", pathname);
   return pathname || "/";
 }
 function clearFreshMatchUrl() {
@@ -3457,7 +3495,11 @@ function clearFreshMatchUrl() {
   url.searchParams.delete("new-match");
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
+function syncLiveRouteLinks() {
+  if (freshMatchLink) freshMatchLink.href = liveRoutePath("/fresh");
+}
 async function bootLivePage() {
+  syncLiveRouteLinks();
   if (freshMatchRequestedOnLoad()) {
     await resetMatch({freshLoad: true, clearFreshUrl: true});
     return;

@@ -919,7 +919,7 @@ mod tests {
     #[test]
     fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
         let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_RUST_FIRST", "true");
+        let _rust_first_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_RUST_FIRST", "true");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-max-flow");
         let problem = build_textbook_max_flow_problem();
 

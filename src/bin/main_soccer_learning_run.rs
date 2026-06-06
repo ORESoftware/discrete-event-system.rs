@@ -361,6 +361,10 @@ fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<
             "SOCCER_MIDFIELDER_PRESS_WEIGHT",
             default.midfielder_press_weight,
         )?,
+        formation_lp_alignment_weight: env_f64(
+            "SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT",
+            default.formation_lp_alignment_weight,
+        )?,
     })
 }
 
@@ -522,6 +526,10 @@ fn validate_tactical_learning_weights(
             "SOCCER_MIDFIELDER_PRESS_WEIGHT",
             tactical_learning.midfielder_press_weight,
         ),
+        (
+            "SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT",
+            tactical_learning.formation_lp_alignment_weight,
+        ),
     ];
     for (name, value) in weights {
         if !value.is_finite() {
@@ -531,7 +539,7 @@ fn validate_tactical_learning_weights(
     Ok(())
 }
 
-fn tactical_learning_weight_values(weights: &SoccerTacticalLearningWeights) -> [f64; 14] {
+fn tactical_learning_weight_values(weights: &SoccerTacticalLearningWeights) -> [f64; 15] {
     [
         weights.attack_spacing_delta_weight,
         weights.attack_spacing_score_weight,
@@ -547,6 +555,7 @@ fn tactical_learning_weight_values(weights: &SoccerTacticalLearningWeights) -> [
         weights.defense_endline_hard_penalty_weight,
         weights.defender_midfielder_press_weight,
         weights.midfielder_press_weight,
+        weights.formation_lp_alignment_weight,
     ]
 }
 

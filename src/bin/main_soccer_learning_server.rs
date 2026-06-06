@@ -557,6 +557,7 @@ fn build_payload(
     let defender_midfielder_press_weight =
         env_f64("SOCCER_DEFENDER_MIDFIELDER_PRESS_WEIGHT", 0.18)?;
     let midfielder_press_weight = env_f64("SOCCER_MIDFIELDER_PRESS_WEIGHT", 0.20)?;
+    let formation_lp_alignment_weight = env_f64("SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT", 0.16)?;
     let tactical_weights = [
         (
             "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
@@ -608,6 +609,10 @@ fn build_payload(
             defender_midfielder_press_weight,
         ),
         ("SOCCER_MIDFIELDER_PRESS_WEIGHT", midfielder_press_weight),
+        (
+            "SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT",
+            formation_lp_alignment_weight,
+        ),
     ];
     validate_payload_settings(
         episodes,
@@ -636,6 +641,7 @@ fn build_payload(
         defense_endline_hard_penalty_weight,
         defender_midfielder_press_weight,
         midfielder_press_weight,
+        formation_lp_alignment_weight,
     };
     let config = payload_match_config(
         minutes,
@@ -674,6 +680,7 @@ fn build_payload(
             "defenseEndlineHardPenaltyWeight": defense_endline_hard_penalty_weight,
             "defenderMidfielderPressWeight": defender_midfielder_press_weight,
             "midfielderPressWeight": midfielder_press_weight,
+            "formationLpAlignmentWeight": formation_lp_alignment_weight,
         },
         "artifactPath": &args.server_artifact_path,
         "learnedParamsPath": &args.server_learned_params_path,

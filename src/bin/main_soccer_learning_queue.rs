@@ -376,6 +376,10 @@ fn env_tactical_learning_weights() -> Result<SoccerTacticalLearningWeights, Box<
             "SOCCER_MIDFIELDER_PRESS_WEIGHT",
             default.midfielder_press_weight,
         )?,
+        formation_lp_alignment_weight: env_f64(
+            "SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT",
+            default.formation_lp_alignment_weight,
+        )?,
     })
 }
 
@@ -439,6 +443,10 @@ fn validate_tactical_learning_weights(
             "SOCCER_MIDFIELDER_PRESS_WEIGHT",
             weights.midfielder_press_weight,
         ),
+        (
+            "SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT",
+            weights.formation_lp_alignment_weight,
+        ),
     ] {
         if !value.is_finite() {
             return Err(invalid_data(format!("{name} must be finite")).into());
@@ -447,7 +455,7 @@ fn validate_tactical_learning_weights(
     Ok(())
 }
 
-fn tactical_learning_weight_values(weights: &SoccerTacticalLearningWeights) -> [f64; 14] {
+fn tactical_learning_weight_values(weights: &SoccerTacticalLearningWeights) -> [f64; 15] {
     [
         weights.attack_spacing_delta_weight,
         weights.attack_spacing_score_weight,
@@ -463,6 +471,7 @@ fn tactical_learning_weight_values(weights: &SoccerTacticalLearningWeights) -> [
         weights.defense_endline_hard_penalty_weight,
         weights.defender_midfielder_press_weight,
         weights.midfielder_press_weight,
+        weights.formation_lp_alignment_weight,
     ]
 }
 
@@ -1948,6 +1957,7 @@ mod tests {
             let mut postgres_weights = SoccerTacticalLearningWeights::default();
             postgres_weights.attack_flank_lane_weight = 1.10 + episode as f64 * 0.07;
             postgres_weights.defense_contract_delta_weight = 0.90 + episode as f64 * 0.05;
+            postgres_weights.formation_lp_alignment_weight = 0.20 + episode as f64 * 0.03;
 
             maybe_apply_postgres_tactical_learning(
                 "test_postgres_refresh_tactical_learning_for_queue",
@@ -1974,6 +1984,11 @@ mod tests {
             );
             assert!(
                 (sample.weights.defense_contract_delta_weight - (0.90 + episode as f64 * 0.05))
+                    .abs()
+                    < 1e-12
+            );
+            assert!(
+                (sample.weights.formation_lp_alignment_weight - (0.20 + episode as f64 * 0.03))
                     .abs()
                     < 1e-12
             );

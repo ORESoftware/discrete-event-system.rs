@@ -434,16 +434,26 @@ fn is_rust_quadratic_solver(opts: &ExternalQuadraticReferenceOptions) -> bool {
 }
 
 fn registered_quadratic_rust_fallback_enabled() -> bool {
-    std::env::var("QP_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("QUADRATIC_REFERENCE_REGISTERED_FALLBACK"))
-        .or_else(|_| std::env::var("QP_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "QP_REFERENCE_REGISTERED_FALLBACK",
+        "QUADRATIC_REFERENCE_REGISTERED_FALLBACK",
+        "QP_REFERENCE_EXTERNAL_FALLBACK",
+        "QUADRATIC_REFERENCE_EXTERNAL_FALLBACK",
+        "QP_REFERENCE_RUST_FIRST",
+        "QUADRATIC_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_registered_quadratic_fallback(opts: &ExternalQuadraticReferenceOptions) -> bool {
@@ -2300,9 +2310,9 @@ x2       1.833333329519
     }
 
     #[test]
-    fn registered_solver_aliases_use_rust_quadratic_reference_without_python() {
+    fn rust_first_env_forces_registered_quadratic_aliases_to_rust_without_python() {
         let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("QP_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _guard = EnvVarGuard::set("QP_REFERENCE_RUST_FIRST", "rust");
         let qp = QuadraticProgram {
             q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
             c: vec![-2.0, -4.0],

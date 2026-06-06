@@ -176,16 +176,25 @@ fn should_use_rust_reference(opts: &ExternalNonlinearReferenceOptions) -> bool {
 }
 
 fn registered_nonlinear_rust_fallback_enabled() -> bool {
-    std::env::var("NONLINEAR_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("NL_REFERENCE_REGISTERED_FALLBACK"))
-        .or_else(|_| std::env::var("NONLINEAR_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "NONLINEAR_REFERENCE_REGISTERED_FALLBACK",
+        "NL_REFERENCE_REGISTERED_FALLBACK",
+        "NONLINEAR_REFERENCE_EXTERNAL_FALLBACK",
+        "NONLINEAR_REFERENCE_RUST_FIRST",
+        "NL_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_registered_nonlinear_fallback(opts: &ExternalNonlinearReferenceOptions) -> bool {
@@ -1158,9 +1167,9 @@ mod tests {
     }
 
     #[test]
-    fn registered_solver_aliases_can_use_rust_reference_without_python() {
+    fn rust_first_env_forces_registered_nonlinear_aliases_to_rust_without_python() {
         let _lock = NONLINEAR_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("NONLINEAR_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _guard = EnvVarGuard::set("NONLINEAR_REFERENCE_RUST_FIRST", "rust");
 
         let scipy_opts = ExternalNonlinearReferenceOptions {
             solver: ExternalNonlinearReferenceSolver::Scipy,

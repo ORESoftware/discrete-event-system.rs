@@ -240,15 +240,23 @@ impl ExternalCpSatReferenceSolver {
 }
 
 fn registered_cp_sat_rust_fallback_enabled() -> bool {
-    env::var("CP_SAT_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| env::var("CP_SAT_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "CP_SAT_REFERENCE_REGISTERED_FALLBACK",
+        "CP_SAT_REFERENCE_EXTERNAL_FALLBACK",
+        "CP_SAT_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_registered_cp_sat_fallback(options: &ExternalCpSatReferenceOptions) -> bool {
@@ -2687,9 +2695,9 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_cp_sat_alias_can_use_rust_reference_without_python() {
+    fn rust_first_env_forces_ortools_cp_sat_to_rust_reference_without_python() {
         let _lock = CP_SAT_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("CP_SAT_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _guard = EnvVarGuard::set("CP_SAT_REFERENCE_RUST_FIRST", "rust");
         let run = solve_cp_sat_json_with_external_reference(
             &tiny_cp_sat_model(),
             &ExternalCpSatReferenceOptions {

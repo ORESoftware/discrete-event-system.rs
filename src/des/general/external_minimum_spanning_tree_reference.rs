@@ -35,15 +35,23 @@ impl ExternalMinimumSpanningTreeReferenceSolver {
 }
 
 fn registered_minimum_spanning_tree_rust_fallback_enabled() -> bool {
-    std::env::var("MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("MINIMUM_SPANNING_TREE_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK",
+        "MINIMUM_SPANNING_TREE_REFERENCE_EXTERNAL_FALLBACK",
+        "MINIMUM_SPANNING_TREE_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_minimum_spanning_tree_reference(
@@ -852,6 +860,35 @@ mod tests {
         assert!(solution
             .message
             .contains("requested solver 'ortools' was validated with Rust fallback"));
+    }
+
+    #[test]
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard =
+            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_RUST_FIRST", "true");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-mst");
+        let problem = build_sample_minimum_spanning_tree_problem();
+
+        let solution = solve_minimum_spanning_tree_with_external_reference(
+            &problem,
+            &ExternalMinimumSpanningTreeReferenceOptions {
+                solver: ExternalMinimumSpanningTreeReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalMinimumSpanningTreeReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-minimum-spanning-tree-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(6.0));
+        assert_eq!(solution.selected_edge_ids, vec!["AB", "BC", "CD", "DE"]);
     }
 
     #[test]

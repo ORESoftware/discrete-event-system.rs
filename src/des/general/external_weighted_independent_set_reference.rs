@@ -38,15 +38,23 @@ impl ExternalWeightedIndependentSetReferenceSolver {
 }
 
 fn registered_weighted_independent_set_rust_fallback_enabled() -> bool {
-    std::env::var("WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("WEIGHTED_INDEPENDENT_SET_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
+        "WEIGHTED_INDEPENDENT_SET_REFERENCE_EXTERNAL_FALLBACK",
+        "WEIGHTED_INDEPENDENT_SET_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_weighted_independent_set_reference(
@@ -949,6 +957,38 @@ mod tests {
         assert!(solution
             .message
             .contains("requested solver 'ortools' was validated with Rust fallback"));
+    }
+
+    #[test]
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard =
+            EnvVarGuard::set("WEIGHTED_INDEPENDENT_SET_REFERENCE_RUST_FIRST", "true");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-weighted-independent-set",
+        );
+        let problem = build_sample_weighted_independent_set_problem();
+
+        let solution = solve_weighted_independent_set_with_external_reference(
+            &problem,
+            &ExternalWeightedIndependentSetReferenceOptions {
+                solver: ExternalWeightedIndependentSetReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalWeightedIndependentSetReferenceStatus::Optimal
+        );
+        assert_eq!(
+            solution.solver,
+            "rust:registered-weighted-independent-set-fallback-for-ortools"
+        );
+        assert_eq!(solution.selected_vertex_ids, vec!["B", "D", "G"]);
+        assert_eq!(solution.objective, Some(16.0));
     }
 
     #[test]

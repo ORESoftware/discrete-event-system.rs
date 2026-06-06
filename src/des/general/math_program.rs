@@ -23,9 +23,10 @@ use crate::des::general::external_linear_cli::{
 };
 use crate::des::general::external_quadratic_reference::{
     solve_miqcp_with_external_reference, solve_miqp_with_external_reference,
-    solve_misocp_with_external_reference, ExternalQuadraticReferenceOptions,
-    ExternalQuadraticReferenceSolution, ExternalQuadraticReferenceSolver,
-    ExternalQuadraticReferenceStatus,
+    solve_misocp_with_external_reference, solve_qcp_with_external_reference,
+    solve_qp_with_external_reference, solve_socp_with_external_reference,
+    ExternalQuadraticReferenceOptions, ExternalQuadraticReferenceSolution,
+    ExternalQuadraticReferenceSolver, ExternalQuadraticReferenceStatus,
 };
 use crate::des::general::ip_mip_des::{
     solve_ipmip_with_des, BranchOrCutConstraint, ConstraintKind, IPMIPProblem, IPMIPSolveOptions,
@@ -9575,7 +9576,6 @@ fn solve_math_program_external_quadratic_rust_reference(
     if opts.python.is_some()
         || opts.script.is_some()
         || !external_math_program_method_prefers_rust_quadratic_reference(method)
-        || !program.has_discrete_features()
     {
         return Ok(None);
     }
@@ -9594,7 +9594,8 @@ fn solve_math_program_external_quadratic_rust_reference(
         }
     };
     let _validated = encode_external_math_program_options(opts)?;
-    if !can_encode_direct_mixed_integer_nonlinear(program) {
+    let has_discrete = program.has_discrete_features();
+    if has_discrete && !can_encode_direct_mixed_integer_nonlinear(program) {
         return Ok(unsupported(
             "Rust mixed-integer nonlinear reference requires direct continuous/integer/binary variables without lowered discrete constraints"
                 .to_string(),
@@ -9613,22 +9614,32 @@ fn solve_math_program_external_quadratic_rust_reference(
                     .to_string(),
             ));
         }
-        let problem = MixedIntegerSecondOrderConeProgram {
-            socp: math_program_to_second_order_cone_reference(program)?,
-            integer_vars: math_program_integer_var_mask(program),
+        let socp = math_program_to_second_order_cone_reference(program)?;
+        let solution = if has_discrete {
+            let problem = MixedIntegerSecondOrderConeProgram {
+                socp,
+                integer_vars: math_program_integer_var_mask(program),
+            };
+            solve_misocp_with_external_reference(&problem, &reference_opts)
+        } else {
+            solve_socp_with_external_reference(&socp, &reference_opts)
         };
-        let solution = solve_misocp_with_external_reference(&problem, &reference_opts);
         return Ok(Some(
             math_program_solution_from_external_quadratic_reference(program, solution),
         ));
     }
 
     if program.has_quadratic_constraints() {
-        let problem = MixedIntegerQuadraticallyConstrainedProgram {
-            qcp: math_program_to_quadratically_constrained_reference(program)?,
-            integer_vars: math_program_integer_var_mask(program),
+        let qcp = math_program_to_quadratically_constrained_reference(program)?;
+        let solution = if has_discrete {
+            let problem = MixedIntegerQuadraticallyConstrainedProgram {
+                qcp,
+                integer_vars: math_program_integer_var_mask(program),
+            };
+            solve_miqcp_with_external_reference(&problem, &reference_opts)
+        } else {
+            solve_qcp_with_external_reference(&qcp, &reference_opts)
         };
-        let solution = solve_miqcp_with_external_reference(&problem, &reference_opts);
         return Ok(Some(
             math_program_solution_from_external_quadratic_reference(program, solution),
         ));
@@ -9636,11 +9647,16 @@ fn solve_math_program_external_quadratic_rust_reference(
 
     if program.has_quadratic_objective() && quadratic_objective_has_native_nonlinear_terms(program)
     {
-        let problem = MixedIntegerQuadraticProgram {
-            qp: math_program_to_quadratic_reference(program)?,
-            integer_vars: math_program_integer_var_mask(program),
+        let qp = math_program_to_quadratic_reference(program)?;
+        let solution = if has_discrete {
+            let problem = MixedIntegerQuadraticProgram {
+                qp,
+                integer_vars: math_program_integer_var_mask(program),
+            };
+            solve_miqp_with_external_reference(&problem, &reference_opts)
+        } else {
+            solve_qp_with_external_reference(&qp, &reference_opts)
         };
-        let solution = solve_miqp_with_external_reference(&problem, &reference_opts);
         return Ok(Some(
             math_program_solution_from_external_quadratic_reference(program, solution),
         ));
@@ -21709,6 +21725,26 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn external_math_program_default_continuous_qp_uses_rust_reference_without_python() {
+        let mut qp = MathProgram::new(ObjectiveSense::Min);
+        let x = qp.add_continuous_var("x", 0.0, Some(0.0), Some(5.0)).unwrap();
+        let y = qp.add_continuous_var("y", 0.0, Some(0.0), Some(5.0)).unwrap();
+        qp.add_quadratic_objective_term(x, x, 2.0).unwrap();
+        qp.add_quadratic_objective_term(y, y, 2.0).unwrap();
+        qp.add_linear_objective_term(x, -2.0).unwrap();
+        qp.add_linear_objective_term(y, -4.0).unwrap();
+
+        let solution =
+            solve_math_program_external(&qp, &ExternalMathProgramOptions::default()).unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::Optimal);
+        assert_eq!(solution.solver, "rust:qp-active-set");
+        assert_close(solution.x[x], 0.5);
+        assert_close(solution.x[y], 1.0);
+        assert_close(solution.objective, -2.5);
     }
 
     #[test]

@@ -35,15 +35,23 @@ impl ExternalAssignmentReferenceSolver {
 }
 
 fn registered_assignment_rust_fallback_enabled() -> bool {
-    std::env::var("ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("ASSIGNMENT_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK",
+        "ASSIGNMENT_REFERENCE_EXTERNAL_FALLBACK",
+        "ASSIGNMENT_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_assignment_reference(opts: &ExternalAssignmentReferenceOptions) -> bool {
@@ -753,6 +761,40 @@ mod tests {
         );
         assert_eq!(scipy.assignment, vec![1, 0]);
         assert_eq!(scipy.objective, Some(3.0));
+    }
+
+    #[test]
+    fn rust_first_env_forces_registered_aliases_to_rust_reference_without_python() {
+        let _lock = ASSIGNMENT_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_RUST_FIRST", "true");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-assignment");
+        let cost = vec![vec![3.0, 1.0], vec![2.0, 4.0]];
+
+        let ortools = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::OrTools,
+            },
+        );
+        let scipy = solve_assignment_with_external_reference(
+            &cost,
+            &ExternalAssignmentReferenceOptions {
+                solver: ExternalAssignmentReferenceSolver::Scipy,
+            },
+        );
+
+        assert_eq!(ortools.status, ExternalAssignmentReferenceStatus::Optimal);
+        assert_eq!(
+            ortools.solver,
+            "rust:registered-assignment-fallback-for-ortools"
+        );
+        assert_eq!(scipy.status, ExternalAssignmentReferenceStatus::Optimal);
+        assert_eq!(
+            scipy.solver,
+            "rust:registered-assignment-fallback-for-scipy"
+        );
     }
 
     #[test]

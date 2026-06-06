@@ -9762,6 +9762,132 @@ fn math_program_external_cli_failure(method: &str, message: String) -> MathProgr
     }
 }
 
+fn normalized_external_math_program_method(method: &str) -> String {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    normalized
+        .strip_suffix(":default")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn solve_math_program_external_native_mip_reference(
+    program: &MathProgram,
+    opts: &ExternalMathProgramOptions,
+    method: &str,
+) -> Result<Option<MathProgramSolution>, MathProgramError> {
+    if opts.python.is_some()
+        || opts.script.is_some()
+        || !external_math_program_method_prefers_native_mip_reference(method)
+    {
+        return Ok(None);
+    }
+    if !program.has_discrete_features()
+        || program.has_quadratic_objective()
+        || program.has_quadratic_constraints()
+        || program.has_conic_constraints()
+    {
+        return Ok(None);
+    }
+
+    let compiled = compile_mip(program)?;
+    let objective_offset = compiled_objective_offset(program, &compiled);
+    let mut mip_opts = IPMIPSolveOptions {
+        max_nodes: opts.node_limit,
+        time_limit_ms: opts.time_limit_ms,
+        mip_gap_rel: opts.relative_gap,
+        mip_gap_abs: opts.absolute_gap,
+        solution_limit: opts
+            .solution_limit
+            .and_then(|limit| usize::try_from(limit).ok()),
+        objective_limit: opts.objective_limit,
+        branch_rule: opts.branch_rule.map(external_math_program_branch_rule_to_native),
+        node_selection: opts
+            .node_selection
+            .map(external_math_program_node_selection_to_native),
+        ..Default::default()
+    };
+    if let Some(start) = &opts.mip_start {
+        mip_opts.mip_start = Some(canonical_mip_start(program, &compiled, start)?);
+    }
+    if let Some(priorities) = &opts.branch_priorities {
+        mip_opts.branch_priorities = Some(canonical_branch_priorities(program, &compiled, priorities)?);
+    }
+
+    let mip = solve_ipmip_with_des(compiled.problem.clone(), mip_opts);
+    let x = compiled.original_x(&mip.x);
+    let objective = objective_value(program, &x);
+    let best_bound = original_mip_best_bound(mip.best_bound, objective_offset);
+    let mip_gap = original_mip_gap(best_bound, objective);
+    let first_branch_variable = first_mip_branch_variable_name(program, &compiled, &mip.trace);
+    let incumbent_source = mip
+        .incumbent_source
+        .as_deref()
+        .map(|source| format!(", incumbent_source={source}"))
+        .unwrap_or_default();
+
+    Ok(Some(MathProgramSolution {
+        status: from_ipmip_status(mip.status),
+        x,
+        objective,
+        best_bound,
+        mip_gap,
+        nodes_explored: Some(mip.nodes_explored),
+        first_branch_variable,
+        solver_version: None,
+        iterations: None,
+        control_feedback: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        solver: external_math_program_native_mip_solver_label(method),
+        message: Some(format!(
+            "direct Rust MIP route for {method}; nodes={}, gap={:.3e}, lp_solves={}{}",
+            mip.nodes_explored, mip.gap, mip.lp_solves, incumbent_source
+        )),
+    }))
+}
+
+fn external_math_program_method_prefers_native_mip_reference(method: &str) -> bool {
+    matches!(
+        normalized_external_math_program_method(method).as_str(),
+        "milp"
+            | "scipy-milp"
+            | "scipy:milp"
+            | "rust-mip"
+            | "rust:ipmip"
+            | "des-ipmip"
+            | "bounded-enumeration"
+            | "rust-bounded-enumeration"
+    )
+}
+
+fn external_math_program_native_mip_solver_label(method: &str) -> String {
+    format!(
+        "rust:des-ipmip-for-{}",
+        normalized_external_math_program_method(method).replace(':', "-")
+    )
+}
+
+fn external_math_program_branch_rule_to_native(rule: ExternalLinearCliBranchRule) -> BranchRule {
+    match rule {
+        ExternalLinearCliBranchRule::FirstFractional => BranchRule::FirstFractional,
+        ExternalLinearCliBranchRule::MostFractional => BranchRule::MostFractional,
+    }
+}
+
+fn external_math_program_node_selection_to_native(
+    selection: ExternalLinearCliNodeSelection,
+) -> NodeSelection {
+    match selection {
+        ExternalLinearCliNodeSelection::Dfs => NodeSelection::Dfs,
+        ExternalLinearCliNodeSelection::BestBound => NodeSelection::BestBound,
+    }
+}
+
 fn solve_math_program_external_cp_sat_rust_reference(
     program: &MathProgram,
     opts: &ExternalMathProgramOptions,
@@ -22424,7 +22550,7 @@ mod tests {
     }
 
     #[test]
-    fn external_math_program_scipy_milp_bridge_keeps_dense_mip_rows() {
+    fn external_math_program_scipy_milp_alias_uses_native_rust_mip() {
         let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK
             .lock()
             .expect("lock external env");
@@ -22455,11 +22581,44 @@ mod tests {
             MathProgramStatus::Optimal,
             "solution={solution:?}"
         );
-        assert_eq!(solution.solver, "rust:bounded-enumeration");
+        assert_eq!(solution.solver, "rust:des-ipmip-for-scipy-milp");
         assert_close(solution.objective, 12.0);
         assert_close(solution.x[x], 4.0);
         assert_close(solution.x[y], 0.0);
         assert!(solution.x[x] + solution.x[y] <= 4.0 + 1e-7);
+    }
+
+    #[test]
+    fn external_math_program_unmapped_method_requires_explicit_python_bridge() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK
+            .lock()
+            .expect("lock external env");
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-math-program");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-math-program");
+        let _bridge_guard = EnvVarGuard::set("MATH_PROGRAM_EXTERNAL_PYTHON_BRIDGE", "0");
+        let _ores_bridge_guard = EnvVarGuard::set("ORES_MATH_PROGRAM_EXTERNAL_PYTHON_BRIDGE", "0");
+        let _reference_bridge_guard = EnvVarGuard::set("MATH_PROGRAM_REFERENCE_PYTHON_BRIDGE", "0");
+        let mut lp = MathProgram::new(ObjectiveSense::Max);
+        let x = lp.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
+        lp.add_constraint("limit", vec![(x, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+
+        let solution = solve_math_program_external(
+            &lp,
+            &ExternalMathProgramOptions {
+                method: Some("python-only-reference".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::NumericalError);
+        assert_eq!(solution.solver, "python-only-reference");
+        assert!(solution.message.as_deref().is_some_and(|message| {
+            message.contains("no Rust math-program route")
+                && message.contains("legacy Python bridge")
+        }));
     }
 
     #[test]

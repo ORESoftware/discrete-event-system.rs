@@ -204,6 +204,14 @@
     line-height: 1.25;
     overflow-wrap: anywhere;
   }
+  .slot .slot-health {
+    grid-column: 1 / 4;
+    color: #9fb0c7;
+    font-size: 11px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+  .slot .slot-health.over { color: #ffb4b4; }
   .surface-control {
     display: grid;
     grid-template-columns: 42px minmax(0, 1fr) 78px;
@@ -373,6 +381,11 @@
         <label for="autoEpisodeEnabled"><input id="autoEpisodeEnabled" type="checkbox" checked>Auto Episodes</label>
       </div>
       <div class="surface-control">
+        <label for="learningIntervalTicks">Learn Cadence</label>
+        <input id="learningIntervalTicks" type="number" min="1" max="100000" step="1" value="4">
+        <input id="policyTrainMaxTransitions" type="number" min="1" max="100000" step="1" value="24">
+      </div>
+      <div class="surface-control">
         <label for="simTicksPerPulse">Speed</label>
         <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="20">
         <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="20">
@@ -457,6 +470,8 @@
       <div class="metric"><span>Timing</span><b id="runtimeTiming">0ms</b></div>
       <div class="metric"><span>Main Loop</span><b id="controllerYield">idle</b></div>
       <div class="metric"><span>Input Queue</span><b id="inputQueue">0 pending</b></div>
+      <div class="metric"><span>Input Age</span><b id="controllerLatency">none</b></div>
+      <div class="metric"><span>Control Budget</span><b id="controllerBudget">100ms ok</b></div>
       <div class="row"><button id="inspectMode" type="button" aria-pressed="false">Inspect</button></div>
       <div id="slots"></div>
       <div class="row">
@@ -556,10 +571,14 @@ const liveHttp = document.getElementById("liveHttp");
 const runtimeTiming = document.getElementById("runtimeTiming");
 const controllerYield = document.getElementById("controllerYield");
 const inputQueue = document.getElementById("inputQueue");
+const controllerLatency = document.getElementById("controllerLatency");
+const controllerBudget = document.getElementById("controllerBudget");
 const inspectModeButton = document.getElementById("inspectMode");
 const learningEnabled = document.getElementById("learningEnabled");
 const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
 const autoEpisodeEnabled = document.getElementById("autoEpisodeEnabled");
+const learningIntervalTicks = document.getElementById("learningIntervalTicks");
+const policyTrainMaxTransitions = document.getElementById("policyTrainMaxTransitions");
 const simTicksPerPulse = document.getElementById("simTicksPerPulse");
 const simTicksPerPulseNumber = document.getElementById("simTicksPerPulseNumber");
 const policyAutosaveEnabled = document.getElementById("policyAutosaveEnabled");
@@ -616,6 +635,7 @@ const events = document.getElementById("events");
 const statusEl = document.getElementById("status");
 const runButton = document.getElementById("run");
 const resetMatchButton = document.getElementById("resetMatch");
+const freshMatchLink = document.getElementById("freshMatchLink");
 const exportPolicyButton = document.getElementById("exportPolicy");
 const exportPostgresPolicyButton = document.getElementById("exportPostgresPolicy");
 const exportPostgresPolicyJsonlButton = document.getElementById("exportPostgresPolicyJsonl");
@@ -655,6 +675,16 @@ let inspectedPlayerId = null;
 let lastSemanticBallAction = null;
 const LIVE_STEP_INTERVAL_MS = 100;
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
+const LIVE_ROUTE_MARKER = "/soccer/live";
+const LIVE_FRESH_MATCH_ALIASES = [
+  "/fresh",
+  "/new-match",
+  "/new_match",
+  "/reset",
+  "/soccer/live/fresh",
+  "/soccer/live/new-match",
+  "/soccer/live/new_match"
+];
 const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
 const SEMANTIC_BALL_ACTIONS = new Set([
   "pass",
@@ -949,7 +979,11 @@ function learningLabel(l) {
   const awayTargets = Number(l.awayPolicyTargetEntries ?? 0);
   const mode = l.learningEnabled === false ? "Off" : l.adversarialLearningEnabled ? "Adv" : "Solo";
   const log = l.learningLoggingEnabled === false ? " NL" : "";
-  return `${mode}${log} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
+  const interval = Math.max(1, Math.round(Number(l.learningIntervalTicks ?? state?.config?.learningIntervalTicks ?? 1)));
+  const cap = Math.max(1, Math.round(Number(l.policyTrainMaxTransitionsPerTick ?? state?.config?.policyTrainMaxTransitionsPerTick ?? 1)));
+  const deferred = Math.max(0, Math.round(Number(l.deferredRewardTransitions ?? 0)));
+  const deferredText = deferred ? ` Q${deferred}` : "";
+  return `${mode}${log} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
 }
 function ballAgentLabel(ball = state?.frame?.ball) {
   const decision = ball?.lastDecision;
@@ -1126,9 +1160,14 @@ function controllerThreadLabel(threads = state?.controllerThreads || []) {
   const accepted = threads.reduce((sum, thread) => sum + Number(thread.acceptedFrames ?? 0), 0);
   const pushed = threads.reduce((sum, thread) => sum + Number(thread.pushedFrames ?? 0), 0);
   const stale = threads.reduce((sum, thread) => sum + Number(thread.rejectedStaleFrames ?? 0), 0);
+  const debounced = threads.reduce((sum, thread) => sum + Number(thread.debouncedFrames ?? 0), 0);
+  const totalDebounce = threads.reduce((sum, thread) => sum + Number(thread.totalDebounceMs ?? 0), 0);
+  const lastDebounce = threads.reduce((max, thread) => Math.max(max, Number(thread.lastDebounceMs ?? 0)), 0);
+  const maxDebounce = threads.reduce((max, thread) => Math.max(max, Number(thread.maxDebounceMs ?? 0)), 0);
+  const avgDebounce = debounced > 0 ? totalDebounce / debounced : 0;
   const closed = threads.filter(thread => thread.closed).length;
   const closedSuffix = closed ? ` ${closed} closed` : "";
-  return `${threads.length} native P${pending} A${accepted} D${pushed} S${stale}${closedSuffix}`;
+  return `${threads.length} native P${pending} A${accepted} D${pushed} S${stale} Db${avgDebounce.toFixed(1)}/${lastDebounce.toFixed(1)}/${maxDebounce.toFixed(1)}ms${closedSuffix}`;
 }
 function liveHttpLabel(http = state?.liveHttp) {
   if (!http) return "pool ?";
@@ -1168,15 +1207,81 @@ function controllerYieldLabel(stats = state?.controllerYield) {
   const notified = Number(stats.notifiedWaits ?? 0);
   const immediate = Number(stats.immediatePendingWaits ?? 0);
   const timedOut = Number(stats.timedOutWaits ?? 0);
+  const lateWaits = Number(stats.lateWaitAttempts ?? 0);
+  const lateNotified = Number(stats.lateNotifiedWaits ?? 0);
+  const lateTimedOut = Number(stats.lateTimedOutWaits ?? 0);
   const queuedBefore = Number(stats.lastQueuedBefore ?? 0);
   const queuedAfter = Number(stats.lastQueuedAfter ?? 0);
-  const last = stats.lastImmediatePending ? "ready" : stats.lastNotified ? "notify" : "timeout";
-  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} ${last} Q${queuedBefore}->${queuedAfter}`;
+  const last = stats.lastWaitLate ? "late"
+    : stats.lastImmediatePending ? "ready"
+    : stats.lastNotified ? "notify"
+    : "timeout";
+  const avgWait = waits > 0 ? Number(stats.totalWaitMs ?? 0) / waits : 0;
+  const lastWait = Number(stats.lastWaitMs ?? 0);
+  const maxWait = Number(stats.maxWaitMs ?? 0);
+  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} L${lateWaits}/${lateNotified}/${lateTimedOut} ${last} Q${queuedBefore}->${queuedAfter} wait ${avgWait.toFixed(1)}/${lastWait.toFixed(1)}/${maxWait.toFixed(1)}ms`;
 }
 function queuedHumanInputsLabel() {
   const queued = Number(state?.queuedHumanInputs ?? 0);
   const assigned = Array.isArray(state?.controllerAssignments) ? state.controllerAssignments.length : 0;
   return `${queued} pending ${assigned}/${humanSlotCount()} assigned`;
+}
+function formatInputAgeMs(ageMs) {
+  const age = Number(ageMs);
+  if (!Number.isFinite(age) || age < 0) return "-";
+  if (age < 1) return "<1ms";
+  if (age < 1000) return `${age.toFixed(0)}ms`;
+  return `${(age / 1000).toFixed(age < 10_000 ? 1 : 0)}s`;
+}
+function consumedHumanInputAgeLabel() {
+  const ages = (state?.frame?.players || [])
+    .map(player => player?.lastDecision?.observation)
+    .filter(o => o?.humanInputPresent && o.humanInputQueueAgeMs != null)
+    .map(o => Number(o.humanInputQueueAgeMs))
+    .filter(age => Number.isFinite(age) && age >= 0);
+  if (!ages.length) return "none";
+  const latest = Math.min(...ages);
+  const oldest = Math.max(...ages);
+  const spread = oldest > latest ? ` max ${formatInputAgeMs(oldest)}` : "";
+  return `${formatInputAgeMs(latest)}${spread}`;
+}
+function controllerLatencyBudgetLabel(b = state?.controllerLatencyBudget) {
+  if (!b) return "100ms ok";
+  const budget = Number(b.tickBudgetMs ?? 100);
+  const estimated = Number(b.estimatedControlLatencyMs ?? 0);
+  const consumed = Number(b.consumedInputs ?? 0);
+  const status = b.overBudget ? "over" : "ok";
+  const queue = Number(b.maxQueueAgeMs ?? 0);
+  const debounce = Number(b.lastDebounceMs ?? 0);
+  const yieldWait = Number(b.lastYieldWaitMs ?? 0);
+  const slotBits = (Array.isArray(b.slots) ? b.slots : [])
+    .filter(slot => slot?.assigned || slot?.pending || Number(slot?.consumedInputs ?? 0) > 0)
+    .slice(0, 4)
+    .map(slot => {
+      const slotId = Number(slot.controllerSlot ?? 0);
+      const slotEstimate = Number(slot.estimatedControlLatencyMs ?? 0);
+      const over = slot.overBudget ? "!" : "";
+      const input = Number(slot.consumedInputs ?? 0) > 0 ? "i" : "";
+      return `S${slotId}:${slotEstimate.toFixed(1)}${input}${over}`;
+    });
+  const slotSuffix = slotBits.length ? ` ${slotBits.join(" ")}` : "";
+  return `${estimated.toFixed(1)}/${budget.toFixed(0)}ms ${status} C${consumed} Q${queue.toFixed(0)} Db${debounce.toFixed(1)} Y${yieldWait.toFixed(1)}${slotSuffix}`;
+}
+function slotLatencyBudget(slot, budget = state?.controllerLatencyBudget) {
+  const slots = Array.isArray(budget?.slots) ? budget.slots : [];
+  return slots.find(item => Number(item?.controllerSlot) === Number(slot)) || null;
+}
+function slotLatencyBudgetLabel(slot) {
+  const b = slotLatencyBudget(slot);
+  if (!b) return "latency pending";
+  const estimate = Number(b.estimatedControlLatencyMs ?? 0);
+  const queue = Number(b.maxQueueAgeMs ?? 0);
+  const debounce = Number(b.lastDebounceMs ?? 0);
+  const consumed = Number(b.consumedInputs ?? 0);
+  const pending = b.pending ? " pending" : "";
+  const input = consumed > 0 ? ` input${consumed}` : " idle";
+  const status = b.overBudget ? " over budget" : " ok";
+  return `${estimate.toFixed(1)}ms${status}${input}${pending} Q${queue.toFixed(0)} Db${debounce.toFixed(1)}`;
 }
 function policyAutosaveLabel(a) {
   if (!a) return "Off";
@@ -1442,7 +1547,7 @@ function agentPomdpLabel(d) {
   const controllerSlot = o.controllerSlot ?? null;
   const controlText = controllerSlot == null
     ? "AI"
-    : `H${controllerSlot}${o.humanInputPresent ? `!${o.humanInputSeq ?? ""}` : ""}`;
+    : `H${controllerSlot}${o.humanInputPresent ? `!${o.humanInputSeq ?? ""}@${formatInputAgeMs(o.humanInputQueueAgeMs)}` : ""}`;
   const options = Number(o.visiblePassOptions ?? 0);
   const passQ = Number(o.expectedPassCompletion ?? 0);
   const goalWindow = Number(o.goalAttackWindowScore ?? 0);
@@ -1712,6 +1817,7 @@ function decisionTelemetryItems(d) {
     {label: "Grid", value: gridCellLabel(o.playerGrid || s.playerGrid)},
     {label: "Facing", value: `R${facingShort(s.receiveFacing || o.receiveFacing)} A${facingShort(s.actionFacing || o.actionFacing)}`},
     {label: "Pressure", value: `${Number(o.realPressure ?? 0).toFixed(2)} / ${Number(o.perceivedPressure ?? 0).toFixed(2)}`, score: Number(o.perceivedPressure ?? 0), min: 0, max: 1},
+    {label: "Input", value: o.humanInputPresent ? `H${o.controllerSlot ?? "-"} #${o.humanInputSeq ?? "-"} ${formatInputAgeMs(o.humanInputQueueAgeMs)}` : "AI"},
     {label: "On ball", value: `${Number(o.realTimeOnBallSeconds ?? 0).toFixed(1)} / ${Number(o.perceivedTimeOnBallSeconds ?? 0).toFixed(1)}s`},
     {label: "Goal", value: `${Number(o.yardsToGoal ?? 0).toFixed(1)}y ${Number(o.opponentGoalAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
@@ -1908,6 +2014,57 @@ function receiverOpennessAt(team, position) {
   if (!Number.isFinite(nearest)) return 1;
   return clamp((nearest - 2.5) / 7.5, 0, 1);
 }
+function teamAttackDir(team) {
+  return team === "Home" ? 1 : -1;
+}
+function teamGoalY(team) {
+  const length = Number(state?.config?.fieldLengthYards || 120);
+  return team === "Home" ? length : 0;
+}
+function fieldWidthYards() {
+  return Number(state?.config?.fieldWidthYards || 80);
+}
+function clampFieldPoint(point) {
+  const width = fieldWidthYards();
+  const length = Number(state?.config?.fieldLengthYards || 120);
+  return {
+    x: clamp(Number(point?.x || 0), 0, width),
+    y: clamp(Number(point?.y || 0), 0, length)
+  };
+}
+function directiveForTeam(team, frame = state?.frame) {
+  return team === "Home" ? frame?.homeDirective : frame?.awayDirective;
+}
+function flankPolicyKind(directive) {
+  const policy = String(directive?.flankAttackPolicy || "none");
+  if (policy === "playDownFlankLowCross") return "low";
+  if (policy === "playDownFlankHighCross") return "high";
+  return "";
+}
+function flankLaneTargetsForDirective(team, crosserPosition, directive) {
+  const kind = flankPolicyKind(directive);
+  if (!kind || !crosserPosition) return [];
+  const width = fieldWidthYards();
+  const centerX = width * 0.5;
+  const dir = teamAttackDir(team);
+  const goalY = teamGoalY(team);
+  const sourceSide = Number(crosserPosition.x || 0) >= centerX ? 1 : -1;
+  const lowTargets = [
+    {point: {x: centerX + sourceSide * 2.8, y: goalY - dir * 7.0}, weight: 0.95},
+    {point: {x: centerX - sourceSide * 1.5, y: goalY - dir * 14.0}, weight: 0.72},
+    {point: {x: centerX, y: goalY - dir * 11.5}, weight: 0.62}
+  ];
+  const highTargets = [
+    {point: {x: centerX - sourceSide * 3.8, y: goalY - dir * 4.8}, weight: 0.98},
+    {point: {x: centerX - sourceSide * 5.2, y: goalY - dir * 8.2}, weight: 0.82},
+    {point: {x: centerX, y: goalY - dir * 11.5}, weight: 0.56}
+  ];
+  return (kind === "high" ? highTargets : lowTargets).map(target => ({
+    ...target,
+    kind,
+    point: clampFieldPoint(target.point)
+  }));
+}
 function passQualityForTarget(p, target, aerial = false) {
   const dist = Math.hypot(Number(target.position?.x || 0) - Number(p.position?.x || 0), Number(target.position?.y || 0) - Number(p.position?.y || 0));
   const openness = receiverOpennessAt(p.team, target.position);
@@ -2072,6 +2229,66 @@ function drawAssistantOffsideLines(r) {
     ctx.setLineDash([]);
   }
 }
+function drawFlankPolicyLanes(r) {
+  const frame = state?.frame;
+  const holderId = frame?.ball?.holder;
+  if (holderId == null) return;
+  const holder = frame.players?.find(player => player.id === holderId);
+  if (!holder) return;
+  const directive = directiveForTeam(holder.team, frame);
+  const kind = flankPolicyKind(directive);
+  if (!kind) return;
+  const width = fieldWidthYards();
+  const flankFit = Math.abs(Number(holder.position?.x || 0) - width * 0.5) / Math.max(1, width * 0.5);
+  const dir = teamAttackDir(holder.team);
+  const attackingDepth = (Number(holder.position?.y || 0) - Number(state.config.fieldLengthYards || 120) * 0.5) * dir;
+  if (flankFit < 0.48 || attackingDepth < -12) return;
+  const origin = mapPoint(holder.position, r);
+  const targets = flankLaneTargetsForDirective(holder.team, holder.position, directive);
+  if (!targets.length) return;
+  const overlap = clamp(Number(directive?.flankOverlapRunProbability ?? 0), 0, 1);
+  const baseColor = holder.team === "Home" ? "137,205,255" : "255,164,164";
+  ctx.save();
+  for (const target of targets) {
+    const to = mapPoint(target.point, r);
+    const alpha = (kind === "high" ? 0.26 : 0.22) * target.weight + overlap * 0.10;
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    if (kind === "high") {
+      const mid = {x: (origin.x + to.x) * 0.5, y: Math.min(origin.y, to.y) - 22};
+      ctx.quadraticCurveTo(mid.x, mid.y, to.x, to.y);
+      ctx.setLineDash([10, 7]);
+    } else {
+      ctx.lineTo(to.x, to.y);
+      ctx.setLineDash(target.weight < 0.8 ? [6, 5] : []);
+    }
+    ctx.strokeStyle = `rgba(${baseColor},${alpha})`;
+    ctx.lineWidth = 2.2 + target.weight * 1.7;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(to.x, to.y, kind === "high" ? 9 : 7, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${baseColor},${Math.min(0.84, alpha + 0.28)})`;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+  }
+  if (overlap > 0) {
+    const side = Number(holder.position?.x || 0) >= width * 0.5 ? 1 : -1;
+    const overlapPoint = clampFieldPoint({
+      x: holder.position.x + side * 8,
+      y: holder.position.y + dir * (10 + overlap * 12)
+    });
+    drawIntentArrow(
+      origin,
+      mapPoint(overlapPoint, r),
+      holder.team === "Home" ? "rgba(246,201,68,.62)" : "rgba(255,215,128,.62)",
+      2.4,
+      true
+    );
+  }
+  ctx.restore();
+}
 function drawSelectedVision(p, r) {
   if (!p) return;
   const origin = mapPoint(p.position, r);
@@ -2196,14 +2413,17 @@ function drawDecisionIntentTraces(r) {
     const to = mapPoint(intent.targetPoint, r);
     const isHolder = player.id === frame?.ball?.holder;
     const isSupport = intent.action === "space";
+    const isOverlap = intent.action === "overlap-run";
+    const isCross = intent.action === "flank-low-cross" || intent.action === "flank-high-cross";
     const isAerial = intent.flight === "aerial";
     const color = isHolder
-      ? (isAerial ? "rgba(246,201,68,.92)" : "rgba(255,255,255,.86)")
+      ? (isCross ? "rgba(246,201,68,.96)" : isAerial ? "rgba(246,201,68,.88)" : "rgba(255,255,255,.86)")
+      : isOverlap ? "rgba(246,201,68,.78)"
       : (player.team === "Home" ? "rgba(137,205,255,.58)" : "rgba(255,164,164,.58)");
-    drawIntentArrow(from, to, color, isHolder ? 3.2 : 2, isSupport);
-    if (intent.targetPlayer != null || isAerial) {
+    drawIntentArrow(from, to, color, isHolder ? 3.2 : isOverlap ? 2.8 : 2, isSupport || isOverlap || isAerial);
+    if (intent.targetPlayer != null || isAerial || isCross || isOverlap) {
       ctx.beginPath();
-      ctx.arc(to.x, to.y, isHolder ? 7 : 5, 0, Math.PI * 2);
+      ctx.arc(to.x, to.y, isHolder || isCross ? 7 : isOverlap ? 6 : 5, 0, Math.PI * 2);
       ctx.strokeStyle = color;
       ctx.lineWidth = isHolder ? 2.5 : 1.5;
       ctx.stroke();
@@ -2339,6 +2559,7 @@ function render() {
   drawPitch(r);
   drawPitchGridOverlay(r);
   drawAssistantOffsideLines(r);
+  drawFlankPolicyLanes(r);
   drawMovementTrails(r);
   drawSelectedVision(inspectedPlayer(), r);
   drawDecisionIntentTraces(r);
@@ -2397,6 +2618,9 @@ function render() {
   runtimeTiming.textContent = runtimeTimingLabel();
   controllerYield.textContent = controllerYieldLabel();
   inputQueue.textContent = queuedHumanInputsLabel();
+  controllerLatency.textContent = consumedHumanInputAgeLabel();
+  controllerBudget.textContent = controllerLatencyBudgetLabel();
+  updateSlotHealthRows();
   tickReward.textContent = tickRewardLabel();
   recentActions.textContent = recentActionLabel();
   recentMoments.textContent = recentMomentLabel();
@@ -2476,7 +2700,7 @@ function liveControllerAssigned() {
   return Array.isArray(state?.controllerAssignments) && state.controllerAssignments.length > 0;
 }
 function effectiveSimTicksPerPulse() {
-  return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();
+  return configuredSimTicksPerPulse();
 }
 function simSpeedLabel() {
   const configured = configuredSimTicksPerPulse();
@@ -2484,7 +2708,8 @@ function simSpeedLabel() {
   const dt = Number(state?.config?.dtSeconds ?? 0.1);
   const speed = effective * dt / (LIVE_STEP_INTERVAL_MS / 1000);
   const speedText = speed >= 10 ? speed.toFixed(0) : speed.toFixed(1);
-  return effective === configured ? `${speedText}x ${effective}t` : `${speedText}x live input`;
+  const inputText = liveControllerAssigned() ? " + input" : "";
+  return `${speedText}x ${effective}t${inputText}`;
 }
 function syncSimSpeedPair(source) {
   const min = Number(simTicksPerPulse.min);
@@ -2550,6 +2775,8 @@ function syncLearningControls() {
   syncingLearning = true;
   learningEnabled.checked = state.config.learningEnabled !== false;
   learningLoggingEnabled.checked = state.config.learningLoggingEnabled !== false;
+  learningIntervalTicks.value = String(Math.max(1, Math.round(Number(state.config.learningIntervalTicks ?? 4))));
+  policyTrainMaxTransitions.value = String(Math.max(1, Math.round(Number(state.config.policyTrainMaxTransitionsPerTick ?? 24))));
   syncingLearning = false;
 }
 function syncPolicyAutosavePair(source) {
@@ -2660,10 +2887,15 @@ function rebuildControls(assignments) {
     const keymap = document.createElement("div");
     keymap.className = "keymap";
     keymap.textContent = controllerKeymapLabel(slot);
+    const health = document.createElement("div");
+    health.className = `slot-health${slotLatencyBudget(slot)?.overBudget ? " over" : ""}`;
+    health.dataset.slot = String(slot);
+    health.textContent = slotLatencyBudgetLabel(slot);
     row.appendChild(label);
     row.appendChild(pick);
     row.appendChild(activeButton);
     row.appendChild(keymap);
+    row.appendChild(health);
     slots.appendChild(row);
   }
   if (Array.from(slotPick.options).some(o => o.value === existing)) {
@@ -2673,6 +2905,14 @@ function rebuildControls(assignments) {
   }
   activeSlot = Number(slotPick.value || 0);
   rebuildTargetPick();
+}
+function updateSlotHealthRows() {
+  slots.querySelectorAll(".slot-health").forEach(node => {
+    const slot = Number(node.dataset.slot ?? 0);
+    const budget = slotLatencyBudget(slot);
+    node.textContent = slotLatencyBudgetLabel(slot);
+    node.classList.toggle("over", !!budget?.overBudget);
+  });
 }
 function rebuildTargetPick() {
   const existing = targetPick.value;
@@ -2884,8 +3124,39 @@ function isFormEditingTarget(target) {
   const tag = String(target?.tagName || "").toLowerCase();
   return tag === "input" || tag === "select" || tag === "textarea" || tag === "button";
 }
+function normalizedPathname(pathname = window.location.pathname) {
+  const path = String(pathname || "/").replace(/\/+$/, "");
+  return path || "/";
+}
+function liveMountPrefix(pathname = window.location.pathname) {
+  const path = normalizedPathname(pathname);
+  const lower = path.toLowerCase();
+  const markerIndex = lower.indexOf(LIVE_ROUTE_MARKER);
+  if (markerIndex >= 0) return path.slice(0, markerIndex);
+  for (const alias of LIVE_FRESH_MATCH_ALIASES) {
+    if (lower.endsWith(alias)) return path.slice(0, path.length - alias.length);
+  }
+  return "";
+}
+function livePathWithMount(path, pathname = window.location.pathname) {
+  const raw = String(path || "");
+  if (!raw.startsWith("/")) return raw;
+  const prefix = liveMountPrefix(pathname);
+  if (!prefix) return raw;
+  if (raw === "/") return `${prefix}/`;
+  return `${prefix}${raw}`;
+}
+function liveApiPath(path) {
+  return livePathWithMount(path);
+}
+function liveRoutePath(path, pathname = window.location.pathname) {
+  return livePathWithMount(path, pathname);
+}
+async function fetchLive(path, options) {
+  return fetch(liveApiPath(path), options);
+}
 async function postJson(path, body) {
-  const res = await fetch(path, {
+  const res = await fetchLive(path, {
     method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify(body)
@@ -2979,7 +3250,9 @@ async function updateLearningRuntime() {
   if (syncingLearning) return;
   const response = await postJson("/api/learning", {
     learningEnabled: learningEnabled.checked,
-    learningLoggingEnabled: learningLoggingEnabled.checked
+    learningLoggingEnabled: learningLoggingEnabled.checked,
+    learningIntervalTicks: Math.max(1, Math.round(Number(learningIntervalTicks.value || 1))),
+    policyTrainMaxTransitionsPerTick: Math.max(1, Math.round(Number(policyTrainMaxTransitions.value || 1)))
   });
   state.config = response.config;
   state.learning = response.learning;
@@ -3037,7 +3310,7 @@ async function replayMomentPolicy() {
   render();
 }
 async function exportTeamPolicy() {
-  const res = await fetch("/api/team-policy");
+  const res = await fetchLive("/api/team-policy");
   if (!res.ok) throw new Error(await res.text());
   const artifact = await res.json();
   const tick = Number(artifact.summary?.ticks ?? state?.summary?.ticks ?? 0);
@@ -3083,7 +3356,7 @@ async function exportPostgresTeamPolicyJsonl() {
     sourceKind: "import",
     status: "candidate"
   };
-  const res = await fetch("/api/team-policy/postgres-export.jsonl", {
+  const res = await fetchLive("/api/team-policy/postgres-export.jsonl", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(body)
@@ -3102,7 +3375,7 @@ async function saveTeamPolicyToDisk() {
     state.learning = response.learning;
     if (response.policyProbability) state.policyProbability = response.policyProbability;
   }
-  const autosave = await fetch("/api/team-policy/autosave").then(res => res.ok ? res.json() : null);
+  const autosave = await fetchLive("/api/team-policy/autosave").then(res => res.ok ? res.json() : null);
   if (state && autosave?.autosave) state.policyAutosave = autosave.autosave;
   await refreshPolicyHistory(response.path, {quiet: true, render: false});
   statusEl.textContent = `policy saved ${response.path} history ${response.historyPath}`;
@@ -3197,7 +3470,7 @@ function downloadTextFile(filename, content, type) {
   URL.revokeObjectURL(url);
 }
 async function exportTrackingDataset() {
-  const res = await fetch("/api/tracking-dataset");
+  const res = await fetchLive("/api/tracking-dataset");
   if (!res.ok) throw new Error(await res.text());
   const dataset = await res.json();
   const lastFrame = Array.isArray(dataset.frames) && dataset.frames.length
@@ -3216,7 +3489,7 @@ async function exportTrackingDataset() {
   statusEl.textContent = `tracking exported ${dataset.frames?.length ?? 0} frames`;
 }
 async function exportTrackingJsonlDataset() {
-  const res = await fetch("/api/tracking-dataset.jsonl");
+  const res = await fetchLive("/api/tracking-dataset.jsonl");
   if (!res.ok) throw new Error(await res.text());
   const jsonl = await res.text();
   const meta = JSON.parse((jsonl.split(/\n/, 1)[0] || "{}"));
@@ -3225,7 +3498,7 @@ async function exportTrackingJsonlDataset() {
   statusEl.textContent = `tracking jsonl exported ${Number(meta.frames ?? 0)} frames`;
 }
 async function exportTrackingTemplate() {
-  const res = await fetch("/api/tracking-template");
+  const res = await fetchLive("/api/tracking-template");
   if (!res.ok) throw new Error(await res.text());
   const dataset = await res.json();
   const blob = new Blob([JSON.stringify(dataset, null, 2)], {type: "application/json"});
@@ -3240,7 +3513,7 @@ async function exportTrackingTemplate() {
   statusEl.textContent = `tracking template ${dataset.frames?.length ?? 0} frames`;
 }
 async function exportTrackingJsonlTemplate() {
-  const res = await fetch("/api/tracking-template.jsonl");
+  const res = await fetchLive("/api/tracking-template.jsonl");
   if (!res.ok) throw new Error(await res.text());
   const jsonl = await res.text();
   const meta = JSON.parse((jsonl.split(/\n/, 1)[0] || "{}"));
@@ -3301,7 +3574,7 @@ async function importTrackingFile(file) {
   render();
 }
 async function loadState() {
-  const res = await fetch("/api/state");
+  const res = await fetchLive("/api/state");
   state = await res.json();
   recentLearningTransitions = [];
   lastSemanticBallAction = null;
@@ -3328,24 +3601,20 @@ function freshMatchRequestedOnLoad() {
     || ["1", "true", "yes"].includes(normalizedNewMatch);
 }
 function normalizedFreshMatchPath(pathname) {
-  const path = String(pathname || "/").replace(/\/+$/, "").toLowerCase();
-  return path || "/";
+  const path = normalizedPathname(pathname);
+  const prefix = liveMountPrefix(pathname);
+  const unmounted = prefix && path.toLowerCase().startsWith(prefix.toLowerCase())
+    ? path.slice(prefix.length)
+    : path;
+  return (unmounted || "/").toLowerCase();
 }
 function freshMatchPathAlias(path) {
-  return [
-    "/fresh",
-    "/new-match",
-    "/new_match",
-    "/reset",
-    "/soccer/live/fresh",
-    "/soccer/live/new-match",
-    "/soccer/live/new_match"
-  ].includes(path);
+  return LIVE_FRESH_MATCH_ALIASES.includes(path);
 }
 function canonicalFreshMatchPath(pathname) {
   const path = normalizedFreshMatchPath(pathname);
-  if (path.startsWith("/soccer/live/")) return "/soccer/live";
-  if (freshMatchPathAlias(path)) return "/";
+  if (path.startsWith("/soccer/live/")) return liveRoutePath("/soccer/live", pathname);
+  if (freshMatchPathAlias(path)) return liveRoutePath("/", pathname);
   return pathname || "/";
 }
 function clearFreshMatchUrl() {
@@ -3357,7 +3626,11 @@ function clearFreshMatchUrl() {
   url.searchParams.delete("new-match");
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
+function syncLiveRouteLinks() {
+  if (freshMatchLink) freshMatchLink.href = liveRoutePath("/fresh");
+}
 async function bootLivePage() {
+  syncLiveRouteLinks();
   if (freshMatchRequestedOnLoad()) {
     await resetMatch({freshLoad: true, clearFreshUrl: true});
     return;
@@ -3563,6 +3836,11 @@ surfacePreset.addEventListener("change", () => {
   });
 });
 [learningEnabled, learningLoggingEnabled].forEach(el => {
+  el.addEventListener("change", () => {
+    updateLearningRuntime().catch(e => statusEl.textContent = e.message);
+  });
+});
+[learningIntervalTicks, policyTrainMaxTransitions].forEach(el => {
   el.addEventListener("change", () => {
     updateLearningRuntime().catch(e => statusEl.textContent = e.message);
   });

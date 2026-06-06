@@ -7,16 +7,10 @@
 //! Driver → [`run`].
 //!
 //! PORT NOTES:
-//!   * Uses the real Rust belief, POMDP/Tiger, and FactMachine modules.
-//!   * Optional Python/scipy reference via `std::process::Command` is only
-//!     attempted when `FACTMACHINE_PY` is explicitly set. The default path uses
+//!   * Uses the real Rust belief, POMDP/Tiger, and FactMachine modules with
 //!     native Rust shadow references.
 
 #![allow(dead_code)]
-
-use std::process::{Child, Command, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::des::general::belief::{brier_score, BinaryOutcome, DiscreteBelief};
 use crate::des::general::pomdp::{pomdp_exact_finite_horizon, MDPVIOptions, QMDPSolver};
@@ -25,7 +19,6 @@ use crate::des::main_factmachine::{
     default_params, run_fact_machine as run_fact_machine_model, FactMachineParams,
     FactMachineResult, MarketType, Policy, ResolutionMode,
 };
-use crate::des::observability::logger::{parse_json, JsonValue};
 
 fn run_fact_machine(params: &FactMachineParams) -> FactMachineResult {
     run_fact_machine_model(params.clone())
@@ -202,164 +195,6 @@ fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
 }
 
 // =============================================================================
-// Optional Python reference.
-// =============================================================================
-
-struct PyJson {
-    final_mean: f64,
-    final_belief: Vec<f64>,
-    mean_history: Vec<f64>,
-    thetas: Vec<f64>,
-    pwin: Vec<f64>,
-}
-
-fn get_any<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a JsonValue> {
-    names.iter().find_map(|name| value.get(name))
-}
-
-fn number_field(value: &JsonValue, names: &[&str], label: &str) -> Result<f64, String> {
-    get_any(value, names)
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| format!("missing numeric field {label}"))
-}
-
-fn number_array_field(value: &JsonValue, names: &[&str], label: &str) -> Result<Vec<f64>, String> {
-    get_any(value, names)
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| format!("missing array field {label}"))?
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            v.as_f64()
-                .ok_or_else(|| format!("{label}[{i}] must be numeric"))
-        })
-        .collect()
-}
-
-fn parse_python_reference(problem: &str, text: &str) -> Result<PyJson, String> {
-    let line = text
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| "Python reference produced no JSON output".to_string())?;
-    let root = parse_json(line.trim())?;
-    match problem {
-        "belief" => Ok(PyJson {
-            final_mean: number_field(&root, &["finalMean", "final_mean"], "finalMean")?,
-            final_belief: number_array_field(
-                &root,
-                &["finalBelief", "final_belief"],
-                "finalBelief",
-            )?,
-            mean_history: number_array_field(
-                &root,
-                &["meanHistory", "mean_history"],
-                "meanHistory",
-            )?,
-            thetas: Vec::new(),
-            pwin: Vec::new(),
-        }),
-        "pwin" => Ok(PyJson {
-            final_mean: 0.0,
-            final_belief: Vec::new(),
-            mean_history: Vec::new(),
-            thetas: number_array_field(&root, &["thetas"], "thetas")?,
-            pwin: number_array_field(&root, &["pwin", "pWin"], "pwin")?,
-        }),
-        other => Err(format!("unknown Python reference problem {other}")),
-    }
-}
-
-fn factmachine_python_timeout_ms() -> u64 {
-    std::env::var("FACTMACHINE_PY_TIMEOUT_MS")
-        .ok()
-        .or_else(|| std::env::var("PYTHON_REFERENCE_TIMEOUT_MS").ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(120_000)
-}
-
-fn wait_for_factmachine_python_output(
-    mut child: Child,
-    timeout_ms: u64,
-) -> Result<(Output, bool), String> {
-    let timeout = Duration::from_millis(timeout_ms);
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map(|output| (output, false))
-                    .map_err(|err| format!("failed to wait for Python reference: {err}"));
-            }
-            Ok(None) => {}
-            Err(err) => return Err(format!("failed to poll Python reference: {err}")),
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            return child
-                .wait_with_output()
-                .map(|output| (output, true))
-                .map_err(|err| format!("failed to collect timed-out Python reference: {err}"));
-        }
-
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn run_python(env: &[(&str, String)]) -> Result<Option<PyJson>, String> {
-    let Some(python) = std::env::var("FACTMACHINE_PY").ok() else {
-        return Ok(None);
-    };
-    let problem = env
-        .iter()
-        .find(|(k, _)| *k == "PROBLEM")
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("");
-    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("external-references")
-        .join("factmachine")
-        .join("factmachine.py");
-    let mut cmd = Command::new(python);
-    cmd.arg(&script);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    let timeout_ms = factmachine_python_timeout_ms();
-    let child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to start Python reference: {e}"))?;
-    match wait_for_factmachine_python_output(child, timeout_ms) {
-        Ok((out, timed_out)) if out.status.success() && !timed_out => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            parse_python_reference(problem, &stdout).map(Some)
-        }
-        Ok((mut out, timed_out)) => {
-            if timed_out {
-                let timeout_message = format!("Python reference timed out after {timeout_ms}ms");
-                if out.stderr.is_empty() {
-                    out.stderr = timeout_message.into_bytes();
-                } else {
-                    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    stderr.push_str("; ");
-                    stderr.push_str(&timeout_message);
-                    out.stderr = stderr.into_bytes();
-                }
-            }
-            Err(format!(
-                "Python reference exited with status {:?}: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
-        }
-        Err(e) => Err(format!("failed to run Python reference: {e}")),
-    }
-}
-
-// =============================================================================
 // Driver.
 // =============================================================================
 
@@ -434,68 +269,6 @@ pub fn run() {
             max_mean_diff < 1e-10,
             &format!("max|Δ|={:.2e}", max_mean_diff),
         );
-
-        let obs_str = obs
-            .iter()
-            .map(|(y, n)| format!("{}/{}", y, n))
-            .collect::<Vec<_>>()
-            .join(",");
-        let py = run_python(&[
-            ("PROBLEM", "belief".to_string()),
-            ("THETA_BINS", k.to_string()),
-            ("INFORMEDNESS", informedness.to_string()),
-            ("OBS", obs_str),
-        ]);
-        match py {
-            Ok(None) => println!("  SKIP    optional Python/scipy belief sidecar unavailable"),
-            Err(e) => c.check(
-                "optional Python/scipy belief sidecar runs and emits JSON",
-                false,
-                &e,
-            ),
-            Ok(Some(py)) => {
-                let d_mean = (model_ref.final_mean - py.final_mean).abs();
-                c.check(
-                    &format!(
-                        "optional Python final E[θ] matches model  model={:.8}  py={:.8}",
-                        model_ref.final_mean, py.final_mean
-                    ),
-                    d_mean < 1e-10,
-                    &format!("|Δ|={:.2e}", d_mean),
-                );
-                if py.final_belief.len() == k {
-                    let max_belief_diff = max_abs_diff(&model_ref.final_belief, &py.final_belief);
-                    c.check(
-                        "optional Python per-bin belief matches model across 21 bins",
-                        max_belief_diff < 1e-10,
-                        &format!("max|Δ|={:.2e}", max_belief_diff),
-                    );
-                } else {
-                    c.check(
-                        "optional Python final belief length matches theta grid",
-                        false,
-                        &format!("got={} expected={k}", py.final_belief.len()),
-                    );
-                }
-                if py.mean_history.len() == obs.len() + 1 {
-                    let max_mean_diff = max_abs_diff(&model_ref.mean_history, &py.mean_history);
-                    c.check(
-                        &format!(
-                            "optional Python mean trajectory matches model across {} steps",
-                            obs.len() + 1
-                        ),
-                        max_mean_diff < 1e-10,
-                        &format!("max|Δ|={:.2e}", max_mean_diff),
-                    );
-                } else {
-                    c.check(
-                        "optional Python mean-history length matches observations",
-                        false,
-                        &format!("got={} expected={}", py.mean_history.len(), obs.len() + 1),
-                    );
-                }
-            }
-        }
     }
 
     // STUDY 2.
@@ -517,39 +290,6 @@ pub fn run() {
             max_diff < 1e-10,
             &format!("max|Δ|={:.2e}", max_diff),
         );
-
-        let py = run_python(&[
-            ("PROBLEM", "pwin".to_string()),
-            ("N_VOTERS", voters.to_string()),
-        ]);
-        match py {
-            Ok(None) => println!("  SKIP    optional Python/scipy p-win sidecar unavailable"),
-            Err(e) => c.check(
-                "optional Python/scipy p-win sidecar runs and emits JSON",
-                false,
-                &e,
-            ),
-            Ok(Some(py)) => {
-                if py.thetas.len() == py.pwin.len() {
-                    let mut max_diff = 0.0_f64;
-                    for i in 0..py.thetas.len() {
-                        let model = binomial_majority_tail_recurrence(py.thetas[i], voters as i64);
-                        max_diff = f64::max(max_diff, (model - py.pwin[i]).abs());
-                    }
-                    c.check(
-                        "optional Python pYesWins matches model to 1e-10",
-                        max_diff < 1e-10,
-                        &format!("max|Δ|={:.2e}", max_diff),
-                    );
-                } else {
-                    c.check(
-                        "optional Python p-win arrays have matching lengths",
-                        false,
-                        &format!("theta={} pwin={}", py.thetas.len(), py.pwin.len()),
-                    );
-                }
-            }
-        }
     }
 
     // STUDY 3.
@@ -973,20 +713,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn factmachine_python_sidecar_wait_enforces_timeout() {
-        let child = Command::new("sleep")
-            .arg("1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn sleep");
+    fn factmachine_belief_reference_matches_log_space_reference() {
+        let states: Vec<f64> = (0..21).map(|i| i as f64 / 20.0).collect();
+        let obs = vec![(12, 20), (15, 22), (9, 19), (17, 20)];
+        let discrete = rust_discrete_belief_reference(&states, 0.6, &obs);
+        let log_space = rust_log_space_belief_reference(&states, 0.6, &obs);
 
-        let (output, timed_out) =
-            wait_for_factmachine_python_output(child, 10).expect("timeout output");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        assert!(timed_out);
-        assert!(!output.status.success());
-        assert!(stderr.is_empty());
+        assert!((discrete.final_mean - log_space.final_mean).abs() < 1e-10);
+        assert!(max_abs_diff(&discrete.final_belief, &log_space.final_belief) < 1e-10);
+        assert!(max_abs_diff(&discrete.mean_history, &log_space.mean_history) < 1e-10);
     }
 }

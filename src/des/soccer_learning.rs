@@ -798,6 +798,14 @@ fn search_soccer_tactical_genome_blend_candidates<F>(
         pressure,
         &mut visit,
     );
+    search_soccer_tactical_mutated_gp_program_candidates(
+        base,
+        &centroid,
+        weighted_summary,
+        pressure,
+        options,
+        &mut visit,
+    );
 }
 
 fn search_soccer_tactical_genome_archetype_candidates<F>(
@@ -917,6 +925,39 @@ struct SoccerTacticalGpInstruction {
     expr: SoccerTacticalGpExpr,
     scale: f64,
 }
+
+const ATTACK_SOCCER_TACTICAL_GP_GENES: [SoccerTacticalGpGene; 5] = [
+    SoccerTacticalGpGene::AttackSpacingDelta,
+    SoccerTacticalGpGene::AttackSpacingScore,
+    SoccerTacticalGpGene::AttackWidthDelta,
+    SoccerTacticalGpGene::AttackWidthScore,
+    SoccerTacticalGpGene::AttackFlankLane,
+];
+
+const DEFENSE_SOCCER_TACTICAL_GP_GENES: [SoccerTacticalGpGene; 7] = [
+    SoccerTacticalGpGene::DefenseSpacingDelta,
+    SoccerTacticalGpGene::DefenseSpacingScore,
+    SoccerTacticalGpGene::DefenseContractDelta,
+    SoccerTacticalGpGene::DefenseCompactnessScore,
+    SoccerTacticalGpGene::DefenseBallDepthScore,
+    SoccerTacticalGpGene::DefenderMidfielderPress,
+    SoccerTacticalGpGene::MidfielderPress,
+];
+
+const ATTACK_SOCCER_TACTICAL_GP_SIGNALS: [SoccerTacticalGpSignal; 4] = [
+    SoccerTacticalGpSignal::AttackWidthGap,
+    SoccerTacticalGpSignal::AttackFlankGap,
+    SoccerTacticalGpSignal::AttackSpacingGap,
+    SoccerTacticalGpSignal::Pressure,
+];
+
+const DEFENSE_SOCCER_TACTICAL_GP_SIGNALS: [SoccerTacticalGpSignal; 5] = [
+    SoccerTacticalGpSignal::DefenseContractGap,
+    SoccerTacticalGpSignal::DefenseSpacingGap,
+    SoccerTacticalGpSignal::DefenseBallGap,
+    SoccerTacticalGpSignal::PressGap,
+    SoccerTacticalGpSignal::Pressure,
+];
 
 const WIDE_FLANK_GP_PROGRAM: [SoccerTacticalGpInstruction; 4] = [
     SoccerTacticalGpInstruction {
@@ -1125,6 +1166,231 @@ fn search_soccer_tactical_gp_program_candidates<F>(
             visit(clamp_soccer_tactical_learning_weights(&candidate));
         }
     }
+}
+
+fn search_soccer_tactical_mutated_gp_program_candidates<F>(
+    base: &SoccerTacticalLearningWeights,
+    centroid: &SoccerTacticalLearningWeights,
+    weighted_summary: &SoccerTacticalLearningSummary,
+    pressure: f64,
+    options: SoccerEvolutionOptions,
+    visit: &mut F,
+) where
+    F: FnMut(SoccerTacticalLearningWeights),
+{
+    if pressure <= 1e-12 {
+        return;
+    }
+    let search_enabled = options.population_size > 1
+        || options.mutation_rate > 0.0
+        || options.mutation_scale > 0.0
+        || options.crossover_rate > 0.0
+        || options.exploration_rate > 0.0
+        || options.exploration_scale > 0.0;
+    if !search_enabled {
+        return;
+    }
+
+    let candidate_count = options.population_size.max(2).min(64);
+    let crossover_rate = options.crossover_rate.clamp(0.0, 1.0);
+    let scale_boost = 1.0
+        + options.mutation_scale.max(0.0).min(1.5) * 0.35
+        + options.exploration_scale.max(0.0).min(1.5) * 0.25;
+    for candidate_index in 0..candidate_count {
+        let mut rng = DeterministicRng::new(candidate_seed(
+            options.seed,
+            candidate_index,
+            0x67a5_1c9d_7ac7_1ca1,
+        ));
+        let mut candidate = if candidate_index % 2 == 0 || rng.next_f64() < crossover_rate {
+            centroid.clone()
+        } else {
+            base.clone()
+        };
+        seed_soccer_tactical_gp_mutation_bias(
+            &mut candidate,
+            weighted_summary,
+            pressure,
+            candidate_index,
+            scale_boost,
+        );
+
+        let program_len = 3 + rng.next_usize(4);
+        for _ in 0..program_len {
+            let instruction = random_soccer_tactical_gp_instruction(
+                weighted_summary,
+                pressure,
+                scale_boost,
+                &mut rng,
+            );
+            apply_soccer_tactical_gp_instruction(
+                &mut candidate,
+                instruction,
+                weighted_summary,
+                pressure,
+            );
+        }
+        visit(clamp_soccer_tactical_learning_weights(&candidate));
+    }
+}
+
+fn seed_soccer_tactical_gp_mutation_bias(
+    weights: &mut SoccerTacticalLearningWeights,
+    summary: &SoccerTacticalLearningSummary,
+    pressure: f64,
+    candidate_index: usize,
+    scale_boost: f64,
+) {
+    let attack_flank_gap = (1.0 - summary.mean_attack_flank_lane_score).clamp(0.0, 1.0);
+    let attack_width_gap = (1.0 - summary.mean_attack_width_score).clamp(0.0, 1.0);
+    let defense_contract_gap = (1.0 - summary.mean_defense_contract_score).clamp(0.0, 1.0);
+    let press_gap = (1.0 - summary.mean_defense_role_press_score).clamp(0.0, 1.0);
+
+    if candidate_index % 3 == 0 {
+        apply_soccer_tactical_gp_instruction(
+            weights,
+            SoccerTacticalGpInstruction {
+                gene: SoccerTacticalGpGene::AttackWidthDelta,
+                expr: SoccerTacticalGpExpr::Signal(SoccerTacticalGpSignal::AttackWidthGap),
+                scale: (0.10 + attack_width_gap * 0.16) * scale_boost,
+            },
+            summary,
+            pressure,
+        );
+        apply_soccer_tactical_gp_instruction(
+            weights,
+            SoccerTacticalGpInstruction {
+                gene: SoccerTacticalGpGene::AttackFlankLane,
+                expr: SoccerTacticalGpExpr::Blend(
+                    SoccerTacticalGpSignal::AttackFlankGap,
+                    SoccerTacticalGpSignal::AttackWidthGap,
+                    0.70,
+                ),
+                scale: (0.12 + attack_flank_gap * 0.18) * scale_boost,
+            },
+            summary,
+            pressure,
+        );
+        apply_soccer_tactical_gp_instruction(
+            weights,
+            SoccerTacticalGpInstruction {
+                gene: SoccerTacticalGpGene::DefenseContractDelta,
+                expr: SoccerTacticalGpExpr::Signal(SoccerTacticalGpSignal::DefenseContractGap),
+                scale: (0.12 + defense_contract_gap * 0.18) * scale_boost,
+            },
+            summary,
+            pressure,
+        );
+        apply_soccer_tactical_gp_instruction(
+            weights,
+            SoccerTacticalGpInstruction {
+                gene: SoccerTacticalGpGene::DefenseCompactnessScore,
+                expr: SoccerTacticalGpExpr::Product(
+                    SoccerTacticalGpSignal::DefenseContractGap,
+                    SoccerTacticalGpSignal::Pressure,
+                ),
+                scale: (0.08 + defense_contract_gap * 0.12) * scale_boost,
+            },
+            summary,
+            pressure,
+        );
+    } else if candidate_index % 3 == 1 {
+        apply_soccer_tactical_gp_instruction(
+            weights,
+            SoccerTacticalGpInstruction {
+                gene: SoccerTacticalGpGene::AttackWidthDelta,
+                expr: SoccerTacticalGpExpr::Signal(SoccerTacticalGpSignal::AttackWidthGap),
+                scale: (0.10 + attack_width_gap * 0.16) * scale_boost,
+            },
+            summary,
+            pressure,
+        );
+        apply_soccer_tactical_gp_instruction(
+            weights,
+            SoccerTacticalGpInstruction {
+                gene: SoccerTacticalGpGene::DefenderMidfielderPress,
+                expr: SoccerTacticalGpExpr::Signal(SoccerTacticalGpSignal::PressGap),
+                scale: (0.06 + press_gap * 0.10) * scale_boost,
+            },
+            summary,
+            pressure,
+        );
+    }
+}
+
+fn random_soccer_tactical_gp_instruction(
+    summary: &SoccerTacticalLearningSummary,
+    pressure: f64,
+    scale_boost: f64,
+    rng: &mut DeterministicRng,
+) -> SoccerTacticalGpInstruction {
+    let gene = random_soccer_tactical_gp_gene(summary, rng);
+    let attack_gene = soccer_tactical_gp_gene_is_attack(gene);
+    let expr = random_soccer_tactical_gp_expr(attack_gene, rng);
+    let scale = (0.05 + rng.next_f64() * 0.34) * (0.65 + pressure * 0.75) * scale_boost;
+    SoccerTacticalGpInstruction { gene, expr, scale }
+}
+
+fn random_soccer_tactical_gp_gene(
+    summary: &SoccerTacticalLearningSummary,
+    rng: &mut DeterministicRng,
+) -> SoccerTacticalGpGene {
+    let attack_pressure = ((1.0 - summary.mean_attack_width_score).clamp(0.0, 1.0) * 0.35
+        + (1.0 - summary.mean_attack_flank_lane_score).clamp(0.0, 1.0) * 0.45
+        + (1.0 - summary.mean_attack_spacing_score).clamp(0.0, 1.0) * 0.20)
+        .max(1e-12);
+    let defense_pressure = ((1.0 - summary.mean_defense_contract_score).clamp(0.0, 1.0) * 0.48
+        + (1.0 - summary.mean_defense_spacing_score).clamp(0.0, 1.0) * 0.18
+        + (1.0 - summary.mean_defense_ball_gap_score).clamp(0.0, 1.0) * 0.17
+        + (1.0 - summary.mean_defense_role_press_score).clamp(0.0, 1.0) * 0.17)
+        .max(1e-12);
+    let attack_probability = attack_pressure / (attack_pressure + defense_pressure);
+    if rng.next_f64() < attack_probability {
+        ATTACK_SOCCER_TACTICAL_GP_GENES[rng.next_usize(ATTACK_SOCCER_TACTICAL_GP_GENES.len())]
+    } else {
+        DEFENSE_SOCCER_TACTICAL_GP_GENES[rng.next_usize(DEFENSE_SOCCER_TACTICAL_GP_GENES.len())]
+    }
+}
+
+fn random_soccer_tactical_gp_expr(
+    attack_gene: bool,
+    rng: &mut DeterministicRng,
+) -> SoccerTacticalGpExpr {
+    let first = random_soccer_tactical_gp_signal(attack_gene, rng);
+    match rng.next_usize(4) {
+        0 => SoccerTacticalGpExpr::Signal(first),
+        1 => {
+            SoccerTacticalGpExpr::Product(first, random_soccer_tactical_gp_signal(attack_gene, rng))
+        }
+        2 => SoccerTacticalGpExpr::Blend(
+            first,
+            random_soccer_tactical_gp_signal(!attack_gene, rng),
+            0.25 + rng.next_f64() * 0.50,
+        ),
+        _ => SoccerTacticalGpExpr::Max(first, random_soccer_tactical_gp_signal(!attack_gene, rng)),
+    }
+}
+
+fn random_soccer_tactical_gp_signal(
+    attack_signal: bool,
+    rng: &mut DeterministicRng,
+) -> SoccerTacticalGpSignal {
+    if attack_signal {
+        ATTACK_SOCCER_TACTICAL_GP_SIGNALS[rng.next_usize(ATTACK_SOCCER_TACTICAL_GP_SIGNALS.len())]
+    } else {
+        DEFENSE_SOCCER_TACTICAL_GP_SIGNALS[rng.next_usize(DEFENSE_SOCCER_TACTICAL_GP_SIGNALS.len())]
+    }
+}
+
+fn soccer_tactical_gp_gene_is_attack(gene: SoccerTacticalGpGene) -> bool {
+    matches!(
+        gene,
+        SoccerTacticalGpGene::AttackSpacingDelta
+            | SoccerTacticalGpGene::AttackSpacingScore
+            | SoccerTacticalGpGene::AttackWidthDelta
+            | SoccerTacticalGpGene::AttackWidthScore
+            | SoccerTacticalGpGene::AttackFlankLane
+    )
 }
 
 fn apply_soccer_tactical_gp_instruction(
@@ -3189,6 +3455,15 @@ mod tests {
     }
 
     #[test]
+    fn postgres_new_sim_refresh_plan_waits_for_async_heads_without_local_buffer() {
+        let plan = soccer_postgres_new_sim_refresh_plan(false, false, true, 0, 2);
+
+        assert!(plan.refresh_from_postgres);
+        assert!(!plan.flush_pending_policy_versions);
+        assert!(plan.wait_for_async_policy_versions);
+    }
+
+    #[test]
     fn postgres_new_sim_refresh_plan_respects_resume_and_flush_opt_outs() {
         let resume_plan = soccer_postgres_new_sim_refresh_plan(true, true, true, 1, 0);
         assert!(resume_plan.refresh_from_postgres);
@@ -3613,6 +3888,67 @@ mod tests {
         assert!(candidates.iter().any(|candidate| {
             soccer_tactical_weight_search_score(candidate, &summary)
                 > soccer_tactical_weight_search_score(&base, &summary)
+        }));
+    }
+
+    #[test]
+    fn tactical_mutated_gp_candidates_search_seeded_extra_shape_space() {
+        let base = SoccerTacticalLearningWeights::default();
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.12,
+            mean_attack_flank_lane_score: 0.10,
+            mean_attack_spacing_score: 0.24,
+            mean_defense_contract_score: 0.11,
+            mean_defense_spacing_score: 0.31,
+            mean_defense_ball_gap_score: 0.38,
+            mean_defense_role_press_score: 0.34,
+            ..Default::default()
+        };
+        let pressure = soccer_tactical_search_pressure(&summary);
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.10,
+            mutation_scale: 0.45,
+            crossover_rate: 1.0,
+            exploration_rate: 0.20,
+            exploration_scale: 0.90,
+            elite_weight_floor: 0.0,
+            population_size: 12,
+            seed: 59,
+        };
+        let mut candidates = Vec::new();
+
+        search_soccer_tactical_mutated_gp_program_candidates(
+            &base,
+            &base,
+            &summary,
+            pressure,
+            options,
+            &mut |candidate| candidates.push(candidate),
+        );
+
+        assert_eq!(candidates.len(), options.population_size);
+        assert!(candidates.iter().all(|candidate| {
+            candidate.attack_flank_lane_weight <= 2.2
+                && candidate.defense_contract_delta_weight <= 2.4
+                && candidate.defender_midfielder_press_weight <= 1.6
+                && candidate.midfielder_press_weight <= 1.6
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.attack_width_delta_weight > base.attack_width_delta_weight
+                && candidate.attack_flank_lane_weight > base.attack_flank_lane_weight
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.defense_contract_delta_weight > base.defense_contract_delta_weight
+                && candidate.defense_compactness_score_weight
+                    > base.defense_compactness_score_weight
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.attack_flank_lane_weight > base.attack_flank_lane_weight
+                && candidate.defense_contract_delta_weight > base.defense_contract_delta_weight
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.defender_midfielder_press_weight > base.defender_midfielder_press_weight
+                || candidate.midfielder_press_weight > base.midfielder_press_weight
         }));
     }
 

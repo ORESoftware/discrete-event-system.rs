@@ -139,9 +139,12 @@ enabled, it also imports the returned `learnedParams` as a new
 `des_soccer_learning_policy_versions` row with `source_kind = 'import'`; stale
 remote results are archived instead of replacing a newer active policy.
 
-For database-fresh tactical weights between remote runs, submit smaller des-rs
-requests and keep `SOCCER_SERVER_RESUME_POSTGRES_POLICY=true` and
-`SOCCER_SERVER_IMPORT_POSTGRES_POLICY=true` enabled. Each request reloads the
-latest active Postgres policy before payload construction, then the import step
-publishes the returned MDP/POMDP, neural, and tactical-learning weights for the
-next local or des-rs request.
+For database-fresh tactical weights between remote runs, keep
+`SOCCER_SERVER_RESUME_POSTGRES_POLICY=true` and
+`SOCCER_SERVER_IMPORT_POSTGRES_POLICY=true` enabled. When a Postgres URL is
+configured, the Rust server adapter defaults to one episode per des-rs request
+so each request reloads the latest active Postgres policy before payload
+construction, then imports the returned MDP/POMDP, neural, and
+tactical-learning weights for the next local or des-rs request. Set
+`SOCCER_SERVER_REQUEST_GAMES` only when you want larger remote batches for
+throughput.

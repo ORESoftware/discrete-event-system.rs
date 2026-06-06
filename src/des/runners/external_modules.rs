@@ -316,9 +316,9 @@ fn do_register() -> Result<(), String> {
     register_external_module(ExternalProgramModule {
         id: COMPUTER_NETWORK_FEL_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
-        description: "Dependency-free Python FEL-style packet-network reference; consumes the same computer-network JSON model spec as the internal registry.".to_string(),
-        source_path: "external-references/computer-network/network_fel_reference.py".to_string(),
-        interpreter: python3(),
+        description: "Rust source-only FEL-style packet-network reference; consumes the same computer-network JSON model spec as the internal registry.".to_string(),
+        source_path: "src/bin/computer_network_reference.rs".to_string(),
+        interpreter: rust_cargo(),
         default_params: params(&[("builtin", s("bottleneck-lab"))]),
         timeout_ms: None,
         max_buffer_bytes: None,
@@ -364,9 +364,9 @@ fn do_register() -> Result<(), String> {
     register_external_module(ExternalProgramModule {
         id: TRAFFIC_FEL_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
-        description: "Dependency-free Python Future Event List traffic reference for model-spec traffic flows and shared source/sink scheduled trips.".to_string(),
-        source_path: "external-references/traffic/fel_traffic_reference.py".to_string(),
-        interpreter: python3(),
+        description: "Rust source-only traffic FEL reference for shared source/sink scheduled trips using the crate-native smart traffic simulator.".to_string(),
+        source_path: "src/bin/traffic_fel_reference.rs".to_string(),
+        interpreter: rust_cargo(),
         default_params: ExternalModuleParams::new(),
         timeout_ms: None,
         max_buffer_bytes: None,
@@ -405,7 +405,12 @@ mod tests {
                 COMPUTER_NETWORK_REFERENCE_ID,
                 "src/bin/computer_network_reference.rs",
             ),
+            (
+                COMPUTER_NETWORK_FEL_REFERENCE_ID,
+                "src/bin/computer_network_reference.rs",
+            ),
             (IP_MIP_REFERENCE_ID, "src/bin/ip_mip_reference.rs"),
+            (TRAFFIC_FEL_REFERENCE_ID, "src/bin/traffic_fel_reference.rs"),
         ] {
             let module = get_external_module(module_id).expect("registered module");
 

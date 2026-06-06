@@ -5268,8 +5268,11 @@ impl Default for MathProgramSolveOptions {
 /// `cbc-cli`, `clp-cli`, `soplex-cli`, `qsopt-ex-cli`, `lp-solve-cli`, and
 /// `lindo-cli` use the Rust `external_linear_cli` adapter for LP/MIP models.
 /// When `method` is omitted for linear LP/MIP models, the facade defaults to
-/// the Rust-native `highs-cli` adapter. Python remains the fallback bridge for
-/// explicit SciPy, OR-Tools, nonlinear oracles, and external API bindings.
+/// the Rust-native `highs-cli` adapter. Continuous QP/QCP defaults and legacy
+/// SciPy/SLSQP names use the native Rust quadratic reference unless a Python
+/// executable or script is explicitly provided.
+/// Python remains the fallback bridge for explicit OR-Tools, nonlinear oracles,
+/// and external API bindings that do not have a Rust route.
 /// Compatibility HiGHS, GLPK, SCIP, CBC, CLP, SoPlex, QSopt_ex, and lp_solve
 /// method names use the Rust CLI adapter for LP/MIP models unless a Python
 /// executable or script is explicitly provided.
@@ -18406,6 +18409,31 @@ mod tests {
         BranchRule, ConcreteLpRelaxationAlgorithm, LpRelaxationAlgorithm, TraceAction,
     };
     use std::process::{Command, Stdio};
+    use std::sync::Mutex;
+
+    static MATH_PROGRAM_EXTERNAL_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn assert_close(a: f64, b: f64) {
         assert!((a - b).abs() <= 1e-6, "left={a}, right={b}");
@@ -21838,6 +21866,11 @@ mod tests {
 
     #[test]
     fn external_math_program_default_continuous_qp_uses_rust_reference_without_python() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK
+            .lock()
+            .expect("lock external env");
+        let _python_bin_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-qp");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-qp");
         let mut qp = MathProgram::new(ObjectiveSense::Min);
         let x = qp
             .add_continuous_var("x", -2.0, Some(0.0), Some(5.0))
@@ -21860,6 +21893,11 @@ mod tests {
 
     #[test]
     fn external_math_program_default_continuous_qcp_uses_rust_reference_without_python() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK
+            .lock()
+            .expect("lock external env");
+        let _python_bin_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-qcp");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-qcp");
         let mut qcp = MathProgram::new(ObjectiveSense::Min);
         let x = qcp
             .add_continuous_var("x", -1.0, Some(0.0), Some(5.0))

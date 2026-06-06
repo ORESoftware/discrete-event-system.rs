@@ -52,6 +52,7 @@ use super::external_program::{
     repo_root_from_runner, run_external_module, ExternalModuleParams, ExternalProgramResult,
     ParamValue,
 };
+use super::validate_computer_network::problem_to_json;
 
 const ENABLE_EXTERNAL_REFERENCES_ENV: &str = "COMPARE_EXTERNAL_FEL_ENABLE_EXTERNAL_REFERENCES";
 
@@ -300,7 +301,7 @@ fn compare_traffic() -> Vec<EngineReport> {
     let mut reports: Vec<EngineReport> = if external_fel_references_enabled() {
         vec![
             run_traffic_external(
-                "Python traffic FEL",
+                "Rust traffic FEL",
                 TRAFFIC_FEL_REFERENCE_ID,
                 &input_path_str,
                 &internal,
@@ -324,7 +325,7 @@ fn compare_traffic() -> Vec<EngineReport> {
             skipped_external_reference_report(
                 "traffic",
                 "five-intersection-scheduled-trips",
-                "Python traffic FEL",
+                "Rust traffic FEL",
                 &input_path_str,
             ),
             skipped_external_reference_report(
@@ -409,9 +410,7 @@ fn skipped_external_reference_report(
         checks: vec![check_row(
             "external reference disabled by default",
             true,
-            format!(
-                "set {ENABLE_EXTERNAL_REFERENCES_ENV}=1 to run Python-backed external references"
-            ),
+            format!("set {ENABLE_EXTERNAL_REFERENCES_ENV}=1 to run external references"),
         )],
         notes: vec![
             "Rust internal scenario ran; external reference process was not spawned".to_string(),
@@ -588,36 +587,10 @@ fn compare_computer_network() -> Vec<EngineReport> {
     let mut reports: Vec<EngineReport> = Vec::new();
     for (name, problem) in scenarios {
         validate_computer_network_problem(&problem).expect("invalid computer-network problem");
-        let input = JsonValue::Object(vec![
-            (
-                "$schema".to_string(),
-                JsonValue::String("des/model-spec/v1".to_string()),
-            ),
-            (
-                "model".to_string(),
-                JsonValue::String("computer-network".to_string()),
-            ),
-            (
-                "description".to_string(),
-                JsonValue::String(format!("{name} shared source/sink packet-flow comparison")),
-            ),
-            // PORT NOTE: the problem is run from the in-memory builder; we do not
-            // round-trip it through JSON (no Serialize for ComputerNetworkProblem).
-            (
-                "parameters".to_string(),
-                JsonValue::Object(vec![(
-                    "problem".to_string(),
-                    JsonValue::String(name.to_string()),
-                )]),
-            ),
-            (
-                "runtime".to_string(),
-                JsonValue::Object(vec![("verbose".to_string(), JsonValue::Bool(false))]),
-            ),
-        ]);
+        let input = problem_to_json(&problem);
         let input_path = out_dir().join(format!("computer-network-{name}.json"));
         let output_path =
-            out_dir().join(format!("computer-network-{name}-python-fel-reference.json"));
+            out_dir().join(format!("computer-network-{name}-rust-fel-reference.json"));
         let _ = fs::write(&input_path, input.to_string_pretty(2));
 
         let internal = run_computer_network_simulation(&problem);
@@ -625,7 +598,7 @@ fn compare_computer_network() -> Vec<EngineReport> {
             reports.push(skipped_external_reference_report(
                 "computer-network",
                 name,
-                "Python computer-network FEL",
+                "Rust computer-network FEL",
                 &input_path.display().to_string(),
             ));
             continue;
@@ -652,7 +625,7 @@ fn compare_computer_network() -> Vec<EngineReport> {
                 reports.push(EngineReport {
                     domain: "computer-network".to_string(),
                     scenario: name.to_string(),
-                    engine: "Python computer-network FEL".to_string(),
+                    engine: "Rust computer-network FEL".to_string(),
                     status: "skipped".to_string(),
                     input_path: input_path.display().to_string(),
                     output_path: Some(output_path.display().to_string()),
@@ -668,7 +641,7 @@ fn compare_computer_network() -> Vec<EngineReport> {
             reports.push(EngineReport {
                 domain: "computer-network".to_string(),
                 scenario: name.to_string(),
-                engine: "Python computer-network FEL".to_string(),
+                engine: "Rust computer-network FEL".to_string(),
                 status: "failed".to_string(),
                 input_path: input_path.display().to_string(),
                 output_path: Some(output_path.display().to_string()),
@@ -691,7 +664,7 @@ fn compare_computer_network() -> Vec<EngineReport> {
         reports.push(EngineReport {
             domain: "computer-network".to_string(),
             scenario: name.to_string(),
-            engine: "Python computer-network FEL".to_string(),
+            engine: "Rust computer-network FEL".to_string(),
             status: if all {
                 "passed".to_string()
             } else {
@@ -1466,6 +1439,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn computer_network_comparison_input_is_full_problem_json() {
+        let problem = build_default_computer_network_problem();
+        let input = problem_to_json(&problem);
+
+        assert!(input.get("nodes").and_then(JsonValue::as_array).is_some());
+        assert!(input.get("links").and_then(JsonValue::as_array).is_some());
+        assert!(input.get("flows").and_then(JsonValue::as_array).is_some());
+        assert!(input
+            .get("durationMs")
+            .and_then(JsonValue::as_f64)
+            .is_some());
+        assert!(input.get("parameters").is_none());
+    }
+
+    #[test]
     fn external_fel_reference_flag_requires_explicit_enable_value() {
         for value in ["1", "true", "TRUE", " yes ", "y", "on"] {
             assert!(
@@ -1477,7 +1465,7 @@ mod tests {
         for value in ["", "0", "false", "no", "off", "python", "auto", "fallback"] {
             assert!(
                 !external_fel_reference_flag_value_enabled(value),
-                "{value:?} should keep external Python references disabled"
+                "{value:?} should keep external references disabled"
             );
         }
     }

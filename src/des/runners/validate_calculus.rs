@@ -7,10 +7,6 @@
 //! driver becomes [`run`].
 //!
 //! ## PORT NOTE
-//!   * `execFileSync(python, [script], {env})` (optional scipy sidecar) →
-//!     [`std::process::Command`]; the sidecar is only attempted when
-//!     `CALCULUS_PY` is set. Missing env stays Rust-only/skip, while enabled
-//!     references must run and emit valid JSON.
 //!   * `richardsonDerivative` is not present in the Rust `expr` module, so a
 //!     faithful local copy ([`richardson_derivative`]) is provided.
 //!   * `toFunction` lives in [`crate::des::general::equation_to_stations`]; the
@@ -19,11 +15,6 @@
 //!   * `process.exit(code)` → returned exit code.
 
 #![allow(dead_code)]
-
-use std::path::PathBuf;
-use std::process::{Child, Command, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::des::general::equation_to_stations::{
     build_field1d, build_ode_system, solve_poisson2d, to_function, Bc, Field1DFamily,
@@ -34,11 +25,10 @@ use crate::des::general::ode::{RK4Integrator, IVP};
 use crate::des::general::quadrature::{
     AdaptiveSimpsonRule, GaussLegendreRule, Integrand1D, SimpsonRule, TrapezoidRule,
 };
-use crate::des::observability::logger::{parse_json, JsonValue};
 use crate::des::shared::transform::Transform;
 
 // -----------------------------------------------------------------------------
-// Local numerics + optional scipy bridge.
+// Local numerics.
 // -----------------------------------------------------------------------------
 
 /// PORT NOTE: faithful copy of `expr.RichardsonDerivative` (five-point
@@ -49,104 +39,6 @@ fn richardson_derivative<F: Fn(f64) -> f64>(f: F, x: f64) -> f64 {
     let d1 = (f(x + h) - f(x - h)) / (2.0 * h);
     let d2 = (f(x + h / 2.0) - f(x - h / 2.0)) / h;
     (4.0 * d2 - d1) / 3.0
-}
-
-fn root() -> PathBuf {
-    match std::env::var("REPO_ROOT") {
-        Ok(r) => PathBuf::from(r),
-        Err(_) => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    }
-}
-
-fn calculus_python_timeout_ms() -> u64 {
-    std::env::var("CALCULUS_PY_TIMEOUT_MS")
-        .ok()
-        .or_else(|| std::env::var("PYTHON_REFERENCE_TIMEOUT_MS").ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(120_000)
-}
-
-fn wait_for_calculus_python_output(
-    mut child: Child,
-    timeout_ms: u64,
-) -> Result<(Output, bool), String> {
-    let timeout = Duration::from_millis(timeout_ms);
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map(|output| (output, false))
-                    .map_err(|err| format!("failed to wait for optional scipy sidecar: {err}"));
-            }
-            Ok(None) => {}
-            Err(err) => return Err(format!("failed to poll optional scipy sidecar: {err}")),
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            return child
-                .wait_with_output()
-                .map(|output| (output, true))
-                .map_err(|err| {
-                    format!("failed to collect timed-out optional scipy sidecar: {err}")
-                });
-        }
-
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-/// `runPython(env)` — runs the optional scipy sidecar and parses the last stdout line.
-fn run_python(extra_env: &[(&str, String)]) -> Result<Option<JsonValue>, String> {
-    let Some(python) = std::env::var("CALCULUS_PY").ok() else {
-        return Ok(None);
-    };
-    let script = root()
-        .join("external-references")
-        .join("calculus")
-        .join("calculus.py");
-    let mut cmd = Command::new(&python);
-    cmd.arg(&script);
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    let timeout_ms = calculus_python_timeout_ms();
-    let child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to start optional scipy sidecar: {e}"))?;
-    let (mut out, timed_out) = wait_for_calculus_python_output(child, timeout_ms)?;
-    if timed_out {
-        let timeout_message = format!("optional scipy sidecar timed out after {timeout_ms}ms");
-        if out.stderr.is_empty() {
-            out.stderr = timeout_message.into_bytes();
-        } else {
-            let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            stderr.push_str("; ");
-            stderr.push_str(&timeout_message);
-            out.stderr = stderr.into_bytes();
-        }
-    }
-    if !out.status.success() {
-        return Err(format!(
-            "optional scipy sidecar exited with status {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let last = stdout
-        .trim()
-        .lines()
-        .last()
-        .ok_or_else(|| "optional scipy sidecar produced no JSON output".to_string())?
-        .to_string();
-    parse_json(&last)
-        .map(Some)
-        .map_err(|e| format!("failed to parse optional scipy sidecar JSON: {e}"))
 }
 
 // -----------------------------------------------------------------------------
@@ -226,10 +118,6 @@ impl Counter {
     }
 }
 
-fn jget(v: &JsonValue, key: &str) -> Option<f64> {
-    v.get(key).and_then(|x| x.as_f64())
-}
-
 const PI: f64 = std::f64::consts::PI;
 
 /// `main` — returns the exit code (0 = no failures).
@@ -284,22 +172,6 @@ pub fn run() -> i32 {
         (ref_ts - ref_closed).abs() < 1e-12,
         Some(format!("|Δ|={}", to_exp((ref_ts - ref_closed).abs(), 2))),
     );
-    match run_python(&[("PROBLEM", "quad".to_string())]) {
-        Ok(Some(py)) => {
-            let v = jget(&py, "value").unwrap_or(f64::NAN);
-            c.check(
-                "optional scipy.integrate.quad agrees with adaptive Simpson",
-                (v - ref_ts).abs() < 1e-10,
-                Some(format!("|Δ|={}", to_exp((v - ref_ts).abs(), 2))),
-            );
-        }
-        Ok(None) => println!("  SKIP    optional scipy quad sidecar unavailable (set CALCULUS_PY)"),
-        Err(e) => c.check(
-            "optional scipy quad sidecar runs and emits JSON",
-            false,
-            Some(e),
-        ),
-    }
     let trap = TrapezoidRule::new(64)
         .transform(Integrand1D::new(integrand, a, b))
         .value;
@@ -360,22 +232,6 @@ pub fn run() -> i32 {
             (station_y - 1.0).abs() < 5e-6,
             Some(format!("|Δ| = {}", to_exp((station_y - 1.0).abs(), 2))),
         );
-        match run_python(&[("PROBLEM", "ode".to_string()), ("T_END", js_num(t1))]) {
-            Ok(Some(sci)) => {
-                let y_at = jget(&sci, "y_at_t1").unwrap_or(f64::NAN);
-                c.check(
-                    "optional scipy DOP853 sidecar vs cos(4π) = 1",
-                    (y_at - 1.0).abs() < 1e-12,
-                    Some(format!("|Δ| = {}", to_exp((y_at - 1.0).abs(), 2))),
-                );
-            }
-            Ok(None) => println!("  SKIP    optional scipy DOP853 sidecar unavailable"),
-            Err(e) => c.check(
-                "optional scipy DOP853 sidecar runs and emits JSON",
-                false,
-                Some(e),
-            ),
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -468,39 +324,6 @@ pub fn run() -> i32 {
             (btcs_peak - expected_peak).abs() < 5e-2,
             Some(format!("peak={}", fixed(btcs_peak, 6))),
         );
-        match run_python(&[
-            ("PROBLEM", "pde-heat".to_string()),
-            ("N", js_num(n as f64)),
-            ("ALPHA", js_num(alpha)),
-            ("T_END", js_num(t_end)),
-        ]) {
-            Ok(Some(sci)) => {
-                let final_values = sci
-                    .get("final_values")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut err_sci = 0.0_f64;
-                for i in 0..n {
-                    let sv = final_values
-                        .get(i)
-                        .and_then(|x| x.as_f64())
-                        .unwrap_or(f64::NAN);
-                    err_sci = err_sci.max((o1.final_values[i] - sv).abs());
-                }
-                c.check(
-                    "FTCS station-net ≡ optional scipy.LSODA sidecar on same FD spatial discretisation",
-                    err_sci < 5e-3,
-                    Some(format!("max|Δ|={}", to_exp(err_sci, 3))),
-                );
-            }
-            Ok(None) => println!("  SKIP    optional scipy LSODA sidecar unavailable"),
-            Err(e) => c.check(
-                "optional scipy LSODA sidecar runs and emits JSON",
-                false,
-                Some(e),
-            ),
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -620,32 +443,6 @@ pub fn run() -> i32 {
             (r_s.iterations as f64) < r_j.iterations as f64 * 0.1,
             None,
         );
-        match run_python(&[
-            ("PROBLEM", "poisson".to_string()),
-            ("N", js_num(n as f64)),
-            ("TOL", js_num(tol)),
-        ]) {
-            Ok(Some(sci)) => {
-                let sci_iters = jget(&sci, "iterations").unwrap_or(f64::NAN);
-                c.check(
-                    "station Jacobi iteration count == optional scipy sidecar iteration count",
-                    r_j.iterations as f64 == sci_iters,
-                    Some(format!("{} vs {}", r_j.iterations, js_num(sci_iters))),
-                );
-                let sci_err = jget(&sci, "max_err_vs_analytical").unwrap_or(f64::NAN);
-                c.check(
-                    "station Jacobi maxErr ≡ optional scipy sidecar maxErr",
-                    (err_j - sci_err).abs() < 1e-12,
-                    Some(format!("|Δ|={}", to_exp((err_j - sci_err).abs(), 2))),
-                );
-            }
-            Ok(None) => println!("  SKIP    optional scipy Jacobi sidecar unavailable"),
-            Err(e) => c.check(
-                "optional scipy Jacobi sidecar runs and emits JSON",
-                false,
-                Some(e),
-            ),
-        }
     }
 
     println!("\n=== Summary: {} passed, {} failed ===", c.pass, c.fail);
@@ -661,20 +458,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn calculus_python_sidecar_wait_enforces_timeout() {
-        let child = Command::new("sleep")
-            .arg("1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn sleep");
+    fn calculus_richardson_derivative_matches_symbolic_reference() {
+        let ast = parse("sin(x) * cos(x)");
+        let f = to_function(&ast, &["x".to_string()]);
+        let df = to_function(&diff(&ast, "x"), &["x".to_string()]);
+        let x = 0.4;
 
-        let (output, timed_out) =
-            wait_for_calculus_python_output(child, 10).expect("timeout output");
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let numerical = richardson_derivative(|xx| f(&[xx]), x);
+        let symbolic = df(&[x]);
 
-        assert!(timed_out);
-        assert!(!output.status.success());
-        assert!(stderr.is_empty());
+        assert!((numerical - symbolic).abs() < 1e-7);
     }
 }

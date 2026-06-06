@@ -1602,6 +1602,10 @@ pub struct SoccerNearestDefenderContext {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerDecisionContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_source_frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_tracking_source_frame_id: Option<String>,
     #[serde(default)]
     pub actor_position: Vec2,
     #[serde(default)]
@@ -19091,6 +19095,11 @@ fn attacking_overload_profile(snapshot: &WorldSnapshot, team: Team) -> Attacking
     let corridor_center_x = focus.x * 0.68 + goal_x * 0.32;
     let corridor_half_width = (18.0 + snapshot.field_width * 0.12).clamp(20.0, 30.0);
     let forward_depth = if loose_long_ball { 50.0 } else { 44.0 };
+    let defender_forward_depth = if loose_long_ball {
+        18.0
+    } else {
+        forward_depth + 5.0
+    };
     let support_trailer_yards = if loose_long_ball { 14.0 } else { 7.0 };
 
     let in_threat_lane = |position: Vec2| {
@@ -19116,7 +19125,7 @@ fn attacking_overload_profile(snapshot: &WorldSnapshot, team: Team) -> Attacking
         } else {
             let forward = (position.y - focus.y) * dir;
             if forward >= -1.5
-                && forward <= forward_depth + 5.0
+                && forward <= defender_forward_depth
                 && (position.x - corridor_center_x).abs() <= corridor_half_width + 4.0
             {
                 defenders += 1;
@@ -20355,6 +20364,8 @@ fn soccer_decision_context_for(
         defending_team_speed_yps,
         attacking_team_acceleration_yps2,
         defending_team_acceleration_yps2,
+        tracking_source_frame_id: None,
+        next_tracking_source_frame_id: None,
     }
 }
 
@@ -23296,6 +23307,13 @@ pub struct SoccerTrackingDataset {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerTrackingFrame {
+    #[serde(
+        default,
+        alias = "frameId",
+        alias = "videoFrameId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_frame_id: Option<String>,
     #[serde(default)]
     pub tick: u64,
     #[serde(default)]
@@ -36199,6 +36217,7 @@ impl SoccerRealtimeSession {
 fn tracking_frame_from_match(sim: &SoccerMatch) -> SoccerTrackingFrame {
     let (ball_action, action_player) = tracking_frame_action_from_match(sim);
     SoccerTrackingFrame {
+        source_frame_id: None,
         tick: sim.tick,
         clock_seconds: sim.clock_seconds,
         ball_position: sim.ball.position,
@@ -38477,6 +38496,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
         config: config.clone(),
         frames: vec![
             SoccerTrackingFrame {
+                source_frame_id: None,
                 tick: 0,
                 clock_seconds: 0.0,
                 ball_position: Vec2::new(40.0, 70.0),
@@ -38544,6 +38564,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                 ],
             },
             SoccerTrackingFrame {
+                source_frame_id: None,
                 tick: 1,
                 clock_seconds: config.dt_seconds,
                 ball_position: Vec2::new(42.8, 77.6),
@@ -38659,7 +38680,7 @@ fn tracking_import_format(request: &SoccerTrackingImportRequest) -> String {
 /// `player_id`, `team`, `role`, and player position columns. Position can be
 /// provided as pitch yards (`x`, `y`), normalized footage coordinates
 /// (`x_norm`, `y_norm`), or pixels (`pixel_x`, `pixel_y`) with image dimensions.
-/// Optional columns include `clock_seconds`, `name`, `shirt`, `vx`, `vy`,
+/// Optional columns include `source_frame_id`, `frame_id`, `clock_seconds`, `name`, `shirt`, `vx`, `vy`,
 /// `ax`, `ay`, `jx`, `jy`, `facing`, `receive_facing`, `action_facing`,
 /// `home_x`, `home_y`, `home_x_norm`, `home_y_norm`, skill columns such as
 /// `top_speed`, `dribbling`, `passing_completion_rate`, `crossing_left`, and
@@ -38690,6 +38711,31 @@ pub fn soccer_tracking_dataset_from_csv(
         let builder = builders
             .entry(tick)
             .or_insert_with(|| TrackingCsvFrameBuilder::new(tick));
+        if let Some(source_frame_id) = csv_optional(
+            row,
+            &header_map,
+            &[
+                "source_frame_id",
+                "sourceframeid",
+                "frame_id",
+                "frameid",
+                "video_frame_id",
+                "videoframeid",
+            ],
+        ) {
+            let source_frame_id = source_frame_id.trim();
+            if !source_frame_id.is_empty() {
+                match builder.source_frame_id.as_deref() {
+                    Some(existing) if existing != source_frame_id => {
+                        return Err(format!(
+                            "tracking csv line {line_no} has source frame id `{source_frame_id}` but tick {tick} already used `{existing}`"
+                        ));
+                    }
+                    None => builder.source_frame_id = Some(source_frame_id.to_string()),
+                    _ => {}
+                }
+            }
+        }
         if let Some(clock) = csv_optional_f64(
             row,
             &header_map,
@@ -38990,6 +39036,7 @@ pub fn soccer_tracking_dataset_from_csv(
     let frames = builders
         .into_values()
         .map(|builder| SoccerTrackingFrame {
+            source_frame_id: builder.source_frame_id,
             tick: builder.tick,
             clock_seconds: builder
                 .clock_seconds
@@ -39063,7 +39110,7 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
                 after.score_away,
                 true,
             );
-            let decision_context = soccer_decision_context_for(
+            let mut decision_context = soccer_decision_context_for(
                 player.id,
                 player.team,
                 &decision.action,
@@ -39071,6 +39118,8 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
                 &before,
                 &after,
             );
+            decision_context.tracking_source_frame_id = pair[0].source_frame_id.clone();
+            decision_context.next_tracking_source_frame_id = pair[1].source_frame_id.clone();
             let before_pos = before.player_position(player.id).unwrap_or(player.position);
             let after_pos = after.player_position(player.id).unwrap_or(before_pos);
             transitions.push(SoccerLearningTransition {
@@ -40027,6 +40076,7 @@ fn tracking_ball_jerk_at(frames: &[SoccerTrackingFrame], idx: usize, config: &Ma
 #[derive(Clone, Debug)]
 struct TrackingCsvFrameBuilder {
     tick: u64,
+    source_frame_id: Option<String>,
     clock_seconds: Option<f64>,
     ball_position: Option<Vec2>,
     ball_velocity: Option<Vec2>,
@@ -40048,6 +40098,7 @@ impl TrackingCsvFrameBuilder {
     fn new(tick: u64) -> Self {
         TrackingCsvFrameBuilder {
             tick,
+            source_frame_id: None,
             clock_seconds: None,
             ball_position: None,
             ball_velocity: None,
@@ -41699,7 +41750,7 @@ fn soccer_moment_replay_transition(
         .filter(|reward| reward.is_finite())
         .unwrap_or(0.0);
     let reward = marker_reward + base_reward * reward_scale;
-    let decision_context = soccer_decision_context_for(
+    let mut decision_context = soccer_decision_context_for(
         player_id,
         player.team,
         &action,
@@ -41707,6 +41758,8 @@ fn soccer_moment_replay_transition(
         &before,
         &after,
     );
+    decision_context.tracking_source_frame_id = before_frame.source_frame_id.clone();
+    decision_context.next_tracking_source_frame_id = after_frame.source_frame_id.clone();
     let before_pos = before.player_position(player_id).unwrap_or(player.position);
     let after_pos = after.player_position(player_id).unwrap_or(before_pos);
 
@@ -44513,7 +44566,10 @@ fn ball_velocity_after_resistance(
     if speed <= 0.0 || dt_seconds <= 0.0 {
         return velocity;
     }
-    let linear_deceleration = speed * linear_drag_per_tick.clamp(0.0, 0.95) / dt_seconds;
+    let linear_drag = linear_drag_per_tick.clamp(0.0, 0.95);
+    let reference_dt = DEFAULT_DT_SECONDS.max(1e-6);
+    let linear_retention = (1.0 - linear_drag).powf((dt_seconds / reference_dt).max(0.0));
+    let linear_speed_loss = speed * (1.0 - linear_retention);
     let air_deceleration = air_resistance.clamp(0.0, 0.10) * speed * speed;
     let rolling_contact = if altitude_yards <= BALL_ROLLING_ALTITUDE_YARDS {
         1.0
@@ -44526,7 +44582,7 @@ fn ball_velocity_after_resistance(
     let grass_deceleration = grass_resistance_yps2.clamp(0.0, 5.0)
         * (1.0 + low_speed_grass_bonus + high_speed_turf_shear + skidding_grass_bonus)
         * rolling_contact;
-    let speed_loss = (linear_deceleration + air_deceleration + grass_deceleration) * dt_seconds;
+    let speed_loss = linear_speed_loss + (air_deceleration + grass_deceleration) * dt_seconds;
     velocity.normalized() * (speed - speed_loss).max(0.0)
 }
 
@@ -51548,6 +51604,7 @@ mod tests {
         session.tracking_frames.clear();
         for tick in 0..=8 {
             let mut frame = tracking_frame_from_match(&session.sim);
+            frame.source_frame_id = Some(format!("goal-src-{tick:03}"));
             frame.tick = tick;
             frame.clock_seconds = tick as f64 * session.sim.config.dt_seconds;
             frame.ball_position = Vec2::new(38.0 + tick as f64 * 0.5, 72.0 + tick as f64 * 2.0);
@@ -51716,6 +51773,10 @@ mod tests {
                 .len(),
             summaries[0].feature_vector_len
         );
+        assert_eq!(
+            records[0]["window"]["frames"][0]["sourceFrameId"],
+            "goal-src-000"
+        );
         let raw_records = std::fs::read_to_string(&moment_path).expect("moment jsonl raw");
         let typed_records =
             soccer_moment_records_from_jsonl(&raw_records).expect("typed moment records");
@@ -51749,6 +51810,25 @@ mod tests {
             .transitions
             .iter()
             .all(|transition| transition.action_target.is_some()));
+        for transition in &replay_dataset.transitions {
+            let expected_before_tick = transition.tick.saturating_sub(1);
+            let expected_before = format!("goal-src-{expected_before_tick:03}");
+            let expected_after = format!("goal-src-{:03}", transition.tick);
+            assert_eq!(
+                transition
+                    .decision_context
+                    .tracking_source_frame_id
+                    .as_deref(),
+                Some(expected_before.as_str())
+            );
+            assert_eq!(
+                transition
+                    .decision_context
+                    .next_tracking_source_frame_id
+                    .as_deref(),
+                Some(expected_after.as_str())
+            );
+        }
         let dribble_replay = replay_dataset
             .transitions
             .iter()
@@ -57928,6 +58008,64 @@ mod tests {
         assert_eq!(fallback.frames.len(), 2);
     }
 
+    #[test]
+    fn tracking_dataset_source_frame_ids_feed_learning_context() {
+        let tracking = sample_tracking_pass_dataset();
+        let mut value = serde_json::to_value(&tracking).expect("tracking value");
+        let frames = value["frames"]
+            .as_array_mut()
+            .expect("tracking frames array");
+        frames[0]
+            .as_object_mut()
+            .expect("first frame object")
+            .insert("frameId".to_string(), serde_json::json!("broadcast-0001"));
+        frames[1]
+            .as_object_mut()
+            .expect("second frame object")
+            .insert(
+                "sourceFrameId".to_string(),
+                serde_json::json!("broadcast-0002"),
+            );
+
+        let parsed = soccer_tracking_dataset_from_json(&value.to_string()).expect("parse tracking");
+        assert_eq!(
+            parsed.frames[0].source_frame_id.as_deref(),
+            Some("broadcast-0001")
+        );
+        assert_eq!(
+            parsed.frames[1].source_frame_id.as_deref(),
+            Some("broadcast-0002")
+        );
+
+        let jsonl = soccer_tracking_dataset_to_jsonl(&parsed).expect("tracking jsonl");
+        assert!(jsonl.contains("\"sourceFrameId\":\"broadcast-0001\""));
+        let reparsed =
+            soccer_tracking_dataset_from_jsonl(&jsonl, MatchConfig::default(), "fallback-source")
+                .expect("parse tracking jsonl");
+        assert_eq!(
+            reparsed.frames[1].source_frame_id.as_deref(),
+            Some("broadcast-0002")
+        );
+
+        let dataset = reparsed.to_learning_dataset().expect("tracking conversion");
+        let passer = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("passer transition");
+        assert_eq!(
+            passer.decision_context.tracking_source_frame_id.as_deref(),
+            Some("broadcast-0001")
+        );
+        assert_eq!(
+            passer
+                .decision_context
+                .next_tracking_source_frame_id
+                .as_deref(),
+            Some("broadcast-0002")
+        );
+    }
+
     fn decode_chunked_http_body(response: &str) -> String {
         let (headers, mut body) = response
             .split_once("\r\n\r\n")
@@ -58037,6 +58175,68 @@ mod tests {
                 .expect("policy from csv");
         let state = SoccerQStateKey::from_transition(passer);
         assert!(policy.q_value(&state, "pass").is_some());
+    }
+
+    #[test]
+    fn tracking_dataset_csv_source_frame_ids_feed_learning_context() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 109,
+            ..Default::default()
+        };
+        let raw = r#"tick,source_frame_id,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_holder,last_touch_team
+0,broadcast-csv-0001,0.0,0,Home passer,Home,Midfielder,8,40.0,70.0,40.0,70.0,0,Home
+0,broadcast-csv-0001,0.0,1,Home runner,Home,Forward,9,44.0,82.0,40.0,70.0,0,Home
+0,broadcast-csv-0001,0.0,2,Away defender,Away,Defender,4,58.0,78.0,40.0,70.0,0,Home
+1,broadcast-csv-0002,0.1,0,Home passer,Home,Midfielder,8,40.2,70.4,44.0,82.0,1,Home
+1,broadcast-csv-0002,0.1,1,Home runner,Home,Forward,9,44.0,82.0,44.0,82.0,1,Home
+1,broadcast-csv-0002,0.1,2,Away defender,Away,Defender,4,56.5,78.5,44.0,82.0,1,Home
+"#;
+
+        let tracking = soccer_tracking_dataset_from_csv(raw, config, "unit-csv-source-frames")
+            .expect("csv tracking");
+        assert_eq!(
+            tracking.frames[0].source_frame_id.as_deref(),
+            Some("broadcast-csv-0001")
+        );
+        assert_eq!(
+            tracking.frames[1].source_frame_id.as_deref(),
+            Some("broadcast-csv-0002")
+        );
+
+        let dataset = tracking.to_learning_dataset().expect("learning dataset");
+        let passer = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("passer transition");
+        assert_eq!(
+            passer.decision_context.tracking_source_frame_id.as_deref(),
+            Some("broadcast-csv-0001")
+        );
+        assert_eq!(
+            passer
+                .decision_context
+                .next_tracking_source_frame_id
+                .as_deref(),
+            Some("broadcast-csv-0002")
+        );
+
+        let conflicting = raw.replacen("broadcast-csv-0001", "broadcast-csv-conflict", 2);
+        let err = soccer_tracking_dataset_from_csv(
+            &conflicting,
+            MatchConfig {
+                duration_seconds: 0.2,
+                seed: 110,
+                ..Default::default()
+            },
+            "unit-csv-source-conflict",
+        )
+        .expect_err("conflicting source frame ids should fail");
+        assert!(
+            err.contains("already used"),
+            "unexpected source frame id conflict error: {err}"
+        );
     }
 
     #[test]
@@ -62073,6 +62273,25 @@ mod tests {
         assert!(long_grass.ball.velocity.len() < short_grass.ball.velocity.len());
         assert!((short_grass.ball.velocity.len() - 9.95).abs() < 1e-9);
         assert!((long_grass.ball.velocity.len() - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linear_ball_drag_is_time_step_stable() {
+        fn roll_for_one_second(dt: f64) -> f64 {
+            let mut velocity = Vec2::new(20.0, 0.0);
+            for _ in 0..((1.0 / dt).round() as usize) {
+                velocity = ball_velocity_after_resistance(velocity, dt, 0.028, 0.0, 0.0, 0.0);
+            }
+            velocity.len()
+        }
+
+        let tenth_second_ticks = roll_for_one_second(0.1);
+        let twentieth_second_ticks = roll_for_one_second(0.05);
+
+        assert!(
+            (tenth_second_ticks - twentieth_second_ticks).abs() < 1e-9,
+            "linear drag should compose over real time, dt=0.1 {tenth_second_ticks}, dt=0.05 {twentieth_second_ticks}"
+        );
     }
 
     #[test]
@@ -68711,6 +68930,7 @@ mod tests {
             config,
             frames: vec![
                 SoccerTrackingFrame {
+                    source_frame_id: None,
                     tick: 0,
                     clock_seconds: 0.0,
                     ball_position: Vec2::new(40.0, 70.0),
@@ -68778,6 +68998,7 @@ mod tests {
                     ],
                 },
                 SoccerTrackingFrame {
+                    source_frame_id: None,
                     tick: 1,
                     clock_seconds: 0.1,
                     ball_position: Vec2::new(44.0, 82.0),

@@ -2689,7 +2689,7 @@ function liveControllerAssigned() {
   return Array.isArray(state?.controllerAssignments) && state.controllerAssignments.length > 0;
 }
 function effectiveSimTicksPerPulse() {
-  return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();
+  return configuredSimTicksPerPulse();
 }
 function simSpeedLabel() {
   const configured = configuredSimTicksPerPulse();
@@ -2697,7 +2697,8 @@ function simSpeedLabel() {
   const dt = Number(state?.config?.dtSeconds ?? 0.1);
   const speed = effective * dt / (LIVE_STEP_INTERVAL_MS / 1000);
   const speedText = speed >= 10 ? speed.toFixed(0) : speed.toFixed(1);
-  return effective === configured ? `${speedText}x ${effective}t` : `${speedText}x live input`;
+  const inputText = liveControllerAssigned() ? " + input" : "";
+  return `${speedText}x ${effective}t${inputText}`;
 }
 function syncSimSpeedPair(source) {
   const min = Number(simTicksPerPulse.min);

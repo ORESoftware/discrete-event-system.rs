@@ -460,7 +460,11 @@ fn default_learning_logging_enabled() -> bool {
 }
 
 fn default_learning_interval_ticks() -> usize {
-    1
+    4
+}
+
+fn default_policy_train_max_transitions_per_tick() -> usize {
+    24
 }
 
 fn default_full_game_learning_enabled() -> bool {
@@ -11319,6 +11323,8 @@ pub struct MatchConfig {
     pub learning_logging_enabled: bool,
     #[serde(default = "default_learning_interval_ticks")]
     pub learning_interval_ticks: usize,
+    #[serde(default = "default_policy_train_max_transitions_per_tick")]
+    pub policy_train_max_transitions_per_tick: usize,
     #[serde(default = "default_full_game_learning_enabled")]
     pub full_game_learning_enabled: bool,
     #[serde(default = "default_formation_lp_enabled")]
@@ -11354,7 +11360,8 @@ impl Default for MatchConfig {
             ball_stop_speed_yps: DEFAULT_BALL_STOP_SPEED_YPS,
             learning_enabled: true,
             learning_logging_enabled: true,
-            learning_interval_ticks: 1,
+            learning_interval_ticks: default_learning_interval_ticks(),
+            policy_train_max_transitions_per_tick: default_policy_train_max_transitions_per_tick(),
             full_game_learning_enabled: true,
             formation_lp_enabled: false,
             tactical_learning: SoccerTacticalLearningWeights::default(),
@@ -30814,13 +30821,13 @@ impl SoccerMatch {
             let period_start = self.config.period_start_after_tick(self.tick);
             let interval = self.config.learning_interval_ticks.max(1);
             let learning_due = interval <= 1
-                || has_tick_reward_events
                 || self.is_done()
                 || period_start.is_some()
                 || self.tick as usize % interval == 0;
             let capture_full_game =
                 self.config.learning_enabled && self.config.full_game_learning_enabled;
-            if learning_due || capture_full_game {
+            let capture_reward_transitions = has_tick_reward_events && !learning_due;
+            if learning_due || capture_full_game || capture_reward_transitions {
                 let phase_started = Instant::now();
                 let mut tick_transitions = self.learning_transitions_for(
                     &tick_start_snapshot,
@@ -30840,10 +30847,18 @@ impl SoccerMatch {
                 if learning_due {
                     let mut new_transitions = Vec::new();
                     new_transitions.append(&mut tick_transitions);
-                    if !self.deferred_reward_transitions.is_empty() {
+                    let train_limit = self.config.policy_train_max_transitions_per_tick.max(1);
+                    if new_transitions.len() > train_limit {
+                        let overflow = new_transitions.split_off(train_limit);
+                        self.deferred_reward_transitions.extend(overflow);
+                    }
+                    let deferred_limit = train_limit.saturating_sub(new_transitions.len());
+                    if deferred_limit > 0 && !self.deferred_reward_transitions.is_empty() {
+                        let drain_count =
+                            deferred_limit.min(self.deferred_reward_transitions.len());
                         let deferred = self
                             .deferred_reward_transitions
-                            .drain(..)
+                            .drain(0..drain_count)
                             .collect::<Vec<_>>();
                         if capture_full_game {
                             self.episode_learning_transitions
@@ -30875,6 +30890,8 @@ impl SoccerMatch {
                         self.learning_transitions.extend(new_transitions);
                         learning_log_elapsed += phase_started.elapsed();
                     }
+                } else if capture_reward_transitions {
+                    self.deferred_reward_transitions.extend(tick_transitions);
                 }
             }
             let phase_started = Instant::now();
@@ -38434,6 +38451,8 @@ where
     config.learning_logging_enabled = false;
     config.max_human_players = 0;
     config.learning_interval_ticks = config.learning_interval_ticks.max(1);
+    config.policy_train_max_transitions_per_tick =
+        config.policy_train_max_transitions_per_tick.max(1);
     config.tactical_learning.validate()?;
     let options = request
         .options
@@ -38743,50 +38762,271 @@ struct TrackingJsonCoordinateCalibration {
     coordinate_space: TrackingJsonCoordinateSpace,
     calibration: TrackingCsvCoordinateCalibration,
     image_dimensions: Option<Vec2>,
+    homography: Option<TrackingJsonHomographySpec>,
 }
 
 impl TrackingJsonCoordinateCalibration {
-    fn map_point(self, point: Vec2, config: &MatchConfig) -> Vec2 {
+    fn resolve(
+        self,
+        config: &MatchConfig,
+        context: &str,
+    ) -> Result<TrackingJsonResolvedCoordinateCalibration, String> {
+        let homography = self
+            .homography
+            .map(|spec| spec.resolve(config, context))
+            .transpose()?;
+        Ok(TrackingJsonResolvedCoordinateCalibration {
+            coordinate_space: self.coordinate_space,
+            calibration: self.calibration,
+            image_dimensions: self.image_dimensions,
+            homography,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TrackingJsonResolvedCoordinateCalibration {
+    coordinate_space: TrackingJsonCoordinateSpace,
+    calibration: TrackingCsvCoordinateCalibration,
+    image_dimensions: Option<Vec2>,
+    homography: Option<TrackingJsonHomography>,
+}
+
+impl TrackingJsonResolvedCoordinateCalibration {
+    fn map_point(self, point: Vec2, config: &MatchConfig, context: &str) -> Result<Vec2, String> {
+        if let Some(homography) = self.homography {
+            return homography.map_point(point, context).map(|point| {
+                point.clamp_to_pitch(config.field_width_yards, config.field_length_yards)
+            });
+        }
         match self.coordinate_space {
             TrackingJsonCoordinateSpace::PitchYards => {
                 if self.calibration.is_identity() {
-                    point.clamp_to_pitch(config.field_width_yards, config.field_length_yards)
+                    Ok(point.clamp_to_pitch(config.field_width_yards, config.field_length_yards))
                 } else {
-                    self.calibration.map_pitch_point(point, config)
+                    Ok(self.calibration.map_pitch_point(point, config))
                 }
             }
             TrackingJsonCoordinateSpace::Normalized => {
-                self.calibration.map_normalized(point, config)
+                Ok(self.calibration.map_normalized(point, config))
             }
-            TrackingJsonCoordinateSpace::Pixels => self.calibration.map_pixel(
+            TrackingJsonCoordinateSpace::Pixels => Ok(self.calibration.map_pixel(
                 point,
                 self.image_dimensions
                     .expect("pixel coordinate calibration requires image dimensions"),
                 config,
-            ),
+            )),
         }
     }
 
-    fn map_vector(self, vector: Vec2, config: &MatchConfig) -> Vec2 {
+    fn map_vector_at(
+        self,
+        point: Vec2,
+        vector: Vec2,
+        config: &MatchConfig,
+        context: &str,
+    ) -> Result<Vec2, String> {
+        if let Some(homography) = self.homography {
+            let mapped_point = homography.map_point(point, context)?;
+            let mapped_tip = homography.map_point(point + vector, context)?;
+            return Ok(mapped_tip - mapped_point);
+        }
         match self.coordinate_space {
             TrackingJsonCoordinateSpace::PitchYards => {
                 if self.calibration.is_identity() {
-                    vector
+                    Ok(vector)
                 } else {
-                    self.calibration.map_pitch_vector(vector, config)
+                    Ok(self.calibration.map_pitch_vector(vector, config))
                 }
             }
             TrackingJsonCoordinateSpace::Normalized => {
-                self.calibration.map_normalized_vector(vector, config)
+                Ok(self.calibration.map_normalized_vector(vector, config))
             }
-            TrackingJsonCoordinateSpace::Pixels => self.calibration.map_pixel_vector(
+            TrackingJsonCoordinateSpace::Pixels => Ok(self.calibration.map_pixel_vector(
                 vector,
                 self.image_dimensions
                     .expect("pixel coordinate calibration requires image dimensions"),
                 config,
-            ),
+            )),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TrackingJsonHomographySpec {
+    Matrix([[f64; 3]; 3]),
+    Corners {
+        source: [Vec2; 4],
+        target: Option<[Vec2; 4]>,
+    },
+}
+
+impl TrackingJsonHomographySpec {
+    fn resolve(
+        self,
+        config: &MatchConfig,
+        context: &str,
+    ) -> Result<TrackingJsonHomography, String> {
+        match self {
+            TrackingJsonHomographySpec::Matrix(matrix) => {
+                TrackingJsonHomography::from_matrix(matrix, context)
+            }
+            TrackingJsonHomographySpec::Corners { source, target } => {
+                let target = target.unwrap_or_else(|| tracking_default_pitch_corners(config));
+                TrackingJsonHomography::from_point_pairs(source, target, context)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TrackingJsonHomography {
+    matrix: [[f64; 3]; 3],
+}
+
+impl TrackingJsonHomography {
+    fn from_matrix(matrix: [[f64; 3]; 3], context: &str) -> Result<Self, String> {
+        if matrix.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "{context}: homography matrix values must be finite"
+            ));
+        }
+        if matrix[2][0].abs() < 1e-12 && matrix[2][1].abs() < 1e-12 && matrix[2][2].abs() < 1e-12 {
+            return Err(format!(
+                "{context}: homography matrix bottom row cannot be all zero"
+            ));
+        }
+        Ok(Self { matrix })
+    }
+
+    fn from_point_pairs(
+        source: [Vec2; 4],
+        target: [Vec2; 4],
+        context: &str,
+    ) -> Result<Self, String> {
+        let mut rows = [[0.0; 9]; 8];
+        for (idx, (src, dst)) in source.into_iter().zip(target).enumerate() {
+            if !src.x.is_finite() || !src.y.is_finite() || !dst.x.is_finite() || !dst.y.is_finite()
+            {
+                return Err(format!("{context}: homography corners must be finite"));
+            }
+            let row = idx * 2;
+            rows[row] = [
+                src.x,
+                src.y,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                -dst.x * src.x,
+                -dst.x * src.y,
+                dst.x,
+            ];
+            rows[row + 1] = [
+                0.0,
+                0.0,
+                0.0,
+                src.x,
+                src.y,
+                1.0,
+                -dst.y * src.x,
+                -dst.y * src.y,
+                dst.y,
+            ];
+        }
+        let solution = solve_tracking_json_linear_8x8(rows, context)?;
+        Ok(Self {
+            matrix: [
+                [solution[0], solution[1], solution[2]],
+                [solution[3], solution[4], solution[5]],
+                [solution[6], solution[7], 1.0],
+            ],
+        })
+    }
+
+    fn map_point(self, point: Vec2, context: &str) -> Result<Vec2, String> {
+        let denominator =
+            self.matrix[2][0] * point.x + self.matrix[2][1] * point.y + self.matrix[2][2];
+        if !denominator.is_finite() || denominator.abs() < 1e-9 {
+            return Err(format!(
+                "{context}: homography denominator is too small for point ({:.6}, {:.6})",
+                point.x, point.y
+            ));
+        }
+        let x = (self.matrix[0][0] * point.x + self.matrix[0][1] * point.y + self.matrix[0][2])
+            / denominator;
+        let y = (self.matrix[1][0] * point.x + self.matrix[1][1] * point.y + self.matrix[1][2])
+            / denominator;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(format!(
+                "{context}: homography produced non-finite point from ({:.6}, {:.6})",
+                point.x, point.y
+            ));
+        }
+        Ok(Vec2::new(x, y))
+    }
+}
+
+fn tracking_default_pitch_corners(config: &MatchConfig) -> [Vec2; 4] {
+    [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(config.field_width_yards, 0.0),
+        Vec2::new(config.field_width_yards, config.field_length_yards),
+        Vec2::new(0.0, config.field_length_yards),
+    ]
+}
+
+fn solve_tracking_json_linear_8x8(
+    mut rows: [[f64; 9]; 8],
+    context: &str,
+) -> Result<[f64; 8], String> {
+    for pivot_col in 0..8 {
+        let mut pivot_row = pivot_col;
+        let mut pivot_abs = rows[pivot_row][pivot_col].abs();
+        for row in (pivot_col + 1)..8 {
+            let candidate_abs = rows[row][pivot_col].abs();
+            if candidate_abs > pivot_abs {
+                pivot_abs = candidate_abs;
+                pivot_row = row;
+            }
+        }
+        if !pivot_abs.is_finite() || pivot_abs < 1e-12 {
+            return Err(format!(
+                "{context}: homography corner system is singular near column {pivot_col}"
+            ));
+        }
+        if pivot_row != pivot_col {
+            rows.swap(pivot_row, pivot_col);
+        }
+        let pivot = rows[pivot_col][pivot_col];
+        for col in pivot_col..9 {
+            rows[pivot_col][col] /= pivot;
+        }
+        for row in 0..8 {
+            if row == pivot_col {
+                continue;
+            }
+            let factor = rows[row][pivot_col];
+            if factor.abs() < 1e-15 {
+                continue;
+            }
+            for col in pivot_col..9 {
+                rows[row][col] -= factor * rows[pivot_col][col];
+            }
+        }
+    }
+
+    let mut solution = [0.0; 8];
+    for row in 0..8 {
+        let value = rows[row][8];
+        if !value.is_finite() {
+            return Err(format!(
+                "{context}: homography solve produced non-finite value"
+            ));
+        }
+        solution[row] = value;
+    }
+    Ok(solution)
 }
 
 fn apply_tracking_json_coordinate_calibration(
@@ -38803,7 +39043,10 @@ fn apply_tracking_json_coordinate_calibration(
             "{context}: field dimensions must be positive before coordinate calibration"
         ));
     }
-    if calibration.coordinate_space == TrackingJsonCoordinateSpace::Pixels {
+    let calibration = calibration.resolve(&dataset.config, context)?;
+    if calibration.coordinate_space == TrackingJsonCoordinateSpace::Pixels
+        && calibration.homography.is_none()
+    {
         let Some(dimensions) = calibration.image_dimensions else {
             return Err(format!(
                 "{context}: pixel coordinate calibration requires imageWidth and imageHeight"
@@ -38821,56 +39064,79 @@ fn apply_tracking_json_coordinate_calibration(
     }
 
     for frame in &mut dataset.frames {
-        frame.ball_position = calibration.map_point(frame.ball_position, &dataset.config);
+        let raw_ball_position = frame.ball_position;
+        frame.ball_position = calibration.map_point(raw_ball_position, &dataset.config, context)?;
         transform_tracking_json_optional_vector(
+            raw_ball_position,
             &mut frame.ball_velocity,
             calibration,
             &dataset.config,
-        );
+            context,
+        )?;
         transform_tracking_json_optional_vector(
+            raw_ball_position,
             &mut frame.ball_acceleration,
             calibration,
             &dataset.config,
-        );
-        transform_tracking_json_optional_vector(&mut frame.ball_jerk, calibration, &dataset.config);
+            context,
+        )?;
         transform_tracking_json_optional_vector(
+            raw_ball_position,
+            &mut frame.ball_jerk,
+            calibration,
+            &dataset.config,
+            context,
+        )?;
+        transform_tracking_json_optional_vector(
+            raw_ball_position,
             &mut frame.ball_curl_acceleration,
             calibration,
             &dataset.config,
-        );
+            context,
+        )?;
         for player in &mut frame.players {
-            player.position = calibration.map_point(player.position, &dataset.config);
+            let raw_position = player.position;
+            player.position = calibration.map_point(raw_position, &dataset.config, context)?;
             if let Some(home_position) = player.home_position.as_mut() {
-                *home_position = calibration.map_point(*home_position, &dataset.config);
+                *home_position = calibration.map_point(*home_position, &dataset.config, context)?;
             }
             transform_tracking_json_optional_vector(
+                raw_position,
                 &mut player.velocity,
                 calibration,
                 &dataset.config,
-            );
+                context,
+            )?;
             transform_tracking_json_optional_vector(
+                raw_position,
                 &mut player.motion_acceleration,
                 calibration,
                 &dataset.config,
-            );
+                context,
+            )?;
             transform_tracking_json_optional_vector(
+                raw_position,
                 &mut player.motion_jerk,
                 calibration,
                 &dataset.config,
-            );
+                context,
+            )?;
         }
     }
     Ok(())
 }
 
 fn transform_tracking_json_optional_vector(
+    raw_position: Vec2,
     slot: &mut Option<Vec2>,
-    calibration: TrackingJsonCoordinateCalibration,
+    calibration: TrackingJsonResolvedCoordinateCalibration,
     config: &MatchConfig,
-) {
+    context: &str,
+) -> Result<(), String> {
     if let Some(vector) = slot.as_mut() {
-        *vector = calibration.map_vector(*vector, config);
+        *vector = calibration.map_vector_at(raw_position, *vector, config, context)?;
     }
+    Ok(())
 }
 
 fn tracking_json_coordinate_calibration_from_value(
@@ -39015,6 +39281,7 @@ fn tracking_json_coordinate_calibration_from_value(
         ],
         context,
     )?;
+    let homography = tracking_json_homography_spec_from_roots(&roots, context)?;
 
     if source_space_raw.is_none()
         && rotation_degrees.is_none()
@@ -39022,6 +39289,7 @@ fn tracking_json_coordinate_calibration_from_value(
         && flip_y.is_none()
         && image_width.is_none()
         && image_height.is_none()
+        && homography.is_none()
     {
         return Ok(None);
     }
@@ -39060,7 +39328,10 @@ fn tracking_json_coordinate_calibration_from_value(
             TrackingJsonCoordinateSpace::PitchYards
         }
     });
-    if coordinate_space == TrackingJsonCoordinateSpace::Pixels && image_dimensions.is_none() {
+    if coordinate_space == TrackingJsonCoordinateSpace::Pixels
+        && image_dimensions.is_none()
+        && homography.is_none()
+    {
         return Err(format!(
             "{context}: pixel coordinate calibration requires imageWidth and imageHeight"
         ));
@@ -39070,7 +39341,263 @@ fn tracking_json_coordinate_calibration_from_value(
         coordinate_space,
         calibration,
         image_dimensions,
+        homography,
     }))
+}
+
+fn tracking_json_homography_spec_from_roots(
+    roots: &[&serde_json::Value],
+    context: &str,
+) -> Result<Option<TrackingJsonHomographySpec>, String> {
+    let matrix_value = roots.iter().find_map(|root| {
+        tracking_json_optional_field(
+            root,
+            &[
+                "homography",
+                "homography_matrix",
+                "homographyMatrix",
+                "pitch_homography",
+                "pitchHomography",
+                "source_to_pitch_homography",
+                "sourceToPitchHomography",
+                "source_to_pitch_matrix",
+                "sourceToPitchMatrix",
+                "projection_matrix",
+                "projectionMatrix",
+                "projective_matrix",
+                "projectiveMatrix",
+            ],
+        )
+    });
+    let source_corners_value = roots.iter().find_map(|root| {
+        tracking_json_optional_field(
+            root,
+            &[
+                "source_pitch_corners",
+                "sourcePitchCorners",
+                "source_corners",
+                "sourceCorners",
+                "pitch_source_corners",
+                "pitchSourceCorners",
+                "field_source_corners",
+                "fieldSourceCorners",
+                "image_pitch_corners",
+                "imagePitchCorners",
+                "video_pitch_corners",
+                "videoPitchCorners",
+            ],
+        )
+    });
+    let target_corners_value = roots.iter().find_map(|root| {
+        tracking_json_optional_field(
+            root,
+            &[
+                "target_pitch_corners",
+                "targetPitchCorners",
+                "pitch_corners",
+                "pitchCorners",
+                "destination_pitch_corners",
+                "destinationPitchCorners",
+                "field_pitch_corners",
+                "fieldPitchCorners",
+            ],
+        )
+    });
+
+    match (matrix_value, source_corners_value, target_corners_value) {
+        (None, None, None) => Ok(None),
+        (Some(_), Some(_), _) => Err(format!(
+            "{context}: provide either homographyMatrix or sourcePitchCorners, not both"
+        )),
+        (Some(matrix), None, None) => Ok(Some(TrackingJsonHomographySpec::Matrix(
+            tracking_json_parse_homography_matrix(matrix, context)?,
+        ))),
+        (Some(_), None, Some(_)) => Err(format!(
+            "{context}: targetPitchCorners cannot be combined with homographyMatrix"
+        )),
+        (None, None, Some(_)) => Err(format!(
+            "{context}: targetPitchCorners requires sourcePitchCorners"
+        )),
+        (None, Some(source), target) => {
+            let source = tracking_json_parse_corner_points(source, context, "sourcePitchCorners")?;
+            let target = target
+                .map(|value| {
+                    tracking_json_parse_corner_points(value, context, "targetPitchCorners")
+                })
+                .transpose()?;
+            Ok(Some(TrackingJsonHomographySpec::Corners { source, target }))
+        }
+    }
+}
+
+fn tracking_json_parse_homography_matrix(
+    value: &serde_json::Value,
+    context: &str,
+) -> Result<[[f64; 3]; 3], String> {
+    let Some(values) = value.as_array() else {
+        return Err(format!("{context}: homographyMatrix must be an array"));
+    };
+    let mut matrix = [[0.0; 3]; 3];
+    if values.len() == 9 {
+        for (idx, value) in values.iter().enumerate() {
+            matrix[idx / 3][idx % 3] =
+                tracking_json_number_value(value, context, "homographyMatrix")?;
+        }
+        return Ok(matrix);
+    }
+    if values.len() == 3 {
+        for (row_idx, row_value) in values.iter().enumerate() {
+            let Some(row) = row_value.as_array() else {
+                return Err(format!(
+                    "{context}: homographyMatrix row {} must be an array",
+                    row_idx + 1
+                ));
+            };
+            if row.len() != 3 {
+                return Err(format!(
+                    "{context}: homographyMatrix row {} must have 3 values",
+                    row_idx + 1
+                ));
+            }
+            for (col_idx, value) in row.iter().enumerate() {
+                matrix[row_idx][col_idx] =
+                    tracking_json_number_value(value, context, "homographyMatrix")?;
+            }
+        }
+        return Ok(matrix);
+    }
+    Err(format!(
+        "{context}: homographyMatrix must have 9 values or 3 rows of 3 values"
+    ))
+}
+
+fn tracking_json_parse_corner_points(
+    value: &serde_json::Value,
+    context: &str,
+    label: &str,
+) -> Result<[Vec2; 4], String> {
+    if let Some(points) = value.as_array() {
+        if points.len() != 4 {
+            return Err(format!("{context}: {label} must contain exactly 4 points"));
+        }
+        let parsed = points
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                tracking_json_parse_vec2_value(value, context, &format!("{label}[{idx}]"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok([parsed[0], parsed[1], parsed[2], parsed[3]]);
+    }
+    if value.is_object() {
+        let keys: [&[&str]; 4] = [
+            &[
+                "top_left",
+                "topLeft",
+                "upper_left",
+                "upperLeft",
+                "north_west",
+                "northWest",
+                "nw",
+            ],
+            &[
+                "top_right",
+                "topRight",
+                "upper_right",
+                "upperRight",
+                "north_east",
+                "northEast",
+                "ne",
+            ],
+            &[
+                "bottom_right",
+                "bottomRight",
+                "lower_right",
+                "lowerRight",
+                "south_east",
+                "southEast",
+                "se",
+            ],
+            &[
+                "bottom_left",
+                "bottomLeft",
+                "lower_left",
+                "lowerLeft",
+                "south_west",
+                "southWest",
+                "sw",
+            ],
+        ];
+        let mut parsed = [Vec2::zero(); 4];
+        for (idx, aliases) in keys.into_iter().enumerate() {
+            let Some(point_value) = tracking_json_optional_field(value, aliases) else {
+                return Err(format!(
+                    "{context}: {label} object must include topLeft, topRight, bottomRight, and bottomLeft"
+                ));
+            };
+            parsed[idx] = tracking_json_parse_vec2_value(
+                point_value,
+                context,
+                aliases.first().copied().unwrap_or(label),
+            )?;
+        }
+        return Ok(parsed);
+    }
+    Err(format!(
+        "{context}: {label} must be an array or named corner object"
+    ))
+}
+
+fn tracking_json_parse_vec2_value(
+    value: &serde_json::Value,
+    context: &str,
+    label: &str,
+) -> Result<Vec2, String> {
+    if let Some(values) = value.as_array() {
+        if values.len() < 2 {
+            return Err(format!("{context}: {label} array must have x and y"));
+        }
+        return Ok(Vec2::new(
+            tracking_json_number_value(&values[0], context, label)?,
+            tracking_json_number_value(&values[1], context, label)?,
+        ));
+    }
+    if value.is_object() {
+        let x =
+            tracking_json_optional_field(value, &["x", "source_x", "sourceX", "pixel_x", "pixelX"])
+                .ok_or_else(|| format!("{context}: {label} missing x"))?;
+        let y =
+            tracking_json_optional_field(value, &["y", "source_y", "sourceY", "pixel_y", "pixelY"])
+                .ok_or_else(|| format!("{context}: {label} missing y"))?;
+        return Ok(Vec2::new(
+            tracking_json_number_value(x, context, label)?,
+            tracking_json_number_value(y, context, label)?,
+        ));
+    }
+    Err(format!(
+        "{context}: {label} must be a point object or [x,y] array"
+    ))
+}
+
+fn tracking_json_number_value(
+    value: &serde_json::Value,
+    context: &str,
+    label: &str,
+) -> Result<f64, String> {
+    let number = match value {
+        serde_json::Value::Number(number) => number
+            .as_f64()
+            .ok_or_else(|| format!("{context}: {label} is not finite"))?,
+        serde_json::Value::String(raw) => raw
+            .trim()
+            .parse::<f64>()
+            .map_err(|err| format!("{context}: parse {label}={raw}: {err}"))?,
+        other => return Err(format!("{context}: {label} must be numeric, got {other}")),
+    };
+    if !number.is_finite() {
+        return Err(format!("{context}: {label} must be finite"));
+    }
+    Ok(number)
 }
 
 fn parse_tracking_json_coordinate_space(
@@ -59181,6 +59708,217 @@ mod tests {
     }
 
     #[test]
+    fn tracking_dataset_json_applies_homography_matrix_before_learning() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 120,
+            ..Default::default()
+        };
+        let value = serde_json::json!({
+            "source": "unit-json-homography-matrix",
+            "config": config,
+            "coordinateCalibration": {
+                "homographyMatrix": [
+                    [80.0, 0.0, 0.0],
+                    [0.0, 120.0, 0.0],
+                    [0.0, 0.0, 1.0]
+                ]
+            },
+            "frames": [
+                {
+                    "tick": 0,
+                    "clockSeconds": 0.0,
+                    "ballPosition": {"x": 0.25, "y": 0.20},
+                    "ballVelocity": {"x": 0.10, "y": 0.05},
+                    "ballHolder": 0,
+                    "lastTouchTeam": "Home",
+                    "players": [
+                        {
+                            "id": 0,
+                            "name": "Home carrier",
+                            "team": "Home",
+                            "role": "Midfielder",
+                            "shirt": 8,
+                            "position": {"x": 0.25, "y": 0.20},
+                            "velocity": {"x": 0.10, "y": 0.05},
+                            "homePosition": {"x": 0.20, "y": 0.25}
+                        }
+                    ]
+                },
+                {
+                    "tick": 1,
+                    "clockSeconds": 0.1,
+                    "ballPosition": {"x": 0.35, "y": 0.25},
+                    "ballVelocity": {"x": 0.08, "y": 0.04},
+                    "ballHolder": 0,
+                    "lastTouchTeam": "Home",
+                    "players": [
+                        {
+                            "id": 0,
+                            "name": "Home carrier",
+                            "team": "Home",
+                            "role": "Midfielder",
+                            "shirt": 8,
+                            "position": {"x": 0.35, "y": 0.25},
+                            "velocity": {"x": 0.08, "y": 0.04},
+                            "homePosition": {"x": 0.20, "y": 0.25}
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let parsed =
+            soccer_tracking_dataset_from_json(&value.to_string()).expect("homography json");
+        assert_eq!(parsed.frames[0].players[0].position, Vec2::new(20.0, 24.0));
+        assert_eq!(parsed.frames[0].ball_position, Vec2::new(20.0, 24.0));
+        assert_eq!(
+            parsed.frames[0].players[0].home_position,
+            Some(Vec2::new(16.0, 30.0))
+        );
+        assert_eq!(
+            parsed.frames[0].players[0].velocity,
+            Some(Vec2::new(8.0, 6.0))
+        );
+        assert_eq!(parsed.frames[1].players[0].position, Vec2::new(28.0, 30.0));
+        assert!(
+            !parsed
+                .to_learning_dataset()
+                .expect("homography json learning")
+                .transitions
+                .is_empty(),
+            "homography matrix JSON should train into transitions"
+        );
+    }
+
+    #[test]
+    fn tracking_dataset_jsonl_solves_pitch_corner_homography() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 121,
+            ..Default::default()
+        };
+        let meta = serde_json::json!({
+            "kind": "soccer-tracking-meta",
+            "source": "unit-jsonl-homography-corners",
+            "config": config,
+            "coordinateCalibration": {
+                "coordinateSpace": "pixels",
+                "sourcePitchCorners": [
+                    {"x": 100.0, "y": 100.0},
+                    {"x": 700.0, "y": 120.0},
+                    {"x": 680.0, "y": 1100.0},
+                    {"x": 80.0, "y": 1080.0}
+                ]
+            }
+        });
+        let frame0 = serde_json::json!({
+            "tick": 0,
+            "clockSeconds": 0.0,
+            "ballPosition": {"x": 100.0, "y": 100.0},
+            "ballVelocity": {"x": 600.0, "y": 20.0},
+            "ballHolder": 0,
+            "lastTouchTeam": "Home",
+            "players": [
+                {
+                    "id": 0,
+                    "name": "Home carrier",
+                    "team": "Home",
+                    "role": "Midfielder",
+                    "shirt": 8,
+                    "position": {"x": 100.0, "y": 100.0},
+                    "velocity": {"x": 600.0, "y": 20.0},
+                    "homePosition": {"x": 80.0, "y": 1080.0}
+                }
+            ]
+        });
+        let frame1 = serde_json::json!({
+            "tick": 1,
+            "clockSeconds": 0.1,
+            "ballPosition": {"x": 680.0, "y": 1100.0},
+            "ballVelocity": {"x": -600.0, "y": -20.0},
+            "ballHolder": 0,
+            "lastTouchTeam": "Home",
+            "players": [
+                {
+                    "id": 0,
+                    "name": "Home carrier",
+                    "team": "Home",
+                    "role": "Midfielder",
+                    "shirt": 8,
+                    "position": {"x": 680.0, "y": 1100.0},
+                    "velocity": {"x": -600.0, "y": -20.0},
+                    "homePosition": {"x": 80.0, "y": 1080.0}
+                }
+            ]
+        });
+        let jsonl = format!("{meta}\n{frame0}\n{frame1}\n");
+
+        let parsed = soccer_tracking_dataset_from_jsonl(
+            &jsonl,
+            MatchConfig::default(),
+            "fallback-homography-corners",
+        )
+        .expect("corner homography jsonl");
+        assert_eq!(parsed.source, "unit-jsonl-homography-corners");
+        assert!(
+            parsed.frames[0].players[0]
+                .position
+                .distance(Vec2::new(0.0, 0.0))
+                < 1e-6
+        );
+        assert!(parsed.frames[0].ball_position.distance(Vec2::new(0.0, 0.0)) < 1e-6);
+        assert!(
+            parsed.frames[0].players[0]
+                .home_position
+                .expect("home position")
+                .distance(Vec2::new(0.0, 120.0))
+                < 1e-6
+        );
+        assert!(
+            parsed.frames[0].players[0]
+                .velocity
+                .expect("homography velocity")
+                .distance(Vec2::new(80.0, 0.0))
+                < 1e-6
+        );
+        assert!(
+            parsed.frames[1].players[0]
+                .position
+                .distance(Vec2::new(80.0, 120.0))
+                < 1e-6
+        );
+        assert!(
+            !parsed
+                .to_learning_dataset()
+                .expect("corner homography learning")
+                .transitions
+                .is_empty(),
+            "corner homography JSONL should train into transitions"
+        );
+
+        let invalid_meta = serde_json::json!({
+            "kind": "soccer-tracking-meta",
+            "source": "unit-jsonl-homography-invalid",
+            "config": MatchConfig::default(),
+            "coordinateCalibration": {
+                "sourcePitchCorners": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
+            }
+        });
+        let invalid = format!("{invalid_meta}\n{frame0}\n{frame1}\n");
+        let err = soccer_tracking_dataset_from_jsonl(
+            &invalid,
+            MatchConfig::default(),
+            "fallback-invalid-homography",
+        )
+        .expect_err("three-corner homography should fail");
+        assert!(
+            err.contains("exactly 4"),
+            "unexpected homography corner error: {err}"
+        );
+    }
+
+    #[test]
     fn tracking_dataset_source_frame_ids_feed_learning_context() {
         let tracking = sample_tracking_pass_dataset();
         let mut value = serde_json::to_value(&tracking).expect("tracking value");
@@ -70787,7 +71525,8 @@ mod tests {
         assert!(html.contains("id=\"matchStep\""));
         assert!(html.contains("function matchStepLabel"));
         assert!(html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t"));
-        assert!(html.contains("liveControllerAssigned() ? 1 : configuredSimTicksPerPulse()"));
+        assert!(html.contains("return configuredSimTicksPerPulse();"));
+        assert!(html.contains("const inputText = liveControllerAssigned() ? \" + input\" : \"\";"));
     }
 
     #[test]

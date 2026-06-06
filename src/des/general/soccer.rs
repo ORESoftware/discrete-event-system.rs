@@ -25682,7 +25682,7 @@ impl SoccerMatch {
                 }
                 AgentScheduleKind::Ball => {
                     let phase_started = Instant::now();
-                    self.integrate_ball();
+                    self.run_ball_time_step();
                     field_ball_elapsed += phase_started.elapsed();
                 }
                 AgentScheduleKind::CentralBrain => {}
@@ -28008,6 +28008,10 @@ impl SoccerMatch {
     }
 
     fn integrate_ball(&mut self) {
+        self.run_ball_time_step();
+    }
+
+    fn run_ball_time_step(&mut self) {
         let previous_velocity = self.ball.velocity;
         let context = BallStepContext {
             tick: self.tick,

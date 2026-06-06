@@ -38882,9 +38882,10 @@ fn tracking_import_format(request: &SoccerTrackingImportRequest) -> String {
 /// `player_id`, `team`, `role`, and player position columns. Position can be
 /// provided as pitch yards (`x`, `y`), normalized footage coordinates
 /// (`x_norm`, `y_norm`), or pixels (`pixel_x`, `pixel_y`) with image dimensions.
-/// Footage coordinates can be mirrored before conversion with optional
-/// `flip_x`/`flip_y` calibration columns when a source feed uses the opposite
-/// sideline or goal-line origin.
+/// Footage coordinates can be rotated in 90-degree turns before conversion with
+/// optional `rotation_degrees`/`rotate_degrees` calibration columns, then
+/// mirrored with optional `flip_x`/`flip_y` columns when a source feed uses the
+/// opposite sideline or goal-line origin.
 /// Optional columns include `source_frame_id`, `frame_id`, `clock_seconds`, `name`, `shirt`, `vx`, `vy`,
 /// `ax`, `ay`, `jx`, `jy`, `facing`, `receive_facing`, `action_facing`,
 /// `home_x`, `home_y`, `home_x_norm`, `home_y_norm`, skill columns such as
@@ -40556,6 +40557,7 @@ struct TrackingCsvPitchPointAliases {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TrackingCsvCoordinateCalibration {
+    quarter_turns_clockwise: u8,
     flip_x: bool,
     flip_y: bool,
 }
@@ -40567,6 +40569,7 @@ impl TrackingCsvCoordinateCalibration {
         line_no: usize,
     ) -> Result<Self, String> {
         Ok(Self {
+            quarter_turns_clockwise: csv_optional_quarter_turns_clockwise(row, header, line_no)?,
             flip_x: csv_optional_bool(
                 row,
                 header,
@@ -40625,8 +40628,17 @@ impl TrackingCsvCoordinateCalibration {
     }
 
     fn map_normalized(self, point: Vec2, config: &MatchConfig) -> Vec2 {
-        let x_norm = if self.flip_x { 1.0 - point.x } else { point.x };
-        let y_norm = if self.flip_y { 1.0 - point.y } else { point.y };
+        let rotated = self.rotate_normalized(point);
+        let x_norm = if self.flip_x {
+            1.0 - rotated.x
+        } else {
+            rotated.x
+        };
+        let y_norm = if self.flip_y {
+            1.0 - rotated.y
+        } else {
+            rotated.y
+        };
         Vec2::new(
             x_norm * config.field_width_yards,
             y_norm * config.field_length_yards,
@@ -40640,6 +40652,67 @@ impl TrackingCsvCoordinateCalibration {
             config,
         )
     }
+
+    fn rotate_normalized(self, point: Vec2) -> Vec2 {
+        match self.quarter_turns_clockwise % 4 {
+            0 => point,
+            1 => Vec2::new(1.0 - point.y, point.x),
+            2 => Vec2::new(1.0 - point.x, 1.0 - point.y),
+            _ => Vec2::new(point.y, 1.0 - point.x),
+        }
+    }
+}
+
+fn csv_optional_quarter_turns_clockwise(
+    row: &[String],
+    header: &HashMap<String, usize>,
+    line_no: usize,
+) -> Result<u8, String> {
+    let Some(degrees) = csv_optional_f64(
+        row,
+        header,
+        &[
+            "rotation_degrees",
+            "rotationdegrees",
+            "rotate_degrees",
+            "rotatedegrees",
+            "coordinate_rotation_degrees",
+            "coordinaterotationdegrees",
+            "tracking_rotation_degrees",
+            "trackingrotationdegrees",
+            "footage_rotation_degrees",
+            "footagerotationdegrees",
+            "image_rotation_degrees",
+            "imagerotationdegrees",
+            "video_rotation_degrees",
+            "videorotationdegrees",
+        ],
+        line_no,
+    )?
+    else {
+        return Ok(0);
+    };
+    if !degrees.is_finite() {
+        return Err(format!(
+            "csv line {line_no} rotation_degrees={degrees}: expected finite 0/90/180/270"
+        ));
+    }
+    let rounded = degrees.round();
+    if (degrees - rounded).abs() > 1e-9 {
+        return Err(format!(
+            "csv line {line_no} rotation_degrees={degrees}: expected whole-degree 0/90/180/270"
+        ));
+    }
+    let mut normalized = (rounded as i32) % 360;
+    if normalized < 0 {
+        normalized += 360;
+    }
+    if normalized % 90 != 0 {
+        return Err(format!(
+            "csv line {line_no} rotation_degrees={degrees}: expected multiple of 90 degrees"
+        ));
+    }
+    Ok((normalized / 90) as u8)
 }
 
 const PLAYER_PITCH_POINT_ALIASES: TrackingCsvPitchPointAliases = TrackingCsvPitchPointAliases {
@@ -58907,6 +58980,51 @@ mod tests {
         assert!(
             !dataset.transitions.is_empty(),
             "flipped footage should still train into learning transitions"
+        );
+    }
+
+    #[test]
+    fn tracking_dataset_csv_rotates_footage_axes_before_learning() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 112,
+            ..Default::default()
+        };
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x_norm,y_norm,home_x_norm,home_y_norm,ball_pixel_x,ball_pixel_y,image_width,image_height,rotation_degrees,ball_holder,last_touch_team
+0,0.0,0,Home carrier,Home,Midfielder,8,0.250000,0.200000,0.300000,0.250000,200,240,800,1200,90,0,Home
+1,0.1,0,Home carrier,Home,Midfielder,8,0.200000,0.150000,0.300000,0.250000,160,180,800,1200,90,0,Home
+"#;
+
+        let tracking = soccer_tracking_dataset_from_csv(raw, config, "unit-csv-rotated-footage")
+            .expect("rotated footage csv tracking");
+        let first = &tracking.frames[0];
+        assert_eq!(first.players[0].position, Vec2::new(64.0, 30.0));
+        assert_eq!(first.players[0].home_position, Some(Vec2::new(60.0, 36.0)));
+        assert_eq!(first.ball_position, Vec2::new(64.0, 30.0));
+        let second = &tracking.frames[1];
+        assert_eq!(second.players[0].position, Vec2::new(68.0, 24.0));
+        assert_eq!(second.ball_position, Vec2::new(68.0, 24.0));
+
+        let dataset = tracking.to_learning_dataset().expect("learning dataset");
+        assert!(
+            !dataset.transitions.is_empty(),
+            "rotated footage should still train into learning transitions"
+        );
+
+        let invalid = raw.replace(",90,0,Home", ",45,0,Home");
+        let err = soccer_tracking_dataset_from_csv(
+            &invalid,
+            MatchConfig {
+                duration_seconds: 0.2,
+                seed: 113,
+                ..Default::default()
+            },
+            "unit-csv-rotated-invalid",
+        )
+        .expect_err("non-quarter-turn footage rotation should fail");
+        assert!(
+            err.contains("multiple of 90"),
+            "unexpected rotation error: {err}"
         );
     }
 

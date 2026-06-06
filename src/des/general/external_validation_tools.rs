@@ -19658,6 +19658,9 @@ pub fn probe_external_validation_tool(
     if tool.artifact_kind == ExternalValidationArtifactKind::RustCrate {
         return probe_rust_crate_validation_tool(tool);
     }
+    if let Some(probe) = probe_unconfigured_proof_or_formal_rust_reference_tool(tool) {
+        return probe;
+    }
 
     let hint = if tool.id == "hexaly" {
         hexaly_configuration_hint(
@@ -19723,10 +19726,12 @@ fn run_external_validation_adapter_with_rust_reference(
         ExternalValidationFamily::ConstraintModeling
         | ExternalValidationFamily::SmtSolver
         | ExternalValidationFamily::SatSolver
-        | ExternalValidationFamily::FormalModelChecker
         | ExternalValidationFamily::NonlinearGlobalSolver
         | ExternalValidationFamily::ConvexConicSolver => {
             run_model_validation_json_with_rust_reference(input, tool.id)
+        }
+        ExternalValidationFamily::FormalModelChecker => {
+            run_formal_benchmark_validation_json_with_rust_reference(input, tool.id)
         }
         ExternalValidationFamily::OutputDataValidator => {
             run_output_validation_json_with_rust_reference(input, tool.id)
@@ -20141,6 +20146,27 @@ fn probe_java_classpath_validation_tool(
     }
 }
 
+fn probe_unconfigured_proof_or_formal_rust_reference_tool(
+    tool: &ExternalValidationToolSpec,
+) -> Option<ExternalValidationProbe> {
+    if !matches!(
+        tool.family,
+        ExternalValidationFamily::ProofChecker | ExternalValidationFamily::FormalModelChecker
+    ) {
+        return None;
+    }
+    let kind = external_validation_tool_rust_reference_kind(tool)?;
+    Some(ExternalValidationProbe {
+        tool_id: tool.id.to_string(),
+        status: ExternalValidationProbeStatus::Ready,
+        command: None,
+        message: format!(
+            "{} external checker is not configured, but Rust {kind} reference is available for the same validation contract",
+            tool.display_name
+        ),
+    })
+}
+
 fn external_validation_node_modules(tool: &ExternalValidationToolSpec) -> &'static [&'static str] {
     match tool.id {
         "zod" => &["zod"],
@@ -20527,6 +20553,7 @@ mod tests {
     use super::{
         probe_java_classpath_validation_tool, probe_node_validation_package_with_command,
         probe_python_validation_package_with_command, probe_rust_crate_validation_tool,
+        probe_unconfigured_proof_or_formal_rust_reference_tool,
         wait_for_external_validation_output,
     };
     use crate::des::general::external_validation_tools::{
@@ -20912,6 +20939,79 @@ mod tests {
     }
 
     #[test]
+    fn proof_checker_probe_uses_rust_reference_without_native_command() {
+        let tool = find_external_validation_tool("lrat-check").unwrap();
+        let probe = probe_unconfigured_proof_or_formal_rust_reference_tool(tool).unwrap();
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust proof-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_proof_reference_without_native_command() {
+        let tool = find_external_validation_tool("lrat-check").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "cnf": "p cnf 1 2\n1 0\n-1 0\n",
+                "proof": "1 0 0\n",
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:small-cnf-proof-for-lrat-check")
+        );
+    }
+
+    #[test]
+    fn formal_checker_probe_uses_rust_reference_without_native_command() {
+        let tool = find_external_validation_tool("prism").unwrap();
+        let probe = probe_unconfigured_proof_or_formal_rust_reference_tool(tool).unwrap();
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust formal-model-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_formal_reference_without_native_command() {
+        let tool = find_external_validation_tool("prism").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "prism-validation",
+                "model": "dtmc\n\nmodule coin\n  s : [0..1] init 0;\n  [] s=0 -> 1:(s'=1);\nendmodule\n",
+                "properties": "P=? [ F s=1 ]"
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:prism-structural")
+        );
+    }
+
+    #[test]
     fn generic_adapter_run_uses_rust_simulation_reference_without_python_or_command() {
         let tool = find_external_validation_tool("simpy").unwrap();
         let run = run_external_validation_adapter(
@@ -20973,6 +21073,12 @@ mod tests {
             ("simpy", "simulation-validation"),
             ("mesa", "simulation-validation"),
             ("drat-trim", "proof-validation"),
+            ("lrat-check", "proof-validation"),
+            ("tlc", "formal-model-validation"),
+            ("prism", "formal-model-validation"),
+            ("storm", "formal-model-validation"),
+            ("alloy", "formal-model-validation"),
+            ("spin", "formal-model-validation"),
         ] {
             let tool = find_external_validation_tool(tool_id).unwrap();
             assert!(

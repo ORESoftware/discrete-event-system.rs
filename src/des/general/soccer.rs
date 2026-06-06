@@ -4673,6 +4673,16 @@ const FLANK_CROSS_MIN_FLANK_SCORE: f64 = 0.52;
 const FLANK_CROSS_MAX_YARDS_TO_GOAL: f64 = 54.0;
 const FLANK_OVERLAP_MIN_OPTION_SHARE: f64 = 1.0 / 3.0;
 
+fn observation_lateral_grid_position(
+    observation: &SoccerPomdpObservation,
+    field_width_yards: f64,
+) -> Vec2 {
+    let cell = observation.player_grid.fine;
+    let columns = cell.columns.max(1) as f64;
+    let x = ((cell.x as f64 + 0.5) / columns) * field_width_yards.max(0.0);
+    Vec2::new(x, 0.0)
+}
+
 fn pass_like_action_flight(action: &str) -> Option<PassFlight> {
     match normalize_soccer_action_label(action) {
         "pass" | "first-time-pass" | "flank-low-cross" => Some(PassFlight::Floor),
@@ -4682,7 +4692,11 @@ fn pass_like_action_flight(action: &str) -> Option<PassFlight> {
 }
 
 fn flank_cross_context_score(observation: &SoccerPomdpObservation, field_width_yards: f64) -> f64 {
-    let flank = flank_lane_score(observation.ball_position, field_width_yards).clamp(0.0, 1.0);
+    let flank = flank_lane_score(
+        observation_lateral_grid_position(observation, field_width_yards),
+        field_width_yards,
+    )
+    .clamp(0.0, 1.0);
     let attacking_depth =
         (1.0 - observation.yards_to_goal / FLANK_CROSS_MAX_YARDS_TO_GOAL).clamp(0.0, 1.0);
     let pressure_release = (observation.perceived_pressure * 0.35
@@ -4697,7 +4711,11 @@ fn flank_cross_context_is_legal(
 ) -> bool {
     observation.has_ball
         && observation.yards_to_goal <= FLANK_CROSS_MAX_YARDS_TO_GOAL
-        && flank_lane_score(observation.ball_position, field_width_yards).clamp(0.0, 1.0)
+        && flank_lane_score(
+            observation_lateral_grid_position(observation, field_width_yards),
+            field_width_yards,
+        )
+        .clamp(0.0, 1.0)
             >= FLANK_CROSS_MIN_FLANK_SCORE
 }
 
@@ -5267,16 +5285,13 @@ impl PlayerAgent {
         .clamp(0.0, 1.0);
         let flank_policy_active = directive.flank_attack_policy.is_flank();
         let flank_drive_multiplier = if flank_policy_active {
-            (1.0
-                + (1.0 - flank_lane_fit) * 0.26
-                + directive.flank_overlap_run_probability * 0.20)
+            (1.0 + (1.0 - flank_lane_fit) * 0.26 + directive.flank_overlap_run_probability * 0.20)
                 .clamp(1.0, 1.48)
         } else {
             1.0
         };
         let low_cross_multiplier = if directive.flank_attack_policy.prefers_low_cross() {
-            (1.0
-                + flank_lane_fit * 0.34
+            (1.0 + flank_lane_fit * 0.34
                 + crossing * 0.16
                 + directive.flank_overlap_run_probability * 0.18)
                 .clamp(1.0, 1.72)
@@ -5286,8 +5301,7 @@ impl PlayerAgent {
             1.0
         };
         let high_cross_multiplier = if directive.flank_attack_policy.prefers_high_cross() {
-            (1.0
-                + flank_lane_fit * 0.42
+            (1.0 + flank_lane_fit * 0.42
                 + crossing * 0.20
                 + directive.flank_overlap_run_probability * 0.18)
                 .clamp(1.0, 1.84)
@@ -5426,7 +5440,7 @@ impl PlayerAgent {
             * floor_pass_patience_multiplier
             * pressured_release_multiplier(observation)
             * low_cross_multiplier)
-        .clamp(0.01, 0.86);
+            .clamp(0.01, 0.86);
         options.push(AgentActionOptionTrace::new(
             "flank-low-cross",
             low_cross_score,
@@ -5458,7 +5472,7 @@ impl PlayerAgent {
             * aerial_forward_runner_multiplier
             * pressured_release_multiplier(observation)
             * high_cross_multiplier)
-        .clamp(0.01, 0.78);
+            .clamp(0.01, 0.78);
         options.push(AgentActionOptionTrace::new(
             "flank-high-cross",
             high_cross_score,
@@ -6871,8 +6885,7 @@ impl PlayerAgent {
                     }
                     "flank-low-cross" => {
                         order_names.push("flank-low-cross".to_string());
-                        let cross_chance =
-                            action_option_score(&action_options, "flank-low-cross");
+                        let cross_chance = action_option_score(&action_options, "flank-low-cross");
                         if let Some(target) = pass_targets.first().copied() {
                             if rng.next_float()
                                 < time_window_probability(cross_chance, snapshot.dt_seconds)
@@ -6894,8 +6907,7 @@ impl PlayerAgent {
                     }
                     "flank-high-cross" => {
                         order_names.push("flank-high-cross".to_string());
-                        let cross_chance =
-                            action_option_score(&action_options, "flank-high-cross");
+                        let cross_chance = action_option_score(&action_options, "flank-high-cross");
                         if let Some(target) = aerial_pass_targets.first().copied() {
                             if rng.next_float()
                                 < time_window_probability(cross_chance, snapshot.dt_seconds)
@@ -17861,8 +17873,12 @@ fn tactical_directive_for_team(
     } + risk_tolerance * 3.0
         + if own_half_possession { 4.5 } else { 0.0 }
         + overload_score * 5.0
-        + if flank_attack_policy.is_flank() { 1.5 } else { 0.0 })
-        .clamp(6.5, 24.0);
+        + if flank_attack_policy.is_flank() {
+            1.5
+        } else {
+            0.0
+        })
+    .clamp(6.5, 24.0);
     let width_factor = if has_ball {
         if attacking_phase {
             0.76 + risk_tolerance * 0.18 + overload_score * 0.06
@@ -17874,7 +17890,7 @@ fn tactical_directive_for_team(
     } else if defending {
         0.36 + press_intensity * 0.10
     } else {
-            0.52 + press_intensity * 0.08
+        0.52 + press_intensity * 0.08
     };
     let width_factor = if flank_attack_policy.is_flank() {
         width_factor + 0.04
@@ -18574,13 +18590,8 @@ fn soccer_decision_target_point(
                 before.field_width * 0.5,
                 team.goal_y(before.field_length),
             )),
-            "pass"
-            | "aerial-pass"
-            | "flank-low-cross"
-            | "flank-high-cross"
-            | "first-time-pass"
-            | "clearance"
-            | "route-one"
+            "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass"
+            | "clearance" | "route-one"
                 if after.ball.position.distance(before.ball.position) > 0.25 =>
             {
                 Some(after.ball.position)
@@ -28227,11 +28238,7 @@ impl SoccerMatch {
         let normalized_action = normalize_soccer_action_label(&action).to_string();
         let is_pass = matches!(
             normalized_action.as_str(),
-            "pass"
-                | "aerial-pass"
-                | "first-time-pass"
-                | "flank-low-cross"
-                | "flank-high-cross"
+            "pass" | "aerial-pass" | "first-time-pass" | "flank-low-cross" | "flank-high-cross"
         );
         let mut plan = SoccerLearnedPlan {
             action,
@@ -28239,8 +28246,10 @@ impl SoccerMatch {
             target_point: None,
         };
         if is_pass {
-            let candidates = if matches!(normalized_action.as_str(), "aerial-pass" | "flank-high-cross")
-            {
+            let candidates = if matches!(
+                normalized_action.as_str(),
+                "aerial-pass" | "flank-high-cross"
+            ) {
                 snapshot.ranked_visible_aerial_pass_targets(player_id, 11)
             } else {
                 let mut candidates = snapshot.ranked_visible_pass_targets(player_id, 11);
@@ -42089,7 +42098,9 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
             observation.has_ball
                 && flank_cross_context_is_legal(&observation, snapshot.field_width)
                 && !goal_attack_shot_is_required(&observation, player.role)
-                && !snapshot.ranked_visible_pass_targets(player_id, 1).is_empty()
+                && !snapshot
+                    .ranked_visible_pass_targets(player_id, 1)
+                    .is_empty()
         }
         "flank-high-cross" => {
             observation.has_ball

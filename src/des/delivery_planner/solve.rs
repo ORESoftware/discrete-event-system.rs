@@ -211,8 +211,6 @@ fn solve_delivery_planner_inner(
                 cancel_flag: None,
                 take_next_incumbent_signal: None,
                 mip_start: None,
-                cancel_flag: None,
-                take_next_incumbent_signal: None,
             },
         )
     }));

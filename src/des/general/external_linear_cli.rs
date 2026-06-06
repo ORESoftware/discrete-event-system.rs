@@ -33,6 +33,7 @@ use crate::des::general::ip_mip_des::{
     SpecialOrderedSetKind,
 };
 use crate::des::general::lp::{LPProblem, Sense};
+use crate::des::shared::linalg::{LinearSystem, Matrix};
 
 /// Linear model family to send to the external CLI bridge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3528,8 +3529,12 @@ fn solve_native_plain_cli_json_direct(
             solve_native_qsopt_ex_cli_model(
                 &model_text,
                 model.c.len(),
-                model.le_rows.len(),
-                model.eq_rows.len(),
+                &model.le_rows,
+                &model.le_rhs,
+                &model.eq_rows,
+                &model.eq_rhs,
+                Some(&model.lbs),
+                Some(&model.ubs),
                 &model.c,
                 opts,
             )
@@ -5538,13 +5543,19 @@ fn solve_lp_with_native_qsopt_ex_cli(
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
     let model_text = lp_problem_to_cplex_lp_string(problem);
-    let le_count = problem.a_ub.as_ref().map_or(0, Vec::len);
-    let eq_count = problem.a_eq.as_ref().map_or(0, Vec::len);
+    let le_rows = problem.a_ub.as_deref().unwrap_or(&[]);
+    let le_rhs = problem.b_ub.as_deref().unwrap_or(&[]);
+    let eq_rows = problem.a_eq.as_deref().unwrap_or(&[]);
+    let eq_rhs = problem.b_eq.as_deref().unwrap_or(&[]);
     solve_native_qsopt_ex_cli_model(
         &model_text,
         problem.c.len(),
-        le_count,
-        eq_count,
+        le_rows,
+        le_rhs,
+        eq_rows,
+        eq_rhs,
+        problem.lb.as_deref(),
+        problem.ub.as_deref(),
         &problem.c,
         opts,
     )
@@ -5621,8 +5632,12 @@ fn solve_ipmip_with_native_lp_solve_cli(
 fn solve_native_qsopt_ex_cli_model(
     model_text: &str,
     variable_count: usize,
-    le_count: usize,
-    eq_count: usize,
+    le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
+    eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    lower_bounds: Option<&[Option<f64>]>,
+    upper_bounds: Option<&[Option<f64>]>,
     objective_coefficients: &[f64],
     opts: &ExternalLinearCliOptions,
 ) -> ExternalLinearCliSolution {
@@ -5715,8 +5730,8 @@ fn solve_native_qsopt_ex_cli_model(
         &solution_path,
         Some(&basis_path),
         variable_count,
-        le_count,
-        eq_count,
+        le_rows.len(),
+        eq_rows.len(),
         &stdout,
         &stderr,
     ) {
@@ -5734,6 +5749,39 @@ fn solve_native_qsopt_ex_cli_model(
         }
     };
     cleanup_native_qsopt_ex_temp_files(&cleanup_paths);
+
+    let mut parsed = parsed;
+    if qsopt_ex_lp_certificate_needs_reconstruction(
+        &parsed,
+        objective_coefficients,
+        le_rows,
+        eq_rows,
+    ) {
+        if let Some((dual_ub, dual_eq, reduced_costs)) =
+            qsopt_ex_lp_certificate_from_basis(&parsed, objective_coefficients, le_rows, eq_rows)
+        {
+            parsed.dual_ub = Some(dual_ub);
+            parsed.dual_eq = Some(dual_eq);
+            parsed.reduced_costs = Some(reduced_costs);
+        }
+    }
+    if parsed.var_basis.is_none() || parsed.row_basis.is_none() {
+        let (inferred_var_basis, inferred_row_basis) = qsopt_ex_lp_basis_from_solution(
+            &parsed,
+            le_rows,
+            le_rhs,
+            eq_rows,
+            eq_rhs,
+            lower_bounds,
+            upper_bounds,
+        );
+        if parsed.var_basis.is_none() {
+            parsed.var_basis = inferred_var_basis;
+        }
+        if parsed.row_basis.is_none() {
+            parsed.row_basis = inferred_row_basis;
+        }
+    }
 
     let status = classify_native_linear_status(&parsed.status, &stdout, &stderr);
     if !matches!(
@@ -10135,6 +10183,180 @@ fn parse_native_qsopt_ex_basis_text(
     (all_some_string(&var_basis), all_some_string(&row_basis))
 }
 
+fn qsopt_ex_lp_basis_from_solution(
+    parsed: &ParsedNativeSoplexSolution,
+    le_rows: &[Vec<f64>],
+    le_rhs: &[f64],
+    eq_rows: &[Vec<f64>],
+    eq_rhs: &[f64],
+    lower_bounds: Option<&[Option<f64>]>,
+    upper_bounds: Option<&[Option<f64>]>,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let (Some(dual_ub), Some(reduced_costs)) =
+        (parsed.dual_ub.as_deref(), parsed.reduced_costs.as_deref())
+    else {
+        return (None, None);
+    };
+    infer_lp_basis_from_complementarity(
+        &parsed.x,
+        lower_bounds,
+        upper_bounds,
+        le_rows,
+        le_rhs,
+        dual_ub,
+        eq_rows,
+        eq_rhs,
+        reduced_costs,
+    )
+}
+
+fn qsopt_ex_lp_certificate_needs_reconstruction(
+    parsed: &ParsedNativeSoplexSolution,
+    objective_coefficients: &[f64],
+    le_rows: &[Vec<f64>],
+    eq_rows: &[Vec<f64>],
+) -> bool {
+    const TOL: f64 = 1.0e-6;
+    let Some(reduced_costs) = parsed
+        .reduced_costs
+        .as_deref()
+        .filter(|values| values.len() == objective_coefficients.len())
+    else {
+        return true;
+    };
+    let dual_ub = if le_rows.is_empty() {
+        parsed.dual_ub.as_deref().unwrap_or(&[])
+    } else {
+        let Some(values) = parsed
+            .dual_ub
+            .as_deref()
+            .filter(|values| values.len() == le_rows.len())
+        else {
+            return true;
+        };
+        values
+    };
+    let dual_eq = if eq_rows.is_empty() {
+        parsed.dual_eq.as_deref().unwrap_or(&[])
+    } else {
+        let Some(values) = parsed
+            .dual_eq
+            .as_deref()
+            .filter(|values| values.len() == eq_rows.len())
+        else {
+            return true;
+        };
+        values
+    };
+    let expected =
+        reduced_costs_from_row_duals(objective_coefficients, le_rows, dual_ub, eq_rows, dual_eq);
+    max_abs_diff(reduced_costs, &expected).is_none_or(|diff| diff > TOL)
+}
+
+fn qsopt_ex_lp_certificate_from_basis(
+    parsed: &ParsedNativeSoplexSolution,
+    objective_coefficients: &[f64],
+    le_rows: &[Vec<f64>],
+    eq_rows: &[Vec<f64>],
+) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    const TOL: f64 = 1.0e-7;
+    let var_basis = parsed.var_basis.as_deref()?;
+    let row_basis = parsed.row_basis.as_deref()?;
+    if parsed.x.len() != objective_coefficients.len()
+        || var_basis.len() != objective_coefficients.len()
+        || row_basis.len() != le_rows.len() + eq_rows.len()
+    {
+        return None;
+    }
+
+    let active_le = row_basis
+        .iter()
+        .take(le_rows.len())
+        .enumerate()
+        .filter_map(|(index, status)| qsopt_ex_row_basis_is_active(status).then_some(index))
+        .collect::<Vec<_>>();
+    let basic_vars = var_basis
+        .iter()
+        .enumerate()
+        .filter_map(|(index, status)| (status == "basic").then_some(index))
+        .collect::<Vec<_>>();
+    let unknown_count = active_le.len() + eq_rows.len();
+    if basic_vars.len() != unknown_count {
+        return None;
+    }
+    if unknown_count == 0 {
+        if objective_coefficients.iter().any(|value| value.abs() > TOL) {
+            return None;
+        }
+        let dual_ub = vec![0.0; le_rows.len()];
+        let dual_eq = vec![0.0; eq_rows.len()];
+        let reduced_costs = reduced_costs_from_row_duals(
+            objective_coefficients,
+            le_rows,
+            &dual_ub,
+            eq_rows,
+            &dual_eq,
+        );
+        return Some((dual_ub, dual_eq, reduced_costs));
+    }
+
+    let mut system: Matrix = Vec::with_capacity(unknown_count);
+    let mut rhs = Vec::with_capacity(unknown_count);
+    for &column in &basic_vars {
+        let mut row = Vec::with_capacity(unknown_count);
+        for &row_index in &active_le {
+            row.push(le_rows[row_index].get(column).copied().unwrap_or(0.0));
+        }
+        for eq_row in eq_rows {
+            row.push(eq_row.get(column).copied().unwrap_or(0.0));
+        }
+        system.push(row);
+        rhs.push(objective_coefficients[column]);
+    }
+    let solution = LinearSystem::new(&system, &rhs, 1.0e-10).try_solve()?;
+    if solution.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+
+    let mut dual_ub = vec![0.0; le_rows.len()];
+    for (offset, &row_index) in active_le.iter().enumerate() {
+        let value = clean_certificate_value(solution[offset]);
+        if value < -TOL {
+            return None;
+        }
+        dual_ub[row_index] = value.max(0.0);
+    }
+    let dual_eq = solution[active_le.len()..]
+        .iter()
+        .map(|value| clean_certificate_value(*value))
+        .collect::<Vec<_>>();
+    let reduced_costs =
+        reduced_costs_from_row_duals(objective_coefficients, le_rows, &dual_ub, eq_rows, &dual_eq);
+    if basic_vars
+        .iter()
+        .any(|&index| reduced_costs[index].abs() > TOL)
+    {
+        return None;
+    }
+    Some((dual_ub, dual_eq, reduced_costs))
+}
+
+fn qsopt_ex_row_basis_is_active(status: &str) -> bool {
+    matches!(status, "at_upper" | "at_lower" | "fixed")
+}
+
+fn max_abs_diff(lhs: &[f64], rhs: &[f64]) -> Option<f64> {
+    if lhs.len() != rhs.len() {
+        return None;
+    }
+    Some(
+        lhs.iter()
+            .zip(rhs)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0, f64::max),
+    )
+}
+
 fn parse_native_lp_solve_solution_text(
     text: &str,
     variable_count: usize,
@@ -13783,6 +14005,97 @@ e0 -1
             super::parse_qsopt_ex_solver_version(stdout),
             Some("QSopt_ex 2.5.10".to_string())
         );
+    }
+
+    #[test]
+    fn native_qsopt_ex_solution_basis_infers_from_certificates() {
+        let solution_text = "\
+status optimal
+VARS:
+x0 6
+x1 4
+REDUCED COSTS:
+x0 0
+x1 0
+PI:
+c0 2.3333333333333335
+c1 0
+c2 0.6666666666666666
+";
+        let parsed = super::parse_native_qsopt_ex_solution_text(solution_text, 2, 3, 0, "", "");
+        let le_rows = vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]];
+        let le_rhs = vec![14.0, 0.0, 2.0];
+        let lower_bounds = vec![Some(0.0), Some(0.0)];
+        let upper_bounds = vec![None, None];
+        let (var_basis, row_basis) = super::qsopt_ex_lp_basis_from_solution(
+            &parsed,
+            &le_rows,
+            &le_rhs,
+            &[],
+            &[],
+            Some(&lower_bounds),
+            Some(&upper_bounds),
+        );
+
+        assert_eq!(
+            var_basis,
+            Some(vec!["basic".to_string(), "basic".to_string()])
+        );
+        assert_eq!(
+            row_basis,
+            Some(vec![
+                "at_upper".to_string(),
+                "basic".to_string(),
+                "at_upper".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn native_qsopt_ex_solution_reconstructs_zero_pi_certificates_from_basis() {
+        let solution_text = "\
+status optimal
+VARS:
+x0 6
+x1 4
+REDUCED COSTS:
+x0 0
+x1 0
+PI:
+c0 0
+c1 0
+c2 0
+";
+        let mut parsed = super::parse_native_qsopt_ex_solution_text(solution_text, 2, 3, 0, "", "");
+        parsed.var_basis = Some(vec!["basic".to_string(), "basic".to_string()]);
+        parsed.row_basis = Some(vec![
+            "at_upper".to_string(),
+            "basic".to_string(),
+            "at_upper".to_string(),
+        ]);
+        let objective = vec![3.0, 4.0];
+        let le_rows = vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]];
+        let eq_rows = Vec::<Vec<f64>>::new();
+
+        assert!(super::qsopt_ex_lp_certificate_needs_reconstruction(
+            &parsed, &objective, &le_rows, &eq_rows
+        ));
+        let (dual_ub, dual_eq, reduced_costs) =
+            super::qsopt_ex_lp_certificate_from_basis(&parsed, &objective, &le_rows, &eq_rows)
+                .expect("certificate from basis");
+
+        assert!((dual_ub[0] - 7.0 / 3.0).abs() <= 1.0e-8);
+        assert_eq!(dual_ub[1], 0.0);
+        assert!((dual_ub[2] - 2.0 / 3.0).abs() <= 1.0e-8);
+        assert_eq!(dual_eq, Vec::<f64>::new());
+        assert_eq!(reduced_costs, vec![0.0, 0.0]);
+
+        parsed.dual_ub = Some(dual_ub);
+        parsed.dual_eq = Some(dual_eq);
+        parsed.reduced_costs = Some(reduced_costs);
+        assert!(!super::qsopt_ex_lp_certificate_needs_reconstruction(
+            &parsed, &objective, &le_rows, &eq_rows
+        ));
     }
 
     #[test]

@@ -128,9 +128,12 @@ pub fn repo_root_from_runner() -> PathBuf {
 }
 
 fn relative_source_has_parent_or_root(relative_source: &str) -> bool {
-    Path::new(relative_source)
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    Path::new(relative_source).components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
 }
 
 fn rust_cargo_bin_name(relative_source: &str) -> Option<String> {
@@ -397,7 +400,8 @@ pub fn run_external_module(
         out_root,
         module_out_dir,
     };
-    let args = external_module_invocation_args(&module, &script, (module.build_args)(&merged, &ctx)?);
+    let args =
+        external_module_invocation_args(&module, &script, (module.build_args)(&merged, &ctx)?);
 
     run_external_program(
         &command,

@@ -130,6 +130,8 @@ const COMPLETED_FORWARD_PASS_BASE_REWARD_OWN_HALF: f64 = 7.0;
 const COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF: f64 = 7.6;
 const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.15;
 const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS: f64 = 30.0;
+const COMPLETED_DANGEROUS_CROSS_BONUS_POINTS: f64 = 3.8;
+const COMPLETED_CROSS_MAX_BONUS_POINTS: f64 = 5.0;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
 const GOALMOUTH_CARRY_REWARD_POINTS: f64 = 1.35;
 const ENDLINE_DRIBBLE_TRAP_PENALTY_POINTS: f64 = 1.85;
@@ -1235,6 +1237,14 @@ pub struct SoccerPomdpObservation {
     pub human_input_present: bool,
     #[serde(default)]
     pub human_input_seq: Option<u64>,
+    #[serde(default)]
+    pub movement_gait: MovementGait,
+    #[serde(default)]
+    pub actor_speed_yps: f64,
+    #[serde(default)]
+    pub actor_acceleration_yps2: f64,
+    #[serde(default)]
+    pub actor_jerk_yps3: f64,
     pub ball_distance: f64,
     pub nearest_opponent_distance: f64,
     pub nearest_teammate_distance: f64,
@@ -2226,6 +2236,14 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub ball_schedule_order: i8,
     #[serde(default)]
+    pub movement_gait: MovementGait,
+    #[serde(default)]
+    pub actor_speed_bin: u8,
+    #[serde(default)]
+    pub actor_acceleration_bin: u8,
+    #[serde(default)]
+    pub actor_jerk_bin: u8,
+    #[serde(default)]
     pub receive_facing: FacingBucket,
     #[serde(default)]
     pub action_facing: FacingBucket,
@@ -2454,6 +2472,19 @@ impl SoccerQStateKey {
             player_macro_cell_id: player_grid.macro_zone.id,
             player_root_cell_id: player_grid.whole_pitch.id,
             ball_schedule_order: observation.ball_schedule_order.clamp(-1, 1),
+            movement_gait: observation.movement_gait,
+            actor_speed_bin: distance_bucket(
+                observation.actor_speed_yps,
+                &[0.75, 2.5, 4.5, 7.0, 9.5],
+            ),
+            actor_acceleration_bin: distance_bucket(
+                observation.actor_acceleration_yps2,
+                &[0.75, 2.0, 4.0, 7.0, 10.5],
+            ),
+            actor_jerk_bin: distance_bucket(
+                observation.actor_jerk_yps3,
+                &[1.5, 4.0, 8.0, 14.0, 22.0],
+            ),
             receive_facing,
             action_facing,
             score_diff_bucket: score_diff_for_team.clamp(-2, 2) as i8,
@@ -2747,6 +2778,10 @@ impl SoccerQStateKey {
             && self.ball_zone_x == other.ball_zone_x
             && self.ball_zone_y == other.ball_zone_y
             && self.ball_schedule_order == other.ball_schedule_order
+            && self.movement_gait == other.movement_gait
+            && self.actor_speed_bin == other.actor_speed_bin
+            && self.actor_acceleration_bin == other.actor_acceleration_bin
+            && self.actor_jerk_bin == other.actor_jerk_bin
             && self.score_diff_bucket == other.score_diff_bucket
             && self.team_brain_mode == other.team_brain_mode
             && self.team_brain_press_bin == other.team_brain_press_bin
@@ -8086,7 +8121,28 @@ impl SharedHumanInputStore {
 #[derive(Clone)]
 pub struct SharedHumanInputs {
     inner: Arc<RwLock<SharedHumanInputStore>>,
-    notifier: Arc<(Mutex<u64>, Condvar)>,
+    notifier: Arc<(Mutex<HumanInputNotifierState>, Condvar)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HumanInputNotifierState {
+    version: u64,
+    version_by_slot: HashMap<usize, u64>,
+}
+
+impl HumanInputNotifierState {
+    fn record_slot_change(&mut self, controller_slot: usize) {
+        self.version = self.version.saturating_add(1);
+        self.version_by_slot.insert(controller_slot, self.version);
+    }
+
+    fn slots_changed_since(&self, controller_slots: &[usize], version: u64) -> bool {
+        controller_slots.iter().any(|slot| {
+            self.version_by_slot
+                .get(slot)
+                .is_some_and(|slot_version| *slot_version > version)
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -8109,7 +8165,10 @@ impl Default for SharedHumanInputs {
     fn default() -> Self {
         SharedHumanInputs {
             inner: Arc::new(RwLock::new(SharedHumanInputStore::default())),
-            notifier: Arc::new((Mutex::new(0), Condvar::new())),
+            notifier: Arc::new((
+                Mutex::new(HumanInputNotifierState::default()),
+                Condvar::new(),
+            )),
         }
     }
 }
@@ -8120,6 +8179,7 @@ impl SharedHumanInputs {
     }
 
     pub fn push(&self, input: HumanInputFrame) -> bool {
+        let controller_slot = input.controller_slot;
         let accepted = self
             .inner
             .write()
@@ -8127,8 +8187,8 @@ impl SharedHumanInputs {
             .push(input);
         if accepted {
             let (lock, condvar) = &*self.notifier;
-            let mut version = lock.lock().expect("human input notifier lock poisoned");
-            *version = version.saturating_add(1);
+            let mut notifier = lock.lock().expect("human input notifier lock poisoned");
+            notifier.record_slot_change(controller_slot);
             condvar.notify_all();
         }
         accepted
@@ -8157,16 +8217,37 @@ impl SharedHumanInputs {
 
     pub fn notification_version(&self) -> u64 {
         let (lock, _) = &*self.notifier;
-        *lock.lock().expect("human input notifier lock poisoned")
+        lock.lock()
+            .expect("human input notifier lock poisoned")
+            .version
     }
 
     pub fn wait_for_change_since(&self, version: u64, timeout: Duration) -> u64 {
         let (lock, condvar) = &*self.notifier;
         let guard = lock.lock().expect("human input notifier lock poisoned");
         let (guard, _) = condvar
-            .wait_timeout_while(guard, timeout, |current| *current <= version)
+            .wait_timeout_while(guard, timeout, |current| current.version <= version)
             .expect("human input notifier wait poisoned");
-        *guard
+        guard.version
+    }
+
+    pub fn wait_for_slot_change_since(
+        &self,
+        controller_slots: &[usize],
+        version: u64,
+        timeout: Duration,
+    ) -> u64 {
+        if controller_slots.is_empty() {
+            return self.notification_version();
+        }
+        let (lock, condvar) = &*self.notifier;
+        let guard = lock.lock().expect("human input notifier lock poisoned");
+        let (guard, _) = condvar
+            .wait_timeout_while(guard, timeout, |current| {
+                !current.slots_changed_since(controller_slots, version)
+            })
+            .expect("human input notifier wait poisoned");
+        guard.version
     }
 
     pub fn wait_for_pending_input(&self, timeout: Duration) -> bool {
@@ -8234,8 +8315,11 @@ impl SharedHumanInputs {
             if now >= deadline {
                 break;
             }
-            let next_version = self
-                .wait_for_change_since(observed_version, deadline.saturating_duration_since(now));
+            let next_version = self.wait_for_slot_change_since(
+                controller_slots,
+                observed_version,
+                deadline.saturating_duration_since(now),
+            );
             let queued_after = self.queued_len_for_slots(controller_slots);
             if queued_after > 0 {
                 let coalesce_deadline =
@@ -8247,7 +8331,8 @@ impl SharedHumanInputs {
                     if coalesce_now >= coalesce_deadline {
                         break;
                     }
-                    let next_coalesced_version = self.wait_for_change_since(
+                    let next_coalesced_version = self.wait_for_slot_change_since(
+                        controller_slots,
                         coalesced_version,
                         coalesce_deadline.saturating_duration_since(coalesce_now),
                     );
@@ -14627,6 +14712,10 @@ impl WorldSnapshot {
                 human_controlled: false,
                 human_input_present: false,
                 human_input_seq: None,
+                movement_gait: MovementGait::Stand,
+                actor_speed_yps: 0.0,
+                actor_acceleration_yps2: 0.0,
+                actor_jerk_yps3: 0.0,
                 ball_distance: 0.0,
                 nearest_opponent_distance: 0.0,
                 nearest_teammate_distance: 0.0,
@@ -15179,6 +15268,10 @@ impl WorldSnapshot {
             human_controlled: me.controller_slot.is_some(),
             human_input_present: false,
             human_input_seq: None,
+            movement_gait: me.movement_gait,
+            actor_speed_yps: me.velocity.len(),
+            actor_acceleration_yps2: me.acceleration.len(),
+            actor_jerk_yps3: me.jerk.len(),
             ball_distance: if visible_ball {
                 me_position.distance(self.ball.position)
             } else {
@@ -18164,6 +18257,93 @@ fn completed_pass_reward(team: Team, origin: Vec2, target: Vec2, field_length: f
     }
 }
 
+fn cross_scoring_channel_score(
+    team: Team,
+    origin: Vec2,
+    target: Vec2,
+    field_width: f64,
+    field_length: f64,
+) -> f64 {
+    if !pass_would_be_cross(origin, target, team, field_width, field_length) {
+        return 0.0;
+    }
+    let flank_origin = flank_lane_score(origin, field_width).clamp(0.0, 1.0);
+    let central_target = (1.0
+        - ((target.x - field_width * 0.5).abs() / (field_width * 0.24).max(1.0)))
+    .clamp(0.0, 1.0);
+    let yards_to_goal = (team.goal_y(field_length) - target.y).abs();
+    let box_depth = (1.0 - yards_to_goal / 24.0).clamp(0.0, 1.0);
+    let cutback_or_six = (1.0 - (yards_to_goal - 10.0).abs() / 18.0).clamp(0.0, 1.0);
+    (flank_origin * 0.32 + central_target * 0.28 + box_depth * 0.28 + cutback_or_six * 0.12)
+        .clamp(0.0, 1.0)
+}
+
+fn completed_cross_reward_from_parts(
+    team: Team,
+    flight: PassFlight,
+    is_cross: bool,
+    origin: Vec2,
+    target: Vec2,
+    receiver_role: PlayerRole,
+    receiver_skills: &SkillProfile,
+    field_width: f64,
+    field_length: f64,
+) -> f64 {
+    if !is_cross {
+        return 0.0;
+    }
+    let scoring_channel =
+        cross_scoring_channel_score(team, origin, target, field_width, field_length);
+    if scoring_channel <= 0.0 {
+        return 0.0;
+    }
+    let receiver_role = match receiver_role {
+        PlayerRole::Forward => 0.18,
+        PlayerRole::Midfielder => 0.10,
+        PlayerRole::Defender => 0.04,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+    let receiver_tool = if flight.is_aerial() {
+        ability01(receiver_skills.height) * 0.45
+            + ability01(receiver_skills.strength) * 0.20
+            + ability01(receiver_skills.first_touch) * 0.20
+            + ability01(receiver_skills.shooting) * 0.15
+    } else {
+        ability01(receiver_skills.first_touch) * 0.34
+            + ability01(receiver_skills.shooting) * 0.30
+            + ability01(receiver_skills.top_speed) * 0.16
+            + ability01(receiver_skills.dribbling) * 0.20
+    };
+    let flight_fit = if flight.is_aerial() {
+        0.64 + receiver_tool * 0.68
+    } else {
+        0.66 + receiver_tool * 0.40
+    };
+    (COMPLETED_DANGEROUS_CROSS_BONUS_POINTS
+        * scoring_channel
+        * (flight_fit + receiver_role).clamp(0.55, 1.35))
+    .clamp(0.0, COMPLETED_CROSS_MAX_BONUS_POINTS)
+}
+
+fn completed_cross_reward(
+    pass: &PendingPass,
+    receiver: &PlayerAgent,
+    field_width: f64,
+    field_length: f64,
+) -> f64 {
+    completed_cross_reward_from_parts(
+        pass.team,
+        pass.flight,
+        pass.is_cross,
+        pass.origin,
+        pass.intended_target,
+        receiver.role,
+        &receiver.skills,
+        field_width,
+        field_length,
+    )
+}
+
 fn pass_stride_anticipation_reward_from_fit(
     stride_fit: f64,
     target_forward_yards: f64,
@@ -19481,33 +19661,54 @@ fn soccer_transition_reward_with_tactics(
 
     if is_pass_like_action(action) {
         if let Some(holder) = after.ball.holder {
-            if holder != player.id
-                && after
+            if holder != player.id {
+                if let Some(receiver_player) = after
                     .players
                     .iter()
-                    .find(|candidate| candidate.id == holder)
-                    .is_some_and(|candidate| candidate.team == player.team)
-            {
-                let target = after.player_position(holder).unwrap_or(after.ball.position);
-                let origin = before
-                    .player_position(player.id)
-                    .unwrap_or(before.ball.position);
-                reward += completed_pass_reward(player.team, origin, target, before.field_length);
-                let action_context = soccer_decision_context_for(
-                    player.id,
-                    player.team,
-                    &decision.action,
-                    decision.action_target.as_ref(),
-                    before,
-                    after,
-                );
-                let receiver_openness =
-                    pass_receiver_openness_for_snapshots(&after.players, player.team, target);
-                reward += completed_pass_anticipation_reward_from_context(
-                    &action_context,
-                    player.team,
-                    receiver_openness,
-                );
+                    .find(|candidate| candidate.id == holder && candidate.team == player.team)
+                {
+                    let target = after.player_position(holder).unwrap_or(after.ball.position);
+                    let origin = before
+                        .player_position(player.id)
+                        .unwrap_or(before.ball.position);
+                    reward +=
+                        completed_pass_reward(player.team, origin, target, before.field_length);
+                    let flight = pass_like_action_flight(action).unwrap_or(PassFlight::Floor);
+                    let is_cross = matches!(action, "flank-low-cross" | "flank-high-cross")
+                        || pass_would_be_cross(
+                            origin,
+                            target,
+                            player.team,
+                            before.field_width,
+                            before.field_length,
+                        );
+                    reward += completed_cross_reward_from_parts(
+                        player.team,
+                        flight,
+                        is_cross,
+                        origin,
+                        target,
+                        receiver_player.role,
+                        &receiver_player.skills,
+                        before.field_width,
+                        before.field_length,
+                    );
+                    let action_context = soccer_decision_context_for(
+                        player.id,
+                        player.team,
+                        &decision.action,
+                        decision.action_target.as_ref(),
+                        before,
+                        after,
+                    );
+                    let receiver_openness =
+                        pass_receiver_openness_for_snapshots(&after.players, player.team, target);
+                    reward += completed_pass_anticipation_reward_from_context(
+                        &action_context,
+                        player.team,
+                        receiver_openness,
+                    );
+                }
             }
             assert!(
                 (135.0..=225.0).contains(&player.skills.weight_pounds),
@@ -29394,7 +29595,13 @@ impl SoccerMatch {
             pass.origin,
             pass.intended_target,
             self.config.field_length_yards,
-        ) + completed_pass_anticipation_reward(pass);
+        ) + completed_pass_anticipation_reward(pass)
+            + completed_cross_reward(
+                pass,
+                receiver_player,
+                self.config.field_width_yards,
+                self.config.field_length_yards,
+            );
         self.record_reward_event(pass.from, amount);
         self.record_possession_touch(pass.from);
         self.record_possession_touch(receiver);
@@ -43473,6 +43680,170 @@ mod tests {
     }
 
     #[test]
+    fn completed_cross_reward_values_dangerous_scoring_channel_delivery() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let crosser = 8;
+        let receiver = 9;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.height = 9.4;
+        sim.players[receiver].skills.strength = 8.6;
+        sim.players[receiver].skills.first_touch = 8.2;
+        sim.players[receiver].skills.shooting = 8.7;
+
+        let mut low_cross = test_pending_pass(
+            Team::Home,
+            crosser,
+            receiver,
+            Vec2::new(8.0, 92.0),
+            Vec2::new(40.0, 106.0),
+        );
+        low_cross.is_cross = true;
+        low_cross.flight = PassFlight::Floor;
+        let mut high_cross = low_cross.clone();
+        high_cross.flight = PassFlight::Aerial;
+        let mut sterile_cross = low_cross.clone();
+        sterile_cross.intended_target = Vec2::new(68.0, 106.0);
+
+        let low_bonus = completed_cross_reward(
+            &low_cross,
+            &sim.players[receiver],
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let high_bonus = completed_cross_reward(
+            &high_cross,
+            &sim.players[receiver],
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let sterile_bonus = completed_cross_reward(
+            &sterile_cross,
+            &sim.players[receiver],
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+
+        assert!(
+            low_bonus > 2.0,
+            "dangerous low cross into the box should carry extra reward: {low_bonus}"
+        );
+        assert!(
+            high_bonus > low_bonus,
+            "high cross to an aerially strong striker should be worth more: high={high_bonus} low={low_bonus}"
+        );
+        assert_eq!(
+            sterile_bonus, 0.0,
+            "wide-to-wide pass should not receive dangerous-cross credit"
+        );
+    }
+
+    #[test]
+    fn completed_pass_reward_event_includes_dangerous_cross_bonus() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let crosser = 8;
+        let receiver = 9;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.height = 9.0;
+        sim.players[receiver].skills.strength = 8.0;
+        sim.players[receiver].skills.first_touch = 8.0;
+        sim.players[receiver].skills.shooting = 8.5;
+        let mut cross = test_pending_pass(
+            Team::Home,
+            crosser,
+            receiver,
+            Vec2::new(8.0, 92.0),
+            Vec2::new(40.0, 106.0),
+        );
+        cross.is_cross = true;
+        cross.flight = PassFlight::Aerial;
+
+        let base = completed_pass_reward(
+            cross.team,
+            cross.origin,
+            cross.intended_target,
+            sim.config.field_length_yards,
+        ) + completed_pass_anticipation_reward(&cross);
+        let event_start = sim.reward_events.len();
+
+        sim.record_completed_pass_reward(&cross, receiver);
+
+        let passer_reward = sim.reward_events[event_start..]
+            .iter()
+            .filter(|event| event.player_id == crosser)
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert!(
+            passer_reward > base + 2.0,
+            "completed cross event should include cross bonus: reward={passer_reward} base={base}"
+        );
+    }
+
+    #[test]
+    fn transition_reward_infers_dangerous_completed_cross_bonus() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14232,
+            ..Default::default()
+        });
+        let crosser = 8;
+        let receiver = 9;
+        let origin = Vec2::new(8.0, 92.0);
+        let box_target = Vec2::new(40.0, 106.0);
+        let wide_target = Vec2::new(68.0, 106.0);
+        sim.players[crosser].position = origin;
+        sim.players[crosser].home_position = origin;
+        sim.players[receiver].position = Vec2::new(40.0, 100.0);
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.height = 9.2;
+        sim.players[receiver].skills.strength = 8.4;
+        sim.players[receiver].skills.first_touch = 8.1;
+        sim.players[receiver].skills.shooting = 8.6;
+        sim.ball.holder = Some(crosser);
+        sim.ball.position = origin;
+        sim.ball.last_touch_team = Some(Team::Home);
+        let before = WorldSnapshot::from_match(&sim);
+
+        let reward_for = |target: Vec2| {
+            let mut after = before.clone();
+            after.ball.holder = Some(receiver);
+            after.ball.position = target;
+            after.set_player_position(receiver, target);
+            let mut decision = test_decision_trace(&before, crosser, "flank-high-cross");
+            decision.action_target = Some(AgentActionTargetTrace {
+                point: Some(target),
+                player_id: Some(receiver),
+                grid: Some(pitch_grid_address(
+                    target,
+                    before.field_width,
+                    before.field_length,
+                )),
+                facing: facing_bucket_from_vector(target - origin),
+                dribble_touch: None,
+            });
+            decision.observation.expected_aerial_pass_completion = 0.76;
+            decision.observation.best_aerial_pass_receiver_openness = 0.72;
+            soccer_transition_reward(
+                &sim.players[crosser],
+                &decision,
+                &before,
+                &after,
+                0,
+                0,
+                0,
+                0,
+                true,
+            )
+        };
+
+        let dangerous = reward_for(box_target);
+        let sterile = reward_for(wide_target);
+        assert!(
+            dangerous > sterile + 1.2,
+            "completed cross into scoring channel should beat wide-to-wide delivery: dangerous={dangerous} sterile={sterile}"
+        );
+    }
+
+    #[test]
     fn transition_rewards_keep_goal_forward_pass_and_forward_carry_hierarchy() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -45132,6 +45503,73 @@ mod tests {
         assert!(
             features[SOCCER_NEURAL_FEATURE_TEAM_FORWARD_VELOCITY] > 0.50,
             "team forward velocity should be visible to the neural learner"
+        );
+    }
+
+    #[test]
+    fn pomdp_and_q_state_track_actor_motion_context() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14232,
+            ..Default::default()
+        });
+        let actor = 6;
+        for player in &mut sim.players {
+            player.velocity = Vec2::zero();
+            player.acceleration = Vec2::zero();
+            player.jerk = Vec2::zero();
+            player.movement_gait = MovementGait::Stand;
+        }
+        sim.ball.holder = Some(actor);
+        sim.ball.position = sim.players[actor].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[actor].velocity = Vec2::new(0.8, 8.2);
+        sim.players[actor].acceleration = Vec2::new(0.4, 5.4);
+        sim.players[actor].jerk = Vec2::new(0.0, 13.2);
+        sim.players[actor].movement_gait = MovementGait::Sprint;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(actor);
+        let mdp_state = snapshot.mdp_state_for_player(actor);
+        let sprint_key =
+            SoccerQStateKey::from_parts(&mdp_state, &observation, Team::Home, sim.players[actor].role);
+
+        assert_eq!(observation.movement_gait, MovementGait::Sprint);
+        assert!(observation.actor_speed_yps > 8.0);
+        assert!(observation.actor_acceleration_yps2 > 5.0);
+        assert!(observation.actor_jerk_yps3 > 13.0);
+        assert_eq!(sprint_key.movement_gait, MovementGait::Sprint);
+        assert!(sprint_key.actor_speed_bin >= 4);
+        assert!(sprint_key.actor_acceleration_bin >= 3);
+        assert!(sprint_key.actor_jerk_bin >= 3);
+
+        let mut standing_observation = observation.clone();
+        standing_observation.movement_gait = MovementGait::Stand;
+        standing_observation.actor_speed_yps = 0.0;
+        standing_observation.actor_acceleration_yps2 = 0.0;
+        standing_observation.actor_jerk_yps3 = 0.0;
+        let standing_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &standing_observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
+
+        assert_eq!(standing_key.movement_gait, MovementGait::Stand);
+        assert!(sprint_key.actor_speed_bin > standing_key.actor_speed_bin);
+        assert!(sprint_key.actor_acceleration_bin > standing_key.actor_acceleration_bin);
+        assert!(sprint_key.actor_jerk_bin > standing_key.actor_jerk_bin);
+        assert_ne!(sprint_key, standing_key);
+
+        let mut policy = SoccerQPolicy::default();
+        policy.set_action_value(sprint_key.clone(), "overlap-run", 5.0);
+        assert_eq!(
+            policy.best_action_hierarchical(&sprint_key).as_deref(),
+            Some("overlap-run")
+        );
+        assert!(
+            policy.best_action_hierarchical(&standing_key).is_none(),
+            "actor motion bins should prevent reusing sprint overlap policy for a standing player"
         );
     }
 
@@ -47092,6 +47530,61 @@ mod tests {
             assert!(input.sprint);
             assert_eq!(q.last_seq_for_slot(slot), Some(3));
         }
+    }
+
+    #[test]
+    fn slot_specific_notifier_ignores_unassigned_slot_changes() {
+        let q = SharedHumanInputs::new();
+        let version = q.notification_version();
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 1,
+            player_id: Some(1),
+            seq: 1,
+            axis: Vec2::new(0.0, 1.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let started = Instant::now();
+        let after_unassigned =
+            q.wait_for_slot_change_since(&[0], version, Duration::from_millis(25));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(18),
+            "assigned-slot wait should sleep through unrelated slot changes: elapsed={elapsed:?}"
+        );
+        assert!(after_unassigned > version);
+        assert_eq!(q.queued_len_for_slots(&[0]), 0);
+        assert_eq!(q.queued_len_for_slots(&[1]), 1);
+
+        let version = q.notification_version();
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 1,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+        let started = Instant::now();
+        let after_assigned =
+            q.wait_for_slot_change_since(&[0], version, Duration::from_millis(100));
+
+        assert!(
+            started.elapsed() < Duration::from_millis(25),
+            "assigned slot change should wake immediately"
+        );
+        assert!(after_assigned > version);
+        assert_eq!(q.queued_len_for_slots(&[0]), 1);
     }
 
     #[test]

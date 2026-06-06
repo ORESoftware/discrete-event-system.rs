@@ -435,6 +435,7 @@ fn external_basis_required(label: &str) -> bool {
             | "cbc-cli"
             | "clp-cli"
             | "soplex-cli"
+            | "qsopt-ex-cli"
             | "lp-solve-cli"
             | "ortools"
             | "ortools-pdlp"

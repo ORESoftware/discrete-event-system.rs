@@ -412,9 +412,15 @@ fn external_certificates_required(_name: &str, label: &str) -> bool {
         "scipy-highs"
             | "highs-cli"
             | "cbc-cli"
+            | "clp-cli"
+            | "soplex-cli"
+            | "qsopt-ex-cli"
+            | "lp-solve-cli"
             | "ortools"
+            | "ortools-pdlp"
             | "glpk"
             | "glpk-cli"
+            | "scip-cli"
             | "gurobi"
             | "cplex"
             | "xpress"
@@ -425,7 +431,19 @@ fn external_basis_required(label: &str) -> bool {
     let base = label.strip_suffix("/des-simplex").unwrap_or(label);
     matches!(
         base,
-        "highs-cli" | "cbc-cli" | "ortools" | "glpk" | "glpk-cli" | "gurobi" | "cplex" | "xpress"
+        "highs-cli"
+            | "cbc-cli"
+            | "clp-cli"
+            | "soplex-cli"
+            | "lp-solve-cli"
+            | "ortools"
+            | "ortools-pdlp"
+            | "glpk"
+            | "glpk-cli"
+            | "scip-cli"
+            | "gurobi"
+            | "cplex"
+            | "xpress"
     )
 }
 

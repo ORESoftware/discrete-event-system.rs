@@ -14254,6 +14254,21 @@ x0.m 0
         assert_eq!(parsed.dual_ub, Some(Vec::new()));
         assert_eq!(parsed.dual_eq, Some(vec![1.0]));
         assert_eq!(parsed.reduced_costs, Some(vec![0.0]));
+        let equality_model = super::PlainLinearCliModel {
+            sense: Sense::Max,
+            c: vec![1.0],
+            le_rows: Vec::new(),
+            le_rhs: Vec::new(),
+            eq_rows: vec![vec![1.0]],
+            eq_rhs: vec![2.0],
+            lbs: vec![Some(0.0)],
+            ubs: vec![None],
+            integer_vars: vec![false],
+        };
+        let (var_basis, row_basis) =
+            super::lindo_gams_lp_basis_from_solution(&equality_model, &parsed);
+        assert_eq!(var_basis, Some(vec!["basic".to_string()]));
+        assert_eq!(row_basis, Some(vec!["fixed".to_string()]));
     }
 
     #[test]

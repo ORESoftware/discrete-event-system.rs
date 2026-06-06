@@ -66,7 +66,12 @@ where
                 parsed.builtin = Some(next_value(program, &mut args, "--builtin", inline_value)?);
             }
             "-h" | "--help" => return Err(CliError(usage(program))),
-            other => return Err(CliError(format!("unknown argument {other}; {}", usage(program)))),
+            other => {
+                return Err(CliError(format!(
+                    "unknown argument {other}; {}",
+                    usage(program)
+                )))
+            }
         }
     }
     if parsed.problem.is_some() && parsed.builtin.is_some() {
@@ -95,14 +100,16 @@ fn builtin_problem(name: Option<&str>) -> Result<ComputerNetworkProblem, CliErro
     match name.unwrap_or("bottleneck-lab") {
         "small-enterprise" | "default" => Ok(build_default_computer_network_problem()),
         "bottleneck-lab" | "bottleneck" => Ok(build_bottleneck_computer_network_problem()),
-        other => Err(CliError(format!("unknown computer-network builtin {other}"))),
+        other => Err(CliError(format!(
+            "unknown computer-network builtin {other}"
+        ))),
     }
 }
 
 fn load_problem(args: &Args) -> Result<ComputerNetworkProblem, CliError> {
     if let Some(path) = &args.problem {
-        let text =
-            fs::read_to_string(path).map_err(|err| CliError(format!("read {}: {err}", path.display())))?;
+        let text = fs::read_to_string(path)
+            .map_err(|err| CliError(format!("read {}: {err}", path.display())))?;
         let json: Value = serde_json::from_str(&text)
             .map_err(|err| CliError(format!("parse {}: {err}", path.display())))?;
         return problem_from_json(&json);
@@ -110,7 +117,10 @@ fn load_problem(args: &Args) -> Result<ComputerNetworkProblem, CliError> {
     builtin_problem(args.builtin.as_deref())
 }
 
-fn object<'a>(value: &'a Value, label: &str) -> Result<&'a serde_json::Map<String, Value>, CliError> {
+fn object<'a>(
+    value: &'a Value,
+    label: &str,
+) -> Result<&'a serde_json::Map<String, Value>, CliError> {
     value
         .as_object()
         .ok_or_else(|| CliError(format!("{label} must be an object")))
@@ -447,14 +457,25 @@ mod tests {
         let result = output.get("result").expect("result");
 
         assert_eq!(output.get("status").and_then(JsonValue::as_str), Some("ok"));
-        assert_eq!(output.get("backend").and_then(JsonValue::as_str), Some("rust"));
+        assert_eq!(
+            output.get("backend").and_then(JsonValue::as_str),
+            Some("rust")
+        );
+        assert!(
+            result
+                .get("generatedPackets")
+                .and_then(JsonValue::as_f64)
+                .unwrap_or(0.0)
+                > 0.0
+        );
         assert!(result
-            .get("generatedPackets")
-            .and_then(JsonValue::as_f64)
-            .unwrap_or(0.0)
-            > 0.0);
-        assert!(result.get("flowStats").and_then(JsonValue::as_array).is_some());
-        assert!(result.get("linkStats").and_then(JsonValue::as_array).is_some());
+            .get("flowStats")
+            .and_then(JsonValue::as_array)
+            .is_some());
+        assert!(result
+            .get("linkStats")
+            .and_then(JsonValue::as_array)
+            .is_some());
         assert!(result
             .get("bottlenecks")
             .and_then(JsonValue::as_array)

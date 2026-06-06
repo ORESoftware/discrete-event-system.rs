@@ -14227,6 +14227,7 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "good-lp",
         "lp-modeler",
         "rust-linprog",
+        "minilp",
     ];
     let stochastic_lp_tools = [
         "pyomo",
@@ -14264,6 +14265,9 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
     let quadratic_modeling_tools = [
         "osqp",
         "osqp-adapter",
+        "osqp-rust",
+        "osqp-rust-adapter",
+        "ores-osqp-rust-adapter",
         "highs",
         "highs-adapter",
         "scipy-optimize",
@@ -14277,6 +14281,9 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "scs-adapter",
         "clarabel",
         "clarabel-adapter",
+        "clarabel-rust",
+        "clarabel-rust-adapter",
+        "ores-clarabel-rust-adapter",
         "ecos",
         "ecos-adapter",
         "mosek",
@@ -18967,6 +18974,139 @@ pub fn find_external_validation_tool(id: &str) -> Option<&'static ExternalValida
         .find(|tool| tool.id == normalized || tool.env_key.eq_ignore_ascii_case(&normalized))
 }
 
+pub fn external_validation_tool_has_rust_reference(tool: &ExternalValidationToolSpec) -> bool {
+    external_validation_tool_rust_reference_kind(tool).is_some()
+}
+
+pub fn external_validation_tool_rust_reference_kind(
+    tool: &ExternalValidationToolSpec,
+) -> Option<&'static str> {
+    let id = normalize_tool_id(tool.id);
+    if external_validation_model_tool_has_rust_reference(&id) {
+        return Some("model-validation");
+    }
+    if external_validation_output_tool_has_rust_reference(&id) {
+        return Some("output-validation");
+    }
+    if external_validation_simulation_tool_has_rust_reference(&id) {
+        return Some("simulation-validation");
+    }
+    if external_validation_proof_tool_has_rust_reference(&id) {
+        return Some("proof-validation");
+    }
+    None
+}
+
+fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
+    matches!(
+        id,
+        "cpmpy"
+            | "pycsp3"
+            | "clingo"
+            | "cvc5"
+            | "bitwuzla"
+            | "pyomo"
+            | "pulp"
+            | "pyscipopt"
+            | "python-mip"
+            | "gurobipy"
+            | "cplex-python"
+            | "xpress-python"
+            | "docplex"
+            | "choco-solver"
+            | "jacop"
+            | "ibm-cp-optimizer"
+            | "ortools-java"
+            | "optaplanner"
+            | "timefold"
+            | "ortools-python"
+            | "ortools-glop"
+            | "ortools-pdlp"
+            | "scipy-optimize"
+            | "mosek"
+            | "copt"
+            | "nlopt"
+            | "casadi"
+            | "osqp"
+            | "scs"
+            | "clarabel"
+            | "ecos"
+            | "proxqp"
+            | "cvxpy"
+            | "cvxopt"
+            | "good-lp"
+            | "lp-modeler"
+            | "rust-linprog"
+            | "minilp"
+            | "argmin"
+            | "nlopt-rs"
+            | "osqp-rust"
+            | "clarabel-rust"
+            | "gurobi-rust"
+            | "cplex-rust"
+            | "ipopt-rust"
+            | "highs-rust"
+            | "scip-rust"
+            | "cbc-rust"
+            | "kissat"
+            | "cadical"
+            | "minisat"
+            | "glucose"
+            | "maplesat"
+            | "pysat"
+    )
+}
+
+fn external_validation_output_tool_has_rust_reference(id: &str) -> bool {
+    matches!(
+        id,
+        "json-schema"
+            | "check-jsonschema"
+            | "openapi-spec-validator"
+            | "csv-validator"
+            | "pydantic"
+            | "marshmallow"
+            | "cerberus"
+            | "python-xmlschema"
+            | "schematron"
+            | "saxon"
+            | "great-expectations"
+            | "pandera"
+            | "whylogs"
+            | "soda-core"
+            | "evidently"
+            | "deepchecks"
+            | "frictionless"
+            | "sqlfluff"
+            | "apache-avro"
+            | "apache-arrow"
+            | "tensorflow-data-validation"
+            | "zod"
+            | "valibot"
+    )
+}
+
+fn external_validation_simulation_tool_has_rust_reference(id: &str) -> bool {
+    matches!(
+        id,
+        "simpy"
+            | "salabim"
+            | "ciw"
+            | "simulus"
+            | "pandapower"
+            | "tellurium"
+            | "mujoco"
+            | "drake"
+            | "pybullet"
+            | "mesa"
+            | "agentpy"
+    )
+}
+
+fn external_validation_proof_tool_has_rust_reference(id: &str) -> bool {
+    matches!(id, "drat-trim" | "lrat" | "cake-lpr" | "frat" | "veripb")
+}
+
 pub fn external_validation_adapter_env_names(tool: &ExternalValidationToolSpec) -> Vec<String> {
     vec![
         format!("ORES_{}_ADAPTER", tool.env_key),
@@ -19494,12 +19634,16 @@ pub fn probe_external_validation_tool(
         if let Some(classpath) = java_classpath_from_install_dirs(tool) {
             return probe_configured_artifact(tool, classpath.to_string_lossy().to_string());
         }
+        return probe_java_classpath_validation_tool(tool);
     }
     if tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage {
         return probe_python_validation_package(tool);
     }
     if tool.artifact_kind == ExternalValidationArtifactKind::NodePackage {
         return probe_node_validation_package(tool, None);
+    }
+    if tool.artifact_kind == ExternalValidationArtifactKind::RustCrate {
+        return probe_rust_crate_validation_tool(tool);
     }
 
     let hint = if tool.id == "hexaly" {
@@ -19536,6 +19680,9 @@ pub fn run_external_validation_adapter(
         };
     };
     let Some(command) = external_validation_adapter_command_with_options(opts) else {
+        if let Some(run) = run_external_validation_adapter_with_rust_reference(input, tool) {
+            return run;
+        }
         return ExternalValidationRun {
             tool_id: tool.id.to_string(),
             status: ExternalValidationRunStatus::Unavailable,
@@ -19549,6 +19696,78 @@ pub fn run_external_validation_adapter(
         };
     };
     run_json_adapter(input, tool, command, opts)
+}
+
+fn run_external_validation_adapter_with_rust_reference(
+    input: &Value,
+    tool: &ExternalValidationToolSpec,
+) -> Option<ExternalValidationRun> {
+    if !external_validation_tool_has_rust_reference(tool) {
+        return None;
+    }
+    let started = Instant::now();
+    let output = match tool.family {
+        ExternalValidationFamily::ConstraintModeling
+        | ExternalValidationFamily::SmtSolver
+        | ExternalValidationFamily::SatSolver
+        | ExternalValidationFamily::FormalModelChecker
+        | ExternalValidationFamily::NonlinearGlobalSolver
+        | ExternalValidationFamily::ConvexConicSolver => {
+            run_model_validation_json_with_rust_reference(input, tool.id)
+        }
+        ExternalValidationFamily::OutputDataValidator => {
+            run_output_validation_json_with_rust_reference(input, tool.id)
+        }
+        ExternalValidationFamily::ProofChecker => {
+            run_proof_validation_json_with_rust_reference(input, tool.id)
+        }
+        ExternalValidationFamily::SimulationEngine => {
+            let run = run_simulation_validation_json_with_external_reference(
+                input,
+                &ExternalSimulationValidationReferenceOptions {
+                    engine_id: Some(tool.id.to_string()),
+                },
+            );
+            run.raw
+        }
+        ExternalValidationFamily::BenchmarkLibrary => return None,
+    };
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    Some(external_validation_run_from_rust_reference_output(
+        tool, output, elapsed_ms,
+    ))
+}
+
+fn external_validation_run_from_rust_reference_output(
+    tool: &ExternalValidationToolSpec,
+    output: Value,
+    elapsed_ms: f64,
+) -> ExternalValidationRun {
+    let status_label = output
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let status = match status_label.as_str() {
+        "ok" => ExternalValidationRunStatus::Ok,
+        "unavailable" => ExternalValidationRunStatus::Unavailable,
+        "invalid-output" => ExternalValidationRunStatus::InvalidOutput,
+        "failed" | "failure" | "error" => ExternalValidationRunStatus::Failed,
+        _ => ExternalValidationRunStatus::InvalidOutput,
+    };
+    let message = output
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    ExternalValidationRun {
+        tool_id: tool.id.to_string(),
+        status,
+        output: Some(output),
+        elapsed_ms,
+        message,
+    }
 }
 
 fn run_json_adapter(
@@ -19646,17 +19865,28 @@ fn run_json_adapter(
 }
 
 fn probe_python_validation_package(tool: &ExternalValidationToolSpec) -> ExternalValidationProbe {
-    let Some(python) = default_python_probe_command() else {
-        return ExternalValidationProbe {
-            tool_id: tool.id.to_string(),
-            status: ExternalValidationProbeStatus::NotConfigured,
-            command: None,
-            message: format!(
-                "{} needs a local adapter command or Python env; set {} or {}",
-                tool.display_name,
-                external_validation_adapter_env_names(tool)[0],
-                external_validation_artifact_hint(tool)
-            ),
+    probe_python_validation_package_with_command(tool, default_python_probe_command())
+}
+
+fn probe_python_validation_package_with_command(
+    tool: &ExternalValidationToolSpec,
+    python: Option<PathBuf>,
+) -> ExternalValidationProbe {
+    let Some(python) = python else {
+        return if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+            rust_reference_python_probe(tool, kind)
+        } else {
+            ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::NotConfigured,
+                command: None,
+                message: format!(
+                    "{} needs a local adapter command or Python env; set {} or {}",
+                    tool.display_name,
+                    external_validation_adapter_env_names(tool)[0],
+                    external_validation_artifact_hint(tool)
+                ),
+            }
         };
     };
     if external_validation_python_modules(tool)
@@ -19670,6 +19900,9 @@ fn probe_python_validation_package(tool: &ExternalValidationToolSpec) -> Externa
             message: format!("{} Python module is importable", tool.display_name),
         };
     }
+    if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+        return rust_reference_python_probe(tool, kind);
+    }
     ExternalValidationProbe {
         tool_id: tool.id.to_string(),
         status: ExternalValidationProbeStatus::NotConfigured,
@@ -19679,6 +19912,21 @@ fn probe_python_validation_package(tool: &ExternalValidationToolSpec) -> Externa
             tool.display_name,
             external_validation_adapter_env_names(tool)[0],
             external_validation_artifact_hint(tool)
+        ),
+    }
+}
+
+fn rust_reference_python_probe(
+    tool: &ExternalValidationToolSpec,
+    kind: &'static str,
+) -> ExternalValidationProbe {
+    ExternalValidationProbe {
+        tool_id: tool.id.to_string(),
+        status: ExternalValidationProbeStatus::Ready,
+        command: None,
+        message: format!(
+            "{} Python package is unavailable, but Rust {kind} reference is available for the same validation contract",
+            tool.display_name
         ),
     }
 }
@@ -19759,17 +20007,29 @@ fn probe_node_validation_package(
     tool: &ExternalValidationToolSpec,
     node_path: Option<&str>,
 ) -> ExternalValidationProbe {
-    let Some(node) = default_node_probe_command() else {
-        return ExternalValidationProbe {
-            tool_id: tool.id.to_string(),
-            status: ExternalValidationProbeStatus::NotConfigured,
-            command: None,
-            message: format!(
-                "{} needs a local adapter command or Node.js env; set {} or {}",
-                tool.display_name,
-                external_validation_adapter_env_names(tool)[0],
-                external_validation_artifact_hint(tool)
-            ),
+    probe_node_validation_package_with_command(tool, node_path, default_node_probe_command())
+}
+
+fn probe_node_validation_package_with_command(
+    tool: &ExternalValidationToolSpec,
+    node_path: Option<&str>,
+    node: Option<PathBuf>,
+) -> ExternalValidationProbe {
+    let Some(node) = node else {
+        return if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+            rust_reference_node_probe(tool, kind)
+        } else {
+            ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::NotConfigured,
+                command: None,
+                message: format!(
+                    "{} needs a local adapter command or Node.js env; set {} or {}",
+                    tool.display_name,
+                    external_validation_adapter_env_names(tool)[0],
+                    external_validation_artifact_hint(tool)
+                ),
+            }
         };
     };
     if external_validation_node_modules(tool)
@@ -19783,6 +20043,9 @@ fn probe_node_validation_package(
             message: format!("{} Node package is importable", tool.display_name),
         };
     }
+    if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+        return rust_reference_node_probe(tool, kind);
+    }
     ExternalValidationProbe {
         tool_id: tool.id.to_string(),
         status: ExternalValidationProbeStatus::NotConfigured,
@@ -19793,6 +20056,75 @@ fn probe_node_validation_package(
             external_validation_adapter_env_names(tool)[0],
             external_validation_artifact_hint(tool)
         ),
+    }
+}
+
+fn rust_reference_node_probe(
+    tool: &ExternalValidationToolSpec,
+    kind: &'static str,
+) -> ExternalValidationProbe {
+    ExternalValidationProbe {
+        tool_id: tool.id.to_string(),
+        status: ExternalValidationProbeStatus::Ready,
+        command: None,
+        message: format!(
+            "{} Node package is unavailable, but Rust {kind} reference is available for the same validation contract",
+            tool.display_name
+        ),
+    }
+}
+
+fn probe_rust_crate_validation_tool(tool: &ExternalValidationToolSpec) -> ExternalValidationProbe {
+    if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::Ready,
+            command: None,
+            message: format!(
+                "{} Rust crate adapter is not configured, but Rust {kind} reference is available for the same validation contract",
+                tool.display_name
+            ),
+        }
+    } else {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} needs a local adapter command or crate marker; set {} or {}",
+                tool.display_name,
+                external_validation_adapter_env_names(tool)[0],
+                external_validation_artifact_hint(tool)
+            ),
+        }
+    }
+}
+
+fn probe_java_classpath_validation_tool(
+    tool: &ExternalValidationToolSpec,
+) -> ExternalValidationProbe {
+    if let Some(kind) = external_validation_tool_rust_reference_kind(tool) {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::Ready,
+            command: None,
+            message: format!(
+                "{} Java classpath is not configured, but Rust {kind} reference is available for the same validation contract",
+                tool.display_name
+            ),
+        }
+    } else {
+        ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} needs a local adapter command or Java classpath; set {} or {}",
+                tool.display_name,
+                external_validation_adapter_env_names(tool)[0],
+                external_validation_artifact_hint(tool)
+            ),
+        }
     }
 }
 
@@ -20179,7 +20511,11 @@ fn resolve_command_path(command: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_external_validation_output;
+    use super::{
+        probe_java_classpath_validation_tool, probe_node_validation_package_with_command,
+        probe_python_validation_package_with_command, probe_rust_crate_validation_tool,
+        wait_for_external_validation_output,
+    };
     use crate::des::general::external_validation_tools::{
         dimacs_cnf_to_string, dimacs_wcnf_to_string, external_benchmark_manifest_to_json,
         external_simulation_validation_engine_manifest, external_simulation_validation_tool_specs,
@@ -20189,14 +20525,15 @@ mod tests {
         external_validation_default_artifact_cli_args, external_validation_default_file_cli_args,
         external_validation_default_text_cli_args, external_validation_file_cli_args,
         external_validation_node_modules, external_validation_python_modules,
+        external_validation_tool_has_rust_reference, external_validation_tool_rust_reference_kind,
         external_validation_tool_specs, find_command_in_install_dir, find_external_validation_tool,
         find_java_classpath_in_install_dir, infer_external_validation_text_verdict, is_jar_file,
         json_schema_validation_request_to_json, minizinc_validation_request_to_json,
         node_probe_command_from_env, prism_validation_model_to_string,
         prism_validation_properties_to_string, python_probe_command_from_env,
-        run_external_validation_artifact_cli, run_external_validation_consensus,
-        run_external_validation_file_cli, run_external_validation_text_cli,
-        run_model_validation_json_with_rust_reference,
+        run_external_validation_adapter, run_external_validation_artifact_cli,
+        run_external_validation_consensus, run_external_validation_file_cli,
+        run_external_validation_text_cli, run_model_validation_json_with_rust_reference,
         run_output_validation_json_with_rust_reference,
         run_proof_validation_json_with_rust_reference,
         run_simulation_validation_json_with_external_reference,
@@ -20204,9 +20541,10 @@ mod tests {
         smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
         DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
         ExternalSimulationValidationReferenceOptions, ExternalSimulationValidationStatus,
-        ExternalSimulationValidationVerdict, ExternalValidationArtifact,
-        ExternalValidationArtifactCliOptions, ExternalValidationArtifactKind,
-        ExternalValidationCapability, ExternalValidationCliInvocation, ExternalValidationFamily,
+        ExternalSimulationValidationVerdict, ExternalValidationAdapterOptions,
+        ExternalValidationArtifact, ExternalValidationArtifactCliOptions,
+        ExternalValidationArtifactKind, ExternalValidationCapability,
+        ExternalValidationCliInvocation, ExternalValidationFamily,
         ExternalValidationFileCliOptions, ExternalValidationProbeStatus,
         ExternalValidationRunStatus, ExternalValidationRuntime, ExternalValidationTextCliOptions,
         ExternalValidationTextFormat, ExternalValidationTextVerdict, JsonSchemaValidationRequest,
@@ -20314,6 +20652,323 @@ mod tests {
             assert!(
                 external_validation_python_modules(tool).contains(&module),
                 "{tool_id} should probe its Python API package"
+            );
+        }
+    }
+
+    #[test]
+    fn python_package_probe_uses_rust_reference_when_python_import_is_unavailable() {
+        let tool = find_external_validation_tool("clingo").unwrap();
+        let probe =
+            probe_python_validation_package_with_command(tool, Some(PathBuf::from("/no/python")));
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust model-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_model_reference_without_python_or_command() {
+        let tool = find_external_validation_tool("cpmpy").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "finite-domain-cp-validation",
+                "variables": {
+                    "left": [0, 1, 2],
+                    "right": [0, 1, 2]
+                },
+                "constraints": [
+                    {"op": "all_different", "vars": ["left", "right"]},
+                    {"op": "sum_le", "vars": ["left", "right"], "rhs": 1}
+                ]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("sat"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:finite-domain-cp-for-cpmpy")
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_output_reference_without_python_or_command() {
+        let tool = find_external_validation_tool("json-schema").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "schema": {
+                    "type": "object",
+                    "required": ["objective"],
+                    "properties": {"objective": {"type": "number"}}
+                },
+                "instance": {"objective": 3.5},
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:json-schema-subset")
+        );
+    }
+
+    #[test]
+    fn node_package_probe_uses_rust_reference_when_node_import_is_unavailable() {
+        let tool = find_external_validation_tool("zod").unwrap();
+        let probe =
+            probe_node_validation_package_with_command(tool, None, Some(PathBuf::from("/no/node")));
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust output-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_node_schema_reference_without_node_or_command() {
+        let tool = find_external_validation_tool("zod").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "schema": {
+                    "score": {"type": "number", "required": true, "min": 0.0},
+                },
+                "instance": {"score": 1.0}
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:pydantic-model-subset-for-zod")
+        );
+    }
+
+    #[test]
+    fn rust_crate_probe_uses_rust_reference_without_crate_marker() {
+        let tool = find_external_validation_tool("good-lp").unwrap();
+        let probe = probe_rust_crate_validation_tool(tool);
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust model-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_crate_linear_reference_without_crate_or_command() {
+        let tool = find_external_validation_tool("good-lp").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "linear-mip-validation",
+                "objective": [1],
+                "constraints": [
+                    {"coefs": [1], "sense": "<=", "rhs": 0},
+                    {"coefs": [1], "sense": ">=", "rhs": 1}
+                ],
+                "domains": [[0, 1]]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("infeasible"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:linear-mip-small-for-good-lp")
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_crate_quadratic_reference_without_crate_or_command() {
+        let tool = find_external_validation_tool("osqp-rust").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "qp-validation",
+                "Q": [
+                    [2, 0],
+                    [0, 2]
+                ],
+                "c": [-2, -4],
+                "lb": [0, 0],
+                "ub": [5, 5]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:quadratic-small-for-osqp-rust")
+        );
+    }
+
+    #[test]
+    fn java_classpath_probe_uses_rust_reference_without_java_artifact() {
+        let tool = find_external_validation_tool("choco-solver").unwrap();
+        let probe = probe_java_classpath_validation_tool(tool);
+
+        assert_eq!(probe.status, ExternalValidationProbeStatus::Ready);
+        assert!(probe.command.is_none());
+        assert!(
+            probe
+                .message
+                .contains("Rust model-validation reference is available"),
+            "{}",
+            probe.message
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_java_cp_reference_without_classpath_or_command() {
+        let tool = find_external_validation_tool("choco-solver").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "finite-domain-cp-validation",
+                "variables": {
+                    "left": [0, 1, 2],
+                    "right": [0, 1, 2]
+                },
+                "constraints": [
+                    {"op": "all_different", "vars": ["left", "right"]},
+                    {"op": "sum_le", "vars": ["left", "right"], "rhs": 1}
+                ]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("sat"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:finite-domain-cp-for-choco-solver")
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_java_planning_reference_without_classpath_or_command() {
+        let tool = find_external_validation_tool("optaplanner").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "traveling-salesman-validation",
+                "points": [
+                    {"id": "A", "x": 0, "y": 0},
+                    {"id": "B", "x": 1, "y": 0},
+                    {"id": "C", "x": 1, "y": 1},
+                    {"id": "D", "x": 0, "y": 1}
+                ]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:tsp-small-for-optaplanner")
+        );
+    }
+
+    #[test]
+    fn generic_adapter_run_uses_rust_simulation_reference_without_python_or_command() {
+        let tool = find_external_validation_tool("simpy").unwrap();
+        let run = run_external_validation_adapter(
+            &json!({
+                "kind": "simulation-validation",
+                "model_format": "json-event-network",
+                "model": {
+                    "servers": 1,
+                    "arrival_times": [0.0, 1.0, 2.0],
+                    "service_times": [1.0, 1.0, 1.0]
+                },
+                "scenario": {"horizon": 10.0},
+                "expected_trace_properties": [
+                    "queue_length_never_negative",
+                    "departures_after_arrivals"
+                ],
+                "metric_expectations": [{
+                    "name": "jobs_completed",
+                    "target": 3.0,
+                    "tolerance": 1e-9,
+                    "comparison": "equal"
+                }]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        let output = run.output.unwrap();
+        assert_eq!(output["verdict"].as_str(), Some("valid"));
+        assert!(output["simulator"]
+            .as_str()
+            .is_some_and(|simulator| simulator.starts_with("rust:single-station-des-for-simpy")));
+    }
+
+    #[test]
+    fn rust_reference_coverage_marks_python_model_output_and_simulation_tools() {
+        for (tool_id, kind) in [
+            ("clingo", "model-validation"),
+            ("osqp", "model-validation"),
+            ("choco-solver", "model-validation"),
+            ("jacop", "model-validation"),
+            ("ibm-cp-optimizer", "model-validation"),
+            ("ortools-java", "model-validation"),
+            ("optaplanner", "model-validation"),
+            ("timefold", "model-validation"),
+            ("json-schema", "output-validation"),
+            ("csv-validator", "output-validation"),
+            ("zod", "output-validation"),
+            ("valibot", "output-validation"),
+            ("good-lp", "model-validation"),
+            ("minilp", "model-validation"),
+            ("argmin", "model-validation"),
+            ("nlopt-rs", "model-validation"),
+            ("osqp-rust", "model-validation"),
+            ("clarabel-rust", "model-validation"),
+            ("highs-rust", "model-validation"),
+            ("scip-rust", "model-validation"),
+            ("cbc-rust", "model-validation"),
+            ("simpy", "simulation-validation"),
+            ("mesa", "simulation-validation"),
+            ("drat-trim", "proof-validation"),
+        ] {
+            let tool = find_external_validation_tool(tool_id).unwrap();
+            assert!(
+                external_validation_tool_has_rust_reference(tool),
+                "{tool_id} should advertise a Rust reference implementation"
+            );
+            assert_eq!(
+                external_validation_tool_rust_reference_kind(tool),
+                Some(kind)
             );
         }
     }

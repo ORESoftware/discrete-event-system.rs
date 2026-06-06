@@ -199,6 +199,11 @@
     gap: 10px;
     font-weight: 700;
   }
+  .loading-title.failed .spinner {
+    animation: none;
+    border-color: #e7b8b8;
+    border-top-color: var(--away);
+  }
   .spinner {
     width: 22px;
     height: 22px;
@@ -226,6 +231,24 @@
     color: var(--muted);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
+  }
+  .auth-panel {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .loading-overlay.auth-required .auth-panel {
+    display: flex;
+  }
+  .auth-panel input {
+    min-width: 0;
+    flex: 1;
+    min-height: 32px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0 8px;
+    font-size: 13px;
   }
   button:disabled,
   select:disabled,
@@ -256,10 +279,14 @@
       <canvas id="pitch" width="1280" height="820"></canvas>
       <div id="loadingOverlay" class="loading-overlay">
         <div class="loading-card">
-          <div class="loading-title"><span class="spinner"></span><span>Loading match data</span></div>
+          <div id="loadingTitle" class="loading-title"><span class="spinner"></span><span id="loadingTitleText">Loading match data</span></div>
           <div class="progress"><div id="loadingBar" class="progress-fill"></div></div>
           <div id="loadingStatus" class="loading-status">Starting download</div>
           <div id="loadingBytes" class="loading-bytes">0 B</div>
+          <form id="authForm" class="auth-panel">
+            <input id="authToken" type="password" placeholder="Auth header" autocomplete="off">
+            <button id="authRetry" type="submit">Retry</button>
+          </form>
         </div>
       </div>
     </div>
@@ -337,6 +364,8 @@
 const TRACE_META_URL = "__SOCCER_TRACE_META_URL__";
 const TRACE_FRAMES_URL = "__SOCCER_TRACE_FRAMES_URL__";
 const RUN_NEW_SIM_URL = "../simulations/main_soccer/run?exact=1&fresh=1";
+const AUTH_HEADER_NAME = "Auth";
+const AUTH_STORAGE_KEY = "desRsAuth";
 const FALLBACK_CONFIG = {
   fieldWidthYards: 80,
   fieldLengthYards: 120,
@@ -437,9 +466,13 @@ const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
 const protectActionButton = document.getElementById("protectAction");
 const loadingOverlay = document.getElementById("loadingOverlay");
+const loadingTitle = document.getElementById("loadingTitle");
+const loadingTitleText = document.getElementById("loadingTitleText");
 const loadingBar = document.getElementById("loadingBar");
 const loadingStatus = document.getElementById("loadingStatus");
 const loadingBytes = document.getElementById("loadingBytes");
+const authForm = document.getElementById("authForm");
+const authToken = document.getElementById("authToken");
 const keys = new Set();
 const MOVE_KEY_CODES = new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD"]);
 const SPRINT_KEY_CODES = new Set(["ShiftLeft","ShiftRight"]);
@@ -470,6 +503,75 @@ function cacheBustUrl(url) {
   const absolute = new URL(url, window.location.href);
   absolute.searchParams.set("v", String(Date.now()));
   return absolute.toString();
+}
+function sessionAuthToken() {
+  try {
+    return window.sessionStorage?.getItem(AUTH_STORAGE_KEY) || "";
+  } catch (_) {
+    return "";
+  }
+}
+function storeSessionAuthToken(value) {
+  try {
+    if (value) window.sessionStorage?.setItem(AUTH_STORAGE_KEY, value);
+  } catch (_) {
+    // Session storage can be unavailable for local file previews.
+  }
+}
+function initializeAuthTokenFromLocation() {
+  const names = ["auth", "Auth", "desRsAuth", "DES_RS_AUTH"];
+  let token = "";
+  const url = new URL(window.location.href);
+  for (const name of names) {
+    token = url.searchParams.get(name) || token;
+    if (token) url.searchParams.delete(name);
+  }
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  if (!token && hash.includes("=")) {
+    const hashParams = new URLSearchParams(hash);
+    for (const name of names) {
+      token = hashParams.get(name) || token;
+      if (token) hashParams.delete(name);
+    }
+    const nextHash = hashParams.toString();
+    url.hash = nextHash ? `#${nextHash}` : "";
+  }
+  if (token) {
+    storeSessionAuthToken(token.trim());
+    window.history.replaceState(null, "", url.toString());
+  }
+}
+function fetchOptions(accept, signal) {
+  const headers = {"Accept": accept};
+  const token = sessionAuthToken();
+  if (token) headers[AUTH_HEADER_NAME] = token;
+  return {headers, cache: "no-store", signal};
+}
+class AuthRequiredError extends Error {
+  constructor(resource, status, detail) {
+    const suffix = detail ? `: ${detail}` : "";
+    super(`${resource} ${status}${suffix}`);
+    this.name = "AuthRequiredError";
+  }
+}
+async function fetchRequiredResource(url, accept, signal, resource) {
+  const response = await fetch(cacheBustUrl(url), fetchOptions(accept, signal));
+  if (response.status === 401 || response.status === 403) {
+    let detail = "";
+    try {
+      detail = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 180);
+    } catch (_) {
+      detail = "";
+    }
+    throw new AuthRequiredError(resource, response.status, detail);
+  }
+  if (!response.ok) throw new Error(`${resource} ${response.status}`);
+  return response;
+}
+function setLoadingTitle(text, state = "loading") {
+  loadingTitleText.textContent = text;
+  loadingTitle.classList.toggle("failed", state === "failed" || state === "auth");
+  loadingOverlay.classList.toggle("auth-required", state === "auth");
 }
 function currentFrame() {
   if (!trace.frames.length) return null;
@@ -555,6 +657,7 @@ function updateLoadingProgress(loadedBytes = 0, totalBytes = 0, message = "Loadi
   const percent = totalBytes > 0 ? bytePercent : framePercent;
   loadingBar.style.width = `${Math.max(percent, trace.frames.length ? 4 : 1).toFixed(1)}%`;
   const ready = canStartPlayback() && !traceFramesComplete ? "Playback ready" : message;
+  setLoadingTitle(ready);
   const rate = loadedFrameRate();
   loadingStatus.textContent = `${ready}; ${trace.frames.length}/${expectedFrames || "?"} frames; ${bufferedSeconds().toFixed(1)}s buffered; ${rate.toFixed(1)} fps incoming`;
   const frameProgress = expectedFrames > 0 ? `${trace.frames.length} / ${expectedFrames} frames` : `${trace.frames.length} frames`;
@@ -1226,12 +1329,7 @@ function appendFrameLine(line) {
 }
 
 async function loadTraceMeta(signal) {
-  const response = await fetch(cacheBustUrl(TRACE_META_URL), {
-    headers: {"Accept": "application/json"},
-    cache: "no-store",
-    signal
-  });
-  if (!response.ok) throw new Error(`metadata ${response.status}`);
+  const response = await fetchRequiredResource(TRACE_META_URL, "application/json", signal, 'metadata');
   const meta = await response.json();
   trace.config = meta.config || trace.config || {...FALLBACK_CONFIG};
   trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
@@ -1243,12 +1341,12 @@ async function loadTraceMeta(signal) {
 }
 
 async function loadTraceFrames(signal) {
-  const response = await fetch(cacheBustUrl(TRACE_FRAMES_URL), {
-    headers: {"Accept": "application/x-ndjson,text/plain,application/jsonl"},
-    cache: "no-store",
-    signal
-  });
-  if (!response.ok) throw new Error(`frames ${response.status}`);
+  const response = await fetchRequiredResource(
+    TRACE_FRAMES_URL,
+    "application/x-ndjson,text/plain,application/jsonl",
+    signal,
+    'frames'
+  );
   const totalBytes = Number(response.headers.get("content-length") || 0);
   let loadedBytes = 0;
   let buffer = "";
@@ -1303,9 +1401,18 @@ async function bootstrapTrace(options = {}) {
     if (err.name === "AbortError") return;
     playing = false;
     loadingBar.style.width = "100%";
-    loadingStatus.textContent = `Load failed: ${err.message}`;
-    loadingBytes.textContent = "Retry after redeploying the split trace artifacts";
-    play.textContent = "Load failed";
+    if (err.name === "AuthRequiredError") {
+      setLoadingTitle("Authentication required", "auth");
+      loadingStatus.textContent = `Auth required: ${err.message}`;
+      loadingBytes.textContent = "Enter the legacy Auth header to load the split trace";
+      play.textContent = "Auth required";
+      authToken.focus();
+    } else {
+      setLoadingTitle("Load failed", "failed");
+      loadingStatus.textContent = `Load failed: ${err.message}`;
+      loadingBytes.textContent = "Retry after redeploying the split trace artifacts";
+      play.textContent = "Load failed";
+    }
     setControlsEnabled(false);
   } finally {
     if (traceLoadController === controller) traceLoadController = null;
@@ -1324,20 +1431,25 @@ async function runNewSimulation() {
   updateLoadingProgress(0, 0, "Running main_soccer");
   play.textContent = "Running";
   try {
-    const response = await fetch(cacheBustUrl(RUN_NEW_SIM_URL), {
-      headers: {"Accept": "application/json"},
-      cache: "no-store"
-    });
-    if (!response.ok) throw new Error(`run ${response.status}`);
+    const response = await fetchRequiredResource(RUN_NEW_SIM_URL, "application/json", undefined, 'run');
     const payload = await response.json();
     if (!payload.ok) throw new Error(payload.error || "simulation failed");
     runNewSimButton.textContent = "Loading";
     await bootstrapTrace({reset: true, message: "Loading new match"});
   } catch (err) {
     loadingBar.style.width = "100%";
-    loadingStatus.textContent = `Run failed: ${err.message}`;
-    loadingBytes.textContent = "main_soccer did not produce a fresh split trace";
-    play.textContent = "Run failed";
+    if (err.name === "AuthRequiredError") {
+      setLoadingTitle("Authentication required", "auth");
+      loadingStatus.textContent = `Auth required: ${err.message}`;
+      loadingBytes.textContent = "Enter the legacy Auth header to run a fresh simulation";
+      play.textContent = "Auth required";
+      authToken.focus();
+    } else {
+      setLoadingTitle("Run failed", "failed");
+      loadingStatus.textContent = `Run failed: ${err.message}`;
+      loadingBytes.textContent = "main_soccer did not produce a fresh split trace";
+      play.textContent = "Run failed";
+    }
   } finally {
     runningNewSimulation = false;
     runNewSimButton.textContent = "Run New Sim";
@@ -1352,6 +1464,14 @@ play.addEventListener("click", () => {
   play.textContent = playing ? "Pause" : "Play";
 });
 runNewSimButton.addEventListener("click", runNewSimulation);
+authForm.addEventListener("submit", e => {
+  e.preventDefault();
+  const token = authToken.value.trim();
+  if (!token) return;
+  storeSessionAuthToken(token);
+  authToken.value = "";
+  bootstrapTrace({reset: true, message: "Retrying match data"});
+});
 document.getElementById("prev").addEventListener("click", () => {
   frameIndex = Math.max(0, frameIndex - 1);
   rebuildPassTargets();
@@ -1388,6 +1508,7 @@ setControlsEnabled(false);
 updateMetrics();
 render();
 requestAnimationFrame(tick);
+initializeAuthTokenFromLocation();
 bootstrapTrace();
 </script>
 </body>

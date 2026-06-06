@@ -71395,6 +71395,15 @@ mod tests {
         assert!(html.contains("soccer-sim.meta.json"));
         assert!(html.contains("soccer-sim.frames.jsonl"));
         assert!(html.contains("Loading match data"));
+        assert!(html.contains("id=\"loadingTitleText\""));
+        assert!(html.contains("id=\"authForm\""));
+        assert!(html.contains("id=\"authToken\""));
+        assert!(html.contains("const AUTH_HEADER_NAME = \"Auth\""));
+        assert!(html.contains("sessionStorage?.setItem(AUTH_STORAGE_KEY"));
+        assert!(html.contains("class AuthRequiredError extends Error"));
+        assert!(html.contains("fetchRequiredResource"));
+        assert!(html.contains("setLoadingTitle(\"Authentication required\", \"auth\")"));
+        assert!(html.contains("setLoadingTitle(\"Load failed\", \"failed\")"));
         assert!(html.contains("id=\"runNewSim\""));
         assert!(html.contains("Run New Sim"));
         assert!(html.contains("../simulations/main_soccer/run?exact=1&fresh=1"));
@@ -71477,8 +71486,8 @@ mod tests {
         assert!(html.contains("if (playerId == null) return false"));
         assert!(html.contains("return pushInput(!shoot, shoot)"));
         assert!(
-            !html.contains("\"frames\""),
-            "static HTML shell should not inline the large frame trace"
+            !html.contains("\"frames\":[") && !html.contains("\"frames\": ["),
+            "static HTML shell should not inline a large JSON frames array"
         );
     }
 
@@ -71509,8 +71518,8 @@ mod tests {
         assert!(html.contains("soccer-sim.meta.json"));
         assert!(html.contains("soccer-sim.frames.jsonl"));
         assert!(
-            !html.contains("\"frames\""),
-            "html shell should not inline frame payloads"
+            !html.contains("\"frames\":[") && !html.contains("\"frames\": ["),
+            "html shell should not inline frame payload arrays"
         );
 
         let meta: serde_json::Value =

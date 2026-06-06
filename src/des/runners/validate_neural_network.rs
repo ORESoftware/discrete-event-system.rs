@@ -7,9 +7,9 @@
 //! PORT NOTES:
 //!   * Uses the real Rust neural-network, neural Q-learning, corridor, policy
 //!     evaluation, and neural-ODE modules.
-//!   * The optional Python reference is invoked through the external-module
-//!     registry only when explicitly requested with
-//!     `NEURAL_NETWORK_REFERENCE_BACKEND=python` or
+//!   * The optional external reference is invoked through the Rust-first
+//!     external-module registry only when explicitly requested with
+//!     `NEURAL_NETWORK_REFERENCE_BACKEND=rust|external` or
 //!     `NEURAL_NETWORK_EXTERNAL_REFERENCE=1`; framework-side checks and the
 //!     default reference artifact stay Rust-only.
 
@@ -224,20 +224,20 @@ struct Reference {
     neural_ode_decay: OdeRef,
 }
 
-fn neural_network_python_reference_requested() -> bool {
+fn neural_network_external_reference_requested() -> bool {
     [
         "NEURAL_NETWORK_REFERENCE_BACKEND",
         "NEURAL_NETWORK_EXTERNAL_REFERENCE",
     ]
     .iter()
     .filter_map(|name| std::env::var(name).ok())
-    .any(|value| neural_network_python_reference_value_requested(&value))
+    .any(|value| neural_network_external_reference_value_requested(&value))
 }
 
-fn neural_network_python_reference_value_requested(value: &str) -> bool {
+fn neural_network_external_reference_value_requested(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "python" | "py" | "external"
+        "1" | "true" | "yes" | "rust" | "cargo" | "external" | "python" | "py"
     )
 }
 
@@ -451,9 +451,9 @@ pub fn run() {
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let python_reference_requested = neural_network_python_reference_requested();
+    let external_reference_requested = neural_network_external_reference_requested();
     let mut external_reference = None;
-    if python_reference_requested {
+    if external_reference_requested {
         let registration = register_built_in_external_modules();
         check(
             &mut checks,
@@ -482,7 +482,7 @@ pub fn run() {
                 Ok(parsed_reference) => {
                     check(
                         &mut checks,
-                        "external Python reference JSON parsed",
+                        "external reference JSON parsed",
                         true,
                         Some(out_path.display().to_string()),
                     );
@@ -491,7 +491,7 @@ pub fn run() {
                 Err(error) => {
                     check(
                         &mut checks,
-                        "external Python reference JSON parsed",
+                        "external reference JSON parsed",
                         false,
                         Some(error),
                     );
@@ -500,20 +500,20 @@ pub fn run() {
         } else if let Some(message) = optional_external_unavailable(&ext) {
             check(
                 &mut checks,
-                "optional external Python reference unavailable cleanly",
+                "optional external reference unavailable cleanly",
                 true,
                 Some(message),
             );
         } else {
             check(
                 &mut checks,
-                "external Python reference process exits cleanly",
+                "external reference process exits cleanly",
                 false,
                 Some(format!("status={}", status_str(ext.status))),
             );
         }
     } else {
-        println!("  SKIP  external Python reference (set NEURAL_NETWORK_REFERENCE_BACKEND=python)");
+        println!("  SKIP  external reference module (set NEURAL_NETWORK_REFERENCE_BACKEND=rust)");
     }
 
     println!();
@@ -696,7 +696,7 @@ pub fn run() {
         )),
     );
 
-    if !python_reference_requested || external_reference.is_none() {
+    if !external_reference_requested || external_reference.is_none() {
         println!();
         println!("-- Rust reference artifact --");
         let rust_reference = Reference {
@@ -787,12 +787,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_reference_switch_only_accepts_explicit_opt_in_values() {
-        for value in ["1", "true", "YES", "python", "py", "external"] {
-            assert!(neural_network_python_reference_value_requested(value));
+    fn external_reference_switch_accepts_rust_first_and_legacy_opt_in_values() {
+        for value in [
+            "1", "true", "YES", "rust", "cargo", "external", "python", "py",
+        ] {
+            assert!(neural_network_external_reference_value_requested(value));
         }
-        for value in ["", "0", "false", "rust", "none", "skip"] {
-            assert!(!neural_network_python_reference_value_requested(value));
+        for value in ["", "0", "false", "none", "skip"] {
+            assert!(!neural_network_external_reference_value_requested(value));
         }
     }
 }

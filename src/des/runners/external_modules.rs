@@ -1,8 +1,8 @@
 //! Port of `src/des/runners/external-modules.ts`.
 //!
 //! Metadata registry of the built-in external reference modules. This file is
-//! metadata only: it registers source scripts that live under
-//! `external-references/` and describes how to invoke them.
+//! metadata only: it registers source scripts under `external-references/` and
+//! Rust reference binaries under `src/bin/`, then describes how to invoke them.
 //!
 //! ## PORT NOTE
 //!
@@ -39,6 +39,14 @@ fn python3() -> ExternalInterpreterSpec {
         env_var: "PYTHON_BIN".to_string(),
         default_command: "python3".to_string(),
         label: "Python 3".to_string(),
+    }
+}
+
+fn rust_cargo() -> ExternalInterpreterSpec {
+    ExternalInterpreterSpec {
+        env_var: "CARGO".to_string(),
+        default_command: "cargo".to_string(),
+        label: "Cargo/Rust".to_string(),
     }
 }
 
@@ -274,9 +282,9 @@ fn do_register() -> Result<(), String> {
     register_external_module(ExternalProgramModule {
         id: NEURAL_NETWORK_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Reference,
-        description: "Dependency-free Python reference for neural XOR, corridor value iteration, and neural ODE decay.".to_string(),
-        source_path: "external-references/neural-network/nn_reference.py".to_string(),
-        interpreter: python3(),
+        description: "Rust source-only reference for neural XOR, corridor value iteration, and neural ODE decay.".to_string(),
+        source_path: "src/bin/neural_network_reference.rs".to_string(),
+        interpreter: rust_cargo(),
         default_params: params(&[
             ("seed", n(7.0)),
             ("xorEpochs", n(8000.0)),
@@ -296,9 +304,9 @@ fn do_register() -> Result<(), String> {
     register_external_module(ExternalProgramModule {
         id: COMPUTER_NETWORK_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
-        description: "Dependency-free Python reference simulator for computer-network topology, queueing, drops, and bottleneck metrics.".to_string(),
-        source_path: "external-references/computer-network/network_reference.py".to_string(),
-        interpreter: python3(),
+        description: "Rust source-only reference simulator for computer-network topology, queueing, drops, and bottleneck metrics.".to_string(),
+        source_path: "src/bin/computer_network_reference.rs".to_string(),
+        interpreter: rust_cargo(),
         default_params: params(&[("builtin", s("bottleneck-lab"))]),
         timeout_ms: None,
         max_buffer_bytes: None,
@@ -320,9 +328,9 @@ fn do_register() -> Result<(), String> {
     register_external_module(ExternalProgramModule {
         id: IP_MIP_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Solver,
-        description: "Source-only external IP/MIP reference: Python brute force for bounded integer models, optional scipy.optimize.milp when installed.".to_string(),
-        source_path: "external-references/ip-mip/ip_mip_reference.py".to_string(),
-        interpreter: python3(),
+        description: "Rust source-only external IP/MIP reference: bounded enumeration for small integer models, with external-solver aliases mapped to the same CLI contract.".to_string(),
+        source_path: "src/bin/ip_mip_reference.rs".to_string(),
+        interpreter: rust_cargo(),
         default_params: params(&[("solver", s("auto")), ("maxEnumerations", n(1_000_000.0))]),
         timeout_ms: None,
         max_buffer_bytes: None,
@@ -378,4 +386,36 @@ fn do_register() -> Result<(), String> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::external_program::get_external_module;
+    use super::*;
+
+    #[test]
+    fn built_in_reference_modules_use_rust_sources_where_available() {
+        register_built_in_external_modules().expect("register built-in modules");
+        for (module_id, source_path) in [
+            (
+                NEURAL_NETWORK_REFERENCE_ID,
+                "src/bin/neural_network_reference.rs",
+            ),
+            (
+                COMPUTER_NETWORK_REFERENCE_ID,
+                "src/bin/computer_network_reference.rs",
+            ),
+            (IP_MIP_REFERENCE_ID, "src/bin/ip_mip_reference.rs"),
+        ] {
+            let module = get_external_module(module_id).expect("registered module");
+
+            assert_eq!(module.source_path, source_path);
+            assert_eq!(module.interpreter.env_var, "CARGO");
+            assert_eq!(module.interpreter.default_command, "cargo");
+            assert!(
+                !module.description.to_ascii_lowercase().contains("python"),
+                "{module_id} description should advertise the Rust reference path"
+            );
+        }
+    }
 }

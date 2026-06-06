@@ -36,15 +36,23 @@ impl ExternalBinPackingReferenceSolver {
 }
 
 fn registered_bin_packing_rust_fallback_enabled() -> bool {
-    std::env::var("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("BIN_PACKING_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "BIN_PACKING_REFERENCE_REGISTERED_FALLBACK",
+        "BIN_PACKING_REFERENCE_EXTERNAL_FALLBACK",
+        "BIN_PACKING_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_bin_packing_reference(opts: &ExternalBinPackingReferenceOptions) -> bool {
@@ -943,6 +951,32 @@ mod tests {
         assert!(solution
             .message
             .contains("requested solver 'ortools' was validated with Rust fallback"));
+    }
+
+    #[test]
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_RUST_FIRST", "true");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-bin-packing");
+        let problem = build_sample_bin_packing_problem();
+
+        let solution = solve_bin_packing_with_external_reference(
+            &problem,
+            &ExternalBinPackingReferenceOptions {
+                solver: ExternalBinPackingReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalBinPackingReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-bin-packing-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(3));
+        assert!((packed_load_sum(&solution.bins) - 30.0).abs() <= 1e-9);
     }
 
     #[test]

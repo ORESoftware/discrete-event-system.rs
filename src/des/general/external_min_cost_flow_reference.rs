@@ -821,7 +821,7 @@ mod tests {
         let _lock = MIN_COST_FLOW_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_RUST_FIRST", "true");
+        let _rust_first_guard = EnvVarGuard::set("MIN_COST_FLOW_REFERENCE_RUST_FIRST", "true");
         let _python_guard =
             EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-min-cost-flow");
 

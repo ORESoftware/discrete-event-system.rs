@@ -720,6 +720,21 @@ pub fn evolve_soccer_tactical_learning_weights_from_genomes(
         }
     }
 
+    search_soccer_tactical_genome_blend_candidates(
+        base,
+        parents,
+        search_options,
+        &weighted_summary,
+        |candidate| {
+            keep_best_soccer_tactical_candidate(
+                &mut best,
+                &mut best_score,
+                candidate,
+                &weighted_summary,
+            );
+        },
+    );
+
     for candidate_index in 0..population_size {
         let mut candidate_options = search_options;
         candidate_options.population_size = 1;
@@ -740,6 +755,36 @@ pub fn evolve_soccer_tactical_learning_weights_from_genomes(
         }
     }
     best
+}
+
+fn search_soccer_tactical_genome_blend_candidates<F>(
+    base: &SoccerTacticalLearningWeights,
+    parents: &[SoccerTacticalLearningGenomeParent<'_>],
+    options: SoccerEvolutionOptions,
+    weighted_summary: &SoccerTacticalLearningSummary,
+    mut visit: F,
+) where
+    F: FnMut(SoccerTacticalLearningWeights),
+{
+    let blend_enabled =
+        parents.len() >= 2 && (options.population_size > 1 || options.crossover_rate > 0.0);
+    if !blend_enabled {
+        return;
+    }
+
+    let Some(centroid) = weighted_soccer_tactical_genome_centroid(parents, options) else {
+        return;
+    };
+    visit(centroid.clone());
+
+    let pressure = soccer_tactical_search_pressure(weighted_summary);
+    if pressure <= 1e-12 {
+        return;
+    }
+    let scale = 1.0 + pressure * 0.75;
+    visit(extrapolate_soccer_tactical_learning_weights(
+        base, &centroid, scale,
+    ));
 }
 
 fn keep_best_soccer_tactical_candidate(
@@ -952,6 +997,197 @@ fn weighted_tactical_evolution_summary(
     weighted_summary.mean_defense_ball_gap_score /= total_weight;
     weighted_summary.mean_defense_role_press_score /= total_weight;
     Some(weighted_summary)
+}
+
+fn weighted_soccer_tactical_genome_centroid(
+    parents: &[SoccerTacticalLearningGenomeParent<'_>],
+    options: SoccerEvolutionOptions,
+) -> Option<SoccerTacticalLearningWeights> {
+    let mut centroid = SoccerTacticalLearningWeights::default();
+    centroid.attack_spacing_delta_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.attack_spacing_delta_weight
+        })?;
+    centroid.attack_spacing_score_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.attack_spacing_score_weight
+        })?;
+    centroid.attack_width_delta_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.attack_width_delta_weight
+        })?;
+    centroid.attack_width_score_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.attack_width_score_weight
+        })?;
+    centroid.attack_flank_lane_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.attack_flank_lane_weight
+        })?;
+    centroid.defense_spacing_delta_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defense_spacing_delta_weight
+        })?;
+    centroid.defense_spacing_score_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defense_spacing_score_weight
+        })?;
+    centroid.defense_contract_delta_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defense_contract_delta_weight
+        })?;
+    centroid.defense_compactness_score_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defense_compactness_score_weight
+        })?;
+    centroid.defense_ball_depth_score_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defense_ball_depth_score_weight
+        })?;
+    centroid.defense_endline_soft_penalty_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defense_endline_soft_penalty_weight
+        })?;
+    centroid.defense_endline_hard_penalty_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defense_endline_hard_penalty_weight
+        })?;
+    centroid.defender_midfielder_press_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.defender_midfielder_press_weight
+        })?;
+    centroid.midfielder_press_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.midfielder_press_weight
+        })?;
+    centroid.formation_lp_alignment_weight =
+        weighted_soccer_tactical_genome_gene(parents, options, |weights| {
+            weights.formation_lp_alignment_weight
+        })?;
+
+    Some(clamp_soccer_tactical_learning_weights(&centroid))
+}
+
+fn weighted_soccer_tactical_genome_gene<F>(
+    parents: &[SoccerTacticalLearningGenomeParent<'_>],
+    options: SoccerEvolutionOptions,
+    getter: F,
+) -> Option<f64>
+where
+    F: Fn(&SoccerTacticalLearningWeights) -> f64,
+{
+    let mut weighted_gene = 0.0;
+    let mut total_weight = 0.0;
+    for parent in parents {
+        let value = getter(parent.weights);
+        if !value.is_finite() {
+            continue;
+        }
+        let weight = tactical_genome_parent_weight(parent.fitness, options);
+        if weight <= 0.0 {
+            continue;
+        }
+        weighted_gene += value * weight;
+        total_weight += weight;
+    }
+    if total_weight > 0.0 {
+        Some(weighted_gene / total_weight)
+    } else {
+        None
+    }
+}
+
+fn extrapolate_soccer_tactical_learning_weights(
+    base: &SoccerTacticalLearningWeights,
+    target: &SoccerTacticalLearningWeights,
+    scale: f64,
+) -> SoccerTacticalLearningWeights {
+    let scale = scale.max(0.0);
+    let mut extrapolated = base.clone();
+    extrapolated.attack_spacing_delta_weight = extrapolate_soccer_tactical_weight(
+        base.attack_spacing_delta_weight,
+        target.attack_spacing_delta_weight,
+        scale,
+    );
+    extrapolated.attack_spacing_score_weight = extrapolate_soccer_tactical_weight(
+        base.attack_spacing_score_weight,
+        target.attack_spacing_score_weight,
+        scale,
+    );
+    extrapolated.attack_width_delta_weight = extrapolate_soccer_tactical_weight(
+        base.attack_width_delta_weight,
+        target.attack_width_delta_weight,
+        scale,
+    );
+    extrapolated.attack_width_score_weight = extrapolate_soccer_tactical_weight(
+        base.attack_width_score_weight,
+        target.attack_width_score_weight,
+        scale,
+    );
+    extrapolated.attack_flank_lane_weight = extrapolate_soccer_tactical_weight(
+        base.attack_flank_lane_weight,
+        target.attack_flank_lane_weight,
+        scale,
+    );
+    extrapolated.defense_spacing_delta_weight = extrapolate_soccer_tactical_weight(
+        base.defense_spacing_delta_weight,
+        target.defense_spacing_delta_weight,
+        scale,
+    );
+    extrapolated.defense_spacing_score_weight = extrapolate_soccer_tactical_weight(
+        base.defense_spacing_score_weight,
+        target.defense_spacing_score_weight,
+        scale,
+    );
+    extrapolated.defense_contract_delta_weight = extrapolate_soccer_tactical_weight(
+        base.defense_contract_delta_weight,
+        target.defense_contract_delta_weight,
+        scale,
+    );
+    extrapolated.defense_compactness_score_weight = extrapolate_soccer_tactical_weight(
+        base.defense_compactness_score_weight,
+        target.defense_compactness_score_weight,
+        scale,
+    );
+    extrapolated.defense_ball_depth_score_weight = extrapolate_soccer_tactical_weight(
+        base.defense_ball_depth_score_weight,
+        target.defense_ball_depth_score_weight,
+        scale,
+    );
+    extrapolated.defense_endline_soft_penalty_weight = extrapolate_soccer_tactical_weight(
+        base.defense_endline_soft_penalty_weight,
+        target.defense_endline_soft_penalty_weight,
+        scale,
+    );
+    extrapolated.defense_endline_hard_penalty_weight = extrapolate_soccer_tactical_weight(
+        base.defense_endline_hard_penalty_weight,
+        target.defense_endline_hard_penalty_weight,
+        scale,
+    );
+    extrapolated.defender_midfielder_press_weight = extrapolate_soccer_tactical_weight(
+        base.defender_midfielder_press_weight,
+        target.defender_midfielder_press_weight,
+        scale,
+    );
+    extrapolated.midfielder_press_weight = extrapolate_soccer_tactical_weight(
+        base.midfielder_press_weight,
+        target.midfielder_press_weight,
+        scale,
+    );
+    extrapolated.formation_lp_alignment_weight = extrapolate_soccer_tactical_weight(
+        base.formation_lp_alignment_weight,
+        target.formation_lp_alignment_weight,
+        scale,
+    );
+    clamp_soccer_tactical_learning_weights(&extrapolated)
+}
+
+fn extrapolate_soccer_tactical_weight(base: f64, target: f64, scale: f64) -> f64 {
+    if base.is_finite() && target.is_finite() {
+        base + (target - base) * scale
+    } else {
+        base
+    }
 }
 
 fn evolve_soccer_tactical_learning_candidate(
@@ -1271,6 +1507,8 @@ fn clamp_soccer_tactical_learning_weights(
     clamped.defender_midfielder_press_weight =
         clamped.defender_midfielder_press_weight.max(0.0).min(1.6);
     clamped.midfielder_press_weight = clamped.midfielder_press_weight.max(0.0).min(1.6);
+    clamped.formation_lp_alignment_weight =
+        clamped.formation_lp_alignment_weight.max(-5.0).min(5.0);
     clamped
 }
 
@@ -2802,6 +3040,133 @@ mod tests {
             soccer_tactical_weight_search_score(&genome, &weighted_summary)
                 > soccer_tactical_weight_search_score(&summary_only, &weighted_summary)
         );
+    }
+
+    #[test]
+    fn tactical_genome_blend_candidates_search_centroid_and_extrapolation() {
+        let base = SoccerTacticalLearningWeights::default();
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.15,
+            mean_attack_flank_lane_score: 0.12,
+            mean_attack_spacing_score: 0.30,
+            mean_defense_contract_score: 0.16,
+            mean_defense_spacing_score: 0.35,
+            mean_defense_ball_gap_score: 0.45,
+            mean_defense_role_press_score: 0.38,
+            ..Default::default()
+        };
+        let mut left = base.clone();
+        left.attack_width_delta_weight = 0.90;
+        left.attack_flank_lane_weight = 0.80;
+        left.defense_contract_delta_weight = 0.95;
+        let mut right = base.clone();
+        right.attack_width_delta_weight = 1.70;
+        right.attack_flank_lane_weight = 1.60;
+        right.defense_contract_delta_weight = 1.75;
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.0,
+            mutation_scale: 0.0,
+            crossover_rate: 1.0,
+            exploration_rate: 0.0,
+            exploration_scale: 0.0,
+            elite_weight_floor: 0.0,
+            population_size: 1,
+            seed: 43,
+        };
+        let parents = [
+            SoccerTacticalLearningGenomeParent {
+                summary: &summary,
+                weights: &left,
+                fitness: 1.0,
+            },
+            SoccerTacticalLearningGenomeParent {
+                summary: &summary,
+                weights: &right,
+                fitness: 3.0,
+            },
+        ];
+        let weighted_summary = weighted_tactical_evolution_summary(
+            &parents
+                .iter()
+                .map(|parent| (parent.summary, parent.fitness))
+                .collect::<Vec<_>>(),
+            options,
+        )
+        .expect("weighted summary");
+        let mut candidates = Vec::new();
+
+        search_soccer_tactical_genome_blend_candidates(
+            &base,
+            &parents,
+            options,
+            &weighted_summary,
+            |candidate| candidates.push(candidate),
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert!((candidates[0].attack_width_delta_weight - 1.50).abs() < 1e-12);
+        assert!((candidates[0].attack_flank_lane_weight - 1.40).abs() < 1e-12);
+        assert!((candidates[0].defense_contract_delta_weight - 1.55).abs() < 1e-12);
+        assert!(candidates[1].attack_width_delta_weight > candidates[0].attack_width_delta_weight);
+        assert!(candidates[1].attack_flank_lane_weight > candidates[0].attack_flank_lane_weight);
+        assert!(
+            candidates[1].defense_contract_delta_weight
+                > candidates[0].defense_contract_delta_weight
+        );
+    }
+
+    #[test]
+    fn tactical_genome_search_can_extrapolate_beyond_elite_parents() {
+        let base = SoccerTacticalLearningWeights::default();
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.12,
+            mean_attack_flank_lane_score: 0.10,
+            mean_attack_spacing_score: 0.28,
+            mean_defense_contract_score: 0.14,
+            mean_defense_spacing_score: 0.32,
+            mean_defense_ball_gap_score: 0.42,
+            mean_defense_role_press_score: 0.35,
+            ..Default::default()
+        };
+        let mut left = base.clone();
+        left.attack_width_delta_weight = 0.90;
+        left.attack_flank_lane_weight = 0.85;
+        left.defense_contract_delta_weight = 0.95;
+        let mut right = base.clone();
+        right.attack_width_delta_weight = 1.20;
+        right.attack_flank_lane_weight = 1.15;
+        right.defense_contract_delta_weight = 1.25;
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.0,
+            mutation_scale: 0.0,
+            crossover_rate: 1.0,
+            exploration_rate: 0.0,
+            exploration_scale: 0.0,
+            elite_weight_floor: 0.0,
+            population_size: 1,
+            seed: 47,
+        };
+
+        let evolved = evolve_soccer_tactical_learning_weights_from_genomes(
+            &base,
+            &[
+                SoccerTacticalLearningGenomeParent {
+                    summary: &summary,
+                    weights: &left,
+                    fitness: 1.0,
+                },
+                SoccerTacticalLearningGenomeParent {
+                    summary: &summary,
+                    weights: &right,
+                    fitness: 3.0,
+                },
+            ],
+            options,
+        );
+
+        assert!(evolved.attack_width_delta_weight > right.attack_width_delta_weight);
+        assert!(evolved.attack_flank_lane_weight > right.attack_flank_lane_weight);
+        assert!(evolved.defense_contract_delta_weight > right.defense_contract_delta_weight);
     }
 
     #[test]

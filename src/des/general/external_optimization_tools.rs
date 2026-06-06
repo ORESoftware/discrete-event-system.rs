@@ -16,8 +16,13 @@ use super::external_linear_cli::{
     ExternalLinearCliOptions, ExternalLinearCliProbeStatus, ExternalLinearCliSolver,
     ExternalLinearCliStatus,
 };
-use super::ip_mip_des::{IPMIPProblem, LowerBoundedIPMIPProblem};
-use super::lp::{LPProblem, Sense};
+use super::ip_mip_des::{
+    solve_ipmip_with_des, solve_lower_bounded_ipmip_with_des, IPMIPProblem, IPMIPSolution,
+    IPMIPSolveOptions, LowerBoundedIPMIPProblem,
+};
+use super::lp::{
+    solve_lp_internal, InternalSimplexOptions, LPProblem, LPSolution, LPStatus, Sense,
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
@@ -1676,7 +1681,11 @@ fn run_native_external_optimization_ecosystem_reference(
         }
         "evolutionary-multiobjective" => native_solve_ecosystem_multiobjective(input),
         "nonlinear-optimization" => native_solve_ecosystem_nonlinear(input),
-        "linear-mip" | "convex-optimization" | "native-solver-binding" | "hybrid-optimization" => {
+        "linear-lp"
+        | "linear-mip"
+        | "convex-optimization"
+        | "native-solver-binding"
+        | "hybrid-optimization" => {
             if native_ecosystem_kind_is_planning(&kind) {
                 native_solve_ecosystem_planning_assignment(input)
             } else if native_ecosystem_kind_is_nonlinear(&kind) {
@@ -1735,6 +1744,14 @@ fn native_ecosystem_kind_is_planning(kind: &str) -> bool {
 
 fn native_ecosystem_kind_is_nonlinear(kind: &str) -> bool {
     matches!(kind, "nonlinear-program" | "ecosystem-nonlinear")
+}
+
+fn native_ecosystem_kind_is_linear_lp(kind: &str) -> bool {
+    kind.contains("continuous")
+        || kind.contains("linear-lp")
+        || kind.contains("linear-program")
+        || kind == "lp"
+        || kind.ends_with("-lp")
 }
 
 fn native_ecosystem_kind_is_cp_job_shop(kind: &str) -> bool {
@@ -1848,6 +1865,8 @@ fn native_external_optimization_ecosystem_family(
         | ExternalOptimizationTool::CbcRust => {
             if native_ecosystem_kind_is_nonlinear(payload_kind) {
                 Some("nonlinear-optimization")
+            } else if native_ecosystem_kind_is_linear_lp(payload_kind) {
+                Some("linear-lp")
             } else {
                 Some("linear-mip")
             }
@@ -1883,15 +1902,6 @@ fn native_better(candidate: f64, incumbent: Option<f64>, sense: &str) -> bool {
         None => true,
         Some(incumbent) if sense == "max" => candidate > incumbent + 1e-12,
         Some(incumbent) => candidate < incumbent - 1e-12,
-    }
-}
-
-fn native_row_feasible(lhs: f64, sense: &str, rhs: f64) -> bool {
-    match sense.trim() {
-        "<=" | "le" | "less-equal" => lhs <= rhs + 1e-9,
-        ">=" | "ge" | "greater-equal" => lhs + 1e-9 >= rhs,
-        "=" | "==" | "eq" | "equal" => (lhs - rhs).abs() <= 1e-9,
-        _ => false,
     }
 }
 
@@ -2270,86 +2280,127 @@ where
 fn native_solve_ecosystem_discrete_linear(
     payload: &Value,
 ) -> NativeExternalOptimizationEcosystemResult {
-    let Some(objective) = native_value_array_as_f64(payload.get("objective")) else {
-        return NativeExternalOptimizationEcosystemResult::status(
-            "invalid",
-            "missing objective vector",
-        );
-    };
-    if objective.is_empty() {
-        return NativeExternalOptimizationEcosystemResult::status(
-            "invalid",
-            "missing objective vector",
-        );
-    }
-    let sense = payload
-        .get("sense")
-        .and_then(Value::as_str)
-        .unwrap_or("min")
-        .to_ascii_lowercase();
-    let domains = match native_integer_domains(payload, objective.len()) {
-        Ok(domains) => domains,
-        Err(message) if message == "empty domain" => {
+    let problem = match external_optimization_linear_cli_problem_from_payload(payload) {
+        Ok(problem) => problem,
+        Err(message) if message == "empty domain" || message == "empty bound interval" => {
             return NativeExternalOptimizationEcosystemResult::status("infeasible", message)
         }
         Err(message) => {
-            return NativeExternalOptimizationEcosystemResult::status("unsupported", message)
+            return NativeExternalOptimizationEcosystemResult::status("invalid", message)
         }
     };
-    let constraints = payload
-        .get("constraints")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut best_x = None::<Vec<f64>>;
-    let mut best_objective = None::<f64>;
-    let mut invalid_message = None::<String>;
-    enumerate_integer_domains(&domains, |assignment| {
-        if invalid_message.is_some() {
-            return;
+    match problem {
+        ExternalOptimizationLinearCliProblem::LinearProgram(problem) => {
+            native_solve_ecosystem_linear_lp(problem)
         }
-        for row in &constraints {
-            let Some(coefs) = native_value_array_as_f64(row.get("coefs")) else {
-                invalid_message = Some("constraint coefficient length mismatch".to_string());
-                return;
-            };
-            if coefs.len() != objective.len() {
-                invalid_message = Some("constraint coefficient length mismatch".to_string());
-                return;
-            }
-            let lhs = coefs
-                .iter()
-                .zip(assignment.iter())
-                .map(|(coef, value)| coef * *value as f64)
-                .sum::<f64>();
-            let row_sense = row.get("sense").and_then(Value::as_str).unwrap_or("<=");
-            let rhs = native_value_as_f64(row.get("rhs"), 0.0);
-            if !native_row_feasible(lhs, row_sense, rhs) {
-                return;
-            }
+        ExternalOptimizationLinearCliProblem::Plain(problem) => {
+            native_solve_ecosystem_linear_mip(problem, payload)
         }
-        let value = objective
-            .iter()
-            .zip(assignment.iter())
-            .map(|(coef, value)| coef * *value as f64)
-            .sum::<f64>();
-        if native_better(value, best_objective, &sense) {
-            best_objective = Some(value);
-            best_x = Some(assignment.iter().map(|value| *value as f64).collect());
+        ExternalOptimizationLinearCliProblem::LowerBounded(problem) => {
+            native_solve_ecosystem_lower_bounded_linear_mip(problem, payload)
         }
-    });
-    if let Some(message) = invalid_message {
-        return NativeExternalOptimizationEcosystemResult::status("invalid", message);
     }
-    match (best_objective, best_x) {
-        (Some(objective), Some(x)) => {
-            NativeExternalOptimizationEcosystemResult::optimal(objective, x)
-        }
-        _ => NativeExternalOptimizationEcosystemResult::status(
-            "infeasible",
-            "no feasible assignment",
+}
+
+fn native_json_f64(value: f64) -> Value {
+    if value.is_finite() {
+        Value::from(value)
+    } else {
+        Value::Null
+    }
+}
+
+fn native_solve_ecosystem_linear_lp(
+    problem: LPProblem,
+) -> NativeExternalOptimizationEcosystemResult {
+    let solution = solve_lp_internal(&problem, &InternalSimplexOptions::default());
+    native_ecosystem_result_from_lp_solution(solution)
+}
+
+fn native_ecosystem_result_from_lp_solution(
+    solution: LPSolution,
+) -> NativeExternalOptimizationEcosystemResult {
+    let message = solution
+        .message
+        .clone()
+        .unwrap_or_else(|| format!("internal simplex returned {}", solution.status.as_str()));
+    let mut result = if solution.status == LPStatus::Optimal {
+        NativeExternalOptimizationEcosystemResult::optimal(solution.objective, solution.x.clone())
+    } else {
+        NativeExternalOptimizationEcosystemResult::status(solution.status.as_str(), message.clone())
+    };
+    result.message = message;
+    result = result.with_extra("solver", Value::String(solution.solver));
+    if let Some(iters) = solution.iters {
+        result = result.with_extra("iterations", Value::from(iters as u64));
+    }
+    result
+}
+
+fn native_mip_solve_options(payload: &Value) -> IPMIPSolveOptions {
+    let max_nodes = payload
+        .get("max_nodes")
+        .or_else(|| payload.get("maxNodes"))
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let time_limit_ms = payload
+        .get("time_limit_ms")
+        .or_else(|| payload.get("timeLimitMs"))
+        .and_then(Value::as_f64);
+    IPMIPSolveOptions {
+        max_nodes,
+        time_limit_ms,
+        allow_external_solvers: Some(false),
+        ..Default::default()
+    }
+}
+
+fn native_solve_ecosystem_linear_mip(
+    problem: IPMIPProblem,
+    payload: &Value,
+) -> NativeExternalOptimizationEcosystemResult {
+    let solution = solve_ipmip_with_des(problem, native_mip_solve_options(payload));
+    native_ecosystem_result_from_ipmip_solution(solution)
+}
+
+fn native_solve_ecosystem_lower_bounded_linear_mip(
+    problem: LowerBoundedIPMIPProblem,
+    payload: &Value,
+) -> NativeExternalOptimizationEcosystemResult {
+    let solution = solve_lower_bounded_ipmip_with_des(problem, native_mip_solve_options(payload));
+    native_ecosystem_result_from_ipmip_solution(solution)
+}
+
+fn native_ecosystem_result_from_ipmip_solution(
+    solution: IPMIPSolution,
+) -> NativeExternalOptimizationEcosystemResult {
+    let has_incumbent = !solution.x.is_empty() && solution.z.is_finite();
+    let mut result = NativeExternalOptimizationEcosystemResult {
+        status: solution.status.as_str(),
+        objective: has_incumbent.then_some(solution.z),
+        x: has_incumbent.then_some(solution.x.clone()),
+        message: format!(
+            "internal DES MIP solver explored {} nodes and {} LP relaxations",
+            solution.nodes_explored, solution.lp_solves
         ),
-    }
+        extra: Vec::new(),
+    };
+    result = result
+        .with_extra("solver", Value::String(solution.solver_kind.to_string()))
+        .with_extra(
+            "executionMode",
+            Value::String(solution.execution_mode.to_string()),
+        )
+        .with_extra("bestBound", native_json_f64(solution.best_bound))
+        .with_extra("mipGap", native_json_f64(solution.gap))
+        .with_extra("nodesExplored", Value::from(solution.nodes_explored as u64))
+        .with_extra("lpSolves", Value::from(solution.lp_solves as u64))
+        .with_extra("inHouseOnly", Value::from(solution.in_house_only))
+        .with_extra(
+            "usesExternalSolvers",
+            Value::from(solution.uses_external_solvers),
+        );
+    result
 }
 
 fn native_solve_ecosystem_nonlinear(payload: &Value) -> NativeExternalOptimizationEcosystemResult {
@@ -6041,6 +6092,59 @@ mod tests {
             assert_eq!(normalized.objective, Some(3.0));
             assert_eq!(normalized.solution, Some(vec![1.0, 0.0]));
         }
+    }
+
+    #[test]
+    fn ecosystem_reference_helper_runs_richer_linear_alias_payloads_in_rust() {
+        let integer_payload = json!({
+            "kind": "ecosystem-linear-integer",
+            "sense": "max",
+            "objective": [1, 2],
+            "rowConstraints": [{"a": [1, 1], "lower": 3, "upper": 5}],
+            "bounds": [
+                {"lower": 2, "upper": 4},
+                {"lb": 1, "ub": 3}
+            ],
+            "integerVars": ["integer", "integer"]
+        });
+        let integer_run = run_external_optimization_ecosystem_reference(
+            &integer_payload,
+            ExternalOptimizationTool::HighsRust,
+        );
+        assert_eq!(integer_run.status, ExternalOptimizationAdapterStatus::Ok);
+        let integer_output = integer_run.output.as_ref().expect("integer output");
+        assert_eq!(integer_output["backend"], "builtin-rust:linear-mip");
+        assert_eq!(integer_output["usesExternalSolvers"], false);
+        let integer_normalized = external_optimization_normalized_result_from_value(integer_output);
+        assert_eq!(integer_normalized.status.as_deref(), Some("optimal"));
+        assert_eq!(integer_normalized.objective, Some(8.0));
+        assert_eq!(integer_normalized.solution, Some(vec![2.0, 3.0]));
+
+        let lp_payload = json!({
+            "kind": "ecosystem-linear-continuous",
+            "sense": "max",
+            "objective": [3, 2],
+            "rowConstraints": [
+                {"a": [1, 1], "bounds": [4, 4]},
+                {"coefs": [1, 0], "sense": "<=", "rhs": 2}
+            ],
+            "bounds": [[0, null], [0, null]],
+            "integer": false
+        });
+        let lp_run = run_external_optimization_ecosystem_reference(
+            &lp_payload,
+            ExternalOptimizationTool::OrToolsGlop,
+        );
+        assert_eq!(lp_run.status, ExternalOptimizationAdapterStatus::Ok);
+        let lp_output = lp_run.output.as_ref().expect("lp output");
+        assert_eq!(lp_output["backend"], "builtin-rust:linear-lp");
+        let lp_normalized = external_optimization_normalized_result_from_value(lp_output);
+        assert_eq!(lp_normalized.status.as_deref(), Some("optimal"));
+        let objective = lp_normalized.objective.expect("lp objective");
+        assert!((objective - 10.0).abs() <= 1e-8);
+        let solution = lp_normalized.solution.expect("lp solution");
+        assert!((solution[0] - 2.0).abs() <= 1e-8);
+        assert!((solution[1] - 2.0).abs() <= 1e-8);
     }
 
     #[test]

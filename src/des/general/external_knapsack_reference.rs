@@ -36,15 +36,23 @@ impl ExternalKnapsackReferenceSolver {
 }
 
 fn registered_knapsack_rust_fallback_enabled() -> bool {
-    std::env::var("KNAPSACK_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("KNAPSACK_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "KNAPSACK_REFERENCE_REGISTERED_FALLBACK",
+        "KNAPSACK_REFERENCE_EXTERNAL_FALLBACK",
+        "KNAPSACK_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_knapsack_reference(opts: &ExternalKnapsackReferenceOptions) -> bool {
@@ -932,6 +940,29 @@ mod tests {
         assert!(solution
             .message
             .contains("requested solver 'ortools' was validated with Rust fallback"));
+    }
+
+    #[test]
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = KNAPSACK_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("KNAPSACK_REFERENCE_RUST_FIRST", "true");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-knapsack");
+        let problem = build_sample_knapsack_problem();
+
+        let solution = solve_knapsack_with_external_reference(
+            &problem,
+            &ExternalKnapsackReferenceOptions {
+                solver: ExternalKnapsackReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalKnapsackReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-knapsack-fallback-for-ortools"
+        );
+        assert_eq!(solution.selected_item_ids, vec!["B", "C", "D"]);
+        assert_eq!(solution.objective, Some(51.0));
     }
 
     #[test]

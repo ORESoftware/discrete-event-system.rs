@@ -1963,6 +1963,7 @@ mod tests {
             let mut postgres_weights = SoccerTacticalLearningWeights::default();
             postgres_weights.attack_flank_lane_weight = 1.10 + episode as f64 * 0.07;
             postgres_weights.defense_contract_delta_weight = 0.90 + episode as f64 * 0.05;
+            postgres_weights.formation_lp_alignment_weight = 0.20 + episode as f64 * 0.03;
 
             maybe_apply_postgres_tactical_learning(
                 "test_postgres_refresh_tactical_learning_for_queue",
@@ -1989,6 +1990,11 @@ mod tests {
             );
             assert!(
                 (sample.weights.defense_contract_delta_weight - (0.90 + episode as f64 * 0.05))
+                    .abs()
+                    < 1e-12
+            );
+            assert!(
+                (sample.weights.formation_lp_alignment_weight - (0.20 + episode as f64 * 0.03))
                     .abs()
                     < 1e-12
             );

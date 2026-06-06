@@ -578,9 +578,18 @@ function initializeUiWhenReady() {
 function phaseLabel(v) {
   return String(v || "").replace(/([a-z])([A-Z])/g, "$1 $2");
 }
+function flankPolicyLabel(d) {
+  const policy = String(d?.flankAttackPolicy || "none");
+  if (!policy || policy === "none") return "";
+  const overlap = Number(d?.flankOverlapRunProbability ?? 0);
+  const overlapText = overlap > 0 ? ` O${Math.round(overlap * 100)}%` : "";
+  if (policy === "playDownFlankLowCross") return ` LowX${overlapText}`;
+  if (policy === "playDownFlankHighCross") return ` HighX${overlapText}`;
+  return ` ${phaseLabel(policy)}${overlapText}`;
+}
 function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
-  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}`;
+  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)}${flankPolicyLabel(d)}`;
 }
 function teamBrainModeLabel(mode) {
   const v = String(mode || "").toLowerCase();
@@ -598,11 +607,12 @@ function teamBrainLabel(brain, fallbackDirective) {
   const cover = target > 0 ? ` C${actual}/${target >= 4 ? "4+" : target}` : "";
   const actions = Number(brain.policyActionEntries ?? 0);
   const targets = Number(brain.policyTargetEntries ?? 0);
+  const flank = flankPolicyLabel(d);
   const centroid = brain.teamCentroid;
   const shape = centroid
     ? ` T${Number(centroid.x ?? 0).toFixed(0)},${Number(centroid.y ?? 0).toFixed(0)} W${Number(brain.teamSpreadYards ?? 0).toFixed(0)} NB${Number(brain.playersNearBall ?? 0)}`
     : "";
-  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)}${cover} Q${actions}/${targets}${shape}`;
+  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)}${cover} Q${actions}/${targets}${flank}${shape}`;
 }
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";

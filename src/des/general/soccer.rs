@@ -277,7 +277,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 81;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 83;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -297,7 +297,9 @@ const SOCCER_NEURAL_FEATURE_TEAM_CENTROID_BALL_DISTANCE: usize = 61;
 const SOCCER_NEURAL_FEATURE_TEAM_SPREAD: usize = 62;
 const SOCCER_NEURAL_FEATURE_TEAM_PLAYERS_NEAR_BALL: usize = 63;
 const SOCCER_NEURAL_FEATURE_TEAM_FORWARD_VELOCITY: usize = 64;
-const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61];
+const SOCCER_NEURAL_FEATURE_TEAM_FLANK_POLICY: usize = 81;
+const SOCCER_NEURAL_FEATURE_TEAM_FLANK_OVERLAP: usize = 82;
+const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
@@ -1246,6 +1248,10 @@ pub struct SoccerPomdpObservation {
     pub team_brain_press_intensity: f64,
     #[serde(default)]
     pub team_brain_risk_tolerance: f64,
+    #[serde(default)]
+    pub team_brain_flank_attack_policy: FlankAttackPolicy,
+    #[serde(default)]
+    pub team_brain_flank_overlap_run_probability: f64,
     #[serde(default)]
     pub team_brain_defensive_cover_target: usize,
     #[serde(default)]
@@ -2231,6 +2237,10 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub team_brain_risk_bin: u8,
     #[serde(default)]
+    pub team_flank_attack_policy: FlankAttackPolicy,
+    #[serde(default)]
+    pub team_flank_overlap_bin: u8,
+    #[serde(default)]
     pub team_brain_cover_target_bin: u8,
     #[serde(default)]
     pub team_brain_cover_actual_bin: u8,
@@ -2455,6 +2465,11 @@ impl SoccerQStateKey {
             team_brain_risk_bin: distance_bucket(
                 observation.team_brain_risk_tolerance,
                 &[0.25, 0.45, 0.65, 0.85],
+            ),
+            team_flank_attack_policy: observation.team_brain_flank_attack_policy,
+            team_flank_overlap_bin: distance_bucket(
+                observation.team_brain_flank_overlap_run_probability,
+                &[0.05, 0.20, FLANK_OVERLAP_MIN_OPTION_SHARE, 0.50],
             ),
             team_brain_cover_target_bin: observation.team_brain_defensive_cover_target.min(4) as u8,
             team_brain_cover_actual_bin: observation.team_brain_defensive_cover_actual.min(4) as u8,
@@ -2736,6 +2751,8 @@ impl SoccerQStateKey {
             && self.team_brain_mode == other.team_brain_mode
             && self.team_brain_press_bin == other.team_brain_press_bin
             && self.team_brain_risk_bin == other.team_brain_risk_bin
+            && self.team_flank_attack_policy == other.team_flank_attack_policy
+            && self.team_flank_overlap_bin == other.team_flank_overlap_bin
             && self.team_brain_cover_target_bin == other.team_brain_cover_target_bin
             && self.team_brain_cover_actual_bin == other.team_brain_cover_actual_bin
             && self.team_centroid_ball_distance_bin == other.team_centroid_ball_distance_bin
@@ -14618,6 +14635,8 @@ impl WorldSnapshot {
                 team_brain_mode: TeamBrainMode::Transition,
                 team_brain_press_intensity: 0.0,
                 team_brain_risk_tolerance: 0.0,
+                team_brain_flank_attack_policy: FlankAttackPolicy::None,
+                team_brain_flank_overlap_run_probability: 0.0,
                 team_brain_defensive_cover_target: 0,
                 team_brain_defensive_cover_actual: 0,
                 team_centroid_to_ball_yards: 0.0,
@@ -15172,6 +15191,8 @@ impl WorldSnapshot {
             team_brain_mode,
             team_brain_press_intensity: team_directive.press_intensity,
             team_brain_risk_tolerance: team_directive.risk_tolerance,
+            team_brain_flank_attack_policy: team_directive.flank_attack_policy,
+            team_brain_flank_overlap_run_probability: team_directive.flank_overlap_run_probability,
             team_brain_defensive_cover_target: team_directive.defensive_cover_target,
             team_brain_defensive_cover_actual: team_directive.defensive_cover_actual,
             team_centroid_to_ball_yards: team_shape.centroid_to_ball_yards,
@@ -20958,6 +20979,10 @@ fn holder_pressure_support_urgency(snapshot: &WorldSnapshot, team: Team) -> f64 
 pub struct SoccerPlaybackDirectiveFrame {
     pub press_intensity: f64,
     pub risk_tolerance: f64,
+    #[serde(default)]
+    pub flank_attack_policy: FlankAttackPolicy,
+    #[serde(default)]
+    pub flank_overlap_run_probability: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -21234,10 +21259,20 @@ impl SoccerPlaybackFrame {
             home_directive: SoccerPlaybackDirectiveFrame {
                 press_intensity: sim.central_brain.home_directive.press_intensity,
                 risk_tolerance: sim.central_brain.home_directive.risk_tolerance,
+                flank_attack_policy: sim.central_brain.home_directive.flank_attack_policy,
+                flank_overlap_run_probability: sim
+                    .central_brain
+                    .home_directive
+                    .flank_overlap_run_probability,
             },
             away_directive: SoccerPlaybackDirectiveFrame {
                 press_intensity: sim.central_brain.away_directive.press_intensity,
                 risk_tolerance: sim.central_brain.away_directive.risk_tolerance,
+                flank_attack_policy: sim.central_brain.away_directive.flank_attack_policy,
+                flank_overlap_run_probability: sim
+                    .central_brain
+                    .away_directive
+                    .flank_overlap_run_probability,
             },
             intents: playback_intents_from_agents(&sim.players, possession_team, sim.ball.holder),
         }
@@ -21311,10 +21346,14 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
             home_directive: SoccerPlaybackDirectiveFrame {
                 press_intensity: frame.home_directive.press_intensity,
                 risk_tolerance: frame.home_directive.risk_tolerance,
+                flank_attack_policy: frame.home_directive.flank_attack_policy,
+                flank_overlap_run_probability: frame.home_directive.flank_overlap_run_probability,
             },
             away_directive: SoccerPlaybackDirectiveFrame {
                 press_intensity: frame.away_directive.press_intensity,
                 risk_tolerance: frame.away_directive.risk_tolerance,
+                flank_attack_policy: frame.away_directive.flank_attack_policy,
+                flank_overlap_run_probability: frame.away_directive.flank_overlap_run_probability,
             },
             intents: playback_intents_from_frame(frame),
         }
@@ -26886,6 +26925,8 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
             | "fake-right-cut-left"
             | "pass"
             | "aerial-pass"
+            | "flank-low-cross"
+            | "flank-high-cross"
             | "route-one"
             | "first-time-shot"
             | "first-time-header"
@@ -26900,6 +26941,14 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
         soccer_neural_bool(defense),
         soccer_neural_bool(support),
     )
+}
+
+fn soccer_neural_flank_policy_feature(policy: FlankAttackPolicy) -> f64 {
+    match policy {
+        FlankAttackPolicy::None => 0.0,
+        FlankAttackPolicy::PlayDownFlankLowCross => -1.0,
+        FlankAttackPolicy::PlayDownFlankHighCross => 1.0,
+    }
 }
 
 fn soccer_neural_transition_features(
@@ -27063,6 +27112,8 @@ fn soccer_neural_transition_features(
                 .formation_lp_fore_aft_speed_error_yps,
             8.0,
         ),
+        soccer_neural_flank_policy_feature(state.team_flank_attack_policy),
+        soccer_neural_bin(state.team_flank_overlap_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -45104,6 +45155,97 @@ mod tests {
     }
 
     #[test]
+    fn pomdp_q_state_and_neural_features_track_team_flank_cross_policy() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14230,
+            ..Default::default()
+        });
+        let holder = 6;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(5.0, 84.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        let mut directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        directive.flank_attack_policy = FlankAttackPolicy::PlayDownFlankHighCross;
+        directive.flank_overlap_run_probability = 0.42;
+        sim.central_brain.home_directive = directive;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(holder);
+        assert_eq!(
+            observation.team_brain_flank_attack_policy,
+            FlankAttackPolicy::PlayDownFlankHighCross
+        );
+        assert!((observation.team_brain_flank_overlap_run_probability - 0.42).abs() < 1e-9);
+
+        let mdp_state = snapshot.mdp_state_for_player(holder);
+        let high_state = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &observation,
+            Team::Home,
+            sim.players[holder].role,
+        );
+        let mut low_observation = observation.clone();
+        low_observation.team_brain_flank_attack_policy = FlankAttackPolicy::PlayDownFlankLowCross;
+        let low_state = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &low_observation,
+            Team::Home,
+            sim.players[holder].role,
+        );
+
+        assert_eq!(
+            high_state.team_flank_attack_policy,
+            FlankAttackPolicy::PlayDownFlankHighCross
+        );
+        assert_eq!(high_state.team_flank_overlap_bin, 3);
+        assert_ne!(high_state, low_state);
+
+        let mut policy = SoccerQPolicy::default();
+        policy.set_action_value(high_state.clone(), "flank-high-cross", 6.0);
+        assert_eq!(
+            policy.best_action_hierarchical(&high_state).as_deref(),
+            Some("flank-high-cross")
+        );
+        assert!(
+            policy.best_action_hierarchical(&low_state).is_none(),
+            "low-cross and high-cross team policies should not share learned choices"
+        );
+
+        let decision = test_decision_trace(&snapshot, holder, "flank-high-cross");
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: holder,
+            team: Team::Home,
+            role: sim.players[holder].role,
+            state: decision.mdp_state.clone(),
+            observation,
+            belief: decision.belief.clone(),
+            action: decision.action.clone(),
+            action_target: decision.action_target.clone(),
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 1.0,
+            next_state: snapshot.mdp_state_for_player(holder),
+            next_observation: snapshot.observation_for(holder),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
+        assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(features[SOCCER_NEURAL_FEATURE_TEAM_FLANK_POLICY], 1.0);
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_TEAM_FLANK_OVERLAP] > 0.0,
+            "overlap probability bin should be visible to the neural learner"
+        );
+    }
+
+    #[test]
     fn q_policy_keys_separate_same_action_by_goal_attack_window() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -51795,6 +51937,61 @@ mod tests {
             assert_eq!(
                 resumed_snapshot.layers[0].weights[0][index], 0.0,
                 "new team-shape input weights should start neutral"
+            );
+        }
+    }
+
+    #[test]
+    fn neural_learning_pads_previous_snapshot_flank_policy_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15079,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_TEAM_FLANK_POLICY;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        for index in previous_dim..SOCCER_NEURAL_FEATURE_DIM {
+            assert_eq!(
+                resumed_snapshot.layers[0].weights[0][index], 0.0,
+                "new flank-policy input weights should start neutral"
             );
         }
     }
@@ -60750,6 +60947,11 @@ mod tests {
         assert!(html.body.contains("exportPostgresTeamPolicyJsonl"));
         assert!(html.body.contains("brain.teamCentroid"));
         assert!(html.body.contains("playersNearBall"));
+        assert!(html.body.contains("function flankPolicyLabel"));
+        assert!(html.body.contains("playDownFlankLowCross"));
+        assert!(html.body.contains("playDownFlankHighCross"));
+        assert!(html.body.contains("LowX"));
+        assert!(html.body.contains("HighX"));
         assert!(html.body.contains("id=\"liveHttp\""));
         assert!(html.body.contains("function liveHttpLabel"));
         assert!(html.body.contains("id=\"runtimeTiming\""));
@@ -60807,6 +61009,15 @@ mod tests {
         let state_value: serde_json::Value = serde_json::from_str(&state.body).expect("state json");
         assert_eq!(state_value["learning"]["teamPoliciesEnabled"], true);
         assert_eq!(state_value["config"]["seed"], 55);
+        assert!(state_value["frame"]["homeDirective"]
+            .get("flankAttackPolicy")
+            .is_some());
+        assert!(state_value["frame"]["homeDirective"]
+            .get("flankOverlapRunProbability")
+            .is_some());
+        assert!(state_value["frame"]["homeBrain"]["directive"]
+            .get("flankAttackPolicy")
+            .is_some());
         assert_eq!(state_value["learning"]["totalTransitions"], 0);
         assert!(state_value["recentMoments"].as_array().unwrap().is_empty());
         assert_eq!(state_value["momentStorage"]["backend"], "jsonl-disk");
@@ -64233,6 +64444,11 @@ mod tests {
         assert!(html.contains("B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}"));
         assert!(html.contains("brain.teamCentroid"));
         assert!(html.contains("playersNearBall"));
+        assert!(html.contains("function flankPolicyLabel"));
+        assert!(html.contains("playDownFlankLowCross"));
+        assert!(html.contains("playDownFlankHighCross"));
+        assert!(html.contains("LowX"));
+        assert!(html.contains("HighX"));
         assert!(html.contains("id=\"agentOrder\""));
         assert!(html.contains("function agentScheduleEntriesForFrame"));
         assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));
@@ -64438,7 +64654,14 @@ mod tests {
         assert!(html.contains("weightPounds"));
         assert!(html.contains("label: \"Weight\""));
         assert!(html.contains("Wt${weight.toFixed(0)}"));
-        assert!(html.contains("[\"aerial-pass\", \"clearance\", \"route-one\"].includes(action)"));
+        assert!(html.contains("\"flank-low-cross\""));
+        assert!(html.contains("\"flank-high-cross\""));
+        assert!(html.contains(
+            "[\"aerial-pass\", \"flank-high-cross\", \"clearance\", \"route-one\"].includes(action)"
+        ));
+        assert!(
+            html.contains("[\"pass\", \"flank-low-cross\", \"first-time-pass\"].includes(action)")
+        );
         assert!(html.contains("trackingPhysicsSmokeLabel"));
         assert!(html.contains("id=\"exportTrackingJsonl\""));
         assert!(html.contains("id=\"sampleTrackingJsonl\""));
@@ -64544,6 +64767,18 @@ mod tests {
         assert!(first_frame["players"][0].get("movementGait").is_some());
         assert!(first_frame["ball"].get("velocity").is_some());
         assert!(first_frame["ball"].get("altitudeYards").is_some());
+        assert!(first_frame["homeDirective"]
+            .get("flankAttackPolicy")
+            .is_some());
+        assert!(first_frame["homeDirective"]
+            .get("flankOverlapRunProbability")
+            .is_some());
+        assert!(first_frame["awayDirective"]
+            .get("flankAttackPolicy")
+            .is_some());
+        assert!(first_frame["awayDirective"]
+            .get("flankOverlapRunProbability")
+            .is_some());
         assert!(first_frame["officials"][0].get("velocity").is_some());
         assert!(first_frame["officials"][0].get("acceleration").is_some());
         assert!(first_frame["officials"][0].get("jerk").is_some());

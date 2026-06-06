@@ -659,6 +659,8 @@ const SLOT_COLORS = ["#f6c944", "#37d688", "#61a5ff", "#ef7ad3"];
 const SEMANTIC_BALL_ACTIONS = new Set([
   "pass",
   "aerial-pass",
+  "flank-low-cross",
+  "flank-high-cross",
   "first-time-pass",
   "clearance",
   "route-one",
@@ -685,6 +687,8 @@ const INTENT_TRACE_ACTIONS = new Set([
   "first-time-header",
   "pass",
   "aerial-pass",
+  "flank-low-cross",
+  "flank-high-cross",
   "first-time-pass",
   "clearance",
   "route-one",
@@ -796,6 +800,15 @@ function fmtClock(s) {
 function phaseLabel(v) {
   return String(v || "").replace(/([a-z])([A-Z])/g, "$1 $2");
 }
+function flankPolicyLabel(d) {
+  const policy = String(d?.flankAttackPolicy || "none");
+  if (!policy || policy === "none") return "";
+  const overlap = Number(d?.flankOverlapRunProbability ?? 0);
+  const overlapText = overlap > 0 ? ` O${Math.round(overlap * 100)}%` : "";
+  if (policy === "playDownFlankLowCross") return ` LowX${overlapText}`;
+  if (policy === "playDownFlankHighCross") return ` HighX${overlapText}`;
+  return ` ${phaseLabel(policy)}${overlapText}`;
+}
 function directiveLabel(d) {
   if (!d) return "P0.00 R0.00";
   const target = Number(d.defensiveCoverTarget ?? 0);
@@ -804,7 +817,8 @@ function directiveLabel(d) {
   const advantage = Number(d.attackingNumbersAdvantage ?? 0);
   const overload = Number(d.attackingOverloadScore ?? 0);
   const numbersUp = advantage > 0 ? ` N+${advantage}/${overload.toFixed(2)}` : "";
-  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)} ${cover}${numbersUp}`;
+  const flank = flankPolicyLabel(d);
+  return `P${Number(d.pressIntensity ?? 0).toFixed(2)} R${Number(d.riskTolerance ?? 0).toFixed(2)} ${cover}${numbersUp}${flank}`;
 }
 function teamBrainModeLabel(mode) {
   const v = String(mode || "").toLowerCase();
@@ -825,6 +839,7 @@ function teamBrainLabel(brain, fallbackDirective) {
   const advantage = Number(brain.attackingNumbersAdvantage ?? d.attackingNumbersAdvantage ?? 0);
   const overload = Number(brain.attackingOverloadScore ?? d.attackingOverloadScore ?? 0);
   const numbersUp = advantage > 0 ? ` N+${advantage}/${overload.toFixed(2)}` : "";
+  const flank = flankPolicyLabel(d);
   const humans = Number(brain.controlledHumanPlayers ?? 0);
   const humanText = humans > 0 ? ` H${humans}` : "";
   const ballSpeed = vecLen(brain.ballVelocity || {x: 0, y: 0});
@@ -836,7 +851,7 @@ function teamBrainLabel(brain, fallbackDirective) {
   const shapeText = centroid
     ? ` T${Number(centroid.x ?? 0).toFixed(0)},${Number(centroid.y ?? 0).toFixed(0)} W${Number(brain.teamSpreadYards ?? 0).toFixed(0)} NB${Number(brain.playersNearBall ?? 0)}`
     : "";
-  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)} ${cover} Q${actions}/${targets}${numbersUp}${humanText}${shapeText}${ballText}`;
+  return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)} ${cover} Q${actions}/${targets}${numbersUp}${flank}${humanText}${shapeText}${ballText}`;
 }
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
@@ -1030,7 +1045,7 @@ function intentPriority(player, action, frame = state?.frame) {
   const possession = livePossessionTeam(frame);
   const holderBonus = holder === player.id ? 32 : 0;
   if (["shoot", "first-time-shot", "first-time-header"].includes(action)) return 110 + holderBonus;
-  if (["pass", "aerial-pass", "first-time-pass"].includes(action)) return 104 + holderBonus;
+  if (["pass", "aerial-pass", "flank-low-cross", "flank-high-cross", "first-time-pass"].includes(action)) return 104 + holderBonus;
   if (["clearance", "route-one"].includes(action)) return 98 + holderBonus;
   if (["carry-forward", "carry-out", "protect-ball", "left-cut", "right-cut", "nutmeg", "fake-left-cut-right", "fake-right-cut-left", "hold-up-flank"].includes(action)) return 92 + holderBonus;
   if (action === "space" && possession === player.team) {
@@ -1078,7 +1093,7 @@ function liveIntentCandidates(frame = state?.frame) {
       const priority = intentPriority(player, action, frame);
       if (priority == null) return null;
       const urgency = clamp(Number(decision?.observation?.decisionUrgency ?? 0), 0, 1);
-      const flight = ["aerial-pass", "clearance", "route-one"].includes(action) ? "aerial" : ["pass", "first-time-pass"].includes(action) ? "floor" : null;
+      const flight = ["aerial-pass", "flank-high-cross", "clearance", "route-one"].includes(action) ? "aerial" : ["pass", "flank-low-cross", "first-time-pass"].includes(action) ? "floor" : null;
       return {
         player,
         action,

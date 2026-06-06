@@ -24,6 +24,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::des::general::general::fisher_yates_shuffle;
+use crate::des::general::lp::{
+    solve_lp_internal, InternalSimplexOptions, LPBasisWarmStart, LPProblem, LPStatus, Sense,
+};
 use crate::des::general::neural_network::{
     ActivationName, DenseLayerConfig, FeedForwardNetwork, RandomNetworkSpec,
 };
@@ -136,8 +139,11 @@ const DEFENSIVE_CLEAR_AND_HOLD_SECOND_SECONDS: f64 = 10.0;
 const DEFENSIVE_CLEAR_AND_HOLD_FIRST_REWARD_POINTS: f64 = 10.0;
 const DEFENSIVE_CLEAR_AND_HOLD_SECOND_REWARD_POINTS: f64 = 20.0;
 const DEFENSIVE_DISPOSSESSION_REWARD_POINTS: f64 = 10.0;
-const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 4.0;
+const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 2.0;
 const BEATEN_BY_DRIBBLE_PENALTY_POINTS: f64 = 3.0;
+const DRIBBLE_BEAT_CONTACT_RADIUS_YARDS: f64 = 3.0;
+const SHOT_BLOCK_DEFENDER_REWARD_POINTS: f64 = 12.0;
+const BLOCKED_SHOT_SHOOTER_PENALTY_POINTS: f64 = 3.0;
 const DRIBBLE_BEAT_REWARD_POINTS: f64 = 6.0;
 const NUTMEG_BEAT_REWARD_POINTS: f64 = 7.0;
 const SIDE_STEP_BEAT_REWARD_POINTS: f64 = DRIBBLE_BEAT_REWARD_POINTS;
@@ -246,6 +252,11 @@ const SOCCER_MOMENT_ROLE_ALIGNED_PLAYERS: usize = 22;
 const SOCCER_MOMENT_FEATURES_PER_ENTITY: usize = 6;
 const SOCCER_MOMENT_FEATURES_PER_FRAME: usize =
     (SOCCER_MOMENT_ROLE_ALIGNED_PLAYERS + 1) * SOCCER_MOMENT_FEATURES_PER_ENTITY;
+const SOCCER_FORMATION_LP_PLAYER_CAPACITY: usize = 11;
+const SOCCER_FORMATION_LP_WORLD_PLAYER_CAPACITY: usize = 22;
+const SOCCER_FORMATION_LP_CONTEXT_FEATURES: usize = 64;
+const SOCCER_FORMATION_LP_PRESS_DISTANCE_YARDS: f64 = 2.8;
+const SOCCER_FORMATION_LP_MAX_ITER: usize = 12_000;
 const SOCCER_SET_PLAY_WINDOW_SECONDS: f64 = 15.0;
 const SOCCER_SET_PLAY_TRAINING_WINDOW_SECONDS: f64 = 10.0;
 const SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS: f64 = 3.0;
@@ -261,7 +272,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 65;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 75;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -423,6 +434,10 @@ fn default_learning_interval_ticks() -> usize {
 }
 
 fn default_full_game_learning_enabled() -> bool {
+    true
+}
+
+fn default_formation_lp_enabled() -> bool {
     true
 }
 
@@ -1191,6 +1206,16 @@ pub struct SoccerPomdpObservation {
     #[serde(default)]
     pub team_forward_velocity_yps: f64,
     #[serde(default)]
+    pub formation_lp_guidance_present: bool,
+    #[serde(default)]
+    pub formation_lp_recommended_move_yards: f64,
+    #[serde(default)]
+    pub formation_lp_pair_error_yards: f64,
+    #[serde(default)]
+    pub formation_lp_pressure_weight: f64,
+    #[serde(default)]
+    pub formation_lp_speed_match_weight: f64,
+    #[serde(default)]
     pub attacking_overload_attackers: usize,
     #[serde(default)]
     pub attacking_overload_defenders: usize,
@@ -1659,6 +1684,20 @@ pub struct SoccerTacticalLearningTrace {
     #[serde(default)]
     pub defense_role_press_delta: f64,
     #[serde(default)]
+    pub formation_lp_guidance: bool,
+    #[serde(default)]
+    pub formation_lp_recommended_move_yards: f64,
+    #[serde(default)]
+    pub formation_lp_actual_move_yards: f64,
+    #[serde(default)]
+    pub formation_lp_disagreement_yards: f64,
+    #[serde(default)]
+    pub formation_lp_alignment_score: f64,
+    #[serde(default)]
+    pub formation_lp_pressure_weight: f64,
+    #[serde(default)]
+    pub formation_lp_pair_error_yards: f64,
+    #[serde(default)]
     pub tactical_reward: f64,
 }
 
@@ -1705,6 +1744,18 @@ pub struct SoccerTacticalLearningSummary {
     pub mean_defense_role_press_score: f64,
     #[serde(default)]
     pub mean_defense_tactical_reward: f64,
+    #[serde(default)]
+    pub lp_guided_transitions: usize,
+    #[serde(default)]
+    pub mean_lp_recommended_move_yards: f64,
+    #[serde(default)]
+    pub mean_lp_actual_move_yards: f64,
+    #[serde(default)]
+    pub mean_lp_disagreement_yards: f64,
+    #[serde(default)]
+    pub mean_lp_alignment_score: f64,
+    #[serde(default)]
+    pub mean_lp_pair_error_yards: f64,
     #[serde(default)]
     pub total_tactical_reward: f64,
     #[serde(default)]
@@ -1824,6 +1875,37 @@ impl SoccerTacticalLearningSummary {
             other.mean_defense_tactical_reward,
             other.defense_transitions,
         );
+        let lp_count = self.lp_guided_transitions;
+        self.mean_lp_recommended_move_yards = weighted_mean(
+            self.mean_lp_recommended_move_yards,
+            lp_count,
+            other.mean_lp_recommended_move_yards,
+            other.lp_guided_transitions,
+        );
+        self.mean_lp_actual_move_yards = weighted_mean(
+            self.mean_lp_actual_move_yards,
+            lp_count,
+            other.mean_lp_actual_move_yards,
+            other.lp_guided_transitions,
+        );
+        self.mean_lp_disagreement_yards = weighted_mean(
+            self.mean_lp_disagreement_yards,
+            lp_count,
+            other.mean_lp_disagreement_yards,
+            other.lp_guided_transitions,
+        );
+        self.mean_lp_alignment_score = weighted_mean(
+            self.mean_lp_alignment_score,
+            lp_count,
+            other.mean_lp_alignment_score,
+            other.lp_guided_transitions,
+        );
+        self.mean_lp_pair_error_yards = weighted_mean(
+            self.mean_lp_pair_error_yards,
+            lp_count,
+            other.mean_lp_pair_error_yards,
+            other.lp_guided_transitions,
+        );
         self.total_transitions = self
             .total_transitions
             .saturating_add(other.total_transitions);
@@ -1836,6 +1918,9 @@ impl SoccerTacticalLearningSummary {
         self.defense_transitions = self
             .defense_transitions
             .saturating_add(other.defense_transitions);
+        self.lp_guided_transitions = self
+            .lp_guided_transitions
+            .saturating_add(other.lp_guided_transitions);
         self.total_tactical_reward =
             finite_metric(self.total_tactical_reward) + finite_metric(other.total_tactical_reward);
         self.mean_tactical_reward = if self.shape_transitions > 0 {
@@ -1937,6 +2022,34 @@ impl SoccerTacticalLearningSummary {
             );
             self.total_tactical_reward += finite_metric(trace.tactical_reward);
         }
+        if trace.formation_lp_guidance {
+            self.lp_guided_transitions = self.lp_guided_transitions.saturating_add(1);
+            record_running_mean(
+                &mut self.mean_lp_recommended_move_yards,
+                self.lp_guided_transitions,
+                trace.formation_lp_recommended_move_yards,
+            );
+            record_running_mean(
+                &mut self.mean_lp_actual_move_yards,
+                self.lp_guided_transitions,
+                trace.formation_lp_actual_move_yards,
+            );
+            record_running_mean(
+                &mut self.mean_lp_disagreement_yards,
+                self.lp_guided_transitions,
+                trace.formation_lp_disagreement_yards,
+            );
+            record_running_mean(
+                &mut self.mean_lp_alignment_score,
+                self.lp_guided_transitions,
+                trace.formation_lp_alignment_score,
+            );
+            record_running_mean(
+                &mut self.mean_lp_pair_error_yards,
+                self.lp_guided_transitions,
+                trace.formation_lp_pair_error_yards,
+            );
+        }
 
         if self.shape_transitions > 0 {
             self.mean_tactical_reward = self.total_tactical_reward / self.shape_transitions as f64;
@@ -2037,6 +2150,16 @@ pub struct SoccerQStateKey {
     pub team_players_near_ball_bin: u8,
     #[serde(default)]
     pub team_forward_velocity_bin: u8,
+    #[serde(default)]
+    pub formation_lp_guidance: bool,
+    #[serde(default)]
+    pub formation_lp_move_bin: u8,
+    #[serde(default)]
+    pub formation_lp_pair_error_bin: u8,
+    #[serde(default)]
+    pub formation_lp_pressure_bin: u8,
+    #[serde(default)]
+    pub formation_lp_speed_match_bin: u8,
     pub has_ball: bool,
     pub visible_ball: bool,
     pub shot_lane_open: bool,
@@ -2255,6 +2378,23 @@ impl SoccerQStateKey {
             team_forward_velocity_bin: distance_bucket(
                 observation.team_forward_velocity_yps,
                 &[-2.0, 0.0, 2.0, 5.0],
+            ),
+            formation_lp_guidance: observation.formation_lp_guidance_present,
+            formation_lp_move_bin: distance_bucket(
+                observation.formation_lp_recommended_move_yards,
+                &[0.35, 0.75, 1.35, 2.25],
+            ),
+            formation_lp_pair_error_bin: distance_bucket(
+                observation.formation_lp_pair_error_yards,
+                &[0.50, 1.50, 3.00, 5.50],
+            ),
+            formation_lp_pressure_bin: distance_bucket(
+                observation.formation_lp_pressure_weight,
+                &[0.10, 0.30, 0.55, 0.80],
+            ),
+            formation_lp_speed_match_bin: distance_bucket(
+                observation.formation_lp_speed_match_weight,
+                &[0.10, 0.30, 0.55, 0.80],
             ),
             has_ball: observation.has_ball,
             visible_ball: observation.visible_ball,
@@ -2510,6 +2650,11 @@ impl SoccerQStateKey {
             && self.team_spread_bin == other.team_spread_bin
             && self.team_players_near_ball_bin == other.team_players_near_ball_bin
             && self.team_forward_velocity_bin == other.team_forward_velocity_bin
+            && self.formation_lp_guidance == other.formation_lp_guidance
+            && self.formation_lp_move_bin == other.formation_lp_move_bin
+            && self.formation_lp_pair_error_bin == other.formation_lp_pair_error_bin
+            && self.formation_lp_pressure_bin == other.formation_lp_pressure_bin
+            && self.formation_lp_speed_match_bin == other.formation_lp_speed_match_bin
             && self.has_ball == other.has_ball
             && self.visible_ball == other.visible_ball
             && self.shot_lane_open == other.shot_lane_open
@@ -6678,6 +6823,25 @@ impl PlayerAgent {
                         &support_context.special_targets,
                     )
                 });
+            let support_target = if matches!(
+                first_support_label.as_str(),
+                "support-shape" | "support-roam"
+            ) {
+                snapshot
+                    .formation_lp_guidance_for(self.id)
+                    .map(|guidance| SupportMovementTarget {
+                        point: snapshot.clamp_to_role_position(
+                            self.id,
+                            guidance.target,
+                            self.home_position,
+                            false,
+                        ),
+                        action_label: support_target.action_label,
+                    })
+                    .unwrap_or(support_target)
+            } else {
+                support_target
+            };
             (
                 SoccerAction::MoveTo(support_target.point),
                 support_target.action_label.to_string(),
@@ -6738,7 +6902,16 @@ impl PlayerAgent {
                         let target = if roam && dist < defend_radius {
                             snapshot.ball.position
                         } else {
-                            snapshot.defensive_assignment_for(self.id, self.home_position, roam)
+                            snapshot
+                                .formation_lp_guidance_for(self.id)
+                                .map(|guidance| guidance.target)
+                                .unwrap_or_else(|| {
+                                    snapshot.defensive_assignment_for(
+                                        self.id,
+                                        self.home_position,
+                                        roam,
+                                    )
+                                })
                         };
                         chosen = Some((SoccerAction::MoveTo(target), "defend".to_string()));
                         break;
@@ -9569,6 +9742,7 @@ pub struct SoccerTacticalLearningWeights {
     pub defense_endline_hard_penalty_weight: f64,
     pub defender_midfielder_press_weight: f64,
     pub midfielder_press_weight: f64,
+    pub formation_lp_alignment_weight: f64,
 }
 
 impl Default for SoccerTacticalLearningWeights {
@@ -9588,6 +9762,7 @@ impl Default for SoccerTacticalLearningWeights {
             defense_endline_hard_penalty_weight: 0.90,
             defender_midfielder_press_weight: 0.18,
             midfielder_press_weight: 0.20,
+            formation_lp_alignment_weight: 0.16,
         }
     }
 }
@@ -9633,6 +9808,10 @@ impl SoccerTacticalLearningWeights {
                 self.defender_midfielder_press_weight,
             ),
             ("midfielderPressWeight", self.midfielder_press_weight),
+            (
+                "formationLpAlignmentWeight",
+                self.formation_lp_alignment_weight,
+            ),
         ] {
             if !value.is_finite() {
                 return Err(format!("{name} must be finite"));
@@ -9814,6 +9993,8 @@ pub struct MatchConfig {
     pub learning_interval_ticks: usize,
     #[serde(default = "default_full_game_learning_enabled")]
     pub full_game_learning_enabled: bool,
+    #[serde(default = "default_formation_lp_enabled")]
+    pub formation_lp_enabled: bool,
     #[serde(default = "default_tactical_learning_weights")]
     pub tactical_learning: SoccerTacticalLearningWeights,
     #[serde(default = "default_neural_learning_config")]
@@ -9847,6 +10028,7 @@ impl Default for MatchConfig {
             learning_logging_enabled: true,
             learning_interval_ticks: 1,
             full_game_learning_enabled: true,
+            formation_lp_enabled: true,
             tactical_learning: SoccerTacticalLearningWeights::default(),
             neural_learning: SoccerNeuralLearningConfig::default(),
             adversarial_embedding_exploitation_enabled: true,
@@ -9868,6 +10050,7 @@ impl MatchConfig {
             learning_enabled: false,
             learning_logging_enabled: false,
             full_game_learning_enabled: false,
+            formation_lp_enabled: false,
             neural_learning: SoccerNeuralLearningConfig {
                 enabled: false,
                 ..SoccerNeuralLearningConfig::default()
@@ -9882,6 +10065,7 @@ impl MatchConfig {
         MatchConfig {
             learning_enabled: false,
             learning_logging_enabled: false,
+            formation_lp_enabled: false,
             neural_learning: SoccerNeuralLearningConfig {
                 enabled: false,
                 ..SoccerNeuralLearningConfig::default()
@@ -10098,6 +10282,7 @@ struct CompletedPassChainEntry {
 struct PossessionProgressTracker {
     team: Team,
     start_y: f64,
+    start_clock_seconds: f64,
     best_gain_yards: f64,
     completed_passes: usize,
     rewarded_milestones: usize,
@@ -10105,9 +10290,14 @@ struct PossessionProgressTracker {
 
 impl PossessionProgressTracker {
     fn new(team: Team, start_position: Vec2) -> Self {
+        Self::new_at(team, start_position, 0.0)
+    }
+
+    fn new_at(team: Team, start_position: Vec2, clock_seconds: f64) -> Self {
         Self {
             team,
             start_y: start_position.y,
+            start_clock_seconds: clock_seconds.max(0.0),
             best_gain_yards: 0.0,
             completed_passes: 0,
             rewarded_milestones: 0,
@@ -10122,6 +10312,10 @@ impl PossessionProgressTracker {
     fn qualifies_for_stall_penalty(&self) -> bool {
         self.completed_passes >= POSSESSION_STALL_PASS_THRESHOLD
             && self.best_gain_yards < POSSESSION_STALL_MIN_GAIN_YARDS
+    }
+
+    fn elapsed_seconds(&self, clock_seconds: f64) -> f64 {
+        (clock_seconds - self.start_clock_seconds).max(0.0)
     }
 }
 
@@ -10668,6 +10862,1520 @@ impl TeamTacticalDirective {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct SoccerFormationLpPlayerVars {
+    target_x: usize,
+    target_y: usize,
+    anchor_slack_x: usize,
+    anchor_slack_y: usize,
+    movement_slack_x: usize,
+    movement_slack_y: usize,
+    pressure_slack_x: usize,
+    pressure_slack_y: usize,
+    speed_match_slack_y: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SoccerFormationLpPlayerRows {
+    anchor_x_upper: usize,
+    anchor_x_lower: usize,
+    anchor_y_upper: usize,
+    anchor_y_lower: usize,
+    movement_x_upper: usize,
+    movement_x_lower: usize,
+    movement_y_upper: usize,
+    movement_y_lower: usize,
+    reach_x_upper: usize,
+    reach_x_lower: usize,
+    reach_y_upper: usize,
+    reach_y_lower: usize,
+    pressure_x_upper: usize,
+    pressure_x_lower: usize,
+    pressure_y_upper: usize,
+    pressure_y_lower: usize,
+    speed_y_upper: usize,
+    speed_y_lower: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SoccerFormationLpPairVars {
+    a: usize,
+    b: usize,
+    separation_slack_x: usize,
+    separation_slack_y: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SoccerFormationLpPairRows {
+    separation_x_upper: usize,
+    separation_x_lower: usize,
+    separation_y_upper: usize,
+    separation_y_lower: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SoccerFormationLpStateVars {
+    players_start: usize,
+    ball_start: usize,
+    context_start: usize,
+    count: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerFormationLpObjectiveWeights {
+    pub expected_goal: f64,
+    pub progression: f64,
+    pub retention: f64,
+    pub expected_goals_against: f64,
+    pub fatigue: f64,
+    pub passing_lane_quality: f64,
+    pub space_occupation: f64,
+    pub numerical_superiority: f64,
+    pub press_resistance: f64,
+    pub defensive_compactness: f64,
+    pub opponent_progression: f64,
+    pub transition_risk: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerFormationLpPlayerGuidance {
+    pub team: Team,
+    pub player_id: usize,
+    pub slot: usize,
+    pub current: Vec2,
+    pub target: Vec2,
+    pub formation_anchor: Vec2,
+    #[serde(default)]
+    pub pressure_target: Option<Vec2>,
+    pub recommended_move: Vec2,
+    #[serde(default)]
+    pub target_velocity: Vec2,
+    #[serde(default)]
+    pub target_acceleration: Vec2,
+    pub recommended_move_yards: f64,
+    #[serde(default)]
+    pub recommended_speed_yps: f64,
+    #[serde(default)]
+    pub recommended_acceleration_yps2: f64,
+    pub formation_error_yards: f64,
+    pub movement_error_yards: f64,
+    pub pair_error_yards: f64,
+    pub pressure_error_yards: f64,
+    pub fore_aft_speed_error_yps: f64,
+    pub pressure_weight: f64,
+    pub speed_match_weight: f64,
+    pub alignment_weight: f64,
+    pub reduced_cost_target_x: f64,
+    pub reduced_cost_target_y: f64,
+    pub solver_status: String,
+    pub solver_objective: f64,
+    pub solver_iterations: Option<usize>,
+    pub solver_elapsed_ms: f64,
+    pub variable_count: usize,
+    pub constraint_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerFormationLpTeamSnapshot {
+    pub team: Team,
+    pub status: String,
+    pub objective: f64,
+    pub variables: usize,
+    pub constraints: usize,
+    pub guided_players: usize,
+    pub iterations: Option<usize>,
+    pub elapsed_ms: f64,
+    pub mean_pair_error_yards: f64,
+    pub mean_pressure_error_yards: f64,
+    pub objective_weights: SoccerFormationLpObjectiveWeights,
+}
+
+impl Default for SoccerFormationLpTeamSnapshot {
+    fn default() -> Self {
+        Self {
+            team: Team::Home,
+            status: "not-solved".to_string(),
+            objective: 0.0,
+            variables: 0,
+            constraints: 0,
+            guided_players: 0,
+            iterations: None,
+            elapsed_ms: 0.0,
+            mean_pair_error_yards: 0.0,
+            mean_pressure_error_yards: 0.0,
+            objective_weights: SoccerFormationLpObjectiveWeights::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SoccerFormationLpSlotInput {
+    active: bool,
+    player_id: usize,
+    role: PlayerRole,
+    current: Vec2,
+    velocity: Vec2,
+    acceleration: Vec2,
+    home_position: Vec2,
+    top_speed: f64,
+    max_acceleration: f64,
+    fatigue: f64,
+    anchor: Vec2,
+    pressure_target: Option<Vec2>,
+    speed_match_velocity_yps: f64,
+    pressure_weight: f64,
+    speed_match_weight: f64,
+    pair_weight: f64,
+    alignment_weight: f64,
+}
+
+#[derive(Clone, Debug)]
+struct SoccerFormationLpBrain {
+    team: Team,
+    problem: LPProblem,
+    player_vars: Vec<SoccerFormationLpPlayerVars>,
+    player_rows: Vec<SoccerFormationLpPlayerRows>,
+    pair_vars: Vec<SoccerFormationLpPairVars>,
+    pair_rows: Vec<SoccerFormationLpPairRows>,
+    state_vars: SoccerFormationLpStateVars,
+    basis_start: Option<LPBasisWarmStart>,
+    last_guidance: Vec<SoccerFormationLpPlayerGuidance>,
+    last_snapshot: SoccerFormationLpTeamSnapshot,
+}
+
+impl SoccerFormationLpBrain {
+    fn new(team: Team) -> Self {
+        let mut c = Vec::new();
+        let mut lb = Vec::new();
+        let mut ub = Vec::new();
+        let mut var_names = Vec::new();
+        let mut player_vars = Vec::new();
+        let mut pair_vars = Vec::new();
+
+        fn add_var(
+            c: &mut Vec<f64>,
+            lb: &mut Vec<Option<f64>>,
+            ub: &mut Vec<Option<f64>>,
+            var_names: &mut Vec<String>,
+            name: String,
+            lower: Option<f64>,
+            upper: Option<f64>,
+        ) -> usize {
+            let idx = c.len();
+            c.push(0.0);
+            lb.push(lower);
+            ub.push(upper);
+            var_names.push(name);
+            idx
+        }
+
+        for slot in 0..SOCCER_FORMATION_LP_PLAYER_CAPACITY {
+            let prefix = format!("{}:slot{slot}", team.label().to_ascii_lowercase());
+            player_vars.push(SoccerFormationLpPlayerVars {
+                target_x: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:target_x"),
+                    Some(0.0),
+                    Some(DEFAULT_FIELD_WIDTH_YARDS),
+                ),
+                target_y: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:target_y"),
+                    Some(0.0),
+                    Some(DEFAULT_FIELD_LENGTH_YARDS),
+                ),
+                anchor_slack_x: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:anchor_slack_x"),
+                    Some(0.0),
+                    None,
+                ),
+                anchor_slack_y: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:anchor_slack_y"),
+                    Some(0.0),
+                    None,
+                ),
+                movement_slack_x: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:movement_slack_x"),
+                    Some(0.0),
+                    None,
+                ),
+                movement_slack_y: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:movement_slack_y"),
+                    Some(0.0),
+                    None,
+                ),
+                pressure_slack_x: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:pressure_slack_x"),
+                    Some(0.0),
+                    None,
+                ),
+                pressure_slack_y: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:pressure_slack_y"),
+                    Some(0.0),
+                    None,
+                ),
+                speed_match_slack_y: add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("{prefix}:speed_match_slack_y"),
+                    Some(0.0),
+                    None,
+                ),
+            });
+        }
+
+        for a in 0..SOCCER_FORMATION_LP_PLAYER_CAPACITY {
+            for b in (a + 1)..SOCCER_FORMATION_LP_PLAYER_CAPACITY {
+                let prefix = format!("{}:pair{a}_{b}", team.label().to_ascii_lowercase());
+                pair_vars.push(SoccerFormationLpPairVars {
+                    a,
+                    b,
+                    separation_slack_x: add_var(
+                        &mut c,
+                        &mut lb,
+                        &mut ub,
+                        &mut var_names,
+                        format!("{prefix}:separation_slack_x"),
+                        Some(0.0),
+                        None,
+                    ),
+                    separation_slack_y: add_var(
+                        &mut c,
+                        &mut lb,
+                        &mut ub,
+                        &mut var_names,
+                        format!("{prefix}:separation_slack_y"),
+                        Some(0.0),
+                        None,
+                    ),
+                });
+            }
+        }
+
+        let players_start = c.len();
+        for slot in 0..SOCCER_FORMATION_LP_WORLD_PLAYER_CAPACITY {
+            for component in ["pos_x", "pos_y", "vel_x", "vel_y", "acc_x", "acc_y"] {
+                add_var(
+                    &mut c,
+                    &mut lb,
+                    &mut ub,
+                    &mut var_names,
+                    format!("world:player{slot}:{component}"),
+                    Some(-2.0),
+                    Some(2.0),
+                );
+            }
+        }
+        let ball_start = c.len();
+        for component in ["pos_x", "pos_y", "vel_x", "vel_y", "acc_x", "acc_y"] {
+            add_var(
+                &mut c,
+                &mut lb,
+                &mut ub,
+                &mut var_names,
+                format!("world:ball:{component}"),
+                Some(-2.0),
+                Some(2.0),
+            );
+        }
+        let context_start = c.len();
+        for idx in 0..SOCCER_FORMATION_LP_CONTEXT_FEATURES {
+            add_var(
+                &mut c,
+                &mut lb,
+                &mut ub,
+                &mut var_names,
+                format!("context:feature{idx}"),
+                Some(-2.0),
+                Some(2.0),
+            );
+        }
+        let state_count = c.len() - players_start;
+        let state_vars = SoccerFormationLpStateVars {
+            players_start,
+            ball_start,
+            context_start,
+            count: state_count,
+        };
+
+        let n = c.len();
+        let mut a_ub = Vec::new();
+        let mut b_ub = Vec::new();
+        let mut con_names = Vec::new();
+        let mut player_rows = Vec::new();
+        let mut pair_rows = Vec::new();
+
+        fn add_ub_row(
+            a_ub: &mut Vec<Vec<f64>>,
+            b_ub: &mut Vec<f64>,
+            con_names: &mut Vec<String>,
+            n: usize,
+            terms: &[(usize, f64)],
+            name: String,
+        ) -> usize {
+            let idx = a_ub.len();
+            let mut row = vec![0.0; n];
+            for (var, coef) in terms {
+                row[*var] = *coef;
+            }
+            a_ub.push(row);
+            b_ub.push(0.0);
+            con_names.push(name);
+            idx
+        }
+
+        for (slot, vars) in player_vars.iter().enumerate() {
+            let prefix = format!("{}:slot{slot}", team.label().to_ascii_lowercase());
+            player_rows.push(SoccerFormationLpPlayerRows {
+                anchor_x_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, 1.0), (vars.anchor_slack_x, -1.0)],
+                    format!("{prefix}:anchor_x_upper"),
+                ),
+                anchor_x_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, -1.0), (vars.anchor_slack_x, -1.0)],
+                    format!("{prefix}:anchor_x_lower"),
+                ),
+                anchor_y_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, 1.0), (vars.anchor_slack_y, -1.0)],
+                    format!("{prefix}:anchor_y_upper"),
+                ),
+                anchor_y_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, -1.0), (vars.anchor_slack_y, -1.0)],
+                    format!("{prefix}:anchor_y_lower"),
+                ),
+                movement_x_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, 1.0), (vars.movement_slack_x, -1.0)],
+                    format!("{prefix}:movement_x_upper"),
+                ),
+                movement_x_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, -1.0), (vars.movement_slack_x, -1.0)],
+                    format!("{prefix}:movement_x_lower"),
+                ),
+                movement_y_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, 1.0), (vars.movement_slack_y, -1.0)],
+                    format!("{prefix}:movement_y_upper"),
+                ),
+                movement_y_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, -1.0), (vars.movement_slack_y, -1.0)],
+                    format!("{prefix}:movement_y_lower"),
+                ),
+                reach_x_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, 1.0)],
+                    format!("{prefix}:reach_x_upper"),
+                ),
+                reach_x_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, -1.0)],
+                    format!("{prefix}:reach_x_lower"),
+                ),
+                reach_y_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, 1.0)],
+                    format!("{prefix}:reach_y_upper"),
+                ),
+                reach_y_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, -1.0)],
+                    format!("{prefix}:reach_y_lower"),
+                ),
+                pressure_x_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, 1.0), (vars.pressure_slack_x, -1.0)],
+                    format!("{prefix}:pressure_x_upper"),
+                ),
+                pressure_x_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_x, -1.0), (vars.pressure_slack_x, -1.0)],
+                    format!("{prefix}:pressure_x_lower"),
+                ),
+                pressure_y_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, 1.0), (vars.pressure_slack_y, -1.0)],
+                    format!("{prefix}:pressure_y_upper"),
+                ),
+                pressure_y_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, -1.0), (vars.pressure_slack_y, -1.0)],
+                    format!("{prefix}:pressure_y_lower"),
+                ),
+                speed_y_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, 1.0), (vars.speed_match_slack_y, -1.0)],
+                    format!("{prefix}:speed_y_upper"),
+                ),
+                speed_y_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[(vars.target_y, -1.0), (vars.speed_match_slack_y, -1.0)],
+                    format!("{prefix}:speed_y_lower"),
+                ),
+            });
+        }
+
+        for pair in &pair_vars {
+            let vars_a = player_vars[pair.a];
+            let vars_b = player_vars[pair.b];
+            let prefix = format!(
+                "{}:pair{}_{}",
+                team.label().to_ascii_lowercase(),
+                pair.a,
+                pair.b
+            );
+            pair_rows.push(SoccerFormationLpPairRows {
+                separation_x_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[
+                        (vars_a.target_x, 1.0),
+                        (vars_b.target_x, -1.0),
+                        (pair.separation_slack_x, -1.0),
+                    ],
+                    format!("{prefix}:separation_x_upper"),
+                ),
+                separation_x_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[
+                        (vars_a.target_x, -1.0),
+                        (vars_b.target_x, 1.0),
+                        (pair.separation_slack_x, -1.0),
+                    ],
+                    format!("{prefix}:separation_x_lower"),
+                ),
+                separation_y_upper: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[
+                        (vars_a.target_y, 1.0),
+                        (vars_b.target_y, -1.0),
+                        (pair.separation_slack_y, -1.0),
+                    ],
+                    format!("{prefix}:separation_y_upper"),
+                ),
+                separation_y_lower: add_ub_row(
+                    &mut a_ub,
+                    &mut b_ub,
+                    &mut con_names,
+                    n,
+                    &[
+                        (vars_a.target_y, -1.0),
+                        (vars_b.target_y, 1.0),
+                        (pair.separation_slack_y, -1.0),
+                    ],
+                    format!("{prefix}:separation_y_lower"),
+                ),
+            });
+        }
+
+        let mut a_eq = Vec::new();
+        let mut b_eq = Vec::new();
+        for var in state_vars.players_start..(state_vars.players_start + state_vars.count) {
+            let mut row = vec![0.0; n];
+            row[var] = 1.0;
+            a_eq.push(row);
+            b_eq.push(0.0);
+            con_names.push(format!("state:{}:fixed", var_names[var]));
+        }
+
+        let problem = LPProblem {
+            sense: Sense::Max,
+            c,
+            a_ub: Some(a_ub),
+            b_ub: Some(b_ub),
+            a_eq: Some(a_eq),
+            b_eq: Some(b_eq),
+            lb: Some(lb),
+            ub: Some(ub),
+            var_names: Some(var_names),
+            con_names: Some(con_names),
+        };
+        let variables = problem.c.len();
+        let constraints =
+            problem.a_ub.as_ref().map_or(0, Vec::len) + problem.a_eq.as_ref().map_or(0, Vec::len);
+        SoccerFormationLpBrain {
+            team,
+            problem,
+            player_vars,
+            player_rows,
+            pair_vars,
+            pair_rows,
+            state_vars,
+            basis_start: None,
+            last_guidance: Vec::new(),
+            last_snapshot: SoccerFormationLpTeamSnapshot {
+                team,
+                status: "not-solved".to_string(),
+                objective: 0.0,
+                variables,
+                constraints,
+                guided_players: 0,
+                iterations: None,
+                elapsed_ms: 0.0,
+                mean_pair_error_yards: 0.0,
+                mean_pressure_error_yards: 0.0,
+                objective_weights: SoccerFormationLpObjectiveWeights::default(),
+            },
+        }
+    }
+
+    fn solve_tick(&mut self, snapshot: &WorldSnapshot, directive: &TeamTacticalDirective) {
+        let objective_weights =
+            soccer_formation_lp_objective_weights(snapshot, self.team, directive);
+        let slots =
+            soccer_formation_lp_slot_inputs(snapshot, self.team, directive, &objective_weights);
+        self.update_problem_for_tick(snapshot, directive, &objective_weights, &slots);
+        let opts = InternalSimplexOptions {
+            max_iter: Some(SOCCER_FORMATION_LP_MAX_ITER),
+            tol: Some(1e-8),
+            basis_start: self.basis_start.clone(),
+        };
+        let solution = solve_lp_internal(&self.problem, &opts);
+        if solution.status == LPStatus::Optimal {
+            self.basis_start = LPBasisWarmStart::from_solution(&solution);
+        }
+        self.capture_solution(snapshot, objective_weights, &slots, &solution);
+    }
+
+    fn update_problem_for_tick(
+        &mut self,
+        snapshot: &WorldSnapshot,
+        _directive: &TeamTacticalDirective,
+        weights: &SoccerFormationLpObjectiveWeights,
+        slots: &[SoccerFormationLpSlotInput],
+    ) {
+        let width = snapshot.field_width.max(1.0);
+        let length = snapshot.field_length.max(1.0);
+        if let Some(ub) = self.problem.ub.as_mut() {
+            for vars in &self.player_vars {
+                ub[vars.target_x] = Some(width);
+                ub[vars.target_y] = Some(length);
+            }
+        }
+        for coef in &mut self.problem.c {
+            *coef = 0.0;
+        }
+        let b_ub = self
+            .problem
+            .b_ub
+            .as_mut()
+            .expect("formation LP has upper rows");
+        let b_eq = self
+            .problem
+            .b_eq
+            .as_mut()
+            .expect("formation LP has state equality rows");
+
+        for (slot, input) in slots.iter().enumerate() {
+            let vars = self.player_vars[slot];
+            let rows = self.player_rows[slot];
+            let current = input.current.clamp_to_pitch(width, length);
+            let anchor = input.anchor.clamp_to_pitch(width, length);
+            let pressure_target = input
+                .pressure_target
+                .unwrap_or(anchor)
+                .clamp_to_pitch(width, length);
+            let speed_match_y = (current.y + input.speed_match_velocity_yps * snapshot.dt_seconds)
+                .clamp(0.0, length);
+            let reach = soccer_formation_lp_reach_yards(input, snapshot.dt_seconds);
+
+            b_ub[rows.anchor_x_upper] = anchor.x;
+            b_ub[rows.anchor_x_lower] = -anchor.x;
+            b_ub[rows.anchor_y_upper] = anchor.y;
+            b_ub[rows.anchor_y_lower] = -anchor.y;
+            b_ub[rows.movement_x_upper] = current.x;
+            b_ub[rows.movement_x_lower] = -current.x;
+            b_ub[rows.movement_y_upper] = current.y;
+            b_ub[rows.movement_y_lower] = -current.y;
+            b_ub[rows.reach_x_upper] = current.x + reach;
+            b_ub[rows.reach_x_lower] = reach - current.x;
+            b_ub[rows.reach_y_upper] = current.y + reach;
+            b_ub[rows.reach_y_lower] = reach - current.y;
+            b_ub[rows.pressure_x_upper] = pressure_target.x;
+            b_ub[rows.pressure_x_lower] = -pressure_target.x;
+            b_ub[rows.pressure_y_upper] = pressure_target.y;
+            b_ub[rows.pressure_y_lower] = -pressure_target.y;
+            b_ub[rows.speed_y_upper] = speed_match_y;
+            b_ub[rows.speed_y_lower] = -speed_match_y;
+
+            if !input.active {
+                continue;
+            }
+            let role_attack = match input.role {
+                PlayerRole::Goalkeeper => 0.05,
+                PlayerRole::Defender => 0.30,
+                PlayerRole::Midfielder => 0.82,
+                PlayerRole::Forward => 1.0,
+            };
+            let role_rest_defense = match input.role {
+                PlayerRole::Goalkeeper => 0.76,
+                PlayerRole::Defender => 1.0,
+                PlayerRole::Midfielder => 0.62,
+                PlayerRole::Forward => 0.24,
+            };
+            let anchor_weight = 0.42
+                + weights.space_occupation * 0.30
+                + weights.passing_lane_quality * 0.18
+                + weights.defensive_compactness * role_rest_defense * 0.26
+                + weights.progression * role_attack * 0.12;
+            let movement_weight =
+                0.18 + weights.fatigue * (0.45 + input.fatigue.clamp(0.0, 1.0) * 0.75);
+            let pressure_weight = input.pressure_weight;
+            let speed_weight = input.speed_match_weight;
+            self.problem.c[vars.anchor_slack_x] -= anchor_weight;
+            self.problem.c[vars.anchor_slack_y] -= anchor_weight;
+            self.problem.c[vars.movement_slack_x] -= movement_weight;
+            self.problem.c[vars.movement_slack_y] -= movement_weight;
+            self.problem.c[vars.pressure_slack_x] -= pressure_weight;
+            self.problem.c[vars.pressure_slack_y] -= pressure_weight;
+            self.problem.c[vars.speed_match_slack_y] -= speed_weight;
+            self.problem.c[vars.target_y] += self.team.attack_dir()
+                * (weights.expected_goal * 0.010 + weights.progression * role_attack * 0.012
+                    - weights.transition_risk * role_rest_defense * 0.006);
+        }
+
+        for (idx, pair) in self.pair_vars.iter().enumerate() {
+            let rows = self.pair_rows[idx];
+            let a = slots[pair.a];
+            let b = slots[pair.b];
+            let desired_dx = a.anchor.x - b.anchor.x;
+            let desired_dy = a.anchor.y - b.anchor.y;
+            b_ub[rows.separation_x_upper] = desired_dx;
+            b_ub[rows.separation_x_lower] = -desired_dx;
+            b_ub[rows.separation_y_upper] = desired_dy;
+            b_ub[rows.separation_y_lower] = -desired_dy;
+            if a.active && b.active {
+                let pair_weight = ((a.pair_weight + b.pair_weight) * 0.5).clamp(0.0, 1.0);
+                self.problem.c[pair.separation_slack_x] -= pair_weight;
+                self.problem.c[pair.separation_slack_y] -= pair_weight;
+            }
+        }
+
+        let state_values = soccer_formation_lp_state_values(snapshot, self.team, weights);
+        for (idx, value) in state_values.into_iter().enumerate() {
+            b_eq[idx] = value.clamp(-2.0, 2.0);
+        }
+    }
+
+    fn capture_solution(
+        &mut self,
+        snapshot: &WorldSnapshot,
+        weights: SoccerFormationLpObjectiveWeights,
+        slots: &[SoccerFormationLpSlotInput],
+        solution: &crate::des::general::lp::LPSolution,
+    ) {
+        let variables = self.problem.c.len();
+        let constraints = self.problem.a_ub.as_ref().map_or(0, Vec::len)
+            + self.problem.a_eq.as_ref().map_or(0, Vec::len);
+        let status = solution.status.as_str().to_string();
+        let mut guidance = Vec::new();
+        let mut pair_error_sum_by_slot = vec![0.0; SOCCER_FORMATION_LP_PLAYER_CAPACITY];
+        let mut pair_count_by_slot = vec![0usize; SOCCER_FORMATION_LP_PLAYER_CAPACITY];
+        if solution.status == LPStatus::Optimal {
+            for pair in &self.pair_vars {
+                let pair_error = solution.x[pair.separation_slack_x].abs()
+                    + solution.x[pair.separation_slack_y].abs();
+                pair_error_sum_by_slot[pair.a] += pair_error;
+                pair_error_sum_by_slot[pair.b] += pair_error;
+                pair_count_by_slot[pair.a] += 1;
+                pair_count_by_slot[pair.b] += 1;
+            }
+            for (slot, input) in slots.iter().enumerate() {
+                if !input.active {
+                    continue;
+                }
+                let vars = self.player_vars[slot];
+                let target = Vec2::new(solution.x[vars.target_x], solution.x[vars.target_y])
+                    .clamp_to_pitch(snapshot.field_width, snapshot.field_length);
+                let recommended_move = target - input.current;
+                let target_velocity = if snapshot.dt_seconds > 1e-9 {
+                    recommended_move / snapshot.dt_seconds
+                } else {
+                    Vec2::zero()
+                };
+                let target_acceleration = if snapshot.dt_seconds > 1e-9 {
+                    (target_velocity - input.velocity) / snapshot.dt_seconds
+                } else {
+                    Vec2::zero()
+                };
+                let pair_error_yards = if pair_count_by_slot[slot] > 0 {
+                    pair_error_sum_by_slot[slot] / pair_count_by_slot[slot] as f64
+                } else {
+                    0.0
+                };
+                let pressure_error_yards = input
+                    .pressure_target
+                    .map(|pressure_target| target.distance(pressure_target))
+                    .unwrap_or(0.0);
+                let fore_aft_speed_error_yps =
+                    if input.speed_match_weight > 1e-9 && snapshot.dt_seconds > 1e-9 {
+                        ((target.y - input.current.y) / snapshot.dt_seconds
+                            - input.speed_match_velocity_yps)
+                            .abs()
+                    } else {
+                        0.0
+                    };
+                let reduced_costs = solution.reduced_costs.as_ref();
+                guidance.push(SoccerFormationLpPlayerGuidance {
+                    team: self.team,
+                    player_id: input.player_id,
+                    slot,
+                    current: input.current,
+                    target,
+                    formation_anchor: input.anchor,
+                    pressure_target: input.pressure_target,
+                    recommended_move,
+                    target_velocity,
+                    target_acceleration,
+                    recommended_move_yards: recommended_move.len(),
+                    recommended_speed_yps: target_velocity.len(),
+                    recommended_acceleration_yps2: target_acceleration.len(),
+                    formation_error_yards: target.distance(input.anchor),
+                    movement_error_yards: target.distance(input.current),
+                    pair_error_yards,
+                    pressure_error_yards,
+                    fore_aft_speed_error_yps,
+                    pressure_weight: input.pressure_weight,
+                    speed_match_weight: input.speed_match_weight,
+                    alignment_weight: input.alignment_weight,
+                    reduced_cost_target_x: reduced_costs
+                        .and_then(|costs| costs.get(vars.target_x))
+                        .copied()
+                        .unwrap_or(0.0),
+                    reduced_cost_target_y: reduced_costs
+                        .and_then(|costs| costs.get(vars.target_y))
+                        .copied()
+                        .unwrap_or(0.0),
+                    solver_status: status.clone(),
+                    solver_objective: solution.objective,
+                    solver_iterations: solution.iters,
+                    solver_elapsed_ms: solution.elapsed_ms,
+                    variable_count: variables,
+                    constraint_count: constraints,
+                });
+            }
+        }
+        let guided_players = guidance.len();
+        let mean_pair_error_yards = if guided_players > 0 {
+            guidance
+                .iter()
+                .map(|entry| entry.pair_error_yards)
+                .sum::<f64>()
+                / guided_players as f64
+        } else {
+            0.0
+        };
+        let pressure_guidance = guidance
+            .iter()
+            .filter(|entry| entry.pressure_weight > 1e-9)
+            .collect::<Vec<_>>();
+        let mean_pressure_error_yards = if pressure_guidance.is_empty() {
+            0.0
+        } else {
+            pressure_guidance
+                .iter()
+                .map(|entry| entry.pressure_error_yards)
+                .sum::<f64>()
+                / pressure_guidance.len() as f64
+        };
+        self.last_guidance = guidance;
+        self.last_snapshot = SoccerFormationLpTeamSnapshot {
+            team: self.team,
+            status,
+            objective: if solution.objective.is_finite() {
+                solution.objective
+            } else {
+                0.0
+            },
+            variables,
+            constraints,
+            guided_players,
+            iterations: solution.iters,
+            elapsed_ms: solution.elapsed_ms,
+            mean_pair_error_yards,
+            mean_pressure_error_yards,
+            objective_weights: weights,
+        };
+    }
+
+    fn disable_tick(&mut self) {
+        self.last_guidance.clear();
+        self.last_snapshot.status = "disabled".to_string();
+        self.last_snapshot.objective = 0.0;
+        self.last_snapshot.guided_players = 0;
+        self.last_snapshot.iterations = None;
+        self.last_snapshot.elapsed_ms = 0.0;
+        self.last_snapshot.mean_pair_error_yards = 0.0;
+        self.last_snapshot.mean_pressure_error_yards = 0.0;
+    }
+}
+
+fn apply_formation_lp_directive_signal(
+    directive: &mut TeamTacticalDirective,
+    snapshot: &SoccerFormationLpTeamSnapshot,
+    guidance: &[SoccerFormationLpPlayerGuidance],
+) {
+    if snapshot.status != "optimal" || guidance.is_empty() {
+        return;
+    }
+    let pressure_guidance = guidance
+        .iter()
+        .filter(|entry| entry.pressure_weight > 0.12)
+        .count();
+    directive.defensive_cover_actual = directive.defensive_cover_actual.max(pressure_guidance);
+    let mean_pressure_weight = guidance
+        .iter()
+        .map(|entry| entry.pressure_weight)
+        .sum::<f64>()
+        / guidance.len() as f64;
+    let mean_pair_error = guidance
+        .iter()
+        .map(|entry| entry.pair_error_yards)
+        .sum::<f64>()
+        / guidance.len() as f64;
+    directive.press_intensity =
+        (directive.press_intensity * 0.92 + mean_pressure_weight * 0.08).clamp(0.0, 1.0);
+    directive.risk_tolerance =
+        (directive.risk_tolerance - (mean_pair_error / 40.0).clamp(0.0, 0.08)).clamp(0.0, 1.0);
+}
+
+fn soccer_lp_scaled(value: f64, scale: f64) -> f64 {
+    if !value.is_finite() || scale.abs() <= 1e-9 {
+        0.0
+    } else {
+        (value / scale).clamp(-2.0, 2.0)
+    }
+}
+
+fn soccer_lp_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn soccer_formation_lp_ball_holder_elapsed_seconds(snapshot: &WorldSnapshot) -> f64 {
+    let Some(holder_id) = snapshot.ball.holder else {
+        return 0.0;
+    };
+    let mut oldest_same_holder = snapshot.clock_seconds;
+    for sample in snapshot.ball_history.iter().rev() {
+        if sample.holder == Some(holder_id) {
+            oldest_same_holder = sample.clock_seconds;
+        } else {
+            break;
+        }
+    }
+    (snapshot.clock_seconds - oldest_same_holder).max(0.0)
+}
+
+fn soccer_formation_lp_average_fatigue(snapshot: &WorldSnapshot, team: Team) -> f64 {
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for player in snapshot.players.iter().filter(|player| player.team == team) {
+        total += player.fatigue.clamp(0.0, 1.0);
+        count += 1;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
+}
+
+fn soccer_formation_lp_rest_defense_score(snapshot: &WorldSnapshot, team: Team) -> f64 {
+    let attack_dir = team.attack_dir();
+    let ball_y = snapshot.ball.position.y;
+    let count = snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team)
+        .filter(|player| !matches!(player.role, PlayerRole::Forward))
+        .filter(|player| {
+            let position = snapshot
+                .player_position(player.id)
+                .unwrap_or(player.position);
+            (ball_y - position.y) * attack_dir >= -2.0
+        })
+        .count();
+    (count as f64 / 5.0).clamp(0.0, 1.0)
+}
+
+fn soccer_formation_lp_objective_weights(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    directive: &TeamTacticalDirective,
+) -> SoccerFormationLpObjectiveWeights {
+    let possession = snapshot
+        .controlled_possession_team()
+        .or_else(|| snapshot.possession_team());
+    let has_ball = possession == Some(team);
+    let defending = possession == Some(team.other());
+    let width = snapshot.field_width.max(1.0);
+    let length = snapshot.field_length.max(1.0);
+    let ball = snapshot.ball.position.clamp_to_pitch(width, length);
+    let opponent_goal = Vec2::new(width * 0.5, team.goal_y(length));
+    let own_goal = Vec2::new(width * 0.5, team.other().goal_y(length));
+    let ball_to_opponent_goal = ball.distance(opponent_goal).min(length);
+    let ball_to_own_goal = ball.distance(own_goal).min(length);
+    let attacking_depth = (1.0 - ball_to_opponent_goal / length).clamp(0.0, 1.0);
+    let own_goal_danger = (1.0 - ball_to_own_goal / length).clamp(0.0, 1.0);
+    let shape = team_shape_observation_from_snapshot(snapshot, team, ball);
+    let opponent_shape = team_shape_observation_from_snapshot(snapshot, team.other(), ball);
+    let holder_pressure = snapshot
+        .ball
+        .holder
+        .and_then(|holder_id| {
+            let holder = snapshot
+                .players
+                .iter()
+                .find(|player| player.id == holder_id)?;
+            let holder_position = snapshot
+                .player_position(holder.id)
+                .unwrap_or(holder.position);
+            Some(pressure_from_nearest_distance(
+                snapshot.nearest_opponent_distance_at(holder.team, holder_position),
+            ))
+        })
+        .unwrap_or(0.0);
+    let team_possession_seconds = snapshot.possession_elapsed_seconds_for_team(team);
+    let settled = (team_possession_seconds / SETTLED_POSSESSION_SECONDS).clamp(0.0, 1.0);
+    let overload = directive.attacking_overload_score.clamp(0.0, 1.0);
+    let numbers = ((directive.attacking_numbers_advantage as f64 + 2.0) / 4.0).clamp(0.0, 1.0);
+    let field_width_usage = (directive.width_yards / width).clamp(0.0, 1.0);
+    let central_pressure =
+        pressure_from_nearest_distance(snapshot.nearest_opponent_distance_at(team, ball));
+    let rest_defense = soccer_formation_lp_rest_defense_score(snapshot, team);
+    let fatigue = soccer_formation_lp_average_fatigue(snapshot, team);
+
+    SoccerFormationLpObjectiveWeights {
+        expected_goal: if has_ball {
+            (attacking_depth * 0.72 + overload * 0.20 + numbers * 0.08).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        progression: if has_ball {
+            (attacking_depth * 0.55
+                + directive.pass_priority.clamp(0.0, 2.0) * 0.16
+                + directive.carry_priority.clamp(0.0, 2.0) * 0.12
+                + settled * 0.17)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        retention: if has_ball {
+            (1.0 - holder_pressure * 0.65 + settled * 0.20 + rest_defense * 0.15).clamp(0.0, 1.0)
+        } else {
+            0.12
+        },
+        expected_goals_against: if defending || possession.is_none() {
+            (own_goal_danger * 0.72 + central_pressure * 0.18 + (1.0 - rest_defense) * 0.10)
+                .clamp(0.0, 1.0)
+        } else {
+            ((1.0 - rest_defense) * 0.40 + own_goal_danger * 0.24).clamp(0.0, 1.0)
+        },
+        fatigue,
+        passing_lane_quality: if has_ball {
+            (field_width_usage * 0.38
+                + (shape.players_near_ball as f64 / 4.0).clamp(0.0, 1.0) * 0.26
+                + (1.0 - holder_pressure) * 0.22
+                + overload * 0.14)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        space_occupation: (field_width_usage * 0.42
+            + (shape.spread_yards / 24.0).clamp(0.0, 1.0) * 0.32
+            + settled * 0.26)
+            .clamp(0.0, 1.0),
+        numerical_superiority: numbers,
+        press_resistance: if has_ball {
+            (1.0 - holder_pressure).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        defensive_compactness: if defending || possession.is_none() {
+            ((1.0 - (shape.spread_yards / 28.0).clamp(0.0, 1.0)) * 0.58
+                + directive.press_intensity.clamp(0.0, 1.0) * 0.22
+                + (opponent_shape.players_near_ball as f64 / 4.0).clamp(0.0, 1.0) * 0.20)
+                .clamp(0.0, 1.0)
+        } else {
+            rest_defense * 0.55
+        },
+        opponent_progression: if defending {
+            (own_goal_danger * 0.65 + attacking_depth * 0.12 + holder_pressure * 0.23)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        transition_risk: if has_ball {
+            ((1.0 - rest_defense) * 0.55 + holder_pressure * 0.30 + attacking_depth * 0.15)
+                .clamp(0.0, 1.0)
+        } else {
+            own_goal_danger
+        },
+    }
+}
+
+fn soccer_formation_lp_anchor(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    directive: &TeamTacticalDirective,
+    player: &PlayerSnapshot,
+    weights: &SoccerFormationLpObjectiveWeights,
+) -> Vec2 {
+    let width = snapshot.field_width.max(1.0);
+    let length = snapshot.field_length.max(1.0);
+    let attack_dir = team.attack_dir();
+    let own_goal_y = team.other().goal_y(length);
+    let home_lane = ((player.home_position.x - width * 0.5) / (width * 0.5)).clamp(-1.0, 1.0);
+    let mut x = width * 0.5 + home_lane * directive.width_yards.clamp(14.0, width) * 0.5;
+    let ball = snapshot.ball.position;
+    let possession = snapshot
+        .controlled_possession_team()
+        .or_else(|| snapshot.possession_team());
+    let y = match possession {
+        Some(possessing) if possessing == team => match player.role {
+            PlayerRole::Goalkeeper => own_goal_y + attack_dir * 7.0,
+            PlayerRole::Defender => directive.defensive_line_y - attack_dir * 2.0,
+            PlayerRole::Midfielder => ball.y - attack_dir * directive.support_depth_yards * 0.42,
+            PlayerRole::Forward => ball.y + attack_dir * directive.support_depth_yards * 0.72,
+        },
+        Some(possessing) if possessing == team.other() => match player.role {
+            PlayerRole::Goalkeeper => own_goal_y + attack_dir * 6.0,
+            PlayerRole::Defender => directive.defensive_line_y,
+            PlayerRole::Midfielder => {
+                let drop = 4.0 + (1.0 - directive.press_intensity).clamp(0.0, 1.0) * 8.0;
+                ball.y - attack_dir * drop
+            }
+            PlayerRole::Forward => {
+                let drop = 1.5 + (1.0 - directive.press_intensity).clamp(0.0, 1.0) * 5.0;
+                ball.y - attack_dir * drop
+            }
+        },
+        _ => player.home_position.y * 0.55 + ball.y * 0.45,
+    };
+
+    if player.role != PlayerRole::Goalkeeper {
+        let ball_lane_pull = ((ball.x - width * 0.5) / (width * 0.5)).clamp(-1.0, 1.0);
+        let pull = if possession == Some(team) {
+            0.18 + weights.progression * 0.10
+        } else {
+            0.12 + weights.defensive_compactness * 0.16
+        };
+        x = x * (1.0 - pull) + (width * 0.5 + ball_lane_pull * width * 0.28) * pull;
+    }
+
+    Vec2::new(x, y).clamp_to_pitch(width, length)
+}
+
+fn soccer_formation_lp_slot_inputs(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    directive: &TeamTacticalDirective,
+    weights: &SoccerFormationLpObjectiveWeights,
+) -> Vec<SoccerFormationLpSlotInput> {
+    let mut players = snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team)
+        .collect::<Vec<_>>();
+    players.sort_by_key(|player| {
+        let role_rank = match player.role {
+            PlayerRole::Goalkeeper => 0usize,
+            PlayerRole::Defender => 1,
+            PlayerRole::Midfielder => 2,
+            PlayerRole::Forward => 3,
+        };
+        (role_rank, player.id)
+    });
+
+    let opponent_holder = snapshot.ball.holder.and_then(|holder_id| {
+        let holder = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == holder_id)?;
+        (holder.team == team.other()).then(|| {
+            let holder_position = snapshot
+                .player_position(holder.id)
+                .unwrap_or(holder.position);
+            (holder.id, holder_position, holder.velocity)
+        })
+    });
+    let mut pressure_ranks = HashMap::new();
+    if let Some((_holder_id, holder_position, _holder_velocity)) = opponent_holder {
+        let mut ranked = players
+            .iter()
+            .filter(|player| player.role != PlayerRole::Goalkeeper)
+            .map(|player| {
+                let position = snapshot
+                    .player_position(player.id)
+                    .unwrap_or(player.position);
+                (player.id, position.distance(holder_position))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (rank, (player_id, _)) in ranked.into_iter().enumerate() {
+            pressure_ranks.insert(player_id, rank);
+        }
+    }
+
+    let mut slots = Vec::with_capacity(SOCCER_FORMATION_LP_PLAYER_CAPACITY);
+    for slot in 0..SOCCER_FORMATION_LP_PLAYER_CAPACITY {
+        if let Some(player) = players.get(slot).copied() {
+            let current = snapshot
+                .player_position(player.id)
+                .unwrap_or(player.position)
+                .clamp_to_pitch(snapshot.field_width, snapshot.field_length);
+            let anchor = soccer_formation_lp_anchor(snapshot, team, directive, player, weights);
+            let mut pressure_target = None;
+            let mut pressure_weight = 0.0;
+            let mut speed_match_weight = 0.0;
+            let mut speed_match_velocity_yps = player.velocity.y;
+            if let Some((_holder_id, holder_position, holder_velocity)) = opponent_holder {
+                if let Some(rank) = pressure_ranks.get(&player.id).copied() {
+                    let target_count = directive.defensive_cover_target.clamp(1, 4);
+                    let near_rank = rank < target_count;
+                    let role_factor = match player.role {
+                        PlayerRole::Goalkeeper => 0.0,
+                        PlayerRole::Defender => 1.0,
+                        PlayerRole::Midfielder => 0.90,
+                        PlayerRole::Forward => 0.46,
+                    };
+                    let rank_factor = if near_rank {
+                        1.0 - rank as f64 / (target_count as f64 + 1.0)
+                    } else {
+                        0.12 / (rank as f64 + 1.0)
+                    };
+                    let pressure_need = (0.36
+                        + weights.expected_goals_against * 0.34
+                        + weights.opponent_progression * 0.22
+                        + directive.press_intensity.clamp(0.0, 1.0) * 0.24)
+                        .clamp(0.0, 1.2);
+                    pressure_weight = (rank_factor * role_factor * pressure_need).clamp(0.0, 1.4);
+                    speed_match_weight =
+                        (pressure_weight * (0.42 + weights.transition_risk * 0.28)).clamp(0.0, 1.0);
+                    speed_match_velocity_yps = holder_velocity.y;
+                    let holder_to_defender = (current - holder_position).normalized();
+                    let approach = if holder_to_defender.len() > 1e-9 {
+                        holder_to_defender
+                    } else {
+                        Vec2::new(0.0, -team.attack_dir())
+                    };
+                    pressure_target = Some(
+                        (holder_position
+                            + approach * SOCCER_FORMATION_LP_PRESS_DISTANCE_YARDS
+                            + holder_velocity * (snapshot.dt_seconds * 0.45))
+                            .clamp_to_pitch(snapshot.field_width, snapshot.field_length),
+                    );
+                }
+            }
+            let pair_weight = (0.08
+                + weights.space_occupation * 0.12
+                + weights.defensive_compactness * 0.16
+                + weights.transition_risk * 0.08)
+                .clamp(0.04, 0.42);
+            slots.push(SoccerFormationLpSlotInput {
+                active: true,
+                player_id: player.id,
+                role: player.role,
+                current,
+                velocity: player.velocity,
+                acceleration: player.acceleration,
+                home_position: player.home_position,
+                top_speed: player_top_speed_yps(player.role, &player.skills),
+                max_acceleration: acceleration_yps2_from_score(player.skills.acceleration)
+                    * strength_to_weight_acceleration_multiplier(&player.skills),
+                fatigue: player.fatigue.clamp(0.0, 1.0),
+                anchor,
+                pressure_target,
+                speed_match_velocity_yps,
+                pressure_weight,
+                speed_match_weight,
+                pair_weight,
+                alignment_weight: (0.46 + pressure_weight * 0.42 + pair_weight * 0.38)
+                    .clamp(0.2, 1.6),
+            });
+        } else {
+            let anchor = Vec2::new(snapshot.field_width * 0.5, snapshot.field_length * 0.5);
+            slots.push(SoccerFormationLpSlotInput {
+                active: false,
+                player_id: usize::MAX - slot,
+                role: PlayerRole::Midfielder,
+                current: anchor,
+                velocity: Vec2::zero(),
+                acceleration: Vec2::zero(),
+                home_position: anchor,
+                top_speed: 0.0,
+                max_acceleration: 0.0,
+                fatigue: 0.0,
+                anchor,
+                pressure_target: None,
+                speed_match_velocity_yps: 0.0,
+                pressure_weight: 0.0,
+                speed_match_weight: 0.0,
+                pair_weight: 0.0,
+                alignment_weight: 0.0,
+            });
+        }
+    }
+    slots
+}
+
+fn soccer_formation_lp_reach_yards(input: &SoccerFormationLpSlotInput, dt_seconds: f64) -> f64 {
+    let dt = dt_seconds.max(0.0);
+    let fatigue_factor = (1.0 - input.fatigue.clamp(0.0, 1.0) * 0.38).clamp(0.35, 1.0);
+    let speed_reach = input.top_speed.max(input.velocity.len()) * fatigue_factor * dt;
+    let acceleration_reach = 0.5 * input.max_acceleration.max(input.acceleration.len()) * dt * dt;
+    (speed_reach + acceleration_reach + 0.12).clamp(0.0, 4.5)
+}
+
+fn soccer_formation_lp_state_values(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    weights: &SoccerFormationLpObjectiveWeights,
+) -> Vec<f64> {
+    let mut values = vec![
+        0.0;
+        SOCCER_FORMATION_LP_WORLD_PLAYER_CAPACITY * 6
+            + 6
+            + SOCCER_FORMATION_LP_CONTEXT_FEATURES
+    ];
+    let width = snapshot.field_width.max(1.0);
+    let length = snapshot.field_length.max(1.0);
+    let mut players = snapshot.players.iter().collect::<Vec<_>>();
+    players.sort_by_key(|player| player.id);
+    for (slot, player) in players
+        .into_iter()
+        .take(SOCCER_FORMATION_LP_WORLD_PLAYER_CAPACITY)
+        .enumerate()
+    {
+        let base = slot * 6;
+        let position = snapshot
+            .player_position(player.id)
+            .unwrap_or(player.position);
+        values[base] = (position.x / width * 2.0 - 1.0).clamp(-2.0, 2.0);
+        values[base + 1] = (position.y / length * 2.0 - 1.0).clamp(-2.0, 2.0);
+        values[base + 2] = soccer_lp_scaled(player.velocity.x, 12.0);
+        values[base + 3] = soccer_lp_scaled(player.velocity.y, 12.0);
+        values[base + 4] = soccer_lp_scaled(player.acceleration.x, 18.0);
+        values[base + 5] = soccer_lp_scaled(player.acceleration.y, 18.0);
+    }
+    let ball_base = SOCCER_FORMATION_LP_WORLD_PLAYER_CAPACITY * 6;
+    values[ball_base] = (snapshot.ball.position.x / width * 2.0 - 1.0).clamp(-2.0, 2.0);
+    values[ball_base + 1] = (snapshot.ball.position.y / length * 2.0 - 1.0).clamp(-2.0, 2.0);
+    values[ball_base + 2] = soccer_lp_scaled(snapshot.ball.velocity.x, 24.0);
+    values[ball_base + 3] = soccer_lp_scaled(snapshot.ball.velocity.y, 24.0);
+    values[ball_base + 4] = soccer_lp_scaled(snapshot.ball.acceleration.x, 36.0);
+    values[ball_base + 5] = soccer_lp_scaled(snapshot.ball.acceleration.y, 36.0);
+
+    let context_base = ball_base + 6;
+    let possession = snapshot
+        .controlled_possession_team()
+        .or_else(|| snapshot.possession_team());
+    let shape = team_shape_observation_from_snapshot(snapshot, team, snapshot.ball.position);
+    let opp_shape =
+        team_shape_observation_from_snapshot(snapshot, team.other(), snapshot.ball.position);
+    let directive = snapshot.tactical_directive(team);
+    let holder_pressure = snapshot
+        .ball
+        .holder
+        .and_then(|holder_id| {
+            let holder = snapshot
+                .players
+                .iter()
+                .find(|player| player.id == holder_id)?;
+            let position = snapshot
+                .player_position(holder.id)
+                .unwrap_or(holder.position);
+            Some(pressure_from_nearest_distance(
+                snapshot.nearest_opponent_distance_at(holder.team, position),
+            ))
+        })
+        .unwrap_or(0.0);
+    let mut context = [0.0; SOCCER_FORMATION_LP_CONTEXT_FEATURES];
+    context[0] = team.attack_dir();
+    context[1] = soccer_lp_unit((possession == Some(team)) as u8 as f64);
+    context[2] = soccer_lp_unit((possession == Some(team.other())) as u8 as f64);
+    context[3] = soccer_lp_scaled(snapshot.clock_seconds, DEFAULT_DURATION_SECONDS);
+    context[4] = soccer_lp_scaled(snapshot.score_home as f64 - snapshot.score_away as f64, 5.0);
+    context[5] = soccer_lp_scaled(snapshot.ball.position.x - width * 0.5, width * 0.5);
+    context[6] = soccer_lp_scaled(
+        (snapshot.ball.position.y - length * 0.5) * team.attack_dir(),
+        length * 0.5,
+    );
+    context[7] = weights.expected_goal;
+    context[8] = weights.progression;
+    context[9] = weights.retention;
+    context[10] = weights.expected_goals_against;
+    context[11] = weights.fatigue;
+    context[12] = weights.passing_lane_quality;
+    context[13] = weights.space_occupation;
+    context[14] = weights.numerical_superiority;
+    context[15] = weights.press_resistance;
+    context[16] = weights.defensive_compactness;
+    context[17] = weights.opponent_progression;
+    context[18] = weights.transition_risk;
+    context[19] = soccer_lp_scaled(snapshot.possession_elapsed_seconds_for_team(team), 30.0);
+    context[20] = soccer_lp_scaled(
+        soccer_formation_lp_ball_holder_elapsed_seconds(snapshot),
+        10.0,
+    );
+    context[21] = soccer_lp_scaled(
+        snapshot
+            .ball
+            .position
+            .distance(Vec2::new(width * 0.5, team.goal_y(length))),
+        length,
+    );
+    context[22] = soccer_lp_scaled(
+        snapshot
+            .ball
+            .position
+            .distance(Vec2::new(width * 0.5, team.other().goal_y(length))),
+        length,
+    );
+    context[23] = soccer_lp_scaled(shape.centroid_to_ball_yards, 40.0);
+    context[24] = soccer_lp_scaled(shape.spread_yards, 35.0);
+    context[25] = soccer_lp_scaled(shape.players_near_ball as f64, 6.0);
+    context[26] = soccer_lp_scaled(shape.forward_velocity_yps, 8.0);
+    context[27] = soccer_lp_scaled(opp_shape.centroid_to_ball_yards, 40.0);
+    context[28] = soccer_lp_scaled(opp_shape.spread_yards, 35.0);
+    context[29] = soccer_lp_scaled(opp_shape.players_near_ball as f64, 6.0);
+    context[30] = soccer_lp_unit(directive.press_intensity);
+    context[31] = soccer_lp_unit(directive.risk_tolerance);
+    context[32] = soccer_lp_scaled(directive.defensive_cover_target as f64, 5.0);
+    context[33] = soccer_lp_scaled(directive.defensive_cover_actual as f64, 5.0);
+    context[34] = soccer_lp_scaled(directive.width_yards, width);
+    context[35] = soccer_lp_scaled(directive.support_depth_yards, 24.0);
+    context[36] = soccer_lp_unit(holder_pressure);
+    context[37] = soccer_lp_unit(soccer_formation_lp_rest_defense_score(snapshot, team));
+    context[38] = soccer_lp_unit(soccer_formation_lp_average_fatigue(snapshot, team));
+    context[39] = soccer_lp_scaled(directive.attacking_numbers_advantage as f64, 4.0);
+    context[40] = soccer_lp_unit(directive.attacking_overload_score);
+    for (offset, value) in context.into_iter().enumerate() {
+        values[context_base + offset] = value.clamp(-2.0, 2.0);
+    }
+    values
+}
+
+fn default_home_formation_lp_brain() -> SoccerFormationLpBrain {
+    SoccerFormationLpBrain::new(Team::Home)
+}
+
+fn default_away_formation_lp_brain() -> SoccerFormationLpBrain {
+    SoccerFormationLpBrain::new(Team::Away)
+}
+
+impl Default for SoccerFormationLpBrain {
+    fn default() -> Self {
+        default_home_formation_lp_brain()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct DefensiveCoverProfile {
     target: usize,
     actual: usize,
@@ -10730,6 +12438,10 @@ pub struct CentralBrain {
     pub pressure_line_away: f64,
     pub home_directive: TeamTacticalDirective,
     pub away_directive: TeamTacticalDirective,
+    #[serde(skip, default = "default_home_formation_lp_brain")]
+    home_formation_lp: SoccerFormationLpBrain,
+    #[serde(skip, default = "default_away_formation_lp_brain")]
+    away_formation_lp: SoccerFormationLpBrain,
 }
 
 impl Default for CentralBrain {
@@ -10749,6 +12461,8 @@ impl Default for CentralBrain {
                 DEFAULT_FIELD_WIDTH_YARDS,
                 DEFAULT_FIELD_LENGTH_YARDS,
             ),
+            home_formation_lp: default_home_formation_lp_brain(),
+            away_formation_lp: default_away_formation_lp_brain(),
         }
     }
 }
@@ -10817,6 +12531,25 @@ impl CentralBrain {
                 snapshot.field_length,
             );
         }
+        if snapshot.formation_lp_enabled {
+            let home_directive = self.home_directive.clone();
+            self.home_formation_lp.solve_tick(snapshot, &home_directive);
+            apply_formation_lp_directive_signal(
+                &mut self.home_directive,
+                &self.home_formation_lp.last_snapshot,
+                &self.home_formation_lp.last_guidance,
+            );
+            let away_directive = self.away_directive.clone();
+            self.away_formation_lp.solve_tick(snapshot, &away_directive);
+            apply_formation_lp_directive_signal(
+                &mut self.away_directive,
+                &self.away_formation_lp.last_snapshot,
+                &self.away_formation_lp.last_guidance,
+            );
+        } else {
+            self.home_formation_lp.disable_tick();
+            self.away_formation_lp.disable_tick();
+        }
         self.pressure_line_home = self.home_directive.defensive_line_y;
         self.pressure_line_away = self.away_directive.defensive_line_y;
     }
@@ -10826,6 +12559,22 @@ impl CentralBrain {
             Team::Home => &self.home_directive,
             Team::Away => &self.away_directive,
         }
+    }
+
+    fn formation_lp_guidance(&self) -> Vec<SoccerFormationLpPlayerGuidance> {
+        self.home_formation_lp
+            .last_guidance
+            .iter()
+            .chain(self.away_formation_lp.last_guidance.iter())
+            .cloned()
+            .collect()
+    }
+
+    fn formation_lp_team_snapshots(&self) -> Vec<SoccerFormationLpTeamSnapshot> {
+        vec![
+            self.home_formation_lp.last_snapshot.clone(),
+            self.away_formation_lp.last_snapshot.clone(),
+        ]
     }
 
     pub fn to_snapshot(
@@ -10957,6 +12706,18 @@ pub struct WorldSnapshot {
     pub phase: TacticalPhase,
     pub home_directive: TeamTacticalDirective,
     pub away_directive: TeamTacticalDirective,
+    #[serde(default = "default_formation_lp_enabled")]
+    pub formation_lp_enabled: bool,
+    #[serde(default)]
+    pub home_team_possession_seconds: f64,
+    #[serde(default)]
+    pub away_team_possession_seconds: f64,
+    #[serde(default)]
+    pub ball_holder_possession_seconds: f64,
+    #[serde(default)]
+    pub formation_lp_guidance: Vec<SoccerFormationLpPlayerGuidance>,
+    #[serde(default)]
+    pub formation_lp_teams: Vec<SoccerFormationLpTeamSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10969,6 +12730,14 @@ enum TeamSpacingMode {
 struct SupportMovementTarget {
     point: Vec2,
     action_label: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FormationLpGuidance {
+    target: Vec2,
+    alignment_weight: f64,
+    pressure_weight: f64,
+    pair_error_yards: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -11211,6 +12980,15 @@ impl WorldSnapshot {
         Self::from_match_with_options(m, WorldSnapshotOptions::OFFICIAL_DECISION)
     }
 
+    fn formation_lp_guidance_for(
+        &self,
+        player_id: usize,
+    ) -> Option<&SoccerFormationLpPlayerGuidance> {
+        self.formation_lp_guidance
+            .iter()
+            .find(|guidance| guidance.player_id == player_id)
+    }
+
     fn from_match_with_options(m: &SoccerMatch, options: WorldSnapshotOptions) -> Self {
         let shared_positions = if options.include_shared_histories {
             m.shared_positions.snapshot_with_current_players(
@@ -11278,6 +13056,35 @@ impl WorldSnapshot {
         let pending_pass = m.pending_pass.as_ref().map(|pass| {
             pending_pass_snapshot_from(pass, m.ball.position, m.ball.velocity, &players)
         });
+        let possession_elapsed = m
+            .possession_progress_tracker
+            .as_ref()
+            .map(|tracker| tracker.elapsed_seconds(m.clock_seconds))
+            .unwrap_or(0.0);
+        let (home_team_possession_seconds, away_team_possession_seconds) = match m
+            .possession_progress_tracker
+            .as_ref()
+            .map(|tracker| tracker.team)
+        {
+            Some(Team::Home) => (possession_elapsed, 0.0),
+            Some(Team::Away) => (0.0, possession_elapsed),
+            None => (0.0, 0.0),
+        };
+        let ball_holder_possession_seconds = m
+            .ball
+            .holder
+            .map(|holder| {
+                let mut start_clock = m.clock_seconds;
+                for sample in m.ball.position_history.iter().rev() {
+                    if sample.holder == Some(holder) {
+                        start_clock = sample.clock_seconds;
+                    } else {
+                        break;
+                    }
+                }
+                (m.clock_seconds - start_clock).max(0.0)
+            })
+            .unwrap_or(0.0);
         WorldSnapshot {
             tick: m.tick,
             clock_seconds: m.clock_seconds,
@@ -11301,6 +13108,20 @@ impl WorldSnapshot {
             phase: m.central_brain.phase,
             home_directive: m.central_brain.home_directive.clone(),
             away_directive: m.central_brain.away_directive.clone(),
+            formation_lp_enabled: m.config.formation_lp_enabled,
+            home_team_possession_seconds,
+            away_team_possession_seconds,
+            ball_holder_possession_seconds,
+            formation_lp_guidance: if m.config.formation_lp_enabled {
+                m.central_brain.formation_lp_guidance()
+            } else {
+                Vec::new()
+            },
+            formation_lp_teams: if m.config.formation_lp_enabled {
+                m.central_brain.formation_lp_team_snapshots()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -11838,6 +13659,11 @@ impl WorldSnapshot {
                 team_spread_yards: 0.0,
                 team_players_near_ball: 0,
                 team_forward_velocity_yps: 0.0,
+                formation_lp_guidance_present: false,
+                formation_lp_recommended_move_yards: 0.0,
+                formation_lp_pair_error_yards: 0.0,
+                formation_lp_pressure_weight: 0.0,
+                formation_lp_speed_match_weight: 0.0,
                 attacking_overload_attackers: 0,
                 attacking_overload_defenders: 0,
                 attacking_numbers_advantage: 0,
@@ -12329,6 +14155,7 @@ impl WorldSnapshot {
             .max(offensive_urgency)
             .max(defensive_urgency)
             .clamp(0.0, 1.0);
+        let formation_lp_guidance = self.formation_lp_guidance_for(player_id);
         let urgency_elapsed = phase_started.elapsed();
         let observation = SoccerPomdpObservation {
             player_id,
@@ -12386,6 +14213,19 @@ impl WorldSnapshot {
             team_spread_yards: team_shape.spread_yards,
             team_players_near_ball: team_shape.players_near_ball,
             team_forward_velocity_yps: team_shape.forward_velocity_yps,
+            formation_lp_guidance_present: formation_lp_guidance.is_some(),
+            formation_lp_recommended_move_yards: formation_lp_guidance
+                .map(|guidance| guidance.recommended_move_yards)
+                .unwrap_or(0.0),
+            formation_lp_pair_error_yards: formation_lp_guidance
+                .map(|guidance| guidance.pair_error_yards)
+                .unwrap_or(0.0),
+            formation_lp_pressure_weight: formation_lp_guidance
+                .map(|guidance| guidance.pressure_weight)
+                .unwrap_or(0.0),
+            formation_lp_speed_match_weight: formation_lp_guidance
+                .map(|guidance| guidance.speed_match_weight)
+                .unwrap_or(0.0),
             attacking_overload_attackers: team_directive.attacking_overload_attackers,
             attacking_overload_defenders: team_directive.attacking_overload_defenders,
             attacking_numbers_advantage: team_directive.attacking_numbers_advantage,
@@ -17229,8 +19069,11 @@ fn tactical_shape_trace(
     spacing_delta: (f64, f64, f64),
     weights: &SoccerTacticalLearningWeights,
 ) -> SoccerTacticalLearningTrace {
+    let lp_trace = formation_lp_learning_trace_for_snapshots(
+        player_id, before, before_pos, after_pos, weights,
+    );
     if matches!(role, PlayerRole::Goalkeeper) {
-        return SoccerTacticalLearningTrace::default();
+        return lp_trace;
     }
     let field_width = before.field_width.max(1.0);
     let before_possession = before.controlled_possession_team();
@@ -17259,6 +19102,7 @@ fn tactical_shape_trace(
                 * weights.attack_spacing_score_weight
                 * spacing_weight;
         }
+        reward += lp_trace.tactical_reward;
         return SoccerTacticalLearningTrace {
             attack_shape: true,
             defense_shape: false,
@@ -17282,6 +19126,7 @@ fn tactical_shape_trace(
             defense_role_press_score: 0.0,
             defense_role_press_delta: 0.0,
             tactical_reward: reward,
+            ..lp_trace
         };
     }
 
@@ -17321,6 +19166,7 @@ fn tactical_shape_trace(
             reward += spacing_delta.2.clamp(-1.0, 1.0) * weights.defense_spacing_delta_weight;
             reward += spacing_delta.1.clamp(-1.0, 1.0) * weights.defense_spacing_score_weight;
         }
+        reward += lp_trace.tactical_reward;
         return SoccerTacticalLearningTrace {
             attack_shape: false,
             defense_shape: true,
@@ -17344,10 +19190,59 @@ fn tactical_shape_trace(
             defense_role_press_score: after_role_press.score,
             defense_role_press_delta: after_role_press.score - before_role_press.score,
             tactical_reward: reward,
+            ..lp_trace
         };
     }
 
-    SoccerTacticalLearningTrace::default()
+    lp_trace
+}
+
+fn formation_lp_learning_trace_for_snapshots(
+    player_id: usize,
+    before: &WorldSnapshot,
+    before_pos: Vec2,
+    after_pos: Vec2,
+    weights: &SoccerTacticalLearningWeights,
+) -> SoccerTacticalLearningTrace {
+    let Some(guidance) = before.formation_lp_guidance_for(player_id) else {
+        return SoccerTacticalLearningTrace::default();
+    };
+    let recommended = guidance.target - before_pos;
+    let actual = after_pos - before_pos;
+    let recommended_move_yards = recommended.len();
+    let actual_move_yards = actual.len();
+    let disagreement_yards = after_pos.distance(guidance.target);
+    let alignment_score = if recommended_move_yards <= 1e-6 {
+        if actual_move_yards <= 0.20 {
+            1.0
+        } else {
+            0.0
+        }
+    } else if actual_move_yards <= 1e-6 {
+        -0.25
+    } else {
+        actual
+            .normalized()
+            .dot(recommended.normalized())
+            .clamp(-1.0, 1.0)
+            * (actual_move_yards / recommended_move_yards).clamp(0.0, 1.0)
+    };
+    let alignment_reward = ((alignment_score + 1.0) * 0.5).clamp(0.0, 1.0);
+    let disagreement_penalty = (disagreement_yards / 4.0).clamp(0.0, 1.0);
+    let tactical_reward = (alignment_reward - 0.65 * disagreement_penalty)
+        * weights.formation_lp_alignment_weight
+        * guidance.alignment_weight.clamp(0.20, 1.60);
+    SoccerTacticalLearningTrace {
+        formation_lp_guidance: true,
+        formation_lp_recommended_move_yards: recommended_move_yards,
+        formation_lp_actual_move_yards: actual_move_yards,
+        formation_lp_disagreement_yards: disagreement_yards,
+        formation_lp_alignment_score: alignment_score,
+        formation_lp_pressure_weight: guidance.pressure_weight,
+        formation_lp_pair_error_yards: guidance.pair_error_yards,
+        tactical_reward,
+        ..Default::default()
+    }
 }
 
 fn team_field_player_lateral_width_for_candidate(
@@ -23988,6 +25883,30 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.team_spread_bin, 5.0),
         soccer_neural_bin(state.team_players_near_ball_bin, 5.0),
         soccer_neural_bin(state.team_forward_velocity_bin, 5.0),
+        soccer_neural_bin(state.yards_to_own_goal_bin, 5.0),
+        1.0 - soccer_neural_bin(state.opposing_goalkeeper_distance_bin, 5.0),
+        soccer_neural_bin(state.forward_dribble_space_bin, 5.0),
+        soccer_neural_bin(state.attacking_numbers_advantage_bin, 5.0),
+        soccer_neural_bin(state.aerial_pass_interception_risk_bin, 5.0),
+        soccer_neural_bool(transition.tactical_trace.formation_lp_guidance),
+        soccer_neural_scaled(
+            transition
+                .tactical_trace
+                .formation_lp_recommended_move_yards,
+            6.0,
+        ),
+        soccer_neural_scaled(
+            transition.tactical_trace.formation_lp_actual_move_yards,
+            6.0,
+        ),
+        soccer_neural_scaled(
+            transition.tactical_trace.formation_lp_disagreement_yards,
+            8.0,
+        ),
+        transition
+            .tactical_trace
+            .formation_lp_alignment_score
+            .clamp(-1.0, 1.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -24222,12 +26141,13 @@ impl SoccerMatch {
             possession_chain,
             completed_pass_chain: VecDeque::new(),
             possession_progress_tracker: kickoff.map(|_| {
-                PossessionProgressTracker::new(
+                PossessionProgressTracker::new_at(
                     Team::Home,
                     Vec2::new(
                         config.field_width_yards * 0.5,
                         config.field_length_yards * 0.5,
                     ),
+                    0.0,
                 )
             }),
             recent_learning_history: VecDeque::new(),
@@ -26108,8 +28028,11 @@ impl SoccerMatch {
         {
             self.finish_possession_progress_chain(false);
             self.possession_chain.clear();
-            self.possession_progress_tracker =
-                Some(PossessionProgressTracker::new(team, self.ball.position));
+            self.possession_progress_tracker = Some(PossessionProgressTracker::new_at(
+                team,
+                self.ball.position,
+                self.clock_seconds,
+            ));
         }
         if self
             .completed_pass_chain
@@ -26190,7 +28113,11 @@ impl SoccerMatch {
             .as_ref()
             .map_or(true, |tracker| tracker.team != team)
         {
-            self.possession_progress_tracker = Some(PossessionProgressTracker::new(team, origin));
+            self.possession_progress_tracker = Some(PossessionProgressTracker::new_at(
+                team,
+                origin,
+                self.clock_seconds,
+            ));
         }
         if let Some(tracker) = self.possession_progress_tracker.as_mut() {
             tracker.completed_passes = tracker.completed_passes.saturating_add(1);
@@ -26212,8 +28139,11 @@ impl SoccerMatch {
             .as_ref()
             .map_or(true, |tracker| tracker.team != team)
         {
-            self.possession_progress_tracker =
-                Some(PossessionProgressTracker::new(team, before.ball.position));
+            self.possession_progress_tracker = Some(PossessionProgressTracker::new_at(
+                team,
+                before.ball.position,
+                before.clock_seconds,
+            ));
         }
         let mut earned = 0usize;
         if let Some(tracker) = self.possession_progress_tracker.as_mut() {
@@ -27226,6 +29156,26 @@ impl SoccerMatch {
         let attacker_name = self.players[attacker_id].name.clone();
         let defender_name = self.players[defender_id].name.clone();
         let attacker_position = self.players[attacker_id].position;
+        let defender_position = self.players[defender_id].position;
+        let attacker_before = self.players[attacker_id]
+            .position_history
+            .back()
+            .copied()
+            .unwrap_or(attacker_position);
+        let defender_before = self.players[defender_id]
+            .position_history
+            .back()
+            .copied()
+            .unwrap_or(defender_position);
+        if !dribble_beat_geometry_is_valid(
+            attacker_team,
+            attacker_before,
+            attacker_position,
+            defender_before,
+            defender_position,
+        ) {
+            return;
+        }
         let attacker_lead = carried_ball_lead(&self.players[attacker_id]);
 
         self.ball.holder = Some(attacker_id);
@@ -28210,8 +30160,8 @@ impl SoccerMatch {
                 self.ball.last_touch_team = Some(defending_team);
                 self.mark_ball_received(blocker_id);
                 self.stat_shot_block(defending_team);
-                self.record_reward_event(blocker_id, 12.0);
-                self.record_reward_event(shot.shooter, 2.0);
+                self.record_reward_event(blocker_id, SHOT_BLOCK_DEFENDER_REWARD_POINTS);
+                self.record_reward_event(shot.shooter, -BLOCKED_SHOT_SHOOTER_PENALTY_POINTS);
                 let shooter_name = self
                     .players
                     .iter()
@@ -29328,17 +31278,16 @@ impl SoccerMatch {
                 *delay_clock = 0.0;
             }
 
-            let lateral_gap = (holder_after_position.x - defender_after_position.x).abs();
-            let attacker_ahead = (holder_after_position.y - defender_after_position.y)
-                * holder_team.attack_dir()
-                > 0.35;
             let beaten = holder_dribbling
                 && active_defense
                 && retained_attack
-                && distance_to_holder <= 5.2
-                && lateral_gap <= 5.0
-                && attacker_ahead
-                && attacker_progress > 0.10;
+                && dribble_beat_geometry_is_valid(
+                    holder_team,
+                    holder_before_position,
+                    holder_after_position,
+                    defender_before_position,
+                    defender_after_position,
+                );
             let beat_clock = self.defensive_beat_clocks.entry(defender.id).or_insert(0.0);
             if beaten {
                 *beat_clock += dt;
@@ -35745,6 +37694,24 @@ fn tracking_frame_to_world_snapshot(
             DefensiveCoverProfile::default(),
             AttackingOverloadProfile::default(),
         ),
+        formation_lp_enabled: config.formation_lp_enabled,
+        home_team_possession_seconds: if last_touch_team == Some(Team::Home) {
+            frame.clock_seconds.max(0.0)
+        } else {
+            0.0
+        },
+        away_team_possession_seconds: if last_touch_team == Some(Team::Away) {
+            frame.clock_seconds.max(0.0)
+        } else {
+            0.0
+        },
+        ball_holder_possession_seconds: if frame.ball_holder.is_some() {
+            frame.clock_seconds.max(0.0)
+        } else {
+            0.0
+        },
+        formation_lp_guidance: Vec::new(),
+        formation_lp_teams: Vec::new(),
     }
 }
 
@@ -36539,6 +38506,24 @@ fn dribble_beat_probability(
     };
     let raw = attacker_evasion / (attacker_evasion + defender_balance * 0.94);
     (raw * kind_multiplier * response_multiplier).clamp(0.10, 0.88)
+}
+
+fn dribble_beat_geometry_is_valid(
+    attacking_team: Team,
+    attacker_before: Vec2,
+    attacker_after: Vec2,
+    defender_before: Vec2,
+    defender_after: Vec2,
+) -> bool {
+    if attacker_before.distance(defender_before) > DRIBBLE_BEAT_CONTACT_RADIUS_YARDS {
+        return false;
+    }
+    let attack_dir = attacking_team.attack_dir();
+    let before_gap = (attacker_before.y - defender_before.y) * attack_dir;
+    let after_gap = (attacker_after.y - defender_after.y) * attack_dir;
+    let forward_progress = (attacker_after.y - attacker_before.y) * attack_dir;
+    let after_lateral_gap = (attacker_after.x - defender_after.x).abs();
+    before_gap <= 0.35 && after_gap >= 0.35 && forward_progress >= 0.25 && after_lateral_gap <= 6.0
 }
 
 fn dribble_dispossession_kind_multiplier(kind: DribbleMoveKind) -> f64 {
@@ -40879,6 +42864,73 @@ mod tests {
     }
 
     #[test]
+    fn integrate_ball_delegates_to_ball_agent_run_time_step() {
+        let mut via_agent = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 309,
+            ..Default::default()
+        });
+        let mut via_shim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 309,
+            ..Default::default()
+        });
+
+        for sim in [&mut via_agent, &mut via_shim] {
+            park_players_except(sim, &[]);
+            sim.ball.holder = None;
+            sim.ball.position = Vec2::new(40.0, 60.0);
+            sim.ball.velocity = Vec2::new(0.0, 12.0);
+            sim.ball.acceleration = Vec2::zero();
+            sim.ball.curl_acceleration = Vec2::zero();
+            sim.ball.altitude_yards = 0.0;
+            sim.ball.last_touch_team = Some(Team::Home);
+            sim.ball.last_decision = None;
+            sim.pending_pass = None;
+            sim.pending_shot = None;
+        }
+
+        via_agent.run_ball_time_step();
+        via_shim.integrate_ball();
+
+        assert!(via_agent.ball.position.distance(via_shim.ball.position) < 1e-9);
+        assert!(via_agent.ball.velocity.distance(via_shim.ball.velocity) < 1e-9);
+        assert!(
+            via_agent
+                .ball
+                .acceleration
+                .distance(via_shim.ball.acceleration)
+                < 1e-9
+        );
+        assert_eq!(
+            via_agent
+                .ball
+                .last_decision
+                .as_ref()
+                .map(|decision| decision.action.as_str()),
+            Some("roll")
+        );
+        let agent_decision = via_agent
+            .ball
+            .last_decision
+            .as_ref()
+            .expect("agent ball decision");
+        let shim_decision = via_shim
+            .ball
+            .last_decision
+            .as_ref()
+            .expect("shim ball decision");
+        assert_eq!(agent_decision.tick, shim_decision.tick);
+        assert_eq!(agent_decision.action, shim_decision.action);
+        assert!(agent_decision.position.distance(shim_decision.position) < 1e-9);
+        assert_eq!(agent_decision.holder, shim_decision.holder);
+        assert_eq!(
+            agent_decision.scheduled_index,
+            shim_decision.scheduled_index
+        );
+    }
+
+    #[test]
     fn pomdp_and_q_state_encode_relative_ball_agent_schedule() {
         let player_id = 5;
         let mut saw_pre_ball = false;
@@ -43482,6 +45534,62 @@ mod tests {
         assert!(observation.human_controlled);
         assert!(observation.human_input_present);
         assert_eq!(observation.human_input_seq, Some(1));
+    }
+
+    #[test]
+    fn main_loop_yield_consumes_delayed_controller_thread_input_same_tick() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 1,
+            seed: 786,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0");
+        let start_x = sim.players[0].position.x;
+        let input_queue = sim.human_inputs.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            input_queue.push(HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            })
+        });
+
+        sim.run_time_step();
+
+        assert!(writer.join().expect("controller writer joins"));
+        let stats = sim.controller_yield_stats();
+        assert_eq!(stats.assigned_players, 1);
+        assert_eq!(stats.wait_attempts, 1);
+        assert_eq!(stats.timed_out_waits, 0);
+        assert!(
+            stats.immediate_pending_waits == 1 || stats.notified_waits == 1,
+            "input should arrive before or during the main-loop yield: {stats:?}"
+        );
+        assert_eq!(sim.human_inputs.queued_len(), 0);
+        assert!(
+            sim.players[0].position.x > start_x,
+            "assigned human player should move from delayed controller input"
+        );
+        let decision = sim.players[0]
+            .last_decision
+            .as_ref()
+            .expect("delayed human input decision");
+        assert_eq!(decision.operation_order, vec!["human-input".to_string()]);
+        assert_eq!(decision.observation.controller_slot, Some(0));
+        assert!(decision.observation.human_controlled);
+        assert!(decision.observation.human_input_present);
+        assert_eq!(decision.observation.human_input_seq, Some(1));
     }
 
     #[test]
@@ -49197,7 +51305,7 @@ mod tests {
         let defender = 12;
         sim.tick = 50;
         sim.players[attacker].position = Vec2::new(40.0, 80.0);
-        sim.players[defender].position = Vec2::new(40.4, 80.0);
+        sim.players[defender].position = Vec2::new(40.4, 80.8);
         sim.ball.holder = Some(attacker);
         sim.ball.position = sim.players[attacker].position;
         sim.ball.last_touch_team = Some(Team::Home);
@@ -49208,7 +51316,7 @@ mod tests {
             Some(test_decision_trace(&before, defender, "defend"));
         sim.defensive_beat_clocks.insert(defender, 0.20);
 
-        sim.players[attacker].position.y += 1.2;
+        sim.players[attacker].position.y += 2.0;
         sim.ball.position = sim.players[attacker].position;
         sim.tick = 51;
         let after = WorldSnapshot::from_match(&sim);
@@ -54543,10 +56651,13 @@ mod tests {
             let defender = 0;
             let attacker = 11;
             sim.players[defender].position = Vec2::new(40.0, 60.0);
+            sim.players[defender].position_history =
+                VecDeque::from([sim.players[defender].position]);
             sim.players[defender].velocity = Vec2::zero();
             sim.players[defender].skills.defending = 1.1;
             sim.players[defender].skills.aggression = 1.2;
-            sim.players[attacker].position = Vec2::new(41.0, 60.0);
+            sim.players[attacker].position = Vec2::new(40.7, 58.8);
+            sim.players[attacker].position_history = VecDeque::from([Vec2::new(40.7, 61.0)]);
             sim.players[attacker].velocity = Vec2::zero();
             sim.players[attacker].skills.dribbling = 9.6;
             sim.players[attacker].skills.first_touch = 9.4;
@@ -54600,12 +56711,15 @@ mod tests {
             });
             let defender = 0;
             let attacker = 11;
-            sim.players[attacker].position = Vec2::new(41.0, 60.0);
+            sim.players[attacker].position = Vec2::new(41.0, 58.8);
+            sim.players[attacker].position_history = VecDeque::from([Vec2::new(41.0, 61.0)]);
             sim.players[attacker].velocity = Vec2::zero();
             sim.players[attacker].skills.dribbling = 9.7;
             sim.players[attacker].skills.acceleration = 9.4;
             sim.players[attacker].skills.first_touch = 9.5;
             sim.players[defender].position = Vec2::new(39.8, 60.0);
+            sim.players[defender].position_history =
+                VecDeque::from([sim.players[defender].position]);
             sim.players[defender].velocity = Vec2::zero();
             sim.players[defender].skills.defending = 2.0;
             sim.players[defender].skills.aggression = 7.8;
@@ -54681,13 +56795,21 @@ mod tests {
     #[test]
     fn dribble_beat_event_uses_move_reward_and_rejects_invalid_contests() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
-        let defender = 0;
-        let attacker = 11;
+        let attacker = 9;
+        let defender = 13;
         sim.players[defender].position = Vec2::new(40.0, 60.0);
-        sim.players[attacker].position = Vec2::new(41.0, 60.0);
+        sim.players[defender].position_history = VecDeque::from([sim.players[defender].position]);
+        sim.players[attacker].position = Vec2::new(40.5, 59.0);
+        sim.players[attacker].position_history = VecDeque::from([sim.players[attacker].position]);
         sim.ball.holder = Some(attacker);
         sim.ball.position = sim.players[attacker].position;
 
+        sim.record_dribble_beat_event(attacker, defender, DribbleMoveKind::Nutmeg);
+        assert!(sim.reward_events.is_empty());
+        assert!(!sim.events.iter().any(|event| event.kind == "nutmeg"));
+
+        sim.players[attacker].position = Vec2::new(40.5, 61.2);
+        sim.ball.position = sim.players[attacker].position;
         sim.record_dribble_beat_event(attacker, defender, DribbleMoveKind::Nutmeg);
 
         let attacker_reward = sim
@@ -54701,7 +56823,7 @@ mod tests {
 
         let reward_count = sim.reward_events.len();
         let event_count = sim.events.len();
-        sim.record_dribble_beat_event(attacker, 12, DribbleMoveKind::Nutmeg);
+        sim.record_dribble_beat_event(attacker, 8, DribbleMoveKind::Nutmeg);
         sim.ball.holder = Some(defender);
         sim.record_dribble_beat_event(attacker, defender, DribbleMoveKind::Nutmeg);
 
@@ -59125,6 +61247,76 @@ mod tests {
         assert!(
             blocked_count >= trials * 3 / 4,
             "covered human shots should mostly be blocked, got {blocked_count}/{trials}"
+        );
+    }
+
+    #[test]
+    fn blocked_shot_penalizes_shooter_and_rewards_blocker_for_learning() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.3,
+            seed: 23_180,
+            ..Default::default()
+        });
+        let shooter = 9;
+        let blocker = 13;
+        park_players_except(&mut sim, &[shooter, blocker]);
+        sim.tick = 44;
+        sim.players[shooter].position = Vec2::new(40.0, 104.0);
+        sim.players[blocker].position = Vec2::new(40.0, 109.0);
+        sim.players[blocker].skills.defending = 10.0;
+        sim.players[blocker].skills.defensive_tracking = 10.0;
+        sim.ball.holder = None;
+        sim.ball.position = sim.players[shooter].position;
+        sim.ball.velocity = Vec2::new(0.0, 25.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.pending_shot = Some(PendingShot {
+            team: Team::Home,
+            shooter,
+            origin: sim.players[shooter].position,
+        });
+        let before = WorldSnapshot::from_match(&sim);
+        sim.players[shooter].last_decision = Some(test_decision_trace(&before, shooter, "shoot"));
+        sim.players[blocker].last_decision = Some(test_decision_trace(&before, blocker, "defend"));
+        let event_start = sim.reward_events.len();
+
+        sim.apply_ball_outcome(BallStepOutcome::ShotBlocked {
+            shot: PendingShot {
+                team: Team::Home,
+                shooter,
+                origin: before.ball.position,
+            },
+            blocker_id: blocker,
+            defending_team: Team::Away,
+            position: sim.players[blocker].position,
+            velocity: Vec2::new(0.0, -8.0),
+            deflection_kind: ShotDeflectionKind::Rebound,
+            keep_shot_active: false,
+            restart: None,
+        });
+
+        let shot_block_events = &sim.reward_events[event_start..];
+        assert!(shot_block_events.iter().any(|event| {
+            event.player_id == blocker && event.amount == SHOT_BLOCK_DEFENDER_REWARD_POINTS
+        }));
+        assert!(shot_block_events.iter().any(|event| {
+            event.player_id == shooter && event.amount == -BLOCKED_SHOT_SHOOTER_PENALTY_POINTS
+        }));
+        let after = WorldSnapshot::from_match(&sim);
+        let transitions = sim.learning_transitions_for(
+            &before,
+            &after,
+            sim.score_home,
+            sim.score_away,
+            shot_block_events,
+        );
+        let shooter_transition = transitions
+            .iter()
+            .find(|transition| transition.player_id == shooter)
+            .expect("shooter learning transition");
+        assert!(
+            shooter_transition.reward < 0.0,
+            "blocked shot should be net negative for the shooter, got {}",
+            shooter_transition.reward
         );
     }
 

@@ -865,10 +865,11 @@ function centralBrainLabel(b) {
   const centerText = center ? ` C${Number(center.x ?? 0).toFixed(0)},${Number(center.y ?? 0).toFixed(0)}` : "";
   const ballSpeed = vecLen(b.ballVelocity || {x: 0, y: 0});
   const ballAccel = vecLen(b.ballAcceleration || {x: 0, y: 0});
+  const ballJerk = vecLen(b.ballJerk || {x: 0, y: 0});
   const ballZ = Number(b.ballAltitudeYards ?? 0);
   const ballSchedule = scheduleSlotLabel(b.ballScheduledIndex);
   const ballAction = b.ballLastAction ? ` ${b.ballLastAction}` : "";
-  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)} z${ballZ.toFixed(1)}${ballSchedule}${ballAction}`;
+  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}${ballSchedule}${ballAction}`;
   return `${players}p ${officials}o ${possession}${holder}${centerText}${ballText}`;
 }
 function agentScheduleGlyph(entry) {
@@ -1500,7 +1501,7 @@ function ballHistoryKinematicsLabel(f, dtSeconds = state?.config?.dtSeconds) {
   const ball = f?.ball || {};
   const velocity = k.velocity || ball.velocity || {x: 0, y: 0};
   const acceleration = k.acceleration || ball.acceleration || {x: 0, y: 0};
-  const jerk = k.jerk || {x: 0, y: 0};
+  const jerk = k.jerk || ball.jerk || {x: 0, y: 0};
   return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
 }
 function scoreValue(source, ...keys) {

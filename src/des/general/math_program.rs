@@ -9792,6 +9792,7 @@ fn solve_math_program_external_native_mip_reference(
         return Ok(None);
     }
 
+    let _validated = encode_external_math_program_options(opts)?;
     let compiled = compile_mip(program)?;
     let objective_offset = compiled_objective_offset(program, &compiled);
     let mut mip_opts = IPMIPSolveOptions {
@@ -9801,8 +9802,17 @@ fn solve_math_program_external_native_mip_reference(
         mip_gap_abs: opts.absolute_gap,
         solution_limit: opts
             .solution_limit
-            .and_then(|limit| usize::try_from(limit).ok()),
+            .map(|limit| {
+                usize::try_from(limit).map_err(|_| {
+                    MathProgramError::InvalidBound(
+                        "external solution_limit is too large for the native MIP backend"
+                            .to_string(),
+                    )
+                })
+            })
+            .transpose()?,
         objective_limit: opts.objective_limit,
+        int_tol: opts.integer_feasibility_tolerance,
         branch_rule: opts
             .branch_rule
             .map(external_math_program_branch_rule_to_native),
@@ -9811,6 +9821,13 @@ fn solve_math_program_external_native_mip_reference(
             .map(external_math_program_node_selection_to_native),
         ..Default::default()
     };
+    if opts.cuts == Some(ExternalLinearCliMipSwitch::Off) {
+        mip_opts.max_cut_rounds = Some(0);
+        mip_opts.max_cuts_per_node = Some(0);
+    }
+    if opts.heuristics == Some(ExternalLinearCliMipSwitch::Off) {
+        mip_opts.heuristic_passes = Some(0);
+    }
     if let Some(start) = &opts.mip_start {
         mip_opts.mip_start = Some(canonical_mip_start(program, &compiled, start)?);
     }
@@ -9841,7 +9858,7 @@ fn solve_math_program_external_native_mip_reference(
         first_branch_variable,
         solver_version: None,
         iterations: None,
-        control_feedback: None,
+        control_feedback: external_math_program_native_mip_control_feedback(opts),
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
@@ -9868,14 +9885,22 @@ fn external_math_program_method_prefers_native_mip_reference(method: &str) -> bo
             | "des-ipmip"
             | "bounded-enumeration"
             | "rust-bounded-enumeration"
+            | "rust"
+            | "rust-internal"
+            | "native"
+            | "native-mip"
+            | "des-mip"
+            | "ipmip"
+            | "des:ipmip"
     )
 }
 
 fn external_math_program_native_mip_solver_label(method: &str) -> String {
-    format!(
-        "rust:des-ipmip-for-{}",
-        normalized_external_math_program_method(method).replace(':', "-")
-    )
+    let normalized = normalized_external_math_program_method(method);
+    if matches!(normalized.as_str(), "des-ipmip" | "des:ipmip" | "ipmip") {
+        return "des-ipmip".to_string();
+    }
+    format!("rust:des-ipmip-for-{}", normalized.replace(':', "-"))
 }
 
 fn external_math_program_branch_rule_to_native(rule: ExternalLinearCliBranchRule) -> BranchRule {
@@ -9892,6 +9917,41 @@ fn external_math_program_node_selection_to_native(
         ExternalLinearCliNodeSelection::Dfs => NodeSelection::Dfs,
         ExternalLinearCliNodeSelection::BestBound => NodeSelection::BestBound,
     }
+}
+
+fn external_math_program_native_mip_control_feedback(
+    opts: &ExternalMathProgramOptions,
+) -> Option<MathProgramSolverControlFeedback> {
+    let feedback = MathProgramSolverControlFeedback {
+        solution_limit: opts.solution_limit,
+        objective_limit: opts.objective_limit,
+        absolute_gap: opts.absolute_gap,
+        integer_feasibility_tolerance: opts.integer_feasibility_tolerance,
+        cuts: opts.cuts.map(|cuts| cuts.as_str().to_string()),
+        heuristics: opts
+            .heuristics
+            .map(|heuristics| heuristics.as_str().to_string()),
+        branch_rule: opts.branch_rule.map(|rule| rule.as_str().to_string()),
+        node_selection: opts
+            .node_selection
+            .map(|selection| selection.as_str().to_string()),
+        branch_priorities_accepted: opts.branch_priorities.as_ref().map(|_| true),
+        branch_priority_count: opts.branch_priorities.as_ref().map(Vec::len),
+        mip_start_accepted: opts.mip_start.as_ref().map(|_| true),
+        ..Default::default()
+    };
+    (feedback.solution_limit.is_some()
+        || feedback.objective_limit.is_some()
+        || feedback.absolute_gap.is_some()
+        || feedback.integer_feasibility_tolerance.is_some()
+        || feedback.cuts.is_some()
+        || feedback.heuristics.is_some()
+        || feedback.branch_rule.is_some()
+        || feedback.node_selection.is_some()
+        || feedback.branch_priorities_accepted.is_some()
+        || feedback.branch_priority_count.is_some()
+        || feedback.mip_start_accepted.is_some())
+    .then_some(feedback)
 }
 
 fn solve_math_program_external_cp_sat_rust_reference(
@@ -22298,6 +22358,41 @@ mod tests {
         );
         assert_close(solution.objective, 4.0);
         assert_eq!(solution.x, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn external_math_program_native_mip_alias_uses_des_ipmip_controls() {
+        let mut mip = MathProgram::new(ObjectiveSense::Max);
+        let x = mip.add_binary_var("x", 4.0).unwrap();
+        let y = mip.add_binary_var("y", 3.0).unwrap();
+        mip.add_constraint("capacity", vec![(x, 2.0), (y, 1.0)], RowSense::Le, 2.0)
+            .unwrap();
+
+        let solution = solve_math_program_external(
+            &mip,
+            &ExternalMathProgramOptions {
+                method: Some("des-ipmip".to_string()),
+                node_limit: Some(32),
+                relative_gap: Some(0.0),
+                mip_start: Some(vec![1.0, 0.0]),
+                branch_rule: Some(ExternalLinearCliBranchRule::FirstFractional),
+                branch_priorities: Some(vec![7, 1]),
+                node_selection: Some(ExternalLinearCliNodeSelection::Dfs),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::Optimal);
+        assert_eq!(solution.solver, "des-ipmip");
+        assert_close(solution.objective, 4.0);
+        assert_eq!(solution.x, vec![1.0, 0.0]);
+        let feedback = solution.control_feedback.expect("native MIP feedback");
+        assert_eq!(feedback.branch_rule.as_deref(), Some("first-fractional"));
+        assert_eq!(feedback.node_selection.as_deref(), Some("dfs"));
+        assert_eq!(feedback.branch_priorities_accepted, Some(true));
+        assert_eq!(feedback.branch_priority_count, Some(2));
+        assert_eq!(feedback.mip_start_accepted, Some(true));
     }
 
     #[test]

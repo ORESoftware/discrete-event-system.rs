@@ -36,15 +36,23 @@ impl ExternalMaxFlowReferenceSolver {
 }
 
 fn registered_max_flow_rust_fallback_enabled() -> bool {
-    std::env::var("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("MAX_FLOW_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "MAX_FLOW_REFERENCE_REGISTERED_FALLBACK",
+        "MAX_FLOW_REFERENCE_EXTERNAL_FALLBACK",
+        "MAX_FLOW_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_max_flow_reference(opts: &ExternalMaxFlowReferenceOptions) -> bool {
@@ -906,6 +914,28 @@ mod tests {
         assert!(solution
             .message
             .contains("requested solver 'ortools' was validated with Rust fallback"));
+    }
+
+    #[test]
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_RUST_FIRST", "true");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-max-flow");
+        let problem = build_textbook_max_flow_problem();
+
+        let solution = solve_max_flow_with_external_reference(
+            &problem,
+            &ExternalMaxFlowReferenceOptions {
+                solver: ExternalMaxFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-max-flow-fallback-for-ortools"
+        );
+        assert!((solution.max_flow.unwrap() - 23.0).abs() <= 1e-9);
     }
 
     #[test]

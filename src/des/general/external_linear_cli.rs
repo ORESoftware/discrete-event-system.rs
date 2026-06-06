@@ -25,11 +25,11 @@ use crate::des::general::ip_mip_des::{
     linearize_sos_problem, linearize_source_ipmip_problem, AbsoluteValueConstraint,
     BranchOrCutConstraint, ConstraintKind, GeneralLinearIPMIPProblem, IPMIPProblem,
     IndicatorConstraint, IndicatorIPMIPProblem, IndicatorSense, L1NormConstraint,
-    LInfNormConstraint, LinearRowConstraint, LogicalConstraint, LogicalConstraintKind,
-    LowerBoundedIPMIPProblem, MaximumConstraint, MinimumConstraint, MultiObjectiveIPMIPProblem,
-    PiecewiseLinearConstraint, PiecewiseLinearPoint, ProductConstraint, PwlIPMIPProblem,
-    QuadraticObjectiveIPMIPProblem, QuadraticObjectiveTerm, SemiIPMIPProblem, SemiVariable,
-    SemiVariableKind, SosIPMIPProblem, SourceIPMIPProblem, SpecialOrderedSet,
+    LInfNormConstraint, LexicographicObjective, LinearRowConstraint, LogicalConstraint,
+    LogicalConstraintKind, LowerBoundedIPMIPProblem, MaximumConstraint, MinimumConstraint,
+    MultiObjectiveIPMIPProblem, PiecewiseLinearConstraint, PiecewiseLinearPoint, ProductConstraint,
+    PwlIPMIPProblem, QuadraticObjectiveIPMIPProblem, QuadraticObjectiveTerm, SemiIPMIPProblem,
+    SemiVariable, SemiVariableKind, SosIPMIPProblem, SourceIPMIPProblem, SpecialOrderedSet,
     SpecialOrderedSetKind,
 };
 use crate::des::general::lp::{LPProblem, Sense};
@@ -1614,7 +1614,24 @@ pub fn solve_source_ipmip_with_external_cli(
 }
 
 fn should_use_rust_linearized_source_cli(opts: &ExternalLinearCliOptions) -> bool {
-    opts.script_path.is_none() && opts.branch_priorities.is_none() && opts.mip_start.is_none()
+    opts.script_path.is_none()
+        && linearized_source_mip_start_can_stay_native(opts)
+        && (opts.branch_priorities.is_none()
+            || matches!(
+                opts.solver,
+                ExternalLinearCliSolver::Scip | ExternalLinearCliSolver::Cbc
+            ))
+}
+
+fn linearized_source_mip_start_can_stay_native(opts: &ExternalLinearCliOptions) -> bool {
+    opts.mip_start.is_none()
+        || (opts.solution_pool_size.is_none()
+            && matches!(
+                opts.solver,
+                ExternalLinearCliSolver::Highs
+                    | ExternalLinearCliSolver::Scip
+                    | ExternalLinearCliSolver::Cbc
+            ))
 }
 
 fn should_use_rust_lower_bounded_source_cli(opts: &ExternalLinearCliOptions) -> bool {
@@ -1746,8 +1763,21 @@ fn solve_linearized_ipmip_with_external_cli(
             *objective_limit -= objective_offset;
         }
     }
+    if let Err(message) = shift_linearized_external_mip_start(
+        &mut solve_opts,
+        source_lb,
+        original_var_count,
+        linearized.c.len(),
+    ) {
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            format!("{}:cli", opts.solver.as_str()),
+            message,
+            elapsed_ms(t0),
+        );
+    }
     if let Err(message) =
-        shift_linearized_external_mip_start(&mut solve_opts, source_lb, linearized.c.len())
+        pad_linearized_external_branch_priorities(&mut solve_opts, linearized.c.len())
     {
         return external_cli_failure(
             ExternalLinearCliStatus::NumericalError,
@@ -1805,30 +1835,62 @@ fn postprocess_linearized_external_solution(
 fn shift_linearized_external_mip_start(
     opts: &mut ExternalLinearCliOptions,
     source_lb: &[f64],
+    original_var_count: usize,
     linearized_var_count: usize,
 ) -> Result<(), String> {
     let Some(start) = opts.mip_start.as_mut() else {
         return Ok(());
     };
-    if !source_lb.is_empty() {
-        if start.len() != source_lb.len() {
-            return Err(format!(
-                "mip_start length {} does not match lower-bound vector length {}",
-                start.len(),
-                source_lb.len()
-            ));
-        }
-        for (value, lower) in start.iter_mut().zip(source_lb.iter()) {
-            *value -= *lower;
-        }
-    }
-    if start.len() != linearized_var_count {
+    if original_var_count > linearized_var_count {
         return Err(format!(
-            "linearized mip_start length {} does not match linearized variable count {}",
+            "original variable count {original_var_count} exceeds linearized variable count {linearized_var_count}"
+        ));
+    }
+    if start.len() != original_var_count && start.len() != linearized_var_count {
+        return Err(format!(
+            "mip_start length {} must match original variable count {} or linearized variable count {}",
             start.len(),
+            original_var_count,
             linearized_var_count
         ));
     }
+    if !source_lb.is_empty() {
+        if source_lb.len() != original_var_count {
+            return Err(format!(
+                "lower-bound vector length {} does not match original variable count {}",
+                source_lb.len(),
+                original_var_count
+            ));
+        }
+        for (value, lower) in start
+            .iter_mut()
+            .take(original_var_count)
+            .zip(source_lb.iter())
+        {
+            *value -= *lower;
+        }
+    }
+    if start.len() < linearized_var_count {
+        start.resize(linearized_var_count, 0.0);
+    }
+    Ok(())
+}
+
+fn pad_linearized_external_branch_priorities(
+    opts: &mut ExternalLinearCliOptions,
+    linearized_var_count: usize,
+) -> Result<(), String> {
+    let Some(priorities) = opts.branch_priorities.as_mut() else {
+        return Ok(());
+    };
+    if priorities.len() > linearized_var_count {
+        return Err(format!(
+            "branch_priorities length {} exceeds linearized variable count {}",
+            priorities.len(),
+            linearized_var_count
+        ));
+    }
+    priorities.resize(linearized_var_count, 0);
     Ok(())
 }
 
@@ -2020,6 +2082,16 @@ pub fn solve_linear_cli_json(
     let solver_name = opts.solver.as_str();
     let bridge_solver = format!("{solver_name}:cli");
     if let Some(solution) = solve_native_plain_cli_json_direct(kind, &problem_json, opts, t0) {
+        return solution;
+    }
+    if let Some(solution) =
+        solve_rust_quadratic_objective_cli_json_direct(kind, &problem_json, opts, t0)
+    {
+        return solution;
+    }
+    if let Some(solution) =
+        solve_rust_multi_objective_cli_json_direct(kind, &problem_json, opts, t0)
+    {
         return solution;
     }
     if let Some(solution) = solve_rust_source_cli_json_direct(kind, &problem_json, opts, t0) {
@@ -3468,6 +3540,54 @@ fn solve_native_plain_cli_json_direct(
     Some(solution)
 }
 
+fn solve_rust_quadratic_objective_cli_json_direct(
+    kind: ExternalLinearCliKind,
+    problem_json: &Value,
+    opts: &ExternalLinearCliOptions,
+    t0: Instant,
+) -> Option<ExternalLinearCliSolution> {
+    if kind != ExternalLinearCliKind::Mip || !should_use_rust_linearized_source_cli(opts) {
+        return None;
+    }
+    let solver = format!("{}:cli", opts.solver.as_str());
+    match quadratic_objective_ipmip_problem_from_cli_json(problem_json) {
+        Ok(Some(problem)) => Some(solve_quadratic_objective_ipmip_with_external_cli(
+            &problem, opts,
+        )),
+        Ok(None) => None,
+        Err(message) => Some(external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            solver,
+            message,
+            elapsed_ms(t0),
+        )),
+    }
+}
+
+fn solve_rust_multi_objective_cli_json_direct(
+    kind: ExternalLinearCliKind,
+    problem_json: &Value,
+    opts: &ExternalLinearCliOptions,
+    t0: Instant,
+) -> Option<ExternalLinearCliSolution> {
+    if kind != ExternalLinearCliKind::Mip || !should_use_rust_multi_objective_cli(opts) {
+        return None;
+    }
+    let solver = format!("{}:cli", opts.solver.as_str());
+    match multi_objective_ipmip_problem_from_cli_json(problem_json) {
+        Ok(Some(problem)) => Some(solve_multi_objective_ipmip_with_rust_external_cli(
+            &problem, opts,
+        )),
+        Ok(None) => None,
+        Err(message) => Some(external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            solver,
+            message,
+            elapsed_ms(t0),
+        )),
+    }
+}
+
 fn solve_rust_source_cli_json_direct(
     kind: ExternalLinearCliKind,
     problem_json: &Value,
@@ -3611,6 +3731,154 @@ const RUST_SOURCE_CLI_FEATURE_KEYS: &[&str] = &[
     "linf_norms",
     "products",
 ];
+
+fn quadratic_objective_ipmip_problem_from_cli_json(
+    problem_json: &Value,
+) -> Result<Option<QuadraticObjectiveIPMIPProblem>, String> {
+    let Some(object) = problem_json.as_object() else {
+        return Ok(None);
+    };
+    let Some(terms_json) =
+        optional_json_array(object.get("quadratic_objective"), "quadratic_objective")?
+    else {
+        return Ok(None);
+    };
+    if terms_json.is_empty() {
+        return Ok(None);
+    }
+    if json_field_has_content(object.get("multi_objectives"))
+        || RUST_SOURCE_CLI_FEATURE_KEYS
+            .iter()
+            .any(|key| json_field_has_content(object.get(*key)))
+    {
+        return Ok(None);
+    }
+
+    let c = required_f64_array(object, "c")?;
+    let n = c.len();
+    let sense = parse_cli_sense(object.get("sense"))?;
+    let a = optional_f64_matrix(object, &["a"])?;
+    let b = optional_f64_array(object, &["b"])?;
+    validate_source_base_rows(n, &a, &b)?;
+    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let lb = optional_plain_f64_array_exact(object.get("lb"), n, "lb")?;
+    let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
+    let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
+    let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
+    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+    let mut quadratic_objective = Vec::with_capacity(terms_json.len());
+    for (idx, term_json) in terms_json.iter().enumerate() {
+        let path = format!("quadratic_objective[{idx}]");
+        let term_object = required_object(term_json, &path)?;
+        let x_var = required_usize_field(term_object, "x_var", &format!("{path}.x_var"))?;
+        validate_source_var_index(x_var, n, &format!("{path}.x_var"))?;
+        let y_var = required_usize_field(term_object, "y_var", &format!("{path}.y_var"))?;
+        validate_source_var_index(y_var, n, &format!("{path}.y_var"))?;
+        quadratic_objective.push(QuadraticObjectiveTerm {
+            x_var,
+            y_var,
+            coeff: required_f64_field(term_object.get("coeff"), &format!("{path}.coeff"))?,
+            name: optional_string_field(term_object.get("name"), &format!("{path}.name"))?,
+        });
+    }
+
+    Ok(Some(QuadraticObjectiveIPMIPProblem {
+        base: IPMIPProblem {
+            sense,
+            c,
+            a,
+            b,
+            integer_vars,
+            ub,
+            var_names,
+            con_names,
+            lazy_constraints,
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        lb,
+        quadratic_objective,
+    }))
+}
+
+fn multi_objective_ipmip_problem_from_cli_json(
+    problem_json: &Value,
+) -> Result<Option<MultiObjectiveIPMIPProblem>, String> {
+    let Some(object) = problem_json.as_object() else {
+        return Ok(None);
+    };
+    let Some(objectives_json) =
+        optional_json_array(object.get("multi_objectives"), "multi_objectives")?
+    else {
+        return Ok(None);
+    };
+    if objectives_json.is_empty() {
+        return Err("multi_objectives must be non-empty".to_string());
+    }
+    if json_field_has_content(object.get("quadratic_objective"))
+        || RUST_SOURCE_CLI_FEATURE_KEYS
+            .iter()
+            .any(|key| json_field_has_content(object.get(*key)))
+    {
+        return Ok(None);
+    }
+
+    let c = required_f64_array(object, "c")?;
+    let n = c.len();
+    if let Some(lb) = optional_plain_f64_array_exact(object.get("lb"), n, "lb")? {
+        if lb.iter().any(|value| value.abs() > 1e-12) {
+            return Ok(None);
+        }
+    }
+    let sense = parse_cli_sense(object.get("sense"))?;
+    let a = optional_f64_matrix(object, &["a"])?;
+    let b = optional_f64_array(object, &["b"])?;
+    validate_source_base_rows(n, &a, &b)?;
+    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
+    let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
+    let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
+    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+    let mut objectives = Vec::with_capacity(objectives_json.len());
+    for (idx, objective_json) in objectives_json.iter().enumerate() {
+        let path = format!("multi_objectives[{idx}]");
+        let objective_object = required_object(objective_json, &path)?;
+        let objective_c = f64_array_from_value(
+            objective_object
+                .get("c")
+                .ok_or_else(|| format!("missing required array '{path}.c'"))?,
+            &format!("{path}.c"),
+        )?;
+        if objective_c.len() != n {
+            return Err(format!(
+                "{path}.c length {} does not match variable count {n}",
+                objective_c.len()
+            ));
+        }
+        objectives.push(LexicographicObjective {
+            sense: parse_cli_sense(objective_object.get("sense"))?,
+            c: objective_c,
+            name: optional_string_field(objective_object.get("name"), &format!("{path}.name"))?,
+        });
+    }
+
+    Ok(Some(MultiObjectiveIPMIPProblem {
+        base: IPMIPProblem {
+            sense,
+            c,
+            a,
+            b,
+            integer_vars,
+            ub,
+            var_names,
+            con_names,
+            lazy_constraints,
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        objectives,
+    }))
+}
 
 fn source_ipmip_problem_from_cli_json(
     problem_json: &Value,
@@ -12342,16 +12610,183 @@ mod tests {
     }
 
     #[test]
+    fn quadratic_objective_json_uses_rust_linearization_without_python_bridge() {
+        let payload =
+            quadratic_objective_ipmip_problem_to_cli_json(&build_quadratic_objective_mix_ip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-quadratic-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-quadratic-json".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "quadratic objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn quadratic_objective_json_rejects_bad_term_index_without_python_bridge() {
+        let mut payload =
+            quadratic_objective_ipmip_problem_to_cli_json(&build_quadratic_objective_mix_ip());
+        payload["quadratic_objective"][0]["x_var"] = serde_json::json!(999);
+
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-quadratic-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-bad-quadratic-json".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::NumericalError);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            solution
+                .message
+                .contains("quadratic_objective[0].x_var index 999 is outside variable count"),
+            "{}",
+            solution.message
+        );
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "bad quadratic objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
+    }
+
+    #[test]
     fn linearized_mip_start_shifts_lower_bounded_source_values() {
         let mut opts = ExternalLinearCliOptions {
             mip_start: Some(vec![3.0, 5.0]),
             ..Default::default()
         };
 
-        super::shift_linearized_external_mip_start(&mut opts, &[3.0, 0.0], 2)
+        super::shift_linearized_external_mip_start(&mut opts, &[3.0, 0.0], 2, 2)
             .expect("shift mip start");
 
         assert_eq!(opts.mip_start, Some(vec![0.0, 5.0]));
+    }
+
+    #[test]
+    fn linearized_mip_start_pads_auxiliary_variables() {
+        let mut opts = ExternalLinearCliOptions {
+            mip_start: Some(vec![3.0, 5.0]),
+            ..Default::default()
+        };
+
+        super::shift_linearized_external_mip_start(&mut opts, &[1.0, 0.0], 2, 5)
+            .expect("pad mip start");
+
+        assert_eq!(opts.mip_start, Some(vec![2.0, 5.0, 0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn rust_linearized_source_cli_allows_native_branch_priority_solvers() {
+        assert!(super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Scip,
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            }
+        ));
+        assert!(super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            }
+        ));
+        assert!(!super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            }
+        ));
+        assert!(super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn rust_linearized_source_cli_allows_native_mip_start_solvers() {
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            assert!(
+                super::should_use_rust_linearized_source_cli(&ExternalLinearCliOptions {
+                    solver,
+                    mip_start: Some(vec![0.0]),
+                    ..Default::default()
+                }),
+                "{} should keep source MIP starts on the Rust/native path",
+                solver.as_str()
+            );
+        }
+        assert!(!super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                mip_start: Some(vec![0.0]),
+                ..Default::default()
+            }
+        ));
+        assert!(!super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                mip_start: Some(vec![0.0]),
+                solution_pool_size: Some(2),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn linearized_branch_priorities_pad_auxiliary_variables() {
+        let mut opts = ExternalLinearCliOptions {
+            branch_priorities: Some(vec![7, 0]),
+            ..Default::default()
+        };
+
+        super::pad_linearized_external_branch_priorities(&mut opts, 5)
+            .expect("pad branch priorities");
+
+        assert_eq!(opts.branch_priorities, Some(vec![7, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn linearized_branch_priorities_reject_too_many_values() {
+        let mut opts = ExternalLinearCliOptions {
+            branch_priorities: Some(vec![7, 0, 3]),
+            ..Default::default()
+        };
+
+        let error = super::pad_linearized_external_branch_priorities(&mut opts, 2)
+            .expect_err("too many branch priorities should fail");
+
+        assert!(error.contains("exceeds linearized variable count"));
     }
 
     #[test]
@@ -12682,6 +13117,124 @@ mod tests {
         assert_eq!(solution.objective_values, Some(vec![1.0, 3.0]));
         assert_eq!(solution.objective, Some(3.0));
         assert_eq!(solution.message, "sequential lexicographic optimization");
+    }
+
+    #[test]
+    fn multi_objective_json_uses_native_highs_without_python_bridge() {
+        let base = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 0.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let payload = multi_objective_ipmip_problem_to_cli_json(&MultiObjectiveIPMIPProblem {
+            base,
+            objectives: vec![
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![1.0, 1.0],
+                    name: Some("cardinality".to_string()),
+                },
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![3.0, 1.0],
+                    name: Some("preference".to_string()),
+                },
+            ],
+        });
+
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-multi-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-multi-objective-json".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "multi-objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn multi_objective_json_rejects_bad_stage_width_without_python_bridge() {
+        let base = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 0.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let mut payload = multi_objective_ipmip_problem_to_cli_json(&MultiObjectiveIPMIPProblem {
+            base,
+            objectives: vec![
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![1.0, 1.0],
+                    name: Some("cardinality".to_string()),
+                },
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![3.0, 1.0],
+                    name: Some("preference".to_string()),
+                },
+            ],
+        });
+        payload["multi_objectives"][1]["c"] = serde_json::json!([3.0]);
+
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-multi-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-bad-multi-objective-json".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::NumericalError);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            solution
+                .message
+                .contains("multi_objectives[1].c length 1 does not match variable count 2"),
+            "{}",
+            solution.message
+        );
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "bad multi-objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
     }
 
     #[test]
@@ -14795,6 +15348,93 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
             "source JSON linearization unexpectedly used Python bridge: {}",
             solution.message
         );
+    }
+
+    #[test]
+    fn source_feature_json_branch_priorities_use_rust_linearization_without_python_bridge() {
+        for (solver, command_path) in [
+            (
+                ExternalLinearCliSolver::Scip,
+                "/definitely/not-a-scip-source-json-priority-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Cbc,
+                "/definitely/not-a-cbc-source-json-priority-binary",
+            ),
+        ] {
+            let problem = build_source_feature_mix_ip();
+            let priority_count = problem.base.c.len();
+            let payload = source_ipmip_problem_to_cli_json(&problem);
+            let solution = super::solve_linear_cli_json(
+                ExternalLinearCliKind::Mip,
+                payload,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(PathBuf::from(command_path)),
+                    python: Some(format!(
+                        "/definitely/not-a-python-for-{}-source-json-priorities",
+                        solver.as_str()
+                    )),
+                    time_limit_secs: Some(2.0),
+                    branch_priorities: Some(vec![5; priority_count]),
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert!(
+                !solution.message.to_ascii_lowercase().contains("python"),
+                "{} source JSON priorities unexpectedly used Python bridge: {}",
+                solver.as_str(),
+                solution.message
+            );
+        }
+    }
+
+    #[test]
+    fn source_feature_json_mip_start_uses_rust_linearization_without_python_bridge() {
+        for (solver, command_path) in [
+            (
+                ExternalLinearCliSolver::Highs,
+                "/definitely/not-a-highs-source-json-mip-start-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Scip,
+                "/definitely/not-a-scip-source-json-mip-start-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Cbc,
+                "/definitely/not-a-cbc-source-json-mip-start-binary",
+            ),
+        ] {
+            let problem = build_source_feature_mix_ip();
+            let payload = source_ipmip_problem_to_cli_json(&problem);
+            let solution = super::solve_linear_cli_json(
+                ExternalLinearCliKind::Mip,
+                payload,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(PathBuf::from(command_path)),
+                    python: Some(format!(
+                        "/definitely/not-a-python-for-{}-source-json-mip-start",
+                        solver.as_str()
+                    )),
+                    time_limit_secs: Some(2.0),
+                    mip_start: Some(vec![0.0; problem.base.c.len()]),
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert!(
+                !solution.message.to_ascii_lowercase().contains("python"),
+                "{} source JSON MIP start unexpectedly used Python bridge: {}",
+                solver.as_str(),
+                solution.message
+            );
+        }
     }
 
     #[test]

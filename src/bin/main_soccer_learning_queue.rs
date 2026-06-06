@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 const DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
+const DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_RETENTION_GAMES: usize = 0;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE: usize = 16;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES: usize = 16;
 const DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS: usize = 2;
@@ -88,6 +89,7 @@ struct PendingPostgresPolicyVersion {
 struct PostgresCompletedRunBatch {
     experiment_id: String,
     runner_id: String,
+    completed_run_retention_games: usize,
     policy_version_batches: usize,
     pending_policy_versions: Vec<PendingPostgresPolicyVersion>,
     pending_runs: Vec<PendingPostgresCompletedRun>,
@@ -95,7 +97,9 @@ struct PostgresCompletedRunBatch {
 
 impl PostgresCompletedRunBatch {
     fn can_absorb(&self, other: &Self) -> bool {
-        self.experiment_id == other.experiment_id && self.runner_id == other.runner_id
+        self.experiment_id == other.experiment_id
+            && self.runner_id == other.runner_id
+            && self.completed_run_retention_games == other.completed_run_retention_games
     }
 
     fn absorb(&mut self, mut other: Self) {
@@ -545,6 +549,7 @@ fn flush_postgres_completed_runs(
     runner_id: &str,
     pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
     pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+    completed_run_retention_games: usize,
 ) -> Result<usize, String> {
     if pending_policy_versions.is_empty() && pending_runs.is_empty() {
         return Ok(0);
@@ -618,6 +623,16 @@ fn flush_postgres_completed_runs(
     let batch_size = inserts.len();
     let run_ids = store.insert_completed_runs(experiment_id, runner_id, &inserts)?;
     drop(inserts);
+    if completed_run_retention_games > 0 {
+        let prune = store
+            .prune_completed_runs_for_experiment(experiment_id, completed_run_retention_games)?;
+        if prune.deleted_runs > 0 || prune.deleted_delta_rows > 0 {
+            println!(
+                "postgres_completed_run_retention keep_latest_runs={} deleted_runs={} deleted_delta_rows={}",
+                completed_run_retention_games, prune.deleted_runs, prune.deleted_delta_rows
+            );
+        }
+    }
     if let (Some(first), Some(last), Some(first_run_id), Some(last_run_id)) = (
         pending_runs.first(),
         pending_runs.last(),
@@ -664,6 +679,7 @@ fn flush_postgres_policy_versions_for_new_sims(
         runner_id,
         pending_policy_versions,
         &mut pending_runs,
+        0,
     )?;
     println!(
         "postgres_policy_versions_flushed_for_new_sims policy_versions_written={pending_count}"
@@ -760,6 +776,7 @@ impl AsyncPostgresCompletedRunWriter {
                     &batch.runner_id,
                     &mut batch.pending_policy_versions,
                     &mut batch.pending_runs,
+                    batch.completed_run_retention_games,
                 );
                 let _ = result_sender.send(PostgresCompletedRunWriteResult {
                     queue_batches,
@@ -836,6 +853,7 @@ impl AsyncPostgresCompletedRunWriter {
         runner_id: &str,
         pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
         pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+        completed_run_retention_games: usize,
     ) -> Result<usize, String> {
         let persisted = self.drain_finished()?;
         if pending_policy_versions.is_empty() && pending_runs.is_empty() {
@@ -848,6 +866,7 @@ impl AsyncPostgresCompletedRunWriter {
         let batch = PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            completed_run_retention_games,
             policy_version_batches,
             pending_policy_versions: std::mem::take(pending_policy_versions),
             pending_runs: std::mem::take(pending_runs),
@@ -1041,6 +1060,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         "SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES",
         default_postgres_completed_run_batch_games(parallel_games),
     )?;
+    let pg_completed_run_retention_games = env_usize_alias(
+        "SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_RETENTION_GAMES",
+        "SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES",
+        DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_RETENTION_GAMES,
+    )?;
     let pg_completed_run_async_queue_batches = env_usize_alias(
         "SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE",
         "SOCCER_POSTGRES_ASYNC_BATCH_QUEUE",
@@ -1212,8 +1236,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_policy_version_buffer = Vec::<PendingPostgresPolicyVersion>::new();
     let mut pg_completed_buffer = Vec::<PendingPostgresCompletedRun>::new();
     let mut pg_episode_starting_policy_versions = HashMap::<usize, (Option<String>, i32)>::new();
-    let mut episode_starting_tactical_weights =
-        HashMap::<usize, SoccerTacticalLearningWeights>::new();
     let mut pg_persisted_games = 0usize;
 
     let mut initial_policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
@@ -1273,7 +1295,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     println!(
-        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_snapshot_every_batches={} neural_drain_timeout_ms={} postgres_required={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={} pg_tactical_learning_authoritative={} pg_refresh_with_resume_artifact={} pg_flush_policy_versions_before_new_sim={}",
+        "soccer_learning_queue_start run_id={} games={} parallel_games={} minutes={:.1} dt={:.3}s ticks_per_game={} seed={} neural_enabled={} neural_backend={:?} neural_snapshot_every_batches={} neural_drain_timeout_ms={} postgres_required={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_run_retention_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={} pg_tactical_learning_authoritative={} pg_refresh_with_resume_artifact={} pg_flush_policy_versions_before_new_sim={}",
         run_id,
         games,
         parallel_games,
@@ -1288,6 +1310,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         postgres_required,
         pg_policy_version_interval_games,
         pg_completed_run_batch_games,
+        pg_completed_run_retention_games,
         pg_completed_writer.is_some(),
         pg_completed_run_async_queue_batches,
         pg_completed_run_async_coalesce_batches,
@@ -1455,8 +1478,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                         match_config.tactical_learning = tactical_learning.clone();
                         active_config = match_config.clone();
                     }
-                    episode_starting_tactical_weights
-                        .insert(next_episode, match_config.tactical_learning.clone());
                     if pg_experiment_id.is_some() {
                         pg_episode_starting_policy_versions.insert(
                             next_episode,
@@ -1471,9 +1492,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 } => {
                     queue_completed_games_seen = queue_completed_games_seen.saturating_add(1);
                     let game_fitness = game.score.match_fitness;
-                    let game_tactical_weights = episode_starting_tactical_weights
-                        .remove(&game.episode)
-                        .unwrap_or_else(|| active_config.tactical_learning.clone());
+                    let game_tactical_weights = game.starting_tactical_learning.clone();
                     tactical_evolution_samples.push_back(TacticalEvolutionSample {
                         summary: game.tactical_summary.clone(),
                         weights: game_tactical_weights,
@@ -1685,6 +1704,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 &run_id,
                                 &mut pg_policy_version_buffer,
                                 &mut pg_completed_buffer,
+                                pg_completed_run_retention_games,
                             )?
                         } else if let Some(store) = pg_store.as_mut() {
                             flush_postgres_completed_runs(
@@ -1693,6 +1713,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 &run_id,
                                 &mut pg_policy_version_buffer,
                                 &mut pg_completed_buffer,
+                                pg_completed_run_retention_games,
                             )?
                         } else {
                             0
@@ -1728,6 +1749,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     &run_id,
                     &mut pg_policy_version_buffer,
                     &mut pg_completed_buffer,
+                    pg_completed_run_retention_games,
                 )
                 .map_err(invalid_data)?
         } else if let Some(store) = pg_store.as_mut() {
@@ -1737,6 +1759,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &run_id,
                 &mut pg_policy_version_buffer,
                 &mut pg_completed_buffer,
+                pg_completed_run_retention_games,
             )
             .map_err(invalid_data)?
         } else {
@@ -1787,6 +1810,7 @@ mod tests {
         PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            completed_run_retention_games: 0,
             policy_version_batches: 0,
             pending_policy_versions: Vec::new(),
             pending_runs: Vec::new(),
@@ -1805,6 +1829,14 @@ mod tests {
         assert_eq!(default_postgres_completed_run_batch_games(4), 10);
         assert_eq!(default_postgres_completed_run_batch_games(16), 16);
         assert_eq!(default_postgres_completed_run_batch_games(64), 64);
+    }
+
+    #[test]
+    fn default_queue_postgres_completed_run_retention_is_disabled() {
+        assert_eq!(
+            DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_RETENTION_GAMES,
+            0
+        );
     }
 
     #[test]
@@ -1904,6 +1936,51 @@ mod tests {
     }
 
     #[test]
+    fn queue_new_sims_sample_latest_postgres_tactical_weights() {
+        let mut active_weights = SoccerTacticalLearningWeights::default();
+        let mut active_config = MatchConfig {
+            tactical_learning: active_weights.clone(),
+            ..Default::default()
+        };
+        let mut samples = Vec::new();
+
+        for episode in 0..3 {
+            let mut postgres_weights = SoccerTacticalLearningWeights::default();
+            postgres_weights.attack_flank_lane_weight = 1.10 + episode as f64 * 0.07;
+            postgres_weights.defense_contract_delta_weight = 0.90 + episode as f64 * 0.05;
+
+            maybe_apply_postgres_tactical_learning(
+                "test_postgres_refresh_tactical_learning_for_queue",
+                episode + 1,
+                &format!("pg-v-{episode}"),
+                episode as i32,
+                &mut active_config,
+                &mut active_weights,
+                Some(postgres_weights),
+            )
+            .expect("valid postgres tactical learning weights");
+            samples.push(TacticalEvolutionSample {
+                summary: SoccerTacticalLearningSummary::default(),
+                weights: active_config.tactical_learning.clone(),
+                fitness: 1.0 + episode as f64,
+            });
+        }
+
+        assert_eq!(samples.len(), 3);
+        for (episode, sample) in samples.iter().enumerate() {
+            assert!(
+                (sample.weights.attack_flank_lane_weight - (1.10 + episode as f64 * 0.07)).abs()
+                    < 1e-12
+            );
+            assert!(
+                (sample.weights.defense_contract_delta_weight - (0.90 + episode as f64 * 0.05))
+                    .abs()
+                    < 1e-12
+            );
+        }
+    }
+
+    #[test]
     fn queue_tactical_samples_carry_episode_starting_weight_genomes() {
         let base = SoccerTacticalLearningWeights::default();
         let mut pg_weights = base.clone();
@@ -1956,10 +2033,13 @@ mod tests {
     #[test]
     fn queue_postgres_batches_only_coalesce_for_same_run() {
         let mut batch = empty_pg_batch("experiment-a", "runner-a");
+        let mut different_retention = empty_pg_batch("experiment-a", "runner-a");
+        different_retention.completed_run_retention_games = 10;
 
         assert!(batch.can_absorb(&empty_pg_batch("experiment-a", "runner-a")));
         assert!(!batch.can_absorb(&empty_pg_batch("experiment-b", "runner-a")));
         assert!(!batch.can_absorb(&empty_pg_batch("experiment-a", "runner-b")));
+        assert!(!batch.can_absorb(&different_retention));
 
         batch.absorb(empty_pg_batch("experiment-a", "runner-a"));
         assert!(batch.pending_policy_versions.is_empty());

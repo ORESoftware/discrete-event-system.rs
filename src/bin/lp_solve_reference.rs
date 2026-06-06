@@ -1,11 +1,44 @@
 use des_engine::des::general::lp::{
-    solve_lp_internal, InternalSimplexOptions, LPProblem, LPStatus, Sense,
+    solve_lp_internal, solve_lp_internal_ipm, InternalInteriorPointOptions, InternalSimplexOptions,
+    LPProblem, LPStatus, Sense,
 };
 use serde_json::{json, Value};
 use std::io::{self, Read};
 
 #[derive(Debug)]
 struct CliError(String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferenceLpMethod {
+    InternalSimplex,
+    InternalIpm,
+}
+
+impl ReferenceLpMethod {
+    fn from_cli(method: &str) -> Result<Self, CliError> {
+        let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+        match normalized.as_str() {
+            "" | "rust" | "fallback" | "internal" | "internal-simplex" | "simplex"
+            | "revised-simplex" | "highs" | "highs-ds" | "highs-simplex" | "scipy:highs"
+            | "scipy:highs-ds" | "scipy:simplex" | "scipy:revised-simplex" | "glop"
+            | "ortools:glop" | "pdlp" | "ortools:pdlp" => Ok(Self::InternalSimplex),
+            "internal-ipm" | "internal-interior-point" | "ipm" | "interior-point"
+            | "highs-ipm" | "scipy:highs-ipm" | "scipy:interior-point" => {
+                Ok(Self::InternalIpm)
+            }
+            other => Err(CliError(format!(
+                "unsupported Rust LP reference method {other:?}; use rust/internal-simplex/internal-ipm"
+            ))),
+        }
+    }
+
+    fn solver_label(self) -> &'static str {
+        match self {
+            Self::InternalSimplex => "rust:internal-simplex",
+            Self::InternalIpm => "rust:internal-ipm",
+        }
+    }
+}
 
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -14,7 +47,7 @@ impl std::fmt::Display for CliError {
 }
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--method rust|fallback|internal|internal-simplex]")
+    format!("usage: {program} [--method rust|fallback|internal|internal-simplex|internal-ipm]")
 }
 
 fn next_option_value(
@@ -36,7 +69,10 @@ fn next_option_value(
         .ok_or_else(|| CliError(format!("{flag} requires a value\n{}", usage(program))))
 }
 
-fn parse_args(program: &str, mut args: impl Iterator<Item = String>) -> Result<String, CliError> {
+fn parse_args(
+    program: &str,
+    mut args: impl Iterator<Item = String>,
+) -> Result<ReferenceLpMethod, CliError> {
     let mut method = "rust".to_string();
     while let Some(arg) = args.next() {
         let (flag, inline) = arg
@@ -53,7 +89,7 @@ fn parse_args(program: &str, mut args: impl Iterator<Item = String>) -> Result<S
             }
         }
     }
-    Ok(method)
+    ReferenceLpMethod::from_cli(&method)
 }
 
 fn get_any<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
@@ -287,7 +323,11 @@ fn optional_string_vec(value: &Option<Vec<String>>) -> Value {
     value.as_ref().map_or(Value::Null, |items| json!(items))
 }
 
-fn solution_json(solution: des_engine::des::general::lp::LPSolution, offset: f64) -> Value {
+fn solution_json(
+    solution: des_engine::des::general::lp::LPSolution,
+    offset: f64,
+    method: ReferenceLpMethod,
+) -> Value {
     let objective = if solution.status == LPStatus::Optimal && solution.objective.is_finite() {
         json!(solution.objective + offset)
     } else {
@@ -298,8 +338,8 @@ fn solution_json(solution: des_engine::des::general::lp::LPSolution, offset: f64
         "x": if solution.status == LPStatus::Optimal { json!(solution.x) } else { json!([]) },
         "objective": objective,
         "iters": solution.iters,
-        "solver": "rust:internal-simplex",
-        "message": solution.message.unwrap_or_else(|| "Rust internal simplex".to_string()),
+        "solver": method.solver_label(),
+        "message": solution.message.unwrap_or_else(|| format!("{} reference", method.solver_label())),
         "elapsedMs": solution.elapsed_ms,
     });
     if let Some(object) = out.as_object_mut() {
@@ -340,14 +380,19 @@ fn run(raw_args: Vec<String>, stdin: &str) -> Result<Value, CliError> {
         .first()
         .cloned()
         .unwrap_or_else(|| "lp_solve_reference".to_string());
-    let _method = parse_args(&program, raw_args.into_iter().skip(1))?;
+    let method = parse_args(&program, raw_args.into_iter().skip(1))?;
     let payload: Value = serde_json::from_str(stdin)
         .map_err(|err| CliError(format!("failed to parse JSON input: {err}")))?;
     let (lp, offset) = parse_lp(&payload)?;
-    Ok(solution_json(
-        solve_lp_internal(&lp, &InternalSimplexOptions::default()),
-        offset,
-    ))
+    let solution = match method {
+        ReferenceLpMethod::InternalSimplex => {
+            solve_lp_internal(&lp, &InternalSimplexOptions::default())
+        }
+        ReferenceLpMethod::InternalIpm => {
+            solve_lp_internal_ipm(&lp, &InternalInteriorPointOptions::default())
+        }
+    };
+    Ok(solution_json(solution, offset, method))
 }
 
 fn main() {
@@ -405,6 +450,38 @@ mod tests {
 
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["objective"], 7.5);
+    }
+
+    #[test]
+    fn method_alias_can_select_native_interior_point() {
+        let output = run(
+            vec![
+                "lp_solve_reference".to_string(),
+                "--method=scipy:interior-point".to_string(),
+            ],
+            r#"{"c":[1,1],"A_ub":[[1,0],[0,1]],"b_ub":[4,3],"sense":"max"}"#,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(output["solver"], "rust:internal-ipm");
+        assert!((output["objective"].as_f64().expect("objective") - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn unsupported_method_fails_before_python_is_needed() {
+        let err = run(
+            vec![
+                "lp_solve_reference".to_string(),
+                "--method=python-only".to_string(),
+            ],
+            r#"{"c":[1],"sense":"max"}"#,
+        )
+        .expect_err("unsupported method should fail");
+
+        assert!(err
+            .to_string()
+            .contains("unsupported Rust LP reference method"));
     }
 
     #[test]

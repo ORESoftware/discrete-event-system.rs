@@ -119,6 +119,7 @@ pub struct SoccerLearningCompletedGame {
     pub summary: MatchSummary,
     pub episode_summary: SoccerSelfPlayEpisodeSummary,
     pub tactical_summary: SoccerTacticalLearningSummary,
+    pub starting_tactical_learning: SoccerTacticalLearningWeights,
     pub policies: SoccerTeamQPolicies,
     pub score: SoccerLearningRunScore,
     pub delta: SoccerLearningPolicyDelta,
@@ -186,13 +187,13 @@ pub struct SoccerEvolutionOptions {
 impl Default for SoccerEvolutionOptions {
     fn default() -> Self {
         Self {
-            mutation_rate: 0.025,
-            mutation_scale: 0.18,
-            crossover_rate: 0.35,
-            exploration_rate: 0.04,
-            exploration_scale: 0.45,
+            mutation_rate: 0.04,
+            mutation_scale: 0.22,
+            crossover_rate: 0.45,
+            exploration_rate: 0.06,
+            exploration_scale: 0.55,
             elite_weight_floor: 0.05,
-            population_size: 4,
+            population_size: 8,
             seed: 2026,
         }
     }
@@ -786,6 +787,24 @@ fn search_soccer_tactical_strategy_candidates<F>(
         wide_flank.attack_flank_lane_weight += attack_flank_gap * 0.30 + attack_pressure * 0.12;
         wide_flank.attack_spacing_delta_weight += attack_spacing_gap * 0.08;
         visit(wide_flank);
+
+        let mut flank_overload = base.clone();
+        flank_overload.attack_width_delta_weight +=
+            attack_width_gap * 0.30 + attack_flank_gap * 0.10;
+        flank_overload.attack_width_score_weight += attack_width_gap * 0.09;
+        flank_overload.attack_flank_lane_weight += attack_flank_gap * 0.38 + attack_pressure * 0.18;
+        flank_overload.attack_spacing_delta_weight +=
+            attack_spacing_gap * 0.12 + attack_pressure * 0.04;
+        flank_overload.attack_spacing_score_weight += attack_spacing_gap * 0.04;
+        visit(flank_overload);
+
+        let mut spread_support = base.clone();
+        spread_support.attack_spacing_delta_weight +=
+            attack_spacing_gap * 0.20 + attack_pressure * 0.06;
+        spread_support.attack_spacing_score_weight += attack_spacing_gap * 0.10;
+        spread_support.attack_width_delta_weight += attack_width_gap * 0.16;
+        spread_support.attack_flank_lane_weight += attack_flank_gap * 0.20;
+        visit(spread_support);
     }
 
     if defense_pressure > 1e-12 {
@@ -798,6 +817,26 @@ fn search_soccer_tactical_strategy_candidates<F>(
         compact_defense.defender_midfielder_press_weight += press_gap * 0.04;
         compact_defense.midfielder_press_weight += press_gap * 0.035;
         visit(compact_defense);
+
+        let mut deep_compact_block = base.clone();
+        deep_compact_block.defense_contract_delta_weight +=
+            defense_contract_gap * 0.34 + defense_pressure * 0.14;
+        deep_compact_block.defense_compactness_score_weight += defense_contract_gap * 0.22;
+        deep_compact_block.defense_spacing_delta_weight += defense_spacing_gap * 0.07;
+        deep_compact_block.defense_spacing_score_weight += defense_spacing_gap * 0.04;
+        deep_compact_block.defense_ball_depth_score_weight +=
+            defense_ball_gap * 0.12 + defense_pressure * 0.04;
+        visit(deep_compact_block);
+
+        let mut press_contract = base.clone();
+        press_contract.defense_contract_delta_weight +=
+            defense_contract_gap * 0.24 + press_gap * 0.08;
+        press_contract.defense_compactness_score_weight += defense_contract_gap * 0.14;
+        press_contract.defender_midfielder_press_weight +=
+            press_gap * 0.08 + defense_pressure * 0.025;
+        press_contract.midfielder_press_weight += press_gap * 0.07 + defense_pressure * 0.020;
+        press_contract.defense_ball_depth_score_weight += defense_ball_gap * 0.05;
+        visit(press_contract);
     }
 
     if shape_pressure > 1e-12 {
@@ -1286,6 +1325,7 @@ fn run_soccer_learning_game_from_snapshot(
     let started = Instant::now();
     config.seed = config.seed.wrapping_add(episode as u32);
     let seed = config.seed as u64;
+    let starting_tactical_learning = config.tactical_learning.clone();
     let total_ticks = config.total_ticks();
     let mut sim =
         SoccerMatch::default_11v11(config).with_team_policies((*starting_policies).clone());
@@ -1324,6 +1364,7 @@ fn run_soccer_learning_game_from_snapshot(
         summary: episode_summary.summary.clone(),
         episode_summary,
         tactical_summary: artifact.tactical_summary,
+        starting_tactical_learning,
         policies,
         score,
         delta,
@@ -2208,6 +2249,18 @@ mod tests {
     }
 
     #[test]
+    fn default_evolution_options_keep_genetic_search_broad() {
+        let options = SoccerEvolutionOptions::default();
+
+        assert!(options.population_size >= 8);
+        assert!(options.mutation_rate >= 0.04);
+        assert!(options.mutation_scale >= 0.20);
+        assert!(options.crossover_rate >= 0.40);
+        assert!(options.exploration_rate >= 0.05);
+        assert!(options.exploration_scale >= 0.50);
+    }
+
+    #[test]
     fn pending_policy_stays_active_only_when_latest_head_matches_parent() {
         assert_eq!(
             soccer_policy_version_insert_status_after_active_head(
@@ -2612,6 +2665,41 @@ mod tests {
     }
 
     #[test]
+    fn tactical_strategy_candidate_families_search_more_shape_space() {
+        let base = SoccerTacticalLearningWeights::default();
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.15,
+            mean_attack_flank_lane_score: 0.12,
+            mean_attack_spacing_score: 0.30,
+            mean_defense_contract_score: 0.16,
+            mean_defense_spacing_score: 0.35,
+            mean_defense_ball_gap_score: 0.45,
+            mean_defense_role_press_score: 0.38,
+            ..Default::default()
+        };
+        let mut candidates = Vec::new();
+        search_soccer_tactical_strategy_candidates(&base, &summary, |candidate| {
+            candidates.push(candidate);
+        });
+
+        assert!(candidates.len() >= 7);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.attack_flank_lane_weight >= base.attack_flank_lane_weight + 0.40
+                && candidate.attack_spacing_delta_weight > base.attack_spacing_delta_weight
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.defense_contract_delta_weight >= base.defense_contract_delta_weight + 0.35
+                && candidate.defense_ball_depth_score_weight
+                    >= base.defense_ball_depth_score_weight + 0.09
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.defender_midfielder_press_weight
+                >= base.defender_midfielder_press_weight + 0.06
+                && candidate.midfielder_press_weight >= base.midfielder_press_weight + 0.05
+        }));
+    }
+
+    #[test]
     fn tactical_population_search_keeps_best_weight_candidate() {
         let base = SoccerTacticalLearningWeights::default();
         let summary = SoccerTacticalLearningSummary {
@@ -2793,6 +2881,68 @@ mod tests {
         assert!(saw_starting_batch);
         assert_eq!(report.completed_games, 1);
         assert_eq!(report.failed_games, 0);
+    }
+
+    #[test]
+    fn queue_completed_game_carries_episode_starting_tactical_weights() {
+        let options = SoccerQPolicyOptions::default();
+        let mut completed_weights = Vec::new();
+        let report = run_soccer_learning_queue_with_events(
+            SoccerLearningQueueRunnerConfig {
+                games: 2,
+                parallel_games: 1,
+                base_seed: 2007,
+                match_config: MatchConfig {
+                    duration_seconds: 0.0,
+                    half_duration_seconds: 0.0,
+                    learning_logging_enabled: false,
+                    max_human_players: 0,
+                    ..Default::default()
+                },
+                initial_neural_network: None,
+                neural_drain_timeout: Duration::from_millis(0),
+                options: options.clone(),
+                prune_action_entries_per_team: 0,
+                prune_target_entries_per_team: 0,
+                min_policy_visits: 0,
+            },
+            SoccerTeamQPolicies::new(options),
+            |event| {
+                match event {
+                    SoccerLearningQueueEvent::StartingBatch {
+                        next_episode,
+                        match_config,
+                        ..
+                    } => {
+                        match_config.tactical_learning.attack_flank_lane_weight =
+                            0.90 + next_episode as f64 * 0.05;
+                        match_config.tactical_learning.defense_contract_delta_weight =
+                            0.70 + next_episode as f64 * 0.03;
+                    }
+                    SoccerLearningQueueEvent::CompletedGame { game, .. } => {
+                        completed_weights.push((
+                            game.episode,
+                            game.starting_tactical_learning.attack_flank_lane_weight,
+                            game.starting_tactical_learning
+                                .defense_contract_delta_weight,
+                        ));
+                    }
+                }
+                Ok(())
+            },
+        )
+        .expect("queue run");
+
+        assert_eq!(report.completed_games, 2);
+        assert_eq!(report.failed_games, 0);
+        assert_eq!(completed_weights.len(), 2);
+        completed_weights.sort_by_key(|(episode, _, _)| *episode);
+        assert_eq!(completed_weights[0].0, 0);
+        assert!((completed_weights[0].1 - 0.90).abs() < 1e-12);
+        assert!((completed_weights[0].2 - 0.70).abs() < 1e-12);
+        assert_eq!(completed_weights[1].0, 1);
+        assert!((completed_weights[1].1 - 0.95).abs() < 1e-12);
+        assert!((completed_weights[1].2 - 0.73).abs() < 1e-12);
     }
 
     #[test]

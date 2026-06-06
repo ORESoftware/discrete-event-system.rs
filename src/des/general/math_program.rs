@@ -5272,10 +5272,10 @@ impl Default for MathProgramSolveOptions {
 /// SciPy/SLSQP names use the native Rust quadratic reference unless a Python
 /// executable or script is explicitly provided.
 /// Python remains the fallback bridge for explicit OR-Tools, nonlinear oracles,
-/// and external API bindings that do not have a Rust route.
-/// Compatibility HiGHS, GLPK, SCIP, CBC, CLP, SoPlex, QSopt_ex, and lp_solve
-/// method names use the Rust CLI adapter for LP/MIP models unless a Python
-/// executable or script is explicitly provided.
+/// and external API bindings that do not have a Rust route. Compatibility
+/// HiGHS, GLPK, SCIP, CBC, CLP, SoPlex, QSopt_ex, lp_solve, Gurobi, CPLEX,
+/// Xpress, and LINDO method names use the Rust CLI adapter for LP/MIP models
+/// unless a Python executable or script is explicitly provided.
 /// The Python bridge remains a fallback when an explicit bridge is requested
 /// but its optional Python solver stack is missing.
 #[derive(Clone, Debug, Default)]
@@ -9441,6 +9441,10 @@ fn parse_external_math_program_default_linear_cli_method(
         "soplex" => Some(ExternalLinearCliSolver::Soplex),
         "qsopt" | "qsopt-ex" => Some(ExternalLinearCliSolver::QsoptEx),
         "lp-solve" | "lpsolve" => Some(ExternalLinearCliSolver::LpSolve),
+        "gurobi" | "gurobi-cl" => Some(ExternalLinearCliSolver::Gurobi),
+        "cplex" => Some(ExternalLinearCliSolver::Cplex),
+        "xpress" | "optimizer" => Some(ExternalLinearCliSolver::Xpress),
+        "lindo" | "runlindo" => Some(ExternalLinearCliSolver::Lindo),
         _ => None,
     }
 }
@@ -21805,6 +21809,13 @@ mod tests {
             ("soplex", ExternalLinearCliSolver::Soplex),
             ("qsopt_ex", ExternalLinearCliSolver::QsoptEx),
             ("lp-solve", ExternalLinearCliSolver::LpSolve),
+            ("gurobi:default", ExternalLinearCliSolver::Gurobi),
+            ("gurobi-cl", ExternalLinearCliSolver::Gurobi),
+            ("cplex:default", ExternalLinearCliSolver::Cplex),
+            ("xpress:default", ExternalLinearCliSolver::Xpress),
+            ("optimizer", ExternalLinearCliSolver::Xpress),
+            ("lindo:default", ExternalLinearCliSolver::Lindo),
+            ("runlindo", ExternalLinearCliSolver::Lindo),
         ] {
             assert_eq!(
                 resolve_external_math_program_linear_cli_solver(
@@ -21833,6 +21844,14 @@ mod tests {
             resolve_external_math_program_linear_cli_solver(&lp, &explicit_python, "cbc"),
             None
         );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &explicit_python,
+                "gurobi:default"
+            ),
+            None
+        );
 
         let custom_script = ExternalMathProgramOptions {
             script: Some("custom_bridge.py".to_string()),
@@ -21850,6 +21869,10 @@ mod tests {
             resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "soplex"),
             None
         );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "cplex:default"),
+            None
+        );
 
         let mut qp = MathProgram::new(ObjectiveSense::Min);
         let q = qp.add_continuous_var("q", 0.0, Some(0.0), None).unwrap();
@@ -21859,6 +21882,14 @@ mod tests {
                 &qp,
                 &ExternalMathProgramOptions::default(),
                 "highs"
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &qp,
+                &ExternalMathProgramOptions::default(),
+                "gurobi:default"
             ),
             None
         );

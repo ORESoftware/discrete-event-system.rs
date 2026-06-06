@@ -2505,7 +2505,9 @@ mod tests {
             .any(|(label, method)| *label == "ortools-pdlp"
                 && method.as_deref() == Some("ortools:PDLP")));
         assert_eq!(
-            methods.last().map(|(label, method)| (*label, method.as_ref())),
+            methods
+                .last()
+                .map(|(label, method)| (*label, method.as_ref())),
             Some(("default-rust-linear", None))
         );
         assert!(!methods.iter().any(|(label, _)| *label == "scipy-highs"));
@@ -2539,7 +2541,9 @@ mod tests {
             Some("highs-cli")
         );
         assert_eq!(
-            lp_methods.last().map(|(label, method)| (*label, method.as_ref())),
+            lp_methods
+                .last()
+                .map(|(label, method)| (*label, method.as_ref())),
             Some(("default-rust-linear", None))
         );
         assert!(!lp_methods.iter().any(|(label, _)| *label == "scipy-highs"));

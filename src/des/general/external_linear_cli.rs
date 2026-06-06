@@ -11852,8 +11852,7 @@ fn first_float_after_colon(line: &str) -> Option<f64> {
 
 fn first_float(text: &str) -> Option<f64> {
     text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '(' || ch == ')')
-        .filter_map(|token| token.trim().trim_end_matches('%').parse::<f64>().ok())
-        .next()
+        .find_map(parse_f64_token)
 }
 
 fn parse_f64_token(token: &str) -> Option<f64> {
@@ -14292,6 +14291,10 @@ e0                                                  1*
         assert_eq!(super::parse_f64_token("2*"), Some(2.0));
         assert_eq!(
             super::parse_f64_token("499999987/125000000"),
+            Some(3.999999896)
+        );
+        assert_eq!(
+            super::first_float("objective value 499999987/125000000"),
             Some(3.999999896)
         );
         assert_eq!(super::percent_gap_from_line("Gap: (7.5%),"), Some(0.075));

@@ -8775,6 +8775,29 @@ pub struct ControllerYieldStats {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerControllerSlotLatencyBudget {
+    pub controller_slot: usize,
+    pub assigned: bool,
+    pub player_id: Option<usize>,
+    pub pending: bool,
+    pub accepted_frames: u64,
+    pub pushed_frames: u64,
+    pub debounced_frames: u64,
+    pub latest_seq_seen: Option<u64>,
+    pub consumed_inputs: usize,
+    pub min_queue_age_ms: f64,
+    pub avg_queue_age_ms: f64,
+    pub max_queue_age_ms: f64,
+    pub last_debounce_ms: f64,
+    pub max_debounce_ms: f64,
+    pub last_yield_wait_ms: f64,
+    pub max_yield_wait_ms: f64,
+    pub estimated_control_latency_ms: f64,
+    pub over_budget: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerControllerLatencyBudget {
     pub tick_budget_ms: f64,
     pub consumed_inputs: usize,
@@ -8787,6 +8810,8 @@ pub struct SoccerControllerLatencyBudget {
     pub max_yield_wait_ms: f64,
     pub estimated_control_latency_ms: f64,
     pub over_budget: bool,
+    #[serde(default)]
+    pub slots: Vec<SoccerControllerSlotLatencyBudget>,
 }
 
 impl ControllerYieldStats {
@@ -34215,21 +34240,41 @@ impl SoccerRealtimeSession {
         controller_yield: ControllerYieldStats,
     ) -> SoccerControllerLatencyBudget {
         let tick_budget_ms = finite_metric((self.sim.config.dt_seconds * 1000.0).max(0.0));
+        let controller_assignments = self.sim.controller_assignments();
+        let mut slot_count = self.sim.config.human_slots();
+        for thread in controller_threads {
+            slot_count = slot_count.max(thread.controller_slot.saturating_add(1));
+        }
+        for assignment in &controller_assignments {
+            slot_count = slot_count.max(assignment.controller_slot.saturating_add(1));
+        }
+        slot_count = slot_count.min(4);
+        let mut queue_ages_by_slot = vec![Vec::<f64>::new(); slot_count];
         let mut consumed_inputs = 0usize;
         let mut min_queue_age_ms = f64::INFINITY;
         let mut max_queue_age_ms: f64 = 0.0;
         let mut total_queue_age_ms = 0.0;
-        for age_ms in frame.players.iter().filter_map(|player| {
-            player
-                .last_decision
-                .as_ref()
-                .and_then(|decision| decision.observation.human_input_queue_age_ms)
-        }) {
+        for player in &frame.players {
+            let Some(decision) = player.last_decision.as_ref() else {
+                continue;
+            };
+            let Some(age_ms) = decision.observation.human_input_queue_age_ms else {
+                continue;
+            };
             let age_ms = finite_metric(age_ms as f64).max(0.0);
             consumed_inputs += 1;
             total_queue_age_ms += age_ms;
             min_queue_age_ms = min_queue_age_ms.min(age_ms);
             max_queue_age_ms = max_queue_age_ms.max(age_ms);
+            let slot = decision
+                .observation
+                .controller_slot
+                .or(player.controller_slot);
+            if let Some(slot) = slot {
+                if slot < queue_ages_by_slot.len() {
+                    queue_ages_by_slot[slot].push(age_ms);
+                }
+            }
         }
         if consumed_inputs == 0 {
             min_queue_age_ms = 0.0;
@@ -34254,6 +34299,70 @@ impl SoccerRealtimeSession {
         } else {
             last_yield_wait_ms.max(last_debounce_ms)
         };
+        let mut player_id_by_slot = vec![None; slot_count];
+        for assignment in &controller_assignments {
+            if assignment.controller_slot < player_id_by_slot.len() {
+                player_id_by_slot[assignment.controller_slot] = Some(assignment.player_id);
+            }
+        }
+        let mut slots = Vec::with_capacity(slot_count);
+        for slot in 0..slot_count {
+            let thread = controller_threads
+                .iter()
+                .find(|thread| thread.controller_slot == slot)
+                .copied()
+                .unwrap_or_default();
+            let ages = &queue_ages_by_slot[slot];
+            let slot_consumed_inputs = ages.len();
+            let (slot_min_queue_age_ms, slot_avg_queue_age_ms, slot_max_queue_age_ms) =
+                if slot_consumed_inputs > 0 {
+                    let mut min_age = f64::INFINITY;
+                    let mut max_age: f64 = 0.0;
+                    let mut total_age = 0.0;
+                    for age in ages {
+                        let age = finite_metric(*age).max(0.0);
+                        min_age = min_age.min(age);
+                        max_age = max_age.max(age);
+                        total_age += age;
+                    }
+                    (min_age, total_age / slot_consumed_inputs as f64, max_age)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+            let slot_last_debounce_ms = finite_metric(thread.last_debounce_ms).max(0.0);
+            let slot_max_debounce_ms = finite_metric(thread.max_debounce_ms).max(0.0);
+            let assigned = player_id_by_slot[slot].is_some();
+            let slot_last_yield_wait_ms = if assigned { last_yield_wait_ms } else { 0.0 };
+            let slot_max_yield_wait_ms = if assigned { max_yield_wait_ms } else { 0.0 };
+            let slot_estimated_control_latency_ms = if slot_consumed_inputs > 0 {
+                slot_max_queue_age_ms + slot_last_debounce_ms
+            } else if assigned || thread.pending {
+                slot_last_yield_wait_ms.max(slot_last_debounce_ms)
+            } else {
+                slot_last_debounce_ms
+            };
+            slots.push(SoccerControllerSlotLatencyBudget {
+                controller_slot: slot,
+                assigned,
+                player_id: player_id_by_slot[slot],
+                pending: thread.pending,
+                accepted_frames: thread.accepted_frames,
+                pushed_frames: thread.pushed_frames,
+                debounced_frames: thread.debounced_frames,
+                latest_seq_seen: thread.latest_seq_seen,
+                consumed_inputs: slot_consumed_inputs,
+                min_queue_age_ms: slot_min_queue_age_ms,
+                avg_queue_age_ms: slot_avg_queue_age_ms,
+                max_queue_age_ms: slot_max_queue_age_ms,
+                last_debounce_ms: slot_last_debounce_ms,
+                max_debounce_ms: slot_max_debounce_ms,
+                last_yield_wait_ms: slot_last_yield_wait_ms,
+                max_yield_wait_ms: slot_max_yield_wait_ms,
+                estimated_control_latency_ms: slot_estimated_control_latency_ms,
+                over_budget: tick_budget_ms > 0.0
+                    && slot_estimated_control_latency_ms > tick_budget_ms,
+            });
+        }
         SoccerControllerLatencyBudget {
             tick_budget_ms,
             consumed_inputs,
@@ -34266,6 +34375,7 @@ impl SoccerRealtimeSession {
             max_yield_wait_ms,
             estimated_control_latency_ms,
             over_budget: tick_budget_ms > 0.0 && estimated_control_latency_ms > tick_budget_ms,
+            slots,
         }
     }
 
@@ -63600,6 +63710,10 @@ mod tests {
         assert!(html.body.contains("id=\"controllerBudget\""));
         assert!(html.body.contains("function controllerLatencyBudgetLabel"));
         assert!(html.body.contains("estimatedControlLatencyMs"));
+        assert!(html.body.contains("b.slots"));
+        assert!(html.body.contains("function slotLatencyBudgetLabel"));
+        assert!(html.body.contains("slot-health"));
+        assert!(html.body.contains("function updateSlotHealthRows"));
         assert!(html.body.contains("ballLastAction"));
         assert!(html.body.contains("brain.ballLastAction"));
         assert!(html.body.contains("drawGoalPosts"));
@@ -63770,6 +63884,15 @@ mod tests {
         );
         assert_eq!(state_value["controllerLatencyBudget"]["consumedInputs"], 0);
         assert_eq!(state_value["controllerLatencyBudget"]["overBudget"], false);
+        let state_budget_slots = state_value["controllerLatencyBudget"]["slots"]
+            .as_array()
+            .expect("controller budget slots");
+        assert_eq!(state_budget_slots.len(), 2);
+        assert_eq!(state_budget_slots[0]["controllerSlot"], 0);
+        assert_eq!(state_budget_slots[0]["assigned"], false);
+        assert_eq!(state_budget_slots[0]["playerId"], serde_json::Value::Null);
+        assert_eq!(state_budget_slots[0]["consumedInputs"], 0);
+        assert_eq!(state_budget_slots[0]["overBudget"], false);
         assert_eq!(state_value["queuedHumanInputs"], 0);
         assert_eq!(state_value["episodeIndex"], 0);
         assert!(state_value["completedEpisodes"]
@@ -63814,6 +63937,14 @@ mod tests {
         assert_eq!(value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
         assert_eq!(value["controllerLatencyBudget"]["consumedInputs"], 0);
         assert_eq!(value["controllerLatencyBudget"]["overBudget"], false);
+        let step_budget_slots = value["controllerLatencyBudget"]["slots"]
+            .as_array()
+            .expect("step controller budget slots");
+        assert_eq!(step_budget_slots.len(), 2);
+        assert_eq!(step_budget_slots[0]["controllerSlot"], 0);
+        assert_eq!(step_budget_slots[0]["assigned"], false);
+        assert_eq!(step_budget_slots[0]["consumedInputs"], 0);
+        assert_eq!(step_budget_slots[0]["overBudget"], false);
         assert!(
             value["frames"].as_array().unwrap().is_empty(),
             "live HTTP step response should avoid duplicating the current frame"
@@ -65383,6 +65514,10 @@ mod tests {
                     .unwrap()
         );
         assert_eq!(value["controllerLatencyBudget"]["overBudget"], false);
+        let budget_slots = value["controllerLatencyBudget"]["slots"]
+            .as_array()
+            .expect("controller latency budget slots");
+        assert_eq!(budget_slots.len(), 4);
         assert!(value["controllerYield"]["lastWaitMs"].as_f64().unwrap() >= 0.0);
         assert!(value["controllerYield"]["totalWaitMs"].as_f64().unwrap() >= 0.0);
         assert!(
@@ -65406,6 +65541,24 @@ mod tests {
                 thread_stats["maxDebounceMs"].as_f64().unwrap()
                     >= thread_stats["lastDebounceMs"].as_f64().unwrap()
             );
+            let slot_budget = budget_slots
+                .iter()
+                .find(|budget| budget["controllerSlot"] == slot)
+                .expect("slot latency budget");
+            assert_eq!(slot_budget["assigned"], true);
+            assert_eq!(slot_budget["playerId"], slot);
+            assert!(slot_budget["pending"].is_boolean());
+            assert!(slot_budget["acceptedFrames"].as_u64().unwrap() >= 1);
+            assert!(slot_budget["pushedFrames"].as_u64().unwrap() >= 1);
+            assert!(slot_budget["debouncedFrames"].as_u64().unwrap() >= 1);
+            assert!(slot_budget["consumedInputs"].as_u64().unwrap() >= 1);
+            assert!(
+                slot_budget["estimatedControlLatencyMs"].as_f64().unwrap()
+                    <= value["controllerLatencyBudget"]["tickBudgetMs"]
+                        .as_f64()
+                        .unwrap()
+            );
+            assert_eq!(slot_budget["overBudget"], false);
             assert!(value["controllerAssignments"]
                 .as_array()
                 .unwrap()
@@ -65684,6 +65837,29 @@ mod tests {
         assert_eq!(step_value["controllerYield"]["waitAttempts"], 1);
         assert_eq!(step_value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
         assert_eq!(step_value["controllerLatencyBudget"]["consumedInputs"], 1);
+        let budget_slots = step_value["controllerLatencyBudget"]["slots"]
+            .as_array()
+            .expect("controller latency budget slots");
+        assert_eq!(budget_slots.len(), 1);
+        assert_eq!(budget_slots[0]["controllerSlot"], 0);
+        assert_eq!(budget_slots[0]["assigned"], true);
+        assert_eq!(budget_slots[0]["playerId"], 0);
+        assert_eq!(budget_slots[0]["consumedInputs"], 1);
+        assert!(
+            budget_slots[0]["maxQueueAgeMs"].as_f64().unwrap()
+                <= step_value["controllerLatencyBudget"]["maxQueueAgeMs"]
+                    .as_f64()
+                    .unwrap()
+        );
+        assert!(
+            budget_slots[0]["estimatedControlLatencyMs"]
+                .as_f64()
+                .unwrap()
+                <= step_value["controllerLatencyBudget"]["tickBudgetMs"]
+                    .as_f64()
+                    .unwrap()
+        );
+        assert_eq!(budget_slots[0]["overBudget"], false);
         assert!(
             step_value["controllerLatencyBudget"]["estimatedControlLatencyMs"]
                 .as_f64()

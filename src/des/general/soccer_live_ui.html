@@ -204,6 +204,14 @@
     line-height: 1.25;
     overflow-wrap: anywhere;
   }
+  .slot .slot-health {
+    grid-column: 1 / 4;
+    color: #9fb0c7;
+    font-size: 11px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+  .slot .slot-health.over { color: #ffb4b4; }
   .surface-control {
     display: grid;
     grid-template-columns: 42px minmax(0, 1fr) 78px;
@@ -1218,7 +1226,34 @@ function controllerLatencyBudgetLabel(b = state?.controllerLatencyBudget) {
   const queue = Number(b.maxQueueAgeMs ?? 0);
   const debounce = Number(b.lastDebounceMs ?? 0);
   const yieldWait = Number(b.lastYieldWaitMs ?? 0);
-  return `${estimated.toFixed(1)}/${budget.toFixed(0)}ms ${status} C${consumed} Q${queue.toFixed(0)} Db${debounce.toFixed(1)} Y${yieldWait.toFixed(1)}`;
+  const slotBits = (Array.isArray(b.slots) ? b.slots : [])
+    .filter(slot => slot?.assigned || slot?.pending || Number(slot?.consumedInputs ?? 0) > 0)
+    .slice(0, 4)
+    .map(slot => {
+      const slotId = Number(slot.controllerSlot ?? 0);
+      const slotEstimate = Number(slot.estimatedControlLatencyMs ?? 0);
+      const over = slot.overBudget ? "!" : "";
+      const input = Number(slot.consumedInputs ?? 0) > 0 ? "i" : "";
+      return `S${slotId}:${slotEstimate.toFixed(1)}${input}${over}`;
+    });
+  const slotSuffix = slotBits.length ? ` ${slotBits.join(" ")}` : "";
+  return `${estimated.toFixed(1)}/${budget.toFixed(0)}ms ${status} C${consumed} Q${queue.toFixed(0)} Db${debounce.toFixed(1)} Y${yieldWait.toFixed(1)}${slotSuffix}`;
+}
+function slotLatencyBudget(slot, budget = state?.controllerLatencyBudget) {
+  const slots = Array.isArray(budget?.slots) ? budget.slots : [];
+  return slots.find(item => Number(item?.controllerSlot) === Number(slot)) || null;
+}
+function slotLatencyBudgetLabel(slot) {
+  const b = slotLatencyBudget(slot);
+  if (!b) return "latency pending";
+  const estimate = Number(b.estimatedControlLatencyMs ?? 0);
+  const queue = Number(b.maxQueueAgeMs ?? 0);
+  const debounce = Number(b.lastDebounceMs ?? 0);
+  const consumed = Number(b.consumedInputs ?? 0);
+  const pending = b.pending ? " pending" : "";
+  const input = consumed > 0 ? ` input${consumed}` : " idle";
+  const status = b.overBudget ? " over budget" : " ok";
+  return `${estimate.toFixed(1)}ms${status}${input}${pending} Q${queue.toFixed(0)} Db${debounce.toFixed(1)}`;
 }
 function policyAutosaveLabel(a) {
   if (!a) return "Off";
@@ -2442,6 +2477,7 @@ function render() {
   inputQueue.textContent = queuedHumanInputsLabel();
   controllerLatency.textContent = consumedHumanInputAgeLabel();
   controllerBudget.textContent = controllerLatencyBudgetLabel();
+  updateSlotHealthRows();
   tickReward.textContent = tickRewardLabel();
   recentActions.textContent = recentActionLabel();
   recentMoments.textContent = recentMomentLabel();
@@ -2705,10 +2741,15 @@ function rebuildControls(assignments) {
     const keymap = document.createElement("div");
     keymap.className = "keymap";
     keymap.textContent = controllerKeymapLabel(slot);
+    const health = document.createElement("div");
+    health.className = `slot-health${slotLatencyBudget(slot)?.overBudget ? " over" : ""}`;
+    health.dataset.slot = String(slot);
+    health.textContent = slotLatencyBudgetLabel(slot);
     row.appendChild(label);
     row.appendChild(pick);
     row.appendChild(activeButton);
     row.appendChild(keymap);
+    row.appendChild(health);
     slots.appendChild(row);
   }
   if (Array.from(slotPick.options).some(o => o.value === existing)) {
@@ -2718,6 +2759,14 @@ function rebuildControls(assignments) {
   }
   activeSlot = Number(slotPick.value || 0);
   rebuildTargetPick();
+}
+function updateSlotHealthRows() {
+  slots.querySelectorAll(".slot-health").forEach(node => {
+    const slot = Number(node.dataset.slot ?? 0);
+    const budget = slotLatencyBudget(slot);
+    node.textContent = slotLatencyBudgetLabel(slot);
+    node.classList.toggle("over", !!budget?.overBudget);
+  });
 }
 function rebuildTargetPick() {
   const existing = targetPick.value;

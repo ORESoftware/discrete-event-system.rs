@@ -26,7 +26,7 @@ use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Args {
     endpoint: String,
     payload_path: PathBuf,
@@ -65,6 +65,15 @@ struct PostgresImportSummary {
     generation: i32,
     status: &'static str,
     fitness: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ServerRequestChunk {
+    index: usize,
+    total_chunks: usize,
+    episode_offset: usize,
+    episodes: usize,
+    seed: u32,
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -198,6 +207,18 @@ fn env_usize(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
         Some(raw) => raw.parse::<usize>().map_err(|err| {
             invalid_input(format!(
                 "{name}={raw:?} is not a non-negative integer: {err}"
+            ))
+            .into()
+        }),
+        None => Ok(default),
+    }
+}
+
+fn env_usize_alias(primary: &str, alias: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    match env_value(primary).or_else(|| env_value(alias)) {
+        Some(raw) => raw.parse::<usize>().map_err(|err| {
+            invalid_input(format!(
+                "{primary}/{alias}={raw:?} is not a non-negative integer: {err}"
             ))
             .into()
         }),
@@ -415,8 +436,100 @@ fn postgres_initial_learned_params(
     )))
 }
 
-fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
-    let episodes = env_usize("SOCCER_GAMES", 100)?;
+fn server_request_chunks(
+    total_episodes: usize,
+    episodes_per_request: usize,
+    base_seed: u32,
+) -> Result<Vec<ServerRequestChunk>, Box<dyn Error>> {
+    if total_episodes == 0 {
+        return Err(invalid_input("SOCCER_GAMES must be at least 1").into());
+    }
+    if episodes_per_request == 0 {
+        return Err(invalid_input(
+            "SOCCER_SERVER_REQUEST_GAMES/SOCCER_SERVER_CHUNK_GAMES must be at least 1",
+        )
+        .into());
+    }
+    let total_chunks = total_episodes.div_ceil(episodes_per_request);
+    let mut chunks = Vec::with_capacity(total_chunks);
+    let mut episode_offset = 0usize;
+    while episode_offset < total_episodes {
+        let remaining = total_episodes - episode_offset;
+        let episodes = remaining.min(episodes_per_request);
+        chunks.push(ServerRequestChunk {
+            index: chunks.len(),
+            total_chunks,
+            episode_offset,
+            episodes,
+            seed: base_seed.wrapping_add(episode_offset as u32),
+        });
+        episode_offset += episodes;
+    }
+    Ok(chunks)
+}
+
+fn chunk_suffix(chunk: ServerRequestChunk) -> String {
+    format!("chunk-{:04}-of-{:04}", chunk.index + 1, chunk.total_chunks)
+}
+
+fn chunked_path(path: &Path, chunk: ServerRequestChunk) -> PathBuf {
+    if chunk.total_chunks <= 1 || chunk.index + 1 == chunk.total_chunks {
+        return path.to_path_buf();
+    }
+    let parent = path.parent();
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "request".into());
+    let mut file_name = format!("{}.{}", stem, chunk_suffix(chunk));
+    if let Some(extension) = path.extension().map(|value| value.to_string_lossy()) {
+        if !extension.is_empty() {
+            file_name.push('.');
+            file_name.push_str(&extension);
+        }
+    }
+    if let Some(dir) = parent {
+        dir.join(file_name)
+    } else {
+        PathBuf::from(file_name)
+    }
+}
+
+fn chunked_server_path(path: &str, chunk: ServerRequestChunk) -> String {
+    chunked_path(Path::new(path), chunk)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn args_for_server_chunk(args: &Args, chunk: ServerRequestChunk) -> Args {
+    if chunk.total_chunks <= 1 || chunk.index + 1 == chunk.total_chunks {
+        return args.clone();
+    }
+    Args {
+        endpoint: args.endpoint.clone(),
+        payload_path: chunked_path(&args.payload_path, chunk),
+        response_path: chunked_path(&args.response_path, chunk),
+        artifact_path: chunked_path(&args.artifact_path, chunk),
+        learned_params_path: chunked_path(&args.learned_params_path, chunk),
+        episode_log_path: chunked_path(&args.episode_log_path, chunk),
+        server_artifact_path: chunked_server_path(&args.server_artifact_path, chunk),
+        server_learned_params_path: chunked_server_path(&args.server_learned_params_path, chunk),
+        auth_header_name: args.auth_header_name.clone(),
+        auth_env_name: args.auth_env_name.clone(),
+        auth_value: args.auth_value.clone(),
+    }
+}
+
+fn build_payload(
+    args: &Args,
+    episodes_override: Option<usize>,
+    seed_override: Option<u32>,
+) -> Result<Value, Box<dyn Error>> {
+    let episodes = match episodes_override {
+        Some(episodes) => episodes,
+        None => env_usize("SOCCER_GAMES", 100)?,
+    };
     let minutes = env_f64("SOCCER_MINUTES", 90.0)?;
     let period_count = env_usize("SOCCER_HALVES", 2)?;
     let period_break_recovery_seconds = env_f64("SOCCER_PERIOD_BREAK_RECOVERY_SECONDS", 900.0)?;
@@ -427,7 +540,10 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
         "SOCCER_FORMATION_LP_ENABLED",
         default_config.formation_lp_enabled,
     )?;
-    let seed = env_u32("SOCCER_SEED", 2026)?;
+    let seed = match seed_override {
+        Some(seed) => seed,
+        None => env_u32("SOCCER_SEED", 2026)?,
+    };
     let alpha = env_f64("SOCCER_ALPHA", 0.20)?;
     let gamma = env_f64("SOCCER_GAMMA", 0.96)?;
     let attack_spacing_delta_weight = env_f64("SOCCER_ATTACK_SPACING_DELTA_WEIGHT", 0.22)?;
@@ -865,14 +981,34 @@ fn import_server_response_to_postgres(
     }))
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    let args = parse_args()?;
-    let payload = build_payload(&args)?;
+fn run_server_request(
+    args: &Args,
+    chunk: ServerRequestChunk,
+) -> Result<(ExtractedServerResponse, Option<PostgresImportSummary>), Box<dyn Error>> {
+    let payload = build_payload(args, Some(chunk.episodes), Some(chunk.seed))?;
     write_payload(&args.payload_path, &payload)?;
-    run_curl(&args)?;
-    let response = extract_response(&args)?;
+    run_curl(args)?;
+    let response = extract_response(args)?;
     let postgres_import = import_server_response_to_postgres(&payload, &response)?;
+    Ok((response, postgres_import))
+}
 
+fn print_server_response_summary(
+    args: &Args,
+    chunk: ServerRequestChunk,
+    response: &ExtractedServerResponse,
+    postgres_import: Option<&PostgresImportSummary>,
+) {
+    if chunk.total_chunks > 1 {
+        println!(
+            "server_request_chunk={}/{} episode_offset={} requested_episodes={} seed={}",
+            chunk.index + 1,
+            chunk.total_chunks,
+            chunk.episode_offset,
+            chunk.episodes,
+            chunk.seed
+        );
+    }
     println!("server_response={}", args.response_path.display());
     println!("artifact={}", args.artifact_path.display());
     println!("learned_params={}", args.learned_params_path.display());
@@ -890,6 +1026,37 @@ fn run() -> Result<(), Box<dyn Error>> {
             import.status,
             import.fitness
         );
+    }
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    let args = parse_args()?;
+    let total_episodes = env_usize("SOCCER_GAMES", 100)?;
+    let base_seed = env_u32("SOCCER_SEED", 2026)?;
+    let episodes_per_request = env_usize_alias(
+        "SOCCER_SERVER_REQUEST_GAMES",
+        "SOCCER_SERVER_CHUNK_GAMES",
+        total_episodes,
+    )?;
+    let chunks = server_request_chunks(total_episodes, episodes_per_request, base_seed)?;
+    if chunks.len() > 1 {
+        println!(
+            "server_request_chunking total_episodes={} request_episodes={} chunks={}",
+            total_episodes,
+            episodes_per_request,
+            chunks.len()
+        );
+    }
+
+    let mut total_response_episodes = 0usize;
+    for chunk in chunks.iter().copied() {
+        let chunk_args = args_for_server_chunk(&args, chunk);
+        let (response, postgres_import) = run_server_request(&chunk_args, chunk)?;
+        total_response_episodes = total_response_episodes.saturating_add(response.episodes);
+        print_server_response_summary(&chunk_args, chunk, &response, postgres_import.as_ref());
+    }
+    if chunks.len() > 1 {
+        println!("server_request_total_episodes={total_response_episodes}");
     }
     Ok(())
 }
@@ -957,6 +1124,108 @@ mod tests {
         assert!(label.ends_with("-server-e000123"));
         assert!(!label.contains(' '));
         assert!(!label.contains('!'));
+    }
+
+    #[test]
+    fn server_request_chunks_split_episodes_and_advance_seed() {
+        let chunks = server_request_chunks(100, 25, 2026).expect("chunks");
+
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(
+            chunks,
+            vec![
+                ServerRequestChunk {
+                    index: 0,
+                    total_chunks: 4,
+                    episode_offset: 0,
+                    episodes: 25,
+                    seed: 2026,
+                },
+                ServerRequestChunk {
+                    index: 1,
+                    total_chunks: 4,
+                    episode_offset: 25,
+                    episodes: 25,
+                    seed: 2051,
+                },
+                ServerRequestChunk {
+                    index: 2,
+                    total_chunks: 4,
+                    episode_offset: 50,
+                    episodes: 25,
+                    seed: 2076,
+                },
+                ServerRequestChunk {
+                    index: 3,
+                    total_chunks: 4,
+                    episode_offset: 75,
+                    episodes: 25,
+                    seed: 2101,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn server_request_chunks_keep_tail_size() {
+        let chunks = server_request_chunks(103, 25, 7).expect("chunks");
+
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(chunks.last().expect("tail").episode_offset, 100);
+        assert_eq!(chunks.last().expect("tail").episodes, 3);
+        assert_eq!(chunks.last().expect("tail").seed, 107);
+    }
+
+    #[test]
+    fn server_request_chunks_reject_zero_size() {
+        assert!(server_request_chunks(100, 0, 2026).is_err());
+        assert!(server_request_chunks(0, 10, 2026).is_err());
+    }
+
+    #[test]
+    fn server_chunk_args_suffix_intermediate_files_but_keep_final_outputs() {
+        let args = Args {
+            endpoint: "https://example.invalid/des-rs/api/train-self-play".to_string(),
+            payload_path: PathBuf::from("out/run/payload.json"),
+            response_path: PathBuf::from("out/run/response.json"),
+            artifact_path: PathBuf::from("out/run/artifact.json"),
+            learned_params_path: PathBuf::from("out/run/learned-params.json"),
+            episode_log_path: PathBuf::from("out/run/episodes.jsonl"),
+            server_artifact_path: "out/server/artifact.json".to_string(),
+            server_learned_params_path: "out/server/learned-params.json".to_string(),
+            auth_header_name: "Auth".to_string(),
+            auth_env_name: Some("DES_RS_AUTH".to_string()),
+            auth_value: None,
+        };
+        let first = ServerRequestChunk {
+            index: 0,
+            total_chunks: 3,
+            episode_offset: 0,
+            episodes: 10,
+            seed: 11,
+        };
+        let final_chunk = ServerRequestChunk {
+            index: 2,
+            total_chunks: 3,
+            episode_offset: 20,
+            episodes: 10,
+            seed: 31,
+        };
+
+        let first_args = args_for_server_chunk(&args, first);
+        let final_args = args_for_server_chunk(&args, final_chunk);
+
+        assert_eq!(
+            first_args.payload_path,
+            PathBuf::from("out/run/payload.chunk-0001-of-0003.json")
+        );
+        assert_eq!(
+            first_args.server_artifact_path,
+            "out/server/artifact.chunk-0001-of-0003.json"
+        );
+        assert_eq!(final_args.payload_path, args.payload_path);
+        assert_eq!(final_args.artifact_path, args.artifact_path);
+        assert_eq!(final_args.server_artifact_path, args.server_artifact_path);
     }
 
     #[test]

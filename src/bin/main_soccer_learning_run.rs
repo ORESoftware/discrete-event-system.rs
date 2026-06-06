@@ -36,6 +36,7 @@ use uuid::Uuid;
 const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 0;
 const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
+const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES: usize = 0;
 const DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE: usize = 4;
 const DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES: usize = 8;
 const DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS: usize = 2;
@@ -869,6 +870,7 @@ struct PendingPostgresPolicyVersion {
 struct PostgresCompletedRunBatch {
     experiment_id: String,
     runner_id: String,
+    completed_run_retention_games: usize,
     policy_version_batches: usize,
     pending_policy_versions: Vec<PendingPostgresPolicyVersion>,
     pending_runs: Vec<PendingPostgresCompletedRun>,
@@ -880,6 +882,7 @@ impl PostgresCompletedRunBatch {
     fn can_absorb(&self, other: &Self) -> bool {
         self.experiment_id == other.experiment_id
             && self.runner_id == other.runner_id
+            && self.completed_run_retention_games == other.completed_run_retention_games
             && self.shard_index == other.shard_index
             && self.shard_count == other.shard_count
     }
@@ -997,6 +1000,7 @@ impl AsyncPostgresCompletedRunWriter {
                     &batch.runner_id,
                     &mut batch.pending_policy_versions,
                     &mut batch.pending_runs,
+                    batch.completed_run_retention_games,
                     batch.shard_index,
                     batch.shard_count,
                 )
@@ -1076,6 +1080,7 @@ impl AsyncPostgresCompletedRunWriter {
         runner_id: &str,
         pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
         pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+        completed_run_retention_games: usize,
         shard_index: usize,
         shard_count: usize,
     ) -> Result<usize, String> {
@@ -1090,6 +1095,7 @@ impl AsyncPostgresCompletedRunWriter {
         let batch = PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            completed_run_retention_games,
             policy_version_batches,
             pending_policy_versions: std::mem::take(pending_policy_versions),
             pending_runs: std::mem::take(pending_runs),
@@ -1484,6 +1490,7 @@ fn soccer_learning_completed_game_from_completed(
         summary,
         episode_summary: game.episode_summary.clone(),
         tactical_summary: game.artifact.tactical_summary.clone(),
+        starting_tactical_learning: game.starting_tactical_learning.clone(),
         policies: game.policies.clone(),
         score,
         delta,
@@ -1498,6 +1505,7 @@ fn flush_postgres_completed_runs(
     runner_id: &str,
     pending_policy_versions: &mut Vec<PendingPostgresPolicyVersion>,
     pending_runs: &mut Vec<PendingPostgresCompletedRun>,
+    completed_run_retention_games: usize,
     shard_index: usize,
     shard_count: usize,
 ) -> Result<usize, Box<dyn Error>> {
@@ -1577,6 +1585,17 @@ fn flush_postgres_completed_runs(
         .insert_completed_runs(experiment_id, runner_id, &inserts)
         .map_err(invalid_data)?;
     let persisted = run_row_ids.len();
+    if completed_run_retention_games > 0 {
+        let prune = store
+            .prune_completed_runs_for_experiment(experiment_id, completed_run_retention_games)
+            .map_err(invalid_data)?;
+        if prune.deleted_runs > 0 || prune.deleted_delta_rows > 0 {
+            println!(
+                "postgres_completed_run_retention keep_latest_runs={} deleted_runs={} deleted_delta_rows={}",
+                completed_run_retention_games, prune.deleted_runs, prune.deleted_delta_rows
+            );
+        }
+    }
     if let (Some(first), Some(last), Some(first_run_id), Some(last_run_id)) = (
         pending_runs.first(),
         pending_runs.last(),
@@ -1626,6 +1645,7 @@ fn flush_postgres_policy_versions_for_new_sims(
         runner_id,
         pending_policy_versions,
         &mut pending_runs,
+        0,
         shard_index,
         shard_count,
     )?;
@@ -1898,6 +1918,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         default_postgres_completed_run_batch_games(parallel_games),
     )?
     .max(1);
+    let pg_completed_run_retention_games = env_usize(
+        "SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES",
+        DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES,
+    )?;
     let pg_completed_run_async_queue_batches = env_usize(
         "SOCCER_POSTGRES_ASYNC_BATCH_QUEUE",
         DEFAULT_SOCCER_POSTGRES_ASYNC_BATCH_QUEUE,
@@ -2195,7 +2219,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
+        "soccer_self_play_start run_id={} games={} parallel_games={} minutes={:.1} halves={} half_minutes={:.1} period_break_recovery_seconds={:.1} dt={:.3}s learning_interval_ticks={} ticks_per_game={} shard={}/{} base_seed={} effective_seed={} logging_transitions={} print_progress={} print_completed_games={} episode_log_flush_interval_games={} pg_policy_version_interval_games={} pg_completed_run_batch_games={} pg_completed_run_retention_games={} pg_completed_async={} pg_completed_async_queue_batches={} pg_completed_async_coalesce_batches={} pg_completed_async_coalesce_wait_ms={} neural_drain_timeout_ms={} game_artifact_mode={} checkpoint_interval_games={} artifact_max_entries_per_policy={} max_policy_entries_per_team={} max_policy_target_entries_per_team={} min_policy_visits={} moment_replay_records={} moment_replay_transitions={} moment_replay_passes={} moment_replay_reward_scale={:.3}",
         run_id,
         games,
         parallel_games,
@@ -2216,6 +2240,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         episode_log_flush_interval_games,
         pg_policy_version_interval_games,
         pg_completed_run_batch_games,
+        pg_completed_run_retention_games,
         pg_completed_writer.is_some(),
         pg_completed_run_async_queue_batches,
         pg_completed_run_async_coalesce_batches,
@@ -2727,6 +2752,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             &pg_runner_id,
                             &mut pg_policy_version_buffer,
                             &mut pg_completed_buffer,
+                            pg_completed_run_retention_games,
                             shard_index,
                             shard_count,
                         )
@@ -2738,6 +2764,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         &pg_runner_id,
                         &mut pg_policy_version_buffer,
                         &mut pg_completed_buffer,
+                        pg_completed_run_retention_games,
                         shard_index,
                         shard_count,
                     )?
@@ -2992,6 +3019,7 @@ mod tests {
         PostgresCompletedRunBatch {
             experiment_id: experiment_id.to_string(),
             runner_id: runner_id.to_string(),
+            completed_run_retention_games: 0,
             policy_version_batches: 0,
             pending_policy_versions: Vec::new(),
             pending_runs: Vec::new(),
@@ -3259,6 +3287,11 @@ mod tests {
     }
 
     #[test]
+    fn default_postgres_completed_run_retention_is_disabled() {
+        assert_eq!(DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES, 0);
+    }
+
+    #[test]
     fn default_neural_drain_timeout_keeps_worker_boundary_wait_bounded() {
         assert_eq!(DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS, 0);
     }
@@ -3327,12 +3360,15 @@ mod tests {
     #[test]
     fn postgres_batches_only_coalesce_for_same_run_and_shard() {
         let mut batch = empty_pg_batch("experiment-a", "runner-a", 0, 2);
+        let mut different_retention = empty_pg_batch("experiment-a", "runner-a", 0, 2);
+        different_retention.completed_run_retention_games = 10;
 
         assert!(batch.can_absorb(&empty_pg_batch("experiment-a", "runner-a", 0, 2)));
         assert!(!batch.can_absorb(&empty_pg_batch("experiment-b", "runner-a", 0, 2)));
         assert!(!batch.can_absorb(&empty_pg_batch("experiment-a", "runner-b", 0, 2)));
         assert!(!batch.can_absorb(&empty_pg_batch("experiment-a", "runner-a", 1, 2)));
         assert!(!batch.can_absorb(&empty_pg_batch("experiment-a", "runner-a", 0, 3)));
+        assert!(!batch.can_absorb(&different_retention));
 
         batch.absorb(empty_pg_batch("experiment-a", "runner-a", 0, 2));
         assert!(batch.pending_policy_versions.is_empty());

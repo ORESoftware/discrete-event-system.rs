@@ -47,6 +47,12 @@ pub struct SoccerLearningPgCompletedRunInsert<'a> {
     pub game: &'a SoccerLearningCompletedGame,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SoccerLearningPgCompletedRunRetentionPrune {
+    pub deleted_runs: u64,
+    pub deleted_delta_rows: u64,
+}
+
 const POSTGRES_MAX_QUERY_PARAMETERS: usize = 65_535;
 const SOCCER_COMPLETED_RUN_HEADER_PARAMETER_COUNT: usize = 22;
 const SOCCER_RUN_DELTA_PARAMETER_COUNT: usize = 16;
@@ -662,6 +668,70 @@ impl SoccerLearningPgStore {
         tx.commit()
             .map_err(|err| format!("commit soccer learning run batch: {err}"))?;
         Ok(run_ids)
+    }
+
+    pub fn prune_completed_runs_for_experiment(
+        &mut self,
+        experiment_id: &str,
+        keep_latest_runs: usize,
+    ) -> Result<SoccerLearningPgCompletedRunRetentionPrune, String> {
+        let Some(keep_latest_runs) = soccer_completed_run_retention_limit(keep_latest_runs) else {
+            return Ok(SoccerLearningPgCompletedRunRetentionPrune::default());
+        };
+
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|err| format!("begin soccer completed-run retention transaction: {err}"))?;
+        let deleted_delta_rows = tx
+            .execute(
+                r#"
+                with stale_runs as (
+                  select id
+                  from (
+                    select
+                      id,
+                      row_number() over (order by created_at desc, id desc) as keep_rank
+                    from des_soccer_learning_runs
+                    where experiment_id = $1::text::uuid
+                  ) ranked
+                  where keep_rank > $2
+                )
+                delete from des_soccer_learning_run_deltas deltas
+                using stale_runs
+                where deltas.run_id = stale_runs.id
+                "#,
+                &[&experiment_id, &keep_latest_runs],
+            )
+            .map_err(|err| format!("prune soccer completed-run deltas: {err}"))?;
+        let deleted_runs = tx
+            .execute(
+                r#"
+                with stale_runs as (
+                  select id
+                  from (
+                    select
+                      id,
+                      row_number() over (order by created_at desc, id desc) as keep_rank
+                    from des_soccer_learning_runs
+                    where experiment_id = $1::text::uuid
+                  ) ranked
+                  where keep_rank > $2
+                )
+                delete from des_soccer_learning_runs runs
+                using stale_runs
+                where runs.id = stale_runs.id
+                "#,
+                &[&experiment_id, &keep_latest_runs],
+            )
+            .map_err(|err| format!("prune soccer completed runs: {err}"))?;
+        tx.commit()
+            .map_err(|err| format!("commit soccer completed-run retention: {err}"))?;
+
+        Ok(SoccerLearningPgCompletedRunRetentionPrune {
+            deleted_runs,
+            deleted_delta_rows,
+        })
     }
 
     pub fn insert_set_play_training_artifact(
@@ -1905,6 +1975,14 @@ fn soccer_policy_branch_key_for_insert(
     Ok(policy_version_id.to_string())
 }
 
+fn soccer_completed_run_retention_limit(keep_latest_runs: usize) -> Option<i64> {
+    if keep_latest_runs == 0 {
+        None
+    } else {
+        Some(keep_latest_runs.min(i64::MAX as usize) as i64)
+    }
+}
+
 fn prune_old_policy_entries_for_branch_tip(
     tx: &mut postgres::Transaction<'_>,
     experiment_id: &str,
@@ -2478,6 +2556,20 @@ mod tests {
         assert!(soccer_policy_version_retains_full_entries("candidate"));
         assert!(!soccer_policy_version_retains_full_entries("archived"));
         assert!(!soccer_policy_version_retains_full_entries("rejected"));
+    }
+
+    #[test]
+    fn completed_run_retention_zero_disables_pruning() {
+        assert_eq!(soccer_completed_run_retention_limit(0), None);
+    }
+
+    #[test]
+    fn completed_run_retention_limit_is_bounded_for_postgres() {
+        assert_eq!(soccer_completed_run_retention_limit(1), Some(1));
+        assert_eq!(
+            soccer_completed_run_retention_limit(usize::MAX),
+            Some(i64::MAX)
+        );
     }
 
     #[test]

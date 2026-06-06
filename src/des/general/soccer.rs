@@ -59618,6 +59618,9 @@ mod tests {
         assert!(html.body.contains("id=\"clearanceAction\""));
         assert!(html.body.contains("id=\"routeOneAction\""));
         assert!(html.body.contains("id=\"dribbleBeats\""));
+        assert!(html.body.contains("id=\"tackles\""));
+        assert!(html.body.contains("id=\"interceptions\""));
+        assert!(html.body.contains("id=\"shotBlocks\""));
         assert!(html.body.contains("function applyInputAck"));
         assert!(html.body.contains("input rejected"));
         assert!(html.body.contains("input accepted"));
@@ -60245,6 +60248,11 @@ mod tests {
         assert!(value["summary"]["stats"].get("shotsOnTargetHome").is_some());
         assert!(value["summary"]["stats"].get("savesAway").is_some());
         assert!(value["summary"]["stats"].get("dribbleBeatsHome").is_some());
+        assert!(value["summary"]["stats"].get("tacklesHome").is_some());
+        assert!(value["summary"]["stats"].get("tacklesAway").is_some());
+        assert!(value["summary"]["stats"].get("tackles").is_some());
+        assert!(value["summary"]["stats"].get("interceptionsHome").is_some());
+        assert!(value["summary"]["stats"].get("shotBlocksHome").is_some());
         assert!(value["summary"]["stats"].get("offsidesHome").is_some());
         assert!(value["summary"]["stats"].get("throwInsHome").is_some());
         assert!(value["summary"]["stats"].get("goalKicksAway").is_some());
@@ -63105,6 +63113,14 @@ mod tests {
         assert!(html.contains("B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}"));
         assert!(html.contains("brain.teamCentroid"));
         assert!(html.contains("playersNearBall"));
+        assert!(html.contains("id=\"clearances\""));
+        assert!(html.contains("id=\"routeOne\""));
+        assert!(html.contains("id=\"tackles\""));
+        assert!(html.contains("id=\"interceptions\""));
+        assert!(html.contains("id=\"shotBlocks\""));
+        assert!(html.contains("s.tacklesHome"));
+        assert!(html.contains("s.interceptionsHome"));
+        assert!(html.contains("s.shotBlocksHome"));
         assert!(html.contains("id=\"ballKinematics\""));
         assert!(html.contains("playbackBallHistoryForFrame"));
         assert!(html.contains("ballHistoryKinematicsLabel"));

@@ -22,12 +22,15 @@ use serde_json::{json, Number, Value};
 use crate::des::general::ip_mip_des::{
     linearize_general_linear_problem, linearize_indicator_problem, linearize_lower_bounds_problem,
     linearize_pwl_problem, linearize_quadratic_objective_problem, linearize_semi_problem,
-    linearize_sos_problem, linearize_source_ipmip_problem, BranchOrCutConstraint, ConstraintKind,
-    GeneralLinearIPMIPProblem, IPMIPProblem, IndicatorConstraint, IndicatorIPMIPProblem,
-    LinearRowConstraint, LowerBoundedIPMIPProblem, MultiObjectiveIPMIPProblem,
-    PiecewiseLinearConstraint, PwlIPMIPProblem, QuadraticObjectiveIPMIPProblem,
-    QuadraticObjectiveTerm, SemiIPMIPProblem, SemiVariable, SosIPMIPProblem, SourceIPMIPProblem,
-    SpecialOrderedSet,
+    linearize_sos_problem, linearize_source_ipmip_problem, AbsoluteValueConstraint,
+    BranchOrCutConstraint, ConstraintKind, GeneralLinearIPMIPProblem, IPMIPProblem,
+    IndicatorConstraint, IndicatorIPMIPProblem, IndicatorSense, L1NormConstraint,
+    LInfNormConstraint, LexicographicObjective, LinearRowConstraint, LogicalConstraint,
+    LogicalConstraintKind, LowerBoundedIPMIPProblem, MaximumConstraint, MinimumConstraint,
+    MultiObjectiveIPMIPProblem, PiecewiseLinearConstraint, PiecewiseLinearPoint, ProductConstraint,
+    PwlIPMIPProblem, QuadraticObjectiveIPMIPProblem, QuadraticObjectiveTerm, SemiIPMIPProblem,
+    SemiVariable, SemiVariableKind, SosIPMIPProblem, SourceIPMIPProblem, SpecialOrderedSet,
+    SpecialOrderedSetKind,
 };
 use crate::des::general::lp::{LPProblem, Sense};
 
@@ -1611,7 +1614,24 @@ pub fn solve_source_ipmip_with_external_cli(
 }
 
 fn should_use_rust_linearized_source_cli(opts: &ExternalLinearCliOptions) -> bool {
-    opts.script_path.is_none() && opts.branch_priorities.is_none() && opts.mip_start.is_none()
+    opts.script_path.is_none()
+        && linearized_source_mip_start_can_stay_native(opts)
+        && (opts.branch_priorities.is_none()
+            || matches!(
+                opts.solver,
+                ExternalLinearCliSolver::Scip | ExternalLinearCliSolver::Cbc
+            ))
+}
+
+fn linearized_source_mip_start_can_stay_native(opts: &ExternalLinearCliOptions) -> bool {
+    opts.mip_start.is_none()
+        || (opts.solution_pool_size.is_none()
+            && matches!(
+                opts.solver,
+                ExternalLinearCliSolver::Highs
+                    | ExternalLinearCliSolver::Scip
+                    | ExternalLinearCliSolver::Cbc
+            ))
 }
 
 fn should_use_rust_lower_bounded_source_cli(opts: &ExternalLinearCliOptions) -> bool {
@@ -1743,8 +1763,21 @@ fn solve_linearized_ipmip_with_external_cli(
             *objective_limit -= objective_offset;
         }
     }
+    if let Err(message) = shift_linearized_external_mip_start(
+        &mut solve_opts,
+        source_lb,
+        original_var_count,
+        linearized.c.len(),
+    ) {
+        return external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            format!("{}:cli", opts.solver.as_str()),
+            message,
+            elapsed_ms(t0),
+        );
+    }
     if let Err(message) =
-        shift_linearized_external_mip_start(&mut solve_opts, source_lb, linearized.c.len())
+        pad_linearized_external_branch_priorities(&mut solve_opts, linearized.c.len())
     {
         return external_cli_failure(
             ExternalLinearCliStatus::NumericalError,
@@ -1802,30 +1835,62 @@ fn postprocess_linearized_external_solution(
 fn shift_linearized_external_mip_start(
     opts: &mut ExternalLinearCliOptions,
     source_lb: &[f64],
+    original_var_count: usize,
     linearized_var_count: usize,
 ) -> Result<(), String> {
     let Some(start) = opts.mip_start.as_mut() else {
         return Ok(());
     };
-    if !source_lb.is_empty() {
-        if start.len() != source_lb.len() {
-            return Err(format!(
-                "mip_start length {} does not match lower-bound vector length {}",
-                start.len(),
-                source_lb.len()
-            ));
-        }
-        for (value, lower) in start.iter_mut().zip(source_lb.iter()) {
-            *value -= *lower;
-        }
-    }
-    if start.len() != linearized_var_count {
+    if original_var_count > linearized_var_count {
         return Err(format!(
-            "linearized mip_start length {} does not match linearized variable count {}",
+            "original variable count {original_var_count} exceeds linearized variable count {linearized_var_count}"
+        ));
+    }
+    if start.len() != original_var_count && start.len() != linearized_var_count {
+        return Err(format!(
+            "mip_start length {} must match original variable count {} or linearized variable count {}",
             start.len(),
+            original_var_count,
             linearized_var_count
         ));
     }
+    if !source_lb.is_empty() {
+        if source_lb.len() != original_var_count {
+            return Err(format!(
+                "lower-bound vector length {} does not match original variable count {}",
+                source_lb.len(),
+                original_var_count
+            ));
+        }
+        for (value, lower) in start
+            .iter_mut()
+            .take(original_var_count)
+            .zip(source_lb.iter())
+        {
+            *value -= *lower;
+        }
+    }
+    if start.len() < linearized_var_count {
+        start.resize(linearized_var_count, 0.0);
+    }
+    Ok(())
+}
+
+fn pad_linearized_external_branch_priorities(
+    opts: &mut ExternalLinearCliOptions,
+    linearized_var_count: usize,
+) -> Result<(), String> {
+    let Some(priorities) = opts.branch_priorities.as_mut() else {
+        return Ok(());
+    };
+    if priorities.len() > linearized_var_count {
+        return Err(format!(
+            "branch_priorities length {} exceeds linearized variable count {}",
+            priorities.len(),
+            linearized_var_count
+        ));
+    }
+    priorities.resize(linearized_var_count, 0);
     Ok(())
 }
 
@@ -2017,6 +2082,19 @@ pub fn solve_linear_cli_json(
     let solver_name = opts.solver.as_str();
     let bridge_solver = format!("{solver_name}:cli");
     if let Some(solution) = solve_native_plain_cli_json_direct(kind, &problem_json, opts, t0) {
+        return solution;
+    }
+    if let Some(solution) =
+        solve_rust_quadratic_objective_cli_json_direct(kind, &problem_json, opts, t0)
+    {
+        return solution;
+    }
+    if let Some(solution) =
+        solve_rust_multi_objective_cli_json_direct(kind, &problem_json, opts, t0)
+    {
+        return solution;
+    }
+    if let Some(solution) = solve_rust_source_cli_json_direct(kind, &problem_json, opts, t0) {
         return solution;
     }
     let stdin_json = match serde_json::to_string(&problem_json) {
@@ -3462,6 +3540,76 @@ fn solve_native_plain_cli_json_direct(
     Some(solution)
 }
 
+fn solve_rust_quadratic_objective_cli_json_direct(
+    kind: ExternalLinearCliKind,
+    problem_json: &Value,
+    opts: &ExternalLinearCliOptions,
+    t0: Instant,
+) -> Option<ExternalLinearCliSolution> {
+    if kind != ExternalLinearCliKind::Mip || !should_use_rust_linearized_source_cli(opts) {
+        return None;
+    }
+    let solver = format!("{}:cli", opts.solver.as_str());
+    match quadratic_objective_ipmip_problem_from_cli_json(problem_json) {
+        Ok(Some(problem)) => Some(solve_quadratic_objective_ipmip_with_external_cli(
+            &problem, opts,
+        )),
+        Ok(None) => None,
+        Err(message) => Some(external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            solver,
+            message,
+            elapsed_ms(t0),
+        )),
+    }
+}
+
+fn solve_rust_multi_objective_cli_json_direct(
+    kind: ExternalLinearCliKind,
+    problem_json: &Value,
+    opts: &ExternalLinearCliOptions,
+    t0: Instant,
+) -> Option<ExternalLinearCliSolution> {
+    if kind != ExternalLinearCliKind::Mip || !should_use_rust_multi_objective_cli(opts) {
+        return None;
+    }
+    let solver = format!("{}:cli", opts.solver.as_str());
+    match multi_objective_ipmip_problem_from_cli_json(problem_json) {
+        Ok(Some(problem)) => Some(solve_multi_objective_ipmip_with_rust_external_cli(
+            &problem, opts,
+        )),
+        Ok(None) => None,
+        Err(message) => Some(external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            solver,
+            message,
+            elapsed_ms(t0),
+        )),
+    }
+}
+
+fn solve_rust_source_cli_json_direct(
+    kind: ExternalLinearCliKind,
+    problem_json: &Value,
+    opts: &ExternalLinearCliOptions,
+    t0: Instant,
+) -> Option<ExternalLinearCliSolution> {
+    if kind != ExternalLinearCliKind::Mip || !should_use_rust_linearized_source_cli(opts) {
+        return None;
+    }
+    let solver = format!("{}:cli", opts.solver.as_str());
+    match source_ipmip_problem_from_cli_json(problem_json) {
+        Ok(Some(problem)) => Some(solve_source_ipmip_with_external_cli(&problem, opts)),
+        Ok(None) => None,
+        Err(message) => Some(external_cli_failure(
+            ExternalLinearCliStatus::NumericalError,
+            solver,
+            message,
+            elapsed_ms(t0),
+        )),
+    }
+}
+
 fn plain_linear_model_from_cli_json(
     kind: ExternalLinearCliKind,
     problem_json: &Value,
@@ -3567,6 +3715,906 @@ fn plain_linear_mip_model_from_cli_json(
         ubs,
         integer_vars,
     }))
+}
+
+const RUST_SOURCE_CLI_FEATURE_KEYS: &[&str] = &[
+    "linear_constraints",
+    "indicators",
+    "sos",
+    "semi_variables",
+    "pwl",
+    "abs",
+    "maximums",
+    "minimums",
+    "logical",
+    "l1_norms",
+    "linf_norms",
+    "products",
+];
+
+fn quadratic_objective_ipmip_problem_from_cli_json(
+    problem_json: &Value,
+) -> Result<Option<QuadraticObjectiveIPMIPProblem>, String> {
+    let Some(object) = problem_json.as_object() else {
+        return Ok(None);
+    };
+    let Some(terms_json) =
+        optional_json_array(object.get("quadratic_objective"), "quadratic_objective")?
+    else {
+        return Ok(None);
+    };
+    if terms_json.is_empty() {
+        return Ok(None);
+    }
+    if json_field_has_content(object.get("multi_objectives"))
+        || RUST_SOURCE_CLI_FEATURE_KEYS
+            .iter()
+            .any(|key| json_field_has_content(object.get(*key)))
+    {
+        return Ok(None);
+    }
+
+    let c = required_f64_array(object, "c")?;
+    let n = c.len();
+    let sense = parse_cli_sense(object.get("sense"))?;
+    let a = optional_f64_matrix(object, &["a"])?;
+    let b = optional_f64_array(object, &["b"])?;
+    validate_source_base_rows(n, &a, &b)?;
+    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let lb = optional_plain_f64_array_exact(object.get("lb"), n, "lb")?;
+    let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
+    let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
+    let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
+    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+    let mut quadratic_objective = Vec::with_capacity(terms_json.len());
+    for (idx, term_json) in terms_json.iter().enumerate() {
+        let path = format!("quadratic_objective[{idx}]");
+        let term_object = required_object(term_json, &path)?;
+        let x_var = required_usize_field(term_object, "x_var", &format!("{path}.x_var"))?;
+        validate_source_var_index(x_var, n, &format!("{path}.x_var"))?;
+        let y_var = required_usize_field(term_object, "y_var", &format!("{path}.y_var"))?;
+        validate_source_var_index(y_var, n, &format!("{path}.y_var"))?;
+        quadratic_objective.push(QuadraticObjectiveTerm {
+            x_var,
+            y_var,
+            coeff: required_f64_field(term_object.get("coeff"), &format!("{path}.coeff"))?,
+            name: optional_string_field(term_object.get("name"), &format!("{path}.name"))?,
+        });
+    }
+
+    Ok(Some(QuadraticObjectiveIPMIPProblem {
+        base: IPMIPProblem {
+            sense,
+            c,
+            a,
+            b,
+            integer_vars,
+            ub,
+            var_names,
+            con_names,
+            lazy_constraints,
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        lb,
+        quadratic_objective,
+    }))
+}
+
+fn multi_objective_ipmip_problem_from_cli_json(
+    problem_json: &Value,
+) -> Result<Option<MultiObjectiveIPMIPProblem>, String> {
+    let Some(object) = problem_json.as_object() else {
+        return Ok(None);
+    };
+    let Some(objectives_json) =
+        optional_json_array(object.get("multi_objectives"), "multi_objectives")?
+    else {
+        return Ok(None);
+    };
+    if objectives_json.is_empty() {
+        return Err("multi_objectives must be non-empty".to_string());
+    }
+    if json_field_has_content(object.get("quadratic_objective"))
+        || RUST_SOURCE_CLI_FEATURE_KEYS
+            .iter()
+            .any(|key| json_field_has_content(object.get(*key)))
+    {
+        return Ok(None);
+    }
+
+    let c = required_f64_array(object, "c")?;
+    let n = c.len();
+    if let Some(lb) = optional_plain_f64_array_exact(object.get("lb"), n, "lb")? {
+        if lb.iter().any(|value| value.abs() > 1e-12) {
+            return Ok(None);
+        }
+    }
+    let sense = parse_cli_sense(object.get("sense"))?;
+    let a = optional_f64_matrix(object, &["a"])?;
+    let b = optional_f64_array(object, &["b"])?;
+    validate_source_base_rows(n, &a, &b)?;
+    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
+    let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
+    let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
+    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+    let mut objectives = Vec::with_capacity(objectives_json.len());
+    for (idx, objective_json) in objectives_json.iter().enumerate() {
+        let path = format!("multi_objectives[{idx}]");
+        let objective_object = required_object(objective_json, &path)?;
+        let objective_c = f64_array_from_value(
+            objective_object
+                .get("c")
+                .ok_or_else(|| format!("missing required array '{path}.c'"))?,
+            &format!("{path}.c"),
+        )?;
+        if objective_c.len() != n {
+            return Err(format!(
+                "{path}.c length {} does not match variable count {n}",
+                objective_c.len()
+            ));
+        }
+        objectives.push(LexicographicObjective {
+            sense: parse_cli_sense(objective_object.get("sense"))?,
+            c: objective_c,
+            name: optional_string_field(objective_object.get("name"), &format!("{path}.name"))?,
+        });
+    }
+
+    Ok(Some(MultiObjectiveIPMIPProblem {
+        base: IPMIPProblem {
+            sense,
+            c,
+            a,
+            b,
+            integer_vars,
+            ub,
+            var_names,
+            con_names,
+            lazy_constraints,
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        objectives,
+    }))
+}
+
+fn source_ipmip_problem_from_cli_json(
+    problem_json: &Value,
+) -> Result<Option<SourceIPMIPProblem>, String> {
+    let Some(object) = problem_json.as_object() else {
+        return Ok(None);
+    };
+    if json_field_has_content(object.get("quadratic_objective"))
+        || json_field_has_content(object.get("multi_objectives"))
+        || !RUST_SOURCE_CLI_FEATURE_KEYS
+            .iter()
+            .any(|key| json_field_has_content(object.get(*key)))
+    {
+        return Ok(None);
+    }
+
+    let c = required_f64_array(object, "c")?;
+    let n = c.len();
+    let sense = parse_cli_sense(object.get("sense"))?;
+    let a = optional_f64_matrix(object, &["a"])?;
+    let b = optional_f64_array(object, &["b"])?;
+    validate_source_base_rows(n, &a, &b)?;
+    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let lb = optional_plain_f64_array_exact(object.get("lb"), n, "lb")?;
+    let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
+    let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
+    let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
+    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+
+    Ok(Some(SourceIPMIPProblem {
+        base: IPMIPProblem {
+            sense,
+            c,
+            a,
+            b,
+            integer_vars,
+            ub,
+            var_names,
+            con_names,
+            lazy_constraints,
+            variable_nodes: None,
+            constraint_nodes: None,
+        },
+        lb,
+        linear_constraints: parse_source_linear_constraints(object.get("linear_constraints"), n)?,
+        indicators: parse_source_indicators(object.get("indicators"), n)?,
+        sos: parse_source_sos_sets(object.get("sos"), n)?,
+        semi_variables: parse_source_semi_variables(object.get("semi_variables"), n)?,
+        pwl: parse_source_pwl_constraints(object.get("pwl"), n)?,
+        abs: parse_source_abs_constraints(object.get("abs"), n)?,
+        maximums: parse_source_maximum_constraints(object.get("maximums"), n)?,
+        minimums: parse_source_minimum_constraints(object.get("minimums"), n)?,
+        logical: parse_source_logical_constraints(object.get("logical"), n)?,
+        l1_norms: parse_source_l1_norm_constraints(object.get("l1_norms"), n)?,
+        linf_norms: parse_source_linf_norm_constraints(object.get("linf_norms"), n)?,
+        products: parse_source_product_constraints(object.get("products"), n)?,
+    }))
+}
+
+fn validate_source_base_rows(n: usize, a: &[Vec<f64>], b: &[f64]) -> Result<(), String> {
+    if a.len() != b.len() {
+        return Err(format!(
+            "a row count {} does not match b length {}",
+            a.len(),
+            b.len()
+        ));
+    }
+    for (idx, row) in a.iter().enumerate() {
+        if row.len() != n {
+            return Err(format!(
+                "a[{idx}] length {} does not match variable count {n}",
+                row.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn optional_plain_f64_array_exact(
+    value: Option<&Value>,
+    n: usize,
+    name: &str,
+) -> Result<Option<Vec<f64>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let values = f64_array_from_value(value, name)?;
+    if values.len() != n {
+        return Err(format!(
+            "{name} length {} does not match variable count {n}",
+            values.len()
+        ));
+    }
+    Ok(Some(values))
+}
+
+fn optional_string_array_exact(
+    value: Option<&Value>,
+    n: usize,
+    name: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(values) = value.as_array() else {
+        return Err(format!("{name} must be an array"));
+    };
+    if values.len() != n {
+        return Err(format!(
+            "{name} length {} does not match expected length {n}",
+            values.len()
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{name}[{idx}] must be a string"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn optional_json_array<'a>(
+    value: Option<&'a Value>,
+    name: &str,
+) -> Result<Option<&'a Vec<Value>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_array()
+        .map(Some)
+        .ok_or_else(|| format!("{name} must be an array"))
+}
+
+fn required_object<'a>(
+    value: &'a Value,
+    name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{name} must be an object"))
+}
+
+fn optional_string_field(value: Option<&Value>, name: &str) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(|value| Some(value.to_string()))
+        .ok_or_else(|| format!("{name} must be a string or null"))
+}
+
+fn required_usize_field(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    name: &str,
+) -> Result<usize, String> {
+    let Some(value) = object.get(key) else {
+        return Err(format!("missing required integer '{name}'"));
+    };
+    usize_from_value(value, name)
+}
+
+fn usize_from_value(value: &Value, name: &str) -> Result<usize, String> {
+    let Some(raw) = value.as_u64() else {
+        return Err(format!("{name} must be a non-negative integer"));
+    };
+    usize::try_from(raw).map_err(|_| format!("{name} is too large for this platform"))
+}
+
+fn required_bool_field(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    name: &str,
+) -> Result<bool, String> {
+    let Some(value) = object.get(key) else {
+        return Err(format!("missing required boolean '{name}'"));
+    };
+    value
+        .as_bool()
+        .ok_or_else(|| format!("{name} must be a boolean"))
+}
+
+fn validate_source_var_index(index: usize, n: usize, name: &str) -> Result<(), String> {
+    if index >= n {
+        return Err(format!(
+            "{name} index {index} is outside variable count {n}"
+        ));
+    }
+    Ok(())
+}
+
+fn required_index_array(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    n: usize,
+    name: &str,
+) -> Result<Vec<usize>, String> {
+    let Some(value) = object.get(key) else {
+        return Err(format!("missing required array '{name}'"));
+    };
+    let Some(values) = value.as_array() else {
+        return Err(format!("{name} must be an array"));
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let index = usize_from_value(value, &format!("{name}[{idx}]"))?;
+            validate_source_var_index(index, n, &format!("{name}[{idx}]"))?;
+            Ok(index)
+        })
+        .collect()
+}
+
+fn parse_constraint_kind(value: Option<&Value>, name: &str) -> Result<ConstraintKind, String> {
+    let Some(value) = value else {
+        return Ok(ConstraintKind::Lazy);
+    };
+    if value.is_null() {
+        return Ok(ConstraintKind::Lazy);
+    }
+    let Some(text) = value.as_str() else {
+        return Err(format!("{name} must be a string"));
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "branch" => Ok(ConstraintKind::Branch),
+        "cut" => Ok(ConstraintKind::Cut),
+        "lazy" => Ok(ConstraintKind::Lazy),
+        other => Err(format!("{name} has unknown constraint kind '{other}'")),
+    }
+}
+
+fn parse_branch_or_cut_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Option<Vec<BranchOrCutConstraint>>, String> {
+    let Some(rows) = optional_json_array(value, "lazy_constraints")? else {
+        return Ok(None);
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("lazy_constraints[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let coefs = required_f64_array(row_object, "coefs")?;
+            if coefs.len() != n {
+                return Err(format!(
+                    "{path}.coefs length {} does not match variable count {n}",
+                    coefs.len()
+                ));
+            }
+            Ok(BranchOrCutConstraint {
+                coefs,
+                rhs: required_f64_field(row_object.get("rhs"), &format!("{path}.rhs"))?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?
+                    .unwrap_or_else(|| format!("lazy_constraint_{idx}")),
+                kind: parse_constraint_kind(row_object.get("kind"), &format!("{path}.kind"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn parse_source_linear_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<LinearRowConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "linear_constraints")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("linear_constraints[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let coefs = required_f64_array(row_object, "coefs")?;
+            if coefs.len() != n {
+                return Err(format!(
+                    "{path}.coefs length {} does not match variable count {n}",
+                    coefs.len()
+                ));
+            }
+            Ok(LinearRowConstraint {
+                coefs,
+                lower: optional_f64_field(row_object.get("lower"), &format!("{path}.lower"))?,
+                upper: optional_f64_field(row_object.get("upper"), &format!("{path}.upper"))?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_indicator_sense(value: Option<&Value>, name: &str) -> Result<IndicatorSense, String> {
+    let Some(value) = value else {
+        return Err(format!("missing required string '{name}'"));
+    };
+    let Some(text) = value.as_str() else {
+        return Err(format!("{name} must be a string"));
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "le" | "<=" => Ok(IndicatorSense::Le),
+        "ge" | ">=" => Ok(IndicatorSense::Ge),
+        "eq" | "=" | "==" => Ok(IndicatorSense::Eq),
+        other => Err(format!("{name} has unknown indicator sense '{other}'")),
+    }
+}
+
+fn parse_source_indicators(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<IndicatorConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "indicators")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("indicators[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let binary_var =
+                required_usize_field(row_object, "binary_var", &format!("{path}.binary_var"))?;
+            validate_source_var_index(binary_var, n, &format!("{path}.binary_var"))?;
+            let coefs = required_f64_array(row_object, "coefs")?;
+            if coefs.len() != n {
+                return Err(format!(
+                    "{path}.coefs length {} does not match variable count {n}",
+                    coefs.len()
+                ));
+            }
+            Ok(IndicatorConstraint {
+                binary_var,
+                active_value: required_bool_field(
+                    row_object,
+                    "active_value",
+                    &format!("{path}.active_value"),
+                )?,
+                coefs,
+                sense: parse_indicator_sense(row_object.get("sense"), &format!("{path}.sense"))?,
+                rhs: required_f64_field(row_object.get("rhs"), &format!("{path}.rhs"))?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_sos_kind(value: Option<&Value>, name: &str) -> Result<SpecialOrderedSetKind, String> {
+    let Some(value) = value else {
+        return Err(format!("missing required string '{name}'"));
+    };
+    let Some(text) = value.as_str() else {
+        return Err(format!("{name} must be a string"));
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "sos1" | "1" => Ok(SpecialOrderedSetKind::Sos1),
+        "sos2" | "2" => Ok(SpecialOrderedSetKind::Sos2),
+        other => Err(format!("{name} has unknown SOS kind '{other}'")),
+    }
+}
+
+fn optional_plain_f64_array_len(
+    value: Option<&Value>,
+    len: usize,
+    name: &str,
+) -> Result<Option<Vec<f64>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let values = f64_array_from_value(value, name)?;
+    if values.len() != len {
+        return Err(format!(
+            "{name} length {} does not match expected length {len}",
+            values.len()
+        ));
+    }
+    Ok(Some(values))
+}
+
+fn parse_source_sos_sets(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<SpecialOrderedSet>, String> {
+    let Some(rows) = optional_json_array(value, "sos")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("sos[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let vars = required_index_array(row_object, "vars", n, &format!("{path}.vars"))?;
+            Ok(SpecialOrderedSet {
+                kind: parse_sos_kind(row_object.get("kind"), &format!("{path}.kind"))?,
+                weights: optional_plain_f64_array_len(
+                    row_object.get("weights"),
+                    vars.len(),
+                    &format!("{path}.weights"),
+                )?,
+                vars,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_semi_variable_kind(value: Option<&Value>, name: &str) -> Result<SemiVariableKind, String> {
+    let Some(value) = value else {
+        return Err(format!("missing required string '{name}'"));
+    };
+    let Some(text) = value.as_str() else {
+        return Err(format!("{name} must be a string"));
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "semi_continuous" | "semi-continuous" | "semicontinuous" => {
+            Ok(SemiVariableKind::SemiContinuous)
+        }
+        "semi_integer" | "semi-integer" | "semiinteger" => Ok(SemiVariableKind::SemiInteger),
+        other => Err(format!("{name} has unknown semi-variable kind '{other}'")),
+    }
+}
+
+fn parse_source_semi_variables(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<SemiVariable>, String> {
+    let Some(rows) = optional_json_array(value, "semi_variables")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("semi_variables[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let var = required_usize_field(row_object, "var", &format!("{path}.var"))?;
+            validate_source_var_index(var, n, &format!("{path}.var"))?;
+            Ok(SemiVariable {
+                kind: parse_semi_variable_kind(row_object.get("kind"), &format!("{path}.kind"))?,
+                var,
+                lower: required_f64_field(row_object.get("lower"), &format!("{path}.lower"))?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_source_pwl_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<PiecewiseLinearConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "pwl")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("pwl[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let x_var = required_usize_field(row_object, "x_var", &format!("{path}.x_var"))?;
+            let y_var = required_usize_field(row_object, "y_var", &format!("{path}.y_var"))?;
+            validate_source_var_index(x_var, n, &format!("{path}.x_var"))?;
+            validate_source_var_index(y_var, n, &format!("{path}.y_var"))?;
+            let Some(points) =
+                optional_json_array(row_object.get("points"), &format!("{path}.points"))?
+            else {
+                return Err(format!("missing required array '{}.points'", path));
+            };
+            let points = points
+                .iter()
+                .enumerate()
+                .map(|(point_idx, point_value)| {
+                    let point_path = format!("{path}.points[{point_idx}]");
+                    let point_object = required_object(point_value, &point_path)?;
+                    Ok::<PiecewiseLinearPoint, String>(PiecewiseLinearPoint {
+                        x: required_f64_field(point_object.get("x"), &format!("{point_path}.x"))?,
+                        y: required_f64_field(point_object.get("y"), &format!("{point_path}.y"))?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(PiecewiseLinearConstraint {
+                x_var,
+                y_var,
+                points,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_source_abs_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<AbsoluteValueConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "abs")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("abs[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let arg_var = required_usize_field(row_object, "arg_var", &format!("{path}.arg_var"))?;
+            let target_var =
+                required_usize_field(row_object, "target_var", &format!("{path}.target_var"))?;
+            validate_source_var_index(arg_var, n, &format!("{path}.arg_var"))?;
+            validate_source_var_index(target_var, n, &format!("{path}.target_var"))?;
+            Ok(AbsoluteValueConstraint {
+                arg_var,
+                target_var,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_source_maximum_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<MaximumConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "maximums")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("maximums[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let target_var =
+                required_usize_field(row_object, "target_var", &format!("{path}.target_var"))?;
+            validate_source_var_index(target_var, n, &format!("{path}.target_var"))?;
+            Ok(MaximumConstraint {
+                target_var,
+                arg_vars: required_index_array(
+                    row_object,
+                    "arg_vars",
+                    n,
+                    &format!("{path}.arg_vars"),
+                )?,
+                constant: optional_f64_field(
+                    row_object.get("constant"),
+                    &format!("{path}.constant"),
+                )?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_source_minimum_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<MinimumConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "minimums")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("minimums[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let target_var =
+                required_usize_field(row_object, "target_var", &format!("{path}.target_var"))?;
+            validate_source_var_index(target_var, n, &format!("{path}.target_var"))?;
+            Ok(MinimumConstraint {
+                target_var,
+                arg_vars: required_index_array(
+                    row_object,
+                    "arg_vars",
+                    n,
+                    &format!("{path}.arg_vars"),
+                )?,
+                constant: optional_f64_field(
+                    row_object.get("constant"),
+                    &format!("{path}.constant"),
+                )?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_logical_constraint_kind(
+    value: Option<&Value>,
+    name: &str,
+) -> Result<LogicalConstraintKind, String> {
+    let Some(value) = value else {
+        return Err(format!("missing required string '{name}'"));
+    };
+    let Some(text) = value.as_str() else {
+        return Err(format!("{name} must be a string"));
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "and" => Ok(LogicalConstraintKind::And),
+        "or" => Ok(LogicalConstraintKind::Or),
+        other => Err(format!("{name} has unknown logical kind '{other}'")),
+    }
+}
+
+fn parse_source_logical_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<LogicalConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "logical")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("logical[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let target_var =
+                required_usize_field(row_object, "target_var", &format!("{path}.target_var"))?;
+            validate_source_var_index(target_var, n, &format!("{path}.target_var"))?;
+            Ok(LogicalConstraint {
+                kind: parse_logical_constraint_kind(
+                    row_object.get("kind"),
+                    &format!("{path}.kind"),
+                )?,
+                target_var,
+                arg_vars: required_index_array(
+                    row_object,
+                    "arg_vars",
+                    n,
+                    &format!("{path}.arg_vars"),
+                )?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_source_l1_norm_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<L1NormConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "l1_norms")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("l1_norms[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let target_var =
+                required_usize_field(row_object, "target_var", &format!("{path}.target_var"))?;
+            validate_source_var_index(target_var, n, &format!("{path}.target_var"))?;
+            Ok(L1NormConstraint {
+                target_var,
+                arg_vars: required_index_array(
+                    row_object,
+                    "arg_vars",
+                    n,
+                    &format!("{path}.arg_vars"),
+                )?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_source_linf_norm_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<LInfNormConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "linf_norms")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("linf_norms[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let target_var =
+                required_usize_field(row_object, "target_var", &format!("{path}.target_var"))?;
+            validate_source_var_index(target_var, n, &format!("{path}.target_var"))?;
+            Ok(LInfNormConstraint {
+                target_var,
+                arg_vars: required_index_array(
+                    row_object,
+                    "arg_vars",
+                    n,
+                    &format!("{path}.arg_vars"),
+                )?,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
+}
+
+fn parse_source_product_constraints(
+    value: Option<&Value>,
+    n: usize,
+) -> Result<Vec<ProductConstraint>, String> {
+    let Some(rows) = optional_json_array(value, "products")? else {
+        return Ok(Vec::new());
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(idx, row_value)| {
+            let path = format!("products[{idx}]");
+            let row_object = required_object(row_value, &path)?;
+            let target_var =
+                required_usize_field(row_object, "target_var", &format!("{path}.target_var"))?;
+            let x_var = required_usize_field(row_object, "x_var", &format!("{path}.x_var"))?;
+            let y_var = required_usize_field(row_object, "y_var", &format!("{path}.y_var"))?;
+            validate_source_var_index(target_var, n, &format!("{path}.target_var"))?;
+            validate_source_var_index(x_var, n, &format!("{path}.x_var"))?;
+            validate_source_var_index(y_var, n, &format!("{path}.y_var"))?;
+            Ok(ProductConstraint {
+                target_var,
+                x_var,
+                y_var,
+                name: optional_string_field(row_object.get("name"), &format!("{path}.name"))?,
+            })
+        })
+        .collect()
 }
 
 fn plain_linear_model_to_string(
@@ -11562,16 +12610,183 @@ mod tests {
     }
 
     #[test]
+    fn quadratic_objective_json_uses_rust_linearization_without_python_bridge() {
+        let payload =
+            quadratic_objective_ipmip_problem_to_cli_json(&build_quadratic_objective_mix_ip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-quadratic-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-quadratic-json".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "quadratic objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn quadratic_objective_json_rejects_bad_term_index_without_python_bridge() {
+        let mut payload =
+            quadratic_objective_ipmip_problem_to_cli_json(&build_quadratic_objective_mix_ip());
+        payload["quadratic_objective"][0]["x_var"] = serde_json::json!(999);
+
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-quadratic-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-bad-quadratic-json".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::NumericalError);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            solution
+                .message
+                .contains("quadratic_objective[0].x_var index 999 is outside variable count"),
+            "{}",
+            solution.message
+        );
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "bad quadratic objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
+    }
+
+    #[test]
     fn linearized_mip_start_shifts_lower_bounded_source_values() {
         let mut opts = ExternalLinearCliOptions {
             mip_start: Some(vec![3.0, 5.0]),
             ..Default::default()
         };
 
-        super::shift_linearized_external_mip_start(&mut opts, &[3.0, 0.0], 2)
+        super::shift_linearized_external_mip_start(&mut opts, &[3.0, 0.0], 2, 2)
             .expect("shift mip start");
 
         assert_eq!(opts.mip_start, Some(vec![0.0, 5.0]));
+    }
+
+    #[test]
+    fn linearized_mip_start_pads_auxiliary_variables() {
+        let mut opts = ExternalLinearCliOptions {
+            mip_start: Some(vec![3.0, 5.0]),
+            ..Default::default()
+        };
+
+        super::shift_linearized_external_mip_start(&mut opts, &[1.0, 0.0], 2, 5)
+            .expect("pad mip start");
+
+        assert_eq!(opts.mip_start, Some(vec![2.0, 5.0, 0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn rust_linearized_source_cli_allows_native_branch_priority_solvers() {
+        assert!(super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Scip,
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            }
+        ));
+        assert!(super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Cbc,
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            }
+        ));
+        assert!(!super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                branch_priorities: Some(vec![5]),
+                ..Default::default()
+            }
+        ));
+        assert!(super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn rust_linearized_source_cli_allows_native_mip_start_solvers() {
+        for solver in [
+            ExternalLinearCliSolver::Highs,
+            ExternalLinearCliSolver::Scip,
+            ExternalLinearCliSolver::Cbc,
+        ] {
+            assert!(
+                super::should_use_rust_linearized_source_cli(&ExternalLinearCliOptions {
+                    solver,
+                    mip_start: Some(vec![0.0]),
+                    ..Default::default()
+                }),
+                "{} should keep source MIP starts on the Rust/native path",
+                solver.as_str()
+            );
+        }
+        assert!(!super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Glpk,
+                mip_start: Some(vec![0.0]),
+                ..Default::default()
+            }
+        ));
+        assert!(!super::should_use_rust_linearized_source_cli(
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                mip_start: Some(vec![0.0]),
+                solution_pool_size: Some(2),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn linearized_branch_priorities_pad_auxiliary_variables() {
+        let mut opts = ExternalLinearCliOptions {
+            branch_priorities: Some(vec![7, 0]),
+            ..Default::default()
+        };
+
+        super::pad_linearized_external_branch_priorities(&mut opts, 5)
+            .expect("pad branch priorities");
+
+        assert_eq!(opts.branch_priorities, Some(vec![7, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn linearized_branch_priorities_reject_too_many_values() {
+        let mut opts = ExternalLinearCliOptions {
+            branch_priorities: Some(vec![7, 0, 3]),
+            ..Default::default()
+        };
+
+        let error = super::pad_linearized_external_branch_priorities(&mut opts, 2)
+            .expect_err("too many branch priorities should fail");
+
+        assert!(error.contains("exceeds linearized variable count"));
     }
 
     #[test]
@@ -11902,6 +13117,124 @@ mod tests {
         assert_eq!(solution.objective_values, Some(vec![1.0, 3.0]));
         assert_eq!(solution.objective, Some(3.0));
         assert_eq!(solution.message, "sequential lexicographic optimization");
+    }
+
+    #[test]
+    fn multi_objective_json_uses_native_highs_without_python_bridge() {
+        let base = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 0.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let payload = multi_objective_ipmip_problem_to_cli_json(&MultiObjectiveIPMIPProblem {
+            base,
+            objectives: vec![
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![1.0, 1.0],
+                    name: Some("cardinality".to_string()),
+                },
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![3.0, 1.0],
+                    name: Some("preference".to_string()),
+                },
+            ],
+        });
+
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-multi-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-multi-objective-json".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "multi-objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn multi_objective_json_rejects_bad_stage_width_without_python_bridge() {
+        let base = IPMIPProblem {
+            sense: Sense::Max,
+            c: vec![0.0, 0.0],
+            a: vec![vec![1.0, 1.0]],
+            b: vec![1.0],
+            integer_vars: vec![true, true],
+            ub: Some(vec![1.0, 1.0]),
+            var_names: None,
+            con_names: None,
+            lazy_constraints: None,
+            variable_nodes: None,
+            constraint_nodes: None,
+        };
+        let mut payload = multi_objective_ipmip_problem_to_cli_json(&MultiObjectiveIPMIPProblem {
+            base,
+            objectives: vec![
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![1.0, 1.0],
+                    name: Some("cardinality".to_string()),
+                },
+                LexicographicObjective {
+                    sense: Sense::Max,
+                    c: vec![3.0, 1.0],
+                    name: Some("preference".to_string()),
+                },
+            ],
+        });
+        payload["multi_objectives"][1]["c"] = serde_json::json!([3.0]);
+
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from(
+                    "/definitely/not-a-highs-multi-objective-json-binary",
+                )),
+                python: Some("/definitely/not-a-python-for-bad-multi-objective-json".to_string()),
+                time_limit_secs: Some(2.0),
+                random_seed: Some(7),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::NumericalError);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            solution
+                .message
+                .contains("multi_objectives[1].c length 1 does not match variable count 2"),
+            "{}",
+            solution.message
+        );
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "bad multi-objective JSON unexpectedly used Python bridge: {}",
+            solution.message
+        );
     }
 
     #[test]
@@ -13991,6 +15324,117 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
             "source linearization unexpectedly used Python bridge: {}",
             solution.message
         );
+    }
+
+    #[test]
+    fn source_feature_json_uses_rust_linearization_without_python_bridge() {
+        let payload = source_ipmip_problem_to_cli_json(&build_source_feature_mix_ip());
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            payload,
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from("/definitely/not-a-highs-source-json-binary")),
+                python: Some("/definitely/not-a-python-for-source-json-linearization".to_string()),
+                time_limit_secs: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            !solution.message.to_ascii_lowercase().contains("python"),
+            "source JSON linearization unexpectedly used Python bridge: {}",
+            solution.message
+        );
+    }
+
+    #[test]
+    fn source_feature_json_branch_priorities_use_rust_linearization_without_python_bridge() {
+        for (solver, command_path) in [
+            (
+                ExternalLinearCliSolver::Scip,
+                "/definitely/not-a-scip-source-json-priority-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Cbc,
+                "/definitely/not-a-cbc-source-json-priority-binary",
+            ),
+        ] {
+            let problem = build_source_feature_mix_ip();
+            let priority_count = problem.base.c.len();
+            let payload = source_ipmip_problem_to_cli_json(&problem);
+            let solution = super::solve_linear_cli_json(
+                ExternalLinearCliKind::Mip,
+                payload,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(PathBuf::from(command_path)),
+                    python: Some(format!(
+                        "/definitely/not-a-python-for-{}-source-json-priorities",
+                        solver.as_str()
+                    )),
+                    time_limit_secs: Some(2.0),
+                    branch_priorities: Some(vec![5; priority_count]),
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert!(
+                !solution.message.to_ascii_lowercase().contains("python"),
+                "{} source JSON priorities unexpectedly used Python bridge: {}",
+                solver.as_str(),
+                solution.message
+            );
+        }
+    }
+
+    #[test]
+    fn source_feature_json_mip_start_uses_rust_linearization_without_python_bridge() {
+        for (solver, command_path) in [
+            (
+                ExternalLinearCliSolver::Highs,
+                "/definitely/not-a-highs-source-json-mip-start-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Scip,
+                "/definitely/not-a-scip-source-json-mip-start-binary",
+            ),
+            (
+                ExternalLinearCliSolver::Cbc,
+                "/definitely/not-a-cbc-source-json-mip-start-binary",
+            ),
+        ] {
+            let problem = build_source_feature_mix_ip();
+            let payload = source_ipmip_problem_to_cli_json(&problem);
+            let solution = super::solve_linear_cli_json(
+                ExternalLinearCliKind::Mip,
+                payload,
+                &ExternalLinearCliOptions {
+                    solver,
+                    command_path: Some(PathBuf::from(command_path)),
+                    python: Some(format!(
+                        "/definitely/not-a-python-for-{}-source-json-mip-start",
+                        solver.as_str()
+                    )),
+                    time_limit_secs: Some(2.0),
+                    mip_start: Some(vec![0.0; problem.base.c.len()]),
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+            assert_eq!(solution.solver, format!("{}:cli", solver.as_str()));
+            assert!(
+                !solution.message.to_ascii_lowercase().contains("python"),
+                "{} source JSON MIP start unexpectedly used Python bridge: {}",
+                solver.as_str(),
+                solution.message
+            );
+        }
     }
 
     #[test]

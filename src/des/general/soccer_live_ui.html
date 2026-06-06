@@ -2343,7 +2343,8 @@ function render() {
   dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
   clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
   routeOne.textContent = `${s.routeOneBallsHome ?? 0} - ${s.routeOneBallsAway ?? 0}`;
-  tackles.textContent = `${s.tacklesHome ?? 0} - ${s.tacklesAway ?? 0}`;
+  const tackleSplitKnown = s.tacklesHome != null || s.tacklesAway != null;
+  tackles.textContent = tackleSplitKnown ? `${s.tacklesHome ?? 0} - ${s.tacklesAway ?? 0}` : `${s.tackles ?? 0}`;
   interceptions.textContent = `${s.interceptionsHome ?? 0} - ${s.interceptionsAway ?? 0}`;
   shotBlocks.textContent = `${s.shotBlocksHome ?? 0} - ${s.shotBlocksAway ?? 0}`;
   recoveries.textContent = `${s.looseBallRecoveriesHome ?? 0} - ${s.looseBallRecoveriesAway ?? 0}`;

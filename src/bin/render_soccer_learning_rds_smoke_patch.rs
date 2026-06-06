@@ -248,6 +248,7 @@ fn render_patch(args: &RenderArgs) -> Value {
                                 env_value("SOCCER_LEARNING_INTERVAL_TICKS", "4"),
                                 env_value("SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES", "5"),
                                 env_value("SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES", "5"),
+                                env_value("SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES", "200"),
                                 env_value("SOCCER_POSTGRES_ASYNC_BATCH_QUEUE", "4"),
                                 env_value("SOCCER_EVOLUTION_ENABLED", "true"),
                                 env_value("SOCCER_EVOLUTION_INTERVAL_GAMES", "5"),
@@ -372,6 +373,10 @@ mod tests {
         assert_eq!(value_for("SOCCER_PARALLEL_GAMES"), "3");
         assert_eq!(value_for("SOCCER_REQUIRE_POSTGRES"), "true");
         assert_eq!(value_for("SOCCER_EVOLUTION_ENABLED"), "true");
+        assert_eq!(
+            value_for("SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES"),
+            "200"
+        );
         assert_eq!(value_for("SOCCER_SOURCE_COMMIT"), "abc123");
         assert!(env.iter().any(
             |entry| entry["name"] == "SOCCER_DATABASE_URL" && entry.get("valueFrom").is_some()

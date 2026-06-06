@@ -37,15 +37,23 @@ impl ExternalMinCostFlowReferenceSolver {
 }
 
 fn registered_min_cost_flow_rust_fallback_enabled() -> bool {
-    std::env::var("MIN_COST_FLOW_REFERENCE_REGISTERED_FALLBACK")
-        .or_else(|_| std::env::var("MIN_COST_FLOW_REFERENCE_EXTERNAL_FALLBACK"))
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-            )
-        })
-        .unwrap_or(false)
+    [
+        "MIN_COST_FLOW_REFERENCE_REGISTERED_FALLBACK",
+        "MIN_COST_FLOW_REFERENCE_EXTERNAL_FALLBACK",
+        "MIN_COST_FLOW_REFERENCE_RUST_FIRST",
+        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+    ]
+    .into_iter()
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn should_use_rust_min_cost_flow_reference(opts: &ExternalMinCostFlowReferenceOptions) -> bool {
@@ -806,6 +814,30 @@ mod tests {
         assert!(solution
             .message
             .contains("requested solver 'ortools' was validated with Rust fallback"));
+    }
+
+    #[test]
+    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+        let _lock = MIN_COST_FLOW_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("lock env guard");
+        let _rust_first_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_RUST_FIRST", "true");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-min-cost-flow");
+
+        let solution = solve_min_cost_flow_with_external_reference(
+            &transportation_problem(),
+            &ExternalMinCostFlowReferenceOptions {
+                solver: ExternalMinCostFlowReferenceSolver::OrTools,
+            },
+        );
+
+        assert_eq!(solution.status, ExternalMinCostFlowReferenceStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-min-cost-flow-fallback-for-ortools"
+        );
+        assert_eq!(solution.objective, Some(21.0));
     }
 
     #[test]

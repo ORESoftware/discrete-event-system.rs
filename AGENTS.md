@@ -2,6 +2,9 @@
 
 - Stay on the `main` branch for now. Do not create feature branches unless the
   user explicitly asks for one.
+- When a task is done, stage all changes with `git add --all`, commit them, and
+  push. If the remote has new commits, pull them in, resolve any conflicts
+  semantically, and re-push.
 - When publishing `.bin` files on the filesystem, place them under a temp
   artifact folder such as `$HOME/.codex/tmp`. Before writing a `.bin` file, move
   any previous `.bin` file with the same name in that same folder to Trash

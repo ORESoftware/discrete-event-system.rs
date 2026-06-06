@@ -73,6 +73,8 @@ spec:
               value: "5"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
               value: "5"
+            - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
+              value: "200"
             - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
               value: "4"
             - name: SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE

@@ -38599,7 +38599,9 @@ where
 }
 
 pub fn soccer_tracking_dataset_from_json(raw: &str) -> Result<SoccerTrackingDataset, String> {
-    serde_json::from_str(raw).map_err(|e| format!("parse soccer tracking dataset: {e}"))
+    let value = serde_json::from_str::<serde_json::Value>(raw)
+        .map_err(|e| format!("parse soccer tracking dataset: {e}"))?;
+    soccer_tracking_dataset_from_json_value(value, "tracking json", false)
 }
 
 fn soccer_tracking_dataset_jsonl_meta(tracking: &SoccerTrackingDataset) -> serde_json::Value {
@@ -38637,6 +38639,7 @@ pub fn soccer_tracking_dataset_from_jsonl(
     }
     let mut config = fallback_config;
     let mut frames = Vec::new();
+    let mut coordinate_calibration = None;
 
     for (line_index, line) in raw.lines().enumerate() {
         let line_no = line_index + 1;
@@ -38649,13 +38652,16 @@ pub fn soccer_tracking_dataset_from_jsonl(
         if value.get("frames").is_some_and(|frames| frames.is_array())
             && value.get("config").is_some()
         {
-            let dataset = serde_json::from_value::<SoccerTrackingDataset>(value.clone())
-                .map_err(|err| format!("tracking jsonl line {line_no} dataset parse: {err}"))?;
             if !frames.is_empty() {
                 return Err(format!(
                     "tracking jsonl line {line_no} embeds a full dataset after frame lines"
                 ));
             }
+            let dataset = soccer_tracking_dataset_from_json_value(
+                value,
+                &format!("tracking jsonl line {line_no} dataset"),
+                true,
+            )?;
             dataset.validate()?;
             return Ok(dataset);
         }
@@ -38675,6 +38681,12 @@ pub fn soccer_tracking_dataset_from_jsonl(
                 config = serde_json::from_value::<MatchConfig>(raw_config.clone())
                     .map_err(|err| format!("tracking jsonl line {line_no} config parse: {err}"))?;
             }
+            if let Some(calibration) = tracking_json_coordinate_calibration_from_value(
+                &value,
+                &format!("tracking jsonl line {line_no} coordinate calibration"),
+            )? {
+                coordinate_calibration = Some(calibration);
+            }
             continue;
         }
         let frame_value = value.get("frame").cloned().unwrap_or(value);
@@ -38683,13 +38695,500 @@ pub fn soccer_tracking_dataset_from_jsonl(
         frames.push(frame);
     }
 
-    let dataset = SoccerTrackingDataset {
+    let mut dataset = SoccerTrackingDataset {
         source,
         config,
         frames,
     };
+    if let Some(calibration) = coordinate_calibration {
+        apply_tracking_json_coordinate_calibration(
+            &mut dataset,
+            calibration,
+            "tracking jsonl coordinate calibration",
+        )?;
+    }
     dataset.validate()?;
     Ok(dataset)
+}
+
+fn soccer_tracking_dataset_from_json_value(
+    value: serde_json::Value,
+    context: &str,
+    validate: bool,
+) -> Result<SoccerTrackingDataset, String> {
+    let calibration = tracking_json_coordinate_calibration_from_value(
+        &value,
+        &format!("{context} coordinate calibration"),
+    )?;
+    let mut dataset = serde_json::from_value::<SoccerTrackingDataset>(value)
+        .map_err(|err| format!("{context} dataset parse: {err}"))?;
+    if let Some(calibration) = calibration {
+        apply_tracking_json_coordinate_calibration(&mut dataset, calibration, context)?;
+    }
+    if validate {
+        dataset.validate()?;
+    }
+    Ok(dataset)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrackingJsonCoordinateSpace {
+    PitchYards,
+    Normalized,
+    Pixels,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TrackingJsonCoordinateCalibration {
+    coordinate_space: TrackingJsonCoordinateSpace,
+    calibration: TrackingCsvCoordinateCalibration,
+    image_dimensions: Option<Vec2>,
+}
+
+impl TrackingJsonCoordinateCalibration {
+    fn map_point(self, point: Vec2, config: &MatchConfig) -> Vec2 {
+        match self.coordinate_space {
+            TrackingJsonCoordinateSpace::PitchYards => {
+                if self.calibration.is_identity() {
+                    point.clamp_to_pitch(config.field_width_yards, config.field_length_yards)
+                } else {
+                    self.calibration.map_pitch_point(point, config)
+                }
+            }
+            TrackingJsonCoordinateSpace::Normalized => {
+                self.calibration.map_normalized(point, config)
+            }
+            TrackingJsonCoordinateSpace::Pixels => self.calibration.map_pixel(
+                point,
+                self.image_dimensions
+                    .expect("pixel coordinate calibration requires image dimensions"),
+                config,
+            ),
+        }
+    }
+
+    fn map_vector(self, vector: Vec2, config: &MatchConfig) -> Vec2 {
+        match self.coordinate_space {
+            TrackingJsonCoordinateSpace::PitchYards => {
+                if self.calibration.is_identity() {
+                    vector
+                } else {
+                    self.calibration.map_pitch_vector(vector, config)
+                }
+            }
+            TrackingJsonCoordinateSpace::Normalized => {
+                self.calibration.map_normalized_vector(vector, config)
+            }
+            TrackingJsonCoordinateSpace::Pixels => self.calibration.map_pixel_vector(
+                vector,
+                self.image_dimensions
+                    .expect("pixel coordinate calibration requires image dimensions"),
+                config,
+            ),
+        }
+    }
+}
+
+fn apply_tracking_json_coordinate_calibration(
+    dataset: &mut SoccerTrackingDataset,
+    calibration: TrackingJsonCoordinateCalibration,
+    context: &str,
+) -> Result<(), String> {
+    if !dataset.config.field_width_yards.is_finite()
+        || !dataset.config.field_length_yards.is_finite()
+        || dataset.config.field_width_yards <= 0.0
+        || dataset.config.field_length_yards <= 0.0
+    {
+        return Err(format!(
+            "{context}: field dimensions must be positive before coordinate calibration"
+        ));
+    }
+    if calibration.coordinate_space == TrackingJsonCoordinateSpace::Pixels {
+        let Some(dimensions) = calibration.image_dimensions else {
+            return Err(format!(
+                "{context}: pixel coordinate calibration requires imageWidth and imageHeight"
+            ));
+        };
+        if !dimensions.x.is_finite()
+            || !dimensions.y.is_finite()
+            || dimensions.x <= 0.0
+            || dimensions.y <= 0.0
+        {
+            return Err(format!(
+                "{context}: imageWidth and imageHeight must be positive finite values"
+            ));
+        }
+    }
+
+    for frame in &mut dataset.frames {
+        frame.ball_position = calibration.map_point(frame.ball_position, &dataset.config);
+        transform_tracking_json_optional_vector(
+            &mut frame.ball_velocity,
+            calibration,
+            &dataset.config,
+        );
+        transform_tracking_json_optional_vector(
+            &mut frame.ball_acceleration,
+            calibration,
+            &dataset.config,
+        );
+        transform_tracking_json_optional_vector(&mut frame.ball_jerk, calibration, &dataset.config);
+        transform_tracking_json_optional_vector(
+            &mut frame.ball_curl_acceleration,
+            calibration,
+            &dataset.config,
+        );
+        for player in &mut frame.players {
+            player.position = calibration.map_point(player.position, &dataset.config);
+            if let Some(home_position) = player.home_position.as_mut() {
+                *home_position = calibration.map_point(*home_position, &dataset.config);
+            }
+            transform_tracking_json_optional_vector(
+                &mut player.velocity,
+                calibration,
+                &dataset.config,
+            );
+            transform_tracking_json_optional_vector(
+                &mut player.motion_acceleration,
+                calibration,
+                &dataset.config,
+            );
+            transform_tracking_json_optional_vector(
+                &mut player.motion_jerk,
+                calibration,
+                &dataset.config,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn transform_tracking_json_optional_vector(
+    slot: &mut Option<Vec2>,
+    calibration: TrackingJsonCoordinateCalibration,
+    config: &MatchConfig,
+) {
+    if let Some(vector) = slot.as_mut() {
+        *vector = calibration.map_vector(*vector, config);
+    }
+}
+
+fn tracking_json_coordinate_calibration_from_value(
+    value: &serde_json::Value,
+    context: &str,
+) -> Result<Option<TrackingJsonCoordinateCalibration>, String> {
+    let mut roots = Vec::new();
+    if let Some(nested) = tracking_json_optional_field(
+        value,
+        &[
+            "coordinate_calibration",
+            "coordinateCalibration",
+            "source_coordinate_calibration",
+            "sourceCoordinateCalibration",
+            "tracking_coordinate_calibration",
+            "trackingCoordinateCalibration",
+            "footage_calibration",
+            "footageCalibration",
+            "coordinate_transform",
+            "coordinateTransform",
+        ],
+    ) {
+        if !nested.is_object() {
+            return Err(format!(
+                "{context}: coordinate calibration must be an object"
+            ));
+        }
+        roots.push(nested);
+    }
+    roots.push(value);
+
+    let source_space_raw = tracking_json_optional_string_from_roots(
+        &roots,
+        &[
+            "coordinate_space",
+            "coordinateSpace",
+            "source_coordinate_space",
+            "sourceCoordinateSpace",
+            "input_coordinate_space",
+            "inputCoordinateSpace",
+            "tracking_coordinate_space",
+            "trackingCoordinateSpace",
+            "footage_coordinate_space",
+            "footageCoordinateSpace",
+            "coordinate_kind",
+            "coordinateKind",
+            "source_coordinate_kind",
+            "sourceCoordinateKind",
+            "space",
+        ],
+        context,
+    )?;
+    let rotation_degrees = tracking_json_optional_f64_from_roots(
+        &roots,
+        &[
+            "rotation_degrees",
+            "rotationDegrees",
+            "rotate_degrees",
+            "rotateDegrees",
+            "coordinate_rotation_degrees",
+            "coordinateRotationDegrees",
+            "tracking_rotation_degrees",
+            "trackingRotationDegrees",
+            "footage_rotation_degrees",
+            "footageRotationDegrees",
+            "image_rotation_degrees",
+            "imageRotationDegrees",
+            "video_rotation_degrees",
+            "videoRotationDegrees",
+        ],
+        context,
+    )?;
+    let flip_x = tracking_json_optional_bool_from_roots(
+        &roots,
+        &[
+            "flip_x",
+            "flipX",
+            "invert_x",
+            "invertX",
+            "mirror_x",
+            "mirrorX",
+            "reverse_x",
+            "reverseX",
+            "coordinate_flip_x",
+            "coordinateFlipX",
+            "tracking_flip_x",
+            "trackingFlipX",
+            "footage_flip_x",
+            "footageFlipX",
+            "x_flipped",
+            "xFlipped",
+            "x_inverted",
+            "xInverted",
+        ],
+        context,
+    )?;
+    let flip_y = tracking_json_optional_bool_from_roots(
+        &roots,
+        &[
+            "flip_y",
+            "flipY",
+            "invert_y",
+            "invertY",
+            "mirror_y",
+            "mirrorY",
+            "reverse_y",
+            "reverseY",
+            "coordinate_flip_y",
+            "coordinateFlipY",
+            "tracking_flip_y",
+            "trackingFlipY",
+            "footage_flip_y",
+            "footageFlipY",
+            "vertical_flip",
+            "verticalFlip",
+            "y_flipped",
+            "yFlipped",
+            "y_inverted",
+            "yInverted",
+        ],
+        context,
+    )?;
+    let image_width = tracking_json_optional_f64_from_roots(
+        &roots,
+        &[
+            "image_width",
+            "imageWidth",
+            "frame_width",
+            "frameWidth",
+            "width",
+        ],
+        context,
+    )?;
+    let image_height = tracking_json_optional_f64_from_roots(
+        &roots,
+        &[
+            "image_height",
+            "imageHeight",
+            "frame_height",
+            "frameHeight",
+            "height",
+        ],
+        context,
+    )?;
+
+    if source_space_raw.is_none()
+        && rotation_degrees.is_none()
+        && flip_x.is_none()
+        && flip_y.is_none()
+        && image_width.is_none()
+        && image_height.is_none()
+    {
+        return Ok(None);
+    }
+
+    let quarter_turns_clockwise = rotation_degrees
+        .map(|degrees| {
+            quarter_turns_clockwise_from_degrees(degrees, &format!("{context} rotationDegrees"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let calibration = TrackingCsvCoordinateCalibration {
+        quarter_turns_clockwise,
+        flip_x: flip_x.unwrap_or(false),
+        flip_y: flip_y.unwrap_or(false),
+    };
+
+    let explicit_space = source_space_raw
+        .as_deref()
+        .map(|raw| parse_tracking_json_coordinate_space(raw, context))
+        .transpose()?;
+    let image_dimensions = match (image_width, image_height) {
+        (Some(width), Some(height)) => Some(Vec2::new(width, height)),
+        (None, None) => None,
+        _ => {
+            return Err(format!(
+                "{context}: pixel coordinate calibration requires both imageWidth and imageHeight"
+            ));
+        }
+    };
+    let coordinate_space = explicit_space.unwrap_or_else(|| {
+        if image_dimensions.is_some() {
+            TrackingJsonCoordinateSpace::Pixels
+        } else if !calibration.is_identity() {
+            TrackingJsonCoordinateSpace::Normalized
+        } else {
+            TrackingJsonCoordinateSpace::PitchYards
+        }
+    });
+    if coordinate_space == TrackingJsonCoordinateSpace::Pixels && image_dimensions.is_none() {
+        return Err(format!(
+            "{context}: pixel coordinate calibration requires imageWidth and imageHeight"
+        ));
+    }
+
+    Ok(Some(TrackingJsonCoordinateCalibration {
+        coordinate_space,
+        calibration,
+        image_dimensions,
+    }))
+}
+
+fn parse_tracking_json_coordinate_space(
+    raw: &str,
+    context: &str,
+) -> Result<TrackingJsonCoordinateSpace, String> {
+    match normalize_csv_header(raw).as_str() {
+        "pitch" | "pitchyard" | "pitchyards" | "yard" | "yards" | "field" | "fieldyards" => {
+            Ok(TrackingJsonCoordinateSpace::PitchYards)
+        }
+        "normalized" | "normalised" | "norm" | "unit" | "unitinterval" | "01" | "zeroone" => {
+            Ok(TrackingJsonCoordinateSpace::Normalized)
+        }
+        "pixel" | "pixels" | "px" | "imagepixel" | "imagepixels" | "video" | "image" => {
+            Ok(TrackingJsonCoordinateSpace::Pixels)
+        }
+        _ => Err(format!(
+            "{context}: unknown coordinateSpace `{raw}`, expected pitchYards, normalized, or pixels"
+        )),
+    }
+}
+
+fn tracking_json_optional_field<'a>(
+    value: &'a serde_json::Value,
+    aliases: &[&str],
+) -> Option<&'a serde_json::Value> {
+    let object = value.as_object()?;
+    aliases.iter().find_map(|alias| {
+        let normalized_alias = normalize_csv_header(alias);
+        object
+            .iter()
+            .find(|(key, _)| normalize_csv_header(key) == normalized_alias)
+            .map(|(_, value)| value)
+    })
+}
+
+fn tracking_json_optional_string_from_roots(
+    roots: &[&serde_json::Value],
+    aliases: &[&str],
+    context: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = roots
+        .iter()
+        .find_map(|root| tracking_json_optional_field(root, aliases))
+    else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::String(raw) => Ok(Some(raw.trim().to_string())),
+        other => Err(format!(
+            "{context}: {} must be a string, got {other}",
+            aliases[0]
+        )),
+    }
+}
+
+fn tracking_json_optional_f64_from_roots(
+    roots: &[&serde_json::Value],
+    aliases: &[&str],
+    context: &str,
+) -> Result<Option<f64>, String> {
+    let Some(value) = roots
+        .iter()
+        .find_map(|root| tracking_json_optional_field(root, aliases))
+    else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_f64()
+            .ok_or_else(|| format!("{context}: {} is not finite", aliases[0]))
+            .map(Some),
+        serde_json::Value::String(raw) => raw
+            .trim()
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|err| format!("{context}: parse {}={raw}: {err}", aliases[0])),
+        other => Err(format!(
+            "{context}: {} must be numeric, got {other}",
+            aliases[0]
+        )),
+    }
+}
+
+fn tracking_json_optional_bool_from_roots(
+    roots: &[&serde_json::Value],
+    aliases: &[&str],
+    context: &str,
+) -> Result<Option<bool>, String> {
+    let Some(value) = roots
+        .iter()
+        .find_map(|root| tracking_json_optional_field(root, aliases))
+    else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Bool(value) => Ok(Some(*value)),
+        serde_json::Value::Number(number) => match number.as_i64() {
+            Some(0) => Ok(Some(false)),
+            Some(1) => Ok(Some(true)),
+            _ => Err(format!(
+                "{context}: {} must be boolean true/false",
+                aliases[0]
+            )),
+        },
+        serde_json::Value::String(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "t" | "yes" | "y" | "on" => Ok(Some(true)),
+            "0" | "false" | "f" | "no" | "n" | "off" => Ok(Some(false)),
+            _ => Err(format!(
+                "{context}: parse {}={raw}: expected boolean true/false",
+                aliases[0]
+            )),
+        },
+        other => Err(format!(
+            "{context}: {} must be boolean true/false, got {other}",
+            aliases[0]
+        )),
+    }
 }
 
 pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingDataset {
@@ -40653,6 +41152,43 @@ impl TrackingCsvCoordinateCalibration {
         )
     }
 
+    fn map_pitch_point(self, point: Vec2, config: &MatchConfig) -> Vec2 {
+        self.map_normalized(
+            Vec2::new(
+                point.x / config.field_width_yards,
+                point.y / config.field_length_yards,
+            ),
+            config,
+        )
+    }
+
+    fn map_normalized_vector(self, vector: Vec2, config: &MatchConfig) -> Vec2 {
+        let rotated = self.rotate_normalized_vector(vector);
+        let x_norm = if self.flip_x { -rotated.x } else { rotated.x };
+        let y_norm = if self.flip_y { -rotated.y } else { rotated.y };
+        Vec2::new(
+            x_norm * config.field_width_yards,
+            y_norm * config.field_length_yards,
+        )
+    }
+
+    fn map_pixel_vector(self, vector: Vec2, image_dimensions: Vec2, config: &MatchConfig) -> Vec2 {
+        self.map_normalized_vector(
+            Vec2::new(vector.x / image_dimensions.x, vector.y / image_dimensions.y),
+            config,
+        )
+    }
+
+    fn map_pitch_vector(self, vector: Vec2, config: &MatchConfig) -> Vec2 {
+        self.map_normalized_vector(
+            Vec2::new(
+                vector.x / config.field_width_yards,
+                vector.y / config.field_length_yards,
+            ),
+            config,
+        )
+    }
+
     fn rotate_normalized(self, point: Vec2) -> Vec2 {
         match self.quarter_turns_clockwise % 4 {
             0 => point,
@@ -40660,6 +41196,19 @@ impl TrackingCsvCoordinateCalibration {
             2 => Vec2::new(1.0 - point.x, 1.0 - point.y),
             _ => Vec2::new(point.y, 1.0 - point.x),
         }
+    }
+
+    fn rotate_normalized_vector(self, vector: Vec2) -> Vec2 {
+        match self.quarter_turns_clockwise % 4 {
+            0 => vector,
+            1 => Vec2::new(-vector.y, vector.x),
+            2 => Vec2::new(-vector.x, -vector.y),
+            _ => Vec2::new(vector.y, -vector.x),
+        }
+    }
+
+    fn is_identity(self) -> bool {
+        self.quarter_turns_clockwise % 4 == 0 && !self.flip_x && !self.flip_y
     }
 }
 
@@ -40692,15 +41241,17 @@ fn csv_optional_quarter_turns_clockwise(
     else {
         return Ok(0);
     };
+    quarter_turns_clockwise_from_degrees(degrees, &format!("csv line {line_no} rotation_degrees"))
+}
+
+fn quarter_turns_clockwise_from_degrees(degrees: f64, context: &str) -> Result<u8, String> {
     if !degrees.is_finite() {
-        return Err(format!(
-            "csv line {line_no} rotation_degrees={degrees}: expected finite 0/90/180/270"
-        ));
+        return Err(format!("{context}={degrees}: expected finite 0/90/180/270"));
     }
     let rounded = degrees.round();
     if (degrees - rounded).abs() > 1e-9 {
         return Err(format!(
-            "csv line {line_no} rotation_degrees={degrees}: expected whole-degree 0/90/180/270"
+            "{context}={degrees}: expected whole-degree 0/90/180/270"
         ));
     }
     let mut normalized = (rounded as i32) % 360;
@@ -40709,7 +41260,7 @@ fn csv_optional_quarter_turns_clockwise(
     }
     if normalized % 90 != 0 {
         return Err(format!(
-            "csv line {line_no} rotation_degrees={degrees}: expected multiple of 90 degrees"
+            "{context}={degrees}: expected multiple of 90 degrees"
         ));
     }
     Ok((normalized / 90) as u8)
@@ -58447,6 +58998,186 @@ mod tests {
         assert_eq!(fallback.source, "frame-only-upload.jsonl");
         assert_eq!(fallback.config.seed, tracking.config.seed);
         assert_eq!(fallback.frames.len(), 2);
+    }
+
+    #[test]
+    fn tracking_dataset_json_calibrates_normalized_footage_coordinates() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 118,
+            ..Default::default()
+        };
+        let value = serde_json::json!({
+            "source": "unit-json-normalized-calibration",
+            "config": config,
+            "coordinateCalibration": {
+                "coordinateSpace": "normalized",
+                "rotationDegrees": 90
+            },
+            "frames": [
+                {
+                    "tick": 0,
+                    "clockSeconds": 0.0,
+                    "ballPosition": {"x": 0.250000, "y": 0.200000},
+                    "ballVelocity": {"x": 0.050000, "y": 0.100000},
+                    "ballHolder": 0,
+                    "lastTouchTeam": "Home",
+                    "players": [
+                        {
+                            "id": 0,
+                            "name": "Home carrier",
+                            "team": "Home",
+                            "role": "Midfielder",
+                            "shirt": 8,
+                            "position": {"x": 0.250000, "y": 0.200000},
+                            "velocity": {"x": 0.050000, "y": 0.100000},
+                            "homePosition": {"x": 0.300000, "y": 0.250000}
+                        }
+                    ]
+                },
+                {
+                    "tick": 1,
+                    "clockSeconds": 0.1,
+                    "ballPosition": {"x": 0.200000, "y": 0.150000},
+                    "ballVelocity": {"x": 0.040000, "y": 0.090000},
+                    "ballHolder": 0,
+                    "lastTouchTeam": "Home",
+                    "players": [
+                        {
+                            "id": 0,
+                            "name": "Home carrier",
+                            "team": "Home",
+                            "role": "Midfielder",
+                            "shirt": 8,
+                            "position": {"x": 0.200000, "y": 0.150000},
+                            "velocity": {"x": 0.040000, "y": 0.090000},
+                            "homePosition": {"x": 0.300000, "y": 0.250000}
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let parsed = soccer_tracking_dataset_from_json(&value.to_string())
+            .expect("normalized json calibration");
+        parsed.validate().expect("calibrated json validates");
+        assert_eq!(parsed.frames[0].players[0].position, Vec2::new(64.0, 30.0));
+        assert_eq!(
+            parsed.frames[0].players[0].home_position,
+            Some(Vec2::new(60.0, 36.0))
+        );
+        assert_eq!(parsed.frames[0].ball_position, Vec2::new(64.0, 30.0));
+        assert_eq!(
+            parsed.frames[0].players[0].velocity,
+            Some(Vec2::new(-8.0, 6.0))
+        );
+        assert_eq!(parsed.frames[1].players[0].position, Vec2::new(68.0, 24.0));
+        assert!(
+            !parsed
+                .to_learning_dataset()
+                .expect("calibrated json learning")
+                .transitions
+                .is_empty(),
+            "calibrated normalized JSON should train into transitions"
+        );
+
+        let mut invalid = value.clone();
+        invalid["coordinateCalibration"]["rotationDegrees"] = serde_json::json!(45);
+        let err = soccer_tracking_dataset_from_json(&invalid.to_string())
+            .expect_err("non-quarter-turn json rotation should fail");
+        assert!(
+            err.contains("multiple of 90"),
+            "unexpected json rotation error: {err}"
+        );
+    }
+
+    #[test]
+    fn tracking_dataset_jsonl_calibrates_pixel_footage_coordinates() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 119,
+            ..Default::default()
+        };
+        let meta = serde_json::json!({
+            "kind": "soccer-tracking-meta",
+            "source": "unit-jsonl-pixel-calibration",
+            "config": config,
+            "coordinateCalibration": {
+                "coordinateSpace": "pixels",
+                "imageWidth": 800,
+                "imageHeight": 1200,
+                "flipX": true,
+                "flipY": true
+            }
+        });
+        let frame0 = serde_json::json!({
+            "tick": 0,
+            "clockSeconds": 0.0,
+            "ballPosition": {"x": 200.0, "y": 240.0},
+            "ballVelocity": {"x": 40.0, "y": 60.0},
+            "ballHolder": 0,
+            "lastTouchTeam": "Home",
+            "players": [
+                {
+                    "id": 0,
+                    "name": "Home carrier",
+                    "team": "Home",
+                    "role": "Midfielder",
+                    "shirt": 8,
+                    "position": {"x": 200.0, "y": 240.0},
+                    "velocity": {"x": 40.0, "y": 60.0},
+                    "homePosition": {"x": 240.0, "y": 300.0}
+                }
+            ]
+        });
+        let frame1 = serde_json::json!({
+            "tick": 1,
+            "clockSeconds": 0.1,
+            "ballPosition": {"x": 160.0, "y": 180.0},
+            "ballVelocity": {"x": 32.0, "y": 48.0},
+            "ballHolder": 0,
+            "lastTouchTeam": "Home",
+            "players": [
+                {
+                    "id": 0,
+                    "name": "Home carrier",
+                    "team": "Home",
+                    "role": "Midfielder",
+                    "shirt": 8,
+                    "position": {"x": 160.0, "y": 180.0},
+                    "velocity": {"x": 32.0, "y": 48.0},
+                    "homePosition": {"x": 240.0, "y": 300.0}
+                }
+            ]
+        });
+        let jsonl = format!("{meta}\n{frame0}\n{frame1}\n");
+
+        let parsed = soccer_tracking_dataset_from_jsonl(
+            &jsonl,
+            MatchConfig::default(),
+            "fallback-jsonl-pixels",
+        )
+        .expect("pixel jsonl calibration");
+        assert_eq!(parsed.source, "unit-jsonl-pixel-calibration");
+        assert_eq!(parsed.frames[0].players[0].position, Vec2::new(60.0, 96.0));
+        assert_eq!(
+            parsed.frames[0].players[0].home_position,
+            Some(Vec2::new(56.0, 90.0))
+        );
+        assert_eq!(parsed.frames[0].ball_position, Vec2::new(60.0, 96.0));
+        assert_eq!(
+            parsed.frames[0].players[0].velocity,
+            Some(Vec2::new(-4.0, -6.0))
+        );
+        assert_eq!(parsed.frames[1].players[0].position, Vec2::new(64.0, 102.0));
+        assert!(
+            !parsed
+                .to_learning_dataset()
+                .expect("calibrated jsonl learning")
+                .transitions
+                .is_empty(),
+            "calibrated pixel JSONL should train into transitions"
+        );
     }
 
     #[test]

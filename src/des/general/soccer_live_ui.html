@@ -381,6 +381,11 @@
         <label for="autoEpisodeEnabled"><input id="autoEpisodeEnabled" type="checkbox" checked>Auto Episodes</label>
       </div>
       <div class="surface-control">
+        <label for="learningIntervalTicks">Learn Cadence</label>
+        <input id="learningIntervalTicks" type="number" min="1" max="100000" step="1" value="4">
+        <input id="policyTrainMaxTransitions" type="number" min="1" max="100000" step="1" value="24">
+      </div>
+      <div class="surface-control">
         <label for="simTicksPerPulse">Speed</label>
         <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="20">
         <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="20">
@@ -572,6 +577,8 @@ const inspectModeButton = document.getElementById("inspectMode");
 const learningEnabled = document.getElementById("learningEnabled");
 const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
 const autoEpisodeEnabled = document.getElementById("autoEpisodeEnabled");
+const learningIntervalTicks = document.getElementById("learningIntervalTicks");
+const policyTrainMaxTransitions = document.getElementById("policyTrainMaxTransitions");
 const simTicksPerPulse = document.getElementById("simTicksPerPulse");
 const simTicksPerPulseNumber = document.getElementById("simTicksPerPulseNumber");
 const policyAutosaveEnabled = document.getElementById("policyAutosaveEnabled");
@@ -972,7 +979,11 @@ function learningLabel(l) {
   const awayTargets = Number(l.awayPolicyTargetEntries ?? 0);
   const mode = l.learningEnabled === false ? "Off" : l.adversarialLearningEnabled ? "Adv" : "Solo";
   const log = l.learningLoggingEnabled === false ? " NL" : "";
-  return `${mode}${log} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
+  const interval = Math.max(1, Math.round(Number(l.learningIntervalTicks ?? state?.config?.learningIntervalTicks ?? 1)));
+  const cap = Math.max(1, Math.round(Number(l.policyTrainMaxTransitionsPerTick ?? state?.config?.policyTrainMaxTransitionsPerTick ?? 1)));
+  const deferred = Math.max(0, Math.round(Number(l.deferredRewardTransitions ?? 0)));
+  const deferredText = deferred ? ` Q${deferred}` : "";
+  return `${mode}${log} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
 }
 function ballAgentLabel(ball = state?.frame?.ball) {
   const decision = ball?.lastDecision;
@@ -2764,6 +2775,8 @@ function syncLearningControls() {
   syncingLearning = true;
   learningEnabled.checked = state.config.learningEnabled !== false;
   learningLoggingEnabled.checked = state.config.learningLoggingEnabled !== false;
+  learningIntervalTicks.value = String(Math.max(1, Math.round(Number(state.config.learningIntervalTicks ?? 4))));
+  policyTrainMaxTransitions.value = String(Math.max(1, Math.round(Number(state.config.policyTrainMaxTransitionsPerTick ?? 24))));
   syncingLearning = false;
 }
 function syncPolicyAutosavePair(source) {
@@ -3237,7 +3250,9 @@ async function updateLearningRuntime() {
   if (syncingLearning) return;
   const response = await postJson("/api/learning", {
     learningEnabled: learningEnabled.checked,
-    learningLoggingEnabled: learningLoggingEnabled.checked
+    learningLoggingEnabled: learningLoggingEnabled.checked,
+    learningIntervalTicks: Math.max(1, Math.round(Number(learningIntervalTicks.value || 1))),
+    policyTrainMaxTransitionsPerTick: Math.max(1, Math.round(Number(policyTrainMaxTransitions.value || 1)))
   });
   state.config = response.config;
   state.learning = response.learning;
@@ -3821,6 +3836,11 @@ surfacePreset.addEventListener("change", () => {
   });
 });
 [learningEnabled, learningLoggingEnabled].forEach(el => {
+  el.addEventListener("change", () => {
+    updateLearningRuntime().catch(e => statusEl.textContent = e.message);
+  });
+});
+[learningIntervalTicks, policyTrainMaxTransitions].forEach(el => {
   el.addEventListener("change", () => {
     updateLearningRuntime().catch(e => statusEl.textContent = e.message);
   });

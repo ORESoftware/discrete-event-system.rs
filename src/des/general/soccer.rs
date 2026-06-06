@@ -26182,6 +26182,10 @@ pub struct SoccerLearningRuntimeRequest {
     pub learning_enabled: Option<bool>,
     pub learning_logging_enabled: Option<bool>,
     #[serde(default)]
+    pub learning_interval_ticks: Option<usize>,
+    #[serde(default)]
+    pub policy_train_max_transitions_per_tick: Option<usize>,
+    #[serde(default)]
     pub neural_learning_enabled: Option<bool>,
     #[serde(default)]
     pub neural_learning_backend: Option<SoccerNeuralLearningBackend>,
@@ -27322,6 +27326,12 @@ pub struct SoccerLearningSnapshot {
     pub learning_enabled: bool,
     #[serde(default = "default_learning_logging_enabled")]
     pub learning_logging_enabled: bool,
+    #[serde(default = "default_learning_interval_ticks")]
+    pub learning_interval_ticks: usize,
+    #[serde(default = "default_policy_train_max_transitions_per_tick")]
+    pub policy_train_max_transitions_per_tick: usize,
+    #[serde(default)]
+    pub deferred_reward_transitions: usize,
     #[serde(default = "default_full_game_learning_enabled")]
     pub full_game_learning_enabled: bool,
     #[serde(default)]
@@ -29585,6 +29595,12 @@ impl SoccerMatch {
             total_transitions: self.learning_transitions.len(),
             learning_enabled: self.config.learning_enabled,
             learning_logging_enabled: self.config.learning_logging_enabled,
+            learning_interval_ticks: self.config.learning_interval_ticks.max(1),
+            policy_train_max_transitions_per_tick: self
+                .config
+                .policy_train_max_transitions_per_tick
+                .max(1),
+            deferred_reward_transitions: self.deferred_reward_transitions.len(),
             full_game_learning_enabled: self.config.full_game_learning_enabled,
             full_game_learning_applied: self.full_game_learning_applied,
             full_game_learning_episode_transitions: self.episode_learning_transitions.len(),
@@ -30134,7 +30150,7 @@ impl SoccerMatch {
     pub fn update_learning_runtime(
         &mut self,
         request: SoccerLearningRuntimeRequest,
-    ) -> SoccerLearningRuntimeResponse {
+    ) -> Result<SoccerLearningRuntimeResponse, String> {
         if let Some(enabled) = request.learning_enabled {
             self.config.learning_enabled = enabled && !self.human_controller_assigned();
             if !enabled {
@@ -30144,6 +30160,18 @@ impl SoccerMatch {
         }
         if let Some(enabled) = request.learning_logging_enabled {
             self.config.learning_logging_enabled = enabled;
+        }
+        if let Some(interval) = request.learning_interval_ticks {
+            if interval == 0 {
+                return Err("learningIntervalTicks must be at least 1".to_string());
+            }
+            self.config.learning_interval_ticks = interval;
+        }
+        if let Some(max_transitions) = request.policy_train_max_transitions_per_tick {
+            if max_transitions == 0 {
+                return Err("policyTrainMaxTransitionsPerTick must be at least 1".to_string());
+            }
+            self.config.policy_train_max_transitions_per_tick = max_transitions;
         }
         if let Some(enabled) = request.neural_learning_enabled {
             self.config.neural_learning.enabled = enabled && self.config.learning_enabled;
@@ -30158,10 +30186,10 @@ impl SoccerMatch {
             }
         }
         self.disable_learning_for_human_gameplay();
-        SoccerLearningRuntimeResponse {
+        Ok(SoccerLearningRuntimeResponse {
             config: self.config.clone(),
             learning: self.learning_stats_snapshot(),
-        }
+        })
     }
 
     fn learned_action_for_player(
@@ -35866,7 +35894,7 @@ impl SoccerRealtimeSession {
     pub fn update_learning_runtime(
         &mut self,
         request: SoccerLearningRuntimeRequest,
-    ) -> SoccerLearningRuntimeResponse {
+    ) -> Result<SoccerLearningRuntimeResponse, String> {
         self.sim.update_learning_runtime(request)
     }
 
@@ -38151,7 +38179,10 @@ fn handle_live_soccer_request_inner(
                     )
                 }
             };
-            LiveHttpResponse::json(&guard.update_learning_runtime(learning_req))
+            match guard.update_learning_runtime(learning_req) {
+                Ok(response) => LiveHttpResponse::json(&response),
+                Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
+            }
         }
         _ => LiveHttpResponse::error(404, "Not Found", "unknown soccer live route"),
     }
@@ -57546,16 +57577,24 @@ mod tests {
         assert!(!learning.adversarial_learning_enabled);
         assert!(!learning.neural_learning_enabled);
 
-        let response = sim.update_learning_runtime(SoccerLearningRuntimeRequest {
-            learning_enabled: Some(true),
-            learning_logging_enabled: Some(true),
-            neural_learning_enabled: Some(true),
-            neural_learning_backend: Some(SoccerNeuralLearningBackend::Inline),
-        });
+        let response = sim
+            .update_learning_runtime(SoccerLearningRuntimeRequest {
+                learning_enabled: Some(true),
+                learning_logging_enabled: Some(true),
+                learning_interval_ticks: Some(6),
+                policy_train_max_transitions_per_tick: Some(12),
+                neural_learning_enabled: Some(true),
+                neural_learning_backend: Some(SoccerNeuralLearningBackend::Inline),
+            })
+            .expect("runtime learning update");
         assert!(!response.config.learning_enabled);
         assert!(!response.config.learning_logging_enabled);
+        assert_eq!(response.config.learning_interval_ticks, 6);
+        assert_eq!(response.config.policy_train_max_transitions_per_tick, 12);
         assert!(!response.config.neural_learning.enabled);
         assert!(!response.learning.learning_enabled);
+        assert_eq!(response.learning.learning_interval_ticks, 6);
+        assert_eq!(response.learning.policy_train_max_transitions_per_tick, 12);
         assert!(!response.learning.neural_learning_enabled);
     }
 
@@ -67456,6 +67495,7 @@ mod tests {
     fn live_http_routes_state_and_step_json() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
+            learning_interval_ticks: 1,
             max_human_players: 2,
             seed: 55,
             ..Default::default()
@@ -67767,6 +67807,8 @@ mod tests {
         assert!(value["recentMoments"].as_array().unwrap().is_empty());
         assert_eq!(value["momentStorage"]["storedRecords"], 0);
         assert_eq!(value["learning"]["totalTransitions"], 44);
+        assert_eq!(value["learning"]["learningIntervalTicks"], 1);
+        assert_eq!(value["learning"]["policyTrainMaxTransitionsPerTick"], 24);
         assert!(value["learning"]["homePolicyEntries"].as_u64().unwrap() > 0);
         assert!(value["learning"]["awayPolicyEntries"].as_u64().unwrap() > 0);
         assert!(value["policyProbability"]["homeStates"].as_u64().unwrap() > 0);
@@ -69539,7 +69581,7 @@ mod tests {
         })));
         let input_queue = session.lock().unwrap().input_queue();
 
-        let body = r#"{"learningEnabled":false,"learningLoggingEnabled":false}"#;
+        let body = r#"{"learningEnabled":false,"learningLoggingEnabled":false,"learningIntervalTicks":8,"policyTrainMaxTransitionsPerTick":16}"#;
         let response = handle_live_soccer_request(
             &format!(
                 "POST /api/learning HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
@@ -69554,9 +69596,36 @@ mod tests {
             serde_json::from_str(&response.body).expect("learning runtime json");
         assert_eq!(value["config"]["learningEnabled"], false);
         assert_eq!(value["config"]["learningLoggingEnabled"], false);
+        assert_eq!(value["config"]["learningIntervalTicks"], 8);
+        assert_eq!(value["config"]["policyTrainMaxTransitionsPerTick"], 16);
         assert_eq!(value["learning"]["learningEnabled"], false);
         assert_eq!(value["learning"]["learningLoggingEnabled"], false);
+        assert_eq!(value["learning"]["learningIntervalTicks"], 8);
+        assert_eq!(value["learning"]["policyTrainMaxTransitionsPerTick"], 16);
         assert!(!session.lock().unwrap().match_ref().config.learning_enabled);
+    }
+
+    #[test]
+    fn live_http_learning_route_rejects_zero_training_cadence() {
+        let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            seed: 592,
+            ..Default::default()
+        })));
+        let input_queue = session.lock().unwrap().input_queue();
+
+        let body = r#"{"learningIntervalTicks":0,"policyTrainMaxTransitionsPerTick":0}"#;
+        let response = handle_live_soccer_request(
+            &format!(
+                "POST /api/learning HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("learningIntervalTicks"));
     }
 
     #[test]
@@ -71519,6 +71588,14 @@ mod tests {
         assert!(html.contains("function scheduleInputFlush"));
         assert!(html.contains("function flushQueuedInputsToInputApi"));
         assert!(html.contains("postJson(\"/api/input\", inputs)"));
+        assert!(html.contains("id=\"learningIntervalTicks\""));
+        assert!(html.contains("id=\"policyTrainMaxTransitions\""));
+        assert!(html.contains("learningIntervalTicks.value = String"));
+        assert!(html.contains("policyTrainMaxTransitions.value = String"));
+        assert!(html.contains("learningIntervalTicks: Math.max(1"));
+        assert!(html.contains("policyTrainMaxTransitionsPerTick: Math.max(1"));
+        assert!(html.contains("[learningIntervalTicks, policyTrainMaxTransitions].forEach"));
+        assert!(html.contains("I${interval} C${cap}"));
         assert!(html.contains("function pulseLowLatencyControllerInput"));
         assert!(html.contains("pulseLowLatencyControllerInput();"));
         assert!(html.contains("scheduleInputFlush(0);"));

@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference weighted Max-SAT solvers.
 //!
 //! The native Rust reference computes a deterministic exact enumeration check
-//! without Python startup. Explicit OR-Tools CP-SAT validation is launched from
-//! Rust with a tiny Python adapter over an integer-scaled copy of the same
-//! weighted Boolean model.
+//! without Python startup. Registered OR-Tools aliases default to that Rust
+//! reference; explicit force-Python switches keep the inline OR-Tools adapter
+//! available for compatibility validation.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -35,22 +35,31 @@ impl ExternalWeightedMaxSatReferenceSolver {
     }
 }
 
-fn registered_weighted_max_sat_rust_fallback_enabled() -> bool {
+fn weighted_max_sat_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn weighted_max_sat_python_reference_forced() -> bool {
     [
-        "WEIGHTED_MAX_SAT_REFERENCE_REGISTERED_FALLBACK",
-        "WEIGHTED_MAX_SAT_REFERENCE_EXTERNAL_FALLBACK",
-        "WEIGHTED_MAX_SAT_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "WEIGHTED_MAX_SAT_REFERENCE_FORCE_PYTHON",
+        "WEIGHTED_MAX_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| weighted_max_sat_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -69,8 +78,8 @@ fn should_use_rust_weighted_max_sat_reference(
 fn should_use_registered_weighted_max_sat_fallback(
     opts: &ExternalWeightedMaxSatReferenceOptions,
 ) -> bool {
-    registered_weighted_max_sat_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalWeightedMaxSatReferenceSolver::OrTools)
+    matches!(opts.solver, ExternalWeightedMaxSatReferenceSolver::OrTools)
+        && !weighted_max_sat_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -789,6 +798,17 @@ mod tests {
         }
     }
 
+    fn weighted_max_sat_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "WEIGHTED_MAX_SAT_REFERENCE_FORCE_PYTHON",
+            "WEIGHTED_MAX_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_sample_weighted_max_sat() {
         let problem = build_sample_weighted_max_sat_problem();
@@ -866,11 +886,15 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = weighted_max_sat_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-weighted-max-sat-alias",
+        );
         let problem = build_sample_weighted_max_sat_problem();
 
         let solution = solve_weighted_max_sat_with_external_reference(
@@ -896,13 +920,15 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn weighted_max_sat_force_python_keeps_ortools_bridge_available() {
         let _lock = WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_RUST_FIRST", "true");
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-weighted-max-sat");
+        let _force_python_guard = EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-forced-weighted-max-sat",
+        );
         let problem = build_sample_weighted_max_sat_problem();
 
         let solution = solve_weighted_max_sat_with_external_reference(
@@ -914,14 +940,12 @@ mod tests {
 
         assert_eq!(
             solution.status,
-            ExternalWeightedMaxSatReferenceStatus::Optimal
+            ExternalWeightedMaxSatReferenceStatus::Unavailable
         );
-        assert_eq!(
-            solution.solver,
-            "rust:registered-weighted-max-sat-fallback-for-ortools"
-        );
-        assert_eq!(solution.objective, Some(16.0));
-        assert_eq!(solution.assignment, vec![true, true, true]);
+        assert_eq!(solution.solver, "ortools:cp-sat-weighted-max-sat");
+        assert!(solution
+            .message
+            .contains("OR-Tools weighted-max-sat adapter"));
     }
 
     #[test]
@@ -929,8 +953,7 @@ mod tests {
         let _lock = WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard =
-            EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = WeightedMaxSatProblem {
             num_vars: 1,
@@ -964,8 +987,7 @@ mod tests {
         let _lock = WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard =
-            EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("WEIGHTED_MAX_SAT_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = build_sample_weighted_max_sat_problem();
 

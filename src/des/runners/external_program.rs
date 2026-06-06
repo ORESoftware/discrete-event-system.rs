@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -308,6 +309,7 @@ pub struct RunExternalOpts {
     pub timeout_ms: Option<u64>,
     pub max_buffer_bytes: Option<usize>,
     pub module_id: Option<String>,
+    pub stdin: Option<String>,
 }
 
 /// `runExternalProgram(command, args, opts)`.
@@ -326,14 +328,27 @@ pub fn run_external_program(
     let _max_buffer = opts.max_buffer_bytes.unwrap_or(10 * 1024 * 1024);
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
+    let stdin = if opts.stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = Command::new(command)
         .args(args)
         .current_dir(&cwd)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to run {command}: {e}"))?;
+    if let Some(input) = &opts.stdin {
+        let Some(mut child_stdin) = child.stdin.take() else {
+            return Err(format!("failed to open stdin for {command}"));
+        };
+        child_stdin
+            .write_all(input.as_bytes())
+            .map_err(|err| format!("failed to write stdin for {command}: {err}"))?;
+    }
 
     let mut timed_out = false;
     loop {
@@ -374,6 +389,20 @@ pub fn run_external_program(
     })
 }
 
+fn param_value_to_stdin_string(value: &ParamValue) -> String {
+    match value {
+        ParamValue::Str(text) => text.clone(),
+        ParamValue::Num(number) => number.to_string(),
+        ParamValue::Bool(flag) => flag.to_string(),
+    }
+}
+
+fn take_external_module_stdin(params: &mut ExternalModuleParams) -> Option<String> {
+    params
+        .remove("stdin")
+        .map(|value| param_value_to_stdin_string(&value))
+}
+
 /// `runExternalModule(id, params)`.
 pub fn run_external_module(
     id: &str,
@@ -391,6 +420,7 @@ pub fn run_external_module(
     for (k, v) in params {
         merged.insert(k.clone(), v.clone());
     }
+    let stdin = take_external_module_stdin(&mut merged);
 
     let command = std::env::var(&module.interpreter.env_var)
         .unwrap_or_else(|_| module.interpreter.default_command.clone());
@@ -411,6 +441,7 @@ pub fn run_external_module(
             timeout_ms: resolve_external_module_timeout_ms(&module),
             max_buffer_bytes: module.max_buffer_bytes,
             module_id: Some(id.to_string()),
+            stdin,
         },
     )
 }
@@ -595,5 +626,38 @@ mod tests {
 
         assert_ne!(result.status, Some(0));
         assert!(result.stderr.contains("timed out after 10ms"));
+    }
+
+    #[test]
+    fn run_external_program_can_pipe_stdin() {
+        let result = run_external_program(
+            "cat",
+            &[],
+            &RunExternalOpts {
+                timeout_ms: Some(1_000),
+                stdin: Some("rust-stdin-payload\n".to_string()),
+                ..RunExternalOpts::default()
+            },
+        )
+        .expect("stdin result");
+
+        assert_eq!(result.status, Some(0));
+        assert_eq!(result.stdout, "rust-stdin-payload\n");
+    }
+
+    #[test]
+    fn external_module_stdin_param_is_consumed_before_arg_building() {
+        let mut params = ExternalModuleParams::new();
+        params.insert(
+            "stdin".to_string(),
+            ParamValue::Str("{\"cost\":[[1]]}".to_string()),
+        );
+        params.insert("solver".to_string(), ParamValue::Str("auto".to_string()));
+
+        let stdin = take_external_module_stdin(&mut params);
+
+        assert_eq!(stdin.as_deref(), Some("{\"cost\":[[1]]}"));
+        assert!(!params.contains_key("stdin"));
+        assert!(params.contains_key("solver"));
     }
 }

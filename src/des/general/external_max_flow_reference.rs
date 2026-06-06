@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference max-flow solvers.
 //!
 //! The native Rust reference computes an independent Edmonds-Karp check without
-//! Python startup. Explicit OR-Tools SimpleMaxFlow validation is launched from
-//! Rust with a tiny Python adapter so the checked-in Python script can remain
-//! launcher glue only.
+//! Python startup. OR-Tools SimpleMaxFlow compatibility validation remains
+//! available through explicit force-Python switches and a tiny inline Python
+//! adapter, so checked-in Python remains launcher glue only.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -35,22 +35,31 @@ impl ExternalMaxFlowReferenceSolver {
     }
 }
 
-fn registered_max_flow_rust_fallback_enabled() -> bool {
+fn max_flow_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn max_flow_python_reference_forced() -> bool {
     [
-        "MAX_FLOW_REFERENCE_REGISTERED_FALLBACK",
-        "MAX_FLOW_REFERENCE_EXTERNAL_FALLBACK",
-        "MAX_FLOW_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "MAX_FLOW_REFERENCE_FORCE_PYTHON",
+        "MAX_FLOW_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| max_flow_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -65,8 +74,8 @@ fn should_use_rust_max_flow_reference(opts: &ExternalMaxFlowReferenceOptions) ->
 }
 
 fn should_use_registered_max_flow_fallback(opts: &ExternalMaxFlowReferenceOptions) -> bool {
-    registered_max_flow_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalMaxFlowReferenceSolver::OrTools)
+    matches!(opts.solver, ExternalMaxFlowReferenceSolver::OrTools)
+        && !max_flow_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -806,6 +815,17 @@ mod tests {
         }
     }
 
+    fn max_flow_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "MAX_FLOW_REFERENCE_FORCE_PYTHON",
+            "MAX_FLOW_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_textbook_max_flow() {
         let problem = build_textbook_max_flow_problem();
@@ -892,9 +912,11 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = max_flow_force_python_off_guards();
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-max-flow-alias");
         let problem = build_textbook_max_flow_problem();
 
         let solution = solve_max_flow_with_external_reference(
@@ -917,10 +939,11 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn max_flow_force_python_keeps_ortools_bridge_available() {
         let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_RUST_FIRST", "true");
-        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-max-flow");
+        let _force_python_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-max-flow");
         let problem = build_textbook_max_flow_problem();
 
         let solution = solve_max_flow_with_external_reference(
@@ -930,18 +953,15 @@ mod tests {
             },
         );
 
-        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Optimal);
-        assert_eq!(
-            solution.solver,
-            "rust:registered-max-flow-fallback-for-ortools"
-        );
-        assert!((solution.max_flow.unwrap() - 23.0).abs() <= 1e-9);
+        assert_eq!(solution.status, ExternalMaxFlowReferenceStatus::Unavailable);
+        assert_eq!(solution.solver, "ortools:simple-max-flow");
+        assert!(solution.message.contains("OR-Tools max-flow adapter"));
     }
 
     #[test]
     fn ortools_adapter_rejects_unscaled_capacities_without_python() {
         let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = MaxFlowProblem {
             num_nodes: 2,
@@ -971,7 +991,7 @@ mod tests {
     #[test]
     fn ortools_adapter_reports_startup_without_repo_script() {
         let _lock = MAX_FLOW_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("MAX_FLOW_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = build_textbook_max_flow_problem();
 

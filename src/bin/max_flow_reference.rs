@@ -23,7 +23,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-edmonds-karp|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-edmonds-karp|rust-edmonds-karp-max-flow|ortools|ortools-simple-max-flow]"
+    )
 }
 
 fn parse_solver(
@@ -57,16 +59,38 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
                     "auto" => ExternalMaxFlowReferenceSolver::Auto,
-                    "fallback" => ExternalMaxFlowReferenceSolver::Fallback,
-                    "rust-edmonds-karp" | "rust_edmonds_karp" | "rust-exact" | "rust_exact" => {
-                        ExternalMaxFlowReferenceSolver::RustEdmondsKarp
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalMaxFlowReferenceSolver::Fallback
                     }
-                    "ortools" => ExternalMaxFlowReferenceSolver::OrTools,
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "edmonds-karp"
+                    | "rust-edmonds-karp"
+                    | "rust:edmonds-karp"
+                    | "rust-edmonds-karp-max-flow"
+                    | "rust:edmonds-karp-max-flow"
+                    | "edmonds-karp-max-flow"
+                    | "max-flow-edmonds-karp"
+                    | "max-flow-exact" => ExternalMaxFlowReferenceSolver::RustEdmondsKarp,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-max-flow"
+                    | "ortools:max-flow"
+                    | "simple-max-flow"
+                    | "ortools-simple-max-flow"
+                    | "ortools:simple-max-flow" => ExternalMaxFlowReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
-                            "unknown solver {value:?}\n{}",
+                            "unknown solver {normalized:?}\n{}",
                             usage(program)
                         )))
                     }
@@ -325,6 +349,58 @@ mod tests {
 
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["maxFlow"], 5.0);
+    }
+
+    #[test]
+    fn parses_max_flow_solver_aliases_used_by_validation_tools() {
+        for alias in [
+            "rust",
+            "native",
+            "rust_exact",
+            "edmonds-karp",
+            "rust:edmonds-karp",
+            "rust-edmonds-karp-max-flow",
+            "rust:edmonds-karp-max-flow",
+            "max-flow-edmonds-karp",
+            "max-flow-exact",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "max_flow_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalMaxFlowReferenceSolver::RustEdmondsKarp
+            );
+        }
+
+        for alias in [
+            "ortools",
+            "or-tools",
+            "google-or-tools",
+            "ortools:max-flow",
+            "simple-max-flow",
+            "ortools-simple-max-flow",
+            "ortools:simple-max-flow",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "max_flow_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalMaxFlowReferenceSolver::OrTools
+            );
+        }
+
+        assert_eq!(
+            parse_solver(
+                "max_flow_reference",
+                ["--solver".to_string(), "rust:fallback".to_string()]
+            )
+            .expect("rust:fallback"),
+            ExternalMaxFlowReferenceSolver::Fallback
+        );
     }
 
     #[test]

@@ -27,7 +27,9 @@ enum TspInput {
 }
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-held-karp|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-held-karp|rust-held-karp-tsp|ortools|ortools-routing-tsp]"
+    )
 }
 
 fn parse_solver(
@@ -61,16 +63,36 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
                     "auto" => ExternalTspReferenceSolver::Auto,
-                    "fallback" => ExternalTspReferenceSolver::Fallback,
-                    "rust-held-karp" | "rust_held_karp" | "rust-exact" | "rust_exact" => {
-                        ExternalTspReferenceSolver::RustHeldKarp
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalTspReferenceSolver::Fallback
                     }
-                    "ortools" => ExternalTspReferenceSolver::OrTools,
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "held-karp"
+                    | "rust-held-karp"
+                    | "rust:held-karp"
+                    | "rust-held-karp-tsp"
+                    | "rust:held-karp-tsp"
+                    | "tsp-held-karp"
+                    | "tsp-held-karp-solver" => ExternalTspReferenceSolver::RustHeldKarp,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-tsp"
+                    | "ortools-routing-tsp"
+                    | "ortools:routing-tsp"
+                    | "routing-tsp" => ExternalTspReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
-                            "unknown solver {value:?}\n{}",
+                            "unknown solver {normalized:?}\n{}",
                             usage(program)
                         )))
                     }
@@ -314,6 +336,51 @@ mod tests {
         assert_eq!(output["solver"], "rust:held-karp-tsp");
         assert_eq!(output["tour"], json!([0, 1, 2, 3]));
         assert_eq!(output["objective"], 4.0);
+    }
+
+    #[test]
+    fn parses_tsp_solver_aliases_used_by_validation_tools() {
+        for alias in [
+            "rust",
+            "native",
+            "rust_exact",
+            "held-karp",
+            "rust:held-karp",
+            "rust-held-karp-tsp",
+            "rust:held-karp-tsp",
+            "tsp-held-karp",
+            "tsp-held-karp-solver",
+        ] {
+            assert_eq!(
+                parse_solver("tsp_reference", ["--solver".to_string(), alias.to_string()])
+                    .expect(alias),
+                ExternalTspReferenceSolver::RustHeldKarp
+            );
+        }
+
+        for alias in [
+            "ortools",
+            "or-tools",
+            "google-or-tools",
+            "ortools-routing-tsp",
+            "ortools:routing-tsp",
+            "routing-tsp",
+        ] {
+            assert_eq!(
+                parse_solver("tsp_reference", ["--solver".to_string(), alias.to_string()])
+                    .expect(alias),
+                ExternalTspReferenceSolver::OrTools
+            );
+        }
+
+        assert_eq!(
+            parse_solver(
+                "tsp_reference",
+                ["--solver".to_string(), "rust:fallback".to_string()]
+            )
+            .expect("rust:fallback"),
+            ExternalTspReferenceSolver::Fallback
+        );
     }
 
     #[test]

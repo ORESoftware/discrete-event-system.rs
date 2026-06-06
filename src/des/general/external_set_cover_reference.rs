@@ -1,8 +1,9 @@
 //! Rust-facing bridge for external/reference set-cover solvers.
 //!
 //! The native Rust reference computes an exact small-instance check without
-//! Python startup. Explicit OR-Tools CP-SAT validation is launched from Rust
-//! with a tiny Python adapter over an integer-scaled copy of the same model.
+//! Python startup. Registered OR-Tools aliases default to that Rust reference;
+//! explicit force-Python switches keep the inline OR-Tools adapter available
+//! for compatibility validation.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -34,22 +35,31 @@ impl ExternalSetCoverReferenceSolver {
     }
 }
 
-fn registered_set_cover_rust_fallback_enabled() -> bool {
+fn set_cover_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn set_cover_python_reference_forced() -> bool {
     [
-        "SET_COVER_REFERENCE_REGISTERED_FALLBACK",
-        "SET_COVER_REFERENCE_EXTERNAL_FALLBACK",
-        "SET_COVER_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "SET_COVER_REFERENCE_FORCE_PYTHON",
+        "SET_COVER_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| set_cover_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -64,8 +74,8 @@ fn should_use_rust_set_cover_reference(opts: &ExternalSetCoverReferenceOptions) 
 }
 
 fn should_use_registered_set_cover_fallback(opts: &ExternalSetCoverReferenceOptions) -> bool {
-    registered_set_cover_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalSetCoverReferenceSolver::OrTools)
+    matches!(opts.solver, ExternalSetCoverReferenceSolver::OrTools)
+        && !set_cover_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -859,6 +869,17 @@ mod tests {
         }
     }
 
+    fn set_cover_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "SET_COVER_REFERENCE_FORCE_PYTHON",
+            "SET_COVER_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_sample_set_cover() {
         let problem = build_sample_set_cover_problem();
@@ -917,9 +938,11 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = SET_COVER_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("SET_COVER_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = set_cover_force_python_off_guards();
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-set-cover-alias");
         let problem = build_sample_set_cover_problem();
 
         let solution = solve_set_cover_with_external_reference(
@@ -943,10 +966,11 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn set_cover_force_python_keeps_ortools_bridge_available() {
         let _lock = SET_COVER_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("SET_COVER_REFERENCE_RUST_FIRST", "true");
-        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-set-cover");
+        let _force_python_guard = EnvVarGuard::set("SET_COVER_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-set-cover");
         let problem = build_sample_set_cover_problem();
 
         let solution = solve_set_cover_with_external_reference(
@@ -956,20 +980,18 @@ mod tests {
             },
         );
 
-        assert_eq!(solution.status, ExternalSetCoverReferenceStatus::Optimal);
         assert_eq!(
-            solution.solver,
-            "rust:registered-set-cover-fallback-for-ortools"
+            solution.status,
+            ExternalSetCoverReferenceStatus::Unavailable
         );
-        assert_eq!(solution.objective, Some(7.0));
-        assert_eq!(solution.selected_set_ids, vec!["A", "B", "D"]);
-        assert_eq!(solution.covered_elements, problem.universe);
+        assert_eq!(solution.solver, ORTOOLS_SET_COVER_SOLVER);
+        assert!(solution.message.contains("OR-Tools set-cover adapter"));
     }
 
     #[test]
     fn ortools_adapter_rejects_unscaled_costs_without_python() {
         let _lock = SET_COVER_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("SET_COVER_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("SET_COVER_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = SetCoverProblem {
             universe: vec!["A".to_string()],
@@ -998,7 +1020,7 @@ mod tests {
     #[test]
     fn ortools_adapter_reports_startup_without_repo_script() {
         let _lock = SET_COVER_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("SET_COVER_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("SET_COVER_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = build_sample_set_cover_problem();
 

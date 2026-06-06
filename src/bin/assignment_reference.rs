@@ -21,7 +21,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-dp|rust-exact|ortools|scipy]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-dp|rust-exact|ortools|linear-sum-assignment|scipy]"
+    )
 }
 
 fn parse_solver(
@@ -55,17 +57,36 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
                     "auto" => ExternalAssignmentReferenceSolver::Auto,
-                    "fallback" => ExternalAssignmentReferenceSolver::Fallback,
-                    "rust-dp" | "rust_dp" | "rust-exact" | "rust_exact" => {
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalAssignmentReferenceSolver::Fallback
+                    }
+                    "rust" | "native" | "rust-native" | "rust-dp" | "rust:dp" | "dp"
+                    | "rust-exact" | "rust:exact" | "exact" => {
                         ExternalAssignmentReferenceSolver::RustDp
                     }
-                    "ortools" => ExternalAssignmentReferenceSolver::OrTools,
-                    "scipy" => ExternalAssignmentReferenceSolver::Scipy,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-assignment"
+                    | "ortools:simple-linear-sum-assignment"
+                    | "ortools-simple-linear-sum-assignment" => {
+                        ExternalAssignmentReferenceSolver::OrTools
+                    }
+                    "scipy"
+                    | "linear-sum-assignment"
+                    | "scipy-linear-sum-assignment"
+                    | "scipy:linear-sum-assignment"
+                    | "scipy:linear-sum-assignment-validation"
+                    | "scipy-linear-sum-assignment-validation" => {
+                        ExternalAssignmentReferenceSolver::Scipy
+                    }
                     _ => {
                         return Err(CliError(format!(
-                            "unknown solver {value:?}\n{}",
+                            "unknown solver {normalized:?}\n{}",
                             usage(program)
                         )))
                     }
@@ -247,6 +268,68 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["assignment"], json!([0, 1]));
         assert_eq!(output["objective"], 2.0);
+    }
+
+    #[test]
+    fn parses_assignment_solver_aliases_used_by_validation_tools() {
+        for alias in [
+            "rust",
+            "rust_dp",
+            "rust:dp",
+            "rust-exact",
+            "rust:exact",
+            "native",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "assignment_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalAssignmentReferenceSolver::RustDp
+            );
+        }
+
+        for alias in [
+            "ortools",
+            "or-tools",
+            "google-or-tools",
+            "ortools:simple-linear-sum-assignment",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "assignment_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalAssignmentReferenceSolver::OrTools
+            );
+        }
+
+        for alias in [
+            "scipy",
+            "linear-sum-assignment",
+            "scipy_linear_sum_assignment",
+            "scipy:linear-sum-assignment-validation",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "assignment_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalAssignmentReferenceSolver::Scipy
+            );
+        }
+
+        assert_eq!(
+            parse_solver(
+                "assignment_reference",
+                ["--solver".to_string(), "rust:fallback".to_string()]
+            )
+            .expect("rust:fallback"),
+            ExternalAssignmentReferenceSolver::Fallback
+        );
     }
 
     #[test]

@@ -62,8 +62,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--solver",
-        choices=["auto", "ortools", "fallback", "rust-kruskal", "rust-exact"],
         default="auto",
+        metavar="SOLVER",
+        help="solver alias to pass through to the Rust minimum_spanning_tree_reference binary",
     )
     args = parser.parse_args()
 

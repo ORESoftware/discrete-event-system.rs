@@ -1,9 +1,10 @@
 //! Rust-facing bridge for external/reference vehicle-routing solvers.
 //!
 //! The native Rust reference computes an exact small CVRP route-cover check
-//! without Python startup. Explicit OR-Tools Routing validation is launched
-//! from Rust through a tiny inline Python adapter, so the checked-in Python
-//! script stays compatibility glue instead of carrying reusable modeling logic.
+//! without Python startup. OR-Tools Routing compatibility validation is still
+//! available through explicit force-Python switches and a tiny inline Python
+//! adapter, so checked-in Python stays glue instead of carrying reusable
+//! modeling logic.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -36,22 +37,31 @@ impl ExternalRoutingReferenceSolver {
     }
 }
 
-fn registered_routing_rust_fallback_enabled() -> bool {
+fn routing_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn routing_python_reference_forced() -> bool {
     [
-        "ROUTING_REFERENCE_REGISTERED_FALLBACK",
-        "ROUTING_REFERENCE_EXTERNAL_FALLBACK",
-        "ROUTING_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "ROUTING_REFERENCE_FORCE_PYTHON",
+        "ROUTING_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| routing_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -66,8 +76,8 @@ fn should_use_rust_routing_reference(opts: &ExternalRoutingReferenceOptions) -> 
 }
 
 fn should_use_registered_routing_fallback(opts: &ExternalRoutingReferenceOptions) -> bool {
-    registered_routing_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalRoutingReferenceSolver::OrTools)
+    matches!(opts.solver, ExternalRoutingReferenceSolver::OrTools)
+        && !routing_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -723,6 +733,17 @@ mod tests {
         }
     }
 
+    fn routing_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "ROUTING_REFERENCE_FORCE_PYTHON",
+            "ROUTING_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     fn sample_customers() -> Vec<VRPCustomer> {
         vec![
             VRPCustomer {
@@ -829,9 +850,11 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("ROUTING_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = routing_force_python_off_guards();
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-routing-alias");
         let solution = solve_cvrp_with_external_reference(
             Point { x: 0.0, y: 0.0 },
             &sample_customers(),
@@ -861,9 +884,11 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn routing_force_python_keeps_ortools_bridge_available() {
         let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_RUST_FIRST", "true");
+        let _force_python_guard = EnvVarGuard::set("ROUTING_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-routing");
         let solution = solve_cvrp_with_external_reference(
             Point { x: 0.0, y: 0.0 },
             &sample_customers(),
@@ -873,12 +898,9 @@ mod tests {
             },
         );
 
-        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Optimal);
-        assert_eq!(
-            solution.solver,
-            "rust:registered-routing-fallback-for-ortools"
-        );
-        assert!(solution.objective.is_some());
+        assert_eq!(solution.status, ExternalRoutingReferenceStatus::Unavailable);
+        assert_eq!(solution.solver, "ortools:routing");
+        assert!(solution.message.contains("OR-Tools Routing adapter"));
     }
 
     #[test]
@@ -900,7 +922,9 @@ mod tests {
     #[test]
     fn ortools_adapter_reports_startup_without_repo_script() {
         let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-a-python-for-routing-ortools");
+        let _force_python_guard = EnvVarGuard::set("ROUTING_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-a-python-for-routing-ortools");
         let solution = solve_cvrp_with_external_reference(
             Point { x: 0.0, y: 0.0 },
             &sample_customers(),

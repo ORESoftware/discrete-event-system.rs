@@ -3,9 +3,10 @@
 //! The default path is a Rust reference for the small smooth, least-squares,
 //! global-benchmark, and Pareto-front models used by the validation suite. The
 //! checked-in Python bridge (`scripts/nonlinear_reference.py`) remains available
-//! for explicit SciPy/NLopt requests. This module owns the typed library
-//! boundary for smooth unconstrained problems, nonlinear least squares, and
-//! derivative-free benchmark minimization.
+//! behind explicit force-Python switches for SciPy/NLopt compatibility checks.
+//! This module owns the typed library boundary for smooth unconstrained
+//! problems, nonlinear least squares, and derivative-free benchmark
+//! minimization.
 
 use std::f64::consts::PI;
 use std::io::Write;
@@ -175,34 +176,42 @@ fn should_use_rust_reference(opts: &ExternalNonlinearReferenceOptions) -> bool {
     )
 }
 
-fn registered_nonlinear_rust_fallback_enabled() -> bool {
+fn nonlinear_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn nonlinear_python_reference_forced() -> bool {
     [
-        "NONLINEAR_REFERENCE_REGISTERED_FALLBACK",
-        "NL_REFERENCE_REGISTERED_FALLBACK",
-        "NONLINEAR_REFERENCE_EXTERNAL_FALLBACK",
-        "NONLINEAR_REFERENCE_RUST_FIRST",
-        "NL_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "NONLINEAR_REFERENCE_FORCE_PYTHON",
+        "NL_REFERENCE_FORCE_PYTHON",
+        "NONLINEAR_REFERENCE_SCIPY_FORCE_PYTHON",
+        "NONLINEAR_REFERENCE_NLOPT_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| nonlinear_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
 
 fn should_use_registered_nonlinear_fallback(opts: &ExternalNonlinearReferenceOptions) -> bool {
-    registered_nonlinear_rust_fallback_enabled()
-        && matches!(
-            opts.solver,
-            ExternalNonlinearReferenceSolver::Scipy | ExternalNonlinearReferenceSolver::Nlopt
-        )
+    matches!(
+        opts.solver,
+        ExternalNonlinearReferenceSolver::Scipy | ExternalNonlinearReferenceSolver::Nlopt
+    ) && !nonlinear_python_reference_forced()
 }
 
 fn reference_max_iterations(opts: &ExternalNonlinearReferenceOptions, default: usize) -> usize {
@@ -1067,6 +1076,19 @@ mod tests {
         }
     }
 
+    fn nonlinear_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "NONLINEAR_REFERENCE_FORCE_PYTHON",
+            "NL_REFERENCE_FORCE_PYTHON",
+            "NONLINEAR_REFERENCE_SCIPY_FORCE_PYTHON",
+            "NONLINEAR_REFERENCE_NLOPT_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn auto_prefers_rust_reference_without_python() {
         let opts = ExternalNonlinearReferenceOptions {
@@ -1167,9 +1189,11 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_registered_nonlinear_aliases_to_rust_without_python() {
+    fn registered_nonlinear_aliases_default_to_rust_without_python() {
         let _lock = NONLINEAR_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("NONLINEAR_REFERENCE_RUST_FIRST", "rust");
+        let _force_python_guards = nonlinear_force_python_off_guards();
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-nonlinear-aliases");
 
         let scipy_opts = ExternalNonlinearReferenceOptions {
             solver: ExternalNonlinearReferenceSolver::Scipy,
@@ -1227,6 +1251,29 @@ mod tests {
             global.solver,
             "rust:registered-nonlinear-fallback-for-nlopt"
         );
+    }
+
+    #[test]
+    fn nonlinear_force_python_keeps_registered_bridge_available() {
+        let _lock = NONLINEAR_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guard = EnvVarGuard::set("NONLINEAR_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-nonlinear");
+        let opts = ExternalNonlinearReferenceOptions {
+            solver: ExternalNonlinearReferenceSolver::Scipy,
+            max_iterations: Some(64),
+        };
+
+        let rosenbrock = solve_rosenbrock_with_external_reference(&[-1.2, 1.0], &opts);
+
+        assert_eq!(
+            rosenbrock.status,
+            ExternalNonlinearReferenceStatus::Unavailable
+        );
+        assert!(rosenbrock.solver.starts_with("external"));
+        assert!(rosenbrock
+            .message
+            .contains("failed to start nonlinear_reference.py"));
     }
 
     #[test]

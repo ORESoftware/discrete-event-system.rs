@@ -63,7 +63,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tool", default="drat")
     args = parser.parse_args()
-    tool = args.tool.lower().replace("_", "-")
+    tool = args.tool
     try:
         exec_rust_reference(tool)
         return 0

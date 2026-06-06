@@ -153,6 +153,42 @@ fn next_option_value(
     Ok(value)
 }
 
+fn normalized_solver_label(solver: &str) -> String {
+    let mut normalized = solver.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized.ends_with(":default") {
+        normalized.truncate(normalized.len() - ":default".len());
+    }
+    normalized
+}
+
+fn rust_reference_solver_alias_supported(solver: &str) -> bool {
+    matches!(
+        normalized_solver_label(solver).as_str(),
+        "auto"
+            | "brute-force"
+            | "enumeration"
+            | "fallback"
+            | "rust"
+            | "rust-enumeration"
+            | "rust-fallback"
+            | "rust:fallback"
+            | "rust-internal"
+            | "rust:internal"
+            | "milp"
+            | "scipy"
+            | "scipy-milp"
+            | "scipy:milp"
+            | "ortools"
+            | "ortools-scip"
+            | "ortools:scip"
+            | "ortools-cp-sat"
+            | "ortools:cp-sat"
+            | "ortools:cpsat"
+            | "cp-sat"
+            | "cpsat"
+    )
+}
+
 fn number(value: &Value, message: impl Into<String>) -> Result<f64, CliError> {
     value
         .as_f64()
@@ -319,6 +355,86 @@ fn append_linear_constraints(
             a.push(row.iter().map(|value| -value).collect());
             b.push(-lower);
         }
+    }
+    Ok(())
+}
+
+fn append_dense_equalities(
+    p: &Value,
+    n: usize,
+    a: &mut Vec<Vec<f64>>,
+    b: &mut Vec<f64>,
+) -> Result<(), CliError> {
+    let Some(raw_a_eq) = p.get("A_eq").or_else(|| p.get("a_eq")) else {
+        return Ok(());
+    };
+    let rows = number_matrix(raw_a_eq, "A_eq")?;
+    let rhs = number_array(
+        p.get("b_eq")
+            .ok_or_else(|| CliError("b_eq must be an array when A_eq is provided".to_string()))?,
+        "b_eq",
+    )?;
+    if rows.len() != rhs.len() {
+        return Err(CliError("A_eq/b_eq length mismatch".to_string()));
+    }
+    for (idx, (row, rhs)) in rows.into_iter().zip(rhs).enumerate() {
+        if row.len() != n {
+            return Err(CliError(format!(
+                "A_eq row {idx} coefficient length does not match variable count"
+            )));
+        }
+        if row.iter().any(|value| !value.is_finite()) || !rhs.is_finite() {
+            return Err(CliError(format!(
+                "A_eq row {idx} coefficients and rhs must be finite"
+            )));
+        }
+        append_equality(a, b, row, rhs);
+    }
+    Ok(())
+}
+
+fn append_lazy_constraints(
+    p: &Value,
+    n: usize,
+    a: &mut Vec<Vec<f64>>,
+    b: &mut Vec<f64>,
+) -> Result<(), CliError> {
+    let Some(raw_constraints) = p
+        .get("lazy_constraints")
+        .or_else(|| p.get("lazyConstraints"))
+    else {
+        return Ok(());
+    };
+    let constraints = raw_constraints
+        .as_array()
+        .ok_or_else(|| CliError("lazy_constraints must be an array".to_string()))?;
+    for (idx, constraint) in constraints.iter().enumerate() {
+        let row = number_array(
+            constraint
+                .get("coefs")
+                .or_else(|| constraint.get("coefficients"))
+                .ok_or_else(|| CliError(format!("lazy constraint {idx} coefs must be an array")))?,
+            &format!("lazy_constraints[{idx}].coefs"),
+        )?;
+        if row.len() != n {
+            return Err(CliError(format!(
+                "lazy constraint {idx} coefficient length does not match variable count"
+            )));
+        }
+        let rhs = number(
+            constraint
+                .get("rhs")
+                .or_else(|| constraint.get("upper"))
+                .ok_or_else(|| CliError(format!("lazy constraint {idx} rhs must be numeric")))?,
+            format!("lazy constraint {idx} rhs must be numeric"),
+        )?;
+        if row.iter().any(|value| !value.is_finite()) || !rhs.is_finite() {
+            return Err(CliError(format!(
+                "lazy constraint {idx} coefficients and rhs must be finite"
+            )));
+        }
+        a.push(row);
+        b.push(rhs);
     }
     Ok(())
 }
@@ -2134,6 +2250,7 @@ fn parse_problem(raw: &Value) -> Result<Problem, CliError> {
     let n = c.len();
     let mut a = if let Some(a) = p
         .get("a")
+        .or_else(|| p.get("A"))
         .or_else(|| p.get("A_ub"))
         .or_else(|| p.get("a_ub"))
     {
@@ -2157,6 +2274,8 @@ fn parse_problem(raw: &Value) -> Result<Problem, CliError> {
         }
     }
     append_linear_constraints(p, n, &mut a, &mut b)?;
+    append_dense_equalities(p, n, &mut a, &mut b)?;
+    append_lazy_constraints(p, n, &mut a, &mut b)?;
     let mut integer_vars = p
         .get("integer_vars")
         .or_else(|| p.get("integerVars"))
@@ -2810,18 +2929,7 @@ fn run(args: &Args, input: &str) -> Result<Value, CliError> {
     let raw = serde_json::from_str::<Value>(input)
         .map_err(|err| CliError(format!("failed to parse JSON: {err}")))?;
     let problem = parse_problem(&raw)?;
-    let solver = args.solver.as_str();
-    if !matches!(
-        solver,
-        "auto"
-            | "brute-force"
-            | "enumeration"
-            | "rust-enumeration"
-            | "ortools"
-            | "ortools-cp-sat"
-            | "scipy"
-            | "scipy-milp"
-    ) {
+    if !rust_reference_solver_alias_supported(&args.solver) {
         return Ok(error_json(format!(
             "unknown or unavailable solver '{}'",
             args.solver
@@ -2945,21 +3053,30 @@ mod tests {
 
     #[test]
     fn external_solver_names_alias_to_rust_enumeration() {
-        let output = run(
-            &Args {
-                problem: None,
-                out: None,
-                solver: "ortools".to_string(),
-                max_enumerations: 100,
-                pool_size: None,
-            },
-            BINARY_SAMPLE,
-        )
-        .expect("run");
+        for solver in [
+            "ortools",
+            "ortools:cp-sat",
+            "ortools_scip",
+            "scipy:milp",
+            "rust:fallback",
+            "rust:internal",
+        ] {
+            let output = run(
+                &Args {
+                    problem: None,
+                    out: None,
+                    solver: solver.to_string(),
+                    max_enumerations: 100,
+                    pool_size: None,
+                },
+                BINARY_SAMPLE,
+            )
+            .expect("run");
 
-        assert_eq!(output["result"]["status"], "optimal");
-        assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
-        assert_eq!(output["result"]["x"], json!([1.0, 0.0]));
+            assert_eq!(output["result"]["status"], "optimal", "{solver}: {output}");
+            assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
+            assert_eq!(output["result"]["x"], json!([1.0, 0.0]));
+        }
     }
 
     #[test]
@@ -2990,6 +3107,91 @@ mod tests {
         assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
         assert_eq!(output["result"]["x"], json!([1.0, 0.0]));
         assert_eq!(output["result"]["objective"], 3.0);
+    }
+
+    #[test]
+    fn bounded_enumeration_expands_dense_equalities() {
+        let output = run(
+            &Args {
+                problem: None,
+                out: None,
+                solver: "brute-force".to_string(),
+                max_enumerations: 100,
+                pool_size: None,
+            },
+            r#"{
+                "sense": "max",
+                "c": [3, 2],
+                "A_eq": [[1, 1]],
+                "b_eq": [4],
+                "integerVars": [true, true],
+                "lb": [0, 0],
+                "ub": [4, 4]
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(output["result"]["status"], "optimal");
+        assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
+        assert_eq!(output["result"]["x"], json!([4.0, 0.0]));
+        assert_eq!(output["result"]["objective"], 12.0);
+    }
+
+    #[test]
+    fn bounded_enumeration_accepts_dense_a_alias() {
+        let output = run(
+            &Args {
+                problem: None,
+                out: None,
+                solver: "brute-force".to_string(),
+                max_enumerations: 100,
+                pool_size: None,
+            },
+            r#"{
+                "sense": "max",
+                "c": [3, 2],
+                "A": [[1, 1]],
+                "b": [4],
+                "integerVars": [true, true],
+                "lb": [0, 0],
+                "ub": [4, 4]
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(output["result"]["status"], "optimal");
+        assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
+        assert_eq!(output["result"]["x"], json!([4.0, 0.0]));
+        assert_eq!(output["result"]["objective"], 12.0);
+    }
+
+    #[test]
+    fn bounded_enumeration_accepts_lazy_constraints_alias() {
+        let output = run(
+            &Args {
+                problem: None,
+                out: None,
+                solver: "brute-force".to_string(),
+                max_enumerations: 100,
+                pool_size: None,
+            },
+            r#"{
+                "sense": "max",
+                "c": [3, 2],
+                "lazyConstraints": [
+                    {"coefs": [1, 1], "rhs": 4}
+                ],
+                "integerVars": [true, true],
+                "lb": [0, 0],
+                "ub": [4, 4]
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(output["result"]["status"], "optimal");
+        assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
+        assert_eq!(output["result"]["x"], json!([4.0, 0.0]));
+        assert_eq!(output["result"]["objective"], 12.0);
     }
 
     #[test]

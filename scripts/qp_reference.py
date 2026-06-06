@@ -30,18 +30,128 @@ from typing import List, Optional, Sequence, Tuple
 
 CVXPY_SOLVER_ALIASES = {
     "osqp": "OSQP",
+    "cvxpy-osqp": "OSQP",
+    "cvxpy:osqp": "OSQP",
     "scs": "SCS",
+    "cvxpy-scs": "SCS",
+    "cvxpy:scs": "SCS",
     "clarabel": "CLARABEL",
+    "cvxpy-clarabel": "CLARABEL",
+    "cvxpy:clarabel": "CLARABEL",
     "ecos": "ECOS",
+    "cvxpy-ecos": "ECOS",
+    "cvxpy:ecos": "ECOS",
     "proxqp": "PROXQP",
+    "cvxpy-proxqp": "PROXQP",
+    "cvxpy:proxqp": "PROXQP",
     "sdpa": "SDPA",
+    "cvxpy-sdpa": "SDPA",
+    "cvxpy:sdpa": "SDPA",
     "mosek": "MOSEK",
+    "cvxpy-mosek": "MOSEK",
+    "cvxpy:mosek": "MOSEK",
     "copt": "COPT",
+    "cvxpy-copt": "COPT",
+    "cvxpy:copt": "COPT",
+    "qpoases": "QPOASES",
+    "cvxpy-qpoases": "QPOASES",
+    "cvxpy:qpoases": "QPOASES",
+    "cosmo": "COSMO",
+    "cvxpy-cosmo": "COSMO",
+    "cvxpy:cosmo": "COSMO",
+    "csdp": "CSDP",
+    "cvxpy-csdp": "CSDP",
+    "cvxpy:csdp": "CSDP",
 }
 
-CVXPY_REFERENCE_SOLVERS = ("cvxpy", "scs", "clarabel", "ecos", "mosek", "copt")
-REGISTERED_CONIC_REFERENCE_SOLVERS = ("qpoases", "proxqp", "cosmo", "sdpa", "csdp")
-RUST_REFERENCE_SOLVERS = ("auto", "fallback", "rust", "rust-internal", "rust-fallback")
+CVXPY_RUST_DEFAULT_REFERENCE_SOLVERS = (
+    "cvxpy",
+    "cvxpy-default",
+    "cvxpy:default",
+    "cvxpy-osqp",
+    "cvxpy:osqp",
+    "scs",
+    "cvxpy-scs",
+    "cvxpy:scs",
+    "clarabel",
+    "cvxpy-clarabel",
+    "cvxpy:clarabel",
+    "ecos",
+    "cvxpy-ecos",
+    "cvxpy:ecos",
+    "mosek",
+    "cvxpy-mosek",
+    "cvxpy:mosek",
+    "copt",
+    "cvxpy-copt",
+    "cvxpy:copt",
+    "qpoases",
+    "cvxpy-qpoases",
+    "cvxpy:qpoases",
+    "proxqp",
+    "cvxpy-proxqp",
+    "cvxpy:proxqp",
+    "cosmo",
+    "cvxpy-cosmo",
+    "cvxpy:cosmo",
+    "sdpa",
+    "cvxpy-sdpa",
+    "cvxpy:sdpa",
+    "csdp",
+    "cvxpy-csdp",
+    "cvxpy:csdp",
+)
+CVXPY_REFERENCE_SOLVERS = CVXPY_RUST_DEFAULT_REFERENCE_SOLVERS
+HIGHS_REFERENCE_SOLVERS = (
+    "highs",
+    "highspy",
+    "highs-qp",
+    "highs:qp",
+    "highs-quadratic",
+    "highs:quadratic",
+)
+OSQP_REFERENCE_SOLVERS = ("osqp", "osqp-qp", "osqp:qp")
+SCIPY_REFERENCE_SOLVERS = ("scipy", "scipy-slsqp", "scipy:slsqp")
+REGISTERED_CONIC_REFERENCE_SOLVERS = (
+    "qpoases",
+    "cvxpy-qpoases",
+    "cvxpy:qpoases",
+    "proxqp",
+    "cvxpy-proxqp",
+    "cvxpy:proxqp",
+    "cosmo",
+    "cvxpy-cosmo",
+    "cvxpy:cosmo",
+    "sdpa",
+    "cvxpy-sdpa",
+    "cvxpy:sdpa",
+    "csdp",
+    "cvxpy-csdp",
+    "cvxpy:csdp",
+)
+RUST_REFERENCE_SOLVERS = (
+    "fallback",
+    "rust",
+    "rust-internal",
+    "rust:internal",
+    "rust-active-set",
+    "rust:active-set",
+    "rust-qp-active-set",
+    "rust:qp-active-set",
+    "rust-quadratic-reference",
+    "rust:quadratic-reference",
+    "rust-miqp-enumeration",
+    "rust:miqp-enumeration",
+    "rust-socp-pattern-search",
+    "rust:socp-pattern-search",
+    "rust-qcp-pattern-search",
+    "rust:qcp-pattern-search",
+    "rust-fallback",
+    "rust:fallback",
+    "builtin",
+    "builtin-qp-active-set",
+    "builtin:qp-active-set",
+)
 
 
 def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
@@ -97,12 +207,96 @@ def package_available(module: str) -> bool:
 
 
 def python_bridge_disabled() -> bool:
-    for name in ("QP_REFERENCE_RUST_FIRST", "ORES_EXTERNAL_REFERENCE_RUST_FIRST"):
-        value = os.environ.get(name)
-        if value and value.strip().lower() not in ("0", "false", "off", "disabled"):
-            return True
     value = os.environ.get("QP_REFERENCE_PYTHON_BRIDGE", "auto")
     return value.strip().lower() in ("0", "false", "off", "disabled", "rust")
+
+
+def auto_prefers_rust_reference() -> bool:
+    value = os.environ.get("QP_REFERENCE_PYTHON_BRIDGE")
+    if value is None:
+        return True
+    return value.strip().lower() in ("0", "false", "off", "disabled", "rust")
+
+
+def truthy_python_reference_override(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in ("1", "true", "yes", "on", "python", "scipy", "slsqp")
+
+
+def scipy_python_reference_forced() -> bool:
+    return any(
+        truthy_python_reference_override(os.environ.get(name))
+        for name in (
+            "QP_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_SCIPY_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_PYTHON_BRIDGE",
+            "QP_EXTERNAL_BRIDGE",
+            "ORES_QP_EXTERNAL_BRIDGE",
+        )
+    )
+
+
+def highs_python_reference_forced() -> bool:
+    return any(
+        truthy_python_reference_override(os.environ.get(name))
+        for name in (
+            "QP_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_HIGHS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_PYTHON_BRIDGE",
+            "QP_EXTERNAL_BRIDGE",
+            "ORES_QP_EXTERNAL_BRIDGE",
+        )
+    )
+
+
+def osqp_python_reference_forced() -> bool:
+    return any(
+        truthy_python_reference_override(os.environ.get(name))
+        for name in (
+            "QP_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_OSQP_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_PYTHON_BRIDGE",
+            "QP_EXTERNAL_BRIDGE",
+            "ORES_QP_EXTERNAL_BRIDGE",
+        )
+    )
+
+
+def cvxpy_python_reference_forced() -> bool:
+    return any(
+        truthy_python_reference_override(os.environ.get(name))
+        for name in (
+            "QP_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_CVXPY_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_PYTHON_BRIDGE",
+            "QP_EXTERNAL_BRIDGE",
+            "ORES_QP_EXTERNAL_BRIDGE",
+        )
+    )
+
+
+def registered_python_reference_forced() -> bool:
+    return any(
+        truthy_python_reference_override(os.environ.get(name))
+        for name in (
+            "QP_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_REGISTERED_FORCE_PYTHON",
+            "QP_REFERENCE_CVXPY_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_PYTHON_BRIDGE",
+            "QP_EXTERNAL_BRIDGE",
+            "ORES_QP_EXTERNAL_BRIDGE",
+        )
+    )
+
+
+def registered_python_reference_forced_for_solver(solver: str) -> bool:
+    return solver in REGISTERED_CONIC_REFERENCE_SOLVERS and registered_python_reference_forced()
 
 
 def rust_reference(qp: dict, solver: str = "auto", max_enumerations: int = 1_000_000) -> dict:
@@ -766,7 +960,7 @@ def osqp_reference(qp_raw: dict) -> Optional[dict]:
 
 
 def cvxpy_solver_name(requested: str, installed: Sequence[str]) -> Optional[str]:
-    if requested == "cvxpy":
+    if requested in ("cvxpy", "cvxpy-default", "cvxpy:default"):
         for candidate in ("CLARABEL", "OSQP", "SCS", "ECOS"):
             if candidate in installed:
                 return candidate
@@ -1040,6 +1234,10 @@ def relabel_registered_fallback(result: dict, solver: str, fallback_kind: str) -
 
 def registered_qp_reference(qp_raw: dict, requested_solver: str) -> dict:
     cvxpy = cvxpy_reference(qp_raw, requested_solver)
+    if registered_python_reference_forced():
+        if cvxpy is not None:
+            return cvxpy
+        return unavailable_reference(f"cvxpy:{requested_solver}", "cvxpy is not installed")
     if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
         return cvxpy
     return relabel_registered_fallback(rust_reference(qp_raw, "fallback"), requested_solver, "qp-active-set")
@@ -1047,6 +1245,10 @@ def registered_qp_reference(qp_raw: dict, requested_solver: str) -> dict:
 
 def registered_socp_reference(raw: dict, requested_solver: str) -> dict:
     cvxpy = cvxpy_socp_reference(raw, requested_solver)
+    if registered_python_reference_forced():
+        if cvxpy is not None:
+            return cvxpy
+        return unavailable_reference(f"cvxpy:{requested_solver}", "cvxpy is not installed")
     if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
         return cvxpy
     return relabel_registered_fallback(rust_reference(raw, "fallback"), requested_solver, "socp-pattern-search")
@@ -1054,6 +1256,10 @@ def registered_socp_reference(raw: dict, requested_solver: str) -> dict:
 
 def registered_qcp_reference(raw: dict, requested_solver: str) -> dict:
     cvxpy = cvxpy_qcp_reference(raw, requested_solver)
+    if registered_python_reference_forced():
+        if cvxpy is not None:
+            return cvxpy
+        return unavailable_reference(f"cvxpy:{requested_solver}", "cvxpy is not installed")
     if cvxpy is not None and cvxpy.get("status") not in ("unavailable", "numerical-error"):
         return cvxpy
     return relabel_registered_fallback(rust_reference(raw, "fallback"), requested_solver, "qcp-pattern-search")
@@ -1068,6 +1274,17 @@ def scipy_iterations(result) -> int:
 
 def should_try_next_auto_reference(result: Optional[dict], solver: str) -> bool:
     return solver == "auto" and result is not None and result.get("status") in ("unavailable", "numerical-error")
+
+
+def problem_payload(raw: dict) -> dict:
+    problem = raw.get("problem")
+    return problem if isinstance(problem, dict) else raw
+
+
+def has_integer_vars(raw: dict) -> bool:
+    source = problem_payload(raw)
+    values = source.get("integer_vars", source.get("integerVars", []))
+    return isinstance(values, list) and any(bool(value) for value in values)
 
 
 def continuous_socp_reference(raw: dict, solver: str) -> dict:
@@ -1129,47 +1346,74 @@ def main() -> int:
     parser.add_argument("--solver", default="auto")
     parser.add_argument("--max-enumerations", type=int, default=1_000_000)
     args = parser.parse_args()
-    args.solver = args.solver.strip().lower().replace("_", "-")
+    rust_solver = args.solver.strip() or "auto"
+    args.solver = rust_solver.lower().replace("_", "-")
     raw_stdin = sys.stdin.read()
     if args.solver in RUST_REFERENCE_SOLVERS:
-        exec_rust_reference(raw_stdin, args.solver, args.max_enumerations)
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
+    if args.solver == "auto" and auto_prefers_rust_reference():
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
+    if args.solver in HIGHS_REFERENCE_SOLVERS and not highs_python_reference_forced():
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
+    if args.solver in OSQP_REFERENCE_SOLVERS and not osqp_python_reference_forced():
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
+    if (
+        args.solver in CVXPY_RUST_DEFAULT_REFERENCE_SOLVERS
+        and not cvxpy_python_reference_forced()
+        and not registered_python_reference_forced_for_solver(args.solver)
+    ):
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
+    if args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS and not registered_python_reference_forced():
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
+    if args.solver in SCIPY_REFERENCE_SOLVERS and not scipy_python_reference_forced():
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
     qp = json.loads(raw_stdin)
+    source = problem_payload(qp)
     if python_bridge_disabled():
         if args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS:
-            os.environ["QP_REFERENCE_REGISTERED_FALLBACK"] = "rust"
-            exec_rust_reference(raw_stdin, args.solver, args.max_enumerations)
+            exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
         exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
     if (
         args.solver in REGISTERED_CONIC_REFERENCE_SOLVERS
-        and not qp.get("integer_vars")
+        and not registered_python_reference_forced()
+        and not has_integer_vars(qp)
         and (python_bridge_disabled() or not package_available("cvxpy"))
     ):
-        os.environ["QP_REFERENCE_REGISTERED_FALLBACK"] = "rust"
-        exec_rust_reference(raw_stdin, args.solver, args.max_enumerations)
+        exec_rust_reference(raw_stdin, rust_solver, args.max_enumerations)
     result = None
-    if qp.get("integer_vars") and qp.get("cones"):
+    has_soc_cones = bool(source.get("cones") or source.get("soc"))
+    has_qcp_constraints = bool(
+        source.get("quadratic_constraints")
+        or source.get("q_constraints")
+        or source.get("quadraticConstraints")
+    )
+    if has_integer_vars(qp) and has_soc_cones:
         exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
-    if qp.get("integer_vars") and (qp.get("quadratic_constraints") or qp.get("q_constraints")):
+    if has_integer_vars(qp) and has_qcp_constraints:
         exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
-    if qp.get("integer_vars"):
+    if has_integer_vars(qp):
         exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
-    if qp.get("cones"):
-        result = continuous_socp_reference(qp, args.solver)
+    if source.get("soc"):
+        exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
+    if source.get("cones"):
+        result = continuous_socp_reference(source, args.solver)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
-    if qp.get("quadratic_constraints") or qp.get("q_constraints"):
-        result = continuous_qcp_reference(qp, args.solver)
+    if source.get("quadraticConstraints"):
+        exec_rust_reference(raw_stdin, "fallback", args.max_enumerations)
+    if source.get("quadratic_constraints") or source.get("q_constraints"):
+        result = continuous_qcp_reference(source, args.solver)
         print(json.dumps(result))
         return 0 if result.get("status") != "unavailable" else 2
-    if args.solver in ("auto", "highs", "highspy", "highs-qp"):
+    if args.solver in ("auto", *HIGHS_REFERENCE_SOLVERS):
         result = highs_qp_reference(qp)
         if args.solver != "auto" and result is None:
             result = {"status": "unavailable", "solver": "highs:qp", "x": [], "objective": None, "message": "highspy is not installed"}
-    if result is None and args.solver in ("auto", "scipy", "scipy-slsqp"):
+    if result is None and args.solver in ("auto", *SCIPY_REFERENCE_SOLVERS):
         result = scipy_reference(qp)
         if args.solver != "auto" and result is None:
             result = {"status": "unavailable", "solver": "scipy:SLSQP", "x": [], "objective": None, "message": "scipy is not installed"}
-    if result is None and args.solver in ("auto", "osqp"):
+    if result is None and args.solver in ("auto", *OSQP_REFERENCE_SOLVERS):
         result = osqp_reference(qp)
         if args.solver != "auto" and result is None:
             result = unavailable_reference("osqp", "osqp is not installed")

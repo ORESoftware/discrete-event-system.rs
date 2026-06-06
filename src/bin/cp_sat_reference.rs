@@ -29,7 +29,7 @@ struct CliArgs {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage: {program} [--solver auto|rust-enumeration|python-enumeration|ortools|ortools-cp-sat] [--enumerate-solutions N] [--assumption-core]"
+        "usage: {program} [--solver auto|rust-enumeration|python-enumeration-legacy|ortools|ortools-cp-sat] [--enumerate-solutions N] [--assumption-core]"
     )
 }
 
@@ -60,7 +60,9 @@ fn parse_solver(value: &str) -> Result<ExternalCpSatReferenceSolver, CliError> {
         "rust-enumeration" | "rust_exact" | "rust-exact" => {
             Ok(ExternalCpSatReferenceSolver::RustEnumeration)
         }
-        "python-enumeration" => Ok(ExternalCpSatReferenceSolver::PythonEnumeration),
+        "python-enumeration" | "python-enumeration-legacy" => {
+            Ok(ExternalCpSatReferenceSolver::PythonEnumeration)
+        }
         "ortools" | "ortools-cp-sat" => Ok(ExternalCpSatReferenceSolver::OrToolsCpSat),
         other => Err(CliError(format!("unknown solver {other:?}"))),
     }

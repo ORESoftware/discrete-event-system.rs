@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference bin-packing solvers.
 //!
 //! The native Rust reference computes a deterministic exact small-instance
-//! check without Python startup. Explicit OR-Tools CP-SAT validation is
-//! launched from Rust with a tiny Python adapter over an integer-scaled copy
-//! of the same item/capacity input.
+//! check without Python startup. Registered OR-Tools aliases default to that
+//! Rust reference; explicit force-Python switches keep the inline OR-Tools
+//! adapter available for compatibility validation.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -35,22 +35,31 @@ impl ExternalBinPackingReferenceSolver {
     }
 }
 
-fn registered_bin_packing_rust_fallback_enabled() -> bool {
+fn bin_packing_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn bin_packing_python_reference_forced() -> bool {
     [
-        "BIN_PACKING_REFERENCE_REGISTERED_FALLBACK",
-        "BIN_PACKING_REFERENCE_EXTERNAL_FALLBACK",
-        "BIN_PACKING_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "BIN_PACKING_REFERENCE_FORCE_PYTHON",
+        "BIN_PACKING_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| bin_packing_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -65,8 +74,8 @@ fn should_use_rust_bin_packing_reference(opts: &ExternalBinPackingReferenceOptio
 }
 
 fn should_use_registered_bin_packing_fallback(opts: &ExternalBinPackingReferenceOptions) -> bool {
-    registered_bin_packing_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalBinPackingReferenceSolver::OrTools)
+    matches!(opts.solver, ExternalBinPackingReferenceSolver::OrTools)
+        && !bin_packing_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -870,6 +879,17 @@ mod tests {
         }
     }
 
+    fn bin_packing_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "BIN_PACKING_REFERENCE_FORCE_PYTHON",
+            "BIN_PACKING_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     fn packed_load_sum(bins: &[ExternalBinPackingReferenceBin]) -> f64 {
         bins.iter().map(|bin| bin.load).sum()
     }
@@ -926,11 +946,13 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = bin_packing_force_python_off_guards();
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-bin-packing-alias");
         let problem = build_sample_bin_packing_problem();
 
         let solution = solve_bin_packing_with_external_reference(
@@ -954,13 +976,15 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn bin_packing_force_python_keeps_ortools_bridge_available() {
         let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_RUST_FIRST", "true");
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-bin-packing");
+        let _force_python_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-forced-bin-packing",
+        );
         let problem = build_sample_bin_packing_problem();
 
         let solution = solve_bin_packing_with_external_reference(
@@ -970,13 +994,12 @@ mod tests {
             },
         );
 
-        assert_eq!(solution.status, ExternalBinPackingReferenceStatus::Optimal);
         assert_eq!(
-            solution.solver,
-            "rust:registered-bin-packing-fallback-for-ortools"
+            solution.status,
+            ExternalBinPackingReferenceStatus::Unavailable
         );
-        assert_eq!(solution.objective, Some(3));
-        assert!((packed_load_sum(&solution.bins) - 30.0).abs() <= 1e-9);
+        assert_eq!(solution.solver, ORTOOLS_BIN_PACKING_SOLVER);
+        assert!(solution.message.contains("OR-Tools bin-packing adapter"));
     }
 
     #[test]
@@ -984,7 +1007,7 @@ mod tests {
         let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = bin_packing_problem_from_weights(1.0, vec![1.0 / 3.0]);
 
@@ -1010,7 +1033,7 @@ mod tests {
         let _lock = BIN_PACKING_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("BIN_PACKING_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = build_sample_bin_packing_problem();
 

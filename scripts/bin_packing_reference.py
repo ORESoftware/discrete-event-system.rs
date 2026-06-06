@@ -56,8 +56,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--solver",
-        choices=["auto", "ortools", "fallback", "rust-exact"],
         default="auto",
+        metavar="SOLVER",
+        help="solver alias to pass through to the Rust bin_packing_reference binary",
     )
     args = parser.parse_args()
 

@@ -25,7 +25,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-branch-and-bound|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-branch-and-bound|rust:branch-and-bound-weighted-independent-set|ortools|ortools:cp-sat-weighted-independent-set]"
+    )
 }
 
 fn parse_solver(
@@ -59,16 +61,47 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
-                    "auto" => ExternalWeightedIndependentSetReferenceSolver::Auto,
-                    "fallback" => ExternalWeightedIndependentSetReferenceSolver::Fallback,
-                    "rust-branch-and-bound"
-                    | "rust_branch_and_bound"
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
+                    "auto" | "default" => ExternalWeightedIndependentSetReferenceSolver::Auto,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalWeightedIndependentSetReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-branch-and-bound"
+                    | "rust:branch-and-bound"
                     | "rust-exact"
-                    | "rust_exact" => {
+                    | "rust:exact"
+                    | "weighted-independent-set"
+                    | "independent-set"
+                    | "maximum-weight-independent-set"
+                    | "branch-and-bound-weighted-independent-set"
+                    | "rust-weighted-independent-set"
+                    | "rust:weighted-independent-set"
+                    | "rust-branch-and-bound-weighted-independent-set"
+                    | "rust:branch-and-bound-weighted-independent-set"
+                    | "rust-exact-weighted-independent-set"
+                    | "rust:exact-weighted-independent-set" => {
                         ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound
                     }
-                    "ortools" => ExternalWeightedIndependentSetReferenceSolver::OrTools,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "or-tools-cp-sat"
+                    | "cp-sat-weighted-independent-set"
+                    | "ortools-weighted-independent-set"
+                    | "ortools:weighted-independent-set"
+                    | "ortools-cp-sat-weighted-independent-set"
+                    | "ortools:cp-sat-weighted-independent-set"
+                    | "or-tools-cp-sat-weighted-independent-set" => {
+                        ExternalWeightedIndependentSetReferenceSolver::OrTools
+                    }
                     _ => {
                         return Err(CliError(format!(
                             "unknown solver {value:?}\n{}",
@@ -286,6 +319,59 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["totalWeight"], 2.0);
         assert_eq!(output["selectedVertexIds"], json!(["A", "C"]));
+    }
+
+    #[test]
+    fn parses_weighted_independent_set_solver_aliases_used_by_validation_tools() {
+        let rust_aliases = [
+            "rust",
+            "native",
+            "exact",
+            "rust:exact",
+            "rust_branch_and_bound_weighted_independent_set",
+            "rust:branch-and-bound-weighted-independent-set",
+            "rust:exact-weighted-independent-set",
+        ];
+        for alias in rust_aliases {
+            let solver = parse_solver(
+                "weighted_independent_set_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(
+                solver,
+                ExternalWeightedIndependentSetReferenceSolver::RustBranchAndBound
+            );
+        }
+
+        let ortools_aliases = [
+            "or-tools",
+            "google-ortools",
+            "ortools:cp-sat",
+            "ortools_cp_sat_weighted_independent_set",
+            "ortools:cp-sat-weighted-independent-set",
+        ];
+        for alias in ortools_aliases {
+            let solver = parse_solver(
+                "weighted_independent_set_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(
+                solver,
+                ExternalWeightedIndependentSetReferenceSolver::OrTools
+            );
+        }
+
+        let fallback = parse_solver(
+            "weighted_independent_set_reference",
+            ["--solver=rust:fallback".to_string()],
+        )
+        .expect("fallback alias");
+        assert_eq!(
+            fallback,
+            ExternalWeightedIndependentSetReferenceSolver::Fallback
+        );
     }
 
     #[test]

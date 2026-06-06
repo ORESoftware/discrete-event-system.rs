@@ -66,10 +66,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--solver",
-        choices=["auto", "ortools", "fallback", "rust-exact"],
         default="auto",
+        metavar="SOLVER",
+        help="solver alias to pass through to the Rust scheduling_reference binary",
     )
-    parser.add_argument("--kind", choices=["auto", "job-shop", "flow-shop"], default="auto")
+    parser.add_argument(
+        "--kind",
+        default="auto",
+        metavar="KIND",
+        help="problem kind alias to pass through to the Rust scheduling_reference binary",
+    )
     args = parser.parse_args()
     try:
         exec_rust_reference(args.solver, args.kind)

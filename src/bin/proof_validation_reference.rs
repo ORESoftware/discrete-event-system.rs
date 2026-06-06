@@ -192,4 +192,44 @@ mod tests {
         assert_eq!(output["validator"], "builtin:small-opb-proof-for-veripb");
         assert_eq!(output["pb_status"], "unsat");
     }
+
+    #[test]
+    fn cli_tool_normalization_is_owned_by_rust_dispatch() {
+        let lrat = run(
+            vec![
+                "proof_validation_reference".to_string(),
+                "--tool".to_string(),
+                "CaKe_LpR".to_string(),
+            ],
+            r#"{
+                "cnf": "p cnf 1 2\n1 0\n-1 0\n",
+                "proof": "1 0 0\n"
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(lrat["status"], "ok");
+        assert_eq!(lrat["verdict"], "valid");
+        assert_eq!(lrat["validator"], "builtin:small-cnf-proof-for-cake-lpr");
+
+        let veripb = run(
+            vec![
+                "proof_validation_reference".to_string(),
+                "--tool=VeRiPb_Checker".to_string(),
+            ],
+            r#"{
+                "kind": "opb-proof-validation",
+                "opb": "1 x >= 1;\n1 x <= 0;\n",
+                "proof": "u 1 x >= 1;\n"
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(veripb["status"], "ok");
+        assert_eq!(veripb["verdict"], "valid");
+        assert_eq!(
+            veripb["validator"],
+            "builtin:small-opb-proof-for-veripb-checker"
+        );
+    }
 }

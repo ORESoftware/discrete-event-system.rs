@@ -4,7 +4,8 @@
 //! the cross-run layer: outcome scoring, policy deltas, weighted merge, simple
 //! evolutionary spawning, and a queue runner that keeps worker slots full.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -171,7 +172,7 @@ pub enum SoccerLearningQueueEvent<'a> {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerEvolutionOptions {
     pub mutation_rate: f64,
@@ -199,6 +200,415 @@ impl Default for SoccerEvolutionOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SoccerEvolutionOptionsPatch {
+    #[serde(alias = "mutation_rate")]
+    mutation_rate: Option<f64>,
+    #[serde(alias = "mutation_scale")]
+    mutation_scale: Option<f64>,
+    #[serde(alias = "crossover_rate")]
+    crossover_rate: Option<f64>,
+    #[serde(alias = "exploration_rate")]
+    exploration_rate: Option<f64>,
+    #[serde(alias = "exploration_scale")]
+    exploration_scale: Option<f64>,
+    #[serde(alias = "elite_weight_floor")]
+    elite_weight_floor: Option<f64>,
+    #[serde(alias = "population_size")]
+    population_size: Option<usize>,
+    seed: Option<u64>,
+}
+
+impl SoccerEvolutionOptionsPatch {
+    fn has_any_field(self) -> bool {
+        self.mutation_rate.is_some()
+            || self.mutation_scale.is_some()
+            || self.crossover_rate.is_some()
+            || self.exploration_rate.is_some()
+            || self.exploration_scale.is_some()
+            || self.elite_weight_floor.is_some()
+            || self.population_size.is_some()
+            || self.seed.is_some()
+    }
+}
+
+fn soccer_evolution_options_patch_from_value(
+    search_metadata: &Value,
+) -> Option<SoccerEvolutionOptionsPatch> {
+    if !search_metadata.is_object() {
+        return None;
+    }
+    if let Some(patch) = search_metadata
+        .get("options")
+        .filter(|value| value.is_object())
+        .and_then(soccer_evolution_options_patch_from_candidate)
+    {
+        return Some(patch);
+    }
+    if let Some(patch) = soccer_evolution_options_patch_from_candidate(search_metadata) {
+        return Some(patch);
+    }
+    for key in [
+        "tactical",
+        "policy",
+        "evolution",
+        "evolutionaryAlgorithm",
+        "evolutionarySearch",
+        "geneticAlgorithm",
+        "geneticProgramming",
+        "adversarialLearning",
+        "mdp",
+        "pomdp",
+        "search",
+        "learningProvenance",
+        "searchParameters",
+    ] {
+        if let Some(patch) = search_metadata
+            .get(key)
+            .and_then(soccer_evolution_options_patch_from_value)
+        {
+            return Some(patch);
+        }
+    }
+    None
+}
+
+fn soccer_evolution_options_patch_from_candidate(
+    value: &Value,
+) -> Option<SoccerEvolutionOptionsPatch> {
+    if !value.is_object() {
+        return None;
+    }
+    let patch = serde_json::from_value::<SoccerEvolutionOptionsPatch>(value.clone()).ok()?;
+    patch.has_any_field().then_some(patch)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SoccerEvolutionSearchPreset {
+    GeneticAlgorithm,
+    GeneticProgramming,
+}
+
+fn soccer_evolution_search_preset_from_value(value: &Value) -> Option<SoccerEvolutionSearchPreset> {
+    match value {
+        Value::String(text) => soccer_evolution_search_preset_from_text(text),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(soccer_evolution_search_preset_from_value)
+            .max(),
+        Value::Object(map) => {
+            let mut preset = [
+                "algorithm",
+                "algorithmFamily",
+                "searchAlgorithm",
+                "searchFamily",
+                "searchMode",
+                "mode",
+                "family",
+                "sourceKind",
+            ]
+            .into_iter()
+            .filter_map(|key| map.get(key))
+            .filter_map(soccer_evolution_search_preset_from_value)
+            .max();
+
+            for (key, nested) in map {
+                let key_preset = soccer_evolution_search_preset_from_text(key);
+                let nested_preset = soccer_evolution_search_preset_from_value(nested);
+                preset = preset.max(key_preset).max(nested_preset);
+            }
+            preset
+        }
+        _ => None,
+    }
+}
+
+fn soccer_evolution_search_preset_from_text(text: &str) -> Option<SoccerEvolutionSearchPreset> {
+    let normalized = text
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.contains("geneticprogramming")
+        || normalized.contains("symbolicregression")
+        || normalized.contains("programtreesearch")
+        || normalized == "gp"
+    {
+        return Some(SoccerEvolutionSearchPreset::GeneticProgramming);
+    }
+    if normalized.contains("geneticalgorithm")
+        || normalized.contains("evolutionary")
+        || normalized.contains("evolution")
+    {
+        return Some(SoccerEvolutionSearchPreset::GeneticAlgorithm);
+    }
+    None
+}
+
+fn apply_soccer_evolution_search_preset(
+    options: &mut SoccerEvolutionOptions,
+    preset: SoccerEvolutionSearchPreset,
+    patch: Option<SoccerEvolutionOptionsPatch>,
+) {
+    let Some(patch) = patch else {
+        return apply_soccer_evolution_search_preset_defaults(options, preset);
+    };
+    let defaults = soccer_evolution_search_preset_defaults(preset);
+    if patch.mutation_rate.is_none() {
+        options.mutation_rate = options.mutation_rate.max(defaults.mutation_rate);
+    }
+    if patch.mutation_scale.is_none() {
+        options.mutation_scale = options.mutation_scale.max(defaults.mutation_scale);
+    }
+    if patch.crossover_rate.is_none() {
+        options.crossover_rate = options.crossover_rate.max(defaults.crossover_rate);
+    }
+    if patch.exploration_rate.is_none() {
+        options.exploration_rate = options.exploration_rate.max(defaults.exploration_rate);
+    }
+    if patch.exploration_scale.is_none() {
+        options.exploration_scale = options.exploration_scale.max(defaults.exploration_scale);
+    }
+    if patch.elite_weight_floor.is_none() {
+        options.elite_weight_floor = options.elite_weight_floor.max(defaults.elite_weight_floor);
+    }
+    if patch.population_size.is_none() {
+        options.population_size = options.population_size.max(defaults.population_size);
+    }
+}
+
+fn apply_soccer_evolution_search_preset_defaults(
+    options: &mut SoccerEvolutionOptions,
+    preset: SoccerEvolutionSearchPreset,
+) {
+    let defaults = soccer_evolution_search_preset_defaults(preset);
+    options.mutation_rate = options.mutation_rate.max(defaults.mutation_rate);
+    options.mutation_scale = options.mutation_scale.max(defaults.mutation_scale);
+    options.crossover_rate = options.crossover_rate.max(defaults.crossover_rate);
+    options.exploration_rate = options.exploration_rate.max(defaults.exploration_rate);
+    options.exploration_scale = options.exploration_scale.max(defaults.exploration_scale);
+    options.elite_weight_floor = options.elite_weight_floor.max(defaults.elite_weight_floor);
+    options.population_size = options.population_size.max(defaults.population_size);
+}
+
+fn soccer_evolution_search_preset_defaults(
+    preset: SoccerEvolutionSearchPreset,
+) -> SoccerEvolutionOptions {
+    match preset {
+        SoccerEvolutionSearchPreset::GeneticAlgorithm => SoccerEvolutionOptions {
+            mutation_rate: 0.06,
+            mutation_scale: 0.26,
+            crossover_rate: 0.55,
+            exploration_rate: 0.08,
+            exploration_scale: 0.65,
+            elite_weight_floor: 0.06,
+            population_size: 16,
+            seed: 0,
+        },
+        SoccerEvolutionSearchPreset::GeneticProgramming => SoccerEvolutionOptions {
+            mutation_rate: 0.08,
+            mutation_scale: 0.34,
+            crossover_rate: 0.62,
+            exploration_rate: 0.14,
+            exploration_scale: 0.90,
+            elite_weight_floor: 0.08,
+            population_size: 24,
+            seed: 0,
+        },
+    }
+}
+
+pub fn soccer_evolution_options_from_search_metadata(
+    search_metadata: Option<&Value>,
+    current: SoccerEvolutionOptions,
+) -> Option<SoccerEvolutionOptions> {
+    let search_metadata = search_metadata?;
+    let patch = soccer_evolution_options_patch_from_value(search_metadata);
+    let preset = soccer_evolution_search_preset_from_value(search_metadata);
+    if patch.is_none() && preset.is_none() {
+        return None;
+    }
+    let mut options = current;
+    if let Some(preset) = preset {
+        apply_soccer_evolution_search_preset(&mut options, preset, patch);
+    }
+    let Some(patch) = patch else {
+        return Some(options);
+    };
+    if let Some(value) = patch.mutation_rate.filter(|value| value.is_finite()) {
+        options.mutation_rate = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = patch.mutation_scale.filter(|value| value.is_finite()) {
+        options.mutation_scale = value.max(0.0);
+    }
+    if let Some(value) = patch.crossover_rate.filter(|value| value.is_finite()) {
+        options.crossover_rate = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = patch.exploration_rate.filter(|value| value.is_finite()) {
+        options.exploration_rate = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = patch.exploration_scale.filter(|value| value.is_finite()) {
+        options.exploration_scale = value.max(0.0);
+    }
+    if let Some(value) = patch.elite_weight_floor.filter(|value| value.is_finite()) {
+        options.elite_weight_floor = value.max(0.0);
+    }
+    if let Some(value) = patch.population_size {
+        options.population_size = value.max(1);
+    }
+    if let Some(value) = patch.seed {
+        options.seed = value;
+    }
+    Some(options)
+}
+
+const SOCCER_LEARNING_FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const SOCCER_LEARNING_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn soccer_learning_fingerprint_mix(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(SOCCER_LEARNING_FINGERPRINT_PRIME);
+}
+
+fn soccer_learning_fingerprint_usize(hash: &mut u64, value: usize) {
+    soccer_learning_fingerprint_mix(hash, value as u64);
+}
+
+fn soccer_learning_fingerprint_f64(hash: &mut u64, value: f64) {
+    let bits = if value == 0.0 { 0 } else { value.to_bits() };
+    soccer_learning_fingerprint_mix(hash, bits);
+}
+
+fn soccer_learning_fingerprint_str(hash: &mut u64, value: &str) {
+    soccer_learning_fingerprint_usize(hash, value.len());
+    for byte in value.as_bytes() {
+        soccer_learning_fingerprint_mix(hash, u64::from(*byte));
+    }
+}
+
+fn soccer_learning_fingerprint_hash<T: Hash>(hash: &mut u64, value: &T) {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    soccer_learning_fingerprint_mix(hash, hasher.finish());
+}
+
+fn soccer_q_policy_options_fingerprint(hash: &mut u64, options: &SoccerQPolicyOptions) {
+    soccer_learning_fingerprint_f64(hash, options.alpha);
+    soccer_learning_fingerprint_f64(hash, options.gamma);
+}
+
+fn soccer_q_entry_fingerprint(entry: &SoccerQEntry) -> u64 {
+    let mut hash = SOCCER_LEARNING_FINGERPRINT_OFFSET;
+    soccer_learning_fingerprint_hash(&mut hash, &entry.state);
+    soccer_learning_fingerprint_str(&mut hash, &entry.action);
+    soccer_learning_fingerprint_f64(&mut hash, entry.value);
+    soccer_learning_fingerprint_mix(&mut hash, u64::from(entry.visits));
+    hash
+}
+
+fn soccer_q_target_entry_fingerprint(entry: &SoccerQTargetEntry) -> u64 {
+    let mut hash = SOCCER_LEARNING_FINGERPRINT_OFFSET;
+    soccer_learning_fingerprint_hash(&mut hash, &entry.state);
+    soccer_learning_fingerprint_str(&mut hash, &entry.action);
+    soccer_learning_fingerprint_usize(&mut hash, entry.target_fine_cell_id);
+    soccer_learning_fingerprint_usize(&mut hash, entry.target_tactical_cell_id);
+    soccer_learning_fingerprint_usize(&mut hash, entry.target_macro_cell_id);
+    soccer_learning_fingerprint_usize(&mut hash, entry.target_root_cell_id);
+    soccer_learning_fingerprint_f64(&mut hash, entry.value);
+    soccer_learning_fingerprint_mix(&mut hash, u64::from(entry.visits));
+    hash
+}
+
+fn soccer_q_policy_fingerprint(hash: &mut u64, team: Team, policy: &SoccerQPolicy) {
+    soccer_learning_fingerprint_mix(
+        hash,
+        match team {
+            Team::Home => 0,
+            Team::Away => 1,
+        },
+    );
+    soccer_q_policy_options_fingerprint(hash, &policy.options);
+
+    let mut action_hashes = policy
+        .entries()
+        .into_iter()
+        .map(|entry| soccer_q_entry_fingerprint(&entry))
+        .collect::<Vec<_>>();
+    action_hashes.sort_unstable();
+    soccer_learning_fingerprint_usize(hash, action_hashes.len());
+    for entry_hash in action_hashes {
+        soccer_learning_fingerprint_mix(hash, entry_hash);
+    }
+
+    let mut target_hashes = policy
+        .target_entries()
+        .into_iter()
+        .map(|entry| soccer_q_target_entry_fingerprint(&entry))
+        .collect::<Vec<_>>();
+    target_hashes.sort_unstable();
+    soccer_learning_fingerprint_usize(hash, target_hashes.len());
+    for entry_hash in target_hashes {
+        soccer_learning_fingerprint_mix(hash, entry_hash);
+    }
+}
+
+pub fn soccer_team_q_policies_fingerprint(policies: &SoccerTeamQPolicies) -> u64 {
+    let mut hash = SOCCER_LEARNING_FINGERPRINT_OFFSET;
+    soccer_q_policy_fingerprint(&mut hash, Team::Home, &policies.home);
+    soccer_q_policy_fingerprint(&mut hash, Team::Away, &policies.away);
+    hash
+}
+
+pub fn soccer_tactical_learning_weights_fingerprint(
+    weights: &SoccerTacticalLearningWeights,
+) -> u64 {
+    let mut hash = SOCCER_LEARNING_FINGERPRINT_OFFSET;
+    soccer_learning_fingerprint_f64(&mut hash, weights.attack_spacing_delta_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.attack_spacing_score_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.attack_width_delta_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.attack_width_score_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.attack_flank_lane_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defense_spacing_delta_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defense_spacing_score_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defense_contract_delta_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defense_compactness_score_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defense_ball_depth_score_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defense_endline_soft_penalty_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defense_endline_hard_penalty_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.defender_midfielder_press_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.midfielder_press_weight);
+    soccer_learning_fingerprint_f64(&mut hash, weights.formation_lp_alignment_weight);
+    hash
+}
+
+pub fn soccer_neural_network_snapshot_fingerprint(snapshot: &SoccerNeuralNetworkSnapshot) -> u64 {
+    let mut hash = SOCCER_LEARNING_FINGERPRINT_OFFSET;
+    soccer_learning_fingerprint_usize(&mut hash, snapshot.input_dim);
+    soccer_learning_fingerprint_usize(&mut hash, snapshot.output_dim);
+    soccer_learning_fingerprint_usize(&mut hash, snapshot.parameter_count);
+    soccer_learning_fingerprint_f64(&mut hash, snapshot.l2_norm);
+    soccer_learning_fingerprint_usize(&mut hash, snapshot.layers.len());
+    for layer in &snapshot.layers {
+        soccer_learning_fingerprint_str(&mut hash, &layer.activation);
+        soccer_learning_fingerprint_usize(&mut hash, layer.weights.len());
+        for row in &layer.weights {
+            soccer_learning_fingerprint_usize(&mut hash, row.len());
+            for value in row {
+                soccer_learning_fingerprint_f64(&mut hash, *value);
+            }
+        }
+        soccer_learning_fingerprint_usize(&mut hash, layer.biases.len());
+        for value in &layer.biases {
+            soccer_learning_fingerprint_f64(&mut hash, *value);
+        }
+    }
+    hash
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SoccerTacticalLearningGenomeParent<'a> {
     pub summary: &'a SoccerTacticalLearningSummary,
@@ -211,11 +621,17 @@ pub struct SoccerPostgresPolicyRefreshCheck<'a> {
     pub current_policy_version_id: Option<&'a str>,
     pub current_generation: i32,
     pub current_updated_at_micros: i64,
+    pub current_policy_fingerprint: Option<u64>,
+    pub latest_policy_fingerprint: Option<u64>,
     pub current_neural_network_present: bool,
+    pub current_neural_network_fingerprint: Option<u64>,
     pub latest_policy_version_id: &'a str,
     pub latest_generation: i32,
     pub latest_updated_at_micros: i64,
     pub latest_neural_network_present: bool,
+    pub latest_neural_network_fingerprint: Option<u64>,
+    pub current_tactical_learning_fingerprint: Option<u64>,
+    pub latest_tactical_learning_fingerprint: Option<u64>,
     pub local_tactical_evolved_since_pg_refresh: bool,
     pub postgres_tactical_learning_authoritative: bool,
 }
@@ -242,6 +658,16 @@ pub fn soccer_postgres_policy_refresh_decision(
         check.current_policy_version_id == Some(check.latest_policy_version_id);
     let same_policy_newer_revision =
         same_policy_version && check.latest_updated_at_micros > check.current_updated_at_micros;
+    let same_policy_neural_weights_changed = same_policy_version
+        && check.latest_neural_network_fingerprint.is_some()
+        && check.current_neural_network_fingerprint != check.latest_neural_network_fingerprint;
+    let same_policy_q_weights_changed = same_policy_version
+        && check.latest_policy_fingerprint.is_some()
+        && check.current_policy_fingerprint != check.latest_policy_fingerprint;
+    let same_policy_tactical_weights_changed = same_policy_version
+        && check.latest_tactical_learning_fingerprint.is_some()
+        && check.current_tactical_learning_fingerprint
+            != check.latest_tactical_learning_fingerprint;
     let newer_generation = check.latest_generation > check.current_generation;
     let different_head_at_same_generation =
         check.latest_generation == check.current_generation && !same_policy_version;
@@ -250,6 +676,8 @@ pub fn soccer_postgres_policy_refresh_decision(
         || newer_generation
         || different_head_at_same_generation
         || same_policy_newer_revision
+        || same_policy_q_weights_changed
+        || same_policy_neural_weights_changed
         || (same_policy_version
             && !check.current_neural_network_present
             && check.latest_neural_network_present);
@@ -257,6 +685,9 @@ pub fn soccer_postgres_policy_refresh_decision(
         || newer_generation
         || different_head_at_same_generation
         || same_policy_newer_revision
+        || (same_policy_tactical_weights_changed
+            && (check.postgres_tactical_learning_authoritative
+                || !check.local_tactical_evolved_since_pg_refresh))
         || (same_policy_version
             && (check.postgres_tactical_learning_authoritative
                 || !check.local_tactical_evolved_since_pg_refresh));
@@ -300,9 +731,8 @@ pub fn soccer_postgres_new_sim_refresh_plan(
         flush_policy_versions_before_new_sim,
         pending_policy_versions,
     );
-    let wait_for_async_policy_versions = refresh_from_postgres
-        && flush_policy_versions_before_new_sim
-        && pending_async_policy_version_batches > 0;
+    let wait_for_async_policy_versions =
+        refresh_from_postgres && pending_async_policy_version_batches > 0;
 
     SoccerPostgresNewSimRefreshPlan {
         refresh_from_postgres,
@@ -806,6 +1236,14 @@ fn search_soccer_tactical_genome_blend_candidates<F>(
         options,
         &mut visit,
     );
+    search_soccer_tactical_novelty_immigrant_candidates(
+        base,
+        &centroid,
+        weighted_summary,
+        pressure,
+        options,
+        &mut visit,
+    );
 }
 
 fn search_soccer_tactical_genome_archetype_candidates<F>(
@@ -1132,6 +1570,60 @@ const TWO_PHASE_GP_PROGRAM: [SoccerTacticalGpInstruction; 5] = [
     },
 ];
 
+const FLANK_SWITCH_COMPACT_GP_PROGRAM: [SoccerTacticalGpInstruction; 6] = [
+    SoccerTacticalGpInstruction {
+        gene: SoccerTacticalGpGene::AttackWidthDelta,
+        expr: SoccerTacticalGpExpr::Blend(
+            SoccerTacticalGpSignal::AttackWidthGap,
+            SoccerTacticalGpSignal::AttackFlankGap,
+            0.45,
+        ),
+        scale: 0.28,
+    },
+    SoccerTacticalGpInstruction {
+        gene: SoccerTacticalGpGene::AttackFlankLane,
+        expr: SoccerTacticalGpExpr::Max(
+            SoccerTacticalGpSignal::AttackFlankGap,
+            SoccerTacticalGpSignal::Pressure,
+        ),
+        scale: 0.36,
+    },
+    SoccerTacticalGpInstruction {
+        gene: SoccerTacticalGpGene::AttackSpacingDelta,
+        expr: SoccerTacticalGpExpr::Blend(
+            SoccerTacticalGpSignal::AttackSpacingGap,
+            SoccerTacticalGpSignal::AttackFlankGap,
+            0.60,
+        ),
+        scale: 0.16,
+    },
+    SoccerTacticalGpInstruction {
+        gene: SoccerTacticalGpGene::DefenseContractDelta,
+        expr: SoccerTacticalGpExpr::Max(
+            SoccerTacticalGpSignal::DefenseContractGap,
+            SoccerTacticalGpSignal::Pressure,
+        ),
+        scale: 0.36,
+    },
+    SoccerTacticalGpInstruction {
+        gene: SoccerTacticalGpGene::DefenseCompactnessScore,
+        expr: SoccerTacticalGpExpr::Blend(
+            SoccerTacticalGpSignal::DefenseContractGap,
+            SoccerTacticalGpSignal::DefenseSpacingGap,
+            0.75,
+        ),
+        scale: 0.24,
+    },
+    SoccerTacticalGpInstruction {
+        gene: SoccerTacticalGpGene::DefenseBallDepthScore,
+        expr: SoccerTacticalGpExpr::Product(
+            SoccerTacticalGpSignal::DefenseBallGap,
+            SoccerTacticalGpSignal::Pressure,
+        ),
+        scale: 0.10,
+    },
+];
+
 fn search_soccer_tactical_gp_program_candidates<F>(
     base: &SoccerTacticalLearningWeights,
     centroid: &SoccerTacticalLearningWeights,
@@ -1145,12 +1637,13 @@ fn search_soccer_tactical_gp_program_candidates<F>(
         return;
     }
 
-    let programs: [&[SoccerTacticalGpInstruction]; 5] = [
+    let programs: [&[SoccerTacticalGpInstruction]; 6] = [
         &WIDE_FLANK_GP_PROGRAM,
         &SUPPORT_SPACING_GP_PROGRAM,
         &COMPACT_BLOCK_GP_PROGRAM,
         &PRESS_FUNNEL_GP_PROGRAM,
         &TWO_PHASE_GP_PROGRAM,
+        &FLANK_SWITCH_COMPACT_GP_PROGRAM,
     ];
     for seed in [base, centroid] {
         for program in programs {
@@ -1230,6 +1723,93 @@ fn search_soccer_tactical_mutated_gp_program_candidates<F>(
                 pressure,
             );
         }
+        visit(clamp_soccer_tactical_learning_weights(&candidate));
+    }
+}
+
+fn search_soccer_tactical_novelty_immigrant_candidates<F>(
+    base: &SoccerTacticalLearningWeights,
+    centroid: &SoccerTacticalLearningWeights,
+    weighted_summary: &SoccerTacticalLearningSummary,
+    pressure: f64,
+    options: SoccerEvolutionOptions,
+    visit: &mut F,
+) where
+    F: FnMut(SoccerTacticalLearningWeights),
+{
+    if pressure <= 1e-12 {
+        return;
+    }
+
+    let attack_width_gap = (1.0 - weighted_summary.mean_attack_width_score).clamp(0.0, 1.0);
+    let attack_flank_gap = (1.0 - weighted_summary.mean_attack_flank_lane_score).clamp(0.0, 1.0);
+    let attack_spacing_gap = (1.0 - weighted_summary.mean_attack_spacing_score).clamp(0.0, 1.0);
+    let defense_contract_gap = (1.0 - weighted_summary.mean_defense_contract_score).clamp(0.0, 1.0);
+    let defense_spacing_gap = (1.0 - weighted_summary.mean_defense_spacing_score).clamp(0.0, 1.0);
+    let defense_ball_gap = (1.0 - weighted_summary.mean_defense_ball_gap_score).clamp(0.0, 1.0);
+    let press_gap = (1.0 - weighted_summary.mean_defense_role_press_score).clamp(0.0, 1.0);
+    let attack_pressure =
+        (attack_width_gap * 0.38 + attack_flank_gap * 0.46 + attack_spacing_gap * 0.16)
+            .clamp(0.0, 1.0);
+    let defense_pressure = (defense_contract_gap * 0.52
+        + defense_spacing_gap * 0.14
+        + defense_ball_gap * 0.14
+        + press_gap * 0.20)
+        .clamp(0.0, 1.0);
+    if attack_pressure <= 1e-12 && defense_pressure <= 1e-12 {
+        return;
+    }
+
+    let candidate_count = options.population_size.max(4).min(24);
+    let scale_boost = 1.0
+        + options.exploration_scale.max(0.0).min(1.5) * 0.35
+        + options.mutation_scale.max(0.0).min(1.5) * 0.20;
+    for candidate_index in 0..candidate_count {
+        let mut rng = DeterministicRng::new(candidate_seed(
+            options.seed,
+            candidate_index,
+            0x9e37_79b9_7f4a_7c15,
+        ));
+        let mut candidate = if candidate_index % 4 < 2 {
+            centroid.clone()
+        } else {
+            base.clone()
+        };
+        let stretch = (0.72 + rng.next_f64() * 0.68) * scale_boost;
+        let attack_bias = if candidate_index % 2 == 0 { 1.25 } else { 0.82 };
+        let defense_bias = if candidate_index % 3 == 0 { 1.25 } else { 0.86 };
+
+        if attack_pressure > 1e-12 {
+            candidate.attack_width_delta_weight +=
+                attack_width_gap * (0.20 + pressure * 0.18) * stretch * attack_bias;
+            candidate.attack_width_score_weight += attack_width_gap * 0.05 * stretch;
+            candidate.attack_flank_lane_weight +=
+                attack_flank_gap * (0.34 + pressure * 0.24) * stretch * attack_bias;
+            candidate.attack_spacing_delta_weight +=
+                attack_spacing_gap * (0.08 + attack_pressure * 0.09) * stretch;
+            candidate.attack_spacing_score_weight += attack_spacing_gap * 0.04 * stretch;
+        }
+
+        if defense_pressure > 1e-12 {
+            candidate.defense_contract_delta_weight +=
+                defense_contract_gap * (0.32 + pressure * 0.22) * stretch * defense_bias;
+            candidate.defense_compactness_score_weight +=
+                defense_contract_gap * (0.22 + defense_pressure * 0.11) * stretch * defense_bias;
+            candidate.defense_spacing_delta_weight +=
+                defense_spacing_gap * (0.06 + defense_pressure * 0.05) * stretch;
+            candidate.defense_ball_depth_score_weight +=
+                defense_ball_gap * (0.05 + defense_pressure * 0.06) * stretch;
+            candidate.defender_midfielder_press_weight +=
+                press_gap * (0.04 + defense_pressure * 0.04) * stretch;
+            candidate.midfielder_press_weight +=
+                press_gap * (0.04 + defense_pressure * 0.03) * stretch;
+        }
+
+        if attack_pressure > 1e-12 && defense_pressure > 1e-12 && candidate_index % 5 == 0 {
+            candidate.attack_flank_lane_weight += attack_flank_gap * 0.16 * stretch;
+            candidate.defense_contract_delta_weight += defense_contract_gap * 0.18 * stretch;
+        }
+
         visit(clamp_soccer_tactical_learning_weights(&candidate));
     }
 }
@@ -2334,6 +2914,59 @@ struct SoccerLearningQueueTask {
     neural_drain_timeout: Duration,
 }
 
+struct CachedSoccerTeamQPoliciesArc {
+    fingerprint: u64,
+    policies: Arc<SoccerTeamQPolicies>,
+}
+
+fn cached_soccer_team_policies_arc(
+    policies: &SoccerTeamQPolicies,
+    cache: &mut Option<CachedSoccerTeamQPoliciesArc>,
+) -> Arc<SoccerTeamQPolicies> {
+    let fingerprint = soccer_team_q_policies_fingerprint(policies);
+    let rebuild_cache = match cache.as_ref() {
+        Some(cached) => cached.fingerprint != fingerprint,
+        None => true,
+    };
+    if rebuild_cache {
+        *cache = Some(CachedSoccerTeamQPoliciesArc {
+            fingerprint,
+            policies: Arc::new(policies.clone()),
+        });
+    }
+    cache
+        .as_ref()
+        .map(|cached| Arc::clone(&cached.policies))
+        .expect("policy cache must exist after rebuild check")
+}
+
+struct CachedSoccerNeuralNetworkSnapshotArc {
+    fingerprint: u64,
+    snapshot: Arc<SoccerNeuralNetworkSnapshot>,
+}
+
+fn cached_soccer_neural_network_snapshot_arc(
+    latest_neural_network: &Option<SoccerNeuralNetworkSnapshot>,
+    cache: &mut Option<CachedSoccerNeuralNetworkSnapshotArc>,
+) -> Option<Arc<SoccerNeuralNetworkSnapshot>> {
+    let Some(snapshot) = latest_neural_network.as_ref() else {
+        *cache = None;
+        return None;
+    };
+    let fingerprint = soccer_neural_network_snapshot_fingerprint(snapshot);
+    let rebuild_cache = match cache.as_ref() {
+        Some(cached) => cached.fingerprint != fingerprint,
+        None => true,
+    };
+    if rebuild_cache {
+        *cache = Some(CachedSoccerNeuralNetworkSnapshotArc {
+            fingerprint,
+            snapshot: Arc::new(snapshot.clone()),
+        });
+    }
+    cache.as_ref().map(|cached| Arc::clone(&cached.snapshot))
+}
+
 pub fn run_soccer_learning_queue_with_observer<F>(
     config: SoccerLearningQueueRunnerConfig,
     initial_policies: SoccerTeamQPolicies,
@@ -2404,6 +3037,8 @@ where
     let mut total_home_goals = 0u32;
     let mut total_away_goals = 0u32;
     let mut latest_neural_network = config.initial_neural_network.clone();
+    let mut starting_policy_arc_cache = None::<CachedSoccerTeamQPoliciesArc>;
+    let mut latest_neural_network_arc_cache = None::<CachedSoccerNeuralNetworkSnapshotArc>;
     let mut first_error = None::<String>;
 
     while completed_games + failed_games < config.games && first_error.is_none() {
@@ -2418,8 +3053,12 @@ where
                     first_error = Some(err);
                     break;
                 }
-                let starting_policies = Arc::new(policies.clone());
-                let starting_neural_network = latest_neural_network.clone().map(Arc::new);
+                let starting_policies =
+                    cached_soccer_team_policies_arc(&policies, &mut starting_policy_arc_cache);
+                let starting_neural_network = cached_soccer_neural_network_snapshot_arc(
+                    &latest_neural_network,
+                    &mut latest_neural_network_arc_cache,
+                );
                 let episode = next_episode;
                 let mut match_config = config.match_config.clone();
                 match_config.seed = config.base_seed;
@@ -3011,7 +3650,10 @@ fn build_policies_from_accumulators(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::des::general::soccer::{PlayerRole, TacticalPhase};
+    use crate::des::general::soccer::{
+        PlayerRole, SoccerNeuralLayerSnapshot, SoccerNeuralLearningBackend,
+        SoccerNeuralLearningConfig, TacticalPhase,
+    };
 
     fn test_state() -> SoccerQStateKey {
         serde_json::from_value(serde_json::json!({
@@ -3207,6 +3849,276 @@ mod tests {
     }
 
     #[test]
+    fn evolution_options_overlay_from_postgres_search_metadata() {
+        let base = SoccerEvolutionOptions::default();
+        let metadata = serde_json::json!({
+            "algorithm": "evolutionary-genetic-programming",
+            "options": {
+                "mutationRate": 1.25,
+                "mutationScale": 0.48,
+                "crossoverRate": 0.72,
+                "explorationRate": 0.18,
+                "explorationScale": 0.95,
+                "eliteWeightFloor": 0.08,
+                "populationSize": 24,
+                "seed": 991
+            }
+        });
+
+        let options = soccer_evolution_options_from_search_metadata(Some(&metadata), base)
+            .expect("postgres search metadata options");
+
+        assert_eq!(options.mutation_rate, 1.0);
+        assert_eq!(options.mutation_scale, 0.48);
+        assert_eq!(options.crossover_rate, 0.72);
+        assert_eq!(options.exploration_rate, 0.18);
+        assert_eq!(options.exploration_scale, 0.95);
+        assert_eq!(options.elite_weight_floor, 0.08);
+        assert_eq!(options.population_size, 24);
+        assert_eq!(options.seed, 991);
+    }
+
+    #[test]
+    fn evolution_options_overlay_accepts_partial_direct_metadata() {
+        let base = SoccerEvolutionOptions::default();
+        let metadata = serde_json::json!({
+            "populationSize": 0,
+            "explorationScale": 0.75
+        });
+
+        let options = soccer_evolution_options_from_search_metadata(Some(&metadata), base)
+            .expect("direct postgres options");
+
+        assert_eq!(options.population_size, 1);
+        assert_eq!(options.exploration_scale, 0.75);
+        assert_eq!(options.mutation_rate, base.mutation_rate);
+        assert_eq!(options.seed, base.seed);
+        assert!(soccer_evolution_options_from_search_metadata(
+            Some(&serde_json::json!({"algorithm": "merge"})),
+            base
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn evolution_options_overlay_accepts_nested_tactical_search_metadata() {
+        let base = SoccerEvolutionOptions::default();
+        let metadata = serde_json::json!({
+            "policy": {
+                "algorithm": "evolutionary-policy-search"
+            },
+            "tactical": {
+                "algorithm": "evolutionary-genetic-programming-tactical-search",
+                "options": {
+                    "mutationRate": 0.12,
+                    "crossoverRate": 0.66,
+                    "populationSize": 32,
+                    "seed": 2027
+                }
+            }
+        });
+
+        let options = soccer_evolution_options_from_search_metadata(Some(&metadata), base)
+            .expect("nested tactical postgres options");
+
+        assert_eq!(options.mutation_rate, 0.12);
+        assert_eq!(options.crossover_rate, 0.66);
+        assert_eq!(options.population_size, 32);
+        assert_eq!(options.seed, 2027);
+        assert!(options.exploration_scale >= 0.90);
+    }
+
+    #[test]
+    fn evolution_options_overlay_accepts_genetic_programming_snake_case_metadata() {
+        let base = SoccerEvolutionOptions::default();
+        let metadata = serde_json::json!({
+            "geneticProgramming": {
+                "algorithm": "evolutionary-genetic-programming-tactical-search",
+                "options": {
+                    "mutation_rate": 0.16,
+                    "mutation_scale": 0.44,
+                    "crossover_rate": 0.70,
+                    "exploration_rate": 0.24,
+                    "exploration_scale": 1.15,
+                    "elite_weight_floor": 0.12,
+                    "population_size": 48,
+                    "seed": 5001
+                }
+            }
+        });
+
+        let options = soccer_evolution_options_from_search_metadata(Some(&metadata), base)
+            .expect("genetic programming postgres options");
+
+        assert_eq!(options.mutation_rate, 0.16);
+        assert_eq!(options.mutation_scale, 0.44);
+        assert_eq!(options.crossover_rate, 0.70);
+        assert_eq!(options.exploration_rate, 0.24);
+        assert_eq!(options.exploration_scale, 1.15);
+        assert_eq!(options.elite_weight_floor, 0.12);
+        assert_eq!(options.population_size, 48);
+        assert_eq!(options.seed, 5001);
+    }
+
+    #[test]
+    fn evolution_options_overlay_accepts_learning_provenance_search_parameters() {
+        let base = SoccerEvolutionOptions::default();
+        let metadata = serde_json::json!({
+            "learningProvenance": {
+                "sourceKind": "evolution",
+                "searchParameters": {
+                    "algorithm": "evolutionary-genetic-programming",
+                    "options": {
+                        "mutationScale": 0.52,
+                        "explorationRate": 0.21,
+                        "eliteWeightFloor": 0.09
+                    }
+                }
+            }
+        });
+
+        let options = soccer_evolution_options_from_search_metadata(Some(&metadata), base)
+            .expect("learning provenance postgres options");
+
+        assert_eq!(options.mutation_scale, 0.52);
+        assert_eq!(options.exploration_rate, 0.21);
+        assert_eq!(options.elite_weight_floor, 0.09);
+        assert!(options.population_size >= 24);
+    }
+
+    #[test]
+    fn evolution_options_overlay_widens_genetic_programming_from_postgres_hint() {
+        let base = SoccerEvolutionOptions::default();
+        let metadata = serde_json::json!({
+            "learningProvenance": {
+                "searchParameters": {
+                    "algorithm": "geneticProgramming",
+                    "options": {
+                        "seed": 7701
+                    }
+                }
+            }
+        });
+
+        let options = soccer_evolution_options_from_search_metadata(Some(&metadata), base)
+            .expect("genetic programming preset from postgres metadata");
+
+        assert_eq!(options.seed, 7701);
+        assert!(options.population_size >= 24);
+        assert!(options.exploration_rate >= 0.14);
+        assert!(options.exploration_scale >= 0.90);
+        assert!(options.crossover_rate >= 0.62);
+    }
+
+    #[test]
+    fn evolution_options_overlay_respects_explicit_genetic_programming_caps() {
+        let base = SoccerEvolutionOptions::default();
+        let metadata = serde_json::json!({
+            "algorithm": "geneticProgramming",
+            "options": {
+                "populationSize": 6,
+                "explorationScale": 0.30,
+                "crossoverRate": 0.25
+            }
+        });
+
+        let options = soccer_evolution_options_from_search_metadata(Some(&metadata), base)
+            .expect("explicit genetic programming caps");
+
+        assert_eq!(options.population_size, 6);
+        assert_eq!(options.exploration_scale, 0.30);
+        assert_eq!(options.crossover_rate, 0.25);
+        assert!(options.mutation_scale >= 0.34);
+    }
+
+    fn tiny_neural_snapshot() -> SoccerNeuralNetworkSnapshot {
+        SoccerNeuralNetworkSnapshot {
+            input_dim: 2,
+            output_dim: 1,
+            parameter_count: 3,
+            l2_norm: 0.42,
+            layers: vec![SoccerNeuralLayerSnapshot {
+                activation: "linear".to_string(),
+                weights: vec![vec![0.20, -0.15]],
+                biases: vec![0.05],
+            }],
+        }
+    }
+
+    #[test]
+    fn queue_policy_arc_cache_reuses_unchanged_policies_and_rebuilds_changes() {
+        let policies = policy_with_action(1.0, 2);
+        let mut cache = None::<CachedSoccerTeamQPoliciesArc>;
+
+        let first = cached_soccer_team_policies_arc(&policies, &mut cache);
+        let repeated = cached_soccer_team_policies_arc(&policies, &mut cache);
+        assert!(Arc::ptr_eq(&first, &repeated));
+
+        let updated_policies = policy_with_action(1.25, 2);
+        let changed = cached_soccer_team_policies_arc(&updated_policies, &mut cache);
+        assert!(!Arc::ptr_eq(&first, &changed));
+
+        let repeated_changed = cached_soccer_team_policies_arc(&updated_policies, &mut cache);
+        assert!(Arc::ptr_eq(&changed, &repeated_changed));
+    }
+
+    #[test]
+    fn queue_neural_snapshot_arc_cache_reuses_unchanged_snapshot_and_rebuilds_changes() {
+        let snapshot = tiny_neural_snapshot();
+        let mut latest_neural_network = Some(snapshot.clone());
+        let mut cache = None::<CachedSoccerNeuralNetworkSnapshotArc>;
+
+        let first = cached_soccer_neural_network_snapshot_arc(&latest_neural_network, &mut cache)
+            .expect("first cached snapshot");
+        let repeated =
+            cached_soccer_neural_network_snapshot_arc(&latest_neural_network, &mut cache)
+                .expect("repeated cached snapshot");
+        assert!(Arc::ptr_eq(&first, &repeated));
+
+        let mut updated = snapshot;
+        updated.layers[0].weights[0][0] += 0.125;
+        latest_neural_network = Some(updated);
+        let changed = cached_soccer_neural_network_snapshot_arc(&latest_neural_network, &mut cache)
+            .expect("changed cached snapshot");
+        assert!(!Arc::ptr_eq(&first, &changed));
+
+        latest_neural_network = None;
+        assert!(
+            cached_soccer_neural_network_snapshot_arc(&latest_neural_network, &mut cache).is_none()
+        );
+        assert!(cache.is_none());
+    }
+
+    #[test]
+    fn learning_weight_fingerprints_change_when_weights_change() {
+        let weights = SoccerTacticalLearningWeights::default();
+        let mut wider_weights = weights.clone();
+        wider_weights.attack_flank_lane_weight += 0.25;
+
+        assert_ne!(
+            soccer_tactical_learning_weights_fingerprint(&weights),
+            soccer_tactical_learning_weights_fingerprint(&wider_weights)
+        );
+
+        let snapshot = tiny_neural_snapshot();
+        let mut updated_snapshot = snapshot.clone();
+        updated_snapshot.layers[0].biases[0] += 0.10;
+        updated_snapshot.l2_norm += 0.10;
+
+        assert_ne!(
+            soccer_neural_network_snapshot_fingerprint(&snapshot),
+            soccer_neural_network_snapshot_fingerprint(&updated_snapshot)
+        );
+
+        let policy = policy_with_action(1.0, 2);
+        let updated_policy = policy_with_action(1.5, 2);
+        assert_ne!(
+            soccer_team_q_policies_fingerprint(&policy),
+            soccer_team_q_policies_fingerprint(&updated_policy)
+        );
+    }
+
+    #[test]
     fn pending_policy_stays_active_only_when_latest_head_matches_parent() {
         assert_eq!(
             soccer_policy_version_insert_status_after_active_head(
@@ -3256,11 +4168,17 @@ mod tests {
             current_policy_version_id: None,
             current_generation: 0,
             current_updated_at_micros: 0,
+            current_policy_fingerprint: None,
+            latest_policy_fingerprint: None,
             current_neural_network_present: false,
+            current_neural_network_fingerprint: None,
             latest_policy_version_id: "v1",
             latest_generation: 4,
             latest_updated_at_micros: 100,
             latest_neural_network_present: true,
+            latest_neural_network_fingerprint: None,
+            current_tactical_learning_fingerprint: None,
+            latest_tactical_learning_fingerprint: None,
             local_tactical_evolved_since_pg_refresh: false,
             postgres_tactical_learning_authoritative: false,
         });
@@ -3272,11 +4190,17 @@ mod tests {
                 current_policy_version_id: Some("v1"),
                 current_generation: 4,
                 current_updated_at_micros: 100,
+                current_policy_fingerprint: None,
+                latest_policy_fingerprint: None,
                 current_neural_network_present: true,
+                current_neural_network_fingerprint: None,
                 latest_policy_version_id: "v2",
                 latest_generation: 5,
                 latest_updated_at_micros: 125,
                 latest_neural_network_present: true,
+                latest_neural_network_fingerprint: None,
+                current_tactical_learning_fingerprint: None,
+                latest_tactical_learning_fingerprint: None,
                 local_tactical_evolved_since_pg_refresh: true,
                 postgres_tactical_learning_authoritative: false,
             });
@@ -3292,11 +4216,17 @@ mod tests {
                 current_policy_version_id: Some("v1"),
                 current_generation: 4,
                 current_updated_at_micros: 100,
+                current_policy_fingerprint: None,
+                latest_policy_fingerprint: None,
                 current_neural_network_present: true,
+                current_neural_network_fingerprint: None,
                 latest_policy_version_id: "v1",
                 latest_generation: 4,
                 latest_updated_at_micros: 125,
                 latest_neural_network_present: true,
+                latest_neural_network_fingerprint: None,
+                current_tactical_learning_fingerprint: None,
+                latest_tactical_learning_fingerprint: None,
                 local_tactical_evolved_since_pg_refresh: true,
                 postgres_tactical_learning_authoritative: false,
             });
@@ -3309,16 +4239,124 @@ mod tests {
                 current_policy_version_id: Some("v1"),
                 current_generation: 4,
                 current_updated_at_micros: 100,
+                current_policy_fingerprint: None,
+                latest_policy_fingerprint: None,
                 current_neural_network_present: false,
+                current_neural_network_fingerprint: None,
                 latest_policy_version_id: "v1",
                 latest_generation: 4,
                 latest_updated_at_micros: 100,
                 latest_neural_network_present: true,
+                latest_neural_network_fingerprint: None,
+                current_tactical_learning_fingerprint: None,
+                latest_tactical_learning_fingerprint: None,
                 local_tactical_evolved_since_pg_refresh: true,
                 postgres_tactical_learning_authoritative: false,
             });
         assert!(neural_arrived.refresh_policy);
         assert!(!neural_arrived.apply_tactical_learning);
+    }
+
+    #[test]
+    fn postgres_policy_refresh_picks_up_same_head_weight_fingerprint_changes() {
+        let policy_weights_changed =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_policy_fingerprint: Some(7),
+                latest_policy_fingerprint: Some(8),
+                current_neural_network_present: true,
+                current_neural_network_fingerprint: Some(10),
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 100,
+                latest_neural_network_present: true,
+                latest_neural_network_fingerprint: Some(10),
+                current_tactical_learning_fingerprint: Some(20),
+                latest_tactical_learning_fingerprint: Some(20),
+                local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: false,
+            });
+
+        assert!(policy_weights_changed.refresh_policy);
+        assert!(!policy_weights_changed.apply_tactical_learning);
+        assert!(policy_weights_changed.same_policy_version);
+        assert!(!policy_weights_changed.same_policy_newer_revision);
+
+        let neural_weights_changed =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_policy_fingerprint: Some(8),
+                latest_policy_fingerprint: Some(8),
+                current_neural_network_present: true,
+                current_neural_network_fingerprint: Some(10),
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 100,
+                latest_neural_network_present: true,
+                latest_neural_network_fingerprint: Some(11),
+                current_tactical_learning_fingerprint: Some(20),
+                latest_tactical_learning_fingerprint: Some(20),
+                local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: false,
+            });
+
+        assert!(neural_weights_changed.refresh_policy);
+        assert!(!neural_weights_changed.apply_tactical_learning);
+        assert!(neural_weights_changed.same_policy_version);
+        assert!(!neural_weights_changed.same_policy_newer_revision);
+
+        let tactical_weights_changed =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_policy_fingerprint: Some(8),
+                latest_policy_fingerprint: Some(8),
+                current_neural_network_present: true,
+                current_neural_network_fingerprint: Some(10),
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 100,
+                latest_neural_network_present: true,
+                latest_neural_network_fingerprint: Some(10),
+                current_tactical_learning_fingerprint: Some(20),
+                latest_tactical_learning_fingerprint: Some(21),
+                local_tactical_evolved_since_pg_refresh: true,
+                postgres_tactical_learning_authoritative: true,
+            });
+
+        assert!(!tactical_weights_changed.refresh_policy);
+        assert!(tactical_weights_changed.apply_tactical_learning);
+        assert!(tactical_weights_changed.same_policy_version);
+        assert!(!tactical_weights_changed.same_policy_newer_revision);
+
+        let tactical_weights_changed_without_local_search =
+            soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                current_policy_version_id: Some("v1"),
+                current_generation: 4,
+                current_updated_at_micros: 100,
+                current_policy_fingerprint: Some(8),
+                latest_policy_fingerprint: Some(8),
+                current_neural_network_present: true,
+                current_neural_network_fingerprint: Some(10),
+                latest_policy_version_id: "v1",
+                latest_generation: 4,
+                latest_updated_at_micros: 100,
+                latest_neural_network_present: true,
+                latest_neural_network_fingerprint: Some(10),
+                current_tactical_learning_fingerprint: Some(20),
+                latest_tactical_learning_fingerprint: Some(22),
+                local_tactical_evolved_since_pg_refresh: false,
+                postgres_tactical_learning_authoritative: false,
+            });
+
+        assert!(!tactical_weights_changed_without_local_search.refresh_policy);
+        assert!(tactical_weights_changed_without_local_search.apply_tactical_learning);
+        assert!(tactical_weights_changed_without_local_search.same_policy_version);
     }
 
     #[test]
@@ -3328,11 +4366,17 @@ mod tests {
                 current_policy_version_id: Some("local-mutation-v2"),
                 current_generation: 5,
                 current_updated_at_micros: 0,
+                current_policy_fingerprint: None,
+                latest_policy_fingerprint: None,
                 current_neural_network_present: true,
+                current_neural_network_fingerprint: None,
                 latest_policy_version_id: "local-mutation-v2",
                 latest_generation: 5,
                 latest_updated_at_micros: 250,
                 latest_neural_network_present: true,
+                latest_neural_network_fingerprint: None,
+                current_tactical_learning_fingerprint: None,
+                latest_tactical_learning_fingerprint: None,
                 local_tactical_evolved_since_pg_refresh: true,
                 postgres_tactical_learning_authoritative: true,
             });
@@ -3349,11 +4393,17 @@ mod tests {
             current_policy_version_id: Some("v1"),
             current_generation: 4,
             current_updated_at_micros: 100,
+            current_policy_fingerprint: None,
+            latest_policy_fingerprint: None,
             current_neural_network_present: true,
+            current_neural_network_fingerprint: None,
             latest_policy_version_id: "v1",
             latest_generation: 4,
             latest_updated_at_micros: 100,
             latest_neural_network_present: true,
+            latest_neural_network_fingerprint: None,
+            current_tactical_learning_fingerprint: None,
+            latest_tactical_learning_fingerprint: None,
             local_tactical_evolved_since_pg_refresh: true,
             postgres_tactical_learning_authoritative: false,
         });
@@ -3367,11 +4417,17 @@ mod tests {
                     current_policy_version_id: Some("v1"),
                     current_generation: 4,
                     current_updated_at_micros: 100,
+                    current_policy_fingerprint: None,
+                    latest_policy_fingerprint: None,
                     current_neural_network_present: true,
+                    current_neural_network_fingerprint: None,
                     latest_policy_version_id: "v1",
                     latest_generation: 4,
                     latest_updated_at_micros: 100,
                     latest_neural_network_present: true,
+                    latest_neural_network_fingerprint: None,
+                    current_tactical_learning_fingerprint: None,
+                    latest_tactical_learning_fingerprint: None,
                     local_tactical_evolved_since_pg_refresh: true,
                     postgres_tactical_learning_authoritative: false,
                 }
@@ -3387,11 +4443,17 @@ mod tests {
                 current_policy_version_id: Some("v1"),
                 current_generation: 4,
                 current_updated_at_micros: 100,
+                current_policy_fingerprint: None,
+                latest_policy_fingerprint: None,
                 current_neural_network_present: true,
+                current_neural_network_fingerprint: None,
                 latest_policy_version_id: "v1",
                 latest_generation: 4,
                 latest_updated_at_micros: 100,
                 latest_neural_network_present: true,
+                latest_neural_network_fingerprint: None,
+                current_tactical_learning_fingerprint: None,
+                latest_tactical_learning_fingerprint: None,
                 local_tactical_evolved_since_pg_refresh: true,
                 postgres_tactical_learning_authoritative: true,
             });
@@ -3407,11 +4469,17 @@ mod tests {
                 current_policy_version_id: Some("pending-v2"),
                 current_generation: 5,
                 current_updated_at_micros: 0,
+                current_policy_fingerprint: None,
+                latest_policy_fingerprint: None,
                 current_neural_network_present: true,
+                current_neural_network_fingerprint: None,
                 latest_policy_version_id: "v1",
                 latest_generation: 4,
                 latest_updated_at_micros: 200,
                 latest_neural_network_present: true,
+                latest_neural_network_fingerprint: None,
+                current_tactical_learning_fingerprint: None,
+                latest_tactical_learning_fingerprint: None,
                 local_tactical_evolved_since_pg_refresh: false,
                 postgres_tactical_learning_authoritative: true,
             });
@@ -3478,7 +4546,7 @@ mod tests {
         let no_flush_plan = soccer_postgres_new_sim_refresh_plan(false, false, false, 1, 1);
         assert!(no_flush_plan.refresh_from_postgres);
         assert!(!no_flush_plan.flush_pending_policy_versions);
-        assert!(!no_flush_plan.wait_for_async_policy_versions);
+        assert!(no_flush_plan.wait_for_async_policy_versions);
     }
 
     #[test]
@@ -3870,7 +4938,7 @@ mod tests {
             &mut |candidate| candidates.push(candidate),
         );
 
-        assert_eq!(candidates.len(), 10);
+        assert_eq!(candidates.len(), 12);
         assert!(candidates.iter().all(|candidate| {
             candidate.attack_flank_lane_weight <= 2.2
                 && candidate.defense_contract_delta_weight <= 2.4
@@ -3884,6 +4952,12 @@ mod tests {
             candidate.defense_contract_delta_weight > base.defense_contract_delta_weight
                 && candidate.defense_compactness_score_weight
                     > base.defense_compactness_score_weight
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.attack_width_delta_weight >= base.attack_width_delta_weight + 0.20
+                && candidate.attack_flank_lane_weight >= base.attack_flank_lane_weight + 0.30
+                && candidate.defense_contract_delta_weight
+                    >= base.defense_contract_delta_weight + 0.30
         }));
         assert!(candidates.iter().any(|candidate| {
             soccer_tactical_weight_search_score(candidate, &summary)
@@ -3949,6 +5023,70 @@ mod tests {
         assert!(candidates.iter().any(|candidate| {
             candidate.defender_midfielder_press_weight > base.defender_midfielder_press_weight
                 || candidate.midfielder_press_weight > base.midfielder_press_weight
+        }));
+    }
+
+    #[test]
+    fn tactical_novelty_immigrants_expand_flank_compact_search_space() {
+        let base = SoccerTacticalLearningWeights::default();
+        let mut centroid = base.clone();
+        centroid.attack_width_delta_weight = 1.10;
+        centroid.attack_flank_lane_weight = 1.05;
+        centroid.defense_contract_delta_weight = 1.20;
+        centroid.defense_compactness_score_weight = 0.70;
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.10,
+            mean_attack_flank_lane_score: 0.09,
+            mean_attack_spacing_score: 0.22,
+            mean_defense_contract_score: 0.10,
+            mean_defense_spacing_score: 0.30,
+            mean_defense_ball_gap_score: 0.36,
+            mean_defense_role_press_score: 0.32,
+            ..Default::default()
+        };
+        let pressure = soccer_tactical_search_pressure(&summary);
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.08,
+            mutation_scale: 0.45,
+            crossover_rate: 1.0,
+            exploration_rate: 0.20,
+            exploration_scale: 0.85,
+            elite_weight_floor: 0.0,
+            population_size: 10,
+            seed: 83,
+        };
+        let mut candidates = Vec::new();
+
+        search_soccer_tactical_novelty_immigrant_candidates(
+            &base,
+            &centroid,
+            &summary,
+            pressure,
+            options,
+            &mut |candidate| candidates.push(candidate),
+        );
+
+        assert_eq!(candidates.len(), options.population_size);
+        assert!(candidates.iter().all(|candidate| {
+            candidate.attack_flank_lane_weight <= 2.2
+                && candidate.defense_contract_delta_weight <= 2.4
+                && candidate.defense_compactness_score_weight <= 2.0
+                && candidate.midfielder_press_weight <= 1.6
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.attack_flank_lane_weight >= centroid.attack_flank_lane_weight + 0.35
+                && candidate.attack_width_delta_weight >= centroid.attack_width_delta_weight + 0.20
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.defense_contract_delta_weight >= centroid.defense_contract_delta_weight + 0.35
+                && candidate.defense_compactness_score_weight
+                    >= centroid.defense_compactness_score_weight + 0.25
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.attack_flank_lane_weight > centroid.attack_flank_lane_weight
+                && candidate.defense_contract_delta_weight > centroid.defense_contract_delta_weight
+                && soccer_tactical_weight_search_score(candidate, &summary)
+                    > soccer_tactical_weight_search_score(&centroid, &summary)
         }));
     }
 
@@ -4185,22 +5323,35 @@ mod tests {
     }
 
     #[test]
-    fn queue_starting_batch_replaces_policy_for_next_game() {
+    fn queue_starting_batch_replaces_policy_and_neural_snapshot_for_next_game() {
         let options = SoccerQPolicyOptions::default();
+        let match_config = MatchConfig {
+            duration_seconds: 0.0,
+            half_duration_seconds: 0.0,
+            learning_logging_enabled: false,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            ..Default::default()
+        };
         let refreshed = policy_with_action(12.0, 7);
+        let mut refreshed_neural = SoccerMatch::default_11v11(match_config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        refreshed_neural.layers[0].weights[0][0] = 0.424_242;
+        refreshed_neural.layers[0].biases[0] = -0.313_131;
         let mut refreshed_episodes = Vec::new();
         let report = run_soccer_learning_queue_with_events(
             SoccerLearningQueueRunnerConfig {
                 games: 1,
                 parallel_games: 1,
                 base_seed: 2031,
-                match_config: MatchConfig {
-                    duration_seconds: 0.0,
-                    half_duration_seconds: 0.0,
-                    learning_logging_enabled: false,
-                    max_human_players: 0,
-                    ..Default::default()
-                },
+                match_config,
                 initial_neural_network: None,
                 neural_drain_timeout: Duration::from_millis(0),
                 options: options.clone(),
@@ -4213,11 +5364,13 @@ mod tests {
                 if let SoccerLearningQueueEvent::StartingBatch {
                     next_episode,
                     policies,
+                    neural_network,
                     ..
                 } = event
                 {
                     refreshed_episodes.push(next_episode);
                     *policies = refreshed.clone();
+                    *neural_network = Some(refreshed_neural.clone());
                 }
                 Ok(())
             },
@@ -4232,6 +5385,11 @@ mod tests {
         assert_eq!(entries[0].action, "pass");
         assert!((entries[0].value - 12.0).abs() < 1e-12);
         assert_eq!(entries[0].visits, 7);
+        let latest_neural = report
+            .latest_neural_network
+            .expect("latest queue neural snapshot");
+        assert_eq!(latest_neural.layers[0].weights[0][0], 0.424_242);
+        assert_eq!(latest_neural.layers[0].biases[0], -0.313_131);
     }
 
     #[test]

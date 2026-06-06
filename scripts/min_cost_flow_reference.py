@@ -60,8 +60,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--solver",
-        choices=["auto", "ortools", "fallback", "rust-ssp", "rust-exact"],
         default="auto",
+        metavar="SOLVER",
+        help="solver alias to pass through to the Rust min_cost_flow_reference binary",
     )
     args = parser.parse_args()
     try:

@@ -80,6 +80,84 @@ LINEAR_CLI_DIRECT_ALIASES = {
     "lp-solve-cli": "lp-solve",
     "lpsolve": "lp-solve",
     "lpsolve-cli": "lp-solve",
+    "gurobi": "gurobi",
+    "gurobi-cli": "gurobi",
+    "cplex": "cplex",
+    "cplex-cli": "cplex",
+    "xpress": "xpress",
+    "xpress-cli": "xpress",
+    "lindo": "lindo",
+    "lindo-cli": "lindo",
+}
+SCIPY_LINEAR_CLI_ALIASES = {
+    "highs": ("highs", None),
+    "highs-ds": ("highs", "simplex"),
+    "highs-simplex": ("highs", "simplex"),
+    "highs-dual-simplex": ("highs", "simplex"),
+    "highs:dual-simplex": ("highs", "simplex"),
+    "highs-ipm": ("highs", "ipm"),
+    "highs:ipm": ("highs", "ipm"),
+}
+RUST_LP_REFERENCE_ALIASES = {
+    "auto": "rust",
+    "fallback": "fallback",
+    "internal": "internal",
+    "internal-ipm": "internal-ipm",
+    "internal-interior-point": "internal-interior-point",
+    "internal-simplex": "internal-simplex",
+    "interior-point": "interior-point",
+    "ipm": "ipm",
+    "glop": "ortools:glop",
+    "ortools": "ortools",
+    "ortools-glop": "ortools:glop",
+    "ortools-pdlp": "ortools:pdlp",
+    "ortools:glop": "ortools:glop",
+    "ortools:pdlp": "ortools:pdlp",
+    "pdlp": "ortools:pdlp",
+    "revised-simplex": "revised-simplex",
+    "rust": "rust",
+    "rust-internal": "rust",
+    "rust:internal": "rust",
+    "scipy": "rust",
+    "scipy:highs": "scipy:highs",
+    "scipy:highs-ds": "scipy:highs-ds",
+    "scipy:highs-simplex": "highs-simplex",
+    "scipy:highs-dual-simplex": "highs-ds",
+    "scipy:highs-ipm": "scipy:highs-ipm",
+    "scipy-highs": "rust",
+    "scipy-highs-ds": "highs-ds",
+    "scipy-highs-simplex": "highs-simplex",
+    "scipy-highs-dual-simplex": "highs-ds",
+    "scipy-highs-ipm": "highs-ipm",
+    "scipy-simplex": "simplex",
+    "scipy-revised-simplex": "revised-simplex",
+    "scipy-interior-point": "interior-point",
+    "scipy:interior-point": "scipy:interior-point",
+    "scipy:revised-simplex": "scipy:revised-simplex",
+    "scipy:simplex": "scipy:simplex",
+    "simplex": "simplex",
+}
+RUST_MIP_REFERENCE_ALIASES = {
+    "auto": "auto",
+    "brute-force": "brute-force",
+    "cp-sat": "ortools-cp-sat",
+    "cpsat": "ortools-cp-sat",
+    "enumeration": "enumeration",
+    "fallback": "rust-enumeration",
+    "milp": "rust-enumeration",
+    "ortools": "ortools",
+    "ortools-cp-sat": "ortools-cp-sat",
+    "ortools-scip": "ortools",
+    "ortools:cp-sat": "ortools-cp-sat",
+    "ortools:cpsat": "ortools-cp-sat",
+    "ortools:scip": "ortools",
+    "rust": "rust-enumeration",
+    "rust-enumeration": "rust-enumeration",
+    "rust-fallback": "rust-enumeration",
+    "rust-internal": "rust-enumeration",
+    "scipy": "rust-enumeration",
+    "scipy-milp": "rust-enumeration",
+    "scipy:milp": "rust-enumeration",
 }
 
 
@@ -358,6 +436,11 @@ def _solver_backend(method: str) -> tuple[str, str]:
     lowered = method.lower()
     if lowered.endswith("-cli"):
         return lowered.removesuffix("-cli"), "cli"
+    direct_cli_solver = LINEAR_CLI_DIRECT_ALIASES.get(
+        lowered
+    ) or LINEAR_CLI_DIRECT_ALIASES.get(lowered.replace("_", "-"))
+    if direct_cli_solver is not None:
+        return direct_cli_solver, "default"
     if ":" in method:
         family, backend = method.split(":", 1)
         family = family.lower()
@@ -389,6 +472,8 @@ def _solver_backend(method: str) -> tuple[str, str]:
         "cpsat": ("ortools", "CP-SAT"),
         "ortools-cp-sat": ("ortools", "CP-SAT"),
         "ortools_cpsat": ("ortools", "CP-SAT"),
+        "glpk": ("glpk", "default"),
+        "glpsol": ("glpk", "default"),
     }
     if lowered in bare_aliases:
         return bare_aliases[lowered]
@@ -400,14 +485,247 @@ def _external_options(payload: dict[str, Any]) -> dict[str, Any]:
     return options if isinstance(options, dict) else {}
 
 
-def _linear_cli_reference_script() -> str:
+def _repo_root() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
-    repo_relative = os.path.abspath(
-        os.path.join(here, "..", "..", "scripts", "linear_cli_reference.py")
-    )
+    repo_relative = os.path.abspath(os.path.join(here, "..", ".."))
+    if os.path.exists(os.path.join(repo_relative, "Cargo.toml")):
+        return repo_relative
+    return os.getcwd()
+
+
+def _linear_cli_reference_script(repo_root: str) -> str:
+    repo_relative = os.path.join(repo_root, "scripts", "linear_cli_reference.py")
     if os.path.exists(repo_relative):
         return repo_relative
-    return os.path.abspath(os.path.join(os.getcwd(), "scripts", "linear_cli_reference.py"))
+    return os.path.abspath(os.path.join(_repo_root(), "scripts", "linear_cli_reference.py"))
+
+
+def _local_rust_binary_is_current(binary_path: str, source_paths: list[str]) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def _linear_cli_reference_command() -> tuple[list[str], str | None]:
+    repo_root = _repo_root()
+    if os.environ.get("LINEAR_CLI_REFERENCE_FORCE_PYTHON", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return [sys.executable, _linear_cli_reference_script(repo_root)], None
+    explicit = os.environ.get("LINEAR_CLI_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit], None
+    local_binary = os.path.join(repo_root, "target", "debug", "linear_cli_reference")
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "linear_cli_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_linear_cli.rs"),
+    ]
+    if _local_rust_binary_is_current(local_binary, source_paths):
+        return [local_binary], None
+    return ["cargo", "run", "--quiet", "--bin", "linear_cli_reference", "--"], repo_root
+
+
+def _lp_reference_command() -> tuple[list[str], str | None]:
+    repo_root = _repo_root()
+    explicit = os.environ.get("LP_SOLVE_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit], None
+    local_binary = os.path.join(repo_root, "target", "debug", "lp_solve_reference")
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "lp_solve_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "lp.rs"),
+    ]
+    if _local_rust_binary_is_current(local_binary, source_paths):
+        return [local_binary], None
+    return ["cargo", "run", "--quiet", "--bin", "lp_solve_reference", "--"], repo_root
+
+
+def _ip_mip_reference_command() -> tuple[list[str], str | None]:
+    repo_root = _repo_root()
+    explicit = os.environ.get("IP_MIP_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit], None
+    local_binary = os.path.join(repo_root, "target", "debug", "ip_mip_reference")
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "ip_mip_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "lp.rs"),
+    ]
+    if _local_rust_binary_is_current(local_binary, source_paths):
+        return [local_binary], None
+    return ["cargo", "run", "--quiet", "--bin", "ip_mip_reference", "--"], repo_root
+
+
+def _quadratic_reference_command() -> tuple[list[str], str | None]:
+    repo_root = _repo_root()
+    explicit = os.environ.get("QP_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit], None
+    local_binary = os.path.join(repo_root, "target", "debug", "qp_reference")
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "qp_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "external_quadratic_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "qp.rs"),
+    ]
+    if _local_rust_binary_is_current(local_binary, source_paths):
+        return [local_binary], None
+    return ["cargo", "run", "--quiet", "--bin", "qp_reference", "--"], repo_root
+
+
+def _quadratic_reference_python_forced() -> bool:
+    for env_var in (
+        "MATH_PROGRAM_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_QP_REFERENCE_FORCE_PYTHON",
+    ):
+        value = os.environ.get(env_var, "")
+        if value.strip().lower() in ("1", "true", "yes", "on", "python"):
+            return True
+    return False
+
+
+def _linear_reference_python_forced() -> bool:
+    for env_var in (
+        "MATH_PROGRAM_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_LINEAR_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_GLPK_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_ORTOOLS_REFERENCE_FORCE_PYTHON",
+    ):
+        value = os.environ.get(env_var, "")
+        if value.strip().lower() in ("1", "true", "yes", "on", "python"):
+            return True
+    return False
+
+
+def _mip_reference_python_forced() -> bool:
+    for env_var in (
+        "MATH_PROGRAM_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_LINEAR_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_GLPK_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_MIP_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_CP_SAT_REFERENCE_FORCE_PYTHON",
+        "MATH_PROGRAM_ORTOOLS_REFERENCE_FORCE_PYTHON",
+    ):
+        value = os.environ.get(env_var, "")
+        if value.strip().lower() in ("1", "true", "yes", "on", "python"):
+            return True
+    return False
+
+
+def _lp_reference_solver_for_method(method: str) -> str | None:
+    if _linear_reference_python_forced():
+        return None
+    normalized = method.strip().lower().replace("_", "-")
+    if normalized.endswith(":default"):
+        normalized = normalized.removesuffix(":default")
+    if normalized in RUST_LP_REFERENCE_ALIASES:
+        return method.strip() or RUST_LP_REFERENCE_ALIASES[normalized]
+    return None
+
+
+def _mip_reference_solver_for_method(method: str) -> str | None:
+    if _mip_reference_python_forced():
+        return None
+    normalized = method.strip().lower().replace("_", "-")
+    if normalized.endswith(":default"):
+        normalized = normalized.removesuffix(":default")
+    if normalized in RUST_MIP_REFERENCE_ALIASES:
+        return method.strip() or RUST_MIP_REFERENCE_ALIASES[normalized]
+    return None
+
+
+def _quadratic_reference_solver_for_method(method: str) -> str | None:
+    if _quadratic_reference_python_forced():
+        return None
+    normalized = method.strip().lower().replace("_", "-")
+    if normalized.endswith(":default"):
+        normalized = normalized.removesuffix(":default")
+    rust_owned_aliases = {
+        "auto",
+        "fallback",
+        "rust",
+        "rust-internal",
+        "rust:internal",
+        "rust-active-set",
+        "rust:active-set",
+        "rust-qp-active-set",
+        "rust:qp-active-set",
+        "rust-quadratic-reference",
+        "rust:quadratic-reference",
+        "rust-miqp-enumeration",
+        "rust:miqp-enumeration",
+        "rust-socp-pattern-search",
+        "rust:socp-pattern-search",
+        "rust-qcp-pattern-search",
+        "rust:qcp-pattern-search",
+        "rust-fallback",
+        "rust:fallback",
+        "builtin",
+        "builtin-qp-active-set",
+        "builtin:qp-active-set",
+        "highs",
+        "highspy",
+        "highs-qp",
+        "highs:qp",
+        "highs-quadratic",
+        "highs:quadratic",
+        "scipy",
+        "scipy-slsqp",
+        "scipy:slsqp",
+        "osqp",
+        "osqp-qp",
+        "osqp:qp",
+        "cvxpy",
+        "cvxpy-default",
+        "cvxpy:default",
+        "cvxpy:osqp",
+        "cvxpy-osqp",
+        "cvxpy:scs",
+        "cvxpy-scs",
+        "cvxpy:clarabel",
+        "cvxpy-clarabel",
+        "cvxpy:ecos",
+        "cvxpy-ecos",
+        "cvxpy:mosek",
+        "cvxpy-mosek",
+        "cvxpy:copt",
+        "cvxpy-copt",
+        "scs",
+        "clarabel",
+        "ecos",
+        "mosek",
+        "copt",
+        "qpoases",
+        "cvxpy:qpoases",
+        "cvxpy-qpoases",
+        "proxqp",
+        "cvxpy:proxqp",
+        "cvxpy-proxqp",
+        "cosmo",
+        "cvxpy:cosmo",
+        "cvxpy-cosmo",
+        "sdpa",
+        "cvxpy:sdpa",
+        "cvxpy-sdpa",
+        "csdp",
+        "cvxpy:csdp",
+        "cvxpy-csdp",
+    }
+    if normalized in rust_owned_aliases:
+        return normalized
+    if normalized == "slsqp":
+        return "scipy:slsqp"
+    if normalized in {
+        "bounded-integer-qp-enumeration",
+        "bounded-integer-conic-enumeration",
+    }:
+        return "rust"
+    return None
 
 
 def _time_limit_seconds(options: dict[str, Any], default: float | None = None) -> float | None:
@@ -568,10 +886,23 @@ def _mip_start(problem: dict[str, Any]) -> list[float] | None:
 
 
 def _mip_rows(problem: dict[str, Any]) -> list[tuple[list[float], float]]:
+    raw_rows = (
+        problem.get("A")
+        or problem.get("a")
+        or problem.get("A_ub")
+        or problem.get("a_ub")
+        or []
+    )
+    raw_rhs = problem.get("b") or problem.get("b_ub") or []
     rows = [
         ([float(v) for v in row], float(bound))
-        for row, bound in zip(problem.get("A", []), problem.get("b", []))
+        for row, bound in zip(raw_rows, raw_rhs)
     ]
+    for row, bound in zip(problem.get("A_eq") or [], problem.get("b_eq") or []):
+        dense = [float(v) for v in row]
+        rhs = float(bound)
+        rows.append((dense, rhs))
+        rows.append(([-value for value in dense], -rhs))
     for lazy in problem.get("lazyConstraints") or []:
         rows.append((
             [float(v) for v in lazy.get("coefs", [])],
@@ -586,20 +917,7 @@ def _mip_row_arrays(problem: dict[str, Any]) -> tuple[list[list[float]], list[fl
 
 
 def _mip_for_linear_cli_bridge(problem: dict[str, Any]) -> dict[str, Any]:
-    bridge_problem = dict(problem)
-    if "A" in problem and "a" not in bridge_problem:
-        bridge_problem["a"] = problem["A"]
-    if "integerVars" in problem and "integer_vars" not in bridge_problem:
-        bridge_problem["integer_vars"] = problem["integerVars"]
-
-    rows = list(bridge_problem.get("a") or [])
-    rhs = list(bridge_problem.get("b") or [])
-    for lazy in problem.get("lazyConstraints") or []:
-        rows.append(lazy.get("coefs", []))
-        rhs.append(lazy.get("rhs", 0.0))
-    bridge_problem["a"] = rows
-    bridge_problem["b"] = rhs
-    return bridge_problem
+    return dict(problem)
 
 
 def solve_linear_cli_bridge(
@@ -607,12 +925,13 @@ def solve_linear_cli_bridge(
     kind: str,
     solver: str,
     options: dict[str, Any],
+    lp_algorithm: str | None = None,
 ) -> dict[str, Any]:
     raw = {"lp": problem} if kind == "lp" else _mip_for_linear_cli_bridge(problem)
     time_limit = _time_limit_seconds(options, 60.0) or 60.0
+    rust_command, rust_cwd = _linear_cli_reference_command()
     commands = [
-        sys.executable,
-        _linear_cli_reference_script(),
+        *rust_command,
         "--kind",
         kind,
         "--solver",
@@ -642,6 +961,10 @@ def solve_linear_cli_bridge(
     for key, flag, cast in passthrough:
         if key in options and options[key] is not None:
             commands.extend([flag, str(cast(options[key]))])
+    if lp_algorithm is not None:
+        commands.extend(["--lp-algorithm", lp_algorithm])
+    elif kind == "lp" and options.get("lpAlgorithm") is not None:
+        commands.extend(["--lp-algorithm", str(options["lpAlgorithm"])])
     if isinstance(options.get("branchPriorities"), list):
         commands.extend(["--branch-priorities", json.dumps(options["branchPriorities"])])
     if isinstance(problem.get("mipStart"), list):
@@ -656,6 +979,7 @@ def solve_linear_cli_bridge(
             stderr=subprocess.PIPE,
             timeout=max(time_limit + 15.0, 20.0),
             check=False,
+            cwd=rust_cwd,
         )
     except subprocess.TimeoutExpired as exc:
         return {
@@ -687,23 +1011,184 @@ def solve_linear_cli_bridge(
     return result
 
 
+def _run_lp_reference_bridge(
+    problem: dict[str, Any],
+    method: str,
+    options: dict[str, Any],
+) -> dict[str, Any] | None:
+    solver = _lp_reference_solver_for_method(method)
+    if solver is None:
+        return None
+    time_limit = _time_limit_seconds(options, 60.0) or 60.0
+    command, cwd = _lp_reference_command()
+    try:
+        run = subprocess.run(
+            [*command, "--method", solver],
+            input=json.dumps({"lp": problem}, allow_nan=True),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(time_limit + 15.0, 20.0),
+            check=False,
+            cwd=cwd,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "time-limit",
+            "x": [],
+            "objective": None,
+            "message": f"rust LP reference bridge timed out: {exc}",
+        }
+    except OSError as exc:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"failed to start rust LP reference bridge: {exc}",
+        }
+
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    if not lines:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"rust LP reference bridge produced no JSON: {run.stderr.strip()}",
+        }
+    try:
+        result = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"rust LP reference bridge emitted invalid JSON: {exc}",
+        }
+    if run.returncode != 0 and not result.get("message"):
+        result["message"] = run.stderr.strip()
+    if result.get("status") == "unavailable":
+        result["status"] = "numerical-error"
+    return result
+
+
+def _run_mip_reference_bridge(
+    problem: dict[str, Any],
+    method: str,
+    options: dict[str, Any],
+) -> dict[str, Any] | None:
+    solver = _mip_reference_solver_for_method(method)
+    if solver is None:
+        return None
+    command, cwd = _ip_mip_reference_command()
+    time_limit = _time_limit_seconds(options, 60.0) or 60.0
+    commands = [*command, "--solver", solver]
+    max_enumerations = _node_limit(options) or 1_000_000
+    commands.extend(["--max-enumerations", str(max_enumerations)])
+    pool_size = _nonnegative_int_or_none(options.get("solutionPoolSize"))
+    if pool_size is not None and pool_size > 0:
+        commands.extend(["--pool-size", str(pool_size)])
+
+    try:
+        run = subprocess.run(
+            commands,
+            input=json.dumps({"problem": _mip_for_linear_cli_bridge(problem)}, allow_nan=True),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(time_limit + 15.0, 20.0),
+            check=False,
+            cwd=cwd,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "time-limit",
+            "x": [],
+            "objective": None,
+            "message": f"rust MIP reference bridge timed out: {exc}",
+        }
+    except OSError as exc:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"failed to start rust MIP reference bridge: {exc}",
+        }
+
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    if not lines:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"rust MIP reference bridge produced no JSON: {run.stderr.strip()}",
+        }
+    try:
+        result = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"rust MIP reference bridge emitted invalid JSON: {exc}",
+        }
+    if run.returncode != 0 and not result.get("message"):
+        result["message"] = run.stderr.strip()
+    if "nodesExplored" not in result and result.get("enumerated") is not None:
+        result["nodesExplored"] = result["enumerated"]
+    if result.get("status") == "unavailable":
+        result["status"] = "numerical-error"
+    return result
+
+
 def _linear_cli_bridge_solver(family: str, backend: str, integer: bool) -> str | None:
     solver = LINEAR_CLI_DIRECT_ALIASES.get(family)
-    if solver is None and backend == "cli" and family in LINEAR_CLI_BACKEND_SOLVERS:
+    if solver is None and family == "scipy" and not _linear_reference_python_forced():
+        alias = SCIPY_LINEAR_CLI_ALIASES.get(backend.strip().lower().replace("_", "-"))
+        if alias is not None:
+            solver = alias[0]
+    if (
+        solver is None
+        and not _linear_reference_python_forced()
+        and backend.strip().lower().replace("_", "-") in {"cli", "default"}
+        and family in LINEAR_CLI_BACKEND_SOLVERS
+    ):
         solver = family
     if solver == "clp" and integer:
         return None
     return solver
 
 
+def _linear_cli_bridge_lp_algorithm(family: str, backend: str) -> str | None:
+    if family != "scipy" or _linear_reference_python_forced():
+        return None
+    alias = SCIPY_LINEAR_CLI_ALIASES.get(backend.strip().lower().replace("_", "-"))
+    if alias is None:
+        return None
+    return alias[1]
+
+
 def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     family, backend = _solver_backend(method)
     if family == "ortools":
+        rust_result = _run_lp_reference_bridge(
+            payload["lp"],
+            method,
+            _external_options(payload),
+        )
+        if rust_result is not None:
+            return rust_result
         return solve_ortools(payload, backend, integer=False)
+    rust_result = _run_lp_reference_bridge(payload["lp"], method, _external_options(payload))
+    if rust_result is not None:
+        return rust_result
     cli_solver = _linear_cli_bridge_solver(family, backend, integer=False)
     if cli_solver is not None:
         return solve_linear_cli_bridge(
-            payload["lp"], "lp", cli_solver, _external_options(payload)
+            payload["lp"],
+            "lp",
+            cli_solver,
+            _external_options(payload),
+            _linear_cli_bridge_lp_algorithm(family, backend),
         )
     if family == "gurobi":
         return solve_gurobi_lp(payload)
@@ -755,259 +1240,144 @@ def solve_lp(payload: dict[str, Any], method: str) -> dict[str, Any]:
     }
 
 
-def _qp_objective_value(qp: dict[str, Any], x: list[float]) -> float:
-    value = sum(float(coef) * x[i] for i, coef in enumerate(qp.get("c", [])))
-    for term in qp.get("quadratic", []):
-        value += (
-            float(term["coeff"])
-            * x[int(term["i"])]
-            * x[int(term["j"])]
+def _quadratic_integer_vars(problem: dict[str, Any]) -> list[Any]:
+    values = problem.get("integer_vars", problem.get("integerVars", []))
+    return values if isinstance(values, list) else []
+
+
+def _has_quadratic_integer_vars(problem: dict[str, Any]) -> bool:
+    return any(bool(value) for value in _quadratic_integer_vars(problem))
+
+
+def _quadratic_reference_qp_payload(problem: dict[str, Any]) -> dict[str, Any]:
+    return dict(problem)
+
+
+def _quadratic_reference_conic_payload(problem: dict[str, Any]) -> dict[str, Any] | None:
+    soc = problem.get("soc") or problem.get("cones") or []
+    raw_constraints = (
+        problem.get("quadraticConstraints")
+        or problem.get("quadratic_constraints")
+        or problem.get("q_constraints")
+        or []
+    )
+    has_quadratic_objective = bool(problem.get("quadratic") or problem.get("Q") or problem.get("q"))
+    if soc and (raw_constraints or has_quadratic_objective):
+        return None
+    return dict(problem)
+
+
+def _run_quadratic_reference_bridge(
+    problem: dict[str, Any],
+    kind: str,
+    method: str,
+    options: dict[str, Any],
+    *,
+    solver_override: str | None = None,
+) -> dict[str, Any] | None:
+    solver = solver_override or _quadratic_reference_solver_for_method(method)
+    if solver is None:
+        return None
+    if kind == "qp":
+        raw = _quadratic_reference_qp_payload(problem)
+    else:
+        converted = _quadratic_reference_conic_payload(problem)
+        if converted is None:
+            return None
+        raw = converted
+    command, cwd = _quadratic_reference_command()
+    max_enumerations = _node_limit(options) or 1_000_000
+    time_limit = _time_limit_seconds(options, 60.0) or 60.0
+    try:
+        run = subprocess.run(
+            [
+                *command,
+                "--solver",
+                solver,
+                "--max-enumerations",
+                str(max_enumerations),
+            ],
+            input=json.dumps(raw, allow_nan=True),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            timeout=max(time_limit + 15.0, 20.0),
+            check=False,
         )
-    return float(value)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "time-limit",
+            "x": [],
+            "objective": None,
+            "message": f"rust quadratic bridge timed out: {exc}",
+        }
+    except OSError as exc:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"failed to start rust quadratic bridge: {exc}",
+        }
+
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    if not lines:
+        return {
+            "status": "numerical-error",
+            "x": [],
+            "objective": None,
+            "message": f"rust quadratic bridge produced no JSON: {run.stderr.strip()}",
+        }
+    result = json.loads(lines[-1])
+    if run.returncode != 0 and not result.get("message"):
+        result["message"] = run.stderr.strip()
+    if result.get("status") == "unavailable":
+        result["status"] = "numerical-error"
+    return result
 
 
-def _qp_feasible(qp: dict[str, Any], x: list[float], tol: float = 1e-8) -> bool:
-    lower = qp.get("lb") or [None] * len(x)
-    upper = qp.get("ub") or [None] * len(x)
-    for i, value in enumerate(x):
-        lo = lower[i] if i < len(lower) else None
-        hi = upper[i] if i < len(upper) else None
-        if lo is not None and value < float(lo) - tol:
-            return False
-        if hi is not None and value > float(hi) + tol:
-            return False
-    for row, bound in zip(qp.get("A_ub") or [], qp.get("b_ub") or []):
-        lhs = sum(float(coef) * value for coef, value in zip(row, x))
-        if lhs > float(bound) + tol:
-            return False
-    for row, bound in zip(qp.get("A_eq") or [], qp.get("b_eq") or []):
-        lhs = sum(float(coef) * value for coef, value in zip(row, x))
-        if abs(lhs - float(bound)) > tol:
-            return False
-    return True
+def _run_quadratic_rust_fallback_bridge(
+    problem: dict[str, Any],
+    kind: str,
+    options: dict[str, Any],
+) -> dict[str, Any] | None:
+    if _quadratic_reference_python_forced():
+        return None
+    return _run_quadratic_reference_bridge(problem, kind, "fallback", options)
 
 
 def solve_bounded_integer_qp_by_enumeration(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    qp = payload["qp"]
-    c = qp.get("c", [])
-    integer_vars = [bool(value) for value in qp.get("integerVars", [])]
-    if len(integer_vars) != len(c) or not all(integer_vars):
+    result = _run_quadratic_reference_bridge(
+        payload["qp"],
+        "qp",
+        "rust",
+        _external_options(payload),
+        solver_override="rust",
+    )
+    if result is None:
         raise RuntimeError(
-            "bounded integer QP fallback requires every variable to be integer"
+            "bounded integer QP fallback requires the Rust quadratic reference"
         )
-
-    lower = qp.get("lb") or [0.0] * len(c)
-    upper = qp.get("ub") or [None] * len(c)
-    domains: list[list[int]] = []
-    for i in range(len(c)):
-        lo = lower[i] if i < len(lower) else 0.0
-        hi = upper[i] if i < len(upper) else None
-        if lo is None or hi is None:
-            raise RuntimeError(
-                "bounded integer QP fallback requires finite integer bounds"
-            )
-        lo_i = math.ceil(float(lo) - 1e-9)
-        hi_i = math.floor(float(hi) + 1e-9)
-        if lo_i > hi_i:
-            return {
-                "status": "infeasible",
-                "x": [],
-                "objective": None,
-                "solver": "python:bounded-integer-qp-enumeration",
-                "message": f"empty domain for variable {i}",
-            }
-        domains.append(list(range(lo_i, hi_i + 1)))
-
-    options = _external_options(payload)
-    max_nodes = _node_limit(options) or 200_000
-    sense = qp.get("sense", "max")
-    minimize = sense != "max"
-    best_x: list[float] | None = None
-    best_obj: float | None = None
-    nodes = 0
-    incumbent: list[int] = [0] * len(c)
-
-    def visit(idx: int) -> bool:
-        nonlocal best_x, best_obj, nodes
-        if nodes >= max_nodes:
-            return False
-        if idx == len(domains):
-            nodes += 1
-            x = [float(value) for value in incumbent]
-            if not _qp_feasible(qp, x):
-                return True
-            objective = _qp_objective_value(qp, x)
-            if best_obj is None or (
-                objective < best_obj - 1e-9
-                if minimize
-                else objective > best_obj + 1e-9
-            ):
-                best_obj = objective
-                best_x = x
-            return True
-        for value in domains[idx]:
-            incumbent[idx] = value
-            if not visit(idx + 1):
-                return False
-        return True
-
-    exhausted = visit(0)
-    status = "optimal" if exhausted else "node-limit"
-    if best_x is None:
-        return {
-            "status": "infeasible" if exhausted else status,
-            "x": [],
-            "objective": None,
-            "solver": "python:bounded-integer-qp-enumeration",
-            "nodesExplored": nodes,
-            "message": f"enumerated {nodes} bounded integer assignments",
-        }
-    return {
-        "status": status,
-        "x": best_x,
-        "objective": best_obj,
-        "bestBound": best_obj,
-        "mipGap": 0.0 if exhausted else None,
-        "nodesExplored": nodes,
-        "solver": "python:bounded-integer-qp-enumeration",
-        "message": f"enumerated {nodes} bounded integer assignments",
-    }
-
-
-def _sparse_value(coeffs: Any, constant: float, x: list[float]) -> float:
-    return float(constant + sum(float(coef) * x[int(idx)] for idx, coef in coeffs))
-
-
-def _quadratic_row_value(row: dict[str, Any], x: list[float]) -> float:
-    value = 0.0
-    for term in row.get("quadratic", []):
-        value += (
-            float(term["coeff"])
-            * x[int(term["i"])]
-            * x[int(term["j"])]
-        )
-    value += sum(float(coef) * x[int(idx)] for idx, coef in row.get("linear", []))
-    return float(value)
-
-
-def _conic_feasible(conic: dict[str, Any], x: list[float], tol: float = 1e-8) -> bool:
-    if not _qp_feasible(conic, x, tol):
-        return False
-    for cone in conic.get("soc", []):
-        values = [
-            _sparse_value(term.get("coeffs", []), float(term.get("constant", 0.0)), x)
-            for term in cone.get("terms", [])
-        ]
-        rhs = _sparse_value(
-            cone.get("rhsCoeffs", []),
-            float(cone.get("rhsConstant", 0.0)),
-            x,
-        )
-        if math.sqrt(sum(value * value for value in values)) > rhs + tol:
-            return False
-    for row in conic.get("quadraticConstraints", []):
-        value = _quadratic_row_value(row, x)
-        rhs = float(row.get("rhs", 0.0))
-        sense = row.get("sense", "<=")
-        if sense == ">=":
-            if value < rhs - tol:
-                return False
-        elif sense in {"=", "=="}:
-            if abs(value - rhs) > tol:
-                return False
-        elif value > rhs + tol:
-            return False
-    return True
+    return result
 
 
 def solve_bounded_integer_conic_by_enumeration(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    conic = payload["conic"]
-    c = conic.get("c", [])
-    integer_vars = [bool(value) for value in conic.get("integerVars", [])]
-    if len(integer_vars) != len(c) or not all(integer_vars):
+    result = _run_quadratic_reference_bridge(
+        payload["conic"],
+        "conic",
+        "rust",
+        _external_options(payload),
+        solver_override="rust",
+    )
+    if result is None:
         raise RuntimeError(
-            "bounded integer conic fallback requires every variable to be integer"
+            "bounded integer conic fallback requires the Rust quadratic reference"
         )
-
-    lower = conic.get("lb") or [0.0] * len(c)
-    upper = conic.get("ub") or [None] * len(c)
-    domains: list[list[int]] = []
-    for i in range(len(c)):
-        lo = lower[i] if i < len(lower) else 0.0
-        hi = upper[i] if i < len(upper) else None
-        if lo is None or hi is None:
-            raise RuntimeError(
-                "bounded integer conic fallback requires finite integer bounds"
-            )
-        lo_i = math.ceil(float(lo) - 1e-9)
-        hi_i = math.floor(float(hi) + 1e-9)
-        if lo_i > hi_i:
-            return {
-                "status": "infeasible",
-                "x": [],
-                "objective": None,
-                "solver": "python:bounded-integer-conic-enumeration",
-                "message": f"empty domain for variable {i}",
-            }
-        domains.append(list(range(lo_i, hi_i + 1)))
-
-    options = _external_options(payload)
-    max_nodes = _node_limit(options) or 200_000
-    minimize = conic.get("sense", "max") != "max"
-    best_x: list[float] | None = None
-    best_obj: float | None = None
-    nodes = 0
-    incumbent: list[int] = [0] * len(c)
-
-    def visit(idx: int) -> bool:
-        nonlocal best_x, best_obj, nodes
-        if nodes >= max_nodes:
-            return False
-        if idx == len(domains):
-            nodes += 1
-            x = [float(value) for value in incumbent]
-            if not _conic_feasible(conic, x):
-                return True
-            objective = _qp_objective_value(conic, x)
-            if best_obj is None or (
-                objective < best_obj - 1e-9
-                if minimize
-                else objective > best_obj + 1e-9
-            ):
-                best_obj = objective
-                best_x = x
-            return True
-        for value in domains[idx]:
-            incumbent[idx] = value
-            if not visit(idx + 1):
-                return False
-        return True
-
-    exhausted = visit(0)
-    status = "optimal" if exhausted else "node-limit"
-    if best_x is None:
-        return {
-            "status": "infeasible" if exhausted else status,
-            "x": [],
-            "objective": None,
-            "solver": "python:bounded-integer-conic-enumeration",
-            "nodesExplored": nodes,
-            "message": f"enumerated {nodes} bounded integer assignments",
-        }
-    return {
-        "status": status,
-        "x": best_x,
-        "objective": best_obj,
-        "bestBound": best_obj,
-        "mipGap": 0.0 if exhausted else None,
-        "nodesExplored": nodes,
-        "solver": "python:bounded-integer-conic-enumeration",
-        "message": f"enumerated {nodes} bounded integer assignments",
-    }
+    return result
 
 
 def solve_qp(payload: dict[str, Any], method: str) -> dict[str, Any]:
@@ -1024,7 +1394,22 @@ def solve_qp(payload: dict[str, Any], method: str) -> dict[str, Any]:
         return solve_xpress_qp(payload)
 
     qp = payload["qp"]
-    if any(bool(value) for value in qp.get("integerVars", [])):
+    rust_result = _run_quadratic_reference_bridge(
+        qp,
+        "qp",
+        method,
+        _external_options(payload),
+    )
+    if rust_result is not None:
+        return rust_result
+    if _has_quadratic_integer_vars(qp):
+        rust_integer_result = _run_quadratic_rust_fallback_bridge(
+            qp,
+            "qp",
+            _external_options(payload),
+        )
+        if rust_integer_result is not None:
+            return rust_integer_result
         return solve_bounded_integer_qp_by_enumeration(payload)
 
     try:
@@ -1120,7 +1505,22 @@ def solve_conic(payload: dict[str, Any], method: str) -> dict[str, Any]:
         return solve_xpress_conic(payload)
 
     conic = payload["conic"]
-    if any(bool(value) for value in conic.get("integerVars", [])):
+    rust_result = _run_quadratic_reference_bridge(
+        conic,
+        "conic",
+        method,
+        _external_options(payload),
+    )
+    if rust_result is not None:
+        return rust_result
+    if _has_quadratic_integer_vars(conic):
+        rust_integer_result = _run_quadratic_rust_fallback_bridge(
+            conic,
+            "conic",
+            _external_options(payload),
+        )
+        if rust_integer_result is not None:
+            return rust_integer_result
         return solve_bounded_integer_conic_by_enumeration(payload)
 
     try:
@@ -1285,7 +1685,21 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
     if family == "ortools":
         normalized_backend = backend.upper().replace("_", "-")
         if normalized_backend in {"CP-SAT", "CPSAT"}:
+            rust_result = _run_mip_reference_bridge(
+                payload["mip"],
+                "ortools:CP-SAT",
+                _external_options(payload),
+            )
+            if rust_result is not None:
+                return rust_result
             return solve_ortools_cp_sat(payload)
+        rust_result = _run_mip_reference_bridge(
+            payload["mip"],
+            method,
+            _external_options(payload),
+        )
+        if rust_result is not None:
+            return rust_result
         return solve_ortools(payload, backend, integer=True)
     cli_solver = _linear_cli_bridge_solver(family, backend, integer=True)
     if cli_solver is not None:
@@ -1300,6 +1714,10 @@ def solve_mip(payload: dict[str, Any], method: str) -> dict[str, Any]:
         return solve_xpress_mip(payload)
     if family == "glpk":
         return solve_glpk_mip(payload)
+
+    rust_result = _run_mip_reference_bridge(payload["mip"], method, _external_options(payload))
+    if rust_result is not None:
+        return rust_result
 
     try:
         import numpy as np

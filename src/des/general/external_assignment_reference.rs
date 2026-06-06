@@ -1,8 +1,9 @@
 //! Rust-facing bridge for external/reference assignment solvers.
 //!
 //! The native Rust reference computes an exact small assignment check without
-//! Python startup. Explicit OR-Tools/SciPy validation is launched from Rust with
-//! a tiny Python adapter over the same cost matrix.
+//! Python startup. Registered OR-Tools/SciPy aliases default to that Rust
+//! reference; explicit force-Python switches keep the inline external adapters
+//! available for compatibility validation.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -34,22 +35,39 @@ impl ExternalAssignmentReferenceSolver {
     }
 }
 
-fn registered_assignment_rust_fallback_enabled() -> bool {
+fn assignment_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn assignment_python_reference_forced(solver: ExternalAssignmentReferenceSolver) -> bool {
+    let solver_force_key = match solver {
+        ExternalAssignmentReferenceSolver::OrTools => {
+            Some("ASSIGNMENT_REFERENCE_ORTOOLS_FORCE_PYTHON")
+        }
+        ExternalAssignmentReferenceSolver::Scipy => Some("ASSIGNMENT_REFERENCE_SCIPY_FORCE_PYTHON"),
+        _ => None,
+    };
     [
-        "ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK",
-        "ASSIGNMENT_REFERENCE_EXTERNAL_FALLBACK",
-        "ASSIGNMENT_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        Some("ASSIGNMENT_REFERENCE_FORCE_PYTHON"),
+        solver_force_key,
+        Some("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
     ]
     .into_iter()
+    .flatten()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| assignment_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -64,11 +82,10 @@ fn should_use_rust_assignment_reference(opts: &ExternalAssignmentReferenceOption
 }
 
 fn should_use_registered_assignment_fallback(opts: &ExternalAssignmentReferenceOptions) -> bool {
-    registered_assignment_rust_fallback_enabled()
-        && matches!(
-            opts.solver,
-            ExternalAssignmentReferenceSolver::OrTools | ExternalAssignmentReferenceSolver::Scipy
-        )
+    matches!(
+        opts.solver,
+        ExternalAssignmentReferenceSolver::OrTools | ExternalAssignmentReferenceSolver::Scipy
+    ) && !assignment_python_reference_forced(opts.solver)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -667,6 +684,18 @@ mod tests {
         }
     }
 
+    fn assignment_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "ASSIGNMENT_REFERENCE_FORCE_PYTHON",
+            "ASSIGNMENT_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ASSIGNMENT_REFERENCE_SCIPY_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_square_assignment() {
         let cost = vec![
@@ -724,11 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn registered_solver_aliases_can_use_rust_reference_without_python() {
+    fn registered_solver_aliases_default_to_rust_reference_without_python() {
         let _lock = ASSIGNMENT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = assignment_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-assignment-aliases",
+        );
         let cost = vec![vec![3.0, 1.0], vec![2.0, 4.0]];
 
         let ortools = solve_assignment_with_external_reference(
@@ -764,12 +797,13 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_registered_aliases_to_rust_reference_without_python() {
+    fn assignment_force_python_keeps_external_adapters_available() {
         let _lock = ASSIGNMENT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_RUST_FIRST", "true");
-        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-assignment");
+        let _force_python_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-assignment");
         let cost = vec![vec![3.0, 1.0], vec![2.0, 4.0]];
 
         let ortools = solve_assignment_with_external_reference(
@@ -785,16 +819,15 @@ mod tests {
             },
         );
 
-        assert_eq!(ortools.status, ExternalAssignmentReferenceStatus::Optimal);
         assert_eq!(
-            ortools.solver,
-            "rust:registered-assignment-fallback-for-ortools"
+            ortools.status,
+            ExternalAssignmentReferenceStatus::Unavailable
         );
-        assert_eq!(scipy.status, ExternalAssignmentReferenceStatus::Optimal);
-        assert_eq!(
-            scipy.solver,
-            "rust:registered-assignment-fallback-for-scipy"
-        );
+        assert_eq!(ortools.solver, "ortools:simple-linear-sum-assignment");
+        assert!(ortools.message.contains("external assignment adapter"));
+        assert_eq!(scipy.status, ExternalAssignmentReferenceStatus::Unavailable);
+        assert_eq!(scipy.solver, "scipy:linear_sum_assignment");
+        assert!(scipy.message.contains("external assignment adapter"));
     }
 
     #[test]
@@ -802,7 +835,8 @@ mod tests {
         let _lock = ASSIGNMENT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard =
+            EnvVarGuard::set("ASSIGNMENT_REFERENCE_ORTOOLS_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let cost = vec![vec![1.0 / 3.0]];
 
@@ -826,7 +860,7 @@ mod tests {
         let _lock = ASSIGNMENT_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("ASSIGNMENT_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let cost = vec![vec![3.0, 1.0], vec![2.0, 4.0]];
 

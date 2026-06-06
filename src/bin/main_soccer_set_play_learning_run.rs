@@ -12,7 +12,9 @@ use des_engine::des::general::soccer::{
     SoccerTeamQPolicies, Team, Vec2,
 };
 use des_engine::des::soccer_learning::{
+    soccer_neural_network_snapshot_fingerprint,
     soccer_policy_version_insert_status_after_active_head, soccer_postgres_policy_refresh_decision,
+    soccer_tactical_learning_weights_fingerprint, soccer_team_q_policies_fingerprint,
     SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
@@ -278,6 +280,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_base_policy_version_id = None::<String>;
     let mut pg_base_generation = None::<i32>;
     let mut pg_base_policy_version_updated_at_micros = 0i64;
+    let mut pg_base_policy_fingerprint = None::<u64>;
+    let mut pg_base_neural_network_fingerprint = None::<u64>;
+    let mut pg_base_tactical_learning_fingerprint = None::<u64>;
     let mut postgres_resume_policy = false;
     let mut initial_neural_network = None::<SoccerNeuralNetworkSnapshot>;
     let initial_policies = if let Some(store) = pg_store.as_mut() {
@@ -314,6 +319,17 @@ fn run() -> Result<(), Box<dyn Error>> {
                 generation,
                 version.neural_network.is_some()
             );
+            pg_base_neural_network_fingerprint = version
+                .neural_network
+                .as_ref()
+                .map(soccer_neural_network_snapshot_fingerprint);
+            pg_base_policy_fingerprint = version
+                .policy_fingerprint
+                .or_else(|| Some(soccer_team_q_policies_fingerprint(&version.policies)));
+            pg_base_tactical_learning_fingerprint = version
+                .tactical_learning
+                .as_ref()
+                .map(soccer_tactical_learning_weights_fingerprint);
             initial_neural_network = version.neural_network;
             pg_base_policy_version_id = Some(policy_version_id);
             pg_base_generation = Some(generation);
@@ -380,16 +396,31 @@ fn run() -> Result<(), Box<dyn Error>> {
             let Some(metadata) = store.load_latest_active_policy_metadata(experiment_id)? else {
                 return Ok(());
             };
+            let latest_neural_network_fingerprint = metadata
+                .neural_network
+                .as_ref()
+                .map(soccer_neural_network_snapshot_fingerprint);
+            let latest_policy_fingerprint = metadata.policy_fingerprint;
+            let latest_tactical_learning_fingerprint = metadata
+                .tactical_learning
+                .as_ref()
+                .map(soccer_tactical_learning_weights_fingerprint);
             let refresh_decision =
                 soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
                     current_policy_version_id: pg_base_policy_version_id.as_deref(),
                     current_generation: pg_base_generation.unwrap_or(-1),
                     current_updated_at_micros: pg_base_policy_version_updated_at_micros,
+                    current_policy_fingerprint: pg_base_policy_fingerprint,
+                    latest_policy_fingerprint,
                     current_neural_network_present: neural_network.is_some(),
+                    current_neural_network_fingerprint: pg_base_neural_network_fingerprint,
                     latest_policy_version_id: &metadata.id,
                     latest_generation: metadata.generation,
                     latest_updated_at_micros: metadata.updated_at_micros,
                     latest_neural_network_present: metadata.neural_network.is_some(),
+                    latest_neural_network_fingerprint,
+                    current_tactical_learning_fingerprint: pg_base_tactical_learning_fingerprint,
+                    latest_tactical_learning_fingerprint,
                     local_tactical_evolved_since_pg_refresh: false,
                     postgres_tactical_learning_authoritative: pg_tactical_learning_authoritative,
                 });
@@ -407,19 +438,59 @@ fn run() -> Result<(), Box<dyn Error>> {
                         version.generation,
                         version.neural_network.is_some()
                     );
+                    let version_neural_network_fingerprint = version
+                        .neural_network
+                        .as_ref()
+                        .map(soccer_neural_network_snapshot_fingerprint);
+                    let version_policy_fingerprint = version
+                        .policy_fingerprint
+                        .or_else(|| Some(soccer_team_q_policies_fingerprint(&version.policies)));
+                    let version_tactical_learning_fingerprint = version
+                        .tactical_learning
+                        .as_ref()
+                        .map(soccer_tactical_learning_weights_fingerprint);
+                    let version_refresh_decision =
+                        soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                            current_policy_version_id: pg_base_policy_version_id.as_deref(),
+                            current_generation: pg_base_generation.unwrap_or(-1),
+                            current_updated_at_micros: pg_base_policy_version_updated_at_micros,
+                            current_policy_fingerprint: pg_base_policy_fingerprint,
+                            latest_policy_fingerprint: version_policy_fingerprint,
+                            current_neural_network_present: neural_network.is_some(),
+                            current_neural_network_fingerprint: pg_base_neural_network_fingerprint,
+                            latest_policy_version_id: &version.id,
+                            latest_generation: version.generation,
+                            latest_updated_at_micros: version.updated_at_micros,
+                            latest_neural_network_present: version.neural_network.is_some(),
+                            latest_neural_network_fingerprint: version_neural_network_fingerprint,
+                            current_tactical_learning_fingerprint:
+                                pg_base_tactical_learning_fingerprint,
+                            latest_tactical_learning_fingerprint:
+                                version_tactical_learning_fingerprint,
+                            local_tactical_evolved_since_pg_refresh: false,
+                            postgres_tactical_learning_authoritative:
+                                pg_tactical_learning_authoritative,
+                        });
                     *policies = version.policies;
                     *neural_network = version.neural_network;
                     *reset_neural_learner = true;
-                    if let Some(tactical_learning) = version.tactical_learning {
-                        config.tactical_learning = tactical_learning;
+                    if version_refresh_decision.apply_tactical_learning {
+                        if let Some(tactical_learning) = version.tactical_learning {
+                            config.tactical_learning = tactical_learning;
+                        }
+                        pg_base_tactical_learning_fingerprint =
+                            version_tactical_learning_fingerprint;
                     }
                     pg_base_policy_version_id = Some(version.id);
                     pg_base_generation = Some(version.generation);
                     pg_base_policy_version_updated_at_micros = version.updated_at_micros;
+                    pg_base_policy_fingerprint = version_policy_fingerprint;
+                    pg_base_neural_network_fingerprint = version_neural_network_fingerprint;
                 }
             } else if refresh_decision.apply_tactical_learning {
                 if let Some(tactical_learning) = metadata.tactical_learning {
                     config.tactical_learning = tactical_learning;
+                    pg_base_tactical_learning_fingerprint = latest_tactical_learning_fingerprint;
                 }
             }
             Ok(())
@@ -500,4 +571,90 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("postgres_run={run_id}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_play_new_episodes_apply_refreshed_tactical_weights_before_sim() {
+        let options = SoccerQPolicyOptions::default();
+        let mut config = MatchConfig {
+            duration_seconds: 0.1,
+            dt_seconds: 0.1,
+            learning_enabled: true,
+            learning_logging_enabled: false,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            ..MatchConfig::default()
+        };
+        config.tactical_learning.attack_flank_lane_weight = 1.0;
+        config.tactical_learning.defense_contract_delta_weight = 1.0;
+
+        let mut submitted_weights = Vec::new();
+        let artifact = train_soccer_set_play_restarts_with_events(
+            SoccerSetPlayTrainingRequest {
+                config,
+                episodes: 3,
+                restart: SoccerSetPlayRestartKind::DirectFreeKick,
+                restarts: vec![SoccerSetPlayRestartKind::DirectFreeKick],
+                team: Team::Home,
+                spot: Some(Vec2 { x: 45.0, y: 72.0 }),
+                duration_seconds: 0.1,
+                options: Some(options.clone()),
+                initial_neural_network: None,
+                vector_hint: None,
+            },
+            SoccerTeamQPolicies::new(options),
+            |event| {
+                let SoccerSetPlayTrainingEvent::StartingEpisode {
+                    episode, config, ..
+                } = event;
+                config.tactical_learning.attack_flank_lane_weight = 1.20 + episode as f64 * 0.07;
+                config.tactical_learning.defense_contract_delta_weight =
+                    0.90 + episode as f64 * 0.05;
+                config.tactical_learning.formation_lp_alignment_weight =
+                    0.30 + episode as f64 * 0.03;
+                submitted_weights.push((
+                    episode,
+                    config.tactical_learning.attack_flank_lane_weight,
+                    config.tactical_learning.defense_contract_delta_weight,
+                    config.tactical_learning.formation_lp_alignment_weight,
+                ));
+                Ok(())
+            },
+        )
+        .expect("set-play training");
+
+        assert_eq!(artifact.episodes.len(), 3);
+        assert_eq!(submitted_weights.len(), 3);
+        for (episode, attack_flank, defense_contract, lp_alignment) in submitted_weights {
+            assert!((attack_flank - (1.20 + episode as f64 * 0.07)).abs() < 1e-12);
+            assert!((defense_contract - (0.90 + episode as f64 * 0.05)).abs() < 1e-12);
+            assert!((lp_alignment - (0.30 + episode as f64 * 0.03)).abs() < 1e-12);
+        }
+        assert!((artifact.config.tactical_learning.attack_flank_lane_weight - 1.34).abs() < 1e-12);
+        assert!(
+            (artifact
+                .config
+                .tactical_learning
+                .defense_contract_delta_weight
+                - 1.00)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (artifact
+                .config
+                .tactical_learning
+                .formation_lp_alignment_weight
+                - 0.36)
+                .abs()
+                < 1e-12
+        );
+    }
 }

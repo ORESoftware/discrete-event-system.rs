@@ -18,7 +18,8 @@ use crate::des::general::soccer::{
 };
 use crate::des::soccer_learning::{
     soccer_learning_from_micros, soccer_learning_to_micros, soccer_team_label,
-    SoccerLearningCompletedGame, SoccerLearningPolicyDeltaEntry, SoccerLearningPolicyEntryKind,
+    soccer_team_q_policies_fingerprint, SoccerLearningCompletedGame,
+    SoccerLearningPolicyDeltaEntry, SoccerLearningPolicyEntryKind,
 };
 
 #[derive(Clone, Debug)]
@@ -26,9 +27,12 @@ pub struct SoccerLearningPgPolicyVersion {
     pub id: String,
     pub generation: i32,
     pub updated_at_micros: i64,
+    pub policy_fingerprint: Option<u64>,
+    pub policy_entry_count: Option<usize>,
     pub policies: SoccerTeamQPolicies,
     pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
     pub tactical_learning: Option<SoccerTacticalLearningWeights>,
+    pub search_metadata: Option<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,8 +40,11 @@ pub struct SoccerLearningPgPolicyMetadata {
     pub id: String,
     pub generation: i32,
     pub updated_at_micros: i64,
+    pub policy_fingerprint: Option<u64>,
+    pub policy_entry_count: Option<usize>,
     pub neural_network: Option<SoccerNeuralNetworkSnapshot>,
     pub tactical_learning: Option<SoccerTacticalLearningWeights>,
+    pub search_metadata: Option<Value>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -94,11 +101,71 @@ fn postgres_insert_sql_buffer(prefix: &str, rows: usize, parameters_per_row: usi
     sql
 }
 
+fn soccer_policy_source_uses_evolutionary_search(source_kind: &str) -> bool {
+    soccer_policy_search_label_uses_evolutionary_search(source_kind)
+}
+
+fn soccer_policy_search_label_uses_evolutionary_search(label: &str) -> bool {
+    let normalized = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    normalized.contains("evolution")
+        || normalized.contains("genetic")
+        || normalized.contains("gp")
+        || normalized.contains("symbolicregression")
+        || normalized.contains("programtree")
+}
+
+fn soccer_policy_search_metadata_uses_evolutionary_search(metadata: &Value) -> bool {
+    match metadata {
+        Value::Object(entries) => entries.iter().any(|(key, value)| {
+            let key = key.to_ascii_lowercase();
+            let key_names_search_label = matches!(
+                key.as_str(),
+                "algorithm"
+                    | "algorithmfamily"
+                    | "kind"
+                    | "searchalgorithm"
+                    | "searchfamily"
+                    | "searchkind"
+                    | "searchmode"
+                    | "mode"
+                    | "family"
+                    | "sourcekind"
+            );
+            if key_names_search_label {
+                match value {
+                    Value::String(label) => {
+                        soccer_policy_search_label_uses_evolutionary_search(label)
+                    }
+                    Value::Array(_) | Value::Object(_) => {
+                        soccer_policy_search_metadata_uses_evolutionary_search(value)
+                    }
+                    _ => false,
+                }
+            } else {
+                matches!(value, Value::Array(_) | Value::Object(_))
+                    && soccer_policy_search_metadata_uses_evolutionary_search(value)
+            }
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(soccer_policy_search_metadata_uses_evolutionary_search),
+        _ => false,
+    }
+}
+
 fn soccer_policy_version_metrics(
+    source_kind: &str,
     fitness: f64,
     neural_network: Option<&SoccerNeuralNetworkSnapshot>,
     tactical_learning: Option<&SoccerTacticalLearningWeights>,
+    search_metadata: Option<&Value>,
 ) -> Result<Value, String> {
+    let evolutionary_search = soccer_policy_source_uses_evolutionary_search(source_kind)
+        || search_metadata.is_some_and(soccer_policy_search_metadata_uses_evolutionary_search);
     let mut metrics = json!({
         "fitness": fitness,
         "learningComponents": {
@@ -109,6 +176,13 @@ fn soccer_policy_version_metrics(
                 .map(|weights| weights.formation_lp_alignment_weight)
                 .unwrap_or(0.0),
             "neuralNetworkSnapshot": neural_network.is_some()
+        },
+        "learningProvenance": {
+            "sourceKind": source_kind,
+            "evolutionarySearch": evolutionary_search,
+            "geneticProgrammingTacticalSearch": evolutionary_search && tactical_learning.is_some(),
+            "tacticalLearningWeightsPersisted": tactical_learning.is_some(),
+            "neuralNetworkSnapshotPersisted": neural_network.is_some()
         }
     });
     if let Some(neural_network) = neural_network {
@@ -121,7 +195,27 @@ fn soccer_policy_version_metrics(
         metrics["tacticalLearning"] = serde_json::to_value(tactical_learning)
             .map_err(|err| format!("serialize soccer tactical learning weights: {err}"))?;
     }
+    if let Some(search_metadata) = search_metadata {
+        if !search_metadata.is_object() {
+            return Err("soccer policy search metadata must be a JSON object".to_string());
+        }
+        metrics["learningProvenance"]["searchParameters"] = search_metadata.clone();
+    }
     Ok(metrics)
+}
+
+fn soccer_policy_entry_count(policies: &SoccerTeamQPolicies) -> usize {
+    policies.home.entries().len()
+        + policies.away.entries().len()
+        + policies.home.target_entries().len()
+        + policies.away.target_entries().len()
+}
+
+fn stamp_soccer_policy_weight_metrics(metrics: &mut Value, policies: &SoccerTeamQPolicies) {
+    metrics["learningComponents"]["policyFingerprint"] =
+        json!(soccer_team_q_policies_fingerprint(policies));
+    metrics["learningComponents"]["policyEntryCount"] = json!(soccer_policy_entry_count(policies));
+    metrics["learningProvenance"]["policyWeightsPersisted"] = json!(true);
 }
 
 fn soccer_policy_version_metrics_with_retention(
@@ -167,6 +261,38 @@ fn soccer_policy_version_tactical_learning_from_values(
             .map_err(|err| format!("decode soccer tactical learning weights: {err}"))?;
     validate_soccer_tactical_learning_weights_for_pg(&weights)?;
     Ok(Some(weights))
+}
+
+fn soccer_policy_version_search_metadata_from_metrics(
+    metrics: &Value,
+) -> Result<Option<Value>, String> {
+    let Some(search_metadata) = metrics
+        .get("learningProvenance")
+        .and_then(|provenance| provenance.get("searchParameters"))
+    else {
+        return Ok(None);
+    };
+    if !search_metadata.is_object() {
+        return Err("soccer policy search metadata must be a JSON object".to_string());
+    }
+    Ok(Some(search_metadata.clone()))
+}
+
+fn soccer_policy_version_policy_fingerprint_from_metrics(metrics: &Value) -> Option<u64> {
+    metrics
+        .get("learningComponents")
+        .and_then(|components| components.get("policyFingerprint"))
+        .or_else(|| metrics.get("policyFingerprint"))
+        .and_then(Value::as_u64)
+}
+
+fn soccer_policy_version_policy_entry_count_from_metrics(metrics: &Value) -> Option<usize> {
+    metrics
+        .get("learningComponents")
+        .and_then(|components| components.get("policyEntryCount"))
+        .or_else(|| metrics.get("policyEntryCount"))
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 fn soccer_policy_version_retains_full_entries(status: &str) -> bool {
@@ -389,13 +515,22 @@ impl SoccerLearningPgStore {
             return Ok(None);
         };
         let policies = self.load_policy_entries(&metadata.id, home_options, away_options)?;
+        let policy_fingerprint = metadata
+            .policy_fingerprint
+            .or_else(|| Some(soccer_team_q_policies_fingerprint(&policies)));
+        let policy_entry_count = metadata
+            .policy_entry_count
+            .or_else(|| Some(soccer_policy_entry_count(&policies)));
         Ok(Some(SoccerLearningPgPolicyVersion {
             id: metadata.id,
             generation: metadata.generation,
             updated_at_micros: metadata.updated_at_micros,
+            policy_fingerprint,
+            policy_entry_count,
             policies,
             neural_network: metadata.neural_network,
             tactical_learning: metadata.tactical_learning,
+            search_metadata: metadata.search_metadata,
         }))
     }
 
@@ -432,12 +567,18 @@ impl SoccerLearningPgStore {
         let neural_network = soccer_policy_version_neural_network_from_metrics(&metrics)?;
         let tactical_learning =
             soccer_policy_version_tactical_learning_from_values(&config, &metrics)?;
+        let search_metadata = soccer_policy_version_search_metadata_from_metrics(&metrics)?;
+        let policy_fingerprint = soccer_policy_version_policy_fingerprint_from_metrics(&metrics);
+        let policy_entry_count = soccer_policy_version_policy_entry_count_from_metrics(&metrics);
         Ok(Some(SoccerLearningPgPolicyMetadata {
             id,
             generation,
             updated_at_micros,
+            policy_fingerprint,
+            policy_entry_count,
             neural_network,
             tactical_learning,
+            search_metadata,
         }))
     }
 
@@ -502,6 +643,7 @@ impl SoccerLearningPgStore {
             policies,
             fitness,
             None,
+            None,
         )
     }
 
@@ -535,6 +677,42 @@ impl SoccerLearningPgStore {
             policies,
             fitness,
             neural_network,
+            None,
+        )
+    }
+
+    pub fn insert_policy_version_with_id_and_neural_network_and_search_metadata(
+        &mut self,
+        policy_version_id: &str,
+        experiment_id: &str,
+        parent_policy_version_id: Option<&str>,
+        generation: i32,
+        version_label: &str,
+        source_kind: &str,
+        status: &str,
+        config: &MatchConfig,
+        home_options: SoccerQPolicyOptions,
+        away_options: SoccerQPolicyOptions,
+        policies: &SoccerTeamQPolicies,
+        fitness: f64,
+        neural_network: Option<&SoccerNeuralNetworkSnapshot>,
+        search_metadata: Option<&Value>,
+    ) -> Result<(), String> {
+        self.insert_policy_version_with_id_inner(
+            policy_version_id,
+            experiment_id,
+            parent_policy_version_id,
+            generation,
+            version_label,
+            source_kind,
+            status,
+            config,
+            home_options,
+            away_options,
+            policies,
+            fitness,
+            neural_network,
+            search_metadata,
         )
     }
 
@@ -553,6 +731,7 @@ impl SoccerLearningPgStore {
         policies: &SoccerTeamQPolicies,
         fitness: f64,
         neural_network: Option<&SoccerNeuralNetworkSnapshot>,
+        search_metadata: Option<&Value>,
     ) -> Result<(), String> {
         let config_json =
             serde_json::to_value(config).map_err(|err| format!("serialize match config: {err}"))?;
@@ -563,11 +742,14 @@ impl SoccerLearningPgStore {
         let lineage = parent_policy_version_id
             .map(|id| json!([id]))
             .unwrap_or_else(|| json!([]));
-        let base_metrics = soccer_policy_version_metrics(
+        let mut base_metrics = soccer_policy_version_metrics(
+            source_kind,
             fitness,
             neural_network,
             Some(&config.tactical_learning),
+            search_metadata,
         )?;
+        stamp_soccer_policy_weight_metrics(&mut base_metrics, policies);
         let retention_kind = SOCCER_POLICY_RETENTION_BRANCH_TIP;
         let full_entries_retained = soccer_policy_version_retains_full_entries(status);
         let entry_count =
@@ -2591,9 +2773,14 @@ mod tests {
         let snapshot = tiny_neural_snapshot();
         let mut tactical_learning = SoccerTacticalLearningWeights::default();
         tactical_learning.formation_lp_alignment_weight = 0.37;
-        let metrics =
-            soccer_policy_version_metrics(1.25, Some(&snapshot), Some(&tactical_learning))
-                .expect("metrics");
+        let metrics = soccer_policy_version_metrics(
+            "evolution",
+            1.25,
+            Some(&snapshot),
+            Some(&tactical_learning),
+            None,
+        )
+        .expect("metrics");
         assert_eq!(metrics["fitness"], json!(1.25));
         assert_eq!(
             metrics["learningComponents"]["mdpPolicyEntries"],
@@ -2613,6 +2800,26 @@ mod tests {
         );
         assert_eq!(
             metrics["learningComponents"]["neuralNetworkSnapshot"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["sourceKind"],
+            json!("evolution")
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["evolutionarySearch"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["geneticProgrammingTacticalSearch"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["tacticalLearningWeightsPersisted"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["neuralNetworkSnapshotPersisted"],
             json!(true)
         );
 
@@ -2653,6 +2860,187 @@ mod tests {
             .expect("tactical learning present");
 
         assert_eq!(decoded.formation_lp_alignment_weight, 0.42);
+    }
+
+    #[test]
+    fn policy_version_metrics_mark_merge_without_evolutionary_search() {
+        let metrics =
+            soccer_policy_version_metrics("merge", 0.5, None, None, None).expect("metrics");
+
+        assert_eq!(metrics["learningProvenance"]["sourceKind"], json!("merge"));
+        assert_eq!(
+            metrics["learningProvenance"]["evolutionarySearch"],
+            json!(false)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["geneticProgrammingTacticalSearch"],
+            json!(false)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["tacticalLearningWeightsPersisted"],
+            json!(false)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["neuralNetworkSnapshotPersisted"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn policy_version_metrics_stamp_policy_weight_fingerprint() {
+        let mut metrics =
+            soccer_policy_version_metrics("merge", 0.5, None, None, None).expect("metrics");
+        let policies = SoccerTeamQPolicies::new(SoccerQPolicyOptions::default());
+
+        stamp_soccer_policy_weight_metrics(&mut metrics, &policies);
+
+        assert_eq!(
+            metrics["learningComponents"]["policyFingerprint"],
+            json!(soccer_team_q_policies_fingerprint(&policies))
+        );
+        assert_eq!(metrics["learningComponents"]["policyEntryCount"], json!(0));
+        assert_eq!(
+            metrics["learningProvenance"]["policyWeightsPersisted"],
+            json!(true)
+        );
+        assert_eq!(
+            soccer_policy_version_policy_fingerprint_from_metrics(&metrics),
+            Some(soccer_team_q_policies_fingerprint(&policies))
+        );
+        assert_eq!(
+            soccer_policy_version_policy_entry_count_from_metrics(&metrics),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn policy_version_metrics_keep_search_parameters_json() {
+        let metrics = soccer_policy_version_metrics(
+            "evolution",
+            0.75,
+            None,
+            Some(&SoccerTacticalLearningWeights::default()),
+            Some(&json!({
+                "algorithm": "evolutionary-genetic-programming",
+                "completedGames": 100,
+                "options": {
+                    "mutationRate": 0.07,
+                    "populationSize": 16
+                }
+            })),
+        )
+        .expect("metrics");
+
+        assert_eq!(
+            metrics["learningProvenance"]["searchParameters"]["algorithm"],
+            json!("evolutionary-genetic-programming")
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["searchParameters"]["options"]["populationSize"],
+            json!(16)
+        );
+        let decoded = soccer_policy_version_search_metadata_from_metrics(&metrics)
+            .expect("decode search metadata")
+            .expect("search metadata present");
+        assert_eq!(
+            decoded["algorithm"],
+            json!("evolutionary-genetic-programming")
+        );
+        assert_eq!(decoded["options"]["mutationRate"], json!(0.07));
+        assert_eq!(decoded["options"]["populationSize"], json!(16));
+    }
+
+    #[test]
+    fn policy_version_metrics_detect_imported_evolutionary_search_metadata() {
+        let metrics = soccer_policy_version_metrics(
+            "server-import",
+            0.75,
+            None,
+            Some(&SoccerTacticalLearningWeights::default()),
+            Some(&json!({
+                "policy": {
+                    "algorithm": "evolutionary-policy-search"
+                },
+                "tactical": {
+                    "algorithm": "evolutionary-genetic-programming-tactical-search"
+                }
+            })),
+        )
+        .expect("metrics");
+
+        assert_eq!(
+            metrics["learningProvenance"]["sourceKind"],
+            json!("server-import")
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["evolutionarySearch"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["geneticProgrammingTacticalSearch"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn policy_version_metrics_detect_genetic_programming_search_aliases() {
+        let metrics = soccer_policy_version_metrics(
+            "server-import",
+            0.75,
+            None,
+            Some(&SoccerTacticalLearningWeights::default()),
+            Some(&json!({
+                "learningProvenance": {
+                    "searchParameters": {
+                        "searchAlgorithm": "geneticProgramming",
+                        "searchFamily": "symbolicRegression"
+                    }
+                }
+            })),
+        )
+        .expect("metrics");
+
+        assert_eq!(
+            metrics["learningProvenance"]["evolutionarySearch"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["geneticProgrammingTacticalSearch"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["searchParameters"]["learningProvenance"]
+                ["searchParameters"]["searchAlgorithm"],
+            json!("geneticProgramming")
+        );
+    }
+
+    #[test]
+    fn policy_version_metrics_keep_plain_server_import_non_evolutionary() {
+        let metrics = soccer_policy_version_metrics(
+            "server-import",
+            0.5,
+            None,
+            Some(&SoccerTacticalLearningWeights::default()),
+            Some(&json!({
+                "algorithm": "server-mdp-pomdp-neural-self-play",
+                "source": "des-rs-http-training-endpoint"
+            })),
+        )
+        .expect("metrics");
+
+        assert_eq!(
+            metrics["learningProvenance"]["evolutionarySearch"],
+            json!(false)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["geneticProgrammingTacticalSearch"],
+            json!(false)
+        );
+        assert_eq!(
+            metrics["learningProvenance"]["searchParameters"]["algorithm"],
+            json!("server-mdp-pomdp-neural-self-play")
+        );
     }
 
     #[test]

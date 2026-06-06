@@ -22,7 +22,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-dsatur|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-dsatur|rust-dsatur-graph-coloring|ortools|ortools-cp-sat-graph-coloring]"
+    )
 }
 
 fn parse_solver(
@@ -56,16 +58,42 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
                     "auto" => ExternalGraphColoringReferenceSolver::Auto,
-                    "fallback" => ExternalGraphColoringReferenceSolver::Fallback,
-                    "rust-dsatur" | "rust_dsatur" | "rust-exact" | "rust_exact" => {
-                        ExternalGraphColoringReferenceSolver::RustDsatur
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalGraphColoringReferenceSolver::Fallback
                     }
-                    "ortools" => ExternalGraphColoringReferenceSolver::OrTools,
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "dsatur"
+                    | "rust-dsatur"
+                    | "rust:dsatur"
+                    | "rust-dsatur-graph-coloring"
+                    | "rust:dsatur-graph-coloring"
+                    | "dsatur-graph-coloring"
+                    | "graph-coloring-dsatur"
+                    | "graph-coloring-exact" => ExternalGraphColoringReferenceSolver::RustDsatur,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-graph-coloring"
+                    | "ortools:graph-coloring"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "cp-sat-graph-coloring"
+                    | "ortools-cp-sat-graph-coloring"
+                    | "ortools:cp-sat-graph-coloring" => {
+                        ExternalGraphColoringReferenceSolver::OrTools
+                    }
                     _ => {
                         return Err(CliError(format!(
-                            "unknown solver {value:?}\n{}",
+                            "unknown solver {normalized:?}\n{}",
                             usage(program)
                         )))
                     }
@@ -267,6 +295,59 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["usedColorCount"], 2);
         assert_eq!(output["objective"], 2.0);
+    }
+
+    #[test]
+    fn parses_graph_coloring_solver_aliases_used_by_validation_tools() {
+        for alias in [
+            "rust",
+            "native",
+            "rust_exact",
+            "dsatur",
+            "rust:dsatur",
+            "rust-dsatur-graph-coloring",
+            "rust:dsatur-graph-coloring",
+            "graph-coloring-dsatur",
+            "graph-coloring-exact",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "graph_coloring_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalGraphColoringReferenceSolver::RustDsatur
+            );
+        }
+
+        for alias in [
+            "ortools",
+            "or-tools",
+            "google-or-tools",
+            "ortools:graph-coloring",
+            "ortools:cp-sat",
+            "cp-sat-graph-coloring",
+            "ortools-cp-sat-graph-coloring",
+            "ortools:cp-sat-graph-coloring",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "graph_coloring_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalGraphColoringReferenceSolver::OrTools
+            );
+        }
+
+        assert_eq!(
+            parse_solver(
+                "graph_coloring_reference",
+                ["--solver".to_string(), "rust:fallback".to_string()]
+            )
+            .expect("rust:fallback"),
+            ExternalGraphColoringReferenceSolver::Fallback
+        );
     }
 
     #[test]

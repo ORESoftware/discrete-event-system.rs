@@ -16,14 +16,26 @@ enum ReferenceLpMethod {
 
 impl ReferenceLpMethod {
     fn from_cli(method: &str) -> Result<Self, CliError> {
-        let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+        let mut normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+        if normalized.ends_with(":default") {
+            normalized.truncate(normalized.len() - ":default".len());
+        }
         match normalized.as_str() {
-            "" | "rust" | "fallback" | "internal" | "internal-simplex" | "simplex"
-            | "revised-simplex" | "highs" | "highs-ds" | "highs-simplex" | "scipy:highs"
-            | "scipy:highs-ds" | "scipy:simplex" | "scipy:revised-simplex" | "glop"
-            | "ortools:glop" | "pdlp" | "ortools:pdlp" => Ok(Self::InternalSimplex),
+            "" | "rust" | "rust-internal" | "rust:internal" | "fallback" | "internal"
+            | "internal-simplex" | "simplex"
+            | "scipy" | "scipy-simplex" | "revised-simplex" | "scipy-revised-simplex" | "highs"
+            | "highs-ds" | "highs-simplex" | "highs-dual-simplex"
+            | "highs:dual-simplex" | "scipy-highs" | "scipy-highs-ds"
+            | "scipy-highs-simplex" | "scipy-highs-dual-simplex" | "scipy:highs"
+            | "scipy:highs-ds" | "scipy:highs-simplex" | "scipy:highs-dual-simplex"
+            | "scipy:simplex" | "scipy:revised-simplex" | "glop" | "ortools"
+            | "ortools-glop" | "ortools:glop" | "pdlp" | "ortools-pdlp"
+            | "ortools:pdlp" => {
+                Ok(Self::InternalSimplex)
+            }
             "internal-ipm" | "internal-interior-point" | "ipm" | "interior-point"
-            | "highs-ipm" | "scipy:highs-ipm" | "scipy:interior-point" => {
+            | "scipy-interior-point" | "highs-ipm" | "highs:ipm" | "scipy-highs-ipm"
+            | "scipy:highs-ipm" | "scipy:interior-point" => {
                 Ok(Self::InternalIpm)
             }
             other => Err(CliError(format!(
@@ -264,8 +276,12 @@ fn parse_lp(payload: &Value) -> Result<(LPProblem, f64), CliError> {
         other => return Err(CliError(format!("unknown LP sense {other:?}"))),
     };
 
-    let mut a_ub = matrix(get_any(raw, &["A_ub", "a_ub", "Aub", "aUb"]), "A_ub", n)?;
-    let mut b_ub = number_array(get_any(raw, &["b_ub", "bUb", "bUB"]), "b_ub")?;
+    let mut a_ub = matrix(
+        get_any(raw, &["A_ub", "a_ub", "Aub", "aUb", "A", "a"]),
+        "A_ub",
+        n,
+    )?;
+    let mut b_ub = number_array(get_any(raw, &["b_ub", "bUb", "bUB", "b"]), "b_ub")?;
     let mut a_eq = matrix(get_any(raw, &["A_eq", "a_eq", "Aeq", "aEq"]), "A_eq", n)?;
     let mut b_eq = number_array(get_any(raw, &["b_eq", "bEq", "bEQ"]), "b_eq")?;
     if a_ub.len() != b_ub.len() {
@@ -453,6 +469,27 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_dense_a_b_aliases() {
+        let payload = serde_json::json!({
+            "sense": "max",
+            "c": [3.0, 2.0],
+            "A": [[1.0, 1.0]],
+            "b": [4.0],
+            "A_eq": [[1.0, -1.0]],
+            "b_eq": [0.0],
+            "ub": [4.0, 4.0]
+        });
+
+        let (problem, offset) = parse_lp(&payload).expect("parse LP");
+
+        assert_eq!(offset, 0.0);
+        assert_eq!(problem.a_ub, Some(vec![vec![1.0, 1.0]]));
+        assert_eq!(problem.b_ub, Some(vec![4.0]));
+        assert_eq!(problem.a_eq, Some(vec![vec![1.0, -1.0]]));
+        assert_eq!(problem.b_eq, Some(vec![0.0]));
+    }
+
+    #[test]
     fn method_alias_can_select_native_interior_point() {
         let output = run(
             vec![
@@ -466,6 +503,37 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["solver"], "rust:internal-ipm");
         assert!((output["objective"].as_f64().expect("objective") - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn legacy_scipy_highs_aliases_stay_native_rust() {
+        for (method, expected_solver) in [
+            ("scipy:default", "rust:internal-simplex"),
+            ("scipy-highs", "rust:internal-simplex"),
+            ("scipy-highs-simplex", "rust:internal-simplex"),
+            ("scipy:highs-dual-simplex", "rust:internal-simplex"),
+            ("scipy-simplex", "rust:internal-simplex"),
+            ("scipy-revised-simplex", "rust:internal-simplex"),
+            ("scipy-highs-ipm", "rust:internal-ipm"),
+            ("scipy-interior-point", "rust:internal-ipm"),
+            ("ortools", "rust:internal-simplex"),
+            ("ortools:default", "rust:internal-simplex"),
+            ("ortools_glop", "rust:internal-simplex"),
+            ("ortools:pdlp", "rust:internal-simplex"),
+        ] {
+            let output = run(
+                vec![
+                    "lp_solve_reference".to_string(),
+                    format!("--method={method}"),
+                ],
+                r#"{"c":[1,1],"A_ub":[[1,0],[0,1]],"b_ub":[4,3],"sense":"max"}"#,
+            )
+            .expect("run");
+
+            assert_eq!(output["status"], "optimal", "{method}: {output}");
+            assert_eq!(output["solver"], expected_solver, "{method}");
+            assert!((output["objective"].as_f64().expect("objective") - 7.0).abs() < 1e-5);
+        }
     }
 
     #[test]

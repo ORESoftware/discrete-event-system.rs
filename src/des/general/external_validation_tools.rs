@@ -322,6 +322,7 @@ const PRISM_FORMATS: &[&str] = &["prism", "pm", "tra", "lab"];
 const UPPAAL_FORMATS: &[&str] = &["xml", "q"];
 const BENCHMARK_FORMATS: &[&str] = &["mps", "lp", "nl", "osil", "json", "dzn"];
 const MILP_FORMATS: &[&str] = &["mps", "lp", "osil", "json"];
+const GRAPH_MODEL_FORMATS: &[&str] = &["json", "graphml", "gexf", "edgelist", "csv"];
 const NLP_FORMATS: &[&str] = &["nl", "osil", "mod", "json"];
 const CONIC_FORMATS: &[&str] = &["mps", "lp", "qps", "cone", "json", "yaml"];
 const SDP_FORMATS: &[&str] = &["sdpa", "dat-s", "csdp", "json"];
@@ -940,6 +941,18 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         capabilities: SOLVE_AND_VALIDATE_CAPS,
         input_formats: &["lp", "mps", "proto", "json"],
         notes: "OR-Tools PDLP first-order linear-programming adapter for large sparse LP validation",
+    },
+    ExternalValidationToolSpec {
+        id: "networkx",
+        display_name: "NetworkX",
+        env_key: "NETWORKX",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::Python,
+        artifact_kind: ExternalValidationArtifactKind::PythonPackage,
+        command_aliases: &["networkx-adapter"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: GRAPH_MODEL_FORMATS,
+        notes: "Python graph-optimization package for flow, spanning-tree, TSP, and independent-set validation",
     },
     ExternalValidationToolSpec {
         id: "scipy-optimize",
@@ -7744,6 +7757,225 @@ fn model_validation_result(
     })
 }
 
+fn model_validation_pareto_source(payload: &Value) -> &Value {
+    [
+        "pareto_front",
+        "paretoFront",
+        "front",
+        "solutions",
+        "population",
+        "result",
+        "output",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key))
+    .find(|value| value.as_object().is_some() || value.as_array().is_some())
+    .unwrap_or(payload)
+}
+
+fn model_validation_payload_has_pareto_front(payload: &Value) -> bool {
+    let source = model_validation_pareto_source(payload);
+    source.as_array().is_some()
+        || [
+            "points",
+            "objectives",
+            "objective_values",
+            "objectiveValues",
+            "front",
+            "solutions",
+            "population",
+        ]
+        .iter()
+        .any(|key| source.get(*key).and_then(Value::as_array).is_some())
+}
+
+fn model_validation_pareto_point(value: &Value, label: &str) -> Result<Vec<f64>, String> {
+    if let Some(values) = value.as_array() {
+        return values
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                model_validation_routing_number(Some(value), &format!("{label}[{idx}]"))
+            })
+            .collect();
+    }
+    if let Some(obj) = value.as_object() {
+        for key in [
+            "objectives",
+            "objective_values",
+            "objectiveValues",
+            "values",
+            "fitness",
+        ] {
+            if let Some(values) = obj.get(key) {
+                return model_validation_pareto_point(values, &format!("{label}.{key}"));
+            }
+        }
+    }
+    Err(format!(
+        "{label} must be an objective vector or object with objectives"
+    ))
+}
+
+fn model_validation_pareto_points(source: &Value) -> Result<Vec<Vec<f64>>, String> {
+    let values = if let Some(values) = source.as_array() {
+        values
+    } else {
+        [
+            "points",
+            "objectives",
+            "objective_values",
+            "objectiveValues",
+            "front",
+            "solutions",
+            "population",
+        ]
+        .iter()
+        .filter_map(|key| source.get(*key).and_then(Value::as_array))
+        .next()
+        .ok_or_else(|| "pareto validation payload needs points/front/solutions".to_string())?
+    };
+    if values.is_empty() {
+        return Err("pareto front must contain at least one point".to_string());
+    }
+    let points = values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| model_validation_pareto_point(value, &format!("point[{idx}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let width = points.first().map(Vec::len).unwrap_or(0);
+    if width == 0 {
+        return Err("pareto objective vectors must not be empty".to_string());
+    }
+    for (idx, point) in points.iter().enumerate() {
+        if point.len() != width {
+            return Err(format!(
+                "point[{idx}] objective dimension {} does not match {width}",
+                point.len()
+            ));
+        }
+        if point.iter().any(|value| !value.is_finite()) {
+            return Err(format!("point[{idx}] contains non-finite objective values"));
+        }
+    }
+    Ok(points)
+}
+
+fn model_validation_pareto_senses(source: &Value, width: usize) -> Result<Vec<bool>, String> {
+    let parse_sense = |value: &str| -> Result<bool, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "min" | "minimize" | "minimise" | "lower" => Ok(false),
+            "max" | "maximize" | "maximise" | "higher" => Ok(true),
+            other => Err(format!("unsupported Pareto objective sense {other:?}")),
+        }
+    };
+    if let Some(value) = source
+        .get("sense")
+        .or_else(|| source.get("objective_sense"))
+        .or_else(|| source.get("objectiveSense"))
+        .and_then(Value::as_str)
+    {
+        return parse_sense(value).map(|sense| vec![sense; width]);
+    }
+    let Some(values) = source
+        .get("objective_senses")
+        .or_else(|| source.get("objectiveSenses"))
+        .or_else(|| source.get("directions"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(vec![false; width]);
+    };
+    if values.len() != width {
+        return Err(format!(
+            "objective sense count {} does not match objective dimension {width}",
+            values.len()
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("objective_senses[{idx}] must be a string"))
+                .and_then(parse_sense)
+        })
+        .collect()
+}
+
+fn model_validation_pareto_dominates(lhs: &[f64], rhs: &[f64], maximize: &[bool]) -> bool {
+    const EPS: f64 = 1e-9;
+    let mut strictly_better = false;
+    for ((lhs, rhs), maximize) in lhs.iter().zip(rhs.iter()).zip(maximize.iter()) {
+        if *maximize {
+            if *lhs + EPS < *rhs {
+                return false;
+            }
+            if *lhs > *rhs + EPS {
+                strictly_better = true;
+            }
+        } else {
+            if *lhs > *rhs + EPS {
+                return false;
+            }
+            if *lhs + EPS < *rhs {
+                strictly_better = true;
+            }
+        }
+    }
+    strictly_better
+}
+
+fn model_validation_pareto_front_reference(payload: &Value, tool: &str) -> Value {
+    let validator = format!("builtin:pareto-front-for-{tool}");
+    let source = model_validation_pareto_source(payload);
+    let points = match model_validation_pareto_points(source) {
+        Ok(points) => points,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    let maximize = match model_validation_pareto_senses(source, points[0].len()) {
+        Ok(maximize) => maximize,
+        Err(message) => {
+            return model_validation_result("failed", "failure", &validator, message, "", "");
+        }
+    };
+    for (candidate_idx, candidate) in points.iter().enumerate() {
+        for (other_idx, other) in points.iter().enumerate() {
+            if candidate_idx == other_idx {
+                continue;
+            }
+            if model_validation_pareto_dominates(other, candidate, &maximize) {
+                return model_validation_result(
+                    "ok",
+                    "invalid",
+                    &validator,
+                    format!("point {candidate_idx} is dominated by point {other_idx}"),
+                    format!(
+                        "points={} objectives={} dominated={candidate_idx}->{other_idx}",
+                        points.len(),
+                        points[0].len()
+                    ),
+                    "",
+                );
+            }
+        }
+    }
+    model_validation_result(
+        "ok",
+        "valid",
+        &validator,
+        "front is non-dominated under declared objective senses",
+        format!(
+            "points={} objectives={} dominated=none",
+            points.len(),
+            points[0].len()
+        ),
+        "",
+    )
+}
+
 fn model_validation_payload_text<'a>(payload: &'a Value, keys: &[&str]) -> &'a str {
     keys.iter()
         .find_map(|key| payload.get(*key).and_then(Value::as_str))
@@ -14222,12 +14454,18 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "lp-solve-cli",
         "lp-solve",
         "lpsolve",
+        "gurobi-cli",
+        "cplex-cli",
+        "xpress-cli",
+        "lindo-cli",
         "ortools-glop",
         "ortools-pdlp",
         "good-lp",
         "lp-modeler",
         "rust-linprog",
         "minilp",
+        "ojalgo",
+        "ojalgo-adapter",
     ];
     let stochastic_lp_tools = [
         "pyomo",
@@ -14311,6 +14549,8 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "cplex-rust",
         "cplex-rust-adapter",
         "ores-cplex-rust-adapter",
+        "ojalgo",
+        "ojalgo-adapter",
     ];
     let nonlinear_modeling_tools = [
         "scipy-optimize",
@@ -14349,6 +14589,26 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "ecos",
         "ecos-adapter",
     ];
+    let evolutionary_output_tools = [
+        "jmetal",
+        "jmetal-adapter",
+        "moea-framework",
+        "moea-framework-adapter",
+        "ecj",
+        "ecj-adapter",
+    ];
+    if matches!(
+        kind.as_str(),
+        "pareto-front-validation"
+            | "pareto-validation"
+            | "multi-objective-validation"
+            | "multiobjective-validation"
+            | "evolutionary-output-validation"
+    ) || (evolutionary_output_tools.contains(&tool.as_str())
+        && model_validation_payload_has_pareto_front(payload))
+    {
+        return model_validation_pareto_front_reference(payload, &tool);
+    }
     if matches!(
         kind.as_str(),
         "scheduling-validation"
@@ -17819,7 +18079,36 @@ pub fn run_simulation_validation_json_with_external_reference(
     )
 }
 
+fn simulation_validation_python_reference_forced() -> bool {
+    [
+        "SIMULATION_VALIDATION_REFERENCE_FORCE_PYTHON",
+        "SIMULATION_VALIDATION_PYTHON_REFERENCE_FORCE",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+    ]
+    .into_iter()
+    .any(|key| {
+        env::var(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "python" | "legacy-python"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
 pub fn run_simulation_validation_json_with_python_reference(
+    payload: &Value,
+    options: &ExternalSimulationValidationReferenceOptions,
+) -> ExternalSimulationValidationReferenceRun {
+    if !simulation_validation_python_reference_forced() {
+        return run_simulation_validation_json_with_external_reference(payload, options);
+    }
+    run_simulation_validation_json_with_legacy_python_reference(payload, options)
+}
+
+fn run_simulation_validation_json_with_legacy_python_reference(
     payload: &Value,
     options: &ExternalSimulationValidationReferenceOptions,
 ) -> ExternalSimulationValidationReferenceRun {
@@ -19006,8 +19295,27 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
         "cpmpy"
             | "pycsp3"
             | "clingo"
+            | "minizinc"
+            | "flatzinc"
+            | "minizinc-solution-checker"
+            | "gecode"
+            | "chuffed"
+            | "ortools-cp-sat"
+            | "pddl-val"
+            | "fast-downward"
+            | "lpg-td"
+            | "optic"
+            | "enhsp"
+            | "z3"
             | "cvc5"
+            | "yices"
             | "bitwuzla"
+            | "boolector"
+            | "mathsat"
+            | "optimathsat"
+            | "opensmt"
+            | "smtinterpol"
+            | "princess"
             | "pyomo"
             | "pulp"
             | "pyscipopt"
@@ -19020,11 +19328,17 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
             | "jacop"
             | "ibm-cp-optimizer"
             | "ortools-java"
+            | "ojalgo"
             | "optaplanner"
             | "timefold"
+            | "hexaly"
+            | "jmetal"
+            | "moea-framework"
+            | "ecj"
             | "ortools-python"
             | "ortools-glop"
             | "ortools-pdlp"
+            | "networkx"
             | "scipy-optimize"
             | "mosek"
             | "copt"
@@ -19041,6 +19355,7 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
             | "lp-modeler"
             | "rust-linprog"
             | "minilp"
+            | "jump"
             | "argmin"
             | "nlopt-rs"
             | "osqp-rust"
@@ -19051,11 +19366,33 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
             | "highs-rust"
             | "scip-rust"
             | "cbc-rust"
+            | "highs-cli"
+            | "glpk-cli"
+            | "scip-cli"
+            | "cbc-cli"
+            | "clp-cli"
+            | "soplex-cli"
+            | "qsopt-ex-cli"
+            | "lp-solve-cli"
+            | "gurobi-cli"
+            | "cplex-cli"
+            | "xpress-cli"
+            | "lindo-cli"
+            | "qpoases"
+            | "cosmo"
+            | "nlopt-cli"
+            | "ipopt"
             | "kissat"
             | "cadical"
+            | "cryptominisat"
             | "minisat"
             | "glucose"
             | "maplesat"
+            | "varisat"
+            | "sat4j"
+            | "open-wbo"
+            | "maxhs"
+            | "roundingsat"
             | "pysat"
     )
 }
@@ -19209,6 +19546,7 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => {
             names.push("ORTOOLS_PYTHON".to_string())
         }
+        "networkx" => names.push("NETWORKX_PYTHON".to_string()),
         "scipy-optimize" => names.push("SCIPY_OPTIMIZE_PYTHON".to_string()),
         "highs-cli" => names.push("HIGHS_CMD".to_string()),
         "glpk-cli" => names.push("GLPSOL_CMD".to_string()),
@@ -19967,6 +20305,7 @@ fn external_validation_python_modules(
         "xpress-python" => &["xpress"],
         "docplex" => &["docplex"],
         "ortools-python" | "ortools-glop" | "ortools-pdlp" => &["ortools"],
+        "networkx" => &["networkx"],
         "scipy-optimize" => &["scipy.optimize", "scipy"],
         "mosek" => &["mosek"],
         "copt" => &["coptpy"],
@@ -20407,8 +20746,11 @@ fn find_first_command(aliases: &[&str]) -> Option<PathBuf> {
 }
 
 fn default_python_probe_command() -> Option<PathBuf> {
-    python_probe_command_from_env(env::var_os("PYTHON_BIN"), env::var_os("PYTHON"))
-        .or_else(|| find_first_command(&["python3", "python"]))
+    python_probe_command_from_env(env::var_os("PYTHON_BIN"), env::var_os("PYTHON")).or_else(|| {
+        external_validation_python_import_probes_enabled()
+            .then(|| find_first_command(&["python3", "python"]))
+            .flatten()
+    })
 }
 
 fn python_probe_command_from_env(
@@ -20419,6 +20761,24 @@ fn python_probe_command_from_env(
         .filter(|value| !value.is_empty())
         .or_else(|| python.filter(|value| !value.is_empty()))
         .map(PathBuf::from)
+}
+
+fn external_validation_python_import_probes_enabled() -> bool {
+    [
+        "ORES_EXTERNAL_VALIDATION_PYTHON_IMPORT_PROBES",
+        "EXTERNAL_VALIDATION_PYTHON_IMPORT_PROBES",
+        "EXTERNAL_VALIDATION_PROBE_PYTHON_IMPORTS",
+    ]
+    .iter()
+    .find_map(|name| env::var(name).ok())
+    .is_some_and(|value| external_validation_python_import_probe_value_enabled(&value))
+}
+
+fn external_validation_python_import_probe_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "1" | "true" | "yes" | "y" | "on" | "python" | "python-imports" | "imports"
+    )
 }
 
 fn python_can_import(python: &Path, module: &str) -> bool {
@@ -20551,6 +20911,7 @@ fn resolve_command_path(command: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
+        external_validation_python_import_probe_value_enabled,
         probe_java_classpath_validation_tool, probe_node_validation_package_with_command,
         probe_python_validation_package_with_command, probe_rust_crate_validation_tool,
         probe_unconfigured_proof_or_formal_rust_reference_tool,
@@ -20577,6 +20938,7 @@ mod tests {
         run_output_validation_json_with_rust_reference,
         run_proof_validation_json_with_rust_reference,
         run_simulation_validation_json_with_external_reference,
+        run_simulation_validation_json_with_python_reference,
         run_simulation_validation_with_external_reference, simulation_validation_request_to_json,
         smtlib_validation_script_to_string, tla_validation_module_to_string, DimacsCnf, DimacsWcnf,
         DimacsWeightedClause, ExternalBenchmarkManifest, ExternalBenchmarkManifestEntry,
@@ -20594,9 +20956,41 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::env;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+    use std::sync::Mutex;
+
+    static SIMULATION_VALIDATION_PYTHON_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = env::var(key).ok();
+            env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => env::set_var(self.key, previous),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn validation_python_probe_command_honors_python_bin_precedence() {
@@ -20619,6 +21013,31 @@ mod tests {
             Some(PathBuf::from("/tmp/python")),
         );
         assert_eq!(python_probe_command_from_env(None, None), None);
+    }
+
+    #[test]
+    fn validation_python_import_probes_are_explicit_opt_in() {
+        for value in [
+            "1",
+            "true",
+            "YES",
+            "on",
+            "python",
+            "python_imports",
+            "imports",
+        ] {
+            assert!(
+                external_validation_python_import_probe_value_enabled(value),
+                "{value:?} should opt into Python import probes"
+            );
+        }
+
+        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+            assert!(
+                !external_validation_python_import_probe_value_enabled(value),
+                "{value:?} should keep Python import probes disabled"
+            );
+        }
     }
 
     #[test]
@@ -21047,6 +21466,85 @@ mod tests {
     }
 
     #[test]
+    fn java_optimization_aliases_use_rust_references_without_adapter() {
+        let ojalgo = find_external_validation_tool("ojalgo").unwrap();
+        let linear = run_external_validation_adapter(
+            &json!({
+                "kind": "linear-validation",
+                "model": {
+                    "objective": [1.0],
+                    "sense": "min",
+                    "variables": [{"name": "x", "domain": [0, 1]}],
+                    "constraints": [{"coefs": [1.0], "sense": ">=", "rhs": 1.0}]
+                }
+            }),
+            &ExternalValidationAdapterOptions::for_tool(ojalgo),
+        );
+        assert_eq!(linear.status, ExternalValidationRunStatus::Ok);
+        let linear_output = linear.output.unwrap();
+        assert_eq!(linear_output["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            linear_output["validator"].as_str(),
+            Some("builtin:linear-mip-small-for-ojalgo")
+        );
+
+        let jmetal = find_external_validation_tool("jmetal").unwrap();
+        let pareto = run_external_validation_adapter(
+            &json!({
+                "kind": "pareto-front-validation",
+                "front": [
+                    {"id": "a", "objectives": [1.0, 3.0]},
+                    {"id": "b", "objectives": [2.0, 2.0]},
+                    {"id": "c", "objectives": [3.0, 1.0]}
+                ],
+                "objective_senses": ["min", "min"]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(jmetal),
+        );
+        assert_eq!(pareto.status, ExternalValidationRunStatus::Ok);
+        let pareto_output = pareto.output.unwrap();
+        assert_eq!(pareto_output["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            pareto_output["validator"].as_str(),
+            Some("builtin:pareto-front-for-jmetal")
+        );
+
+        let moea = find_external_validation_tool("moea-framework").unwrap();
+        let dominated = run_external_validation_adapter(
+            &json!({
+                "kind": "pareto-front-validation",
+                "front": [[1.0, 1.0], [2.0, 2.0]],
+                "objective_senses": ["min", "min"]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(moea),
+        );
+        assert_eq!(dominated.status, ExternalValidationRunStatus::Ok);
+        let dominated_output = dominated.output.unwrap();
+        assert_eq!(dominated_output["verdict"].as_str(), Some("invalid"));
+        assert_eq!(
+            dominated_output["validator"].as_str(),
+            Some("builtin:pareto-front-for-moea-framework")
+        );
+
+        let ecj = find_external_validation_tool("ecj").unwrap();
+        let max_front = run_external_validation_adapter(
+            &json!({
+                "kind": "multi-objective-validation",
+                "points": [[3.0, 1.0], [2.0, 2.0], [1.0, 3.0]],
+                "objective_senses": ["max", "max"]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(ecj),
+        );
+        assert_eq!(max_front.status, ExternalValidationRunStatus::Ok);
+        let max_front_output = max_front.output.unwrap();
+        assert_eq!(max_front_output["verdict"].as_str(), Some("valid"));
+        assert_eq!(
+            max_front_output["validator"].as_str(),
+            Some("builtin:pareto-front-for-ecj")
+        );
+    }
+
+    #[test]
     fn rust_reference_coverage_marks_python_model_output_and_simulation_tools() {
         for (tool_id, kind) in [
             ("clingo", "model-validation"),
@@ -21055,8 +21553,13 @@ mod tests {
             ("jacop", "model-validation"),
             ("ibm-cp-optimizer", "model-validation"),
             ("ortools-java", "model-validation"),
+            ("ojalgo", "model-validation"),
             ("optaplanner", "model-validation"),
             ("timefold", "model-validation"),
+            ("jmetal", "model-validation"),
+            ("moea-framework", "model-validation"),
+            ("ecj", "model-validation"),
+            ("networkx", "model-validation"),
             ("json-schema", "output-validation"),
             ("csv-validator", "output-validation"),
             ("zod", "output-validation"),
@@ -22058,6 +22561,107 @@ mod tests {
     }
 
     #[test]
+    fn native_sat_smt_pb_solver_ids_advertise_rust_model_validation_fallbacks() {
+        for tool_id in [
+            "z3",
+            "yices",
+            "boolector",
+            "mathsat",
+            "optimathsat",
+            "opensmt",
+            "smtinterpol",
+            "princess",
+            "cryptominisat",
+            "varisat",
+            "sat4j",
+            "open-wbo",
+            "maxhs",
+            "roundingsat",
+        ] {
+            let tool = find_external_validation_tool(tool_id).expect(tool_id);
+            assert!(
+                external_validation_tool_has_rust_reference(tool),
+                "{tool_id} should advertise a Rust model-validation fallback"
+            );
+            assert_eq!(
+                external_validation_tool_rust_reference_kind(tool),
+                Some("model-validation"),
+                "{tool_id}"
+            );
+        }
+
+        for tool_id in [
+            "z3",
+            "yices",
+            "boolector",
+            "mathsat",
+            "optimathsat",
+            "opensmt",
+            "smtinterpol",
+            "princess",
+        ] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "script": "(declare-const x Bool)\n(assert x)\n(check-sat)\n",
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}");
+            assert_eq!(run["verdict"].as_str(), Some("sat"), "{tool_id}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some("builtin:smtlib-smoke"),
+                "{tool_id}"
+            );
+        }
+
+        for tool_id in ["cryptominisat", "varisat", "sat4j"] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "dimacs": "p cnf 1 1\n1 0\n",
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}");
+            assert_eq!(run["verdict"].as_str(), Some("sat"), "{tool_id}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some("builtin:dimacs-small-cnf"),
+                "{tool_id}"
+            );
+        }
+
+        for tool_id in ["open-wbo", "maxhs"] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "wcnf": "p wcnf 1 1 10\n2 1 0\n",
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}");
+            assert_eq!(run["verdict"].as_str(), Some("optimal"), "{tool_id}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some("builtin:wcnf-small-maxsat"),
+                "{tool_id}"
+            );
+        }
+
+        let roundingsat = run_model_validation_json_with_rust_reference(
+            &json!({
+                "opb": "1 x1 >= 1;\n",
+            }),
+            "roundingsat",
+        );
+        assert_eq!(roundingsat["status"].as_str(), Some("ok"));
+        assert_eq!(roundingsat["verdict"].as_str(), Some("sat"));
+        assert_eq!(
+            roundingsat["validator"].as_str(),
+            Some("builtin:opb-small-pb")
+        );
+    }
+
+    #[test]
     fn cp_python_modeling_adapters_use_rust_finite_domain_fallbacks() {
         let cpmpy = run_model_validation_json_with_rust_reference(
             &json!({
@@ -22151,6 +22755,105 @@ mod tests {
             }),
             "{cp_sat:?}"
         );
+    }
+
+    #[test]
+    fn native_cp_and_planning_solver_ids_advertise_rust_model_validation_fallbacks() {
+        for tool_id in [
+            "minizinc",
+            "flatzinc",
+            "minizinc-solution-checker",
+            "gecode",
+            "chuffed",
+            "ortools-cp-sat",
+            "pddl-val",
+            "fast-downward",
+            "lpg-td",
+            "optic",
+            "enhsp",
+        ] {
+            let tool = find_external_validation_tool(tool_id).expect(tool_id);
+            assert!(
+                external_validation_tool_has_rust_reference(tool),
+                "{tool_id} should advertise a Rust model-validation fallback"
+            );
+            assert_eq!(
+                external_validation_tool_rust_reference_kind(tool),
+                Some("model-validation"),
+                "{tool_id}"
+            );
+        }
+
+        for tool_id in [
+            "minizinc",
+            "flatzinc",
+            "minizinc-solution-checker",
+            "gecode",
+            "chuffed",
+        ] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "model": "var 0..1: x; constraint x >= 1; solve satisfy;",
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}");
+            assert_eq!(run["verdict"].as_str(), Some("sat"), "{tool_id}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some("builtin:minizinc-smoke"),
+                "{tool_id}"
+            );
+        }
+
+        let cp_sat = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "cp-sat-validation",
+                "variables": [
+                    {"name": "x", "domain": [0, 1]},
+                    {"name": "y", "domain": [0, 1]}
+                ],
+                "constraints": [
+                    {
+                        "kind": "linear",
+                        "terms": [
+                            {"var": 0, "coeff": 1},
+                            {"var": 1, "coeff": 1}
+                        ],
+                        "sense": "eq",
+                        "rhs": 1
+                    }
+                ]
+            }),
+            "ortools-cp-sat",
+        );
+        assert_eq!(cp_sat["status"].as_str(), Some("ok"));
+        assert_eq!(cp_sat["verdict"].as_str(), Some("feasible"));
+        assert_eq!(
+            cp_sat["validator"].as_str(),
+            Some("builtin:cp-sat-small-for-ortools-cp-sat")
+        );
+
+        let domain = "(define (domain flank)\n  (:predicates (at ?p ?x) (clear ?x))\n  (:action move\n    :parameters (?p ?from ?to)\n    :precondition (and (at ?p ?from) (clear ?to))\n    :effect (and (not (at ?p ?from)) (at ?p ?to)))\n)\n";
+        let problem = "(define (problem spread-wide)\n  (:domain flank)\n  (:objects p1 left center)\n  (:init (at p1 center) (clear left))\n  (:goal (and (at p1 left)))\n)\n";
+        let plan = "0.000: (move p1 center left) [1.000]\n";
+        for tool_id in ["pddl-val", "fast-downward", "lpg-td", "optic", "enhsp"] {
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "domain": domain,
+                    "problem": problem,
+                    "plan": plan,
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}");
+            assert_eq!(run["verdict"].as_str(), Some("valid"), "{tool_id}");
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(format!("builtin:pddl-structural-for-{tool_id}").as_str()),
+                "{tool_id}"
+            );
+        }
     }
 
     #[test]
@@ -22479,6 +23182,106 @@ mod tests {
                     .as_str()
                     .is_some_and(|stdout| stdout.contains("x0=1") && stdout.contains("objective=3")),
                 "{alias}: {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_source_lp_mip_cli_ids_advertise_rust_linear_reference_fallbacks() {
+        for tool_id in [
+            "highs-cli",
+            "glpk-cli",
+            "scip-cli",
+            "cbc-cli",
+            "clp-cli",
+            "soplex-cli",
+            "qsopt-ex-cli",
+            "lp-solve-cli",
+        ] {
+            let tool = find_external_validation_tool(tool_id).expect(tool_id);
+            assert!(
+                external_validation_tool_has_rust_reference(tool),
+                "{tool_id} should advertise a Rust linear-model fallback"
+            );
+            assert_eq!(
+                external_validation_tool_rust_reference_kind(tool),
+                Some("model-validation"),
+                "{tool_id}"
+            );
+
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "linear-mip-validation",
+                    "sense": "max",
+                    "objective": [3, 2],
+                    "constraints": [
+                        {"coefs": [1, 1], "sense": "<=", "rhs": 1}
+                    ],
+                    "domains": [[0, 1], [0, 1]]
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}: {run:?}");
+            assert_eq!(
+                run["verdict"].as_str(),
+                Some("optimal"),
+                "{tool_id}: {run:?}"
+            );
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(format!("builtin:linear-mip-small-for-{tool_id}").as_str()),
+                "{tool_id}: {run:?}"
+            );
+            assert!(
+                run["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("x0=1") && stdout.contains("objective=3")),
+                "{tool_id}: {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn commercial_lp_mip_cli_ids_advertise_rust_linear_reference_fallbacks() {
+        for tool_id in ["gurobi-cli", "cplex-cli", "xpress-cli", "lindo-cli"] {
+            let tool = find_external_validation_tool(tool_id).expect(tool_id);
+            assert!(
+                external_validation_tool_has_rust_reference(tool),
+                "{tool_id} should advertise a Rust linear-model fallback"
+            );
+            assert_eq!(
+                external_validation_tool_rust_reference_kind(tool),
+                Some("model-validation"),
+                "{tool_id}"
+            );
+
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "sense": "max",
+                    "objective": [3, 2],
+                    "constraints": [
+                        {"coefs": [1, 1], "sense": "<=", "rhs": 1}
+                    ],
+                    "domains": [[0, 1], [0, 1]]
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}: {run:?}");
+            assert_eq!(
+                run["verdict"].as_str(),
+                Some("optimal"),
+                "{tool_id}: {run:?}"
+            );
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(format!("builtin:linear-mip-small-for-{tool_id}").as_str()),
+                "{tool_id}: {run:?}"
+            );
+            assert!(
+                run["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("x0=1") && stdout.contains("objective=3")),
+                "{tool_id}: {run:?}"
             );
         }
     }
@@ -22871,6 +23674,52 @@ mod tests {
     }
 
     #[test]
+    fn networkx_adapter_uses_rust_graph_reference_without_adapter() {
+        let tool = find_external_validation_tool("networkx").unwrap();
+        assert_eq!(tool.runtime, ExternalValidationRuntime::Python);
+        assert_eq!(
+            tool.artifact_kind,
+            ExternalValidationArtifactKind::PythonPackage
+        );
+        assert_eq!(
+            external_validation_tool_rust_reference_kind(tool),
+            Some("model-validation")
+        );
+
+        let max_flow = run_external_validation_adapter(
+            &json!({
+                "kind": "max-flow-validation",
+                "numNodes": 4,
+                "source": 0,
+                "sink": 3,
+                "edges": [
+                    {"from": 0, "to": 1, "capacity": 3},
+                    {"from": 0, "to": 2, "capacity": 2},
+                    {"from": 1, "to": 3, "capacity": 2},
+                    {"from": 2, "to": 3, "capacity": 3},
+                    {"from": 1, "to": 2, "capacity": 1}
+                ]
+            }),
+            &ExternalValidationAdapterOptions::for_tool(tool),
+        );
+
+        assert_eq!(max_flow.status, ExternalValidationRunStatus::Ok);
+        let output = max_flow.output.expect("networkx rust reference output");
+        assert_eq!(output["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            output["validator"].as_str(),
+            Some("builtin:max-flow-small-for-networkx")
+        );
+        assert!(
+            output["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("max_flow=5.000")
+                    && stdout.contains("solver=rust:edmonds-karp-max-flow")
+            }),
+            "{output:?}"
+        );
+    }
+
+    #[test]
     fn network_flow_and_mst_adapters_use_rust_reference_fallbacks() {
         let max_flow = run_model_validation_json_with_rust_reference(
             &json!({
@@ -23087,6 +23936,121 @@ mod tests {
     }
 
     #[test]
+    fn declared_jump_and_hexaly_solver_ids_advertise_rust_reference_fallbacks() {
+        let jump = find_external_validation_tool("jump").expect("jump");
+        assert!(
+            external_validation_tool_has_rust_reference(jump),
+            "jump should advertise a Rust stochastic-LP fallback"
+        );
+        assert_eq!(
+            external_validation_tool_rust_reference_kind(jump),
+            Some("model-validation")
+        );
+        let stochastic = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "stochastic-lp-validation",
+                "cFirst": [-1],
+                "aFirst": [[1]],
+                "bFirst": [20],
+                "qSecond": [3],
+                "wSecond": [[1], [1]],
+                "scenarios": [
+                    {
+                        "t": [[-1], [0]],
+                        "h": [0, 5],
+                        "prob": 0.5
+                    },
+                    {
+                        "t": [[-1], [0]],
+                        "h": [0, 15],
+                        "prob": 0.5
+                    }
+                ]
+            }),
+            "jump",
+        );
+        assert_eq!(stochastic["status"].as_str(), Some("ok"));
+        assert_eq!(stochastic["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            stochastic["validator"].as_str(),
+            Some("builtin:stochastic-lp-small-for-jump")
+        );
+        assert!(
+            stochastic["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("x0=15.000")
+                    && stdout.contains("objective=15.000")
+                    && stdout.contains("solver=rust:monolithic-slp")
+            }),
+            "{stochastic:?}"
+        );
+
+        let hexaly = find_external_validation_tool("hexaly").expect("hexaly");
+        assert!(
+            external_validation_tool_has_rust_reference(hexaly),
+            "hexaly should advertise Rust routing/TSP fallbacks"
+        );
+        assert_eq!(
+            external_validation_tool_rust_reference_kind(hexaly),
+            Some("model-validation")
+        );
+        let tsp = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "tsp-validation",
+                "distanceMatrix": [
+                    [0, 1, 1.4142135623730951, 1],
+                    [1, 0, 1, 1.4142135623730951],
+                    [1.4142135623730951, 1, 0, 1],
+                    [1, 1.4142135623730951, 1, 0]
+                ]
+            }),
+            "hexaly",
+        );
+        assert_eq!(tsp["status"].as_str(), Some("ok"));
+        assert_eq!(tsp["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            tsp["validator"].as_str(),
+            Some("builtin:tsp-small-for-hexaly")
+        );
+        assert!(
+            tsp["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("objective=4.000") && stdout.contains("solver=rust:held-karp-tsp")
+            }),
+            "{tsp:?}"
+        );
+
+        let routing = run_model_validation_json_with_rust_reference(
+            &json!({
+                "kind": "routing-validation",
+                "distance_matrix": [
+                    [0, 2, 9, 10],
+                    [2, 0, 4, 6],
+                    [9, 4, 0, 3],
+                    [10, 6, 3, 0]
+                ],
+                "starts": [0],
+                "ends": [0],
+                "vehicles": 1,
+                "customers": [1, 2, 3]
+            }),
+            "hexaly",
+        );
+        assert_eq!(routing["status"].as_str(), Some("ok"));
+        assert_eq!(routing["verdict"].as_str(), Some("optimal"));
+        assert_eq!(
+            routing["validator"].as_str(),
+            Some("builtin:routing-small-for-hexaly")
+        );
+        assert!(
+            routing["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("route=0->1->2->3->0")
+                    && stdout.contains("objective=19.000")
+                    && stdout.contains("solver=builtin:routing-matrix-for-hexaly")
+            }),
+            "{routing:?}"
+        );
+    }
+
+    #[test]
     fn nonlinear_python_and_rust_adapters_use_rust_reference_fallbacks() {
         let scipy = run_model_validation_json_with_rust_reference(
             &json!({
@@ -23214,6 +24178,102 @@ mod tests {
     }
 
     #[test]
+    fn numerical_cli_solver_ids_advertise_rust_qp_nlp_reference_fallbacks() {
+        for tool_id in ["qpoases", "cosmo"] {
+            let tool = find_external_validation_tool(tool_id).expect(tool_id);
+            assert!(
+                external_validation_tool_has_rust_reference(tool),
+                "{tool_id} should advertise a Rust quadratic-model fallback"
+            );
+            assert_eq!(
+                external_validation_tool_rust_reference_kind(tool),
+                Some("model-validation"),
+                "{tool_id}"
+            );
+
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "qp-validation",
+                    "Q": [
+                        [2, 0],
+                        [0, 2]
+                    ],
+                    "c": [-2, -4],
+                    "lb": [0, 0],
+                    "ub": [5, 5]
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}: {run:?}");
+            assert_eq!(
+                run["verdict"].as_str(),
+                Some("optimal"),
+                "{tool_id}: {run:?}"
+            );
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(format!("builtin:quadratic-small-for-{tool_id}").as_str()),
+                "{tool_id}: {run:?}"
+            );
+            assert!(
+                run["stdout"].as_str().is_some_and(|stdout| {
+                    stdout.contains("x0=1.000")
+                        && stdout.contains("x1=2.000")
+                        && stdout.contains("objective=-5.000")
+                        && stdout.contains("solver=rust:qp-active-set")
+                }),
+                "{tool_id}: {run:?}"
+            );
+        }
+
+        for (tool_id, solver) in [
+            ("nlopt-cli", "solver=builtin:nlp-pattern-search-for-nlopt"),
+            ("ipopt", "solver=builtin:nlp-pattern-search-for-ipopt"),
+        ] {
+            let tool = find_external_validation_tool(tool_id).expect(tool_id);
+            assert!(
+                external_validation_tool_has_rust_reference(tool),
+                "{tool_id} should advertise a Rust nonlinear-model fallback"
+            );
+            assert_eq!(
+                external_validation_tool_rust_reference_kind(tool),
+                Some("model-validation"),
+                "{tool_id}"
+            );
+
+            let run = run_model_validation_json_with_rust_reference(
+                &json!({
+                    "kind": "nonlinear-validation",
+                    "variables": [
+                        {"name": "x", "lb": -1.0, "ub": 2.0, "start": 0.0}
+                    ],
+                    "objective": "(x - 0.5)**2",
+                    "constraints": [],
+                    "sense": "min"
+                }),
+                tool_id,
+            );
+            assert_eq!(run["status"].as_str(), Some("ok"), "{tool_id}: {run:?}");
+            assert_eq!(
+                run["verdict"].as_str(),
+                Some("optimal"),
+                "{tool_id}: {run:?}"
+            );
+            assert_eq!(
+                run["validator"].as_str(),
+                Some(format!("builtin:nonlinear-reference-for-{tool_id}").as_str()),
+                "{tool_id}: {run:?}"
+            );
+            assert!(
+                run["stdout"]
+                    .as_str()
+                    .is_some_and(|stdout| stdout.contains("x=0.500") && stdout.contains(solver)),
+                "{tool_id}: {run:?}"
+            );
+        }
+    }
+
+    #[test]
     fn pddl_planning_aliases_use_rust_structural_fallbacks() {
         let domain = "(define (domain flank)\n  (:predicates (at ?p ?x) (clear ?x))\n  (:action move\n    :parameters (?p ?from ?to)\n    :precondition (and (at ?p ?from) (clear ?to))\n    :effect (and (not (at ?p ?from)) (at ?p ?to)))\n)\n";
         let problem = "(define (problem spread-wide)\n  (:domain flank)\n  (:objects p1 left center)\n  (:init (at p1 center) (clear left))\n  (:goal (and (at p1 left)))\n)\n";
@@ -23307,7 +24367,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 268);
+        assert_eq!(tools.len(), 269);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -23343,6 +24403,12 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "jmetal" && tool.input_formats.contains(&"json") }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "networkx"
+                && tool.runtime == ExternalValidationRuntime::Python
+                && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
+                && tool.input_formats.contains(&"graphml")
+        }));
         assert!(tools.iter().any(|tool| {
             tool.id == "moea-framework" && tool.runtime == ExternalValidationRuntime::Java
         }));
@@ -24453,6 +25519,47 @@ mod tests {
         assert_eq!(run.verdict, ExternalSimulationValidationVerdict::Unknown);
         assert_eq!(run.simulator, "rust:unsupported-simulation-format");
         assert!(run.message.contains("json-unsupported-smoke"));
+    }
+
+    #[test]
+    fn simulation_validation_python_named_reference_defaults_to_rust_without_python() {
+        let _lock = SIMULATION_VALIDATION_PYTHON_ENV_LOCK
+            .lock()
+            .expect("lock simulation validation python env");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-simulation-validation",
+        );
+        let _force_guard = EnvVarGuard::clear("SIMULATION_VALIDATION_REFERENCE_FORCE_PYTHON");
+        let _legacy_force_guard =
+            EnvVarGuard::clear("SIMULATION_VALIDATION_PYTHON_REFERENCE_FORCE");
+        let _global_force_guard = EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON");
+        let payload = json!({
+            "kind": "simulation-validation",
+            "engine": "simpy",
+            "model_format": "json-event-network",
+            "model": {
+                "servers": 1,
+                "arrival_times": [0.0, 1.0],
+                "service_times": [0.5, 0.5]
+            },
+            "expected_trace_properties": ["departures_after_arrivals"],
+            "metric_expectations": [
+                {"name": "jobs_completed", "target": 2.0, "tolerance": 1e-9, "comparison": "equal"}
+            ]
+        });
+
+        let run = run_simulation_validation_json_with_python_reference(
+            &payload,
+            &ExternalSimulationValidationReferenceOptions::default(),
+        );
+
+        assert_eq!(run.status, ExternalSimulationValidationStatus::Ok);
+        assert_eq!(run.verdict, ExternalSimulationValidationVerdict::Valid);
+        assert!(run
+            .simulator
+            .starts_with("rust:single-station-des-for-simpy"));
+        assert_eq!(run.metrics.get("jobs_completed").copied(), Some(2.0));
     }
 
     #[test]

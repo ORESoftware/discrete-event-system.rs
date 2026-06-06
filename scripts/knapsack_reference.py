@@ -62,8 +62,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--solver",
-        choices=["auto", "ortools", "fallback", "rust-branch-and-bound", "rust-exact"],
         default="auto",
+        metavar="SOLVER",
+        help="solver alias to pass through to the Rust knapsack_reference binary",
     )
     args = parser.parse_args()
     try:

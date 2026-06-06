@@ -111,6 +111,7 @@ use crate::des::general::external_nonlinear_validation_reference::{
 };
 use crate::des::general::external_optimization_ecosystem as legacy_external_optimization_ecosystem;
 use crate::des::general::external_optimization_tools::{
+    external_optimization_adapter_options_use_rust_ecosystem_reference,
     external_optimization_comparison_report_to_json,
     external_optimization_ecosystem_reference_invocation, external_optimization_tool_specs,
     external_optimization_tools, probe_external_optimization_tool,
@@ -6645,6 +6646,25 @@ impl Driver {
             java_count >= 12 && rust_count >= 11,
             format!("java={java_count} rust={rust_count}"),
         );
+        let rust_reference_invocations = current_tools
+            .iter()
+            .filter(|tool| {
+                let invocation =
+                    external_optimization_ecosystem_reference_invocation("rust-reference", **tool);
+                external_optimization_adapter_options_use_rust_ecosystem_reference(
+                    &invocation.options,
+                )
+            })
+            .count();
+        self.check(
+            "External optimization ecosystem reference invocations default to Rust binary",
+            rust_reference_invocations == current_tools.len(),
+            format!(
+                "rust_invocations={} tools={}",
+                rust_reference_invocations,
+                current_tools.len()
+            ),
+        );
         let python_count = specs
             .iter()
             .filter(|spec| spec.language == ExternalOptimizationLanguage::Python)
@@ -6659,7 +6679,7 @@ impl Driver {
             .count();
         self.check(
             "External optimization ecosystem registry Python/Julia/native split",
-            python_count == 28 && julia_count == 1 && native_count == 44,
+            python_count == 28 && julia_count == 1 && native_count == 45,
             format!("python={python_count} julia={julia_count} native={native_count}"),
         );
         self.check(
@@ -6704,6 +6724,10 @@ impl Driver {
                 spec.tool == ExternalOptimizationTool::HighsCli
                     && spec.family == ExternalOptimizationFamily::LinearMip
                     && spec.exactness == ExternalOptimizationExactness::Exact
+            }) && specs.iter().any(|spec| {
+                spec.tool == ExternalOptimizationTool::NvidiaCuOpt
+                    && spec.family == ExternalOptimizationFamily::LinearMip
+                    && spec.exactness == ExternalOptimizationExactness::Numerical
             }) && specs.iter().any(|spec| {
                 spec.tool == ExternalOptimizationTool::SoplexCli
                     && spec.family == ExternalOptimizationFamily::LinearMip
@@ -6800,9 +6824,9 @@ impl Driver {
             .iter()
             .filter(|spec| spec.family == ExternalCpSatReferenceFamily::Fallback)
             .count();
-        let cp_python_bridge_specs = cp_specs
+        let cp_rust_compatibility_alias_specs = cp_specs
             .iter()
-            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::PythonBridge)
+            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::RustCompatibilityAlias)
             .count();
         self.check(
             "External CP-SAT reference registry splits direct and ecosystem contracts",
@@ -6810,7 +6834,7 @@ impl Driver {
                 && direct_cp_specs == 4
                 && ecosystem_cp_specs == 15
                 && cp_rust_fallback_specs == 1
-                && cp_python_bridge_specs == 1
+                && cp_rust_compatibility_alias_specs == 1
                 && cp_specs.iter().any(|spec| {
                     spec.solver == ExternalCpSatReferenceSolver::OrToolsCpSat
                         && spec.family == ExternalCpSatReferenceFamily::CpSatScript
@@ -6823,7 +6847,7 @@ impl Driver {
                 })
                 && cp_specs.iter().any(|spec| {
                     spec.solver == ExternalCpSatReferenceSolver::PythonEnumeration
-                        && spec.family == ExternalCpSatReferenceFamily::PythonBridge
+                        && spec.family == ExternalCpSatReferenceFamily::RustCompatibilityAlias
                         && spec.supports_cp_sat_json
                 })
                 && cp_specs.iter().any(|spec| {
@@ -6832,12 +6856,12 @@ impl Driver {
                         && spec.supports_ecosystem_cp_assignment
                 }),
             format!(
-                "cp_specs={} direct={} ecosystem={} rust_fallback={} python_bridge={}",
+                "cp_specs={} direct={} ecosystem={} rust_fallback={} rust_compatibility_aliases={}",
                 cp_specs.len(),
                 direct_cp_specs,
                 ecosystem_cp_specs,
                 cp_rust_fallback_specs,
-                cp_python_bridge_specs
+                cp_rust_compatibility_alias_specs
             ),
         );
         let cp_sat_smoke = serde_json::json!({
@@ -7153,6 +7177,10 @@ impl Driver {
                 ecosystem_invocation("cplex-cli-reference", ExternalOptimizationTool::CplexCli),
                 ecosystem_invocation("xpress-cli-reference", ExternalOptimizationTool::XpressCli),
                 ecosystem_invocation("lindo-cli-reference", ExternalOptimizationTool::LindoCli),
+                ecosystem_invocation(
+                    "nvidia-cuopt-reference",
+                    ExternalOptimizationTool::NvidiaCuOpt,
+                ),
                 ecosystem_invocation("highs-rust-reference", ExternalOptimizationTool::HighsRust),
                 ecosystem_invocation("scip-rust-reference", ExternalOptimizationTool::ScipRust),
                 ecosystem_invocation("cbc-rust-reference", ExternalOptimizationTool::CbcRust),
@@ -8635,7 +8663,8 @@ impl Driver {
                 && nlp_solver_specs
                     .iter()
                     .filter(|spec| {
-                        spec.family == ExternalNonlinearValidationReferenceFamily::ScipyBridge
+                        spec.family
+                            == ExternalNonlinearValidationReferenceFamily::RegisteredSolverLabel
                     })
                     .count()
                     == 10
@@ -20685,8 +20714,6 @@ impl Driver {
             1e-6,
         );
         self.max_abs_close("SOCP x", &socp_internal.x, &socp_reference.x, 1e-6);
-        let previous_registered_fallback = std::env::var_os("QP_REFERENCE_REGISTERED_FALLBACK");
-        std::env::set_var("QP_REFERENCE_REGISTERED_FALLBACK", "rust");
         for solver in [
             ExternalQuadraticReferenceSolver::Qpoases,
             ExternalQuadraticReferenceSolver::Proxqp,
@@ -20811,11 +20838,6 @@ impl Driver {
             );
             let x_check = format!("QCP registered {} x", solver.as_arg());
             self.max_abs_close(&x_check, &qcp_internal.x, &optional_qcp_reference.x, 1e-6);
-        }
-        if let Some(value) = previous_registered_fallback {
-            std::env::set_var("QP_REFERENCE_REGISTERED_FALLBACK", value);
-        } else {
-            std::env::remove_var("QP_REFERENCE_REGISTERED_FALLBACK");
         }
         let external_qcp = solve_qcp_with_external_reference(
             &qcp,

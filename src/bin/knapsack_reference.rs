@@ -22,7 +22,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-branch-and-bound|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-branch-and-bound|rust:branch-and-bound-knapsack|ortools|ortools:cp-sat-knapsack]"
+    )
 }
 
 fn parse_solver(
@@ -56,14 +58,41 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
-                    "auto" => ExternalKnapsackReferenceSolver::Auto,
-                    "fallback" => ExternalKnapsackReferenceSolver::Fallback,
-                    "rust-branch-and-bound"
-                    | "rust_branch_and_bound"
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
+                    "auto" | "default" => ExternalKnapsackReferenceSolver::Auto,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalKnapsackReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-branch-and-bound"
+                    | "rust:branch-and-bound"
                     | "rust-exact"
-                    | "rust_exact" => ExternalKnapsackReferenceSolver::RustBranchAndBound,
-                    "ortools" => ExternalKnapsackReferenceSolver::OrTools,
+                    | "rust:exact"
+                    | "knapsack"
+                    | "branch-and-bound-knapsack"
+                    | "rust-knapsack"
+                    | "rust:knapsack"
+                    | "rust-branch-and-bound-knapsack"
+                    | "rust:branch-and-bound-knapsack"
+                    | "rust-exact-knapsack"
+                    | "rust:exact-knapsack" => ExternalKnapsackReferenceSolver::RustBranchAndBound,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "or-tools-cp-sat"
+                    | "cp-sat-knapsack"
+                    | "ortools-knapsack"
+                    | "ortools:knapsack"
+                    | "ortools-cp-sat-knapsack"
+                    | "ortools:cp-sat-knapsack"
+                    | "or-tools-cp-sat-knapsack" => ExternalKnapsackReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
                             "unknown solver {value:?}\n{}",
@@ -308,6 +337,47 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["selectedItemIds"], json!(["I2"]));
         assert_eq!(output["objective"], 10.0);
+    }
+
+    #[test]
+    fn parses_knapsack_solver_aliases_used_by_validation_tools() {
+        let rust_aliases = [
+            "rust",
+            "native",
+            "exact",
+            "rust:exact",
+            "rust_branch_and_bound_knapsack",
+            "rust:branch-and-bound-knapsack",
+            "rust:exact-knapsack",
+        ];
+        for alias in rust_aliases {
+            let solver = parse_solver(
+                "knapsack_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalKnapsackReferenceSolver::RustBranchAndBound);
+        }
+
+        let ortools_aliases = [
+            "or-tools",
+            "google-ortools",
+            "ortools:cp-sat",
+            "ortools_cp_sat_knapsack",
+            "ortools:cp-sat-knapsack",
+        ];
+        for alias in ortools_aliases {
+            let solver = parse_solver(
+                "knapsack_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalKnapsackReferenceSolver::OrTools);
+        }
+
+        let fallback = parse_solver("knapsack_reference", ["--solver=rust:fallback".to_string()])
+            .expect("fallback alias");
+        assert_eq!(fallback, ExternalKnapsackReferenceSolver::Fallback);
     }
 
     #[test]

@@ -22,7 +22,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-enumeration|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-enumeration|rust:exact-weighted-max-sat|ortools|ortools:cp-sat-weighted-max-sat]"
+    )
 }
 
 fn parse_solver(
@@ -56,13 +58,46 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
-                    "auto" => ExternalWeightedMaxSatReferenceSolver::Auto,
-                    "fallback" => ExternalWeightedMaxSatReferenceSolver::Fallback,
-                    "rust-enumeration" | "rust_enumeration" | "rust-exact" | "rust_exact" => {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
+                    "auto" | "default" => ExternalWeightedMaxSatReferenceSolver::Auto,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalWeightedMaxSatReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-enumeration"
+                    | "rust:enumeration"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "weighted-max-sat"
+                    | "max-sat"
+                    | "weighted-maxsat"
+                    | "maxsat"
+                    | "exact-weighted-max-sat"
+                    | "rust-weighted-max-sat"
+                    | "rust:weighted-max-sat"
+                    | "rust-exact-weighted-max-sat"
+                    | "rust:exact-weighted-max-sat" => {
                         ExternalWeightedMaxSatReferenceSolver::RustEnumeration
                     }
-                    "ortools" => ExternalWeightedMaxSatReferenceSolver::OrTools,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "or-tools-cp-sat"
+                    | "cp-sat-weighted-max-sat"
+                    | "ortools-weighted-max-sat"
+                    | "ortools:weighted-max-sat"
+                    | "ortools-cp-sat-weighted-max-sat"
+                    | "ortools:cp-sat-weighted-max-sat"
+                    | "or-tools-cp-sat-weighted-max-sat" => {
+                        ExternalWeightedMaxSatReferenceSolver::OrTools
+                    }
                     _ => {
                         return Err(CliError(format!(
                             "unknown solver {value:?}\n{}",
@@ -299,6 +334,53 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["assignment"], json!([true]));
         assert_eq!(output["objective"], 2.0);
+    }
+
+    #[test]
+    fn parses_weighted_max_sat_solver_aliases_used_by_validation_tools() {
+        let rust_aliases = [
+            "rust",
+            "native",
+            "exact",
+            "rust:exact",
+            "rust_enumeration",
+            "rust:enumeration",
+            "rust:exact-weighted-max-sat",
+        ];
+        for alias in rust_aliases {
+            let solver = parse_solver(
+                "weighted_max_sat_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(
+                solver,
+                ExternalWeightedMaxSatReferenceSolver::RustEnumeration
+            );
+        }
+
+        let ortools_aliases = [
+            "or-tools",
+            "google-ortools",
+            "ortools:cp-sat",
+            "ortools_cp_sat_weighted_max_sat",
+            "ortools:cp-sat-weighted-max-sat",
+        ];
+        for alias in ortools_aliases {
+            let solver = parse_solver(
+                "weighted_max_sat_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalWeightedMaxSatReferenceSolver::OrTools);
+        }
+
+        let fallback = parse_solver(
+            "weighted_max_sat_reference",
+            ["--solver=rust:fallback".to_string()],
+        )
+        .expect("fallback alias");
+        assert_eq!(fallback, ExternalWeightedMaxSatReferenceSolver::Fallback);
     }
 
     #[test]

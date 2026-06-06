@@ -1,8 +1,9 @@
 //! Rust-facing bridge for external/reference graph-coloring solvers.
 //!
 //! The native Rust reference computes an exact DSATUR check without Python
-//! startup. Explicit OR-Tools CP-SAT validation is launched from Rust with a
-//! tiny Python adapter over a normalized copy of the same graph.
+//! startup. Registered OR-Tools aliases default to that Rust reference;
+//! explicit force-Python switches keep the inline OR-Tools adapter available
+//! for compatibility validation.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -34,22 +35,31 @@ impl ExternalGraphColoringReferenceSolver {
     }
 }
 
-fn registered_graph_coloring_rust_fallback_enabled() -> bool {
+fn graph_coloring_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn graph_coloring_python_reference_forced() -> bool {
     [
-        "GRAPH_COLORING_REFERENCE_REGISTERED_FALLBACK",
-        "GRAPH_COLORING_REFERENCE_EXTERNAL_FALLBACK",
-        "GRAPH_COLORING_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "GRAPH_COLORING_REFERENCE_FORCE_PYTHON",
+        "GRAPH_COLORING_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| graph_coloring_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -66,8 +76,8 @@ fn should_use_rust_graph_coloring_reference(opts: &ExternalGraphColoringReferenc
 fn should_use_registered_graph_coloring_fallback(
     opts: &ExternalGraphColoringReferenceOptions,
 ) -> bool {
-    registered_graph_coloring_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalGraphColoringReferenceSolver::OrTools)
+    matches!(opts.solver, ExternalGraphColoringReferenceSolver::OrTools)
+        && !graph_coloring_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -750,6 +760,17 @@ mod tests {
         }
     }
 
+    fn graph_coloring_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "GRAPH_COLORING_REFERENCE_FORCE_PYTHON",
+            "GRAPH_COLORING_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_sample_graph_coloring() {
         let problem = build_sample_graph_coloring_problem();
@@ -817,11 +838,15 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = GRAPH_COLORING_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set("GRAPH_COLORING_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = graph_coloring_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-graph-coloring-alias",
+        );
         let problem = build_sample_graph_coloring_problem();
 
         let solution = solve_graph_coloring_with_external_reference(
@@ -847,13 +872,15 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn graph_coloring_force_python_keeps_ortools_bridge_available() {
         let _lock = GRAPH_COLORING_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("GRAPH_COLORING_REFERENCE_RUST_FIRST", "true");
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-graph-coloring");
+        let _force_python_guard = EnvVarGuard::set("GRAPH_COLORING_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-forced-graph-coloring",
+        );
         let problem = build_sample_graph_coloring_problem();
 
         let solution = solve_graph_coloring_with_external_reference(
@@ -865,14 +892,10 @@ mod tests {
 
         assert_eq!(
             solution.status,
-            ExternalGraphColoringReferenceStatus::Optimal
+            ExternalGraphColoringReferenceStatus::Unavailable
         );
-        assert_eq!(
-            solution.solver,
-            "rust:registered-graph-coloring-fallback-for-ortools"
-        );
-        assert_eq!(solution.used_color_count, Some(3));
-        assert_eq!(solution.objective, Some(3.0));
+        assert_eq!(solution.solver, ORTOOLS_GRAPH_COLORING_SOLVER);
+        assert!(solution.message.contains("OR-Tools graph-coloring adapter"));
     }
 
     #[test]
@@ -880,7 +903,7 @@ mod tests {
         let _lock = GRAPH_COLORING_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set("GRAPH_COLORING_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard = EnvVarGuard::set("GRAPH_COLORING_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = build_sample_graph_coloring_problem();
 

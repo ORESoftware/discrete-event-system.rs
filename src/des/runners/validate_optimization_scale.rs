@@ -954,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn cp_scale_python_aliases_remain_explicit() {
+    fn cp_scale_python_aliases_are_native_rust_compatibility_labels() {
         for alias in [
             "python",
             "python-enumeration",
@@ -962,11 +962,23 @@ mod tests {
             "python-fallback",
             "python_fallback",
         ] {
+            let solver = cp_reference_solver_from_name(alias);
             assert_eq!(
-                cp_reference_solver_from_name(alias),
+                solver,
                 Some(ExternalCpSatReferenceSolver::PythonEnumeration),
                 "{alias}"
             );
+            let model = cp_sat_model_to_reference_json(&build_cp_permutation_model(3));
+            let run = solve_cp_sat_json_with_external_reference(
+                &model,
+                &ExternalCpSatReferenceOptions {
+                    solver: solver.expect("python compatibility alias"),
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(run.status.as_str(), "optimal", "{alias}");
+            assert_eq!(run.backend, "rust:cp-native-enumeration", "{alias}");
         }
     }
 

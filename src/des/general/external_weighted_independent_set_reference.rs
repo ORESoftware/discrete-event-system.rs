@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference weighted independent-set solvers.
 //!
 //! The native Rust reference computes a deterministic exact branch-and-bound
-//! check without Python startup. Explicit OR-Tools CP-SAT validation is launched
-//! from Rust with a tiny Python adapter over an integer-scaled copy of the same
-//! conflict graph.
+//! check without Python startup. Registered OR-Tools aliases default to that
+//! Rust reference; explicit force-Python switches keep the inline OR-Tools
+//! adapter available for compatibility validation.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -37,22 +37,31 @@ impl ExternalWeightedIndependentSetReferenceSolver {
     }
 }
 
-fn registered_weighted_independent_set_rust_fallback_enabled() -> bool {
+fn weighted_independent_set_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn weighted_independent_set_python_reference_forced() -> bool {
     [
-        "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
-        "WEIGHTED_INDEPENDENT_SET_REFERENCE_EXTERNAL_FALLBACK",
-        "WEIGHTED_INDEPENDENT_SET_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "WEIGHTED_INDEPENDENT_SET_REFERENCE_FORCE_PYTHON",
+        "WEIGHTED_INDEPENDENT_SET_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| weighted_independent_set_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -71,11 +80,10 @@ fn should_use_rust_weighted_independent_set_reference(
 fn should_use_registered_weighted_independent_set_fallback(
     opts: &ExternalWeightedIndependentSetReferenceOptions,
 ) -> bool {
-    registered_weighted_independent_set_rust_fallback_enabled()
-        && matches!(
-            opts.solver,
-            ExternalWeightedIndependentSetReferenceSolver::OrTools
-        )
+    matches!(
+        opts.solver,
+        ExternalWeightedIndependentSetReferenceSolver::OrTools
+    ) && !weighted_independent_set_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -841,6 +849,17 @@ mod tests {
         }
     }
 
+    fn weighted_independent_set_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "WEIGHTED_INDEPENDENT_SET_REFERENCE_FORCE_PYTHON",
+            "WEIGHTED_INDEPENDENT_SET_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_sample_weighted_independent_set() {
         let problem = build_sample_weighted_independent_set_problem();
@@ -927,13 +946,14 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set(
-            "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
-            "rust",
+        let _force_python_guards = weighted_independent_set_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-weighted-independent-set-alias",
         );
         let problem = build_sample_weighted_independent_set_problem();
 
@@ -960,15 +980,15 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn weighted_independent_set_force_python_keeps_ortools_bridge_available() {
         let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard =
-            EnvVarGuard::set("WEIGHTED_INDEPENDENT_SET_REFERENCE_RUST_FIRST", "true");
+        let _force_python_guard =
+            EnvVarGuard::set("WEIGHTED_INDEPENDENT_SET_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set(
             "PYTHON_BIN",
-            "/definitely/not-python-for-weighted-independent-set",
+            "/definitely/not-python-for-forced-weighted-independent-set",
         );
         let problem = build_sample_weighted_independent_set_problem();
 
@@ -981,14 +1001,12 @@ mod tests {
 
         assert_eq!(
             solution.status,
-            ExternalWeightedIndependentSetReferenceStatus::Optimal
+            ExternalWeightedIndependentSetReferenceStatus::Unavailable
         );
-        assert_eq!(
-            solution.solver,
-            "rust:registered-weighted-independent-set-fallback-for-ortools"
-        );
-        assert_eq!(solution.selected_vertex_ids, vec!["B", "D", "G"]);
-        assert_eq!(solution.objective, Some(16.0));
+        assert_eq!(solution.solver, "ortools:cp-sat-weighted-independent-set");
+        assert!(solution
+            .message
+            .contains("OR-Tools weighted-independent-set adapter"));
     }
 
     #[test]
@@ -996,10 +1014,8 @@ mod tests {
         let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set(
-            "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
-            "0",
-        );
+        let _force_python_guard =
+            EnvVarGuard::set("WEIGHTED_INDEPENDENT_SET_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = WeightedIndependentSetProblem {
             vertices: vec![WeightedIndependentSetVertex {
@@ -1031,10 +1047,8 @@ mod tests {
         let _lock = WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard = EnvVarGuard::set(
-            "WEIGHTED_INDEPENDENT_SET_REFERENCE_REGISTERED_FALLBACK",
-            "0",
-        );
+        let _force_python_guard =
+            EnvVarGuard::set("WEIGHTED_INDEPENDENT_SET_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = build_sample_weighted_independent_set_problem();
 

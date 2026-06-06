@@ -15,11 +15,21 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::des::general::cp_sat::{
+    CpConstraint, CpModel, CpObjective, CpVariable, LinearSense as CpLinearSense,
+    LinearTerm as CpLinearTerm, ObjectiveSense as CpObjectiveSense,
+};
+use crate::des::general::external_cp_sat_reference::{
+    cp_sat_model_to_reference_json, solve_cp_sat_json_with_external_reference,
+    ExternalCpSatReferenceOptions, ExternalCpSatReferenceRun, ExternalCpSatReferenceSolver,
+    ExternalCpSatReferenceStatus,
+};
 use crate::des::general::external_linear_cli::{
     solve_ipmip_with_external_cli, solve_lp_with_external_cli, ExternalLinearCliBranchRule,
-    ExternalLinearCliKind, ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat,
-    ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
-    ExternalLinearCliSolution, ExternalLinearCliSolver, ExternalLinearCliStatus,
+    ExternalLinearCliKind, ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch,
+    ExternalLinearCliModelFormat, ExternalLinearCliNodeSelection, ExternalLinearCliOptions,
+    ExternalLinearCliPresolve, ExternalLinearCliSolution, ExternalLinearCliSolver,
+    ExternalLinearCliStatus,
 };
 use crate::des::general::external_quadratic_reference::{
     solve_miqcp_with_external_reference, solve_miqp_with_external_reference,
@@ -29,8 +39,8 @@ use crate::des::general::external_quadratic_reference::{
     ExternalQuadraticReferenceSolver, ExternalQuadraticReferenceStatus,
 };
 use crate::des::general::ip_mip_des::{
-    solve_ipmip_with_des, BranchOrCutConstraint, ConstraintKind, IPMIPProblem, IPMIPSolveOptions,
-    IPMIPStatus, IPMIPTraceEvent, TraceAction,
+    solve_ipmip_with_des, BranchOrCutConstraint, BranchRule, ConstraintKind, IPMIPProblem,
+    IPMIPSolveOptions, IPMIPStatus, IPMIPTraceEvent, NodeSelection, TraceAction,
 };
 use crate::des::general::lp::{
     analyze_lp_bound_sensitivity_internal, analyze_lp_objective_sensitivity_internal,
@@ -5285,7 +5295,9 @@ pub struct ExternalMathProgramOptions {
     /// `ortools:PDLP`, `ortools:SCIP`, `ortools:CP-SAT`, `glpk:default`,
     /// `gurobi:default`, `cplex:default`, `xpress:default`, or `lindo-cli`.
     pub method: Option<String>,
-    /// Python executable. Defaults to `PYTHON_BIN`, then `PYTHON`, then `python3`.
+    /// Python executable for the explicit legacy Python bridge. When the bridge
+    /// is enabled without this field, defaults to `PYTHON_BIN`, then `PYTHON`,
+    /// then `python3`.
     pub python: Option<String>,
     /// Script path. Defaults to `external-references/math-program/math_program_solve.py`.
     pub script: Option<String>,
@@ -8971,6 +8983,24 @@ fn solve_math_program_external_single_objective(
     {
         return Ok(solution);
     }
+    if let Some(solution) =
+        solve_math_program_external_native_mip_reference(program, opts, &method)?
+    {
+        return Ok(solution);
+    }
+    if let Some(solution) =
+        solve_math_program_external_cp_sat_rust_reference(program, opts, &method)?
+    {
+        return Ok(solution);
+    }
+    if !external_math_program_python_bridge_requested(opts) {
+        return Ok(math_program_external_cli_failure(
+            &method,
+            format!(
+                "no Rust math-program route is registered for {method}; set ExternalMathProgramOptions::python/script or MATH_PROGRAM_EXTERNAL_PYTHON_BRIDGE=1 to use the legacy Python bridge"
+            ),
+        ));
+    }
     let python = resolve_external_math_program_python(opts);
     let script = opts
         .script
@@ -9232,6 +9262,36 @@ fn resolve_external_math_program_python_from(
         .unwrap_or_else(|| "python3".to_string())
 }
 
+fn external_math_program_python_bridge_requested(opts: &ExternalMathProgramOptions) -> bool {
+    opts.python.is_some()
+        || opts.script.is_some()
+        || [
+            "MATH_PROGRAM_EXTERNAL_PYTHON_BRIDGE",
+            "ORES_MATH_PROGRAM_EXTERNAL_PYTHON_BRIDGE",
+            "MATH_PROGRAM_REFERENCE_PYTHON_BRIDGE",
+        ]
+        .into_iter()
+        .any(external_math_program_python_bridge_env_enabled)
+}
+
+fn external_math_program_python_bridge_env_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| external_math_program_python_bridge_value_enabled(&value))
+}
+
+fn external_math_program_python_bridge_value_enabled(value: &str) -> bool {
+    matches!(
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .replace('_', "-")
+            .as_str(),
+        "1" | "true" | "yes" | "y" | "on" | "python" | "python-bridge" | "legacy-python"
+            | "compat" | "compatibility"
+    )
+}
+
 fn should_fallback_highs_default_to_cli(
     program: &MathProgram,
     method: &str,
@@ -9288,7 +9348,24 @@ fn is_highs_default_method(method: &str) -> bool {
         .strip_suffix(":default")
         .unwrap_or(&normalized)
         .to_string();
-    matches!(normalized.as_str(), "highs" | "highs-ds" | "highs-ipm")
+    matches!(
+        normalized.as_str(),
+        "highs"
+            | "highs-ds"
+            | "highs-simplex"
+            | "highs-dual-simplex"
+            | "highs-ipm"
+            | "scipy-highs"
+            | "scipy-highs-ds"
+            | "scipy-highs-simplex"
+            | "scipy-highs-dual-simplex"
+            | "scipy-highs-ipm"
+            | "scipy:highs"
+            | "scipy:highs-ds"
+            | "scipy:highs-simplex"
+            | "scipy:highs-dual-simplex"
+            | "scipy:highs-ipm"
+    )
 }
 
 fn is_glpk_default_method(method: &str) -> bool {
@@ -9346,7 +9423,7 @@ fn solve_math_program_external_linear_cli(
             )));
         }
         let compiled = compile_mip(program)?;
-        let mut cli_opts = external_linear_cli_options_from_math(opts, solver)?;
+        let mut cli_opts = external_linear_cli_options_from_math(opts, solver, None)?;
         if let Some(start) = &opts.mip_start {
             cli_opts.mip_start = Some(canonical_mip_start(program, &compiled, start)?);
         }
@@ -9384,8 +9461,14 @@ fn solve_math_program_external_linear_cli(
         )));
     }
     let lp = program.to_lp_problem()?;
-    let cli_solution =
-        solve_lp_with_external_cli(&lp, &external_linear_cli_options_from_math(opts, solver)?);
+    let cli_solution = solve_lp_with_external_cli(
+        &lp,
+        &external_linear_cli_options_from_math(
+            opts,
+            solver,
+            external_math_program_linear_cli_lp_algorithm(method),
+        )?,
+    );
     Ok(Some(math_program_solution_from_external_linear_cli(
         program,
         None,
@@ -9449,6 +9532,50 @@ fn parse_external_math_program_default_linear_cli_method(
     }
 }
 
+fn parse_external_math_program_registered_linear_fallback_method(
+    method: &str,
+) -> Option<ExternalLinearCliSolver> {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    let normalized = normalized
+        .strip_suffix(":default")
+        .unwrap_or(&normalized)
+        .to_string();
+    match normalized.as_str() {
+        "glop" | "ortools-glop" | "ortools:glop" => Some(ExternalLinearCliSolver::Highs),
+        "pdlp" | "ortools-pdlp" | "ortools:pdlp" => Some(ExternalLinearCliSolver::Highs),
+        "ortools-scip" | "ortools:scip" => Some(ExternalLinearCliSolver::Scip),
+        _ => None,
+    }
+}
+
+fn external_math_program_linear_cli_lp_algorithm(
+    method: &str,
+) -> Option<ExternalLinearCliLpAlgorithm> {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    let normalized = normalized
+        .strip_suffix(":default")
+        .unwrap_or(&normalized)
+        .to_string();
+    match normalized.as_str() {
+        "highs-ds"
+        | "highs-simplex"
+        | "highs-dual-simplex"
+        | "highs:dual-simplex"
+        | "scipy-highs-ds"
+        | "scipy-highs-simplex"
+        | "scipy-highs-dual-simplex"
+        | "scipy:highs-ds"
+        | "scipy:highs-simplex"
+        | "scipy:highs-dual-simplex"
+        | "glop"
+        | "ortools-glop"
+        | "ortools:glop" => Some(ExternalLinearCliLpAlgorithm::Simplex),
+        "highs-ipm" | "highs:ipm" | "scipy-highs-ipm" | "scipy:highs-ipm" | "pdlp"
+        | "ortools-pdlp" | "ortools:pdlp" => Some(ExternalLinearCliLpAlgorithm::Ipm),
+        _ => None,
+    }
+}
+
 fn resolve_external_math_program_linear_cli_solver(
     program: &MathProgram,
     opts: &ExternalMathProgramOptions,
@@ -9469,6 +9596,9 @@ fn resolve_external_math_program_linear_cli_solver(
     if is_glpk_default_method(method) {
         return Some(ExternalLinearCliSolver::Glpk);
     }
+    if let Some(solver) = parse_external_math_program_registered_linear_fallback_method(method) {
+        return Some(solver);
+    }
     if let Some(solver) = parse_external_math_program_default_linear_cli_method(method) {
         return Some(solver);
     }
@@ -9478,6 +9608,7 @@ fn resolve_external_math_program_linear_cli_solver(
 fn external_linear_cli_options_from_math(
     opts: &ExternalMathProgramOptions,
     solver: ExternalLinearCliSolver,
+    lp_algorithm: Option<ExternalLinearCliLpAlgorithm>,
 ) -> Result<ExternalLinearCliOptions, MathProgramError> {
     let _validated = encode_external_math_program_options(opts)?;
     Ok(ExternalLinearCliOptions {
@@ -9505,6 +9636,7 @@ fn external_linear_cli_options_from_math(
         heuristics: opts.heuristics,
         branch_rule: opts.branch_rule,
         node_selection: opts.node_selection,
+        lp_algorithm,
         python: opts.python.clone(),
         ..Default::default()
     })
@@ -9630,6 +9762,204 @@ fn math_program_external_cli_failure(method: &str, message: String) -> MathProgr
     }
 }
 
+fn solve_math_program_external_cp_sat_rust_reference(
+    program: &MathProgram,
+    opts: &ExternalMathProgramOptions,
+    method: &str,
+) -> Result<Option<MathProgramSolution>, MathProgramError> {
+    let Some(solver) = external_math_program_cp_sat_reference_solver_for_method(method) else {
+        return Ok(None);
+    };
+    if opts.python.is_some()
+        || opts.script.is_some()
+        || !program.has_discrete_features()
+        || program.has_quadratic_objective()
+        || program.has_quadratic_constraints()
+        || program.has_conic_constraints()
+    {
+        return Ok(None);
+    }
+    let _validated = encode_external_math_program_options(opts)?;
+    let compiled = compile_mip(program)?;
+    let Some(model) = compiled_mip_to_cp_sat_reference_model(&compiled, opts.node_limit) else {
+        return Ok(None);
+    };
+    let run = solve_cp_sat_json_with_external_reference(
+        &cp_sat_model_to_reference_json(&model),
+        &ExternalCpSatReferenceOptions {
+            solver,
+            ..Default::default()
+        },
+    );
+    Ok(Some(math_program_solution_from_external_cp_sat_reference(
+        program, &compiled, run,
+    )))
+}
+
+fn external_math_program_cp_sat_reference_solver_for_method(
+    method: &str,
+) -> Option<ExternalCpSatReferenceSolver> {
+    let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
+    let normalized = normalized.strip_suffix(":default").unwrap_or(&normalized);
+    match normalized {
+        "cp-sat" | "cpsat" | "ortools-cp-sat" | "ortools:cpsat" | "ortools:cp-sat" => {
+            Some(ExternalCpSatReferenceSolver::OrToolsCpSat)
+        }
+        "rust-cp-sat" | "rust:cp-sat" | "rust-enumeration" | "cp-sat-rust-enumeration" => {
+            Some(ExternalCpSatReferenceSolver::RustEnumeration)
+        }
+        "python-enumeration" | "python-enumeration-legacy" => {
+            Some(ExternalCpSatReferenceSolver::PythonEnumeration)
+        }
+        _ => None,
+    }
+}
+
+fn compiled_mip_to_cp_sat_reference_model(
+    compiled: &CompiledMip,
+    node_limit: Option<usize>,
+) -> Option<CpModel> {
+    if compiled.problem.c.len() != compiled.problem.integer_vars.len()
+        || !compiled.problem.integer_vars.iter().all(|&integer| integer)
+    {
+        return None;
+    }
+    let upper_bounds = compiled.problem.ub.as_ref()?;
+    if upper_bounds.len() != compiled.problem.c.len() {
+        return None;
+    }
+    let names = compiled.problem.var_names.as_ref();
+    let mut domain_product = 1usize;
+    let max_domain_product = node_limit.unwrap_or(100_000).max(1);
+    let mut variables = Vec::with_capacity(upper_bounds.len());
+    for (idx, &ub) in upper_bounds.iter().enumerate() {
+        let upper = integral_i64_for_cp_sat(ub)?;
+        if upper < 0 {
+            return None;
+        }
+        let domain_len = usize::try_from(upper).ok()?.checked_add(1)?;
+        domain_product = domain_product.checked_mul(domain_len)?;
+        if domain_product > max_domain_product {
+            return None;
+        }
+        let domain = (0..=upper).collect::<Vec<_>>();
+        let name = names
+            .and_then(|names| names.get(idx))
+            .cloned()
+            .unwrap_or_else(|| format!("x{idx}"));
+        variables.push(CpVariable { name, domain });
+    }
+
+    let mut constraints = Vec::with_capacity(compiled.problem.a.len());
+    for (row_idx, row) in compiled.problem.a.iter().enumerate() {
+        let rhs = integral_i64_for_cp_sat(*compiled.problem.b.get(row_idx)?)?;
+        let terms = compiled_mip_cp_sat_terms(row)?;
+        constraints.push(CpConstraint::Linear {
+            terms,
+            sense: CpLinearSense::Le,
+            rhs,
+        });
+    }
+
+    let terms = compiled_mip_cp_sat_terms(&compiled.problem.c)?;
+    let objective = (!terms.is_empty()).then_some(CpObjective {
+        sense: match compiled.problem.sense {
+            LpSense::Min => CpObjectiveSense::Min,
+            LpSense::Max => CpObjectiveSense::Max,
+        },
+        terms,
+    });
+
+    Some(CpModel {
+        variables,
+        constraints,
+        objective,
+    })
+}
+
+fn compiled_mip_cp_sat_terms(coefficients: &[f64]) -> Option<Vec<CpLinearTerm>> {
+    let mut terms = Vec::new();
+    for (var, &coeff) in coefficients.iter().enumerate() {
+        if coeff.abs() <= 1e-12 {
+            continue;
+        }
+        terms.push(CpLinearTerm {
+            var,
+            coeff: integral_i64_for_cp_sat(coeff)?,
+        });
+    }
+    Some(terms)
+}
+
+fn integral_i64_for_cp_sat(value: f64) -> Option<i64> {
+    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return None;
+    }
+    let rounded = value.round();
+    ((value - rounded).abs() <= 1e-9).then_some(rounded as i64)
+}
+
+fn math_program_solution_from_external_cp_sat_reference(
+    program: &MathProgram,
+    compiled: &CompiledMip,
+    run: ExternalCpSatReferenceRun,
+) -> MathProgramSolution {
+    let status = from_external_cp_sat_reference_status(run.status);
+    let canonical_x = if run.assignment.len() == compiled.problem.c.len() {
+        run.assignment.iter().map(|&value| value as f64).collect()
+    } else {
+        Vec::new()
+    };
+    let x = if canonical_x.len() == compiled.problem.c.len() {
+        compiled.original_x(&canonical_x)
+    } else {
+        Vec::new()
+    };
+    let objective = if x.len() == program.variables.len() {
+        objective_value(program, &x)
+    } else {
+        run.objective.unwrap_or(f64::NAN)
+    };
+
+    MathProgramSolution {
+        status,
+        x,
+        objective,
+        best_bound: None,
+        mip_gap: None,
+        nodes_explored: run.nodes.and_then(|nodes| usize::try_from(nodes).ok()),
+        first_branch_variable: None,
+        solver_version: None,
+        iterations: None,
+        control_feedback: None,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        solver: run.backend,
+        message: Some(run.message),
+    }
+}
+
+fn from_external_cp_sat_reference_status(
+    status: ExternalCpSatReferenceStatus,
+) -> MathProgramStatus {
+    match status {
+        ExternalCpSatReferenceStatus::Optimal => MathProgramStatus::Optimal,
+        ExternalCpSatReferenceStatus::Feasible => MathProgramStatus::Feasible,
+        ExternalCpSatReferenceStatus::Infeasible => MathProgramStatus::Infeasible,
+        ExternalCpSatReferenceStatus::Exhausted => MathProgramStatus::NodeLimit,
+        ExternalCpSatReferenceStatus::Unavailable
+        | ExternalCpSatReferenceStatus::Invalid
+        | ExternalCpSatReferenceStatus::Unsupported
+        | ExternalCpSatReferenceStatus::Failed
+        | ExternalCpSatReferenceStatus::Unknown => MathProgramStatus::NumericalError,
+    }
+}
+
 fn solve_math_program_external_quadratic_rust_reference(
     program: &MathProgram,
     opts: &ExternalMathProgramOptions,
@@ -9665,7 +9995,8 @@ fn solve_math_program_external_quadratic_rust_reference(
     }
 
     let reference_opts = ExternalQuadraticReferenceOptions {
-        solver: ExternalQuadraticReferenceSolver::RustInternal,
+        solver: external_math_program_quadratic_reference_solver_for_method(method)
+            .unwrap_or(ExternalQuadraticReferenceSolver::RustInternal),
         max_enumerations: opts.node_limit,
     };
 
@@ -9728,20 +10059,51 @@ fn solve_math_program_external_quadratic_rust_reference(
 }
 
 fn external_math_program_method_prefers_rust_quadratic_reference(method: &str) -> bool {
+    external_math_program_quadratic_reference_solver_for_method(method).is_some()
+}
+
+fn external_math_program_quadratic_reference_solver_for_method(
+    method: &str,
+) -> Option<ExternalQuadraticReferenceSolver> {
     let normalized = method.trim().to_ascii_lowercase().replace('_', "-");
-    matches!(
-        normalized.as_str(),
+    let normalized = normalized.strip_suffix(":default").unwrap_or(&normalized);
+    if normalized.starts_with("highs") {
+        return Some(ExternalQuadraticReferenceSolver::RustInternal);
+    }
+    match normalized {
         "rust"
-            | "rust-internal"
-            | "rust:internal"
-            | "auto"
-            | "fallback"
-            | "slsqp"
-            | "scipy"
-            | "scipy:slsqp"
-            | "bounded-integer-qp-enumeration"
-            | "bounded-integer-conic-enumeration"
-    )
+        | "rust-internal"
+        | "rust:internal"
+        | "auto"
+        | "fallback"
+        | "slsqp"
+        | "scipy"
+        | "scipy-slsqp"
+        | "scipy:slsqp"
+        | "bounded-integer-qp-enumeration"
+        | "bounded-integer-conic-enumeration" => {
+            Some(ExternalQuadraticReferenceSolver::RustInternal)
+        }
+        "osqp" | "cvxpy-osqp" | "cvxpy:osqp" => Some(ExternalQuadraticReferenceSolver::Osqp),
+        "cvxpy" => Some(ExternalQuadraticReferenceSolver::Cvxpy),
+        "scs" | "cvxpy-scs" | "cvxpy:scs" => Some(ExternalQuadraticReferenceSolver::Scs),
+        "clarabel" | "cvxpy-clarabel" | "cvxpy:clarabel" => {
+            Some(ExternalQuadraticReferenceSolver::Clarabel)
+        }
+        "ecos" | "cvxpy-ecos" | "cvxpy:ecos" => Some(ExternalQuadraticReferenceSolver::Ecos),
+        "mosek" | "cvxpy-mosek" | "cvxpy:mosek" => Some(ExternalQuadraticReferenceSolver::Mosek),
+        "copt" | "cvxpy-copt" | "cvxpy:copt" => Some(ExternalQuadraticReferenceSolver::Copt),
+        "qpoases" | "cvxpy-qpoases" | "cvxpy:qpoases" => {
+            Some(ExternalQuadraticReferenceSolver::Qpoases)
+        }
+        "proxqp" | "cvxpy-proxqp" | "cvxpy:proxqp" => {
+            Some(ExternalQuadraticReferenceSolver::Proxqp)
+        }
+        "cosmo" | "cvxpy-cosmo" | "cvxpy:cosmo" => Some(ExternalQuadraticReferenceSolver::Cosmo),
+        "sdpa" | "cvxpy-sdpa" | "cvxpy:sdpa" => Some(ExternalQuadraticReferenceSolver::Sdpa),
+        "csdp" | "cvxpy-csdp" | "cvxpy:csdp" => Some(ExternalQuadraticReferenceSolver::Csdp),
+        _ => None,
+    }
 }
 
 fn external_math_program_method_is_rust_quadratic_reference(method: &str) -> bool {
@@ -10474,7 +10836,7 @@ fn encode_conic_problem(program: &MathProgram) -> Result<Value, MathProgramError
 }
 
 fn encode_ipmip_problem(mip: &IPMIPProblem) -> Value {
-    json!({
+    let mut value = json!({
         "sense": mip.sense.as_str(),
         "c": &mip.c,
         "A": &mip.a,
@@ -10483,14 +10845,24 @@ fn encode_ipmip_problem(mip: &IPMIPProblem) -> Value {
         "ub": &mip.ub,
         "varNames": &mip.var_names,
         "conNames": &mip.con_names,
-        "lazyConstraints": mip.lazy_constraints.as_ref().map(|rows| rows.iter().map(|row| {
-            json!({
-                "coefs": row.coefs,
-                "rhs": row.rhs,
-                "name": row.name,
-            })
-        }).collect::<Vec<_>>()),
-    })
+    });
+    if let (Some(rows), Some(object)) = (&mip.lazy_constraints, value.as_object_mut()) {
+        object.insert(
+            "lazyConstraints".to_string(),
+            Value::Array(
+                rows.iter()
+                    .map(|row| {
+                        json!({
+                            "coefs": row.coefs,
+                            "rhs": row.rhs,
+                            "name": row.name,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    value
 }
 
 fn parse_external_status(raw: &Value) -> MathProgramStatus {
@@ -21763,6 +22135,40 @@ mod tests {
     }
 
     #[test]
+    fn external_math_program_ortools_cp_sat_alias_uses_rust_reference_without_python() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK.lock().expect("lock env");
+        let _python_bin_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-cp-sat");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-cp-sat");
+        let _force_cp_sat_python_guard = EnvVarGuard::set("CP_SAT_REFERENCE_FORCE_PYTHON", "0");
+        let _force_ortools_python_guard =
+            EnvVarGuard::set("CP_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON", "0");
+        let _force_all_python_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON", "0");
+        let mut mip = MathProgram::new(ObjectiveSense::Max);
+        let x = mip.add_binary_var("x", 4.0).unwrap();
+        let y = mip.add_binary_var("y", 3.0).unwrap();
+        mip.add_constraint("capacity", vec![(x, 2.0), (y, 1.0)], RowSense::Le, 2.0)
+            .unwrap();
+
+        let solution = solve_math_program_external(
+            &mip,
+            &ExternalMathProgramOptions {
+                method: Some("ortools-cp-sat".to_string()),
+                node_limit: Some(16),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-cp-sat-fallback-for-ortools-cp-sat"
+        );
+        assert_close(solution.objective, 4.0);
+        assert_eq!(solution.x, vec![1.0, 0.0]);
+    }
+
+    #[test]
     fn external_math_program_rust_first_alias_resolver_prefers_cli_for_linear_models() {
         let mut lp = MathProgram::new(ObjectiveSense::Max);
         let x = lp.add_continuous_var("x", 1.0, Some(0.0), None).unwrap();
@@ -21784,6 +22190,116 @@ mod tests {
                 "HiGHS-DS:default"
             ),
             Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "scipy:highs-ds"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "scipy:highs-ipm"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "scipy-highs"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "scipy-highs-simplex"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "scipy:highs-dual-simplex"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "ortools:GLOP"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "ortools-pdlp"
+            ),
+            Some(ExternalLinearCliSolver::Highs)
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(
+                &lp,
+                &ExternalMathProgramOptions::default(),
+                "ortools:SCIP"
+            ),
+            Some(ExternalLinearCliSolver::Scip)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("HiGHS-DS:default"),
+            Some(ExternalLinearCliLpAlgorithm::Simplex)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("scipy:highs-ds"),
+            Some(ExternalLinearCliLpAlgorithm::Simplex)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("scipy-highs-simplex"),
+            Some(ExternalLinearCliLpAlgorithm::Simplex)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("scipy:highs-dual-simplex"),
+            Some(ExternalLinearCliLpAlgorithm::Simplex)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("scipy:highs-ipm"),
+            Some(ExternalLinearCliLpAlgorithm::Ipm)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("scipy-highs-ipm"),
+            Some(ExternalLinearCliLpAlgorithm::Ipm)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("ortools:GLOP"),
+            Some(ExternalLinearCliLpAlgorithm::Simplex)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("ortools:PDLP"),
+            Some(ExternalLinearCliLpAlgorithm::Ipm)
+        );
+        assert_eq!(
+            external_math_program_linear_cli_lp_algorithm("scipy:highs"),
+            None
+        );
+        assert_eq!(
+            external_linear_cli_options_from_math(
+                &ExternalMathProgramOptions::default(),
+                ExternalLinearCliSolver::Highs,
+                external_math_program_linear_cli_lp_algorithm("scipy:highs-ipm"),
+            )
+            .unwrap()
+            .lp_algorithm,
+            Some(ExternalLinearCliLpAlgorithm::Ipm)
         );
         assert_eq!(
             resolve_external_math_program_linear_cli_solver(
@@ -21845,6 +22361,14 @@ mod tests {
             None
         );
         assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &explicit_python, "ortools:GLOP"),
+            None
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &explicit_python, "ortools:SCIP"),
+            None
+        );
+        assert_eq!(
             resolve_external_math_program_linear_cli_solver(
                 &lp,
                 &explicit_python,
@@ -21867,6 +22391,10 @@ mod tests {
         );
         assert_eq!(
             resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "soplex"),
+            None
+        );
+        assert_eq!(
+            resolve_external_math_program_linear_cli_solver(&lp, &custom_script, "ortools:PDLP"),
             None
         );
         assert_eq!(
@@ -21896,6 +22424,45 @@ mod tests {
     }
 
     #[test]
+    fn external_math_program_scipy_milp_bridge_keeps_dense_mip_rows() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK
+            .lock()
+            .expect("lock external env");
+        let _python_bin_guard = EnvVarGuard::set("PYTHON_BIN", "python3");
+        let _python_guard = EnvVarGuard::set("PYTHON", "python3");
+        let _force_python_guard = EnvVarGuard::set("MATH_PROGRAM_REFERENCE_FORCE_PYTHON", "0");
+        let _force_mip_python_guard =
+            EnvVarGuard::set("MATH_PROGRAM_MIP_REFERENCE_FORCE_PYTHON", "0");
+        let mut mip = MathProgram::new(ObjectiveSense::Max);
+        let x = mip.add_integer_var("x", 3.0, Some(0.0), Some(4.0)).unwrap();
+        let y = mip.add_integer_var("y", 2.0, Some(0.0), Some(4.0)).unwrap();
+        mip.add_constraint("capacity", vec![(x, 1.0), (y, 1.0)], RowSense::Le, 4.0)
+            .unwrap();
+
+        let solution = solve_math_program_external(
+            &mip,
+            &ExternalMathProgramOptions {
+                method: Some("scipy:milp".to_string()),
+                time_limit_ms: Some(1_000.0),
+                node_limit: Some(10_000),
+                ..ExternalMathProgramOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            solution.status,
+            MathProgramStatus::Optimal,
+            "solution={solution:?}"
+        );
+        assert_eq!(solution.solver, "rust:bounded-enumeration");
+        assert_close(solution.objective, 12.0);
+        assert_close(solution.x[x], 4.0);
+        assert_close(solution.x[y], 0.0);
+        assert!(solution.x[x] + solution.x[y] <= 4.0 + 1e-7);
+    }
+
+    #[test]
     fn external_math_program_default_continuous_qp_uses_rust_reference_without_python() {
         let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK
             .lock()
@@ -21920,6 +22487,69 @@ mod tests {
         assert_close(solution.x[x], 0.5);
         assert_close(solution.x[y], 1.0);
         assert_close(solution.objective, -2.5);
+    }
+
+    #[test]
+    fn external_math_program_open_source_qp_aliases_use_rust_reference_without_python() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK
+            .lock()
+            .expect("lock external env");
+        let _python_bin_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-qp");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-qp");
+        let mut qp = MathProgram::new(ObjectiveSense::Min);
+        let x = qp
+            .add_continuous_var("x", -2.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let y = qp
+            .add_continuous_var("y", -4.0, Some(0.0), Some(5.0))
+            .unwrap();
+        qp.add_quadratic_objective_term(x, x, 2.0).unwrap();
+        qp.add_quadratic_objective_term(y, y, 2.0).unwrap();
+
+        for (method, solver) in [
+            ("scipy-slsqp", "rust:qp-active-set"),
+            ("osqp", "builtin:qp-active-set-for-osqp"),
+            ("cvxpy-osqp", "builtin:qp-active-set-for-osqp"),
+            ("cvxpy", "builtin:qp-active-set-for-cvxpy"),
+            ("scs", "builtin:qp-active-set-for-scs"),
+            ("cvxpy-scs", "builtin:qp-active-set-for-scs"),
+            ("cvxpy:clarabel", "builtin:qp-active-set-for-clarabel"),
+            ("cvxpy-clarabel", "builtin:qp-active-set-for-clarabel"),
+            ("cvxpy:ecos", "builtin:qp-active-set-for-ecos"),
+            ("cvxpy-ecos", "builtin:qp-active-set-for-ecos"),
+            ("mosek", "builtin:qp-active-set-for-mosek"),
+            ("cvxpy-mosek", "builtin:qp-active-set-for-mosek"),
+            ("cvxpy:copt", "builtin:qp-active-set-for-copt"),
+            ("cvxpy-copt", "builtin:qp-active-set-for-copt"),
+            ("qpoases", "builtin:qp-active-set-for-qpoases"),
+            ("cvxpy-qpoases", "builtin:qp-active-set-for-qpoases"),
+            ("cvxpy:qpoases", "builtin:qp-active-set-for-qpoases"),
+            ("cvxpy-proxqp", "builtin:qp-active-set-for-proxqp"),
+            ("cvxpy:proxqp", "builtin:qp-active-set-for-proxqp"),
+            ("cosmo", "builtin:qp-active-set-for-cosmo"),
+            ("cvxpy-cosmo", "builtin:qp-active-set-for-cosmo"),
+            ("cvxpy:cosmo", "builtin:qp-active-set-for-cosmo"),
+            ("cvxpy-sdpa", "builtin:qp-active-set-for-sdpa"),
+            ("cvxpy:sdpa", "builtin:qp-active-set-for-sdpa"),
+            ("csdp", "builtin:qp-active-set-for-csdp"),
+            ("cvxpy-csdp", "builtin:qp-active-set-for-csdp"),
+            ("cvxpy:csdp", "builtin:qp-active-set-for-csdp"),
+        ] {
+            let solution = solve_math_program_external(
+                &qp,
+                &ExternalMathProgramOptions {
+                    method: Some(method.to_string()),
+                    ..ExternalMathProgramOptions::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(solution.status, MathProgramStatus::Optimal);
+            assert_eq!(solution.solver, solver, "method={method}");
+            assert_close(solution.x[x], 0.5);
+            assert_close(solution.x[y], 1.0);
+            assert_close(solution.objective, -2.5);
+        }
     }
 
     #[test]

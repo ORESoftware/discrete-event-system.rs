@@ -22,29 +22,102 @@ impl Error for CliError {}
 
 fn usage(program: &str) -> String {
     format!(
-        "usage: {program} [--solver auto|fallback|scipy|ipopt|bonmin|minotaur|couenne|symphony|knitro|mosek|baron|copt|casadi|nlopt|nlopt-cli]"
+        "usage: {program} [--solver auto|fallback|rust:nonlinear-validation-reference|scipy|scipy:slsqp|ipopt|bonmin|minotaur|couenne|symphony|knitro|mosek|baron|copt|casadi|nlopt|nlopt:bobyqa|nlopt-cli]"
     )
 }
 
 fn parse_solver(value: &str) -> Result<ExternalNonlinearValidationReferenceSolver, CliError> {
-    match value {
+    match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
         "auto" => Ok(ExternalNonlinearValidationReferenceSolver::Auto),
-        "fallback" | "rust" | "rust-fallback" => {
-            Ok(ExternalNonlinearValidationReferenceSolver::Fallback)
+        "fallback"
+        | "builtin"
+        | "rust"
+        | "rust-fallback"
+        | "rust:fallback"
+        | "rust-nonlinear-validation-reference"
+        | "rust:nonlinear-validation-reference"
+        | "builtin-nlp-pattern-search"
+        | "builtin:nlp-pattern-search" => Ok(ExternalNonlinearValidationReferenceSolver::Fallback),
+        "scipy"
+        | "scipy-minimize"
+        | "scipy:minimize"
+        | "scipy-slsqp"
+        | "scipy:slsqp"
+        | "builtin-nlp-pattern-search-for-scipy"
+        | "builtin:nlp-pattern-search-for-scipy" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Scipy)
         }
-        "scipy" => Ok(ExternalNonlinearValidationReferenceSolver::Scipy),
-        "ipopt" => Ok(ExternalNonlinearValidationReferenceSolver::Ipopt),
-        "bonmin" => Ok(ExternalNonlinearValidationReferenceSolver::Bonmin),
-        "minotaur" => Ok(ExternalNonlinearValidationReferenceSolver::Minotaur),
-        "couenne" => Ok(ExternalNonlinearValidationReferenceSolver::Couenne),
-        "symphony" => Ok(ExternalNonlinearValidationReferenceSolver::Symphony),
-        "knitro" => Ok(ExternalNonlinearValidationReferenceSolver::Knitro),
-        "mosek" => Ok(ExternalNonlinearValidationReferenceSolver::Mosek),
-        "baron" => Ok(ExternalNonlinearValidationReferenceSolver::Baron),
-        "copt" => Ok(ExternalNonlinearValidationReferenceSolver::Copt),
-        "casadi" => Ok(ExternalNonlinearValidationReferenceSolver::Casadi),
-        "nlopt" => Ok(ExternalNonlinearValidationReferenceSolver::Nlopt),
-        "nlopt-cli" => Ok(ExternalNonlinearValidationReferenceSolver::NloptCli),
+        "ipopt"
+        | "ipopt-default"
+        | "ipopt:default"
+        | "builtin-nlp-pattern-search-for-ipopt"
+        | "builtin:nlp-pattern-search-for-ipopt" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Ipopt)
+        }
+        "bonmin"
+        | "builtin-nlp-pattern-search-for-bonmin"
+        | "builtin:nlp-pattern-search-for-bonmin" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Bonmin)
+        }
+        "minotaur"
+        | "builtin-nlp-pattern-search-for-minotaur"
+        | "builtin:nlp-pattern-search-for-minotaur" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Minotaur)
+        }
+        "couenne"
+        | "builtin-nlp-pattern-search-for-couenne"
+        | "builtin:nlp-pattern-search-for-couenne" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Couenne)
+        }
+        "symphony"
+        | "builtin-nlp-pattern-search-for-symphony"
+        | "builtin:nlp-pattern-search-for-symphony" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Symphony)
+        }
+        "knitro"
+        | "artelys-knitro"
+        | "builtin-nlp-pattern-search-for-knitro"
+        | "builtin:nlp-pattern-search-for-knitro" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Knitro)
+        }
+        "mosek"
+        | "builtin-nlp-pattern-search-for-mosek"
+        | "builtin:nlp-pattern-search-for-mosek" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Mosek)
+        }
+        "baron"
+        | "builtin-nlp-pattern-search-for-baron"
+        | "builtin:nlp-pattern-search-for-baron" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Baron)
+        }
+        "copt" | "builtin-nlp-pattern-search-for-copt" | "builtin:nlp-pattern-search-for-copt" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Copt)
+        }
+        "casadi"
+        | "casadi-ipopt"
+        | "casadi:ipopt"
+        | "builtin-nlp-pattern-search-for-casadi"
+        | "builtin:nlp-pattern-search-for-casadi" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Casadi)
+        }
+        "nlopt"
+        | "nlopt:bobyqa"
+        | "nlopt-cobyla"
+        | "nlopt:cobyla"
+        | "nlopt-direct"
+        | "nlopt:direct"
+        | "nlopt-nelder-mead"
+        | "nlopt:nelder-mead"
+        | "builtin-nlp-pattern-search-for-nlopt"
+        | "builtin:nlp-pattern-search-for-nlopt" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::Nlopt)
+        }
+        "nlopt-cli"
+        | "nlopt:cli"
+        | "builtin-nlp-pattern-search-for-nlopt-cli"
+        | "builtin:nlp-pattern-search-for-nlopt-cli" => {
+            Ok(ExternalNonlinearValidationReferenceSolver::NloptCli)
+        }
         other => Err(CliError(format!("unknown solver {other:?}"))),
     }
 }
@@ -187,6 +260,51 @@ mod tests {
         ],
         "sense": "min"
     }"#;
+
+    #[test]
+    fn parser_accepts_rust_and_external_solver_labels_used_by_validation_tools() {
+        for raw in [
+            "rust:nonlinear-validation-reference",
+            "builtin:nlp-pattern-search",
+            "RuSt_FaLlBaCk",
+        ] {
+            assert_eq!(
+                parse_solver(raw).unwrap(),
+                ExternalNonlinearValidationReferenceSolver::Fallback,
+                "{raw}"
+            );
+        }
+        for raw in [
+            "scipy:slsqp",
+            "ipopt:default",
+            "casadi:ipopt",
+            "nlopt:bobyqa",
+            "nlopt:cli",
+            "NlOpT_NeLdEr_MeAd",
+        ] {
+            assert!(parse_solver(raw).is_ok(), "{raw}");
+        }
+        for (raw, expected) in [
+            (
+                "builtin:nlp-pattern-search-for-scipy",
+                ExternalNonlinearValidationReferenceSolver::Scipy,
+            ),
+            (
+                "builtin:nlp-pattern-search-for-ipopt",
+                ExternalNonlinearValidationReferenceSolver::Ipopt,
+            ),
+            (
+                "builtin:nlp-pattern-search-for-casadi",
+                ExternalNonlinearValidationReferenceSolver::Casadi,
+            ),
+            (
+                "builtin:nlp-pattern-search-for-nlopt-cli",
+                ExternalNonlinearValidationReferenceSolver::NloptCli,
+            ),
+        ] {
+            assert_eq!(parse_solver(raw).unwrap(), expected, "{raw}");
+        }
+    }
 
     #[test]
     fn rust_fallback_solves_small_expression_model() {

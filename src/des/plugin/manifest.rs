@@ -196,6 +196,32 @@ impl RunSpec {
     }
 }
 
+fn plugin_language_is_python(language: Option<&str>) -> bool {
+    let Some(language) = language else {
+        return false;
+    };
+    let normalized = language
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(normalized.as_str(), "py" | "python" | "cpython")
+}
+
+fn plugin_command_is_python(command: &str) -> bool {
+    let executable = command
+        .trim()
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .next()
+        .unwrap_or(command)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    executable == "python"
+        || executable == "pythonw"
+        || executable == "python3"
+        || executable.starts_with("python3.")
+}
+
 /// Everything the host needs to run a plugin and render its player.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +280,15 @@ impl PluginManifest {
         }
         if self.run.command.trim().is_empty() {
             return Err("plugin run.command must be non-empty".to_string());
+        }
+        if self.runtime == PluginRuntimeKind::Rust
+            && (plugin_language_is_python(self.language.as_deref())
+                || plugin_command_is_python(&self.run.command))
+        {
+            return Err(
+                "rust plugins must use a Rust command; declare python adapters as foreign-process"
+                    .to_string(),
+            );
         }
         match (self.runtime, self.transport) {
             (PluginRuntimeKind::ForeignProcess, PluginTransportKind::CAbi) => {
@@ -331,5 +366,47 @@ mod tests {
         assert!(m.validate_sdk_boundary().is_ok());
         m.transport = PluginTransportKind::CAbi;
         assert!(m.validate_sdk_boundary().unwrap_err().contains("IPC"));
+    }
+
+    #[test]
+    fn boundary_validation_rejects_python_command_for_rust_runtime() {
+        let m = PluginManifest {
+            id: "bad-rust-python".to_string(),
+            name: "Bad Rust Python".to_string(),
+            version: String::new(),
+            description: String::new(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: None,
+            run: RunSpec::new("/usr/bin/python3.11", &["plugin.py"]),
+            output: OutputKind::Jsonl,
+            player: PlayerKind::Sim,
+            controls: Vec::new(),
+            title: None,
+        };
+
+        let err = m.validate_sdk_boundary().unwrap_err();
+        assert!(err.contains("foreign-process"));
+    }
+
+    #[test]
+    fn boundary_validation_rejects_python_language_for_rust_runtime() {
+        let m = PluginManifest {
+            id: "bad-rust-language".to_string(),
+            name: "Bad Rust Language".to_string(),
+            version: String::new(),
+            description: String::new(),
+            runtime: PluginRuntimeKind::Rust,
+            transport: PluginTransportKind::Stdio,
+            language: Some("CPython".to_string()),
+            run: RunSpec::new("./target/release/plugin", &[]),
+            output: OutputKind::Jsonl,
+            player: PlayerKind::Sim,
+            controls: Vec::new(),
+            title: None,
+        };
+
+        let err = m.validate_sdk_boundary().unwrap_err();
+        assert!(err.contains("rust plugins"));
     }
 }

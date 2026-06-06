@@ -4,7 +4,8 @@ use std::fmt;
 use std::io::{self, Read};
 
 use des_engine::des::general::external_optimization_tools::{
-    run_external_optimization_ecosystem_reference_with_rust_builtin, ExternalOptimizationTool,
+    external_optimization_tools, run_external_optimization_ecosystem_reference_with_rust_builtin,
+    ExternalOptimizationTool,
 };
 use serde_json::{json, Value};
 
@@ -18,108 +19,6 @@ impl fmt::Display for CliError {
 }
 
 impl Error for CliError {}
-
-const TOOLS: &[ExternalOptimizationTool] = &[
-    ExternalOptimizationTool::ChocoSolver,
-    ExternalOptimizationTool::Jacop,
-    ExternalOptimizationTool::IbmCpOptimizer,
-    ExternalOptimizationTool::OptaPlanner,
-    ExternalOptimizationTool::Timefold,
-    ExternalOptimizationTool::FastDownward,
-    ExternalOptimizationTool::LpgTd,
-    ExternalOptimizationTool::Optic,
-    ExternalOptimizationTool::Enhsp,
-    ExternalOptimizationTool::JMetal,
-    ExternalOptimizationTool::MoeaFramework,
-    ExternalOptimizationTool::Ecj,
-    ExternalOptimizationTool::OjAlgo,
-    ExternalOptimizationTool::OrToolsJava,
-    ExternalOptimizationTool::Cpmpy,
-    ExternalOptimizationTool::PyCsp3,
-    ExternalOptimizationTool::Conjure,
-    ExternalOptimizationTool::SavileRow,
-    ExternalOptimizationTool::Picat,
-    ExternalOptimizationTool::Clingo,
-    ExternalOptimizationTool::Clingcon,
-    ExternalOptimizationTool::Sat4j,
-    ExternalOptimizationTool::PySat,
-    ExternalOptimizationTool::OpenWbo,
-    ExternalOptimizationTool::Pyomo,
-    ExternalOptimizationTool::Pulp,
-    ExternalOptimizationTool::Cvxpy,
-    ExternalOptimizationTool::Cvxopt,
-    ExternalOptimizationTool::PyScipOpt,
-    ExternalOptimizationTool::PythonMip,
-    ExternalOptimizationTool::GurobiPy,
-    ExternalOptimizationTool::CplexPython,
-    ExternalOptimizationTool::XpressPython,
-    ExternalOptimizationTool::Docplex,
-    ExternalOptimizationTool::OrToolsPython,
-    ExternalOptimizationTool::OrToolsGlop,
-    ExternalOptimizationTool::OrToolsPdlp,
-    ExternalOptimizationTool::OrToolsCpSat,
-    ExternalOptimizationTool::ScipyOptimize,
-    ExternalOptimizationTool::MosekPython,
-    ExternalOptimizationTool::Jump,
-    ExternalOptimizationTool::Ampl,
-    ExternalOptimizationTool::Gams,
-    ExternalOptimizationTool::Hexaly,
-    ExternalOptimizationTool::Minotaur,
-    ExternalOptimizationTool::Symphony,
-    ExternalOptimizationTool::Ipopt,
-    ExternalOptimizationTool::Bonmin,
-    ExternalOptimizationTool::Couenne,
-    ExternalOptimizationTool::Knitro,
-    ExternalOptimizationTool::Mosek,
-    ExternalOptimizationTool::Baron,
-    ExternalOptimizationTool::Copt,
-    ExternalOptimizationTool::Casadi,
-    ExternalOptimizationTool::Osqp,
-    ExternalOptimizationTool::Scs,
-    ExternalOptimizationTool::Clarabel,
-    ExternalOptimizationTool::Ecos,
-    ExternalOptimizationTool::Qpoases,
-    ExternalOptimizationTool::Proxqp,
-    ExternalOptimizationTool::Cosmo,
-    ExternalOptimizationTool::Sdpa,
-    ExternalOptimizationTool::Csdp,
-    ExternalOptimizationTool::Z3,
-    ExternalOptimizationTool::Cvc5,
-    ExternalOptimizationTool::Yices,
-    ExternalOptimizationTool::Bitwuzla,
-    ExternalOptimizationTool::Boolector,
-    ExternalOptimizationTool::MathSat,
-    ExternalOptimizationTool::OptiMathSat,
-    ExternalOptimizationTool::OpenSmt,
-    ExternalOptimizationTool::SmtInterpol,
-    ExternalOptimizationTool::Princess,
-    ExternalOptimizationTool::HighsCli,
-    ExternalOptimizationTool::GlpkCli,
-    ExternalOptimizationTool::ScipCli,
-    ExternalOptimizationTool::CbcCli,
-    ExternalOptimizationTool::ClpCli,
-    ExternalOptimizationTool::SoplexCli,
-    ExternalOptimizationTool::QsoptExCli,
-    ExternalOptimizationTool::LpSolveCli,
-    ExternalOptimizationTool::GurobiCli,
-    ExternalOptimizationTool::CplexCli,
-    ExternalOptimizationTool::XpressCli,
-    ExternalOptimizationTool::LindoCli,
-    ExternalOptimizationTool::GoodLp,
-    ExternalOptimizationTool::LpModeler,
-    ExternalOptimizationTool::RustLinprog,
-    ExternalOptimizationTool::MiniLp,
-    ExternalOptimizationTool::Argmin,
-    ExternalOptimizationTool::Nlopt,
-    ExternalOptimizationTool::OsqpRust,
-    ExternalOptimizationTool::ClarabelRust,
-    ExternalOptimizationTool::GurobiRust,
-    ExternalOptimizationTool::CplexRust,
-    ExternalOptimizationTool::IpoptRust,
-    ExternalOptimizationTool::HighsRust,
-    ExternalOptimizationTool::ScipRust,
-    ExternalOptimizationTool::CbcRust,
-];
 
 fn usage(program: &str) -> String {
     format!("usage: {program} [--tool TOOL]")
@@ -203,7 +102,7 @@ fn parse_tool(raw: &str, payload: &Value) -> Result<ExternalOptimizationTool, Cl
     if normalized == "auto" || normalized.is_empty() {
         return Ok(default_tool_for_payload(payload));
     }
-    TOOLS
+    external_optimization_tools()
         .iter()
         .copied()
         .find(|tool| tool.as_str() == normalized)
@@ -340,6 +239,30 @@ mod tests {
     }
 
     #[test]
+    fn cuopt_cli_uses_rust_linear_mip_backend() {
+        let output = run(
+            vec![
+                "optimization_ecosystem_reference".to_string(),
+                "--tool=nvidia-cuopt".to_string(),
+            ],
+            r#"{
+                "kind": "ecosystem-linear-binary",
+                "sense": "max",
+                "objective": [3, 2],
+                "constraints": [{"coefs": [1, 1], "sense": "<=", "rhs": 1}],
+                "domains": [[0, 1], [0, 1]]
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(output["tool"], "nvidia-cuopt");
+        assert_eq!(output["family"], "linear-mip");
+        assert_eq!(output["backend"], "builtin-rust:linear-mip");
+        assert_eq!(output["objective"], 3.0);
+    }
+
+    #[test]
     fn auto_selects_family_from_payload_kind() {
         let output = run(
             vec!["optimization_ecosystem_reference".to_string()],
@@ -355,5 +278,44 @@ mod tests {
         assert_eq!(output["tool"], "optaplanner");
         assert_eq!(output["family"], "planning-metaheuristic");
         assert_eq!(output["backend"], "builtin-rust:planning-metaheuristic");
+    }
+
+    #[test]
+    fn cli_tool_normalization_is_owned_by_rust_dispatch() {
+        let choco = run(
+            vec![
+                "optimization_ecosystem_reference".to_string(),
+                "--tool".to_string(),
+                "ChOcO_SoLvEr".to_string(),
+            ],
+            r#"{
+                "kind": "ecosystem-cp-assignment",
+                "costs": [[3, 1], [2, 4]]
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(choco["status"], "optimal");
+        assert_eq!(choco["tool"], "choco-solver");
+        assert_eq!(choco["family"], "constraint-programming");
+
+        let cuopt = run(
+            vec![
+                "optimization_ecosystem_reference".to_string(),
+                "--tool=NvIdIa_CuOpT".to_string(),
+            ],
+            r#"{
+                "kind": "ecosystem-linear-binary",
+                "sense": "max",
+                "objective": [3, 2],
+                "constraints": [{"coefs": [1, 1], "sense": "<=", "rhs": 1}],
+                "domains": [[0, 1], [0, 1]]
+            }"#,
+        )
+        .expect("run");
+
+        assert_eq!(cuopt["status"], "optimal");
+        assert_eq!(cuopt["tool"], "nvidia-cuopt");
+        assert_eq!(cuopt["family"], "linear-mip");
     }
 }

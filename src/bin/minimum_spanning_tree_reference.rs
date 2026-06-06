@@ -25,7 +25,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-kruskal|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-kruskal|rust-kruskal-mst|ortools|ortools-cp-sat-mst]"
+    )
 }
 
 fn parse_solver(
@@ -59,16 +61,37 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
                     "auto" => ExternalMinimumSpanningTreeReferenceSolver::Auto,
-                    "fallback" => ExternalMinimumSpanningTreeReferenceSolver::Fallback,
-                    "rust-kruskal" | "rust_kruskal" | "rust-exact" | "rust_exact" => {
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalMinimumSpanningTreeReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "kruskal"
+                    | "rust-kruskal"
+                    | "rust:kruskal"
+                    | "rust-kruskal-mst"
+                    | "rust:kruskal-mst"
+                    | "kruskal-mst"
+                    | "mst-kruskal"
+                    | "minimum-spanning-tree-kruskal"
+                    | "minimum-spanning-tree-exact" => {
                         ExternalMinimumSpanningTreeReferenceSolver::RustKruskal
                     }
-                    "ortools" => ExternalMinimumSpanningTreeReferenceSolver::OrTools,
+                    "ortools" | "or-tools" | "google-ortools" | "google-or-tools"
+                    | "ortools-mst" | "ortools:mst" | "ortools-cp-sat" | "ortools:cp-sat"
+                    | "cp-sat-mst" | "ortools-cp-sat-mst" | "ortools:cp-sat-mst" => {
+                        ExternalMinimumSpanningTreeReferenceSolver::OrTools
+                    }
                     _ => {
                         return Err(CliError(format!(
-                            "unknown solver {value:?}\n{}",
+                            "unknown solver {normalized:?}\n{}",
                             usage(program)
                         )))
                     }
@@ -282,6 +305,60 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["selectedEdgeIds"], json!(["AB"]));
         assert_eq!(output["objective"], 2.0);
+    }
+
+    #[test]
+    fn parses_minimum_spanning_tree_solver_aliases_used_by_validation_tools() {
+        for alias in [
+            "rust",
+            "native",
+            "rust_exact",
+            "kruskal",
+            "rust:kruskal",
+            "rust-kruskal-mst",
+            "rust:kruskal-mst",
+            "mst-kruskal",
+            "minimum-spanning-tree-kruskal",
+            "minimum-spanning-tree-exact",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "minimum_spanning_tree_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalMinimumSpanningTreeReferenceSolver::RustKruskal
+            );
+        }
+
+        for alias in [
+            "ortools",
+            "or-tools",
+            "google-or-tools",
+            "ortools:mst",
+            "ortools:cp-sat",
+            "cp-sat-mst",
+            "ortools-cp-sat-mst",
+            "ortools:cp-sat-mst",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "minimum_spanning_tree_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalMinimumSpanningTreeReferenceSolver::OrTools
+            );
+        }
+
+        assert_eq!(
+            parse_solver(
+                "minimum_spanning_tree_reference",
+                ["--solver".to_string(), "rust:fallback".to_string()]
+            )
+            .expect("rust:fallback"),
+            ExternalMinimumSpanningTreeReferenceSolver::Fallback
+        );
     }
 
     #[test]

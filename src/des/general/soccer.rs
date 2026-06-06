@@ -34651,6 +34651,14 @@ impl SoccerRealtimeSession {
             .as_ref()
             .map(SoccerTeamQPolicies::from_learned_params)
             .transpose()?;
+        let initial_neural_network = request
+            .initial_learned_params
+            .as_ref()
+            .and_then(|params| params.neural_network.clone());
+        if let Some(snapshot) = initial_neural_network.as_ref() {
+            build_soccer_neural_network_from_snapshot(snapshot)?;
+            config.neural_learning.enabled = true;
+        }
         if let Some(tactical_learning) = request.tactical_learning {
             tactical_learning.validate()?;
             config.tactical_learning = tactical_learning;
@@ -34674,19 +34682,24 @@ impl SoccerRealtimeSession {
             })
             .unwrap_or_default();
         validate_soccer_q_policy_options(&options)?;
-        let artifact = if let Some(initial_policies) = initial_policies {
-            train_soccer_team_policies_from_self_play_with_initial_policies_and_progress(
+        let initial_policies =
+            initial_policies.unwrap_or_else(|| SoccerTeamQPolicies::new(options.clone()));
+        let (artifact, latest_neural_network) =
+            train_soccer_team_policies_from_self_play_with_initial_policies_neural_progress_and_checkpoints(
                 config,
                 request.episodes,
                 options,
                 initial_policies,
+                initial_neural_network,
                 |_| {},
                 |_, _, _, _| {},
-            )
-        } else {
-            train_soccer_team_policies_from_self_play(config, request.episodes, options)
-        };
-        let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+                |_| {},
+            )?;
+        let learned_params =
+            SoccerSelfPlayLearnedParams::from_training_artifact_with_neural_network(
+                &artifact,
+                latest_neural_network,
+            );
         let default_learned_params_path = request
             .artifact_path
             .as_deref()
@@ -37837,11 +37850,52 @@ pub fn train_soccer_team_policies_from_self_play_with_initial_policies_progress_
     config: MatchConfig,
     episodes: usize,
     options: SoccerQPolicyOptions,
+    policies: SoccerTeamQPolicies,
+    on_episode: F,
+    on_progress: G,
+    on_checkpoint: H,
+) -> SoccerSelfPlayTrainingArtifact
+where
+    F: FnMut(&SoccerSelfPlayEpisodeSummary),
+    G: FnMut(usize, u64, u64, u64),
+    H: FnMut(&SoccerSelfPlayTrainingArtifact),
+{
+    train_soccer_team_policies_from_self_play_with_initial_policies_neural_progress_and_checkpoints(
+        config,
+        episodes,
+        options,
+        policies,
+        None,
+        on_episode,
+        on_progress,
+        on_checkpoint,
+    )
+    .expect("self-play without an initial neural snapshot should not fail")
+    .0
+}
+
+const SOCCER_SELF_PLAY_NEURAL_FINAL_DRAIN_TIMEOUT_MS: u64 = 200;
+
+fn train_soccer_team_policies_from_self_play_with_initial_policies_neural_progress_and_checkpoints<
+    F,
+    G,
+    H,
+>(
+    config: MatchConfig,
+    episodes: usize,
+    options: SoccerQPolicyOptions,
     mut policies: SoccerTeamQPolicies,
+    initial_neural_network: Option<SoccerNeuralNetworkSnapshot>,
     mut on_episode: F,
     mut on_progress: G,
     mut on_checkpoint: H,
-) -> SoccerSelfPlayTrainingArtifact
+) -> Result<
+    (
+        SoccerSelfPlayTrainingArtifact,
+        Option<SoccerNeuralNetworkSnapshot>,
+    ),
+    String,
+>
 where
     F: FnMut(&SoccerSelfPlayEpisodeSummary),
     G: FnMut(usize, u64, u64, u64),
@@ -37851,6 +37905,9 @@ where
     policies.away.options = options.clone();
     let mut episode_summaries = Vec::new();
     let mut tactical_summary = SoccerTacticalLearningSummary::default();
+    let mut neural_learner: Option<SoccerNeuralLearner> = None;
+    let mut initial_neural_network = initial_neural_network;
+    let mut latest_neural_network = None;
     let base_seed = config.seed;
 
     for episode in 0..episodes {
@@ -37859,6 +37916,15 @@ where
         episode_config.seed = episode_seed;
         let total_ticks = episode_config.total_ticks();
         let mut sim = SoccerMatch::default_11v11(episode_config).with_team_policies(policies);
+        if sim.config.learning_enabled && sim.config.neural_learning.enabled {
+            if let Some(learner) = neural_learner.take() {
+                sim.neural_learner = Some(learner);
+            } else if let Some(snapshot) = initial_neural_network.take() {
+                sim.set_neural_network_snapshot(snapshot)?;
+            }
+        } else {
+            sim.neural_learner = None;
+        }
         let progress_interval = (total_ticks / 9).max(1);
         for tick_idx in 0..total_ticks {
             sim.run_time_step();
@@ -37872,10 +37938,23 @@ where
                 );
             }
         }
+        if let Some(learner) = &mut sim.neural_learner {
+            if episode + 1 == episodes {
+                learner.drain_results_until_idle(Duration::from_millis(
+                    SOCCER_SELF_PLAY_NEURAL_FINAL_DRAIN_TIMEOUT_MS,
+                ));
+            } else {
+                learner.drain_results();
+            }
+        }
+        if episode + 1 == episodes {
+            latest_neural_network = sim.learning_snapshot().neural_network;
+        }
         policies = sim
             .team_policies
             .take()
             .unwrap_or_else(|| SoccerTeamQPolicies::new(options.clone()));
+        neural_learner = sim.neural_learner.take();
         tactical_summary.merge(&sim.tactical_summary);
         let summary = SoccerSelfPlayEpisodeSummary {
             episode,
@@ -37899,13 +37978,14 @@ where
         on_checkpoint(&checkpoint_artifact);
     }
 
-    soccer_self_play_training_artifact(
+    let artifact = soccer_self_play_training_artifact(
         &config,
         &options,
         &tactical_summary,
         &episode_summaries,
         &policies,
-    )
+    );
+    Ok((artifact, latest_neural_network))
 }
 
 fn soccer_self_play_training_artifact(
@@ -54267,11 +54347,37 @@ mod tests {
         let mut seed_params = SoccerSelfPlayLearnedParams::from_training_artifact(&seed_artifact);
         seed_params.tactical_learning.attack_flank_lane_weight = 0.73;
         seed_params.tactical_learning.defense_contract_delta_weight = 0.84;
+        let mut neural_seed_config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 1537,
+            learning_enabled: true,
+            learning_logging_enabled: false,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                learning_rate: 0.0,
+                train_every_ticks: 10_000,
+                batch_size: 4,
+                max_batches_per_tick: 1,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            ..Default::default()
+        };
+        let mut neural_snapshot = SoccerMatch::default_11v11(neural_seed_config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        neural_snapshot.layers[0].weights[0][0] = 0.4321;
+        neural_snapshot.layers[0].biases[0] = -0.1234;
+        seed_params.neural_network = Some(neural_snapshot.clone());
+        neural_seed_config.neural_learning.enabled = false;
 
         let mut session = SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 0.2,
             seed: 1535,
-            ..Default::default()
+            ..neural_seed_config
         });
         let response = session
             .train_self_play_team_policy(SoccerSelfPlayTrainingRequest {
@@ -54307,6 +54413,19 @@ mod tests {
         );
         assert!(response.artifact.home_entries.len() >= seed_params.home_entries.len());
         assert!(response.artifact.away_entries.len() >= seed_params.away_entries.len());
+        assert!(response.artifact.config.neural_learning.enabled);
+        let restored_neural_snapshot = response
+            .learned_params
+            .neural_network
+            .expect("returned neural snapshot");
+        assert_eq!(
+            restored_neural_snapshot.layers[0].weights[0][0],
+            neural_snapshot.layers[0].weights[0][0]
+        );
+        assert_eq!(
+            restored_neural_snapshot.layers[0].biases[0],
+            neural_snapshot.layers[0].biases[0]
+        );
     }
 
     #[test]

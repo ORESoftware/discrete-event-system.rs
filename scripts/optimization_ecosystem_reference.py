@@ -27,11 +27,6 @@ def result(tool: str, message: str) -> dict[str, Any]:
     }
 
 
-def arg_tool(args_tool: str | None) -> str:
-    raw = args_tool or os.environ.get("ORES_EXTERNAL_OPTIMIZATION_TOOL") or "auto"
-    return raw.lower().replace("_", "-")
-
-
 def rust_reference_command() -> list[str]:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(script_dir)
@@ -59,24 +54,26 @@ def local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
     )
 
 
-def exec_rust_reference(tool: str) -> None:
+def exec_rust_reference(tool: str | None) -> None:
     command = rust_reference_command()
+    args: list[str] = []
+    if tool:
+        args.extend(["--tool", tool])
     if command[0] == "cargo":
         script_dir = os.path.dirname(os.path.abspath(__file__))
         os.chdir(os.path.dirname(script_dir))
-    os.execvp(command[0], [*command, "--tool", tool])
+    os.execvp(command[0], [*command, *args])
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tool", default=None)
     args = parser.parse_args()
-    tool = arg_tool(args.tool)
     try:
-        exec_rust_reference(tool)
+        exec_rust_reference(args.tool)
         return 0
     except Exception as exc:
-        print(json.dumps(result(tool, str(exc)), sort_keys=True))
+        print(json.dumps(result(args.tool or "auto", str(exc)), sort_keys=True))
         return 0
 
 

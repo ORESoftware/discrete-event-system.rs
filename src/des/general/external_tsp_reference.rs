@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference TSP solvers.
 //!
 //! The native Rust reference computes an exact Held-Karp check without Python
-//! startup. Explicit OR-Tools Routing validation is launched from Rust through
-//! a tiny inline Python adapter, so the checked-in Python script can remain
-//! launcher glue instead of owning solver-model construction.
+//! startup. Registered OR-Tools aliases default to that Rust reference; explicit
+//! force-Python switches keep the inline OR-Tools adapter available for
+//! compatibility validation without making Python the default path.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -32,22 +32,33 @@ impl ExternalTspReferenceSolver {
     }
 }
 
-fn registered_tsp_rust_fallback_enabled() -> bool {
+fn tsp_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn tsp_python_reference_forced() -> bool {
     [
-        "TSP_REFERENCE_REGISTERED_FALLBACK",
-        "TSP_REFERENCE_EXTERNAL_FALLBACK",
-        "TSP_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "TSP_REFERENCE_FORCE_PYTHON",
+        "TSP_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
-    .find_map(|key| std::env::var(key).ok())
-    .map(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-        )
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| tsp_reference_force_python_value(&value))
+            .unwrap_or(false)
     })
-    .unwrap_or(false)
 }
 
 fn should_use_rust_tsp_reference(opts: &ExternalTspReferenceOptions) -> bool {
@@ -60,8 +71,7 @@ fn should_use_rust_tsp_reference(opts: &ExternalTspReferenceOptions) -> bool {
 }
 
 fn should_use_registered_tsp_fallback(opts: &ExternalTspReferenceOptions) -> bool {
-    registered_tsp_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalTspReferenceSolver::OrTools)
+    matches!(opts.solver, ExternalTspReferenceSolver::OrTools) && !tsp_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -676,6 +686,17 @@ mod tests {
         }
     }
 
+    fn tsp_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "TSP_REFERENCE_FORCE_PYTHON",
+            "TSP_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     fn unit_square_matrix() -> Vec<Vec<f64>> {
         vec![
             vec![0.0, 1.0, 2.0_f64.sqrt(), 1.0],
@@ -740,9 +761,10 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = TSP_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("TSP_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = tsp_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-tsp-alias");
         let opts = ExternalTspReferenceOptions {
             solver: ExternalTspReferenceSolver::OrTools,
         };
@@ -805,10 +827,10 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn tsp_force_python_keeps_ortools_bridge_available() {
         let _lock = TSP_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("TSP_REFERENCE_RUST_FIRST", "1");
-        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-tsp");
+        let _force_python_guard = EnvVarGuard::set("TSP_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-tsp");
 
         let solution = solve_tsp_with_external_reference(
             &unit_square_matrix(),
@@ -817,15 +839,14 @@ mod tests {
             },
         );
 
-        assert_eq!(solution.status, ExternalTspReferenceStatus::Optimal);
-        assert_eq!(solution.solver, "rust:registered-tsp-fallback-for-ortools");
-        assert_eq!(solution.tour, vec![0, 1, 2, 3]);
-        assert_eq!(solution.objective, Some(4.0));
+        assert_eq!(solution.status, ExternalTspReferenceStatus::Unavailable);
+        assert!(solution.message.contains("OR-Tools TSP adapter"));
     }
 
     #[test]
     fn ortools_adapter_reports_startup_without_repo_script() {
         let _lock = TSP_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guard = EnvVarGuard::set("TSP_REFERENCE_FORCE_PYTHON", "1");
         let _guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-a-python-for-tsp-ortools");
 
         let solution = solve_tsp_with_external_reference(

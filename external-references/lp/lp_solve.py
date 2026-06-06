@@ -1,69 +1,96 @@
 #!/usr/bin/env python3
-"""Small scipy.linprog bridge for des_engine's LP external solver.
+"""Compatibility launcher for the Rust LP reference solver.
 
-The Rust side writes {"lp": ..., "method": "..."} on stdin and expects a
-single JSON object on stdout. Keep this script dependency-light so it can serve
-as an optional validation oracle whenever Python + SciPy are available.
+The Rust crate owns the LP reference implementation. This script remains as the
+stable legacy path for callers that still invoke
+``external-references/lp/lp_solve.py`` directly.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
+import os
 import sys
 from typing import Any
 
 
-def _clean(value: Any) -> Any:
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, list):
-        return [_clean(item) for item in value]
-    if isinstance(value, tuple):
-        return [_clean(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _clean(item) for key, item in value.items()}
-    return value
-
-
-def _array_or_none(value: Any) -> Any:
+def _truthy_python_override(value: str | None) -> bool:
     if value is None:
-        return None
-    return value
+        return False
+    return value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "python",
+        "py",
+        "scipy",
+        "legacy-python",
+    }
 
 
-def _bounds(lp: dict[str, Any]) -> list[tuple[float | None, float | None]]:
-    n = len(lp.get("c", []))
-    lower = lp.get("lb")
-    upper = lp.get("ub")
-    bounds = []
-    for i in range(n):
-        lo = lower[i] if lower is not None and i < len(lower) else 0.0
-        hi = upper[i] if upper is not None and i < len(upper) else None
-        bounds.append((lo, hi))
-    return bounds
+def _force_python_reference() -> bool:
+    return any(
+        _truthy_python_override(os.environ.get(name))
+        for name in (
+            "LP_SOLVE_REFERENCE_FORCE_PYTHON",
+            "LP_EXTERNAL_REFERENCE_FORCE_PYTHON",
+            "LP_EXTERNAL_BRIDGE",
+            "ORES_LP_EXTERNAL_BRIDGE",
+        )
+    )
 
 
-def _status(code: int) -> str:
-    if code == 0:
-        return "optimal"
-    if code == 1:
-        return "iter-limit"
-    if code == 2:
-        return "infeasible"
-    if code == 3:
-        return "unbounded"
-    return "numerical-error"
+def _result(status: str, message: str) -> dict[str, Any]:
+    return {
+        "status": status,
+        "x": [],
+        "objective": None,
+        "iters": None,
+        "solver": "rust:lp-reference",
+        "message": message,
+    }
 
 
-def _marginals(section: Any) -> Any:
-    if section is None:
-        return None
-    values = getattr(section, "marginals", None)
-    if values is None:
-        return None
-    return [float(v) for v in values]
+def _repo_root() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(here, "..", ".."))
+    if os.path.exists(os.path.join(repo_root, "Cargo.toml")):
+        return repo_root
+    return os.getcwd()
+
+
+def _local_rust_binary_is_current(repo_root: str, binary_path: str) -> bool:
+    if not os.path.exists(binary_path):
+        return False
+    binary_mtime = os.path.getmtime(binary_path)
+    source_paths = [
+        os.path.join(repo_root, "src", "bin", "lp_solve_reference.rs"),
+        os.path.join(repo_root, "src", "des", "general", "lp.rs"),
+    ]
+    return all(
+        not os.path.exists(source_path) or os.path.getmtime(source_path) <= binary_mtime
+        for source_path in source_paths
+    )
+
+
+def _rust_reference_command() -> tuple[list[str], str | None]:
+    repo_root = _repo_root()
+    explicit = os.environ.get("LP_SOLVE_REFERENCE_RUST_BIN")
+    if explicit:
+        return [explicit], None
+    local_binary = os.path.join(repo_root, "target", "debug", "lp_solve_reference")
+    if _local_rust_binary_is_current(repo_root, local_binary):
+        return [local_binary], None
+    return ["cargo", "run", "--quiet", "--bin", "lp_solve_reference", "--"], repo_root
+
+
+def _exec_rust_reference(method: str) -> None:
+    command, cwd = _rust_reference_command()
+    if cwd is not None:
+        os.chdir(cwd)
+    os.execvp(command[0], [*command, "--method", method])
 
 
 def main() -> int:
@@ -71,100 +98,23 @@ def main() -> int:
     parser.add_argument("--method", default="highs")
     args = parser.parse_args()
 
-    try:
-        from scipy.optimize import linprog
-    except Exception as exc:  # pragma: no cover - depends on host environment
+    if _force_python_reference():
         print(
             json.dumps(
-                {
-                    "status": "numerical-error",
-                    "x": [],
-                    "objective": None,
-                    "message": f"scipy unavailable: {exc}",
-                }
+                _result(
+                    "unavailable",
+                    "the legacy Python SciPy LP bridge has been retired; use the Rust lp_solve_reference binary",
+                )
             )
         )
-        return 0
+        return 2
 
     try:
-        payload = json.load(sys.stdin)
-        lp = payload["lp"]
+        _exec_rust_reference(args.method)
     except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "status": "numerical-error",
-                    "x": [],
-                    "objective": None,
-                    "message": f"invalid LP payload: {exc}",
-                }
-            )
-        )
-        return 0
-
-    sense = lp.get("sense", "max")
-    c = [float(v) for v in lp.get("c", [])]
-    scipy_c = [-v for v in c] if sense == "max" else c
-
-    try:
-        result = linprog(
-            scipy_c,
-            A_ub=_array_or_none(lp.get("A_ub")),
-            b_ub=_array_or_none(lp.get("b_ub")),
-            A_eq=_array_or_none(lp.get("A_eq")),
-            b_eq=_array_or_none(lp.get("b_eq")),
-            bounds=_bounds(lp),
-            method=args.method,
-        )
-    except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "status": "numerical-error",
-                    "x": [],
-                    "objective": None,
-                    "message": f"scipy linprog failed: {exc}",
-                }
-            )
-        )
-        return 0
-
-    x = [float(v) for v in result.x] if result.x is not None else []
-    objective = None
-    if result.fun is not None and math.isfinite(float(result.fun)):
-        objective = -float(result.fun) if sense == "max" else float(result.fun)
-
-    sign = -1.0 if sense == "max" else 1.0
-    dual_ub = _marginals(getattr(result, "ineqlin", None))
-    dual_eq = _marginals(getattr(result, "eqlin", None))
-    if dual_ub is not None:
-        dual_ub = [sign * v for v in dual_ub]
-    if dual_eq is not None:
-        dual_eq = [sign * v for v in dual_eq]
-
-    lower = _marginals(getattr(result, "lower", None))
-    upper = _marginals(getattr(result, "upper", None))
-    reduced_costs = None
-    if lower is not None and upper is not None:
-        reduced_costs = [sign * (a + b) for a, b in zip(lower, upper)]
-
-    print(
-        json.dumps(
-            _clean(
-                {
-                    "status": _status(int(result.status)),
-                    "x": x,
-                    "objective": objective,
-                    "dualUB": dual_ub,
-                    "dualEQ": dual_eq,
-                    "reducedCosts": reduced_costs,
-                    "iters": getattr(result, "nit", None),
-                    "message": str(result.message),
-                }
-            )
-        )
-    )
-    return 0
+        print(json.dumps(_result("numerical-error", f"failed to exec Rust LP reference: {exc}")))
+        return 1
+    return 1
 
 
 if __name__ == "__main__":

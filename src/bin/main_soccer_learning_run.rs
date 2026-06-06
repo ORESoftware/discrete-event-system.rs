@@ -1,6 +1,6 @@
 //! Run accelerated soccer self-play and persist learned MDP/POMDP policies.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Error as IoError, ErrorKind, Write};
@@ -19,13 +19,15 @@ use des_engine::des::general::soccer::{
 };
 use des_engine::des::soccer_learning::{
     evolve_soccer_tactical_learning_weights_from_genomes, evolve_soccer_team_policies,
-    soccer_learning_run_score, soccer_policy_delta_entries,
+    soccer_evolution_options_from_search_metadata, soccer_learning_run_score,
+    soccer_neural_network_snapshot_fingerprint, soccer_policy_delta_entries,
     soccer_policy_version_insert_status_after_active_head, soccer_postgres_new_sim_refresh_plan,
     soccer_postgres_policy_refresh_decision,
     soccer_should_flush_postgres_policy_versions_for_new_sim,
-    soccer_should_refresh_postgres_for_new_sim, SoccerEvolutionOptions,
-    SoccerLearningCompletedGame, SoccerPostgresPolicyRefreshCheck,
-    SoccerTacticalLearningGenomeParent, SOCCER_POLICY_STATUS_ACTIVE,
+    soccer_should_refresh_postgres_for_new_sim, soccer_tactical_learning_weights_fingerprint,
+    soccer_team_q_policies_fingerprint, SoccerEvolutionOptions, SoccerLearningCompletedGame,
+    SoccerPostgresPolicyRefreshCheck, SoccerTacticalLearningGenomeParent,
+    SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
@@ -33,7 +35,7 @@ use des_engine::des::soccer_learning_pg::{
 use serde::Serialize;
 use uuid::Uuid;
 
-const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 0;
+const DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS: usize = 2;
 const DEFAULT_SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES: usize = 10;
 const DEFAULT_SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES: usize = 0;
@@ -51,6 +53,8 @@ const DEFAULT_SOCCER_PRINT_COMPLETED_GAMES: bool = false;
 const DEFAULT_SOCCER_EVOLUTION_ENABLED: bool = true;
 const DEFAULT_SOCCER_EVOLUTION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES: usize = 4;
+const SOCCER_POLICY_SOURCE_MERGE: &str = "merge";
+const SOCCER_POLICY_SOURCE_EVOLUTION: &str = "evolution";
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
@@ -142,6 +146,13 @@ fn default_postgres_completed_run_batch_games(parallel_games: usize) -> usize {
 
 fn default_evolution_interval_games(parallel_games: usize) -> usize {
     parallel_games.max(DEFAULT_SOCCER_EVOLUTION_INTERVAL_GAMES)
+}
+
+fn default_evolution_window_games(
+    evolution_interval_games: usize,
+    evolution_elite_games: usize,
+) -> usize {
+    evolution_interval_games.max(evolution_elite_games).max(1)
 }
 
 fn default_disk_learning_artifacts_enabled(postgres_configured: bool) -> bool {
@@ -601,11 +612,47 @@ fn maybe_apply_postgres_tactical_learning(
     Ok(true)
 }
 
+fn maybe_apply_postgres_evolution_options(
+    event_label: &str,
+    next_episode: usize,
+    policy_version_id: &str,
+    generation: i32,
+    evolution_options: &mut SoccerEvolutionOptions,
+    search_metadata: Option<&serde_json::Value>,
+) -> bool {
+    let Some(postgres_options) =
+        soccer_evolution_options_from_search_metadata(search_metadata, *evolution_options)
+    else {
+        return false;
+    };
+    if postgres_options == *evolution_options {
+        return false;
+    }
+    println!(
+        "{} next_episode={} policy_version={} generation={} mutation_rate={:.4}->{:.4} crossover_rate={:.4}->{:.4} exploration_scale={:.4}->{:.4} population_size={}->{}",
+        event_label,
+        next_episode,
+        policy_version_id,
+        generation,
+        evolution_options.mutation_rate,
+        postgres_options.mutation_rate,
+        evolution_options.crossover_rate,
+        postgres_options.crossover_rate,
+        evolution_options.exploration_scale,
+        postgres_options.exploration_scale,
+        evolution_options.population_size,
+        postgres_options.population_size
+    );
+    *evolution_options = postgres_options;
+    true
+}
+
 fn refresh_postgres_policy_for_next_sim(
     store: &mut SoccerLearningPgStore,
     experiment_id: &str,
     next_episode: usize,
     options: &SoccerQPolicyOptions,
+    evolution_options: &mut SoccerEvolutionOptions,
     config: &mut MatchConfig,
     tactical_learning: &mut SoccerTacticalLearningWeights,
     policies: &mut SoccerTeamQPolicies,
@@ -614,10 +661,14 @@ fn refresh_postgres_policy_for_next_sim(
     pg_last_policy_version_id: &mut Option<String>,
     pg_generation: &mut i32,
     pg_base_policy_version_updated_at_micros: &mut i64,
+    pg_base_policy_fingerprint: &mut Option<u64>,
+    pg_base_neural_network_fingerprint: &mut Option<u64>,
+    pg_base_tactical_learning_fingerprint: &mut Option<u64>,
     local_tactical_evolved_since_pg_refresh: &mut bool,
     postgres_tactical_learning_authoritative: bool,
     pg_policy_version_buffer_len: usize,
     pending_async_pg_batches: usize,
+    pending_async_policy_version_batches: usize,
 ) -> Result<bool, Box<dyn Error>> {
     let Some(metadata) = store
         .load_latest_active_policy_metadata(experiment_id)
@@ -625,20 +676,45 @@ fn refresh_postgres_policy_for_next_sim(
     else {
         return Ok(false);
     };
+    let latest_neural_network_fingerprint = metadata
+        .neural_network
+        .as_ref()
+        .map(soccer_neural_network_snapshot_fingerprint);
+    let latest_policy_fingerprint = metadata.policy_fingerprint;
+    let latest_tactical_learning_fingerprint = metadata
+        .tactical_learning
+        .as_ref()
+        .map(soccer_tactical_learning_weights_fingerprint);
     let refresh_decision =
         soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
             current_policy_version_id: pg_base_policy_version_id.as_deref(),
             current_generation: *pg_generation,
             current_updated_at_micros: *pg_base_policy_version_updated_at_micros,
+            current_policy_fingerprint: *pg_base_policy_fingerprint,
+            latest_policy_fingerprint,
             current_neural_network_present: latest_neural_network.is_some(),
+            current_neural_network_fingerprint: *pg_base_neural_network_fingerprint,
             latest_policy_version_id: &metadata.id,
             latest_generation: metadata.generation,
             latest_updated_at_micros: metadata.updated_at_micros,
             latest_neural_network_present: metadata.neural_network.is_some(),
+            latest_neural_network_fingerprint,
+            current_tactical_learning_fingerprint: *pg_base_tactical_learning_fingerprint,
+            latest_tactical_learning_fingerprint,
             local_tactical_evolved_since_pg_refresh: *local_tactical_evolved_since_pg_refresh,
             postgres_tactical_learning_authoritative,
         });
     let mut changed = false;
+    if maybe_apply_postgres_evolution_options(
+        "postgres_refresh_evolution_options_for_game",
+        next_episode,
+        &metadata.id,
+        metadata.generation,
+        evolution_options,
+        metadata.search_metadata.as_ref(),
+    ) {
+        changed = true;
+    }
     if refresh_decision.apply_tactical_learning {
         if maybe_apply_postgres_tactical_learning(
             "postgres_refresh_tactical_learning_for_game",
@@ -652,21 +728,80 @@ fn refresh_postgres_policy_for_next_sim(
             *local_tactical_evolved_since_pg_refresh = false;
             changed = true;
         }
+        if metadata.tactical_learning.is_some() {
+            *pg_base_tactical_learning_fingerprint = latest_tactical_learning_fingerprint;
+        }
     }
     if refresh_decision.refresh_policy {
         if let Some(version) = store
             .load_latest_active_policy(experiment_id, options.clone(), options.clone())
             .map_err(invalid_data)?
         {
+            let version_neural_network_fingerprint = version
+                .neural_network
+                .as_ref()
+                .map(soccer_neural_network_snapshot_fingerprint);
+            let version_policy_fingerprint = version
+                .policy_fingerprint
+                .or_else(|| Some(soccer_team_q_policies_fingerprint(&version.policies)));
+            let version_tactical_learning_fingerprint = version
+                .tactical_learning
+                .as_ref()
+                .map(soccer_tactical_learning_weights_fingerprint);
+            let version_refresh_decision =
+                soccer_postgres_policy_refresh_decision(SoccerPostgresPolicyRefreshCheck {
+                    current_policy_version_id: pg_base_policy_version_id.as_deref(),
+                    current_generation: *pg_generation,
+                    current_updated_at_micros: *pg_base_policy_version_updated_at_micros,
+                    current_policy_fingerprint: *pg_base_policy_fingerprint,
+                    latest_policy_fingerprint: version_policy_fingerprint,
+                    current_neural_network_present: latest_neural_network.is_some(),
+                    current_neural_network_fingerprint: *pg_base_neural_network_fingerprint,
+                    latest_policy_version_id: &version.id,
+                    latest_generation: version.generation,
+                    latest_updated_at_micros: version.updated_at_micros,
+                    latest_neural_network_present: version.neural_network.is_some(),
+                    latest_neural_network_fingerprint: version_neural_network_fingerprint,
+                    current_tactical_learning_fingerprint: *pg_base_tactical_learning_fingerprint,
+                    latest_tactical_learning_fingerprint: version_tactical_learning_fingerprint,
+                    local_tactical_evolved_since_pg_refresh:
+                        *local_tactical_evolved_since_pg_refresh,
+                    postgres_tactical_learning_authoritative,
+                });
+            maybe_apply_postgres_evolution_options(
+                "postgres_refresh_evolution_options_for_loaded_policy",
+                next_episode,
+                &version.id,
+                version.generation,
+                evolution_options,
+                version.search_metadata.as_ref(),
+            );
+            if version_refresh_decision.apply_tactical_learning {
+                if maybe_apply_postgres_tactical_learning(
+                    "postgres_refresh_tactical_learning_for_loaded_policy",
+                    next_episode,
+                    &version.id,
+                    version.generation,
+                    config,
+                    tactical_learning,
+                    version.tactical_learning.clone(),
+                )? {
+                    *local_tactical_evolved_since_pg_refresh = false;
+                }
+                if version.tactical_learning.is_some() {
+                    *pg_base_tactical_learning_fingerprint = version_tactical_learning_fingerprint;
+                }
+            }
             println!(
-                "postgres_refresh_policy_for_game next_episode={} policy_version={} previous_policy_version={} generation={} neural_network={} pending_policy_versions={} pending_async_batches={}",
+                "postgres_refresh_policy_for_game next_episode={} policy_version={} previous_policy_version={} generation={} neural_network={} pending_policy_versions={} pending_async_batches={} pending_async_policy_version_batches={}",
                 next_episode,
                 version.id,
                 pg_base_policy_version_id.as_deref().unwrap_or("none"),
                 version.generation,
                 version.neural_network.is_some(),
                 pg_policy_version_buffer_len,
-                pending_async_pg_batches
+                pending_async_pg_batches,
+                pending_async_policy_version_batches
             );
             *policies = version.policies;
             *latest_neural_network = version.neural_network;
@@ -674,6 +809,9 @@ fn refresh_postgres_policy_for_next_sim(
             *pg_last_policy_version_id = Some(version.id);
             *pg_generation = version.generation;
             *pg_base_policy_version_updated_at_micros = version.updated_at_micros;
+            *pg_base_policy_fingerprint = version_policy_fingerprint;
+            *pg_base_neural_network_fingerprint = version_neural_network_fingerprint;
+            *pg_base_tactical_learning_fingerprint = version_tactical_learning_fingerprint;
             *local_tactical_evolved_since_pg_refresh = false;
             changed = true;
         }
@@ -728,6 +866,56 @@ struct CompletedGame {
     elapsed_seconds: f64,
 }
 
+#[derive(Clone, Debug)]
+struct EvolutionSearchSample {
+    policies: SoccerTeamQPolicies,
+    tactical_summary: SoccerTacticalLearningSummary,
+    starting_tactical_learning: SoccerTacticalLearningWeights,
+    fitness: f64,
+}
+
+impl EvolutionSearchSample {
+    fn from_completed_game(game: &CompletedGame) -> Self {
+        Self {
+            policies: game.policies.clone(),
+            tactical_summary: game.artifact.tactical_summary.clone(),
+            starting_tactical_learning: game.starting_tactical_learning.clone(),
+            fitness: soccer_learning_run_score(&game.episode_summary.summary).match_fitness,
+        }
+    }
+}
+
+fn push_evolution_search_samples(
+    samples: &mut VecDeque<EvolutionSearchSample>,
+    completed_games: &[CompletedGame],
+    window_games: usize,
+) {
+    let window_games = window_games.max(1);
+    for game in completed_games {
+        samples.push_back(EvolutionSearchSample::from_completed_game(game));
+        while samples.len() > window_games {
+            samples.pop_front();
+        }
+    }
+}
+
+fn clear_evolution_search_samples_after_postgres_refresh(
+    event_label: &str,
+    next_episode: usize,
+    policy_version_id: Option<&str>,
+    samples: &mut VecDeque<EvolutionSearchSample>,
+) -> usize {
+    let samples_cleared = samples.len();
+    samples.clear();
+    if samples_cleared > 0 {
+        println!(
+            "{event_label} next_episode={next_episode} policy_version={} samples_cleared={samples_cleared}",
+            policy_version_id.unwrap_or("none")
+        );
+    }
+    samples_cleared
+}
+
 struct SoccerLearningWorkerTask {
     episode: usize,
     config: MatchConfig,
@@ -739,6 +927,59 @@ struct SoccerLearningWorkerTask {
     print_progress: bool,
     neural_drain_timeout: Duration,
     retain_neural_network_in_game_artifact: bool,
+}
+
+struct CachedTeamQPoliciesArc {
+    fingerprint: u64,
+    policies: Arc<SoccerTeamQPolicies>,
+}
+
+fn cached_team_policies_arc(
+    policies: &SoccerTeamQPolicies,
+    cache: &mut Option<CachedTeamQPoliciesArc>,
+) -> Arc<SoccerTeamQPolicies> {
+    let fingerprint = soccer_team_q_policies_fingerprint(policies);
+    let rebuild_cache = match cache.as_ref() {
+        Some(cached) => cached.fingerprint != fingerprint,
+        None => true,
+    };
+    if rebuild_cache {
+        *cache = Some(CachedTeamQPoliciesArc {
+            fingerprint,
+            policies: Arc::new(policies.clone()),
+        });
+    }
+    cache
+        .as_ref()
+        .map(|cached| Arc::clone(&cached.policies))
+        .expect("policy cache must exist after rebuild check")
+}
+
+struct CachedNeuralNetworkSnapshotArc {
+    fingerprint: u64,
+    snapshot: Arc<SoccerNeuralNetworkSnapshot>,
+}
+
+fn cached_neural_network_snapshot_arc(
+    latest_neural_network: &Option<SoccerNeuralNetworkSnapshot>,
+    cache: &mut Option<CachedNeuralNetworkSnapshotArc>,
+) -> Option<Arc<SoccerNeuralNetworkSnapshot>> {
+    let Some(snapshot) = latest_neural_network.as_ref() else {
+        *cache = None;
+        return None;
+    };
+    let fingerprint = soccer_neural_network_snapshot_fingerprint(snapshot);
+    let rebuild_cache = match cache.as_ref() {
+        Some(cached) => cached.fingerprint != fingerprint,
+        None => true,
+    };
+    if rebuild_cache {
+        *cache = Some(CachedNeuralNetworkSnapshotArc {
+            fingerprint,
+            snapshot: Arc::new(snapshot.clone()),
+        });
+    }
+    cache.as_ref().map(|cached| Arc::clone(&cached.snapshot))
 }
 
 struct SoccerLearningWorkerPool {
@@ -865,6 +1106,7 @@ struct PendingPostgresPolicyVersion {
     policies: SoccerTeamQPolicies,
     fitness: f64,
     neural_network: Option<SoccerNeuralNetworkSnapshot>,
+    search_metadata: Option<serde_json::Value>,
 }
 
 struct PostgresCompletedRunBatch {
@@ -921,10 +1163,10 @@ impl AsyncPostgresCompletedRunWriter {
             let mut store = match SoccerLearningPgStore::connect_from_env() {
                 Ok(Some(store)) => store,
                 Ok(None) => {
-                    while receiver.recv().is_ok() {
+                    while let Ok(batch) = receiver.recv() {
                         let _ = result_sender.send(PostgresCompletedRunWriteResult {
                             queue_batches: 1,
-                            policy_version_batches: 0,
+                            policy_version_batches: batch.policy_version_batches,
                             result: Err(
                                 "postgres completed-run writer could not find a database URL"
                                     .to_string(),
@@ -934,10 +1176,10 @@ impl AsyncPostgresCompletedRunWriter {
                     return;
                 }
                 Err(error) => {
-                    while receiver.recv().is_ok() {
+                    while let Ok(batch) = receiver.recv() {
                         let _ = result_sender.send(PostgresCompletedRunWriteResult {
                             queue_batches: 1,
-                            policy_version_batches: 0,
+                            policy_version_batches: batch.policy_version_batches,
                             result: Err(format!(
                                 "postgres completed-run writer connect failed: {error}"
                             )),
@@ -1426,6 +1668,25 @@ fn tactical_genome_parents_from_completed_games<'a>(
         .collect()
 }
 
+fn tactical_genome_parents_from_evolution_samples<'a>(
+    samples: &'a VecDeque<EvolutionSearchSample>,
+    ranked_samples: &[(usize, f64)],
+    elite_count: usize,
+) -> Vec<SoccerTacticalLearningGenomeParent<'a>> {
+    ranked_samples
+        .iter()
+        .take(elite_count)
+        .map(|(sample_index, fitness)| {
+            let sample = &samples[*sample_index];
+            SoccerTacticalLearningGenomeParent {
+                summary: &sample.tactical_summary,
+                weights: &sample.starting_tactical_learning,
+                fitness: *fitness,
+            }
+        })
+        .collect()
+}
+
 fn merge_policy_delta(dst: &mut SoccerQPolicy, before: &SoccerQPolicy, after: &SoccerQPolicy) {
     for (key, after_visits) in &after.visits {
         let before_visits = before.visits.get(key).copied().unwrap_or(0);
@@ -1552,7 +1813,7 @@ fn flush_postgres_completed_runs(
             );
         }
         store
-            .insert_policy_version_with_id_and_neural_network(
+            .insert_policy_version_with_id_and_neural_network_and_search_metadata(
                 &policy_version.id,
                 experiment_id,
                 policy_version.parent_policy_version_id.as_deref(),
@@ -1566,6 +1827,7 @@ fn flush_postgres_completed_runs(
                 &policy_version.policies,
                 policy_version.fitness,
                 policy_version.neural_network.as_ref(),
+                policy_version.search_metadata.as_ref(),
             )
             .map_err(invalid_data)?;
     }
@@ -1962,8 +2224,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES,
     )?
     .max(1);
+    let evolution_window_games = env_usize(
+        "SOCCER_EVOLUTION_WINDOW_GAMES",
+        default_evolution_window_games(evolution_interval_games, evolution_elite_games),
+    )?
+    .max(evolution_elite_games)
+    .max(1);
     let default_evolution_options = SoccerEvolutionOptions::default();
-    let evolution_options = SoccerEvolutionOptions {
+    let mut evolution_options = SoccerEvolutionOptions {
         mutation_rate: env_f64(
             "SOCCER_EVOLUTION_MUTATION_RATE",
             default_evolution_options.mutation_rate,
@@ -2131,6 +2399,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut pg_last_policy_version_id = None::<String>;
     let mut pg_generation = 0i32;
     let mut pg_base_policy_version_updated_at_micros = 0i64;
+    let mut pg_base_policy_fingerprint = None::<u64>;
+    let mut pg_base_neural_network_fingerprint = None::<u64>;
+    let mut pg_base_tactical_learning_fingerprint = None::<u64>;
     let mut pg_persisted_games = 0usize;
     let mut policies = load_initial_policies(resume_artifact.as_deref(), options.clone())?;
     let mut initial_neural_network = None::<SoccerNeuralNetworkSnapshot>;
@@ -2147,6 +2418,18 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .load_latest_active_policy(&experiment_id, options.clone(), options.clone())
                 .map_err(invalid_data)?
             {
+                let version_neural_network_fingerprint = version
+                    .neural_network
+                    .as_ref()
+                    .map(soccer_neural_network_snapshot_fingerprint);
+                let version_policy_fingerprint = version
+                    .policy_fingerprint
+                    .or_else(|| Some(soccer_team_q_policies_fingerprint(&version.policies)));
+                let version_tactical_learning_fingerprint = version
+                    .tactical_learning
+                    .as_ref()
+                    .map(soccer_tactical_learning_weights_fingerprint);
+                let version_search_metadata = version.search_metadata.clone();
                 println!(
                     "postgres_resume_policy experiment={} policy_version={} generation={} neural_network={}",
                     experiment_slug,
@@ -2165,10 +2448,21 @@ fn run() -> Result<(), Box<dyn Error>> {
                     &mut tactical_learning,
                     version.tactical_learning,
                 )?;
+                maybe_apply_postgres_evolution_options(
+                    "postgres_resume_evolution_options",
+                    1,
+                    &version.id,
+                    version.generation,
+                    &mut evolution_options,
+                    version_search_metadata.as_ref(),
+                );
                 pg_base_policy_version_id = Some(version.id.clone());
                 pg_last_policy_version_id = Some(version.id);
                 pg_generation = version.generation;
                 pg_base_policy_version_updated_at_micros = version.updated_at_micros;
+                pg_base_policy_fingerprint = version_policy_fingerprint;
+                pg_base_neural_network_fingerprint = version_neural_network_fingerprint;
+                pg_base_tactical_learning_fingerprint = version_tactical_learning_fingerprint;
             }
         }
         println!(
@@ -2269,9 +2563,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     println!("default_disk_learning_artifacts={default_disk_learning_artifacts}");
     println!(
-        "evolution enabled={} interval_games={} elite_games={} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} elite_weight_floor={:.4} population_size={} seed={}",
+        "evolution enabled={} interval_games={} window_games={} elite_games={} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} elite_weight_floor={:.4} population_size={} seed={}",
         evolution_enabled,
         evolution_interval_games,
+        evolution_window_games,
         evolution_elite_games,
         evolution_options.mutation_rate,
         evolution_options.mutation_scale,
@@ -2366,6 +2661,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut next_episode = 0usize;
     let mut last_checkpoint_episode = 0usize;
     let mut latest_neural_network = initial_neural_network.clone();
+    let mut latest_policy_arc_cache = None::<CachedTeamQPoliciesArc>;
+    let mut latest_neural_network_arc_cache = None::<CachedNeuralNetworkSnapshotArc>;
+    let mut evolution_search_samples =
+        VecDeque::<EvolutionSearchSample>::with_capacity(evolution_window_games);
     let mut local_tactical_evolved_since_pg_refresh = false;
     let mut pg_policy_version_buffer = Vec::new();
     let mut pg_completed_buffer = Vec::new();
@@ -2373,11 +2672,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     let worker_pool = SoccerLearningWorkerPool::start(parallel_games);
     let retain_neural_network_in_game_artifact =
         write_game_artifacts && game_artifact_mode.as_str() == "full";
+    let adversarial_moment_windows = Arc::new(adversarial_moment_windows);
 
     while next_episode < games {
         let batch_size = parallel_games.min(games - next_episode);
         let batch_start_episode = next_episode;
-        let batch_adversarial_moment_windows = Arc::new(adversarial_moment_windows.clone());
         println!(
             "starting_batch episodes={}..{} parallel_games={}",
             batch_start_episode + 1,
@@ -2421,30 +2720,50 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 .drain_policy_versions_finished()
                                 .map_err(invalid_data)?;
                             pending_async_pg_batches = writer.pending_batches;
+                            pending_async_policy_version_batches =
+                                writer.pending_policy_version_batches;
                         }
                     }
-                    refresh_postgres_policy_for_next_sim(
-                        store,
-                        experiment_id,
-                        episode + 1,
-                        &options,
-                        &mut config,
-                        &mut tactical_learning,
-                        &mut policies,
-                        &mut latest_neural_network,
-                        &mut pg_base_policy_version_id,
-                        &mut pg_last_policy_version_id,
-                        &mut pg_generation,
-                        &mut pg_base_policy_version_updated_at_micros,
-                        &mut local_tactical_evolved_since_pg_refresh,
-                        pg_tactical_learning_authoritative,
-                        pg_policy_version_buffer.len(),
-                        pending_async_pg_batches,
-                    )?;
+                    if new_sim_refresh_plan.refresh_from_postgres
+                        && refresh_postgres_policy_for_next_sim(
+                            store,
+                            experiment_id,
+                            episode + 1,
+                            &options,
+                            &mut evolution_options,
+                            &mut config,
+                            &mut tactical_learning,
+                            &mut policies,
+                            &mut latest_neural_network,
+                            &mut pg_base_policy_version_id,
+                            &mut pg_last_policy_version_id,
+                            &mut pg_generation,
+                            &mut pg_base_policy_version_updated_at_micros,
+                            &mut pg_base_policy_fingerprint,
+                            &mut pg_base_neural_network_fingerprint,
+                            &mut pg_base_tactical_learning_fingerprint,
+                            &mut local_tactical_evolved_since_pg_refresh,
+                            pg_tactical_learning_authoritative,
+                            pg_policy_version_buffer.len(),
+                            pending_async_pg_batches,
+                            pending_async_policy_version_batches,
+                        )?
+                    {
+                        clear_evolution_search_samples_after_postgres_refresh(
+                            "postgres_refresh_evolution_samples_reset_for_game",
+                            episode + 1,
+                            pg_base_policy_version_id.as_deref(),
+                            &mut evolution_search_samples,
+                        );
+                    }
                 }
             }
-            let episode_starting_policies = Arc::new(policies.clone());
-            let episode_starting_neural_network = latest_neural_network.clone().map(Arc::new);
+            let episode_starting_policies =
+                cached_team_policies_arc(&policies, &mut latest_policy_arc_cache);
+            let episode_starting_neural_network = cached_neural_network_snapshot_arc(
+                &latest_neural_network,
+                &mut latest_neural_network_arc_cache,
+            );
             let episode_starting_policy_version_id = pg_base_policy_version_id.clone();
             let episode_starting_policy_generation = pg_generation;
             let mut episode_config = config.clone();
@@ -2456,7 +2775,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 starting_policy_version_id: episode_starting_policy_version_id,
                 starting_policy_generation: episode_starting_policy_generation,
                 initial_neural_network: episode_starting_neural_network.as_ref().map(Arc::clone),
-                adversarial_moment_windows: Arc::clone(&batch_adversarial_moment_windows),
+                adversarial_moment_windows: Arc::clone(&adversarial_moment_windows),
                 print_progress,
                 neural_drain_timeout,
                 retain_neural_network_in_game_artifact,
@@ -2505,7 +2824,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         parent_policy_version_id: pg_game_base_policy_version_id.clone(),
                         generation: next_generation,
                         version_label,
-                        source_kind: "merge",
+                        source_kind: SOCCER_POLICY_SOURCE_MERGE,
                         status: "active",
                         config: config.clone(),
                         home_options: options.clone(),
@@ -2513,11 +2832,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                         policies: policies.clone(),
                         fitness: completed_learning_game.score.match_fitness,
                         neural_network: latest_neural_network.clone(),
+                        search_metadata: None,
                     });
                     pg_base_policy_version_id = Some(output_policy_version_id.clone());
                     pg_last_policy_version_id = Some(output_policy_version_id.clone());
                     pg_generation = next_generation;
                     pg_base_policy_version_updated_at_micros = 0;
+                    pg_base_policy_fingerprint =
+                        Some(soccer_team_q_policies_fingerprint(&policies));
+                    pg_base_neural_network_fingerprint = latest_neural_network
+                        .as_ref()
+                        .map(soccer_neural_network_snapshot_fingerprint);
+                    pg_base_tactical_learning_fingerprint = Some(
+                        soccer_tactical_learning_weights_fingerprint(&config.tactical_learning),
+                    );
                     Some(output_policy_version_id)
                 } else {
                     pg_last_policy_version_id.clone()
@@ -2584,41 +2912,43 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        push_evolution_search_samples(
+            &mut evolution_search_samples,
+            &completed_games,
+            evolution_window_games,
+        );
         let completed_after_batch = episode_summaries.len();
         let should_evolve = evolution_enabled
             && !completed_games.is_empty()
+            && !evolution_search_samples.is_empty()
             && (completed_after_batch >= games
                 || completed_after_batch % evolution_interval_games == 0);
         if should_evolve {
-            let mut ranked_parents = completed_games
+            let mut ranked_samples = evolution_search_samples
                 .iter()
                 .enumerate()
-                .map(|(idx, game)| {
-                    (
-                        idx,
-                        soccer_learning_run_score(&game.episode_summary.summary).match_fitness,
-                    )
-                })
+                .filter(|(_, sample)| sample.fitness.is_finite())
+                .map(|(idx, sample)| (idx, sample.fitness))
                 .collect::<Vec<_>>();
-            ranked_parents.sort_by(|left, right| {
+            ranked_samples.sort_by(|left, right| {
                 right
                     .1
                     .partial_cmp(&left.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            let elite_count = evolution_elite_games.min(ranked_parents.len()).max(1);
-            let best_fitness = ranked_parents
+            let elite_count = evolution_elite_games.min(ranked_samples.len()).max(1);
+            let best_fitness = ranked_samples
                 .first()
                 .map(|(_, fitness)| *fitness)
                 .unwrap_or(0.0);
             let mut parents = Vec::with_capacity(elite_count + 1);
             parents.push((&policies, best_fitness));
-            for (game_index, fitness) in ranked_parents.iter().take(elite_count) {
-                parents.push((&completed_games[*game_index].policies, *fitness));
+            for (sample_index, fitness) in ranked_samples.iter().take(elite_count) {
+                parents.push((&evolution_search_samples[*sample_index].policies, *fitness));
             }
-            let tactical_parents = tactical_genome_parents_from_completed_games(
-                &completed_games,
-                &ranked_parents,
+            let tactical_parents = tactical_genome_parents_from_evolution_samples(
+                &evolution_search_samples,
+                &ranked_samples,
                 elite_count,
             );
             let mut batch_evolution_options = evolution_options;
@@ -2638,8 +2968,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             config.tactical_learning = tactical_learning.clone();
             local_tactical_evolved_since_pg_refresh = true;
             println!(
-                "policy_evolved games_completed={} elite_games={} best_fitness={:.4} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} population_size={}",
+                "policy_evolved games_completed={} sample_window_games={} samples={} elite_games={} best_fitness={:.4} mutation_rate={:.4} mutation_scale={:.4} crossover_rate={:.4} exploration_rate={:.4} exploration_scale={:.4} population_size={}",
                 completed_after_batch,
+                evolution_window_games,
+                evolution_search_samples.len(),
                 elite_count,
                 best_fitness,
                 batch_evolution_options.mutation_rate,
@@ -2650,8 +2982,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                 batch_evolution_options.population_size
             );
             println!(
-                "tactical_weights_evolved games_completed={} population_size={} attack_width_delta={:.3}->{:.3} attack_flank_lane={:.3}->{:.3} defense_contract_delta={:.3}->{:.3}",
+                "tactical_weights_evolved games_completed={} sample_window_games={} samples={} population_size={} attack_width_delta={:.3}->{:.3} attack_flank_lane={:.3}->{:.3} defense_contract_delta={:.3}->{:.3}",
                 completed_after_batch,
+                evolution_window_games,
+                evolution_search_samples.len(),
                 batch_evolution_options.population_size,
                 previous_tactical_learning.attack_width_delta_weight,
                 tactical_learning.attack_width_delta_weight,
@@ -2666,7 +3000,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let next_generation = pg_generation.saturating_add(1);
                 let output_policy_version_id = Uuid::new_v4().to_string();
                 let version_label = format!(
-                    "{}-mutation",
+                    "{}-evolution",
                     soccer_learning_pg_version_label(
                         &run_id,
                         shard_index,
@@ -2678,7 +3012,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     parent_policy_version_id: pg_base_policy_version_id.clone(),
                     generation: next_generation,
                     version_label,
-                    source_kind: "mutation",
+                    source_kind: SOCCER_POLICY_SOURCE_EVOLUTION,
                     status: "active",
                     config: config.clone(),
                     home_options: options.clone(),
@@ -2686,11 +3020,27 @@ fn run() -> Result<(), Box<dyn Error>> {
                     policies: policies.clone(),
                     fitness: best_fitness,
                     neural_network: latest_neural_network.clone(),
+                    search_metadata: Some(serde_json::json!({
+                        "algorithm": "evolutionary-genetic-programming",
+                        "completedGames": completed_after_batch,
+                        "eliteGames": elite_count,
+                        "windowGames": evolution_window_games,
+                        "sampleCount": evolution_search_samples.len(),
+                        "bestFitness": best_fitness,
+                        "options": batch_evolution_options
+                    })),
                 });
                 pg_base_policy_version_id = Some(output_policy_version_id.clone());
                 pg_last_policy_version_id = Some(output_policy_version_id);
                 pg_generation = next_generation;
                 pg_base_policy_version_updated_at_micros = 0;
+                pg_base_policy_fingerprint = Some(soccer_team_q_policies_fingerprint(&policies));
+                pg_base_neural_network_fingerprint = latest_neural_network
+                    .as_ref()
+                    .map(soccer_neural_network_snapshot_fingerprint);
+                pg_base_tactical_learning_fingerprint = Some(
+                    soccer_tactical_learning_weights_fingerprint(&config.tactical_learning),
+                );
             }
         }
 
@@ -3009,6 +3359,44 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static SOCCER_RUN_PG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn clear_postgres_env() -> Vec<EnvVarGuard> {
+        [
+            "SOCCER_DATABASE_URL",
+            "AGENT_TASKS_RDS_DATABASE_URL",
+            "RDS_DATABASE_URL",
+            "DATABASE_URL",
+            "PG_DATABASE_URL",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::clear)
+        .collect()
+    }
 
     fn empty_pg_batch(
         experiment_id: &str,
@@ -3204,6 +3592,108 @@ mod tests {
     }
 
     #[test]
+    fn batch_evolution_window_keeps_prior_batch_genomes_for_search() {
+        let mut flank_weights = SoccerTacticalLearningWeights::default();
+        flank_weights.attack_flank_lane_weight = 1.75;
+        let mut contract_weights = SoccerTacticalLearningWeights::default();
+        contract_weights.defense_contract_delta_weight = 0.55;
+        let mut samples = std::collections::VecDeque::new();
+
+        push_evolution_search_samples(
+            &mut samples,
+            &[completed_game_with_starting_tactical_learning(
+                0,
+                flank_weights.clone(),
+                SoccerTacticalLearningSummary::default(),
+            )],
+            2,
+        );
+        push_evolution_search_samples(
+            &mut samples,
+            &[completed_game_with_starting_tactical_learning(
+                1,
+                contract_weights.clone(),
+                SoccerTacticalLearningSummary::default(),
+            )],
+            2,
+        );
+
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].policies.home.entries()[0].visits, 2);
+        assert_eq!(samples[1].policies.home.entries()[0].visits, 3);
+        let parents =
+            tactical_genome_parents_from_evolution_samples(&samples, &[(0, 3.0), (1, 4.0)], 2);
+        assert_eq!(
+            parents[0].weights.attack_flank_lane_weight,
+            flank_weights.attack_flank_lane_weight
+        );
+        assert_eq!(
+            parents[1].weights.defense_contract_delta_weight,
+            contract_weights.defense_contract_delta_weight
+        );
+
+        push_evolution_search_samples(
+            &mut samples,
+            &[completed_game_with_starting_tactical_learning(
+                2,
+                SoccerTacticalLearningWeights::default(),
+                SoccerTacticalLearningSummary::default(),
+            )],
+            2,
+        );
+
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].policies.home.entries()[0].visits, 3);
+        assert_eq!(samples[1].policies.home.entries()[0].visits, 4);
+    }
+
+    #[test]
+    fn postgres_refresh_clears_batch_evolution_sample_window() {
+        let mut flank_weights = SoccerTacticalLearningWeights::default();
+        flank_weights.attack_flank_lane_weight = 1.75;
+        let mut contract_weights = SoccerTacticalLearningWeights::default();
+        contract_weights.defense_contract_delta_weight = 0.55;
+        let mut samples = std::collections::VecDeque::new();
+        push_evolution_search_samples(
+            &mut samples,
+            &[
+                completed_game_with_starting_tactical_learning(
+                    0,
+                    flank_weights.clone(),
+                    SoccerTacticalLearningSummary::default(),
+                ),
+                completed_game_with_starting_tactical_learning(
+                    1,
+                    contract_weights.clone(),
+                    SoccerTacticalLearningSummary::default(),
+                ),
+            ],
+            8,
+        );
+
+        let cleared = clear_evolution_search_samples_after_postgres_refresh(
+            "test_postgres_refresh_evolution_samples_reset",
+            3,
+            Some("pg-v3"),
+            &mut samples,
+        );
+
+        assert_eq!(cleared, 2);
+        assert!(samples.is_empty());
+        push_evolution_search_samples(
+            &mut samples,
+            &[completed_game_with_starting_tactical_learning(
+                2,
+                SoccerTacticalLearningWeights::default(),
+                SoccerTacticalLearningSummary::default(),
+            )],
+            8,
+        );
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].policies.home.entries()[0].visits, 4);
+    }
+
+    #[test]
     fn postgres_tactical_learning_is_cloned_into_next_worker_config() {
         let mut active_weights = SoccerTacticalLearningWeights::default();
         let mut config = MatchConfig {
@@ -3252,6 +3742,219 @@ mod tests {
     }
 
     #[test]
+    fn batch_new_sims_apply_postgres_weights_before_each_worker_task() {
+        let mut active_weights = SoccerTacticalLearningWeights::default();
+        let mut config = MatchConfig {
+            tactical_learning: active_weights.clone(),
+            ..Default::default()
+        };
+        let mut submitted_weights = Vec::new();
+
+        for episode in 0..3 {
+            let mut postgres_weights = SoccerTacticalLearningWeights::default();
+            postgres_weights.attack_flank_lane_weight = 1.15 + episode as f64 * 0.09;
+            postgres_weights.defense_contract_delta_weight = 0.88 + episode as f64 * 0.06;
+            postgres_weights.formation_lp_alignment_weight = 0.24 + episode as f64 * 0.04;
+            maybe_apply_postgres_tactical_learning(
+                "test_postgres_tactical_learning_for_worker",
+                episode + 1,
+                &format!("pg-v-{episode}"),
+                episode as i32,
+                &mut config,
+                &mut active_weights,
+                Some(postgres_weights),
+            )
+            .expect("valid postgres tactical learning weights");
+
+            let mut episode_config = config.clone();
+            episode_config.seed = 4400 + episode as u32;
+            submitted_weights.push((
+                episode,
+                episode_config.tactical_learning.attack_flank_lane_weight,
+                episode_config
+                    .tactical_learning
+                    .defense_contract_delta_weight,
+                episode_config
+                    .tactical_learning
+                    .formation_lp_alignment_weight,
+            ));
+        }
+
+        assert_eq!(submitted_weights.len(), 3);
+        for (episode, attack_flank, defense_contract, lp_alignment) in submitted_weights {
+            assert!((attack_flank - (1.15 + episode as f64 * 0.09)).abs() < 1e-12);
+            assert!((defense_contract - (0.88 + episode as f64 * 0.06)).abs() < 1e-12);
+            assert!((lp_alignment - (0.24 + episode as f64 * 0.04)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn batch_new_sims_apply_postgres_evolution_options_before_search() {
+        let mut evolution_options = SoccerEvolutionOptions::default();
+        let mut submitted_options = Vec::new();
+
+        for episode in 0..3 {
+            let metadata = serde_json::json!({
+                "algorithm": "evolutionary-genetic-programming",
+                "options": {
+                    "mutationRate": 0.06 + episode as f64 * 0.02,
+                    "crossoverRate": 0.40 + episode as f64 * 0.05,
+                    "explorationScale": 0.55 + episode as f64 * 0.10,
+                    "populationSize": 8 + episode * 4,
+                    "seed": 900 + episode as u64
+                }
+            });
+
+            assert!(maybe_apply_postgres_evolution_options(
+                "test_postgres_evolution_options_for_worker",
+                episode + 1,
+                &format!("pg-v-{episode}"),
+                episode as i32,
+                &mut evolution_options,
+                Some(&metadata),
+            ));
+            submitted_options.push((episode, evolution_options));
+        }
+
+        assert_eq!(submitted_options.len(), 3);
+        for (episode, options) in submitted_options {
+            assert!((options.mutation_rate - (0.06 + episode as f64 * 0.02)).abs() < 1e-12);
+            assert!((options.crossover_rate - (0.40 + episode as f64 * 0.05)).abs() < 1e-12);
+            assert!((options.exploration_scale - (0.55 + episode as f64 * 0.10)).abs() < 1e-12);
+            assert_eq!(options.population_size, 8 + episode * 4);
+            assert_eq!(options.seed, 900 + episode as u64);
+        }
+    }
+
+    #[test]
+    fn batch_loaded_policy_evolution_option_refresh_clears_stale_search_window() {
+        let mut evolution_options = SoccerEvolutionOptions::default();
+        let mut samples = std::collections::VecDeque::new();
+        push_evolution_search_samples(
+            &mut samples,
+            &[completed_game_with_starting_tactical_learning(
+                0,
+                SoccerTacticalLearningWeights::default(),
+                SoccerTacticalLearningSummary::default(),
+            )],
+            8,
+        );
+        let metadata = serde_json::json!({
+            "algorithm": "geneticProgramming",
+            "options": {
+                "mutationRate": 0.11,
+                "crossoverRate": 0.64,
+                "explorationScale": 1.05,
+                "populationSize": 24,
+                "seed": 4217
+            }
+        });
+
+        let changed = maybe_apply_postgres_evolution_options(
+            "test_loaded_policy_evolution_options_for_worker",
+            5,
+            "pg-v-gp",
+            12,
+            &mut evolution_options,
+            Some(&metadata),
+        );
+        if changed {
+            clear_evolution_search_samples_after_postgres_refresh(
+                "test_loaded_policy_evolution_samples_reset",
+                5,
+                Some("pg-v-gp"),
+                &mut samples,
+            );
+        }
+
+        assert!(changed);
+        assert!(samples.is_empty());
+        assert_eq!(evolution_options.population_size, 24);
+        assert_eq!(evolution_options.seed, 4217);
+        assert!((evolution_options.crossover_rate - 0.64).abs() < 1e-12);
+        assert!((evolution_options.exploration_scale - 1.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn batch_new_sims_cache_refreshed_policy_and_neural_snapshot_into_worker_task() {
+        let mut policies = test_policy_with_action(-1.0, 1);
+        let mut latest_neural_network = None::<SoccerNeuralNetworkSnapshot>;
+        let refreshed_policies = test_policy_with_action(7.5, 11);
+        let refreshed_neural_network = SoccerNeuralNetworkSnapshot {
+            input_dim: 3,
+            output_dim: 2,
+            parameter_count: 8,
+            l2_norm: 0.625,
+            layers: Vec::new(),
+        };
+
+        assert_eq!(policies.home.entries()[0].visits, 1);
+        assert!(latest_neural_network.is_none());
+        policies = refreshed_policies;
+        latest_neural_network = Some(refreshed_neural_network.clone());
+        let mut policy_cache = None::<CachedTeamQPoliciesArc>;
+        let mut neural_cache = None::<CachedNeuralNetworkSnapshotArc>;
+        let episode_starting_policies = cached_team_policies_arc(&policies, &mut policy_cache);
+        let repeated_starting_policies = cached_team_policies_arc(&policies, &mut policy_cache);
+        let episode_starting_neural_network =
+            cached_neural_network_snapshot_arc(&latest_neural_network, &mut neural_cache);
+        let repeated_starting_neural_network =
+            cached_neural_network_snapshot_arc(&latest_neural_network, &mut neural_cache);
+        let task = SoccerLearningWorkerTask {
+            episode: 0,
+            config: MatchConfig::default(),
+            starting_policies: episode_starting_policies,
+            starting_policy_version_id: Some("pg-v11".to_string()),
+            starting_policy_generation: 11,
+            initial_neural_network: episode_starting_neural_network.as_ref().map(Arc::clone),
+            adversarial_moment_windows: Arc::new(Vec::new()),
+            print_progress: false,
+            neural_drain_timeout: Duration::from_millis(0),
+            retain_neural_network_in_game_artifact: false,
+        };
+
+        let entries = task.starting_policies.home.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "pass");
+        assert!((entries[0].value - 7.5).abs() < 1e-12);
+        assert_eq!(entries[0].visits, 11);
+        assert!(Arc::ptr_eq(
+            &task.starting_policies,
+            &repeated_starting_policies
+        ));
+        policies = test_policy_with_action(8.25, 11);
+        let updated_starting_policies = cached_team_policies_arc(&policies, &mut policy_cache);
+        assert!(!Arc::ptr_eq(
+            &task.starting_policies,
+            &updated_starting_policies
+        ));
+        let neural = task
+            .initial_neural_network
+            .as_ref()
+            .expect("worker neural snapshot");
+        assert!(Arc::ptr_eq(
+            neural,
+            repeated_starting_neural_network
+                .as_ref()
+                .expect("cached worker neural snapshot")
+        ));
+        assert_eq!(
+            neural.parameter_count,
+            refreshed_neural_network.parameter_count
+        );
+        assert_eq!(neural.l2_norm, refreshed_neural_network.l2_norm);
+        let mut updated_neural_network = refreshed_neural_network.clone();
+        updated_neural_network.l2_norm += 0.125;
+        latest_neural_network = Some(updated_neural_network);
+        let updated_starting_neural_network =
+            cached_neural_network_snapshot_arc(&latest_neural_network, &mut neural_cache)
+                .expect("updated cached worker neural snapshot");
+        assert!(!Arc::ptr_eq(neural, &updated_starting_neural_network));
+        assert_eq!(task.starting_policy_version_id.as_deref(), Some("pg-v11"));
+        assert_eq!(task.starting_policy_generation, 11);
+    }
+
+    #[test]
     fn tactical_learning_match_detects_formation_lp_alignment_weight() {
         let left = SoccerTacticalLearningWeights::default();
         let mut right = left.clone();
@@ -3293,7 +3996,7 @@ mod tests {
 
     #[test]
     fn default_neural_drain_timeout_keeps_worker_boundary_wait_bounded() {
-        assert_eq!(DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS, 0);
+        assert_eq!(DEFAULT_SOCCER_NEURAL_DRAIN_TIMEOUT_MS, 2);
     }
 
     #[test]
@@ -3309,6 +4012,41 @@ mod tests {
     #[test]
     fn default_postgres_async_writer_waits_briefly_to_coalesce_io() {
         assert_eq!(DEFAULT_SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS, 2);
+    }
+
+    #[test]
+    fn async_postgres_writer_missing_db_drains_policy_version_wait_counter() {
+        let _lock = SOCCER_RUN_PG_ENV_LOCK.lock().expect("lock pg env");
+        let _guards = clear_postgres_env();
+        let mut writer = AsyncPostgresCompletedRunWriter::start(1, 1, Duration::from_millis(0));
+        let sender = writer.sender.as_ref().expect("writer sender").clone();
+        sender
+            .send(PostgresCompletedRunBatch {
+                experiment_id: "experiment-a".to_string(),
+                runner_id: "runner-a".to_string(),
+                completed_run_retention_games: 0,
+                policy_version_batches: 1,
+                pending_policy_versions: Vec::new(),
+                pending_runs: Vec::new(),
+                shard_index: 0,
+                shard_count: 1,
+            })
+            .expect("send synthetic batch");
+        writer.pending_batches = 1;
+        writer.pending_policy_version_batches = 1;
+
+        let result = writer.drain_policy_versions_finished();
+
+        assert!(result
+            .expect_err("missing DB should fail")
+            .contains("could not find a database URL"));
+        assert_eq!(writer.pending_batches, 0);
+        assert_eq!(writer.pending_policy_version_batches, 0);
+        drop(sender);
+        writer.sender.take();
+        if let Some(handle) = writer.handle.take() {
+            handle.join().expect("join async postgres writer");
+        }
     }
 
     #[test]
@@ -3351,10 +4089,29 @@ mod tests {
 
         assert!(DEFAULT_SOCCER_EVOLUTION_ENABLED);
         assert!(DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES >= 1);
+        assert_eq!(
+            default_evolution_window_games(10, DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES),
+            10
+        );
+        assert_eq!(default_evolution_window_games(4, 10), 10);
+        assert_eq!(default_evolution_window_games(0, 0), 1);
         assert!(options.population_size > 1);
         assert!(options.mutation_rate > 0.0);
         assert!(options.mutation_scale > 0.0);
         assert!(options.crossover_rate > 0.0);
+    }
+
+    #[test]
+    fn postgres_policy_sources_name_evolutionary_search() {
+        let label = format!(
+            "{}-evolution",
+            soccer_learning_pg_version_label("run-a", 2, 4)
+        );
+
+        assert_eq!(SOCCER_POLICY_SOURCE_MERGE, "merge");
+        assert_eq!(SOCCER_POLICY_SOURCE_EVOLUTION, "evolution");
+        assert!(label.ends_with("-evolution"));
+        assert!(!label.ends_with("-mutation"));
     }
 
     #[test]

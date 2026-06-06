@@ -18,6 +18,8 @@ use des_engine::des::general::math_program::{
     RowSense,
 };
 
+const ENABLE_PYTHON_BRIDGES_ENV: &str = "VALIDATE_MATH_PROGRAM_ENABLE_PYTHON_BRIDGES";
+
 fn main() {
     let cases = vec![
         ("lp-row-senses", build_lp_case()),
@@ -235,6 +237,18 @@ fn external_methods_for_case(
     name: &str,
     program: &MathProgram,
 ) -> Vec<(&'static str, Option<String>)> {
+    external_methods_for_case_with_python_bridges(
+        name,
+        program,
+        validate_math_program_python_bridges_enabled(),
+    )
+}
+
+fn external_methods_for_case_with_python_bridges(
+    name: &str,
+    program: &MathProgram,
+    include_python_bridges: bool,
+) -> Vec<(&'static str, Option<String>)> {
     let continuous_nonlinear = !program.has_discrete_features()
         && (program.has_quadratic_objective()
             || program.has_quadratic_constraints()
@@ -242,28 +256,14 @@ fn external_methods_for_case(
     let mixed_integer_nonlinear = program.has_discrete_features()
         && (program.has_quadratic_constraints() || program.has_conic_constraints());
     let direct_mixed_integer_qp = name == "mixed-integer-qp";
-    let ortools_method = if program.has_discrete_features() {
-        "ortools:SCIP"
-    } else {
-        "ortools:GLOP"
-    };
     let mut external_methods = if continuous_nonlinear {
-        vec![
-            ("scipy-slsqp", Some("SLSQP".to_string())),
-            ("gurobi", Some("gurobi:default".to_string())),
-            ("cplex", Some("cplex:default".to_string())),
-            ("xpress", Some("xpress:default".to_string())),
-        ]
+        nonlinear_methods(include_python_bridges)
     } else if mixed_integer_nonlinear || direct_mixed_integer_qp {
-        vec![
-            ("gurobi", Some("gurobi:default".to_string())),
-            ("cplex", Some("cplex:default".to_string())),
-            ("xpress", Some("xpress:default".to_string())),
-        ]
+        nonlinear_methods(include_python_bridges)
     } else if program.has_discrete_features() {
-        mixed_integer_linear_methods(ortools_method)
+        mixed_integer_linear_methods(include_python_bridges)
     } else {
-        continuous_linear_methods(ortools_method)
+        continuous_linear_methods(include_python_bridges)
     };
     if program.has_discrete_features() && !mixed_integer_nonlinear && !direct_mixed_integer_qp {
         external_methods.push(("ortools-cp-sat", Some("ortools:CP-SAT".to_string())));
@@ -272,15 +272,44 @@ fn external_methods_for_case(
     external_methods
 }
 
+fn validate_math_program_python_bridges_enabled() -> bool {
+    std::env::var(ENABLE_PYTHON_BRIDGES_ENV)
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
 fn default_rust_linear_method() -> (&'static str, Option<String>) {
     ("default-rust-linear", None)
 }
 
-fn mixed_integer_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<String>)> {
-    vec![
+fn rust_quadratic_reference_method() -> (&'static str, Option<String>) {
+    ("rust-quadratic-reference", Some("rust".to_string()))
+}
+
+fn nonlinear_methods(include_python_bridges: bool) -> Vec<(&'static str, Option<String>)> {
+    let mut methods = vec![rust_quadratic_reference_method()];
+    if include_python_bridges {
+        methods.extend([
+            ("gurobi", Some("gurobi:default".to_string())),
+            ("cplex", Some("cplex:default".to_string())),
+            ("xpress", Some("xpress:default".to_string())),
+        ]);
+    }
+    methods
+}
+
+fn mixed_integer_linear_methods(
+    _include_python_bridges: bool,
+) -> Vec<(&'static str, Option<String>)> {
+    let methods = vec![
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
-        ("ortools", Some(ortools_method.to_string())),
+        ("ortools", Some("ortools:SCIP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
         ("scip-cli", Some("scip-cli:default".to_string())),
@@ -289,10 +318,11 @@ fn mixed_integer_linear_methods(ortools_method: &str) -> Vec<(&'static str, Opti
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
-    ]
+    ];
+    methods
 }
 
-fn continuous_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<String>)> {
+fn continuous_linear_methods(_include_python_bridges: bool) -> Vec<(&'static str, Option<String>)> {
     vec![
         ("highs-cli", Some("highs-cli:default".to_string())),
         ("cbc-cli", Some("cbc-cli:default".to_string())),
@@ -300,7 +330,7 @@ fn continuous_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<
         ("soplex-cli", Some("soplex-cli".to_string())),
         ("qsopt-ex-cli", Some("qsopt-ex-cli".to_string())),
         ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-        ("ortools", Some(ortools_method.to_string())),
+        ("ortools", Some("ortools:GLOP".to_string())),
         ("ortools-pdlp", Some("ortools:PDLP".to_string())),
         ("glpk", Some("glpk:default".to_string())),
         ("glpk-cli", Some("glpk-cli:default".to_string())),
@@ -311,6 +341,14 @@ fn continuous_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<
         ("lindo-cli", Some("lindo-cli".to_string())),
         default_rust_linear_method(),
     ]
+}
+
+fn mixed_integer_linear_methods_with_cp_sat_and_default() -> Vec<(&'static str, Option<String>)> {
+    let include_python_bridges = validate_math_program_python_bridges_enabled();
+    let mut methods = mixed_integer_linear_methods(include_python_bridges);
+    methods.push(("ortools-cp-sat", Some("ortools:CP-SAT".to_string())));
+    methods.push(default_rust_linear_method());
+    methods
 }
 
 #[derive(Clone, Copy)]
@@ -491,10 +529,7 @@ fn mip_quality_case_ok(name: &str, label: &str, report: &MathProgramCrossCheck) 
 
 fn external_quality_required(label: &str) -> bool {
     let base = label.strip_suffix("/des-simplex").unwrap_or(label);
-    matches!(
-        base,
-        "default-rust-linear" | "ortools-cp-sat" | "gurobi" | "cplex"
-    )
+    matches!(base, "default-rust-linear" | "gurobi" | "cplex")
 }
 
 fn quality_metadata_consistent(solution: &MathProgramSolution) -> bool {
@@ -546,21 +581,7 @@ fn run_mip_start_case() -> Result<bool, String> {
     let name = "mip-start";
     let program = build_mip_start_case();
     let start = vec![0.0, 1.0, 1.0];
-    let methods = vec![
-        ("highs-cli", Some("highs-cli:default".to_string())),
-        ("cbc-cli", Some("cbc-cli:default".to_string())),
-        ("ortools", Some("ortools:SCIP".to_string())),
-        ("glpk", Some("glpk:default".to_string())),
-        ("glpk-cli", Some("glpk-cli:default".to_string())),
-        ("scip-cli", Some("scip-cli:default".to_string())),
-        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-        ("gurobi", Some("gurobi:default".to_string())),
-        ("cplex", Some("cplex:default".to_string())),
-        ("xpress", Some("xpress:default".to_string())),
-        ("lindo-cli", Some("lindo-cli".to_string())),
-        ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        default_rust_linear_method(),
-    ];
+    let methods = mixed_integer_linear_methods_with_cp_sat_and_default();
 
     let mut ok = true;
     for (label, method) in methods {
@@ -597,21 +618,7 @@ fn run_external_mip_options_case() -> Result<bool, String> {
     let name = "external-mip-options";
     let program = build_mip_start_case();
     let node_limit = 3usize;
-    let methods = vec![
-        ("highs-cli", Some("highs-cli:default".to_string())),
-        ("cbc-cli", Some("cbc-cli:default".to_string())),
-        ("ortools", Some("ortools:SCIP".to_string())),
-        ("glpk", Some("glpk:default".to_string())),
-        ("glpk-cli", Some("glpk-cli:default".to_string())),
-        ("scip-cli", Some("scip-cli:default".to_string())),
-        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-        ("gurobi", Some("gurobi:default".to_string())),
-        ("cplex", Some("cplex:default".to_string())),
-        ("xpress", Some("xpress:default".to_string())),
-        ("lindo-cli", Some("lindo-cli".to_string())),
-        ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        default_rust_linear_method(),
-    ];
+    let methods = mixed_integer_linear_methods_with_cp_sat_and_default();
 
     let mut ok = true;
     for (label, method) in methods {
@@ -656,21 +663,7 @@ fn run_external_mip_options_case() -> Result<bool, String> {
 fn run_conflict_case() -> Result<bool, String> {
     let name = "linear-conflict";
     let program = build_conflict_case();
-    let methods = vec![
-        ("highs-cli", Some("highs-cli:default".to_string())),
-        ("cbc-cli", Some("cbc-cli:default".to_string())),
-        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-        ("ortools", Some("ortools:SCIP".to_string())),
-        ("glpk", Some("glpk:default".to_string())),
-        ("glpk-cli", Some("glpk-cli:default".to_string())),
-        ("scip-cli", Some("scip-cli:default".to_string())),
-        ("gurobi", Some("gurobi:default".to_string())),
-        ("cplex", Some("cplex:default".to_string())),
-        ("xpress", Some("xpress:default".to_string())),
-        ("lindo-cli", Some("lindo-cli".to_string())),
-        ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        default_rust_linear_method(),
-    ];
+    let methods = mixed_integer_linear_methods_with_cp_sat_and_default();
     let conflict_opts = MathProgramConflictOptions::default();
 
     let mut ok = true;
@@ -715,21 +708,7 @@ fn run_assumption_core_case() -> Result<bool, String> {
         MathProgram::bool_lit(assume_b),
         MathProgram::not_lit(assume_noise),
     ];
-    let methods = vec![
-        ("highs-cli", Some("highs-cli:default".to_string())),
-        ("cbc-cli", Some("cbc-cli:default".to_string())),
-        ("ortools", Some("ortools:SCIP".to_string())),
-        ("glpk", Some("glpk:default".to_string())),
-        ("glpk-cli", Some("glpk-cli:default".to_string())),
-        ("scip-cli", Some("scip-cli:default".to_string())),
-        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-        ("gurobi", Some("gurobi:default".to_string())),
-        ("cplex", Some("cplex:default".to_string())),
-        ("xpress", Some("xpress:default".to_string())),
-        ("lindo-cli", Some("lindo-cli".to_string())),
-        ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        default_rust_linear_method(),
-    ];
+    let methods = mixed_integer_linear_methods_with_cp_sat_and_default();
     let core_opts = MathProgramAssumptionCoreOptions::default();
 
     let mut ok = true;
@@ -760,23 +739,7 @@ fn run_assumption_core_case() -> Result<bool, String> {
 fn run_feas_relax_case() -> Result<bool, String> {
     let name = "feasibility-relaxation";
     let program = build_feas_relax_case();
-    let methods = vec![
-        ("highs-cli", Some("highs-cli:default".to_string())),
-        ("cbc-cli", Some("cbc-cli:default".to_string())),
-        ("clp-cli", Some("clp-cli".to_string())),
-        ("soplex-cli", Some("soplex-cli".to_string())),
-        ("qsopt-ex-cli", Some("qsopt-ex-cli".to_string())),
-        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-        ("ortools", Some("ortools:GLOP".to_string())),
-        ("glpk", Some("glpk:default".to_string())),
-        ("glpk-cli", Some("glpk-cli:default".to_string())),
-        ("scip-cli", Some("scip-cli:default".to_string())),
-        ("gurobi", Some("gurobi:default".to_string())),
-        ("cplex", Some("cplex:default".to_string())),
-        ("xpress", Some("xpress:default".to_string())),
-        ("lindo-cli", Some("lindo-cli".to_string())),
-        default_rust_linear_method(),
-    ];
+    let methods = continuous_linear_methods(validate_math_program_python_bridges_enabled());
     let relax_opts = MathProgramFeasRelaxOptions {
         linear_penalty: 10.0,
         bound_penalty: 1.0,
@@ -819,21 +782,7 @@ fn run_feas_relax_case() -> Result<bool, String> {
 fn run_solution_pool_case() -> Result<bool, String> {
     let name = "solution-pool";
     let program = build_solution_pool_case();
-    let methods = vec![
-        ("highs-cli", Some("highs-cli:default".to_string())),
-        ("cbc-cli", Some("cbc-cli:default".to_string())),
-        ("ortools", Some("ortools:SCIP".to_string())),
-        ("glpk", Some("glpk:default".to_string())),
-        ("glpk-cli", Some("glpk-cli:default".to_string())),
-        ("scip-cli", Some("scip-cli:default".to_string())),
-        ("lp-solve-cli", Some("lp-solve-cli".to_string())),
-        ("gurobi", Some("gurobi:default".to_string())),
-        ("cplex", Some("cplex:default".to_string())),
-        ("xpress", Some("xpress:default".to_string())),
-        ("lindo-cli", Some("lindo-cli".to_string())),
-        ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        default_rust_linear_method(),
-    ];
+    let methods = mixed_integer_linear_methods_with_cp_sat_and_default();
     let pool_opts = MathProgramSolutionPoolOptions {
         max_solutions: 3,
         ..Default::default()
@@ -2496,10 +2445,14 @@ mod tests {
     }
 
     #[test]
-    fn continuous_lp_matrix_includes_ortools_pdlp() {
+    fn continuous_lp_matrix_includes_rust_first_ortools_linear_fallbacks() {
         let lp = super::build_lp_case();
-        let methods = super::external_methods_for_case("lp-row-senses", &lp);
+        let methods =
+            super::external_methods_for_case_with_python_bridges("lp-row-senses", &lp, false);
         assert_eq!(methods.first().map(|(label, _)| *label), Some("highs-cli"));
+        assert!(methods.iter().any(
+            |(label, method)| *label == "ortools" && method.as_deref() == Some("ortools:GLOP")
+        ));
         assert!(methods
             .iter()
             .any(|(label, method)| *label == "ortools-pdlp"
@@ -2514,14 +2467,56 @@ mod tests {
     }
 
     #[test]
+    fn continuous_lp_matrix_includes_ortools_pdlp_when_python_bridges_enabled() {
+        let lp = super::build_lp_case();
+        let methods =
+            super::external_methods_for_case_with_python_bridges("lp-row-senses", &lp, true);
+        assert_eq!(methods.first().map(|(label, _)| *label), Some("highs-cli"));
+        assert!(methods.iter().any(
+            |(label, method)| *label == "ortools" && method.as_deref() == Some("ortools:GLOP")
+        ));
+        assert!(methods
+            .iter()
+            .any(|(label, method)| *label == "ortools-pdlp"
+                && method.as_deref() == Some("ortools:PDLP")));
+        assert_eq!(
+            methods
+                .last()
+                .map(|(label, method)| (*label, method.as_ref())),
+            Some(("default-rust-linear", None))
+        );
+    }
+
+    #[test]
     fn linear_external_matrices_keep_omitted_method_as_rust_default() {
         let mip = super::build_binary_mip_case();
-        let mip_methods = super::external_methods_for_case("binary-mip", &mip);
+        let mip_methods =
+            super::external_methods_for_case_with_python_bridges("binary-mip", &mip, false);
         assert_eq!(
             mip_methods.first().map(|(label, _)| *label),
             Some("highs-cli")
         );
+        assert!(mip_methods.iter().any(
+            |(label, method)| *label == "ortools" && method.as_deref() == Some("ortools:SCIP")
+        ));
         assert!(mip_methods
+            .iter()
+            .any(|(label, method)| *label == "ortools-cp-sat"
+                && method.as_deref() == Some("ortools:CP-SAT")));
+        assert_eq!(
+            mip_methods
+                .last()
+                .map(|(label, method)| (*label, method.as_ref())),
+            Some(("default-rust-linear", None))
+        );
+        assert!(!mip_methods.iter().any(|(label, _)| *label == "scipy-highs"));
+
+        let mip_with_python =
+            super::external_methods_for_case_with_python_bridges("binary-mip", &mip, true);
+        assert!(mip_with_python.iter().any(
+            |(label, method)| *label == "ortools" && method.as_deref() == Some("ortools:SCIP")
+        ));
+        assert!(mip_with_python
             .iter()
             .any(|(label, _)| *label == "ortools-cp-sat"));
         let default_rust_position = mip_methods
@@ -2532,10 +2527,19 @@ mod tests {
             .iter()
             .position(|(label, _)| *label == "ortools-cp-sat")
             .expect("cp-sat oracle");
+        let opt_in_cp_sat_position = mip_with_python
+            .iter()
+            .position(|(label, _)| *label == "ortools-cp-sat")
+            .expect("cp-sat oracle");
+        let opt_in_default_position = mip_with_python
+            .iter()
+            .position(|(label, method)| *label == "default-rust-linear" && method.is_none())
+            .expect("default Rust linear oracle");
         assert!(default_rust_position > cp_sat_position);
-        assert!(!mip_methods.iter().any(|(label, _)| *label == "scipy-highs"));
+        assert!(opt_in_default_position > opt_in_cp_sat_position);
+        assert_eq!(default_rust_position, mip_methods.len() - 1);
 
-        let lp_methods = super::continuous_linear_methods("ortools:GLOP");
+        let lp_methods = super::continuous_linear_methods(false);
         assert_eq!(
             lp_methods.first().map(|(label, _)| *label),
             Some("highs-cli")
@@ -2546,19 +2550,68 @@ mod tests {
                 .map(|(label, method)| (*label, method.as_ref())),
             Some(("default-rust-linear", None))
         );
+        assert!(lp_methods.iter().any(
+            |(label, method)| *label == "ortools" && method.as_deref() == Some("ortools:GLOP")
+        ));
+        assert!(lp_methods
+            .iter()
+            .any(|(label, method)| *label == "ortools-pdlp"
+                && method.as_deref() == Some("ortools:PDLP")));
         assert!(!lp_methods.iter().any(|(label, _)| *label == "scipy-highs"));
+    }
+
+    #[test]
+    fn nonlinear_matrices_default_to_rust_reference_and_gate_api_bridges() {
+        let qp = super::build_continuous_qp_case();
+        let default_qp =
+            super::external_methods_for_case_with_python_bridges("continuous-qp", &qp, false);
+        assert_eq!(
+            default_qp
+                .first()
+                .map(|(label, method)| (*label, method.as_deref())),
+            Some(("rust-quadratic-reference", Some("rust")))
+        );
+        assert_eq!(default_qp.len(), 1);
+
+        let api_qp =
+            super::external_methods_for_case_with_python_bridges("continuous-qp", &qp, true);
+        assert!(api_qp.iter().any(
+            |(label, method)| *label == "gurobi" && method.as_deref() == Some("gurobi:default")
+        ));
+        assert!(
+            api_qp
+                .iter()
+                .any(|(label, method)| *label == "cplex"
+                    && method.as_deref() == Some("cplex:default"))
+        );
+        assert!(api_qp.iter().any(
+            |(label, method)| *label == "xpress" && method.as_deref() == Some("xpress:default")
+        ));
+
+        let miqp = super::build_mixed_integer_qp_case();
+        let default_miqp =
+            super::external_methods_for_case_with_python_bridges("mixed-integer-qp", &miqp, false);
+        assert_eq!(
+            default_miqp
+                .first()
+                .map(|(label, method)| (*label, method.as_deref())),
+            Some(("rust-quadratic-reference", Some("rust")))
+        );
+        assert_eq!(default_miqp.len(), 1);
     }
 
     #[test]
     fn non_lp_matrices_do_not_use_ortools_pdlp() {
         let mip = super::build_binary_mip_case();
-        let mip_methods = super::external_methods_for_case("binary-mip", &mip);
+        let mip_methods =
+            super::external_methods_for_case_with_python_bridges("binary-mip", &mip, true);
         assert!(!mip_methods
             .iter()
             .any(|(label, _)| *label == "ortools-pdlp"));
 
         let qp = super::build_continuous_qp_case();
-        let qp_methods = super::external_methods_for_case("continuous-qp", &qp);
+        let qp_methods =
+            super::external_methods_for_case_with_python_bridges("continuous-qp", &qp, true);
         assert!(!qp_methods.iter().any(|(label, _)| *label == "ortools-pdlp"));
     }
 }

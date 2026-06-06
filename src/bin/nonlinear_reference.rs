@@ -33,19 +33,57 @@ struct Args {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage: {program} [--solver auto|rust-fallback|fallback|scipy|nlopt] [--max-iterations N]"
+        "usage: {program} [--solver auto|rust|rust:nonlinear-reference|fallback|scipy|scipy:slsqp|nlopt|nlopt:bobyqa] [--max-iterations N]"
     )
 }
 
 fn parse_solver(value: &str) -> Result<ExternalNonlinearReferenceSolver, CliError> {
     match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
         "auto" => Ok(ExternalNonlinearReferenceSolver::Auto),
-        "rust" | "rust-fallback" | "rust-reference" => {
-            Ok(ExternalNonlinearReferenceSolver::RustFallback)
+        "rust"
+        | "rust-fallback"
+        | "rust:fallback"
+        | "rust-reference"
+        | "rust:reference"
+        | "rust-nonlinear-reference"
+        | "rust:nonlinear-reference"
+        | "rust-known-rosenbrock-minimum"
+        | "rust:known-rosenbrock-minimum"
+        | "rust-gauss-newton"
+        | "rust:gauss-newton"
+        | "rust-analytic-global-benchmark"
+        | "rust:analytic-global-benchmark"
+        | "rust-bounded-center"
+        | "rust:bounded-center"
+        | "rust-pareto-portfolio-enumeration"
+        | "rust:pareto-portfolio-enumeration" => Ok(ExternalNonlinearReferenceSolver::RustFallback),
+        "fallback" | "builtin" | "builtin-nonlinear-reference" | "builtin:nonlinear-reference" => {
+            Ok(ExternalNonlinearReferenceSolver::Fallback)
         }
-        "fallback" => Ok(ExternalNonlinearReferenceSolver::Fallback),
-        "scipy" => Ok(ExternalNonlinearReferenceSolver::Scipy),
-        "nlopt" | "nlopt-cli" => Ok(ExternalNonlinearReferenceSolver::Nlopt),
+        "scipy"
+        | "scipy-minimize"
+        | "scipy:minimize"
+        | "scipy-slsqp"
+        | "scipy:slsqp"
+        | "scipy-lbfgsb"
+        | "scipy:lbfgsb"
+        | "rust-registered-nonlinear-fallback-for-scipy"
+        | "rust:registered-nonlinear-fallback-for-scipy" => {
+            Ok(ExternalNonlinearReferenceSolver::Scipy)
+        }
+        "nlopt"
+        | "nlopt-cli"
+        | "nlopt:bobyqa"
+        | "nlopt-cobyla"
+        | "nlopt:cobyla"
+        | "nlopt-nelder-mead"
+        | "nlopt:nelder-mead"
+        | "nlopt-lbfgs"
+        | "nlopt:lbfgs"
+        | "rust-registered-nonlinear-fallback-for-nlopt"
+        | "rust:registered-nonlinear-fallback-for-nlopt" => {
+            Ok(ExternalNonlinearReferenceSolver::Nlopt)
+        }
         other => Err(CliError(format!("unknown solver {other:?}"))),
     }
 }
@@ -402,6 +440,54 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_accepts_rust_and_external_solver_labels_used_by_validation_tools() {
+        for raw in [
+            "rust:nonlinear-reference",
+            "rust:known-rosenbrock-minimum",
+            "rust:gauss-newton",
+            "rust:analytic-global-benchmark",
+            "rust:pareto-portfolio-enumeration",
+        ] {
+            assert_eq!(
+                parse_solver(raw).unwrap(),
+                ExternalNonlinearReferenceSolver::RustFallback,
+                "{raw}"
+            );
+        }
+        for raw in ["fallback", "builtin:nonlinear-reference"] {
+            assert_eq!(
+                parse_solver(raw).unwrap(),
+                ExternalNonlinearReferenceSolver::Fallback,
+                "{raw}"
+            );
+        }
+        for raw in [
+            "scipy:minimize",
+            "scipy:slsqp",
+            "ScIpY_LbFgSb",
+            "rust:registered-nonlinear-fallback-for-scipy",
+        ] {
+            assert_eq!(
+                parse_solver(raw).unwrap(),
+                ExternalNonlinearReferenceSolver::Scipy,
+                "{raw}"
+            );
+        }
+        for raw in [
+            "nlopt:bobyqa",
+            "nlopt:cobyla",
+            "NlOpT_NeLdEr_MeAd",
+            "rust:registered-nonlinear-fallback-for-nlopt",
+        ] {
+            assert_eq!(
+                parse_solver(raw).unwrap(),
+                ExternalNonlinearReferenceSolver::Nlopt,
+                "{raw}"
+            );
+        }
+    }
 
     #[test]
     fn rust_rosenbrock_cli_uses_known_minimum() {

@@ -23,7 +23,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|rust-monolithic|scipy|fallback]")
+    format!(
+        "usage: {program} [--solver auto|rust-monolithic|highs|scipy|scipy-highs|scipy-highs-ds|scipy-highs-ipm|fallback]"
+    )
 }
 
 fn next_option_value(
@@ -48,13 +50,38 @@ fn next_option_value(
 }
 
 fn parse_solver(value: &str) -> Result<ExternalStochasticLpReferenceSolver, CliError> {
-    match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
         "auto" => Ok(ExternalStochasticLpReferenceSolver::Auto),
-        "rust" | "rust-monolithic" | "monolithic" => {
-            Ok(ExternalStochasticLpReferenceSolver::RustMonolithic)
+        "rust"
+        | "native"
+        | "rust-native"
+        | "rust-monolithic"
+        | "rust-monolithic-slp"
+        | "rust:monolithic"
+        | "rust:monolithic-slp"
+        | "monolithic"
+        | "monolithic-slp"
+        | "slp"
+        | "highs"
+        | "highs-cli"
+        | "highs:cli"
+        | "rust-highs"
+        | "rust:highs" => Ok(ExternalStochasticLpReferenceSolver::RustMonolithic),
+        "scipy"
+        | "scipy-highs"
+        | "scipy:highs"
+        | "scipy-highs-ds"
+        | "scipy:highs-ds"
+        | "scipy-highs-simplex"
+        | "scipy:highs-simplex"
+        | "scipy-highs-dual-simplex"
+        | "scipy:highs-dual-simplex"
+        | "scipy-highs-ipm"
+        | "scipy:highs-ipm" => Ok(ExternalStochasticLpReferenceSolver::Scipy),
+        "fallback" | "rust-fallback" | "rust:fallback" => {
+            Ok(ExternalStochasticLpReferenceSolver::Fallback)
         }
-        "scipy" | "scipy-highs" | "highs" => Ok(ExternalStochasticLpReferenceSolver::Scipy),
-        "fallback" | "rust-fallback" => Ok(ExternalStochasticLpReferenceSolver::Fallback),
         other => Err(CliError(format!("unknown solver {other:?}"))),
     }
 }
@@ -377,5 +404,58 @@ mod tests {
 
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["solver"], "rust:monolithic-slp");
+    }
+
+    #[test]
+    fn generic_highs_alias_uses_rust_monolithic_reference() {
+        let output = run(
+            vec![
+                "stochastic_lp_reference".to_string(),
+                "--solver=highs".to_string(),
+            ],
+            SAMPLE,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(output["solver"], "rust:monolithic-slp");
+    }
+
+    #[test]
+    fn parses_stochastic_solver_aliases_used_by_rust_facades() {
+        for alias in [
+            "rust",
+            "rust_monolithic",
+            "rust:monolithic-slp",
+            "monolithic-slp",
+            "highs-cli",
+            "highs:cli",
+            "rust:highs",
+        ] {
+            assert_eq!(
+                parse_solver(alias).expect(alias),
+                ExternalStochasticLpReferenceSolver::RustMonolithic
+            );
+        }
+
+        for alias in [
+            "scipy",
+            "scipy-highs",
+            "scipy:highs",
+            "scipy_highs_ds",
+            "scipy-highs-simplex",
+            "scipy-highs-dual-simplex",
+            "scipy:highs-ipm",
+        ] {
+            assert_eq!(
+                parse_solver(alias).expect(alias),
+                ExternalStochasticLpReferenceSolver::Scipy
+            );
+        }
+
+        assert_eq!(
+            parse_solver("rust:fallback").expect("rust:fallback"),
+            ExternalStochasticLpReferenceSolver::Fallback
+        );
     }
 }

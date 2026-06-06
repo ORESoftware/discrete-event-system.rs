@@ -1,8 +1,9 @@
 //! Rust-facing bridge for external/reference minimum spanning tree solvers.
 //!
 //! The native Rust reference computes an independent Kruskal check without
-//! Python startup. Explicit OR-Tools CP-SAT validation is launched from Rust
-//! with a tiny Python adapter over an integer-scaled copy of the same graph.
+//! Python startup. Registered OR-Tools aliases default to that Rust reference;
+//! explicit force-Python switches keep the inline OR-Tools adapter available
+//! for compatibility validation.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -34,22 +35,31 @@ impl ExternalMinimumSpanningTreeReferenceSolver {
     }
 }
 
-fn registered_minimum_spanning_tree_rust_fallback_enabled() -> bool {
+fn minimum_spanning_tree_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn minimum_spanning_tree_python_reference_forced() -> bool {
     [
-        "MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK",
-        "MINIMUM_SPANNING_TREE_REFERENCE_EXTERNAL_FALLBACK",
-        "MINIMUM_SPANNING_TREE_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "MINIMUM_SPANNING_TREE_REFERENCE_FORCE_PYTHON",
+        "MINIMUM_SPANNING_TREE_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| minimum_spanning_tree_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -68,11 +78,10 @@ fn should_use_rust_minimum_spanning_tree_reference(
 fn should_use_registered_minimum_spanning_tree_fallback(
     opts: &ExternalMinimumSpanningTreeReferenceOptions,
 ) -> bool {
-    registered_minimum_spanning_tree_rust_fallback_enabled()
-        && matches!(
-            opts.solver,
-            ExternalMinimumSpanningTreeReferenceSolver::OrTools
-        )
+    matches!(
+        opts.solver,
+        ExternalMinimumSpanningTreeReferenceSolver::OrTools
+    ) && !minimum_spanning_tree_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -762,6 +771,17 @@ mod tests {
         }
     }
 
+    fn minimum_spanning_tree_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "MINIMUM_SPANNING_TREE_REFERENCE_FORCE_PYTHON",
+            "MINIMUM_SPANNING_TREE_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_sample_mst() {
         let problem = build_sample_minimum_spanning_tree_problem();
@@ -830,13 +850,14 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set(
-            "MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK",
-            "rust",
+        let _force_python_guards = minimum_spanning_tree_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-minimum-spanning-tree-alias",
         );
         let problem = build_sample_minimum_spanning_tree_problem();
 
@@ -863,13 +884,13 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn minimum_spanning_tree_force_python_keeps_ortools_bridge_available() {
         let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard =
-            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_RUST_FIRST", "true");
-        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-mst");
+        let _force_python_guard =
+            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-mst");
         let problem = build_sample_minimum_spanning_tree_problem();
 
         let solution = solve_minimum_spanning_tree_with_external_reference(
@@ -881,14 +902,12 @@ mod tests {
 
         assert_eq!(
             solution.status,
-            ExternalMinimumSpanningTreeReferenceStatus::Optimal
+            ExternalMinimumSpanningTreeReferenceStatus::Unavailable
         );
-        assert_eq!(
-            solution.solver,
-            "rust:registered-minimum-spanning-tree-fallback-for-ortools"
-        );
-        assert_eq!(solution.objective, Some(6.0));
-        assert_eq!(solution.selected_edge_ids, vec!["AB", "BC", "CD", "DE"]);
+        assert_eq!(solution.solver, ORTOOLS_MST_SOLVER);
+        assert!(solution
+            .message
+            .contains("OR-Tools minimum-spanning-tree adapter"));
     }
 
     #[test]
@@ -896,8 +915,8 @@ mod tests {
         let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard =
-            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard =
+            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = MinimumSpanningTreeProblem {
             vertices: vec!["A".to_string(), "B".to_string()],
@@ -929,8 +948,8 @@ mod tests {
         let _lock = MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _fallback_guard =
-            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_REGISTERED_FALLBACK", "0");
+        let _force_python_guard =
+            EnvVarGuard::set("MINIMUM_SPANNING_TREE_REFERENCE_FORCE_PYTHON", "1");
         let _python_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python");
         let problem = build_sample_minimum_spanning_tree_problem();
 

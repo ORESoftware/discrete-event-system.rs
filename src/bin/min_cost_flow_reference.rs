@@ -24,7 +24,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-ssp|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-ssp|rust-ssp-min-cost-flow|ortools|ortools-simple-min-cost-flow]"
+    )
 }
 
 fn parse_solver(
@@ -58,16 +60,42 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
                     "auto" => ExternalMinCostFlowReferenceSolver::Auto,
-                    "fallback" => ExternalMinCostFlowReferenceSolver::Fallback,
-                    "rust-ssp" | "rust_ssp" | "rust-exact" | "rust_exact" => {
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalMinCostFlowReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "ssp"
+                    | "rust-ssp"
+                    | "rust:ssp"
+                    | "rust-ssp-min-cost-flow"
+                    | "rust:ssp-min-cost-flow"
+                    | "ssp-min-cost-flow"
+                    | "successive-shortest-path"
+                    | "successive-shortest-augmenting-path"
+                    | "min-cost-flow-ssp"
+                    | "min-cost-flow-exact" => {
                         ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath
                     }
-                    "ortools" => ExternalMinCostFlowReferenceSolver::OrTools,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-min-cost-flow"
+                    | "ortools:min-cost-flow"
+                    | "simple-min-cost-flow"
+                    | "ortools-simple-min-cost-flow"
+                    | "ortools:simple-min-cost-flow" => ExternalMinCostFlowReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
-                            "unknown solver {value:?}\n{}",
+                            "unknown solver {normalized:?}\n{}",
                             usage(program)
                         )))
                     }
@@ -329,6 +357,60 @@ mod tests {
 
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["objective"], 21.0);
+    }
+
+    #[test]
+    fn parses_min_cost_flow_solver_aliases_used_by_validation_tools() {
+        for alias in [
+            "rust",
+            "native",
+            "rust_exact",
+            "ssp",
+            "rust:ssp",
+            "rust-ssp-min-cost-flow",
+            "rust:ssp-min-cost-flow",
+            "successive-shortest-path",
+            "successive-shortest-augmenting-path",
+            "min-cost-flow-ssp",
+            "min-cost-flow-exact",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "min_cost_flow_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalMinCostFlowReferenceSolver::RustSuccessiveShortestPath
+            );
+        }
+
+        for alias in [
+            "ortools",
+            "or-tools",
+            "google-or-tools",
+            "ortools:min-cost-flow",
+            "simple-min-cost-flow",
+            "ortools-simple-min-cost-flow",
+            "ortools:simple-min-cost-flow",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "min_cost_flow_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalMinCostFlowReferenceSolver::OrTools
+            );
+        }
+
+        assert_eq!(
+            parse_solver(
+                "min_cost_flow_reference",
+                ["--solver".to_string(), "rust:fallback".to_string()]
+            )
+            .expect("rust:fallback"),
+            ExternalMinCostFlowReferenceSolver::Fallback
+        );
     }
 
     #[test]

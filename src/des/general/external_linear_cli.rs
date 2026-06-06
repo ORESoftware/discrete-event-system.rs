@@ -5,7 +5,7 @@
 //! external binaries into the repository. Plain LP/MIP solves for the common
 //! open-source and commercial CLIs run through native Rust model writers and
 //! parser paths where practical. `scripts/linear_cli_reference.py` remains an
-//! explicit compatibility bridge for solver options or source features that do
+//! opt-in compatibility bridge for solver options or source features that do
 //! not yet have a Rust direct path.
 
 use std::collections::HashSet;
@@ -2081,7 +2081,8 @@ pub fn probe_external_linear_cli_solvers(
 
 /// Solve a raw linear-CLI JSON payload through a locally installed command-line
 /// solver. Rust direct paths are attempted first; the Python compatibility
-/// bridge is used only when no native route supports the requested shape.
+/// bridge is used only when explicitly enabled and no native route supports the
+/// requested shape.
 pub fn solve_linear_cli_json(
     kind: ExternalLinearCliKind,
     problem_json: Value,
@@ -2105,6 +2106,14 @@ pub fn solve_linear_cli_json(
     }
     if let Some(solution) = solve_rust_source_cli_json_direct(kind, &problem_json, opts, t0) {
         return solution;
+    }
+    if !external_linear_cli_python_bridge_enabled(opts) {
+        return external_cli_failure(
+            ExternalLinearCliStatus::Unavailable,
+            bridge_solver,
+            "no Rust direct external CLI route supports this model shape; set ORES_EXTERNAL_LINEAR_CLI_PYTHON_BRIDGE=1, EXTERNAL_LINEAR_CLI_PYTHON_BRIDGE=1, or pass an explicit python/script_path compatibility bridge".to_string(),
+            elapsed_ms(t0),
+        );
     }
     let stdin_json = match serde_json::to_string(&problem_json) {
         Ok(stdin_json) => stdin_json,
@@ -3643,8 +3652,8 @@ fn plain_linear_lp_model_from_cli_json(
     let c = required_f64_array(object, "c")?;
     let n = c.len();
     let sense = parse_cli_sense(object.get("sense"))?;
-    let mut le_rows = optional_f64_matrix(object, &["A_ub", "a_ub"])?;
-    let mut le_rhs = optional_f64_array(object, &["b_ub"])?;
+    let mut le_rows = optional_f64_matrix(object, &["A_ub", "a_ub", "A", "a"])?;
+    let mut le_rhs = optional_f64_array(object, &["b_ub", "b"])?;
     let mut eq_rows = optional_f64_matrix(object, &["A_eq", "a_eq"])?;
     let mut eq_rhs = optional_f64_array(object, &["b_eq"])?;
     append_linear_constraint_rows(
@@ -3700,10 +3709,10 @@ fn plain_linear_mip_model_from_cli_json(
     let c = required_f64_array(object, "c")?;
     let n = c.len();
     let sense = parse_cli_sense(object.get("sense"))?;
-    let mut le_rows = optional_f64_matrix(object, &["a"])?;
-    let mut le_rhs = optional_f64_array(object, &["b"])?;
-    let mut eq_rows = Vec::new();
-    let mut eq_rhs = Vec::new();
+    let mut le_rows = optional_f64_matrix(object, &["a", "A", "A_ub", "a_ub"])?;
+    let mut le_rhs = optional_f64_array(object, &["b", "b_ub"])?;
+    let mut eq_rows = optional_f64_matrix(object, &["A_eq", "a_eq"])?;
+    let mut eq_rhs = optional_f64_array(object, &["b_eq"])?;
     append_linear_constraint_rows(
         object.get("linear_constraints"),
         n,
@@ -3712,10 +3721,10 @@ fn plain_linear_mip_model_from_cli_json(
         &mut eq_rows,
         &mut eq_rhs,
     )?;
-    append_lazy_constraint_rows(object.get("lazy_constraints"), n, &mut le_rows, &mut le_rhs)?;
+    append_lazy_constraint_rows(lazy_constraints_value(object), n, &mut le_rows, &mut le_rhs)?;
     let lbs = optional_bound_array(object.get("lb"), n, Some(0.0), true, "lb")?;
     let ubs = optional_bound_array(object.get("ub"), n, None, false, "ub")?;
-    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let integer_vars = optional_bool_array(integer_vars_value(object), n, false, "integer_vars")?;
     validate_plain_linear_model_dimensions(n, &le_rows, &le_rhs, &eq_rows, &eq_rhs, &lbs, &ubs)?;
     Ok(Some(PlainLinearCliModel {
         sense,
@@ -3773,12 +3782,12 @@ fn quadratic_objective_ipmip_problem_from_cli_json(
     let a = optional_f64_matrix(object, &["a"])?;
     let b = optional_f64_array(object, &["b"])?;
     validate_source_base_rows(n, &a, &b)?;
-    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let integer_vars = optional_bool_array(integer_vars_value(object), n, false, "integer_vars")?;
     let lb = optional_plain_f64_array_exact(object.get("lb"), n, "lb")?;
     let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
     let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
     let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
-    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+    let lazy_constraints = parse_branch_or_cut_constraints(lazy_constraints_value(object), n)?;
     let mut quadratic_objective = Vec::with_capacity(terms_json.len());
     for (idx, term_json) in terms_json.iter().enumerate() {
         let path = format!("quadratic_objective[{idx}]");
@@ -3847,11 +3856,11 @@ fn multi_objective_ipmip_problem_from_cli_json(
     let a = optional_f64_matrix(object, &["a"])?;
     let b = optional_f64_array(object, &["b"])?;
     validate_source_base_rows(n, &a, &b)?;
-    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let integer_vars = optional_bool_array(integer_vars_value(object), n, false, "integer_vars")?;
     let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
     let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
     let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
-    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+    let lazy_constraints = parse_branch_or_cut_constraints(lazy_constraints_value(object), n)?;
     let mut objectives = Vec::with_capacity(objectives_json.len());
     for (idx, objective_json) in objectives_json.iter().enumerate() {
         let path = format!("multi_objectives[{idx}]");
@@ -3914,12 +3923,12 @@ fn source_ipmip_problem_from_cli_json(
     let a = optional_f64_matrix(object, &["a"])?;
     let b = optional_f64_array(object, &["b"])?;
     validate_source_base_rows(n, &a, &b)?;
-    let integer_vars = optional_bool_array(object.get("integer_vars"), n, false, "integer_vars")?;
+    let integer_vars = optional_bool_array(integer_vars_value(object), n, false, "integer_vars")?;
     let lb = optional_plain_f64_array_exact(object.get("lb"), n, "lb")?;
     let ub = optional_plain_f64_array_exact(object.get("ub"), n, "ub")?;
     let var_names = optional_string_array_exact(object.get("var_names"), n, "var_names")?;
     let con_names = optional_string_array_exact(object.get("con_names"), a.len(), "con_names")?;
-    let lazy_constraints = parse_branch_or_cut_constraints(object.get("lazy_constraints"), n)?;
+    let lazy_constraints = parse_branch_or_cut_constraints(lazy_constraints_value(object), n)?;
 
     Ok(Some(SourceIPMIPProblem {
         base: IPMIPProblem {
@@ -4141,6 +4150,18 @@ fn parse_constraint_kind(value: Option<&Value>, name: &str) -> Result<Constraint
         "lazy" => Ok(ConstraintKind::Lazy),
         other => Err(format!("{name} has unknown constraint kind '{other}'")),
     }
+}
+
+fn lazy_constraints_value(object: &serde_json::Map<String, Value>) -> Option<&Value> {
+    object
+        .get("lazy_constraints")
+        .or_else(|| object.get("lazyConstraints"))
+}
+
+fn integer_vars_value(object: &serde_json::Map<String, Value>) -> Option<&Value> {
+    object
+        .get("integer_vars")
+        .or_else(|| object.get("integerVars"))
 }
 
 fn parse_branch_or_cut_constraints(
@@ -11962,6 +11983,30 @@ fn resolve_python(opts: &ExternalLinearCliOptions) -> String {
         .unwrap_or_else(|| "python3".to_string())
 }
 
+fn external_linear_cli_python_bridge_enabled(opts: &ExternalLinearCliOptions) -> bool {
+    opts.python.is_some()
+        || opts.script_path.is_some()
+        || [
+            "ORES_EXTERNAL_LINEAR_CLI_PYTHON_BRIDGE",
+            "EXTERNAL_LINEAR_CLI_PYTHON_BRIDGE",
+            "LINEAR_CLI_REFERENCE_PYTHON_BRIDGE",
+        ]
+        .into_iter()
+        .any(|name| {
+            std::env::var(name)
+                .ok()
+                .is_some_and(|value| external_linear_cli_python_bridge_value_enabled(&value))
+        })
+}
+
+fn external_linear_cli_python_bridge_value_enabled(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true" | "yes" | "y" | "on" | "python" | "python-bridge" | "compat" | "compatibility"
+    )
+}
+
 fn solver_command_env_var(solver: ExternalLinearCliSolver) -> String {
     format!("ORES_{}_BIN", solver.as_str().to_ascii_uppercase())
 }
@@ -12951,6 +12996,63 @@ mod tests {
     }
 
     #[test]
+    fn linear_cli_python_bridge_env_values_are_explicit_opt_in() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "python",
+            "python_bridge",
+            "compatibility",
+        ] {
+            assert!(
+                super::external_linear_cli_python_bridge_value_enabled(value),
+                "{value:?} should enable the compatibility bridge"
+            );
+        }
+
+        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+            assert!(
+                !super::external_linear_cli_python_bridge_value_enabled(value),
+                "{value:?} should keep the Rust direct path strict"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_linear_cli_json_does_not_use_python_by_default() {
+        let solution = super::solve_linear_cli_json(
+            ExternalLinearCliKind::Mip,
+            source_ipmip_problem_to_cli_json(&build_source_feature_mix_ip()),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Highs,
+                command_path: Some(PathBuf::from("/definitely/not-a-highs-binary")),
+                time_limit_secs: Some(2.0),
+                branch_priorities: Some(vec![1; build_source_feature_mix_ip().base.c.len()]),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(solution.status, ExternalLinearCliStatus::Unavailable);
+        assert_eq!(solution.solver, "highs:cli");
+        assert!(
+            solution
+                .message
+                .contains("no Rust direct external CLI route"),
+            "{}",
+            solution.message
+        );
+        assert!(
+            solution
+                .message
+                .contains("ORES_EXTERNAL_LINEAR_CLI_PYTHON_BRIDGE"),
+            "{}",
+            solution.message
+        );
+    }
+
+    #[test]
     fn ipmip_payload_uses_plain_mip_shape() {
         let p = IPMIPProblem {
             sense: Sense::Max,
@@ -13315,6 +13417,116 @@ mod tests {
         assert!(mps_text.contains("    x0        c1        1\n"));
         assert!(mps_text.contains("    x1        c1        1\n"));
         assert!(mps_text.contains("    RHS1      c1        1\n"));
+    }
+
+    #[test]
+    fn plain_mip_parser_accepts_camel_case_lazy_constraints() {
+        let payload = serde_json::json!({
+            "sense": "max",
+            "c": [3.0, 2.0],
+            "integer_vars": [true, true],
+            "lb": [0.0, 0.0],
+            "ub": [4.0, 4.0],
+            "lazyConstraints": [
+                {"coefs": [1.0, 1.0], "rhs": 4.0}
+            ]
+        });
+
+        let model = super::plain_linear_model_from_cli_json(ExternalLinearCliKind::Mip, &payload)
+            .expect("parse")
+            .expect("plain MIP");
+
+        assert_eq!(model.le_rows, vec![vec![1.0, 1.0]]);
+        assert_eq!(model.le_rhs, vec![4.0]);
+        assert_eq!(model.integer_vars, vec![true, true]);
+    }
+
+    #[test]
+    fn plain_mip_parser_accepts_dense_ub_and_eq_aliases() {
+        let payload = serde_json::json!({
+            "sense": "max",
+            "c": [3.0, 2.0],
+            "A_ub": [[1.0, 0.0]],
+            "b_ub": [4.0],
+            "A_eq": [[1.0, 1.0]],
+            "b_eq": [4.0],
+            "integerVars": [true, true],
+            "lb": [0.0, 0.0],
+            "ub": [4.0, 4.0]
+        });
+
+        let model = super::plain_linear_model_from_cli_json(ExternalLinearCliKind::Mip, &payload)
+            .expect("parse")
+            .expect("plain MIP");
+
+        assert_eq!(model.le_rows, vec![vec![1.0, 0.0]]);
+        assert_eq!(model.le_rhs, vec![4.0]);
+        assert_eq!(model.eq_rows, vec![vec![1.0, 1.0]]);
+        assert_eq!(model.eq_rhs, vec![4.0]);
+        assert_eq!(model.integer_vars, vec![true, true]);
+    }
+
+    #[test]
+    fn plain_lp_parser_accepts_dense_a_b_aliases() {
+        let payload = serde_json::json!({
+            "sense": "max",
+            "c": [3.0, 2.0],
+            "A": [[1.0, 1.0]],
+            "b": [4.0],
+            "A_eq": [[1.0, -1.0]],
+            "b_eq": [0.0],
+            "lb": [0.0, 0.0],
+            "ub": [4.0, 4.0]
+        });
+
+        let model = super::plain_linear_model_from_cli_json(ExternalLinearCliKind::Lp, &payload)
+            .expect("parse")
+            .expect("plain LP");
+
+        assert_eq!(model.le_rows, vec![vec![1.0, 1.0]]);
+        assert_eq!(model.le_rhs, vec![4.0]);
+        assert_eq!(model.eq_rows, vec![vec![1.0, -1.0]]);
+        assert_eq!(model.eq_rhs, vec![0.0]);
+        assert_eq!(model.integer_vars, vec![false, false]);
+    }
+
+    #[test]
+    fn source_mip_parser_preserves_camel_case_lazy_constraint_kind() {
+        let payload = serde_json::json!({
+            "sense": "max",
+            "c": [3.0, 2.0],
+            "integer_vars": [true, true],
+            "lb": [0.0, 0.0],
+            "ub": [4.0, 4.0],
+            "indicators": [
+                {
+                    "binary_var": 0,
+                    "active_value": true,
+                    "coefs": [0.0, 1.0],
+                    "rhs": 0.0,
+                    "sense": "le"
+                }
+            ],
+            "lazyConstraints": [
+                {
+                    "coefs": [1.0, 1.0],
+                    "rhs": 4.0,
+                    "name": "source-cut",
+                    "kind": "cut"
+                }
+            ]
+        });
+
+        let problem = super::source_ipmip_problem_from_cli_json(&payload)
+            .expect("parse")
+            .expect("source MIP");
+        let constraints = problem.base.lazy_constraints.expect("lazy constraints");
+
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].coefs, vec![1.0, 1.0]);
+        assert_eq!(constraints[0].rhs, 4.0);
+        assert_eq!(constraints[0].name, "source-cut");
+        assert_eq!(constraints[0].kind, ConstraintKind::Cut);
     }
 
     #[test]

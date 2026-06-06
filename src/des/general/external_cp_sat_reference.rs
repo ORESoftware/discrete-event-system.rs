@@ -2,10 +2,11 @@
 //!
 //! The native Rust fallback accepts the crate's compact CP-SAT JSON model and
 //! enumerates small finite-domain validation models without a Python dependency.
-//! `scripts/cp_sat_reference.py` remains available for OR-Tools CP-SAT, while
-//! the legacy `python-enumeration` solver id is retained as a compatibility
-//! alias for native Rust exact enumeration. Broader CP ecosystems such as Choco,
-//! JaCoP, CPMpy, Conjure, clingo, SAT4J, and Open-WBO use the
+//! Registered OR-Tools CP-SAT aliases default to that Rust reference;
+//! `scripts/cp_sat_reference.py` remains available through explicit
+//! force-Python switches, while the legacy `python-enumeration` solver id is
+//! retained as a compatibility alias for native Rust exact enumeration. Broader
+//! CP ecosystems such as Choco, JaCoP, CPMpy, Conjure, clingo, SAT4J, and Open-WBO use the
 //! `optimization_ecosystem_reference.py` smoke-model contract instead; this
 //! module exposes both paths without pretending they share one model format.
 
@@ -111,7 +112,7 @@ impl ExternalCpSatReferenceSolver {
             ExternalCpSatReferenceSolver::OrToolsCpSat => "Google OR-Tools CP-SAT",
             ExternalCpSatReferenceSolver::RustEnumeration => "Rust exact CP enumeration",
             ExternalCpSatReferenceSolver::PythonEnumeration => {
-                "Rust exact CP enumeration (legacy Python alias)"
+                "Rust exact CP enumeration (legacy alias)"
             }
             ExternalCpSatReferenceSolver::ChocoSolver => "Choco Solver",
             ExternalCpSatReferenceSolver::JaCoP => "JaCoP",
@@ -137,7 +138,7 @@ impl ExternalCpSatReferenceSolver {
             ExternalCpSatReferenceSolver::OrToolsCpSat => ExternalCpSatReferenceFamily::CpSatScript,
             ExternalCpSatReferenceSolver::RustEnumeration => ExternalCpSatReferenceFamily::Fallback,
             ExternalCpSatReferenceSolver::PythonEnumeration => {
-                ExternalCpSatReferenceFamily::PythonBridge
+                ExternalCpSatReferenceFamily::RustCompatibilityAlias
             }
             ExternalCpSatReferenceSolver::ChocoSolver
             | ExternalCpSatReferenceSolver::JaCoP
@@ -239,29 +240,41 @@ impl ExternalCpSatReferenceSolver {
     }
 }
 
-fn registered_cp_sat_rust_fallback_enabled() -> bool {
+fn cp_sat_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "ortools"
+            | "ortools-cp-sat"
+            | "external"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn cp_sat_python_reference_forced() -> bool {
     [
-        "CP_SAT_REFERENCE_REGISTERED_FALLBACK",
-        "CP_SAT_REFERENCE_EXTERNAL_FALLBACK",
-        "CP_SAT_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "CP_SAT_REFERENCE_FORCE_PYTHON",
+        "CP_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| cp_sat_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
 
 fn should_use_registered_cp_sat_fallback(options: &ExternalCpSatReferenceOptions) -> bool {
-    registered_cp_sat_rust_fallback_enabled()
-        && matches!(options.solver, ExternalCpSatReferenceSolver::OrToolsCpSat)
+    matches!(options.solver, ExternalCpSatReferenceSolver::OrToolsCpSat)
+        && !cp_sat_python_reference_forced()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,7 +283,7 @@ pub enum ExternalCpSatReferenceFamily {
     CpSatScript,
     EcosystemReference,
     Fallback,
-    PythonBridge,
+    RustCompatibilityAlias,
 }
 
 impl ExternalCpSatReferenceFamily {
@@ -280,7 +293,7 @@ impl ExternalCpSatReferenceFamily {
             ExternalCpSatReferenceFamily::CpSatScript => "cp-sat-script",
             ExternalCpSatReferenceFamily::EcosystemReference => "ecosystem-reference",
             ExternalCpSatReferenceFamily::Fallback => "fallback",
-            ExternalCpSatReferenceFamily::PythonBridge => "python-bridge",
+            ExternalCpSatReferenceFamily::RustCompatibilityAlias => "rust-compatibility-alias",
         }
     }
 }
@@ -2482,6 +2495,17 @@ mod tests {
         }
     }
 
+    fn cp_sat_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "CP_SAT_REFERENCE_FORCE_PYTHON",
+            "CP_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     fn tiny_cp_sat_model() -> Value {
         json!({
             "variables": [
@@ -2524,16 +2548,16 @@ mod tests {
             .iter()
             .filter(|spec| spec.family == ExternalCpSatReferenceFamily::Fallback)
             .count();
-        let python_bridge = specs
+        let rust_compatibility_aliases = specs
             .iter()
-            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::PythonBridge)
+            .filter(|spec| spec.family == ExternalCpSatReferenceFamily::RustCompatibilityAlias)
             .count();
 
         assert_eq!(specs.len(), 19);
         assert_eq!(direct, 4);
         assert_eq!(ecosystem, 15);
         assert_eq!(rust_fallback, 1);
-        assert_eq!(python_bridge, 1);
+        assert_eq!(rust_compatibility_aliases, 1);
         assert!(specs.iter().any(|spec| {
             spec.solver == ExternalCpSatReferenceSolver::RustEnumeration
                 && spec.family == ExternalCpSatReferenceFamily::Fallback
@@ -2541,9 +2565,9 @@ mod tests {
         }));
         assert!(specs.iter().any(|spec| {
             spec.solver == ExternalCpSatReferenceSolver::PythonEnumeration
-                && spec.family == ExternalCpSatReferenceFamily::PythonBridge
+                && spec.family == ExternalCpSatReferenceFamily::RustCompatibilityAlias
                 && spec.supports_cp_sat_json
-                && spec.display_name.contains("Python")
+                && spec.display_name.contains("legacy alias")
         }));
         assert!(specs.iter().any(|spec| {
             spec.solver == ExternalCpSatReferenceSolver::ChocoSolver
@@ -2695,9 +2719,11 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_cp_sat_to_rust_reference_without_python() {
+    fn registered_ortools_cp_sat_alias_defaults_to_rust_reference_without_python() {
         let _lock = CP_SAT_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("CP_SAT_REFERENCE_RUST_FIRST", "rust");
+        let _force_python_guards = cp_sat_force_python_off_guards();
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-cp-sat-alias");
         let run = solve_cp_sat_json_with_external_reference(
             &tiny_cp_sat_model(),
             &ExternalCpSatReferenceOptions {
@@ -2717,6 +2743,26 @@ mod tests {
         assert!(run
             .message
             .contains("requested solver 'ortools-cp-sat' was validated with Rust fallback"));
+    }
+
+    #[test]
+    fn cp_sat_force_python_keeps_ortools_bridge_available() {
+        let _lock = CP_SAT_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guard = EnvVarGuard::set("CP_SAT_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-cp-sat");
+        let run = solve_cp_sat_json_with_external_reference(
+            &tiny_cp_sat_model(),
+            &ExternalCpSatReferenceOptions {
+                solver: ExternalCpSatReferenceSolver::OrToolsCpSat,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalCpSatReferenceStatus::Unavailable);
+        assert_eq!(run.solver, ExternalCpSatReferenceSolver::OrToolsCpSat);
+        assert_eq!(run.backend, "ortools-cp-sat");
+        assert!(run.assignment.is_empty());
     }
 
     #[test]

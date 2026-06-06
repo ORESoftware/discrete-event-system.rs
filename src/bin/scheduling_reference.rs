@@ -32,7 +32,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-exact|ortools] [--kind auto|job-shop|flow-shop]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-exact|rust:exact-job-shop|ortools|ortools:cp-sat] [--kind auto|job-shop|flow-shop]"
+    )
 }
 
 fn parse_args(
@@ -54,11 +56,39 @@ fn parse_args(
         match key.as_str() {
             "--solver" => {
                 let value = next_option_value(program, "--solver", inline_value, &mut values)?;
-                solver = match value.as_str() {
-                    "auto" => ExternalSchedulingReferenceSolver::Auto,
-                    "fallback" => ExternalSchedulingReferenceSolver::Fallback,
-                    "rust-exact" | "rust_exact" => ExternalSchedulingReferenceSolver::RustExact,
-                    "ortools" => ExternalSchedulingReferenceSolver::OrTools,
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
+                    "auto" | "default" => ExternalSchedulingReferenceSolver::Auto,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalSchedulingReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "scheduling"
+                    | "rust-scheduling"
+                    | "rust:scheduling"
+                    | "exact-job-shop"
+                    | "rust-exact-job-shop"
+                    | "rust:exact-job-shop"
+                    | "exact-flow-shop"
+                    | "rust-exact-flow-shop"
+                    | "rust:exact-flow-shop" => ExternalSchedulingReferenceSolver::RustExact,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "or-tools-cp-sat"
+                    | "ortools-cp-sat-flow-shop"
+                    | "ortools:cp-sat-flow-shop"
+                    | "or-tools-cp-sat-flow-shop"
+                    | "ortools-scheduling"
+                    | "ortools:scheduling" => ExternalSchedulingReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
                             "unknown solver {value:?}\n{}",
@@ -69,12 +99,18 @@ fn parse_args(
             }
             "--kind" => {
                 let value = next_option_value(program, "--kind", inline_value, &mut values)?;
-                kind = match value.as_str() {
-                    "auto" => SchedulingKind::Auto,
-                    "job-shop" | "job_shop" | "jobshop" => SchedulingKind::JobShop,
-                    "flow-shop" | "flow_shop" | "flowshop" | "permutation-flow-shop" => {
-                        SchedulingKind::FlowShop
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                kind = match normalized.as_str() {
+                    "auto" | "default" => SchedulingKind::Auto,
+                    "job-shop" | "jobshop" | "jssp" | "job-shop-scheduling" => {
+                        SchedulingKind::JobShop
                     }
+                    "flow-shop"
+                    | "flowshop"
+                    | "pfsp"
+                    | "permutation-flow-shop"
+                    | "permutation-flowshop"
+                    | "flow-shop-scheduling" => SchedulingKind::FlowShop,
                     _ => {
                         return Err(CliError(format!(
                             "unknown kind {value:?}\n{}",
@@ -491,6 +527,64 @@ mod tests {
         assert_eq!(output["solver"], "rust:exact-flow-shop");
         assert_eq!(output["sequence"].as_array().expect("sequence").len(), 4);
         assert_eq!(output["schedule"].as_array().expect("schedule").len(), 12);
+    }
+
+    #[test]
+    fn parses_scheduling_solver_and_kind_aliases_used_by_validation_tools() {
+        let rust_aliases = [
+            "rust",
+            "native",
+            "exact",
+            "rust:exact",
+            "rust_exact_job_shop",
+            "rust:exact-job-shop",
+            "rust:exact-flow-shop",
+        ];
+        for alias in rust_aliases {
+            let (solver, _) = parse_args(
+                "scheduling_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalSchedulingReferenceSolver::RustExact);
+        }
+
+        let ortools_aliases = [
+            "or-tools",
+            "google-ortools",
+            "ortools:cp-sat",
+            "ortools_cp_sat_flow_shop",
+            "ortools:cp-sat-flow-shop",
+        ];
+        for alias in ortools_aliases {
+            let (solver, _) = parse_args(
+                "scheduling_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalSchedulingReferenceSolver::OrTools);
+        }
+
+        let (_, job_shop) = parse_args(
+            "scheduling_reference",
+            ["--kind".to_string(), "jssp".to_string()],
+        )
+        .expect("jssp kind");
+        assert_eq!(job_shop, SchedulingKind::JobShop);
+
+        let (_, flow_shop) = parse_args(
+            "scheduling_reference",
+            ["--kind=permutation_flowshop".to_string()],
+        )
+        .expect("pfsp kind");
+        assert_eq!(flow_shop, SchedulingKind::FlowShop);
+
+        let (fallback, _) = parse_args(
+            "scheduling_reference",
+            ["--solver=rust:fallback".to_string()],
+        )
+        .expect("fallback alias");
+        assert_eq!(fallback, ExternalSchedulingReferenceSolver::Fallback);
     }
 
     #[test]

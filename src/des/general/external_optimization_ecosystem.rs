@@ -124,6 +124,7 @@ pub enum ExternalOptimizationTool {
     CplexCli,
     XpressCli,
     LindoCli,
+    NvidiaCuOpt,
     GoodLp,
     LpModeler,
     RustLinprog,
@@ -228,6 +229,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CplexCli,
             ExternalOptimizationTool::XpressCli,
             ExternalOptimizationTool::LindoCli,
+            ExternalOptimizationTool::NvidiaCuOpt,
             ExternalOptimizationTool::GoodLp,
             ExternalOptimizationTool::LpModeler,
             ExternalOptimizationTool::RustLinprog,
@@ -332,6 +334,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CplexCli => "cplex-cli",
             ExternalOptimizationTool::XpressCli => "xpress-cli",
             ExternalOptimizationTool::LindoCli => "lindo-cli",
+            ExternalOptimizationTool::NvidiaCuOpt => "nvidia-cuopt",
             ExternalOptimizationTool::GoodLp => "good-lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -436,6 +439,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CplexCli => "IBM ILOG CPLEX Optimizer CLI",
             ExternalOptimizationTool::XpressCli => "FICO Xpress Optimizer CLI",
             ExternalOptimizationTool::LindoCli => "LINDO Systems CLI",
+            ExternalOptimizationTool::NvidiaCuOpt => "NVIDIA cuOpt",
             ExternalOptimizationTool::GoodLp => "good_lp",
             ExternalOptimizationTool::LpModeler => "lp-modeler",
             ExternalOptimizationTool::RustLinprog => "rust-linprog",
@@ -539,6 +543,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
             | ExternalOptimizationTool::LindoCli
+            | ExternalOptimizationTool::NvidiaCuOpt
             | ExternalOptimizationTool::OrToolsCpSat => ExternalOptimizationEcosystem::Native,
             ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
@@ -644,6 +649,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CplexCli => "CPLEX_STUDIO_DIR",
             ExternalOptimizationTool::XpressCli => "XPRESSDIR",
             ExternalOptimizationTool::LindoCli => "LINDO_HOME",
+            ExternalOptimizationTool::NvidiaCuOpt => "NVIDIA_CUOPT_DIR",
             ExternalOptimizationTool::GoodLp => "GOOD_LP_CARGO_MANIFEST",
             ExternalOptimizationTool::LpModeler => "LP_MODELER_CARGO_MANIFEST",
             ExternalOptimizationTool::RustLinprog => "RUST_LINPROG_CARGO_MANIFEST",
@@ -750,6 +756,12 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CplexCli => &["CPLEX_CMD", "CPLEX_HOME"],
             ExternalOptimizationTool::XpressCli => &["XPRESS_CMD", "XPRESS_HOME"],
             ExternalOptimizationTool::LindoCli => &["RUNLINDO_CMD", "LINDO_CMD", "LINDOAPI_CMD"],
+            ExternalOptimizationTool::NvidiaCuOpt => &[
+                "NVIDIA_CUOPT_CMD",
+                "CUOPT_CMD",
+                "NVIDIA_CUOPT_HOME",
+                "CUOPT_HOME",
+            ],
             ExternalOptimizationTool::GoodLp => &["GOOD_LP_CARGO_MANIFEST"],
             ExternalOptimizationTool::LpModeler => &["LP_MODELER_CARGO_MANIFEST"],
             ExternalOptimizationTool::RustLinprog => &["RUST_LINPROG_CARGO_MANIFEST"],
@@ -904,6 +916,12 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::LindoCli => {
                 &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
             }
+            ExternalOptimizationTool::NvidiaCuOpt => &[
+                "NVIDIA_CUOPT_HOME",
+                "NVIDIA_CUOPT_DIR",
+                "CUOPT_HOME",
+                "CUOPT_DIR",
+            ],
             ExternalOptimizationTool::NloptRs => &["NLOPT_DIR", "NLOPT_HOME"],
             ExternalOptimizationTool::OsqpRust => &["OSQP_DIR", "OSQP_HOME"],
             ExternalOptimizationTool::GurobiRust => &["GUROBI_HOME"],
@@ -998,6 +1016,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::CplexCli => &["cplex"],
             ExternalOptimizationTool::XpressCli => &["optimizer", "xpress"],
             ExternalOptimizationTool::LindoCli => &["runlindo", "lindo", "lindoapi"],
+            ExternalOptimizationTool::NvidiaCuOpt => {
+                &["cuopt", "nvidia-cuopt-adapter", "cuopt-adapter"]
+            }
             ExternalOptimizationTool::Conjure => &["conjure"],
             ExternalOptimizationTool::Picat => &["picat"],
             ExternalOptimizationTool::Clingo => &["clingo"],
@@ -1256,9 +1277,27 @@ fn probe_java_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe 
 fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProbe {
     let t0 = Instant::now();
     let primary_env_var = tool.env_var();
-    let configured_python = configured_python_command(tool)
-        .or_else(|| python_command_from_install_dirs(tool))
-        .or_else(|| default_python_probe_command().map(|python| (python, primary_env_var, None)));
+    let configured_python =
+        configured_python_command(tool).or_else(|| python_command_from_install_dirs(tool));
+    let configured_python = if configured_python.is_some() {
+        configured_python
+    } else if external_optimization_ecosystem_python_import_probes_enabled() {
+        default_python_probe_command().map(|python| (python, primary_env_var, None))
+    } else {
+        return probe_result(
+            tool,
+            ExternalOptimizationProbeStatus::NotConfigured,
+            default_python_probe_command(),
+            primary_env_var,
+            None,
+            elapsed_ms(t0),
+            format!(
+                "{} needs an explicit Python env; set {primary_env_var}, one of {:?}, or EXTERNAL_OPTIMIZATION_PYTHON_IMPORT_PROBES=1 to probe importable Python packages",
+                tool.display_name(),
+                tool.install_dir_env_vars()
+            ),
+        );
+    };
     let Some((python, env_var, source_artifact)) = configured_python else {
         return probe_result(
             tool,
@@ -1340,8 +1379,41 @@ fn probe_python_tool(tool: ExternalOptimizationTool) -> ExternalOptimizationProb
 }
 
 fn default_python_probe_command() -> Option<PathBuf> {
-    python_probe_command_from_env(env::var_os("PYTHON_BIN"), env::var_os("PYTHON"))
-        .or_else(|| find_first_command(&["python3", "python"]))
+    python_probe_command_from_env_or_path(
+        env::var_os("PYTHON_BIN"),
+        env::var_os("PYTHON"),
+        external_optimization_ecosystem_python_import_probes_enabled(),
+    )
+}
+
+fn external_optimization_ecosystem_python_import_probes_enabled() -> bool {
+    [
+        "ORES_EXTERNAL_OPTIMIZATION_PYTHON_IMPORT_PROBES",
+        "EXTERNAL_OPTIMIZATION_PYTHON_IMPORT_PROBES",
+        "EXTERNAL_OPTIMIZATION_PROBE_PYTHON_IMPORTS",
+    ]
+    .iter()
+    .find_map(|name| env::var(name).ok())
+    .is_some_and(|value| external_optimization_ecosystem_python_import_probe_value_enabled(&value))
+}
+
+fn external_optimization_ecosystem_python_import_probe_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "1" | "true" | "yes" | "y" | "on" | "python" | "python-imports" | "imports"
+    )
+}
+
+fn python_probe_command_from_env_or_path(
+    python_bin: Option<OsString>,
+    python: Option<OsString>,
+    import_probes_enabled: bool,
+) -> Option<PathBuf> {
+    python_probe_command_from_env(python_bin, python).or_else(|| {
+        import_probes_enabled
+            .then(|| find_first_command(&["python3", "python"]))
+            .flatten()
+    })
 }
 
 fn python_probe_command_from_env(
@@ -1908,6 +1980,47 @@ mod tests {
     }
 
     #[test]
+    fn python_import_probes_are_explicit_opt_in() {
+        for value in [
+            "1",
+            "true",
+            "YES",
+            "on",
+            "python",
+            "python_imports",
+            "imports",
+        ] {
+            assert!(
+                external_optimization_ecosystem_python_import_probe_value_enabled(value),
+                "{value:?} should opt into Python import probes"
+            );
+        }
+
+        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+            assert!(
+                !external_optimization_ecosystem_python_import_probe_value_enabled(value),
+                "{value:?} should keep Python import probes disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn ambient_python_command_discovery_requires_import_probe_opt_in() {
+        assert_eq!(
+            python_probe_command_from_env_or_path(None, None, false),
+            None
+        );
+        assert_eq!(
+            python_probe_command_from_env_or_path(
+                Some(OsString::from("/tmp/python-bin")),
+                None,
+                false,
+            ),
+            Some(PathBuf::from("/tmp/python-bin"))
+        );
+    }
+
+    #[test]
     fn ecosystem_probe_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
@@ -1927,7 +2040,7 @@ mod tests {
 
     #[test]
     fn ecosystem_tool_metadata_covers_supported_languages() {
-        assert_eq!(ExternalOptimizationTool::all().len(), 99);
+        assert_eq!(ExternalOptimizationTool::all().len(), 100);
         assert_eq!(
             ExternalOptimizationTool::ChocoSolver.ecosystem(),
             ExternalOptimizationEcosystem::Java
@@ -2194,6 +2307,23 @@ mod tests {
         assert!(ExternalOptimizationTool::LindoCli
             .native_command_aliases()
             .contains(&"runlindo"));
+        assert_eq!(
+            ExternalOptimizationTool::NvidiaCuOpt.ecosystem(),
+            ExternalOptimizationEcosystem::Native
+        );
+        assert_eq!(
+            ExternalOptimizationTool::NvidiaCuOpt.env_var(),
+            "NVIDIA_CUOPT_DIR"
+        );
+        assert!(ExternalOptimizationTool::NvidiaCuOpt
+            .artifact_env_vars()
+            .contains(&"NVIDIA_CUOPT_CMD"));
+        assert!(ExternalOptimizationTool::NvidiaCuOpt
+            .install_dir_env_vars()
+            .contains(&"CUOPT_HOME"));
+        assert!(ExternalOptimizationTool::NvidiaCuOpt
+            .native_command_aliases()
+            .contains(&"nvidia-cuopt-adapter"));
         assert!(ExternalOptimizationTool::HighsRust
             .rust_dependency_names()
             .contains(&"highs-sys"));

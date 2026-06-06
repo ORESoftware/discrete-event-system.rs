@@ -135,6 +135,7 @@ pub enum ExternalOptimizationTool {
     HighsRust,
     ScipRust,
     CbcRust,
+    NvidiaCuOpt,
 }
 
 impl ExternalOptimizationTool {
@@ -239,6 +240,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::HighsRust => "highs-rust",
             ExternalOptimizationTool::ScipRust => "scip-rust",
             ExternalOptimizationTool::CbcRust => "cbc-rust",
+            ExternalOptimizationTool::NvidiaCuOpt => "nvidia-cuopt",
         }
     }
 
@@ -343,6 +345,7 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::HighsRust => "HiGHS Rust bindings",
             ExternalOptimizationTool::ScipRust => "SCIP Rust bindings",
             ExternalOptimizationTool::CbcRust => "CBC Rust bindings",
+            ExternalOptimizationTool::NvidiaCuOpt => "NVIDIA cuOpt",
         }
     }
 
@@ -429,6 +432,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
             | ExternalOptimizationTool::LindoCli
+            | ExternalOptimizationTool::NvidiaCuOpt
             | ExternalOptimizationTool::Conjure
             | ExternalOptimizationTool::Picat
             | ExternalOptimizationTool::Clingcon
@@ -503,6 +507,7 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CplexCli
             | ExternalOptimizationTool::XpressCli
             | ExternalOptimizationTool::LindoCli
+            | ExternalOptimizationTool::NvidiaCuOpt
             | ExternalOptimizationTool::GoodLp
             | ExternalOptimizationTool::LpModeler
             | ExternalOptimizationTool::RustLinprog
@@ -664,7 +669,8 @@ impl ExternalOptimizationTool {
             | ExternalOptimizationTool::CplexPython
             | ExternalOptimizationTool::XpressPython
             | ExternalOptimizationTool::MosekPython
-            | ExternalOptimizationTool::ScipyOptimize => ExternalOptimizationExactness::Numerical,
+            | ExternalOptimizationTool::ScipyOptimize
+            | ExternalOptimizationTool::NvidiaCuOpt => ExternalOptimizationExactness::Numerical,
         }
     }
 
@@ -868,6 +874,12 @@ impl ExternalOptimizationTool {
             }
             ExternalOptimizationTool::ScipRust => &["ores-scip-rust-adapter", "scip-rust-adapter"],
             ExternalOptimizationTool::CbcRust => &["ores-cbc-rust-adapter", "cbc-rust-adapter"],
+            ExternalOptimizationTool::NvidiaCuOpt => &[
+                "ores-nvidia-cuopt-adapter",
+                "nvidia-cuopt-adapter",
+                "cuopt-adapter",
+                "cuopt",
+            ],
         }
     }
 
@@ -1217,6 +1229,9 @@ impl ExternalOptimizationTool {
             ExternalOptimizationTool::HighsRust => "Rust bindings to HiGHS LP/MIP/QP",
             ExternalOptimizationTool::ScipRust => "Rust bindings to SCIP MIP/CP stack",
             ExternalOptimizationTool::CbcRust => "Rust bindings to COIN-OR CBC MIP",
+            ExternalOptimizationTool::NvidiaCuOpt => {
+                "GPU-accelerated NVIDIA solver ecosystem target for LP, MIP, QP, and routing validation adapters"
+            }
         }
     }
 }
@@ -1411,6 +1426,7 @@ pub fn external_optimization_tools() -> &'static [ExternalOptimizationTool] {
         ExternalOptimizationTool::HighsRust,
         ExternalOptimizationTool::ScipRust,
         ExternalOptimizationTool::CbcRust,
+        ExternalOptimizationTool::NvidiaCuOpt,
     ]
 }
 
@@ -1526,14 +1542,81 @@ pub struct ExternalOptimizationAdapterInvocation {
 }
 
 pub fn external_optimization_ecosystem_reference_script() -> PathBuf {
-    let root = env::var_os("REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    root.join("scripts")
+    external_optimization_ecosystem_reference_root()
+        .join("scripts")
         .join("optimization_ecosystem_reference.py")
 }
 
+fn external_optimization_ecosystem_reference_root() -> PathBuf {
+    env::var_os("REPO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn use_python_optimization_ecosystem_reference_bridge() -> bool {
+    [
+        "ORES_OPTIMIZATION_ECOSYSTEM_REFERENCE_BRIDGE",
+        "OPTIMIZATION_ECOSYSTEM_REFERENCE_BRIDGE",
+    ]
+    .into_iter()
+    .find_map(|name| env::var(name).ok())
+    .map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "python" | "py" | "script" | "python-script"
+        )
+    })
+    .unwrap_or(false)
+}
+
 pub fn external_optimization_ecosystem_reference_options(
+    tool: ExternalOptimizationTool,
+) -> ExternalOptimizationAdapterOptions {
+    if use_python_optimization_ecosystem_reference_bridge() {
+        return external_optimization_ecosystem_reference_python_options(tool);
+    }
+    let cargo = env::var_os("CARGO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cargo"));
+    ExternalOptimizationAdapterOptions {
+        tool,
+        command_path: Some(cargo),
+        working_dir: Some(external_optimization_ecosystem_reference_root()),
+        extra_args: vec![
+            "run".to_string(),
+            "--quiet".to_string(),
+            "--bin".to_string(),
+            "optimization_ecosystem_reference".to_string(),
+            "--".to_string(),
+            "--tool".to_string(),
+            tool.as_str().to_string(),
+        ],
+        ..Default::default()
+    }
+}
+
+pub fn external_optimization_adapter_options_use_rust_ecosystem_reference(
+    options: &ExternalOptimizationAdapterOptions,
+) -> bool {
+    let command_is_cargo = options.command_path.as_ref().is_some_and(|command| {
+        command
+            .file_name()
+            .map(|name| name == "cargo")
+            .unwrap_or_else(|| command.to_string_lossy().ends_with("cargo"))
+    });
+    let runs_rust_binary = options.extra_args.windows(3).any(|args| {
+        args[0] == "--bin" && args[1] == "optimization_ecosystem_reference" && args[2] == "--"
+    });
+    command_is_cargo
+        && options.working_dir.is_some()
+        && runs_rust_binary
+        && options
+            .extra_args
+            .iter()
+            .all(|arg| !arg.ends_with("optimization_ecosystem_reference.py"))
+}
+
+fn external_optimization_ecosystem_reference_python_options(
     tool: ExternalOptimizationTool,
 ) -> ExternalOptimizationAdapterOptions {
     let python = env::var_os("PYTHON_BIN")
@@ -1574,6 +1657,15 @@ pub fn run_external_optimization_ecosystem_reference(
     if let Some(run) = run_native_external_optimization_ecosystem_reference(input, tool) {
         return run;
     }
+    if !use_python_optimization_ecosystem_reference_bridge() {
+        return ExternalOptimizationAdapterRun {
+            tool,
+            status: ExternalOptimizationAdapterStatus::Ok,
+            output: Some(external_optimization_ecosystem_unavailable_output(tool)),
+            elapsed_ms: 0.0,
+            message: String::new(),
+        };
+    }
     let options = external_optimization_ecosystem_reference_options(tool);
     run_external_optimization_adapter(input, &options)
 }
@@ -1588,19 +1680,23 @@ pub fn run_external_optimization_ecosystem_reference_with_rust_builtin(
     ExternalOptimizationAdapterRun {
         tool,
         status: ExternalOptimizationAdapterStatus::Unavailable,
-        output: Some(json!({
-            "kind": "optimization-ecosystem-reference-result",
-            "tool": tool.as_str(),
-            "family": "unknown",
-            "status": "unsupported",
-            "objective": null,
-            "x": null,
-            "message": "no Rust builtin ecosystem reference for this tool/payload",
-            "backend": "builtin-rust:unavailable",
-        })),
+        output: Some(external_optimization_ecosystem_unavailable_output(tool)),
         elapsed_ms: 0.0,
         message: "no Rust builtin ecosystem reference for this tool/payload".to_string(),
     }
+}
+
+fn external_optimization_ecosystem_unavailable_output(tool: ExternalOptimizationTool) -> Value {
+    json!({
+        "kind": "optimization-ecosystem-reference-result",
+        "tool": tool.as_str(),
+        "family": "unknown",
+        "status": "unsupported",
+        "objective": null,
+        "x": null,
+        "message": "no Rust builtin ecosystem reference for this tool/payload",
+        "backend": "builtin-rust:unavailable",
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1667,6 +1763,9 @@ fn run_native_external_optimization_ecosystem_reference(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if !kind.is_empty() && !native_ecosystem_kind_is_known(&kind) {
+        return None;
+    }
     let family = native_external_optimization_ecosystem_family(tool, &kind)?;
     let result = match family {
         "constraint-programming" | "smt-omt" => {
@@ -1742,6 +1841,10 @@ fn native_ecosystem_kind_is_planning(kind: &str) -> bool {
     )
 }
 
+fn native_ecosystem_kind_is_cp_assignment(kind: &str) -> bool {
+    matches!(kind, "cp-assignment" | "ecosystem-cp-assignment")
+}
+
 fn native_ecosystem_kind_is_nonlinear(kind: &str) -> bool {
     matches!(kind, "nonlinear-program" | "ecosystem-nonlinear")
 }
@@ -1756,6 +1859,28 @@ fn native_ecosystem_kind_is_linear_lp(kind: &str) -> bool {
 
 fn native_ecosystem_kind_is_cp_job_shop(kind: &str) -> bool {
     matches!(kind, "cp-job-shop" | "ecosystem-cp-job-shop")
+}
+
+fn native_ecosystem_kind_is_linear_mip(kind: &str) -> bool {
+    kind.contains("linear-binary")
+        || kind.contains("linear-integer")
+        || kind.contains("linear-mip")
+        || kind == "mip"
+        || kind.ends_with("-mip")
+}
+
+fn native_ecosystem_kind_is_multiobjective(kind: &str) -> bool {
+    matches!(kind, "multiobjective-front" | "ecosystem-multiobjective")
+}
+
+fn native_ecosystem_kind_is_known(kind: &str) -> bool {
+    native_ecosystem_kind_is_cp_assignment(kind)
+        || native_ecosystem_kind_is_cp_job_shop(kind)
+        || native_ecosystem_kind_is_planning(kind)
+        || native_ecosystem_kind_is_multiobjective(kind)
+        || native_ecosystem_kind_is_nonlinear(kind)
+        || native_ecosystem_kind_is_linear_lp(kind)
+        || native_ecosystem_kind_is_linear_mip(kind)
 }
 
 fn native_external_optimization_ecosystem_family(
@@ -1860,6 +1985,7 @@ fn native_external_optimization_ecosystem_family(
         | ExternalOptimizationTool::LpModeler
         | ExternalOptimizationTool::RustLinprog
         | ExternalOptimizationTool::MiniLp
+        | ExternalOptimizationTool::NvidiaCuOpt
         | ExternalOptimizationTool::HighsRust
         | ExternalOptimizationTool::ScipRust
         | ExternalOptimizationTool::CbcRust => {
@@ -3427,6 +3553,12 @@ pub fn artifact_env_names(tool: ExternalOptimizationTool) -> Vec<String> {
             names.push("CBC_DIR".to_string());
             names.push("COINOR_DIR".to_string());
         }
+        ExternalOptimizationTool::NvidiaCuOpt => {
+            names.push("NVIDIA_CUOPT_CMD".to_string());
+            names.push("CUOPT_CMD".to_string());
+            names.push("NVIDIA_CUOPT_HOME".to_string());
+            names.push("CUOPT_HOME".to_string());
+        }
         _ => {}
     }
     names
@@ -3551,6 +3683,12 @@ pub fn external_optimization_command_dir_env_names(tool: ExternalOptimizationToo
         ExternalOptimizationTool::LindoCli => {
             &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
         }
+        ExternalOptimizationTool::NvidiaCuOpt => &[
+            "NVIDIA_CUOPT_HOME",
+            "NVIDIA_CUOPT_DIR",
+            "CUOPT_HOME",
+            "CUOPT_DIR",
+        ],
         ExternalOptimizationTool::Nlopt => &["NLOPT_DIR", "NLOPT_HOME"],
         ExternalOptimizationTool::OsqpRust => &["OSQP_DIR", "OSQP_HOME"],
         ExternalOptimizationTool::GurobiRust => &["GUROBI_HOME"],
@@ -4146,8 +4284,23 @@ fn probe_python_tool(opts: &ExternalOptimizationAdapterOptions) -> ExternalOptim
 }
 
 fn default_python_probe_command() -> Option<PathBuf> {
-    python_probe_command_from_env(env::var_os("PYTHON_BIN"), env::var_os("PYTHON"))
-        .or_else(|| find_first_command(&["python3", "python"]))
+    python_probe_command_from_env_or_path(
+        env::var_os("PYTHON_BIN"),
+        env::var_os("PYTHON"),
+        external_optimization_python_import_probes_enabled(),
+    )
+}
+
+fn python_probe_command_from_env_or_path(
+    python_bin: Option<OsString>,
+    python: Option<OsString>,
+    import_probes_enabled: bool,
+) -> Option<PathBuf> {
+    python_probe_command_from_env(python_bin, python).or_else(|| {
+        import_probes_enabled
+            .then(|| find_first_command(&["python3", "python"]))
+            .flatten()
+    })
 }
 
 fn python_probe_command_from_env(
@@ -5122,13 +5275,17 @@ fn numeric_vector_from_value(value: &Value) -> Option<Vec<f64>> {
 mod tests {
     use super::{
         external_optimization_python_import_probe_value_enabled, python_import_probe_code,
-        python_probe_command_from_env, wait_for_external_optimization_adapter_output,
+        python_probe_command_from_env, python_probe_command_from_env_or_path,
+        wait_for_external_optimization_adapter_output,
     };
     use crate::des::general::external_linear_cli::external_linear_cli_command;
     use crate::des::general::external_optimization_tools::{
-        adapter_env_names, artifact_env_names, external_optimization_command_dir_env_names,
+        adapter_env_names, artifact_env_names,
+        external_optimization_adapter_options_use_rust_ecosystem_reference,
+        external_optimization_command_dir_env_names,
         external_optimization_comparison_report_to_json,
         external_optimization_ecosystem_reference_options,
+        external_optimization_ecosystem_reference_python_options,
         external_optimization_normalized_result_from_value, external_optimization_tool_specs,
         external_optimization_tools, find_command_in_install_dir,
         run_external_optimization_adapter, run_external_optimization_comparison,
@@ -5147,7 +5304,7 @@ mod tests {
     #[test]
     fn registry_covers_requested_java_and_rust_ecosystems() {
         let specs = external_optimization_tool_specs();
-        assert_eq!(external_optimization_tools().len(), 99);
+        assert_eq!(external_optimization_tools().len(), 100);
         assert_eq!(
             specs
                 .iter()
@@ -5208,7 +5365,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.language == ExternalOptimizationLanguage::Native)
                 .count(),
-            44
+            45
         );
         assert!(specs.iter().any(|spec| {
             spec.tool == ExternalOptimizationTool::ChocoSolver
@@ -5418,6 +5575,16 @@ mod tests {
                 && spec.exactness == ExternalOptimizationExactness::Exact
                 && spec.adapter_command_aliases.is_empty()
         }));
+        assert!(specs.iter().any(|spec| {
+            spec.tool == ExternalOptimizationTool::NvidiaCuOpt
+                && spec.language == ExternalOptimizationLanguage::Native
+                && spec.family == ExternalOptimizationFamily::LinearMip
+                && spec.exactness == ExternalOptimizationExactness::Numerical
+                && spec
+                    .adapter_command_aliases
+                    .contains(&"nvidia-cuopt-adapter")
+                && spec.notes.contains("GPU-accelerated NVIDIA")
+        }));
         assert_eq!(
             ExternalOptimizationTool::HighsCli.linear_cli_solver(),
             Some(ExternalLinearCliSolver::Highs)
@@ -5479,6 +5646,22 @@ mod tests {
                 "{value:?} should keep Python import probes disabled"
             );
         }
+    }
+
+    #[test]
+    fn ambient_python_command_discovery_requires_import_probe_opt_in() {
+        assert_eq!(
+            python_probe_command_from_env_or_path(None, None, false),
+            None
+        );
+        assert_eq!(
+            python_probe_command_from_env_or_path(
+                Some(OsString::from("/tmp/python-bin")),
+                None,
+                false,
+            ),
+            Some(PathBuf::from("/tmp/python-bin"))
+        );
     }
 
     #[test]
@@ -5665,6 +5848,16 @@ mod tests {
             .contains(&"GUROBI_CL_CMD".to_string()));
         assert!(artifact_env_names(ExternalOptimizationTool::LindoCli)
             .contains(&"LINDOAPI_CMD".to_string()));
+        assert_eq!(
+            artifact_env_names(ExternalOptimizationTool::NvidiaCuOpt)[0],
+            "ORES_NVIDIA_CUOPT_DIR"
+        );
+        assert!(artifact_env_names(ExternalOptimizationTool::NvidiaCuOpt)
+            .contains(&"NVIDIA_CUOPT_CMD".to_string()));
+        assert!(
+            external_optimization_command_dir_env_names(ExternalOptimizationTool::NvidiaCuOpt)
+                .contains(&"CUOPT_HOME".to_string())
+        );
         assert_eq!(
             artifact_env_names(ExternalOptimizationTool::OrToolsCpSat)[0],
             "ORES_ORTOOLS_CP_SAT_DIR"
@@ -6355,6 +6548,10 @@ mod tests {
                 ExternalOptimizationTool::QsoptExCli,
                 "builtin-rust:linear-mip",
             ),
+            (
+                ExternalOptimizationTool::NvidiaCuOpt,
+                "builtin-rust:linear-mip",
+            ),
         ] {
             let run = run_external_optimization_ecosystem_reference(&linear_payload, tool);
             assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
@@ -6481,9 +6678,63 @@ mod tests {
     }
 
     #[test]
-    fn ecosystem_reference_options_point_at_checked_in_script() {
+    fn ecosystem_reference_options_default_to_rust_binary() {
         let opts =
             external_optimization_ecosystem_reference_options(ExternalOptimizationTool::Jacop);
+        assert_eq!(opts.tool, ExternalOptimizationTool::Jacop);
+        assert!(external_optimization_adapter_options_use_rust_ecosystem_reference(&opts));
+        assert!(opts.command_path.is_some());
+        assert!(opts
+            .command_path
+            .as_ref()
+            .is_some_and(|command| command.ends_with("cargo")));
+        assert_eq!(
+            opts.extra_args,
+            vec![
+                "run",
+                "--quiet",
+                "--bin",
+                "optimization_ecosystem_reference",
+                "--",
+                "--tool",
+                "jacop"
+            ]
+        );
+        assert!(opts
+            .extra_args
+            .iter()
+            .all(|arg| !arg.ends_with("optimization_ecosystem_reference.py")));
+
+        let python_opts = external_optimization_ecosystem_reference_python_options(
+            ExternalOptimizationTool::Jacop,
+        );
+        assert!(!external_optimization_adapter_options_use_rust_ecosystem_reference(&python_opts));
+    }
+
+    #[test]
+    fn ecosystem_reference_public_runner_uses_in_process_rust_for_unknown_kind() {
+        let run = run_external_optimization_ecosystem_reference(
+            &json!({"kind": "ecosystem-unavailable-smoke"}),
+            ExternalOptimizationTool::Jacop,
+        );
+
+        assert_eq!(run.status, ExternalOptimizationAdapterStatus::Ok);
+        assert_eq!(run.elapsed_ms, 0.0);
+        let output = run.output.as_ref().expect("rust adapter output");
+        assert_eq!(output["backend"], "builtin-rust:unavailable");
+        assert_eq!(output["status"], "unsupported");
+        assert_eq!(output["tool"], "jacop");
+        assert!(output["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no Rust builtin ecosystem reference"));
+    }
+
+    #[test]
+    fn ecosystem_reference_python_options_keep_checked_in_script_available() {
+        let opts = external_optimization_ecosystem_reference_python_options(
+            ExternalOptimizationTool::Jacop,
+        );
         assert_eq!(opts.tool, ExternalOptimizationTool::Jacop);
         assert!(opts.command_path.is_some());
         assert!(opts

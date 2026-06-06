@@ -105,7 +105,7 @@ impl ExternalNonlinearValidationReferenceSolver {
             | ExternalNonlinearValidationReferenceSolver::Mosek
             | ExternalNonlinearValidationReferenceSolver::Baron
             | ExternalNonlinearValidationReferenceSolver::Copt => {
-                ExternalNonlinearValidationReferenceFamily::ScipyBridge
+                ExternalNonlinearValidationReferenceFamily::RegisteredSolverLabel
             }
             ExternalNonlinearValidationReferenceSolver::Casadi
             | ExternalNonlinearValidationReferenceSolver::Nlopt
@@ -123,7 +123,7 @@ impl ExternalNonlinearValidationReferenceSolver {
             ExternalNonlinearValidationReferenceFamily::Auto => {
                 "Use the dependency-free Rust bounded grid plus pattern-search reference for small NLP validation models."
             }
-            ExternalNonlinearValidationReferenceFamily::ScipyBridge => {
+            ExternalNonlinearValidationReferenceFamily::RegisteredSolverLabel => {
                 "Registered NLP solver label validated through the deterministic Rust bounded pattern-search reference."
             }
             ExternalNonlinearValidationReferenceFamily::PackageBridge => {
@@ -149,7 +149,7 @@ impl ExternalNonlinearValidationReferenceSolver {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalNonlinearValidationReferenceFamily {
     Auto,
-    ScipyBridge,
+    RegisteredSolverLabel,
     PackageBridge,
     Fallback,
 }
@@ -158,7 +158,9 @@ impl ExternalNonlinearValidationReferenceFamily {
     pub fn as_str(self) -> &'static str {
         match self {
             ExternalNonlinearValidationReferenceFamily::Auto => "auto",
-            ExternalNonlinearValidationReferenceFamily::ScipyBridge => "scipy-bridge",
+            ExternalNonlinearValidationReferenceFamily::RegisteredSolverLabel => {
+                "registered-solver-label"
+            }
             ExternalNonlinearValidationReferenceFamily::PackageBridge => "package-bridge",
             ExternalNonlinearValidationReferenceFamily::Fallback => "fallback",
         }
@@ -933,9 +935,9 @@ mod tests {
         assert_eq!(
             specs
                 .iter()
-                .filter(
-                    |spec| spec.family == ExternalNonlinearValidationReferenceFamily::ScipyBridge
-                )
+                .filter(|spec| {
+                    spec.family == ExternalNonlinearValidationReferenceFamily::RegisteredSolverLabel
+                })
                 .count(),
             10
         );
@@ -962,7 +964,8 @@ mod tests {
         assert_eq!(items.len(), 15);
         assert!(items.iter().any(|item| {
             item.get("id").and_then(|value| value.as_str()) == Some("knitro")
-                && item.get("family").and_then(|value| value.as_str()) == Some("scipy-bridge")
+                && item.get("family").and_then(|value| value.as_str())
+                    == Some("registered-solver-label")
         }));
     }
 

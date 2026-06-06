@@ -19,7 +19,9 @@ use des_engine::des::general::soccer::{
     SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION,
 };
 use des_engine::des::soccer_learning::{
-    soccer_learning_run_score, soccer_policy_version_insert_status_after_active_head,
+    soccer_learning_run_score, soccer_neural_network_snapshot_fingerprint,
+    soccer_policy_version_insert_status_after_active_head,
+    soccer_tactical_learning_weights_fingerprint, soccer_team_q_policies_fingerprint,
     SOCCER_POLICY_STATUS_ACTIVE,
 };
 use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
@@ -67,6 +69,18 @@ struct PostgresImportSummary {
     fitness: f64,
 }
 
+#[derive(Debug)]
+struct PostgresInitialLearnedParams {
+    experiment_id: String,
+    policy_version_id: String,
+    generation: i32,
+    policy_fingerprint: Option<u64>,
+    tactical_learning_fingerprint: u64,
+    neural_network_fingerprint: Option<u64>,
+    search_metadata: Option<Value>,
+    params: SoccerSelfPlayLearnedParams,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ServerRequestChunk {
     index: usize,
@@ -75,6 +89,10 @@ struct ServerRequestChunk {
     episodes: usize,
     seed: u32,
 }
+
+const ALLOW_POSTGRES_MULTI_GAME_SERVER_CHUNKS_ENV: &str =
+    "SOCCER_SERVER_ALLOW_POSTGRES_MULTI_GAME_CHUNKS";
+const REQUIRE_FRESH_POSTGRES_WEIGHTS_ENV: &str = "SOCCER_SERVER_REQUIRE_FRESH_POSTGRES_WEIGHTS";
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message.into())
@@ -336,6 +354,23 @@ fn default_server_request_games(
     }
 }
 
+fn effective_server_request_games(
+    requested_episodes_per_request: usize,
+    postgres_database_url_present: bool,
+    postgres_resume_enabled: bool,
+    allow_postgres_multi_game_chunks: bool,
+    require_fresh_postgres_weights: bool,
+) -> usize {
+    if postgres_database_url_present
+        && postgres_resume_enabled
+        && (require_fresh_postgres_weights || !allow_postgres_multi_game_chunks)
+    {
+        requested_episodes_per_request.min(1)
+    } else {
+        requested_episodes_per_request
+    }
+}
+
 fn postgres_resume_metadata_from_payload(payload: &Value) -> Option<PostgresResumeMetadata> {
     let resume = payload.get("postgresResume")?;
     let experiment_id = resume.get("experimentId")?.as_str()?.trim();
@@ -386,6 +421,59 @@ fn server_response_fitness(artifact: &SoccerSelfPlayTrainingArtifact) -> f64 {
     }
 }
 
+fn server_import_search_metadata(
+    payload: &Value,
+    response: &ExtractedServerResponse,
+    parent_policy_version_id: Option<&str>,
+    parent_generation: i32,
+    generation: i32,
+    fitness: f64,
+) -> Value {
+    let resume = payload.get("postgresResume").cloned().unwrap_or_else(|| {
+        json!({
+            "policyVersionId": parent_policy_version_id,
+            "generation": parent_generation,
+        })
+    });
+    json!({
+        "algorithm": "server-mdp-pomdp-neural-self-play",
+        "source": "des-rs-http-training-endpoint",
+        "request": {
+            "episodes": payload.get("episodes").and_then(Value::as_u64),
+            "seed": payload.get("seed").and_then(Value::as_u64),
+            "minutes": payload.get("minutes").and_then(Value::as_f64),
+            "dtSeconds": payload.get("dtSeconds").and_then(Value::as_f64),
+            "learningIntervalTicks": payload
+                .get("learningIntervalTicks")
+                .and_then(Value::as_u64),
+            "formationLpEnabled": payload
+                .get("formationLpEnabled")
+                .and_then(Value::as_bool),
+            "importIntoSession": payload
+                .get("importIntoSession")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "initialLearnedParamsIncluded": payload.get("initialLearnedParams").is_some(),
+            "serverArtifactPath": payload.get("artifactPath").and_then(Value::as_str),
+            "serverLearnedParamsPath": payload.get("learnedParamsPath").and_then(Value::as_str),
+        },
+        "postgresResume": resume,
+        "response": {
+            "episodes": response.episodes,
+            "homeEntries": response.home_entries,
+            "awayEntries": response.away_entries,
+            "fitness": fitness,
+            "generation": generation,
+        },
+        "learningComponents": {
+            "mdpPolicyEntries": response.home_entries + response.away_entries > 0,
+            "pomdpStateKeyFeatures": true,
+            "neuralNetworkSnapshot": response.learned_params.neural_network.is_some(),
+            "tacticalLearningWeights": true,
+        }
+    })
+}
+
 fn payload_match_config(
     minutes: f64,
     period_count: usize,
@@ -415,7 +503,7 @@ fn payload_match_config(
 fn postgres_initial_learned_params(
     config: &MatchConfig,
     options: &SoccerQPolicyOptions,
-) -> Result<Option<(String, String, i32, SoccerSelfPlayLearnedParams)>, Box<dyn Error>> {
+) -> Result<Option<PostgresInitialLearnedParams>, Box<dyn Error>> {
     if !postgres_resume_enabled()? {
         return Ok(None);
     }
@@ -436,6 +524,15 @@ fn postgres_initial_learned_params(
         .tactical_learning
         .clone()
         .unwrap_or_else(|| config.tactical_learning.clone());
+    let tactical_learning_fingerprint =
+        soccer_tactical_learning_weights_fingerprint(&tactical_learning);
+    let neural_network_fingerprint = version
+        .neural_network
+        .as_ref()
+        .map(soccer_neural_network_snapshot_fingerprint);
+    let policy_fingerprint = version
+        .policy_fingerprint
+        .or_else(|| Some(soccer_team_q_policies_fingerprint(&version.policies)));
     let params = SoccerSelfPlayLearnedParams {
         version: SOCCER_SELF_PLAY_LEARNED_PARAMS_VERSION,
         config: MatchConfig {
@@ -452,12 +549,16 @@ fn postgres_initial_learned_params(
         away_target_entries: version.policies.away.target_entries(),
         neural_network: version.neural_network,
     };
-    Ok(Some((
+    Ok(Some(PostgresInitialLearnedParams {
         experiment_id,
-        version.id,
-        version.generation,
+        policy_version_id: version.id,
+        generation: version.generation,
+        policy_fingerprint,
+        tactical_learning_fingerprint,
+        neural_network_fingerprint,
+        search_metadata: version.search_metadata,
         params,
-    )))
+    }))
 }
 
 fn server_request_chunks(
@@ -719,15 +820,18 @@ fn build_payload(
         "learnedParamsPath": &args.server_learned_params_path,
         "importIntoSession": import_into_session,
     });
-    if let Some((experiment_id, policy_version_id, generation, params)) =
-        postgres_initial_learned_params(&config, &options)?
-    {
-        payload["tacticalLearning"] = serde_json::to_value(&params.tactical_learning)?;
-        payload["initialLearnedParams"] = serde_json::to_value(params)?;
+    if let Some(postgres_initial) = postgres_initial_learned_params(&config, &options)? {
+        payload["tacticalLearning"] =
+            serde_json::to_value(&postgres_initial.params.tactical_learning)?;
+        payload["initialLearnedParams"] = serde_json::to_value(&postgres_initial.params)?;
         payload["postgresResume"] = json!({
-            "experimentId": experiment_id,
-            "policyVersionId": policy_version_id,
-            "generation": generation,
+            "experimentId": postgres_initial.experiment_id,
+            "policyVersionId": postgres_initial.policy_version_id,
+            "generation": postgres_initial.generation,
+            "policyFingerprint": postgres_initial.policy_fingerprint,
+            "tacticalLearningFingerprint": postgres_initial.tactical_learning_fingerprint,
+            "neuralNetworkFingerprint": postgres_initial.neural_network_fingerprint,
+            "searchParameters": postgres_initial.search_metadata,
         });
     }
     Ok(payload)
@@ -962,6 +1066,14 @@ fn import_server_response_to_postgres(
     let version_label = postgres_import_version_label(&run_id, response.episodes);
     let policy_version_id = Uuid::new_v4().to_string();
     let fitness = server_response_fitness(&response.artifact);
+    let search_metadata = server_import_search_metadata(
+        payload,
+        response,
+        parent_policy_version_id.as_deref(),
+        parent_generation,
+        generation,
+        fitness,
+    );
 
     if insert_status != SOCCER_POLICY_STATUS_ACTIVE {
         println!(
@@ -979,13 +1091,13 @@ fn import_server_response_to_postgres(
                 .unwrap_or_else(|| "none".to_string())
         );
     }
-    store.insert_policy_version_with_id_and_neural_network(
+    store.insert_policy_version_with_id_and_neural_network_and_search_metadata(
         &policy_version_id,
         &experiment_id,
         parent_policy_version_id.as_deref(),
         generation,
         &version_label,
-        "import",
+        "server-import",
         insert_status,
         &config,
         response.learned_params.options.clone(),
@@ -993,6 +1105,7 @@ fn import_server_response_to_postgres(
         &policies,
         fitness,
         response.learned_params.neural_network.as_ref(),
+        Some(&search_metadata),
     )?;
 
     Ok(Some(PostgresImportSummary {
@@ -1057,16 +1170,37 @@ fn run() -> Result<(), Box<dyn Error>> {
     let args = parse_args()?;
     let total_episodes = env_usize("SOCCER_GAMES", 100)?;
     let base_seed = env_u32("SOCCER_SEED", 2026)?;
+    let postgres_url_present = postgres_database_url_present();
+    let postgres_resume_enabled = postgres_resume_enabled()?;
     let default_request_games = default_server_request_games(
         total_episodes,
-        postgres_database_url_present(),
-        postgres_resume_enabled()?,
+        postgres_url_present,
+        postgres_resume_enabled,
     );
-    let episodes_per_request = env_usize_alias(
+    let requested_episodes_per_request = env_usize_alias(
         "SOCCER_SERVER_REQUEST_GAMES",
         "SOCCER_SERVER_CHUNK_GAMES",
         default_request_games,
     )?;
+    let allow_postgres_multi_game_chunks =
+        env_bool(ALLOW_POSTGRES_MULTI_GAME_SERVER_CHUNKS_ENV, false)?;
+    let require_fresh_postgres_weights = env_bool(REQUIRE_FRESH_POSTGRES_WEIGHTS_ENV, true)?;
+    let episodes_per_request = effective_server_request_games(
+        requested_episodes_per_request,
+        postgres_url_present,
+        postgres_resume_enabled,
+        allow_postgres_multi_game_chunks,
+        require_fresh_postgres_weights,
+    );
+    if episodes_per_request != requested_episodes_per_request {
+        println!(
+            "server_request_games_clamped_for_postgres_refresh requested={} effective={} set {}=0 and {}=1 to allow multi-game chunks",
+            requested_episodes_per_request,
+            episodes_per_request,
+            REQUIRE_FRESH_POSTGRES_WEIGHTS_ENV,
+            ALLOW_POSTGRES_MULTI_GAME_SERVER_CHUNKS_ENV
+        );
+    }
     let chunks = server_request_chunks(total_episodes, episodes_per_request, base_seed)?;
     if chunks.len() > 1 {
         println!(
@@ -1161,6 +1295,46 @@ mod tests {
         assert_eq!(default_server_request_games(1, true, true), 1);
         assert_eq!(default_server_request_games(100, false, true), 100);
         assert_eq!(default_server_request_games(100, true, false), 100);
+    }
+
+    #[test]
+    fn effective_server_request_games_clamps_manual_override_for_postgres_resume() {
+        assert_eq!(
+            effective_server_request_games(25, true, true, false, true),
+            1
+        );
+        assert_eq!(
+            effective_server_request_games(25, true, true, true, true),
+            1
+        );
+        assert_eq!(
+            effective_server_request_games(25, true, true, false, false),
+            1
+        );
+        assert_eq!(
+            effective_server_request_games(25, true, true, true, false),
+            25
+        );
+        assert_eq!(
+            effective_server_request_games(25, false, true, false, true),
+            25
+        );
+        assert_eq!(
+            effective_server_request_games(25, true, false, false, true),
+            25
+        );
+    }
+
+    #[test]
+    fn postgres_resume_request_planner_builds_one_episode_chunks_for_fresh_weights() {
+        let episodes_per_request = effective_server_request_games(25, true, true, true, true);
+        let chunks = server_request_chunks(100, episodes_per_request, 2026).expect("chunks");
+
+        assert_eq!(episodes_per_request, 1);
+        assert_eq!(chunks.len(), 100);
+        assert!(chunks.iter().all(|chunk| chunk.episodes == 1));
+        assert_eq!(chunks.first().expect("first chunk").seed, 2026);
+        assert_eq!(chunks.last().expect("last chunk").seed, 2125);
     }
 
     #[test]
@@ -1286,5 +1460,97 @@ mod tests {
             / artifact.episodes.len() as f64;
 
         assert!((server_response_fitness(&artifact) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn server_import_search_metadata_records_resume_and_learning_shape() {
+        let artifact = SoccerSelfPlayTrainingArtifact {
+            config: MatchConfig::default(),
+            options: SoccerQPolicyOptions::default(),
+            tactical_learning: SoccerTacticalLearningWeights::default(),
+            tactical_summary: SoccerTacticalLearningSummary::default(),
+            episodes: vec![episode_summary(0, 1, 0)],
+            home_entries: Vec::new(),
+            home_target_entries: Vec::new(),
+            away_entries: Vec::new(),
+            away_target_entries: Vec::new(),
+        };
+        let learned_params = SoccerSelfPlayLearnedParams::from_training_artifact(&artifact);
+        let response = ExtractedServerResponse {
+            episodes: 1,
+            home_entries: 4,
+            away_entries: 3,
+            artifact,
+            learned_params,
+        };
+        let payload = json!({
+            "episodes": 1,
+            "seed": 2026,
+            "minutes": 0.5,
+            "dtSeconds": 0.2,
+            "learningIntervalTicks": 4,
+            "formationLpEnabled": true,
+            "artifactPath": "out/server/artifact.json",
+            "learnedParamsPath": "out/server/learned-params.json",
+            "initialLearnedParams": {},
+            "postgresResume": {
+                "experimentId": "exp-1",
+                "policyVersionId": "policy-7",
+                "generation": 12,
+                "policyFingerprint": 1234567_u64,
+                "tacticalLearningFingerprint": 7654321_u64,
+                "neuralNetworkFingerprint": null,
+                "searchParameters": {
+                    "algorithm": "evolutionary-genetic-programming-tactical-search",
+                    "options": {
+                        "mutationRate": 0.09,
+                        "populationSize": 18
+                    }
+                }
+            }
+        });
+        let metadata =
+            server_import_search_metadata(&payload, &response, Some("policy-7"), 12, 13, 0.75);
+
+        assert_eq!(
+            metadata["algorithm"],
+            json!("server-mdp-pomdp-neural-self-play")
+        );
+        assert_eq!(metadata["request"]["episodes"], json!(1));
+        assert_eq!(metadata["request"]["seed"], json!(2026));
+        assert_eq!(
+            metadata["request"]["initialLearnedParamsIncluded"],
+            json!(true)
+        );
+        assert_eq!(
+            metadata["postgresResume"]["policyVersionId"],
+            json!("policy-7")
+        );
+        assert_eq!(
+            metadata["postgresResume"]["policyFingerprint"],
+            json!(1234567_u64)
+        );
+        assert_eq!(
+            metadata["postgresResume"]["tacticalLearningFingerprint"],
+            json!(7654321_u64)
+        );
+        assert_eq!(
+            metadata["postgresResume"]["searchParameters"]["algorithm"],
+            json!("evolutionary-genetic-programming-tactical-search")
+        );
+        assert_eq!(
+            metadata["postgresResume"]["searchParameters"]["options"]["populationSize"],
+            json!(18)
+        );
+        assert_eq!(metadata["response"]["generation"], json!(13));
+        assert_eq!(metadata["response"]["fitness"], json!(0.75));
+        assert_eq!(
+            metadata["learningComponents"]["mdpPolicyEntries"],
+            json!(true)
+        );
+        assert_eq!(
+            metadata["learningComponents"]["tacticalLearningWeights"],
+            json!(true)
+        );
     }
 }

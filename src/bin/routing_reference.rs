@@ -28,7 +28,9 @@ struct RoutingInput {
 }
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-exact|rust:exact-cvrp|ortools|ortools:routing]"
+    )
 }
 
 fn parse_solver(
@@ -62,11 +64,28 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
-                    "auto" => ExternalRoutingReferenceSolver::Auto,
-                    "fallback" => ExternalRoutingReferenceSolver::Fallback,
-                    "rust-exact" | "rust_exact" => ExternalRoutingReferenceSolver::RustExact,
-                    "ortools" => ExternalRoutingReferenceSolver::OrTools,
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
+                    "auto" | "default" => ExternalRoutingReferenceSolver::Auto,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalRoutingReferenceSolver::Fallback
+                    }
+                    "rust" | "native" | "rust-native" | "exact" | "rust-exact" | "rust:exact"
+                    | "routing" | "cvrp" | "exact-cvrp" | "rust-routing" | "rust:routing"
+                    | "rust-cvrp" | "rust:cvrp" | "rust-exact-cvrp" | "rust:exact-cvrp" => {
+                        ExternalRoutingReferenceSolver::RustExact
+                    }
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-routing"
+                    | "ortools:routing"
+                    | "or-tools-routing"
+                    | "ortools-cvrp"
+                    | "ortools:cvrp"
+                    | "ortools-routing-cvrp"
+                    | "ortools:routing-cvrp" => ExternalRoutingReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
                             "unknown solver {value:?}\n{}",
@@ -326,6 +345,47 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["objective"], 0.0);
         assert_eq!(output["routes"], json!([]));
+    }
+
+    #[test]
+    fn parses_routing_solver_aliases_used_by_validation_tools() {
+        let rust_aliases = [
+            "rust",
+            "native",
+            "exact",
+            "rust:exact",
+            "rust_exact_cvrp",
+            "rust:exact-cvrp",
+            "rust:routing",
+        ];
+        for alias in rust_aliases {
+            let solver = parse_solver(
+                "routing_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalRoutingReferenceSolver::RustExact);
+        }
+
+        let ortools_aliases = [
+            "or-tools",
+            "google-ortools",
+            "ortools:routing",
+            "ortools_cvrp",
+            "ortools:routing-cvrp",
+        ];
+        for alias in ortools_aliases {
+            let solver = parse_solver(
+                "routing_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalRoutingReferenceSolver::OrTools);
+        }
+
+        let fallback = parse_solver("routing_reference", ["--solver=rust:fallback".to_string()])
+            .expect("fallback alias");
+        assert_eq!(fallback, ExternalRoutingReferenceSolver::Fallback);
     }
 
     #[test]

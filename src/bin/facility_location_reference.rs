@@ -22,7 +22,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-exact|rust:exact-facility-location|ortools|ortools:cp-sat-facility-location]"
+    )
 }
 
 fn parse_solver(
@@ -56,13 +58,41 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
-                    "auto" => ExternalFacilityLocationReferenceSolver::Auto,
-                    "fallback" => ExternalFacilityLocationReferenceSolver::Fallback,
-                    "rust-exact" | "rust_exact" => {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
+                    "auto" | "default" => ExternalFacilityLocationReferenceSolver::Auto,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalFacilityLocationReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "facility-location"
+                    | "exact-facility-location"
+                    | "rust-facility-location"
+                    | "rust:facility-location"
+                    | "rust-exact-facility-location"
+                    | "rust:exact-facility-location" => {
                         ExternalFacilityLocationReferenceSolver::RustExact
                     }
-                    "ortools" => ExternalFacilityLocationReferenceSolver::OrTools,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "or-tools-cp-sat"
+                    | "cp-sat-facility-location"
+                    | "ortools-facility-location"
+                    | "ortools:facility-location"
+                    | "ortools-cp-sat-facility-location"
+                    | "ortools:cp-sat-facility-location"
+                    | "or-tools-cp-sat-facility-location" => {
+                        ExternalFacilityLocationReferenceSolver::OrTools
+                    }
                     _ => {
                         return Err(CliError(format!(
                             "unknown solver {value:?}\n{}",
@@ -299,6 +329,49 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["openFacilities"], json!(["A"]));
         assert_eq!(output["objective"], 2.0);
+    }
+
+    #[test]
+    fn parses_facility_location_solver_aliases_used_by_validation_tools() {
+        let rust_aliases = [
+            "rust",
+            "native",
+            "exact",
+            "rust:exact",
+            "rust_exact_facility_location",
+            "rust:exact-facility-location",
+        ];
+        for alias in rust_aliases {
+            let solver = parse_solver(
+                "facility_location_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalFacilityLocationReferenceSolver::RustExact);
+        }
+
+        let ortools_aliases = [
+            "or-tools",
+            "google-ortools",
+            "ortools:cp-sat",
+            "ortools_cp_sat_facility_location",
+            "ortools:cp-sat-facility-location",
+        ];
+        for alias in ortools_aliases {
+            let solver = parse_solver(
+                "facility_location_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalFacilityLocationReferenceSolver::OrTools);
+        }
+
+        let fallback = parse_solver(
+            "facility_location_reference",
+            ["--solver=rust:fallback".to_string()],
+        )
+        .expect("fallback alias");
+        assert_eq!(fallback, ExternalFacilityLocationReferenceSolver::Fallback);
     }
 
     #[test]

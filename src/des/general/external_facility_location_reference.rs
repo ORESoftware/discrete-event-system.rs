@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference facility-location solvers.
 //!
 //! The native Rust reference computes an exact small-instance check without
-//! Python startup. Explicit OR-Tools CP-SAT validation is launched from Rust
-//! through a tiny inline Python adapter, so the checked-in Python script can
-//! remain launcher glue.
+//! Python startup. Registered OR-Tools aliases default to that Rust reference;
+//! explicit force-Python switches keep the inline OR-Tools adapter available
+//! for compatibility validation.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -35,22 +35,33 @@ impl ExternalFacilityLocationReferenceSolver {
     }
 }
 
-fn registered_facility_location_rust_fallback_enabled() -> bool {
+fn facility_location_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn facility_location_python_reference_forced() -> bool {
     [
-        "FACILITY_LOCATION_REFERENCE_REGISTERED_FALLBACK",
-        "FACILITY_LOCATION_REFERENCE_EXTERNAL_FALLBACK",
-        "FACILITY_LOCATION_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "FACILITY_LOCATION_REFERENCE_FORCE_PYTHON",
+        "FACILITY_LOCATION_REFERENCE_ORTOOLS_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
-    .find_map(|key| std::env::var(key).ok())
-    .map(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-        )
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| facility_location_reference_force_python_value(&value))
+            .unwrap_or(false)
     })
-    .unwrap_or(false)
 }
 
 fn should_use_rust_facility_location_reference(
@@ -67,11 +78,10 @@ fn should_use_rust_facility_location_reference(
 fn should_use_registered_facility_location_fallback(
     opts: &ExternalFacilityLocationReferenceOptions,
 ) -> bool {
-    registered_facility_location_rust_fallback_enabled()
-        && matches!(
-            opts.solver,
-            ExternalFacilityLocationReferenceSolver::OrTools
-        )
+    matches!(
+        opts.solver,
+        ExternalFacilityLocationReferenceSolver::OrTools
+    ) && !facility_location_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -843,6 +853,17 @@ mod tests {
         }
     }
 
+    fn facility_location_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "FACILITY_LOCATION_REFERENCE_FORCE_PYTHON",
+            "FACILITY_LOCATION_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_sample_facility_location() {
         let problem = build_sample_facility_location_problem();
@@ -908,11 +929,15 @@ mod tests {
     }
 
     #[test]
-    fn registered_ortools_alias_can_use_rust_reference_without_python() {
+    fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = FACILITY_LOCATION_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set("FACILITY_LOCATION_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = facility_location_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-facility-location-alias",
+        );
         let problem = build_sample_facility_location_problem();
 
         let solution = solve_facility_location_with_external_reference(
@@ -939,13 +964,15 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_ortools_to_rust_reference_without_python() {
+    fn facility_location_force_python_keeps_ortools_bridge_available() {
         let _lock = FACILITY_LOCATION_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("FACILITY_LOCATION_REFERENCE_RUST_FIRST", "1");
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-facility-location");
+        let _force_python_guard = EnvVarGuard::set("FACILITY_LOCATION_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-forced-facility-location",
+        );
         let problem = build_sample_facility_location_problem();
 
         let solution = solve_facility_location_with_external_reference(
@@ -957,14 +984,11 @@ mod tests {
 
         assert_eq!(
             solution.status,
-            ExternalFacilityLocationReferenceStatus::Optimal
+            ExternalFacilityLocationReferenceStatus::Unavailable
         );
-        assert_eq!(
-            solution.solver,
-            "rust:registered-facility-location-fallback-for-ortools"
-        );
-        assert_eq!(solution.open_facility_ids, vec!["North", "South"]);
-        assert_eq!(solution.objective, Some(28.0));
+        assert!(solution
+            .message
+            .contains("OR-Tools facility-location adapter"));
     }
 
     #[test]
@@ -972,6 +996,7 @@ mod tests {
         let _lock = FACILITY_LOCATION_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
+        let _force_python_guard = EnvVarGuard::set("FACILITY_LOCATION_REFERENCE_FORCE_PYTHON", "1");
         let _guard = EnvVarGuard::set(
             "PYTHON_BIN",
             "/definitely/not-python-for-facility-location-ortools",

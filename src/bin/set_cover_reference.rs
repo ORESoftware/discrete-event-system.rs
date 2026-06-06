@@ -22,7 +22,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-exact|rust-exact-set-cover|ortools|ortools-cp-sat-set-cover]"
+    )
 }
 
 fn parse_solver(
@@ -56,14 +58,36 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
                     "auto" => ExternalSetCoverReferenceSolver::Auto,
-                    "fallback" => ExternalSetCoverReferenceSolver::Fallback,
-                    "rust-exact" | "rust_exact" => ExternalSetCoverReferenceSolver::RustExact,
-                    "ortools" => ExternalSetCoverReferenceSolver::OrTools,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalSetCoverReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "rust-exact-set-cover"
+                    | "rust:exact-set-cover"
+                    | "exact-set-cover"
+                    | "set-cover-exact" => ExternalSetCoverReferenceSolver::RustExact,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-set-cover"
+                    | "ortools:set-cover"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "cp-sat-set-cover"
+                    | "ortools-cp-sat-set-cover"
+                    | "ortools:cp-sat-set-cover" => ExternalSetCoverReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
-                            "unknown solver {value:?}\n{}",
+                            "unknown solver {normalized:?}\n{}",
                             usage(program)
                         )))
                     }
@@ -238,6 +262,58 @@ mod tests {
         assert_eq!(output["solver"], "rust:exact-set-cover");
         assert_eq!(output["objective"], 7.0);
         assert_eq!(output["selectedSets"], json!(["A", "B", "D"]));
+    }
+
+    #[test]
+    fn parses_set_cover_solver_aliases_used_by_validation_tools() {
+        for alias in [
+            "rust",
+            "native",
+            "rust_exact",
+            "rust:exact",
+            "rust-exact-set-cover",
+            "rust:exact-set-cover",
+            "exact-set-cover",
+            "set-cover-exact",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "set_cover_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalSetCoverReferenceSolver::RustExact
+            );
+        }
+
+        for alias in [
+            "ortools",
+            "or-tools",
+            "google-or-tools",
+            "ortools:set-cover",
+            "ortools:cp-sat",
+            "cp-sat-set-cover",
+            "ortools-cp-sat-set-cover",
+            "ortools:cp-sat-set-cover",
+        ] {
+            assert_eq!(
+                parse_solver(
+                    "set_cover_reference",
+                    ["--solver".to_string(), alias.to_string()]
+                )
+                .expect(alias),
+                ExternalSetCoverReferenceSolver::OrTools
+            );
+        }
+
+        assert_eq!(
+            parse_solver(
+                "set_cover_reference",
+                ["--solver".to_string(), "rust:fallback".to_string()]
+            )
+            .expect("rust:fallback"),
+            ExternalSetCoverReferenceSolver::Fallback
+        );
     }
 
     #[test]

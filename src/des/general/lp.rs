@@ -3749,14 +3749,23 @@ fn rust_external_lp_cli_method(
 )> {
     let normalized = normalized_external_lp_method(method);
     match normalized.as_str() {
-        "highs" | "scipy:highs" | "highs:cli" | "highs-cli" => {
+        "highs" | "scipy-highs" | "scipy:highs" | "highs:cli" | "highs-cli" => {
             Some((ExternalLinearCliSolver::Highs, None))
         }
-        "highs-ds" | "scipy:highs-ds" | "highs-simplex" | "highs:dual-simplex" => Some((
+        "highs-ds"
+        | "highs-simplex"
+        | "highs-dual-simplex"
+        | "highs:dual-simplex"
+        | "scipy-highs-ds"
+        | "scipy-highs-simplex"
+        | "scipy-highs-dual-simplex"
+        | "scipy:highs-ds"
+        | "scipy:highs-simplex"
+        | "scipy:highs-dual-simplex" => Some((
             ExternalLinearCliSolver::Highs,
             Some(ExternalLinearCliLpAlgorithm::Simplex),
         )),
-        "highs-ipm" | "scipy:highs-ipm" | "highs:ipm" => Some((
+        "highs-ipm" | "highs:ipm" | "scipy-highs-ipm" | "scipy:highs-ipm" => Some((
             ExternalLinearCliSolver::Highs,
             Some(ExternalLinearCliLpAlgorithm::Ipm),
         )),
@@ -3794,17 +3803,29 @@ fn external_solver_label(method: &str) -> String {
         let normalized = normalized_external_lp_method(method);
         match normalized.as_str() {
             "highs" | "highs:cli" | "highs-cli" => "highs:cli".to_string(),
-            "highs-ds" | "highs-simplex" | "highs:dual-simplex" => "highs-ds:cli".to_string(),
+            "highs-ds" | "highs-simplex" | "highs-dual-simplex" | "highs:dual-simplex" => {
+                "highs-ds:cli".to_string()
+            }
             "highs-ipm" | "highs:ipm" => "highs-ipm:cli".to_string(),
-            "scipy:highs" => "scipy:highs".to_string(),
-            "scipy:highs-ds" => "scipy:highs-ds".to_string(),
-            "scipy:highs-ipm" => "scipy:highs-ipm".to_string(),
+            "scipy-highs" | "scipy:highs" => "scipy:highs".to_string(),
+            "scipy-highs-ds"
+            | "scipy-highs-simplex"
+            | "scipy-highs-dual-simplex"
+            | "scipy:highs-ds"
+            | "scipy:highs-simplex"
+            | "scipy:highs-dual-simplex" => "scipy:highs-ds".to_string(),
+            "scipy-highs-ipm" | "scipy:highs-ipm" => "scipy:highs-ipm".to_string(),
             _ => format!("{}:cli", solver.as_str()),
         }
     } else if normalized_external_lp_method(method).starts_with("scipy:") {
         normalized_external_lp_method(method)
     } else {
-        format!("scipy:{method}")
+        match normalized_external_lp_method(method).as_str() {
+            "scipy-simplex" => "scipy:simplex".to_string(),
+            "scipy-revised-simplex" => "scipy:revised-simplex".to_string(),
+            "scipy-interior-point" => "scipy:interior-point".to_string(),
+            _ => format!("scipy:{method}"),
+        }
     }
 }
 
@@ -3853,10 +3874,13 @@ fn should_use_rust_external_lp_internal_fallback(
     matches!(
         normalized_external_lp_method(method).as_str(),
         "simplex"
+            | "scipy-simplex"
             | "scipy:simplex"
             | "revised-simplex"
+            | "scipy-revised-simplex"
             | "scipy:revised-simplex"
             | "interior-point"
+            | "scipy-interior-point"
             | "scipy:interior-point"
     )
 }
@@ -3961,7 +3985,8 @@ pub struct ExternalSolverOptions {
     /// paths unless a Python executable/script override is supplied.
     pub method: Option<String>,
     /// Override the Python executable for the explicit legacy Python bridge.
-    /// Defaults to `PYTHON`, then `PYTHON_BIN`, then `"python3"`.
+    /// When the explicit bridge is enabled without this field, defaults to
+    /// `PYTHON`, then `PYTHON_BIN`, then `"python3"`.
     pub python: Option<String>,
     /// Override the legacy Python bridge script path. Defaults to
     /// `external-references/lp/lp_solve.py`.
@@ -4005,19 +4030,6 @@ impl ExternalSolver {
                 t0,
             );
         }
-        let python = self
-            .opts
-            .python
-            .clone()
-            .or_else(|| std::env::var("PYTHON").ok())
-            .or_else(|| std::env::var("PYTHON_BIN").ok())
-            .unwrap_or_else(|| "python3".to_string());
-        let script = self
-            .opts
-            .script
-            .clone()
-            .unwrap_or_else(|| DEFAULT_SCRIPT.to_string());
-
         let numerical_error = |msg: String, t0: Instant| LPSolution {
             status: LPStatus::NumericalError,
             x: Vec::new(),
@@ -4034,6 +4046,28 @@ impl ExternalSolver {
             elapsed_ms: ms_since(t0),
             message: Some(msg),
         };
+
+        if !explicit_lp_python_bridge_requested(&self.opts) {
+            return numerical_error(
+                format!(
+                    "no Rust LP route is registered for {requested_solver}; set ExternalSolverOptions::python/script or LP_EXTERNAL_BRIDGE=python to use the legacy Python bridge"
+                ),
+                t0,
+            );
+        }
+
+        let python = self
+            .opts
+            .python
+            .clone()
+            .or_else(|| std::env::var("PYTHON").ok())
+            .or_else(|| std::env::var("PYTHON_BIN").ok())
+            .unwrap_or_else(|| "python3".to_string());
+        let script = self
+            .opts
+            .script
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SCRIPT.to_string());
 
         let payload = encode_request(p, &method);
 
@@ -4154,8 +4188,8 @@ impl Transform<LPProblem, LPSolution> for ExternalSolver {
 
 /// Solve via the external LP bridge. Rust local CLI / internal validation paths
 /// are preferred by default; the legacy Python bridge is used only for explicit
-/// Python/script overrides or methods without a Rust path. (Kept as the stable
-/// public free-function API; prefer `ExternalSolver` for new code.)
+/// Python/script/bridge-env overrides. (Kept as the stable public free-function
+/// API; prefer `ExternalSolver` for new code.)
 pub fn solve_lp_external(p: &LPProblem, opts: &ExternalSolverOptions) -> LPSolution {
     ExternalSolver::new(opts.clone()).run(p)
 }
@@ -4841,8 +4875,22 @@ mod tests {
         assert_eq!(external_solver_label("ortools-PDLP"), "ortools:pdlp");
         assert_eq!(external_solver_label("highs"), "highs:cli");
         assert_eq!(external_solver_label("scipy:highs"), "scipy:highs");
+        assert_eq!(external_solver_label("scipy-highs"), "scipy:highs");
+        assert_eq!(
+            external_solver_label("scipy-highs-simplex"),
+            "scipy:highs-ds"
+        );
+        assert_eq!(
+            external_solver_label("scipy:highs-dual-simplex"),
+            "scipy:highs-ds"
+        );
+        assert_eq!(external_solver_label("scipy-simplex"), "scipy:simplex");
         assert_eq!(
             external_solver_label("scipy:interior-point"),
+            "scipy:interior-point"
+        );
+        assert_eq!(
+            external_solver_label("scipy-interior-point"),
             "scipy:interior-point"
         );
         assert_eq!(external_solver_label("glpk"), "glpk:cli");
@@ -4884,10 +4932,24 @@ mod tests {
             dual_simplex.lp_algorithm,
             Some(ExternalLinearCliLpAlgorithm::Simplex)
         );
+        let scipy_dual_simplex = rust_external_lp_cli_options("scipy-highs-simplex", &opts)
+            .expect("scipy-highs-simplex should map");
+        assert_eq!(scipy_dual_simplex.solver, ExternalLinearCliSolver::Highs);
+        assert_eq!(
+            scipy_dual_simplex.lp_algorithm,
+            Some(ExternalLinearCliLpAlgorithm::Simplex)
+        );
 
         let ipm = rust_external_lp_cli_options("highs_ipm", &opts).expect("highs-ipm should map");
         assert_eq!(ipm.solver, ExternalLinearCliSolver::Highs);
         assert_eq!(ipm.lp_algorithm, Some(ExternalLinearCliLpAlgorithm::Ipm));
+        let scipy_ipm =
+            rust_external_lp_cli_options("scipy-highs-ipm", &opts).expect("scipy-highs-ipm");
+        assert_eq!(scipy_ipm.solver, ExternalLinearCliSolver::Highs);
+        assert_eq!(
+            scipy_ipm.lp_algorithm,
+            Some(ExternalLinearCliLpAlgorithm::Ipm)
+        );
 
         for (method, solver) in [
             ("glpk", ExternalLinearCliSolver::Glpk),
@@ -4927,6 +4989,15 @@ mod tests {
         assert!(
             std::path::Path::new(DEFAULT_SCRIPT).is_file(),
             "{DEFAULT_SCRIPT} should stay available for explicit Python compatibility"
+        );
+        let script = std::fs::read_to_string(DEFAULT_SCRIPT).expect("read legacy LP bridge");
+        assert!(
+            script.contains("lp_solve_reference"),
+            "{DEFAULT_SCRIPT} should default to the Rust LP reference"
+        );
+        assert!(
+            script.contains("LP_SOLVE_REFERENCE_FORCE_PYTHON"),
+            "{DEFAULT_SCRIPT} should retain an explicit SciPy compatibility opt-in"
         );
     }
 
@@ -4971,8 +5042,17 @@ mod tests {
             ("glop", "rust:lp-fallback-for-ortools:glop"),
             ("pdlp", "rust:lp-fallback-for-ortools:pdlp"),
             ("simplex", "rust:lp-fallback-for-scipy:simplex"),
+            ("scipy-simplex", "rust:lp-fallback-for-scipy:simplex"),
+            (
+                "scipy-revised-simplex",
+                "rust:lp-fallback-for-scipy:revised-simplex",
+            ),
             (
                 "scipy:interior-point",
+                "rust:lp-fallback-for-scipy:interior-point",
+            ),
+            (
+                "scipy-interior-point",
                 "rust:lp-fallback-for-scipy:interior-point",
             ),
         ] {
@@ -5018,6 +5098,35 @@ mod tests {
             .message
             .as_deref()
             .is_some_and(|message| message.contains("external solver could not start")));
+    }
+
+    #[test]
+    fn unmapped_external_lp_method_requires_explicit_python_bridge() {
+        if lp_external_bridge_forced_python() {
+            eprintln!("skipping Rust-first LP bridge gate test because LP_EXTERNAL_BRIDGE=python");
+            return;
+        }
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![1.0]]),
+            b_ub: Some(vec![1.0]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_external(
+            &p,
+            &ExternalSolverOptions {
+                method: Some("python-only-reference".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sol.status, LPStatus::NumericalError);
+        assert_eq!(sol.solver, "scipy:python-only-reference");
+        assert!(sol.message.as_deref().is_some_and(|message| {
+            message.contains("no Rust LP route") && message.contains("legacy Python bridge")
+        }));
     }
 
     #[test]

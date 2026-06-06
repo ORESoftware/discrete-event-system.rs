@@ -1,9 +1,9 @@
 //! Rust-facing bridge for external/reference stochastic LP solvers.
 //!
 //! The native Rust reference builds the extensive-form sample-average LP and
-//! solves it through the Rust LP stack without Python startup. Explicit
-//! SciPy/HiGHS validation is launched from Rust through a tiny inline Python
-//! adapter, so the checked-in Python script can remain launcher glue.
+//! solves it through the Rust LP stack without Python startup. Registered
+//! SciPy aliases default to that Rust reference; explicit force-Python switches
+//! keep the inline SciPy/HiGHS adapter available for compatibility validation.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -34,22 +34,36 @@ impl ExternalStochasticLpReferenceSolver {
     }
 }
 
-fn registered_stochastic_lp_rust_fallback_enabled() -> bool {
+fn stochastic_lp_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "scipy"
+            | "external"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn stochastic_lp_python_reference_forced() -> bool {
     [
-        "STOCHASTIC_LP_REFERENCE_REGISTERED_FALLBACK",
-        "STOCHASTIC_LP_REFERENCE_EXTERNAL_FALLBACK",
-        "STOCHASTIC_LP_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "STOCHASTIC_LP_REFERENCE_FORCE_PYTHON",
+        "STOCHASTIC_LP_REFERENCE_SCIPY_FORCE_PYTHON",
+        "STOCHASTIC_LP_EXTERNAL_BRIDGE",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
-    .find_map(|key| std::env::var(key).ok())
-    .map(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-        )
+    .any(|key| {
+        std::env::var(key)
+            .map(|value| stochastic_lp_reference_force_python_value(&value))
+            .unwrap_or(false)
     })
-    .unwrap_or(false)
 }
 
 fn should_use_rust_stochastic_lp_reference(opts: &ExternalStochasticLpReferenceOptions) -> bool {
@@ -64,8 +78,8 @@ fn should_use_rust_stochastic_lp_reference(opts: &ExternalStochasticLpReferenceO
 fn should_use_registered_stochastic_lp_fallback(
     opts: &ExternalStochasticLpReferenceOptions,
 ) -> bool {
-    registered_stochastic_lp_rust_fallback_enabled()
-        && matches!(opts.solver, ExternalStochasticLpReferenceSolver::Scipy)
+    matches!(opts.solver, ExternalStochasticLpReferenceSolver::Scipy)
+        && !stochastic_lp_python_reference_forced()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -679,6 +693,18 @@ mod tests {
         }
     }
 
+    fn stochastic_lp_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "STOCHASTIC_LP_REFERENCE_FORCE_PYTHON",
+            "STOCHASTIC_LP_REFERENCE_SCIPY_FORCE_PYTHON",
+            "STOCHASTIC_LP_EXTERNAL_BRIDGE",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn rust_reference_solves_sample_stochastic_lp() {
         let problem = build_production_slp(vec![1.0, 1.0], vec![3.0, 2.0], None);
@@ -739,11 +765,13 @@ mod tests {
     }
 
     #[test]
-    fn registered_scipy_alias_can_use_rust_reference_without_python() {
+    fn scipy_alias_defaults_to_rust_reference_without_python() {
         let _lock = STOCHASTIC_LP_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set("STOCHASTIC_LP_REFERENCE_REGISTERED_FALLBACK", "rust");
+        let _force_python_guards = stochastic_lp_force_python_off_guards();
+        let _python_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-stochastic-lp");
         let problem = build_production_slp(vec![1.0], vec![3.0], None);
         let scenarios = build_production_scenarios(
             UniformDemandSpec {
@@ -778,13 +806,15 @@ mod tests {
     }
 
     #[test]
-    fn rust_first_env_forces_scipy_to_rust_reference_without_python() {
+    fn stochastic_lp_force_python_keeps_scipy_bridge_available() {
         let _lock = STOCHASTIC_LP_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _rust_first_guard = EnvVarGuard::set("STOCHASTIC_LP_REFERENCE_RUST_FIRST", "1");
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-stochastic-lp");
+        let _force_python_guard = EnvVarGuard::set("STOCHASTIC_LP_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-forced-stochastic-lp",
+        );
         let problem = build_production_slp(vec![1.0], vec![3.0], None);
         let scenarios = build_production_scenarios(
             UniformDemandSpec {
@@ -804,14 +834,9 @@ mod tests {
 
         assert_eq!(
             solution.status,
-            ExternalStochasticLpReferenceStatus::Optimal
+            ExternalStochasticLpReferenceStatus::Unavailable
         );
-        assert_eq!(
-            solution.solver,
-            "rust:registered-stochastic-lp-fallback-for-scipy"
-        );
-        assert_eq!(solution.x.len(), 1);
-        assert_eq!(solution.y_by_scenario.len(), scenarios.len());
+        assert!(solution.message.contains("SciPy stochastic LP adapter"));
     }
 
     #[test]
@@ -819,7 +844,8 @@ mod tests {
         let _lock = STOCHASTIC_LP_REFERENCE_ENV_LOCK
             .lock()
             .expect("lock env guard");
-        let _guard = EnvVarGuard::set(
+        let _force_python_guard = EnvVarGuard::set("STOCHASTIC_LP_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set(
             "PYTHON_BIN",
             "/definitely/not-python-for-stochastic-lp-scipy",
         );

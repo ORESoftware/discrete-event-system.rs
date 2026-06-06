@@ -39,19 +39,28 @@ fn parse_kind(value: &str) -> Result<ExternalLinearCliKind, String> {
 }
 
 fn parse_solver(value: &str) -> Result<ExternalLinearCliSolver, String> {
-    match value {
-        "highs" => Ok(ExternalLinearCliSolver::Highs),
-        "glpk" => Ok(ExternalLinearCliSolver::Glpk),
-        "scip" => Ok(ExternalLinearCliSolver::Scip),
-        "cbc" => Ok(ExternalLinearCliSolver::Cbc),
-        "clp" => Ok(ExternalLinearCliSolver::Clp),
-        "soplex" => Ok(ExternalLinearCliSolver::Soplex),
-        "qsopt-ex" | "qsopt_ex" | "qsopt" => Ok(ExternalLinearCliSolver::QsoptEx),
-        "lp-solve" | "lp_solve" | "lpsolve" => Ok(ExternalLinearCliSolver::LpSolve),
-        "gurobi" => Ok(ExternalLinearCliSolver::Gurobi),
-        "cplex" => Ok(ExternalLinearCliSolver::Cplex),
-        "xpress" => Ok(ExternalLinearCliSolver::Xpress),
-        "lindo" => Ok(ExternalLinearCliSolver::Lindo),
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "highs" | "highs-cli" | "highs:cli" => Ok(ExternalLinearCliSolver::Highs),
+        "glpk" | "glpsol" | "glpk-cli" | "glpk:cli" => Ok(ExternalLinearCliSolver::Glpk),
+        "scip" | "scip-cli" | "scip:cli" => Ok(ExternalLinearCliSolver::Scip),
+        "cbc" | "coin-cbc" | "coin-or-cbc" | "cbc-cli" | "cbc:cli" => {
+            Ok(ExternalLinearCliSolver::Cbc)
+        }
+        "clp" | "clp-cli" | "clp:cli" => Ok(ExternalLinearCliSolver::Clp),
+        "soplex" | "soplex-cli" | "soplex:cli" => Ok(ExternalLinearCliSolver::Soplex),
+        "qsopt-ex" | "qsopt" | "esolver" | "qsopt-ex-cli" | "qsopt-ex:cli" => {
+            Ok(ExternalLinearCliSolver::QsoptEx)
+        }
+        "lp-solve" | "lpsolve" | "lp-solve-cli" | "lp-solve:cli" => {
+            Ok(ExternalLinearCliSolver::LpSolve)
+        }
+        "gurobi" | "gurobi-cl" | "gurobi-cli" | "gurobi:cli" => Ok(ExternalLinearCliSolver::Gurobi),
+        "cplex" | "cplex-cli" | "cplex:cli" => Ok(ExternalLinearCliSolver::Cplex),
+        "xpress" | "optimizer" | "xpress-cli" | "xpress:cli" => Ok(ExternalLinearCliSolver::Xpress),
+        "lindo" | "runlindo" | "lindoapi" | "lindo-cli" | "lindo:cli" => {
+            Ok(ExternalLinearCliSolver::Lindo)
+        }
         _ => Err(format!("unknown solver {value:?}")),
     }
 }
@@ -548,6 +557,27 @@ mod tests {
         assert_eq!(opts.branch_priorities, Some(vec![0, 3, 1]));
         assert_eq!(opts.mip_start, Some(vec![1.0, 0.0, 1.0]));
         assert_eq!(problem_path, Some(PathBuf::from("problem.json")));
+    }
+
+    #[test]
+    fn parses_solver_aliases_used_by_rust_facades() {
+        for (alias, expected) in [
+            ("highs-cli", ExternalLinearCliSolver::Highs),
+            ("glpsol", ExternalLinearCliSolver::Glpk),
+            ("scip:cli", ExternalLinearCliSolver::Scip),
+            ("coin-or-cbc", ExternalLinearCliSolver::Cbc),
+            ("clp_cli", ExternalLinearCliSolver::Clp),
+            ("soplex-cli", ExternalLinearCliSolver::Soplex),
+            ("qsopt", ExternalLinearCliSolver::QsoptEx),
+            ("esolver", ExternalLinearCliSolver::QsoptEx),
+            ("lp_solve", ExternalLinearCliSolver::LpSolve),
+            ("gurobi_cl", ExternalLinearCliSolver::Gurobi),
+            ("cplex:cli", ExternalLinearCliSolver::Cplex),
+            ("optimizer", ExternalLinearCliSolver::Xpress),
+            ("runlindo", ExternalLinearCliSolver::Lindo),
+        ] {
+            assert_eq!(parse_solver(alias).expect(alias), expected, "{alias}");
+        }
     }
 
     #[test]

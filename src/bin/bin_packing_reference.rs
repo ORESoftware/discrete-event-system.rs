@@ -22,7 +22,9 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [--solver auto|fallback|rust-exact|ortools]")
+    format!(
+        "usage: {program} [--solver auto|fallback|rust-exact|rust:exact-bin-packing|ortools|ortools:cp-sat-bin-packing]"
+    )
 }
 
 fn parse_solver(
@@ -56,11 +58,37 @@ fn parse_solver(
                     }
                     value
                 };
-                solver = match value.as_str() {
-                    "auto" => ExternalBinPackingReferenceSolver::Auto,
-                    "fallback" => ExternalBinPackingReferenceSolver::Fallback,
-                    "rust-exact" | "rust_exact" => ExternalBinPackingReferenceSolver::RustExact,
-                    "ortools" => ExternalBinPackingReferenceSolver::OrTools,
+                let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+                solver = match normalized.as_str() {
+                    "auto" | "default" => ExternalBinPackingReferenceSolver::Auto,
+                    "fallback" | "rust-fallback" | "rust:fallback" => {
+                        ExternalBinPackingReferenceSolver::Fallback
+                    }
+                    "rust"
+                    | "native"
+                    | "rust-native"
+                    | "exact"
+                    | "rust-exact"
+                    | "rust:exact"
+                    | "bin-packing"
+                    | "exact-bin-packing"
+                    | "rust-bin-packing"
+                    | "rust:bin-packing"
+                    | "rust-exact-bin-packing"
+                    | "rust:exact-bin-packing" => ExternalBinPackingReferenceSolver::RustExact,
+                    "ortools"
+                    | "or-tools"
+                    | "google-ortools"
+                    | "google-or-tools"
+                    | "ortools-cp-sat"
+                    | "ortools:cp-sat"
+                    | "or-tools-cp-sat"
+                    | "cp-sat-bin-packing"
+                    | "ortools-bin-packing"
+                    | "ortools:bin-packing"
+                    | "ortools-cp-sat-bin-packing"
+                    | "ortools:cp-sat-bin-packing"
+                    | "or-tools-cp-sat-bin-packing" => ExternalBinPackingReferenceSolver::OrTools,
                     _ => {
                         return Err(CliError(format!(
                             "unknown solver {value:?}\n{}",
@@ -299,6 +327,49 @@ mod tests {
         assert_eq!(output["solver"], "rust:exact-bin-packing");
         assert_eq!(output["objective"], 2);
         assert_eq!(output["totalWeight"], 20.0);
+    }
+
+    #[test]
+    fn parses_bin_packing_solver_aliases_used_by_validation_tools() {
+        let rust_aliases = [
+            "rust",
+            "native",
+            "exact",
+            "rust:exact",
+            "rust_exact_bin_packing",
+            "rust:exact-bin-packing",
+        ];
+        for alias in rust_aliases {
+            let solver = parse_solver(
+                "bin_packing_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalBinPackingReferenceSolver::RustExact);
+        }
+
+        let ortools_aliases = [
+            "or-tools",
+            "google-ortools",
+            "ortools:cp-sat",
+            "ortools_cp_sat_bin_packing",
+            "ortools:cp-sat-bin-packing",
+        ];
+        for alias in ortools_aliases {
+            let solver = parse_solver(
+                "bin_packing_reference",
+                ["--solver".to_string(), alias.to_string()],
+            )
+            .expect(alias);
+            assert_eq!(solver, ExternalBinPackingReferenceSolver::OrTools);
+        }
+
+        let fallback = parse_solver(
+            "bin_packing_reference",
+            ["--solver=rust:fallback".to_string()],
+        )
+        .expect("fallback alias");
+        assert_eq!(fallback, ExternalBinPackingReferenceSolver::Fallback);
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! The native Rust reference uses the crate's active-set, enumeration, and
 //! pattern-search solvers without Python startup. The checked-in Python bridge
 //! (`scripts/qp_reference.py`) remains available for installed open-source
-//! solvers such as HiGHS/highspy, SciPy, OSQP, and CVXPY backends.
+//! solvers such as HiGHS/highspy, SciPy, OSQP, and CVXPY backends when callers
+//! explicitly force the Python bridge.
 
 use std::fs;
 use std::io::Write;
@@ -192,7 +193,7 @@ impl ExternalQuadraticReferenceSolver {
                 "Use the native Rust reference by default; explicit solver ids opt into Python-backed external bridges."
             }
             ExternalQuadraticReferenceFamily::DirectPythonApi => {
-                "Direct Python package bridge; reports unavailable when the package is not installed unless the registered Rust fallback is enabled."
+                "Direct Python package bridge; Rust-first aliases use the checked-in fallback by default and can force Python when package-level validation is needed."
             }
             ExternalQuadraticReferenceFamily::Cvxpy => {
                 "CVXPY-dispatched solver; reports unavailable when CVXPY or the requested backend is not installed unless the registered Rust fallback is enabled."
@@ -433,37 +434,68 @@ fn is_rust_quadratic_solver(opts: &ExternalQuadraticReferenceOptions) -> bool {
     ) || should_use_registered_quadratic_fallback(opts)
 }
 
-fn registered_quadratic_rust_fallback_enabled() -> bool {
+fn quadratic_reference_force_python_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "on"
+            | "python"
+            | "py"
+            | "scipy"
+            | "slsqp"
+            | "external"
+            | "legacy-python"
+            | "python-reference"
+            | "python-bridge"
+    )
+}
+
+fn quadratic_python_reference_forced() -> bool {
     [
-        "QP_REFERENCE_REGISTERED_FALLBACK",
-        "QUADRATIC_REFERENCE_REGISTERED_FALLBACK",
-        "QP_REFERENCE_EXTERNAL_FALLBACK",
-        "QUADRATIC_REFERENCE_EXTERNAL_FALLBACK",
-        "QP_REFERENCE_RUST_FIRST",
-        "QUADRATIC_REFERENCE_RUST_FIRST",
-        "ORES_EXTERNAL_REFERENCE_RUST_FIRST",
+        "QP_REFERENCE_FORCE_PYTHON",
+        "QP_REFERENCE_SCIPY_FORCE_PYTHON",
+        "QP_REFERENCE_OSQP_FORCE_PYTHON",
+        "QP_REFERENCE_CVXPY_FORCE_PYTHON",
+        "QUADRATIC_REFERENCE_FORCE_PYTHON",
+        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
     .any(|key| {
         std::env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "rust" | "fallback" | "rust-fallback"
-                )
-            })
+            .map(|value| quadratic_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
 
 fn should_use_registered_quadratic_fallback(opts: &ExternalQuadraticReferenceOptions) -> bool {
-    registered_quadratic_rust_fallback_enabled()
-        && !matches!(
-            opts.solver,
-            ExternalQuadraticReferenceSolver::Auto
-                | ExternalQuadraticReferenceSolver::RustInternal
-                | ExternalQuadraticReferenceSolver::Fallback
-        )
+    if matches!(
+        opts.solver,
+        ExternalQuadraticReferenceSolver::Auto
+            | ExternalQuadraticReferenceSolver::RustInternal
+            | ExternalQuadraticReferenceSolver::Fallback
+    ) || quadratic_python_reference_forced()
+    {
+        return false;
+    }
+    matches!(
+        opts.solver,
+        ExternalQuadraticReferenceSolver::Highs
+            | ExternalQuadraticReferenceSolver::Scipy
+            | ExternalQuadraticReferenceSolver::Osqp
+            | ExternalQuadraticReferenceSolver::Cvxpy
+            | ExternalQuadraticReferenceSolver::Scs
+            | ExternalQuadraticReferenceSolver::Clarabel
+            | ExternalQuadraticReferenceSolver::Ecos
+            | ExternalQuadraticReferenceSolver::Mosek
+            | ExternalQuadraticReferenceSolver::Copt
+            | ExternalQuadraticReferenceSolver::Qpoases
+            | ExternalQuadraticReferenceSolver::Proxqp
+            | ExternalQuadraticReferenceSolver::Cosmo
+            | ExternalQuadraticReferenceSolver::Sdpa
+            | ExternalQuadraticReferenceSolver::Csdp
+    )
 }
 
 fn relabel_registered_rust_fallback(
@@ -2079,6 +2111,20 @@ mod tests {
         }
     }
 
+    fn quadratic_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "QP_REFERENCE_FORCE_PYTHON",
+            "QP_REFERENCE_SCIPY_FORCE_PYTHON",
+            "QP_REFERENCE_OSQP_FORCE_PYTHON",
+            "QP_REFERENCE_CVXPY_FORCE_PYTHON",
+            "QUADRATIC_REFERENCE_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
+
     #[test]
     fn gams_mosek_qp_model_text_uses_qcp_objective_and_solution_puts() {
         let qp = QuadraticProgram {
@@ -2248,6 +2294,8 @@ x2       1.833333329519
 
     #[test]
     fn auto_prefers_rust_qp_reference_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("PYTHON_BIN", "des-rs-missing-python-for-rust-first-test");
         let problem = QuadraticProgram {
             q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
             c: vec![-2.0, -4.0],
@@ -2310,9 +2358,214 @@ x2       1.833333329519
     }
 
     #[test]
-    fn rust_first_env_forces_registered_quadratic_aliases_to_rust_without_python() {
+    fn scipy_alias_defaults_to_rust_quadratic_reference_without_python() {
         let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
-        let _guard = EnvVarGuard::set("QP_REFERENCE_RUST_FIRST", "rust");
+        let _force_python_guards = quadratic_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "des-rs-missing-python-for-scipy-quadratic-test",
+        );
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        let solution = solve_qp_with_external_reference(
+            &qp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Scipy,
+                ..Default::default()
+            },
+        );
+
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "builtin:qp-active-set-for-scipy");
+        assert!(solution
+            .message
+            .contains("registered external solver fallback"));
+    }
+
+    #[test]
+    fn highs_alias_defaults_to_rust_quadratic_reference_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guards = quadratic_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "des-rs-missing-python-for-highs-quadratic-test",
+        );
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        let solution = solve_qp_with_external_reference(
+            &qp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Highs,
+                ..Default::default()
+            },
+        );
+
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "builtin:qp-active-set-for-highs");
+        assert!(solution
+            .message
+            .contains("registered external solver fallback"));
+    }
+
+    #[test]
+    fn osqp_alias_defaults_to_rust_quadratic_reference_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guards = quadratic_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "des-rs-missing-python-for-osqp-quadratic-test",
+        );
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        let solution = solve_qp_with_external_reference(
+            &qp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Osqp,
+                ..Default::default()
+            },
+        );
+
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "builtin:qp-active-set-for-osqp");
+        assert!(solution
+            .message
+            .contains("registered external solver fallback"));
+    }
+
+    #[test]
+    fn cvxpy_alias_defaults_to_rust_quadratic_reference_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guards = quadratic_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "des-rs-missing-python-for-cvxpy-quadratic-test",
+        );
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        let solution = solve_qp_with_external_reference(
+            &qp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Cvxpy,
+                ..Default::default()
+            },
+        );
+
+        assert_optimal(&solution);
+        assert_eq!(solution.solver, "builtin:qp-active-set-for-cvxpy");
+        assert!(solution
+            .message
+            .contains("registered external solver fallback"));
+    }
+
+    #[test]
+    fn open_source_cvxpy_backends_default_to_rust_quadratic_reference_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guards = quadratic_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "des-rs-missing-python-for-open-cvxpy-quadratic-test",
+        );
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        for (solver, expected) in [
+            (
+                ExternalQuadraticReferenceSolver::Scs,
+                "builtin:qp-active-set-for-scs",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Clarabel,
+                "builtin:qp-active-set-for-clarabel",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Ecos,
+                "builtin:qp-active-set-for-ecos",
+            ),
+        ] {
+            let solution = solve_qp_with_external_reference(
+                &qp,
+                &ExternalQuadraticReferenceOptions {
+                    solver,
+                    ..Default::default()
+                },
+            );
+
+            assert_optimal(&solution);
+            assert_eq!(solution.solver, expected);
+            assert!(solution
+                .message
+                .contains("registered external solver fallback"));
+        }
+    }
+
+    #[test]
+    fn scipy_force_python_keeps_quadratic_bridge_available() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guard = EnvVarGuard::set("QP_REFERENCE_FORCE_PYTHON", "1");
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "des-rs-missing-python-for-forced-scipy-quadratic-test",
+        );
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![-2.0, -4.0],
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ub: Some(vec![Some(5.0), Some(5.0)]),
+            ..Default::default()
+        };
+
+        let solution = solve_qp_with_external_reference(
+            &qp,
+            &ExternalQuadraticReferenceOptions {
+                solver: ExternalQuadraticReferenceSolver::Scipy,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            solution.status,
+            ExternalQuadraticReferenceStatus::Unavailable
+        );
+        assert!(solution.message.contains("failed to start qp_reference.py"));
+    }
+
+    #[test]
+    fn registered_quadratic_aliases_default_to_rust_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _force_python_guards = quadratic_force_python_off_guards();
+        let _python_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "des-rs-missing-python-for-registered-quadratic-test",
+        );
         let qp = QuadraticProgram {
             q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
             c: vec![-2.0, -4.0],
@@ -2331,8 +2584,32 @@ x2       1.833333329519
                 "builtin:qp-active-set-for-cvxpy",
             ),
             (
+                ExternalQuadraticReferenceSolver::Mosek,
+                "builtin:qp-active-set-for-mosek",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Copt,
+                "builtin:qp-active-set-for-copt",
+            ),
+            (
                 ExternalQuadraticReferenceSolver::Qpoases,
                 "builtin:qp-active-set-for-qpoases",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Proxqp,
+                "builtin:qp-active-set-for-proxqp",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Cosmo,
+                "builtin:qp-active-set-for-cosmo",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Sdpa,
+                "builtin:qp-active-set-for-sdpa",
+            ),
+            (
+                ExternalQuadraticReferenceSolver::Csdp,
+                "builtin:qp-active-set-for-csdp",
             ),
         ] {
             let solution = solve_qp_with_external_reference(
@@ -2431,6 +2708,8 @@ x2       1.833333329519
 
     #[test]
     fn auto_prefers_rust_miqcp_reference_without_python() {
+        let _lock = QUADRATIC_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
+        let _guard = EnvVarGuard::set("PYTHON_BIN", "des-rs-missing-python-for-rust-first-test");
         let problem = super::MixedIntegerQuadraticallyConstrainedProgram {
             qcp: super::QuadraticallyConstrainedProgram {
                 q: vec![vec![0.0, 0.0], vec![0.0, 0.0]],

@@ -29,8 +29,9 @@ fn print_help() {
     println!("Usage:");
     println!("  ts-node src/des/runners/run-external-module.ts --list");
     println!("  ts-node src/des/runners/run-external-module.ts <module-id> [--key=value ...]");
+    println!("  ts-node src/des/runners/run-external-module.ts assignment-reference --stdin='{{\"cost\":[[1,2],[3,4]]}}'");
     println!();
-    println!("External module invocations are shell-free and source paths must live under external-references/.");
+    println!("External module invocations are shell-free; source paths must live under external-references/ or src/bin/.");
 }
 
 fn valid_param_key(key: &str) -> bool {

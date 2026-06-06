@@ -123,6 +123,10 @@ const GOAL_CONTEXT_CREDIT_SCAN_ACTIONS: usize = 48;
 const GOAL_CONTEXT_CREDIT_MAX_AGE_TICKS: u64 = 600;
 const GOAL_CONTEXT_CREDIT_MIN_SCORE: f64 = 0.05;
 const SHOT_ON_TARGET_REWARD_POINTS: f64 = 50.0;
+const COMPLETED_FORWARD_PASS_BASE_REWARD_OWN_HALF: f64 = 7.0;
+const COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF: f64 = 7.6;
+const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.15;
+const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS: f64 = 30.0;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
 const GOALMOUTH_CARRY_REWARD_POINTS: f64 = 1.35;
 const ENDLINE_DRIBBLE_TRAP_PENALTY_POINTS: f64 = 1.85;
@@ -165,6 +169,8 @@ const POSSESSION_STALL_MIN_GAIN_YARDS: f64 = 30.0;
 const POSSESSION_STALL_PENALTY_POINTS: f64 = 18.0;
 const POSSESSION_PROGRESS_REWARD_WEIGHTS: [f64; 5] = [0.38, 0.27, 0.18, 0.11, 0.06];
 const POSSESSION_STALL_PENALTY_WEIGHTS: [f64; 5] = [0.34, 0.27, 0.20, 0.13, 0.06];
+const DENSE_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.12;
+const DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD: f64 = 0.145;
 const NOT_FACING_BALL_INTERCEPTION_MULTIPLIER: f64 = 0.40;
 const FACING_BALL_MIN_DOT: f64 = 0.12;
 const STRIKER_HOLD_UP_MIN_GOAL_DISTANCE_YARDS: f64 = GOAL_APPROACH_CARRY_YARDS;
@@ -15230,12 +15236,20 @@ fn pass_direction_bucket(team: Team, origin: Vec2, target: Vec2) -> PassDirectio
 }
 
 fn completed_pass_reward(team: Team, origin: Vec2, target: Vec2, field_length: f64) -> f64 {
+    let forward_yards = ((target.y - origin.y) * team.attack_dir())
+        .max(0.0)
+        .clamp(0.0, COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS);
+    let forward_progress_reward = forward_yards * COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD;
     match (
         pass_direction_bucket(team, origin, target),
         pass_origin_in_own_half(team, origin, field_length),
     ) {
-        (PassDirectionBucket::Forward, true) => 8.0,
-        (PassDirectionBucket::Forward, false) => 9.0,
+        (PassDirectionBucket::Forward, true) => {
+            COMPLETED_FORWARD_PASS_BASE_REWARD_OWN_HALF + forward_progress_reward
+        }
+        (PassDirectionBucket::Forward, false) => {
+            COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF + forward_progress_reward
+        }
         (PassDirectionBucket::Lateral, _) => 1.6,
         (PassDirectionBucket::Backward, true) => 0.1,
         (PassDirectionBucket::Backward, false) => 0.7,
@@ -16716,7 +16730,8 @@ fn dense_soccer_transition_reward(
                 after_possession == Some(player.team),
             );
             if ball_forward > 1.25 {
-                reward += ball_forward.clamp(0.0, 24.0) * 0.075;
+                reward +=
+                    ball_forward.clamp(0.0, 24.0) * DENSE_FORWARD_PASS_PROGRESS_REWARD_PER_YARD;
             } else if ball_forward.abs() <= 1.25 && before_obs.perceived_pressure < 0.30 {
                 reward -= 0.22;
             }
@@ -16746,7 +16761,10 @@ fn dense_soccer_transition_reward(
                 };
                 let pressure_multiplier =
                     (1.0 - before_obs.perceived_pressure.clamp(0.0, 1.0) * 0.22).clamp(0.70, 1.0);
-                reward += carry_progress * 0.105 * role_multiplier * pressure_multiplier;
+                reward += carry_progress
+                    * DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD
+                    * role_multiplier
+                    * pressure_multiplier;
                 if carry_progress >= 6.0 {
                     reward += 0.18 * role_multiplier;
                 }
@@ -25664,7 +25682,7 @@ impl SoccerMatch {
                 }
                 AgentScheduleKind::Ball => {
                     let phase_started = Instant::now();
-                    self.integrate_ball();
+                    self.run_ball_time_step();
                     field_ball_elapsed += phase_started.elapsed();
                 }
                 AgentScheduleKind::CentralBrain => {}
@@ -27990,6 +28008,10 @@ impl SoccerMatch {
     }
 
     fn integrate_ball(&mut self) {
+        self.run_ball_time_step();
+    }
+
+    fn run_ball_time_step(&mut self) {
         let previous_velocity = self.ball.velocity;
         let context = BallStepContext {
             tick: self.tick,
@@ -40058,51 +40080,58 @@ mod tests {
     #[test]
     fn completed_pass_reward_prioritizes_forward_progression() {
         let field_length = 120.0;
+        let short_forward = completed_pass_reward(
+            Team::Home,
+            Vec2::new(40.0, 40.0),
+            Vec2::new(40.0, 52.0),
+            field_length,
+        );
+        let long_forward = completed_pass_reward(
+            Team::Home,
+            Vec2::new(40.0, 40.0),
+            Vec2::new(40.0, 76.0),
+            field_length,
+        );
+        let attacking_forward = completed_pass_reward(
+            Team::Home,
+            Vec2::new(40.0, 76.0),
+            Vec2::new(40.0, 88.0),
+            field_length,
+        );
+        let lateral = completed_pass_reward(
+            Team::Home,
+            Vec2::new(40.0, 76.0),
+            Vec2::new(52.0, 76.2),
+            field_length,
+        );
+        let own_half_backward = completed_pass_reward(
+            Team::Home,
+            Vec2::new(40.0, 40.0),
+            Vec2::new(40.0, 30.0),
+            field_length,
+        );
+        let attacking_backward = completed_pass_reward(
+            Team::Home,
+            Vec2::new(40.0, 76.0),
+            Vec2::new(40.0, 66.0),
+            field_length,
+        );
 
-        assert_eq!(
-            completed_pass_reward(
-                Team::Home,
-                Vec2::new(40.0, 40.0),
-                Vec2::new(40.0, 52.0),
-                field_length
-            ),
-            8.0
+        assert!(
+            short_forward > lateral + 7.0,
+            "forward completions should be much more valuable than lateral recycling: forward={short_forward} lateral={lateral}"
         );
-        assert_eq!(
-            completed_pass_reward(
-                Team::Home,
-                Vec2::new(40.0, 76.0),
-                Vec2::new(40.0, 88.0),
-                field_length
-            ),
-            9.0
+        assert!(
+            long_forward > short_forward + 2.0,
+            "longer controlled forward completions should learn faster: long={long_forward} short={short_forward}"
         );
-        assert_eq!(
-            completed_pass_reward(
-                Team::Home,
-                Vec2::new(40.0, 76.0),
-                Vec2::new(52.0, 76.2),
-                field_length
-            ),
-            1.6
+        assert!(
+            attacking_forward > own_half_backward + 8.0,
+            "attacking forward pass should swamp own-half backward pass: forward={attacking_forward} backward={own_half_backward}"
         );
-        assert_eq!(
-            completed_pass_reward(
-                Team::Home,
-                Vec2::new(40.0, 40.0),
-                Vec2::new(40.0, 30.0),
-                field_length
-            ),
-            0.1
-        );
-        assert_eq!(
-            completed_pass_reward(
-                Team::Home,
-                Vec2::new(40.0, 76.0),
-                Vec2::new(40.0, 66.0),
-                field_length
-            ),
-            0.7
+        assert!(
+            lateral > attacking_backward,
+            "lateral recycle should still beat a backward release: lateral={lateral} backward={attacking_backward}"
         );
     }
 

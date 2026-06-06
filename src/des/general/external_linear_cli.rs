@@ -8043,6 +8043,11 @@ fn solve_native_lindo_gams_model(
     }
 
     let objective = dot_f64(objective_coefficients, &parsed.x);
+    let (var_basis, row_basis) = if kind == ExternalLinearCliKind::Lp {
+        lindo_gams_lp_basis_from_solution(model, &parsed)
+    } else {
+        (None, None)
+    };
     ExternalLinearCliSolution {
         status,
         solver: bridge_solver,
@@ -8088,12 +8093,36 @@ fn solve_native_lindo_gams_model(
         reduced_costs: (kind == ExternalLinearCliKind::Lp)
             .then_some(parsed.reduced_costs)
             .flatten(),
-        var_basis: None,
-        row_basis: None,
+        var_basis,
+        row_basis,
         iterations: parse_gams_iteration_count(&listing),
         elapsed_ms: elapsed,
         message: "GAMS LINDO solve".to_string(),
     }
+}
+
+fn lindo_gams_lp_basis_from_solution(
+    model: &PlainLinearCliModel,
+    parsed: &ParsedNativeNamedSolution,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let (Some(dual_ub), Some(_dual_eq), Some(reduced_costs)) = (
+        parsed.dual_ub.as_deref(),
+        parsed.dual_eq.as_deref(),
+        parsed.reduced_costs.as_deref(),
+    ) else {
+        return (None, None);
+    };
+    infer_lp_basis_from_complementarity(
+        &parsed.x,
+        Some(&model.lbs),
+        Some(&model.ubs),
+        &model.le_rows,
+        &model.le_rhs,
+        dual_ub,
+        &model.eq_rows,
+        &model.eq_rhs,
+        reduced_costs,
+    )
 }
 
 fn gams_lindo_model_text(
@@ -14181,12 +14210,36 @@ x1.m 0
         let parsed = super::parse_native_lindo_gams_solution_text(row_senses, 2, 3, 0, "");
         assert_eq!(parsed.status, "optimal");
         assert_eq!(parsed.x, vec![6.0, 4.0]);
-        let dual_ub = parsed.dual_ub.unwrap();
+        let dual_ub = parsed.dual_ub.as_ref().unwrap();
         assert!((dual_ub[0] - 7.0 / 3.0).abs() <= 1.0e-12);
         assert_eq!(dual_ub[1], 0.0);
         assert!((dual_ub[2] - 2.0 / 3.0).abs() <= 1.0e-12);
         assert_eq!(parsed.dual_eq, Some(Vec::new()));
         assert_eq!(parsed.reduced_costs, Some(vec![0.0, 0.0]));
+        let model = super::PlainLinearCliModel {
+            sense: Sense::Max,
+            c: vec![3.0, 4.0],
+            le_rows: vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]],
+            le_rhs: vec![14.0, 0.0, 2.0],
+            eq_rows: Vec::new(),
+            eq_rhs: Vec::new(),
+            lbs: vec![Some(0.0), Some(0.0)],
+            ubs: vec![None, None],
+            integer_vars: vec![false, false],
+        };
+        let (var_basis, row_basis) = super::lindo_gams_lp_basis_from_solution(&model, &parsed);
+        assert_eq!(
+            var_basis,
+            Some(vec!["basic".to_string(), "basic".to_string()])
+        );
+        assert_eq!(
+            row_basis,
+            Some(vec![
+                "at_upper".to_string(),
+                "basic".to_string(),
+                "at_upper".to_string()
+            ])
+        );
 
         let equality = "\
 modelstat 1

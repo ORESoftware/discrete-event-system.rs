@@ -4673,16 +4673,6 @@ const FLANK_CROSS_MIN_FLANK_SCORE: f64 = 0.52;
 const FLANK_CROSS_MAX_YARDS_TO_GOAL: f64 = 54.0;
 const FLANK_OVERLAP_MIN_OPTION_SHARE: f64 = 1.0 / 3.0;
 
-fn observation_lateral_grid_position(
-    observation: &SoccerPomdpObservation,
-    field_width_yards: f64,
-) -> Vec2 {
-    let cell = observation.player_grid.fine;
-    let columns = cell.columns.max(1) as f64;
-    let x = ((cell.x as f64 + 0.5) / columns) * field_width_yards.max(0.0);
-    Vec2::new(x, 0.0)
-}
-
 fn pass_like_action_flight(action: &str) -> Option<PassFlight> {
     match normalize_soccer_action_label(action) {
         "pass" | "first-time-pass" | "flank-low-cross" => Some(PassFlight::Floor),
@@ -4691,12 +4681,12 @@ fn pass_like_action_flight(action: &str) -> Option<PassFlight> {
     }
 }
 
-fn flank_cross_context_score(observation: &SoccerPomdpObservation, field_width_yards: f64) -> f64 {
-    let flank = flank_lane_score(
-        observation_lateral_grid_position(observation, field_width_yards),
-        field_width_yards,
-    )
-    .clamp(0.0, 1.0);
+fn flank_cross_context_score(
+    observation: &SoccerPomdpObservation,
+    player_position: Vec2,
+    field_width_yards: f64,
+) -> f64 {
+    let flank = flank_lane_score(player_position, field_width_yards).clamp(0.0, 1.0);
     let attacking_depth =
         (1.0 - observation.yards_to_goal / FLANK_CROSS_MAX_YARDS_TO_GOAL).clamp(0.0, 1.0);
     let pressure_release = (observation.perceived_pressure * 0.35
@@ -4707,15 +4697,12 @@ fn flank_cross_context_score(observation: &SoccerPomdpObservation, field_width_y
 
 fn flank_cross_context_is_legal(
     observation: &SoccerPomdpObservation,
+    player_position: Vec2,
     field_width_yards: f64,
 ) -> bool {
     observation.has_ball
         && observation.yards_to_goal <= FLANK_CROSS_MAX_YARDS_TO_GOAL
-        && flank_lane_score(
-            observation_lateral_grid_position(observation, field_width_yards),
-            field_width_yards,
-        )
-        .clamp(0.0, 1.0)
+        && flank_lane_score(player_position, field_width_yards).clamp(0.0, 1.0)
             >= FLANK_CROSS_MIN_FLANK_SCORE
 }
 
@@ -5424,10 +5411,12 @@ impl PlayerAgent {
         let aerial_forward_runner_multiplier = observation
             .aerial_forward_runner_pass_multiplier
             .clamp(1.0, 1.50);
-        let flank_cross_context = flank_cross_context_score(observation, field_width);
-        let flank_cross_legal_context = flank_cross_context_is_legal(observation, field_width)
-            && !goal_attack_shot_required
-            && !goalmouth_carry_forced;
+        let flank_cross_context =
+            flank_cross_context_score(observation, self.position, field_width);
+        let flank_cross_legal_context =
+            flank_cross_context_is_legal(observation, self.position, field_width)
+                && !goal_attack_shot_required
+                && (!goalmouth_carry_forced || directive.flank_attack_policy.is_flank());
         let low_cross_score = (self.preferences.pass_bias
             * directive.pass_priority
             * (0.42 + passing * 0.24 + crossing * 0.42)
@@ -5764,12 +5753,12 @@ impl PlayerAgent {
                 "overlap-run",
                 special_score(
                     overlap_support.point,
-                    0.56 + touchline_fit * 0.12
-                        + forward.max(0.0) * 0.010
-                        + shape_support_urgency * 0.18
+                    0.56 + shape_support_urgency * 0.18
                         + holder_pressure_urgency * 0.22
                         + if flank_policy_active {
-                            directive.flank_overlap_run_probability * 0.30
+                            touchline_fit * 0.12
+                                + forward.max(0.0) * 0.010
+                                + directive.flank_overlap_run_probability * 0.30
                         } else {
                             0.0
                         },
@@ -42198,16 +42187,22 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
             observation.has_ball && snapshot.best_aerial_pass_target(player_id).is_some()
         }
         "flank-low-cross" => {
+            let player_position = snapshot
+                .player_position(player_id)
+                .unwrap_or(player.position);
             observation.has_ball
-                && flank_cross_context_is_legal(&observation, snapshot.field_width)
+                && flank_cross_context_is_legal(&observation, player_position, snapshot.field_width)
                 && !goal_attack_shot_is_required(&observation, player.role)
                 && !snapshot
                     .ranked_visible_pass_targets(player_id, 1)
                     .is_empty()
         }
         "flank-high-cross" => {
+            let player_position = snapshot
+                .player_position(player_id)
+                .unwrap_or(player.position);
             observation.has_ball
-                && flank_cross_context_is_legal(&observation, snapshot.field_width)
+                && flank_cross_context_is_legal(&observation, player_position, snapshot.field_width)
                 && !goal_attack_shot_is_required(&observation, player.role)
                 && !snapshot
                     .ranked_visible_aerial_pass_targets(player_id, 1)
@@ -44527,6 +44522,62 @@ mod tests {
             TeamTacticalDirective::neutral(Team::Away, snapshot.field_width, snapshot.field_length);
         let neutral_shape = neutral_snapshot.defensive_shape_for(12, away_def_home);
         assert!(defensive_shape.y > neutral_shape.y);
+    }
+
+    #[test]
+    fn tactical_directive_can_select_low_or_high_flank_cross_policy() {
+        let attacking_overload = AttackingOverloadProfile {
+            attackers: 5,
+            defenders: 2,
+            advantage: 3,
+            score: 0.80,
+        };
+        let low = tactical_directive_for_team(
+            Team::Home,
+            TacticalPhase::HomeAttack,
+            Some(Team::Home),
+            Vec2::new(12.0, 100.0),
+            0,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+            DefensiveCoverProfile::default(),
+            attacking_overload,
+        );
+        let high = tactical_directive_for_team(
+            Team::Home,
+            TacticalPhase::HomeAttack,
+            Some(Team::Home),
+            Vec2::new(4.0, 84.0),
+            0,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+            DefensiveCoverProfile::default(),
+            attacking_overload,
+        );
+        let no_possession = tactical_directive_for_team(
+            Team::Home,
+            TacticalPhase::HomeAttack,
+            Some(Team::Away),
+            Vec2::new(4.0, 84.0),
+            0,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+            DefensiveCoverProfile::default(),
+            attacking_overload,
+        );
+
+        assert_eq!(
+            low.flank_attack_policy,
+            FlankAttackPolicy::PlayDownFlankLowCross
+        );
+        assert_eq!(
+            high.flank_attack_policy,
+            FlankAttackPolicy::PlayDownFlankHighCross
+        );
+        assert!(low.flank_overlap_run_probability + 1e-9 >= FLANK_OVERLAP_MIN_OPTION_SHARE);
+        assert!(high.flank_overlap_run_probability + 1e-9 >= FLANK_OVERLAP_MIN_OPTION_SHARE);
+        assert_eq!(no_possession.flank_attack_policy, FlankAttackPolicy::None);
+        assert_eq!(no_possession.flank_overlap_run_probability, 0.0);
     }
 
     #[test]
@@ -55135,10 +55186,19 @@ mod tests {
             .find(|option| option.label == "support-roam")
             .map(|option| option.probability)
             .unwrap_or(0.0);
+        let overlap_probability = options
+            .iter()
+            .find(|option| option.label == "overlap-run")
+            .map(|option| option.probability)
+            .unwrap_or(0.0);
         let target =
             snapshot.positional_open_space_for(winger, sim.players[winger].home_position, false);
 
-        assert!(roam_probability > 0.40);
+        assert!(roam_probability > 0.05);
+        assert!(
+            overlap_probability + 1e-9 >= FLANK_OVERLAP_MIN_OPTION_SHARE,
+            "flank overlap-run should be at least one third when available: {overlap_probability}"
+        );
         assert!(snapshot.attacking_support_sprint_active(Team::Home));
         assert!(
             target.y > sim.players[striker].position.y,
@@ -55152,6 +55212,48 @@ mod tests {
         let surge_snapshot = WorldSnapshot::from_match(&sim);
         assert!(surge_snapshot.attacking_support_sprint_active(Team::Home));
         assert!(surge_snapshot.defensive_tracking_sprint_active(Team::Away));
+    }
+
+    #[test]
+    fn flank_cross_policy_exposes_overlap_run_at_directive_floor() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        let winger = 8;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(4.0, 84.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(68.0, 74.0);
+        sim.players[winger].home_position = Vec2::new(68.0, 64.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(30.0, 104.0 + (away - 11) as f64 * 0.3);
+        }
+        let mut directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        directive.flank_attack_policy = FlankAttackPolicy::PlayDownFlankHighCross;
+        directive.flank_overlap_run_probability = 0.42;
+        sim.central_brain.home_directive = directive.clone();
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let options = sim.players[winger].support_action_options(&snapshot);
+        let overlap = options
+            .iter()
+            .find(|option| option.label == "overlap-run")
+            .expect("flank policy should expose overlap-run");
+
+        assert!(overlap.legal);
+        assert!(
+            overlap.probability + 1e-9 >= directive.flank_overlap_run_probability,
+            "policy overlap probability should honor directive floor: {overlap:?}"
+        );
+        assert!(
+            action_option_score(&options, "wide-outlet") > 0.0,
+            "flank policy should still leave wide outlet support available: {options:?}"
+        );
     }
 
     #[test]
@@ -55738,6 +55840,142 @@ mod tests {
             .expect("calm clearance option");
         assert!(!calm_clearance.legal);
         assert_eq!(calm_clearance.probability, 0.0);
+    }
+
+    #[test]
+    fn flank_cross_policies_offer_low_and_high_cross_actions() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let crosser = 8;
+        let striker = 9;
+        sim.ball.holder = Some(crosser);
+        sim.ball.position = Vec2::new(72.0, 72.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[crosser].position = sim.ball.position;
+        sim.players[crosser].velocity = Vec2::new(0.0, 1.0);
+        sim.players[crosser].action_facing = FacingBucket::North;
+        sim.players[crosser].skills.crossing_left = 8.6;
+        sim.players[crosser].skills.crossing_right = 8.8;
+        sim.players[striker].position = Vec2::new(62.0, 102.0);
+        sim.players[striker].velocity = Vec2::new(0.0, 1.2);
+        sim.players[striker].skills.height = 8.8;
+        sim.players[striker].skills.strength = 8.4;
+        sim.players[6].position = Vec2::new(58.0, 98.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(12.0 + (away - 11) as f64, 106.0);
+        }
+        sim.players[11].position = Vec2::new(40.0, 118.0);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(crosser);
+        let pass_targets = snapshot.ranked_visible_pass_targets(crosser, 3);
+        let aerial_targets = snapshot.ranked_visible_aerial_pass_targets(crosser, 3);
+        assert!(
+            !pass_targets.is_empty(),
+            "wide crosser should have a floor target"
+        );
+        assert!(
+            !aerial_targets.is_empty(),
+            "wide crosser should have an aerial target"
+        );
+
+        let mut directive = snapshot.tactical_directive(Team::Home).clone();
+        directive.flank_attack_policy = FlankAttackPolicy::PlayDownFlankLowCross;
+        directive.flank_overlap_run_probability = FLANK_OVERLAP_MIN_OPTION_SHARE;
+        let low_options = sim.players[crosser].possession_action_options(
+            &observation,
+            &directive,
+            pass_targets.len(),
+            aerial_targets.len(),
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let low_cross = low_options
+            .iter()
+            .find(|option| option.label == "flank-low-cross")
+            .expect("low cross option");
+        let low_policy_high_cross_probability = low_options
+            .iter()
+            .find(|option| option.label == "flank-high-cross")
+            .map(|option| option.probability)
+            .unwrap_or(0.0);
+        assert!(low_cross.legal);
+        assert!(low_cross.probability > 0.0);
+        assert!(
+            low_cross.probability > low_policy_high_cross_probability,
+            "low-cross policy should prefer low cross: low={low_cross:?} high_probability={low_policy_high_cross_probability}"
+        );
+        assert!(learned_action_label_is_legal(
+            "play-down-flank-low-cross",
+            &snapshot,
+            crosser
+        ));
+
+        directive.flank_attack_policy = FlankAttackPolicy::PlayDownFlankHighCross;
+        let high_options = sim.players[crosser].possession_action_options(
+            &observation,
+            &directive,
+            pass_targets.len(),
+            aerial_targets.len(),
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let high_cross = high_options
+            .iter()
+            .find(|option| option.label == "flank-high-cross")
+            .expect("high cross option");
+        let high_policy_low_cross_probability = high_options
+            .iter()
+            .find(|option| option.label == "flank-low-cross")
+            .map(|option| option.probability)
+            .unwrap_or(0.0);
+        assert!(high_cross.legal);
+        assert!(high_cross.probability > 0.0);
+        assert!(
+            high_cross.probability > high_policy_low_cross_probability,
+            "high-cross policy should prefer aerial cross: high={high_cross:?} low_probability={high_policy_low_cross_probability}"
+        );
+        assert!(learned_action_label_is_legal(
+            "play-down-flank-high-cross",
+            &snapshot,
+            crosser
+        ));
+
+        let low_plan = SoccerLearnedPlan {
+            action: "play-down-flank-low-cross".to_string(),
+            target_player: Some(striker),
+            target_point: None,
+        };
+        let (low_action, low_label) = sim.players[crosser]
+            .action_from_learned_plan(&low_plan, &snapshot, &observation)
+            .expect("low cross learned action");
+        assert_eq!(low_label, "flank-low-cross");
+        assert!(matches!(
+            low_action,
+            SoccerAction::Pass {
+                flight: PassFlight::Floor,
+                ..
+            }
+        ));
+
+        let high_plan = SoccerLearnedPlan {
+            action: "play-down-flank-high-cross".to_string(),
+            target_player: Some(striker),
+            target_point: None,
+        };
+        let (high_action, high_label) = sim.players[crosser]
+            .action_from_learned_plan(&high_plan, &snapshot, &observation)
+            .expect("high cross learned action");
+        assert_eq!(high_label, "flank-high-cross");
+        assert!(matches!(
+            high_action,
+            SoccerAction::Pass {
+                flight: PassFlight::Aerial,
+                ..
+            }
+        ));
     }
 
     #[test]

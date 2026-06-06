@@ -1185,13 +1185,19 @@ function controllerYieldLabel(stats = state?.controllerYield) {
   const notified = Number(stats.notifiedWaits ?? 0);
   const immediate = Number(stats.immediatePendingWaits ?? 0);
   const timedOut = Number(stats.timedOutWaits ?? 0);
+  const lateWaits = Number(stats.lateWaitAttempts ?? 0);
+  const lateNotified = Number(stats.lateNotifiedWaits ?? 0);
+  const lateTimedOut = Number(stats.lateTimedOutWaits ?? 0);
   const queuedBefore = Number(stats.lastQueuedBefore ?? 0);
   const queuedAfter = Number(stats.lastQueuedAfter ?? 0);
-  const last = stats.lastImmediatePending ? "ready" : stats.lastNotified ? "notify" : "timeout";
+  const last = stats.lastWaitLate ? "late"
+    : stats.lastImmediatePending ? "ready"
+    : stats.lastNotified ? "notify"
+    : "timeout";
   const avgWait = waits > 0 ? Number(stats.totalWaitMs ?? 0) / waits : 0;
   const lastWait = Number(stats.lastWaitMs ?? 0);
   const maxWait = Number(stats.maxWaitMs ?? 0);
-  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} ${last} Q${queuedBefore}->${queuedAfter} wait ${avgWait.toFixed(1)}/${lastWait.toFixed(1)}/${maxWait.toFixed(1)}ms`;
+  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} L${lateWaits}/${lateNotified}/${lateTimedOut} ${last} Q${queuedBefore}->${queuedAfter} wait ${avgWait.toFixed(1)}/${lastWait.toFixed(1)}/${maxWait.toFixed(1)}ms`;
 }
 function queuedHumanInputsLabel() {
   const queued = Number(state?.queuedHumanInputs ?? 0);

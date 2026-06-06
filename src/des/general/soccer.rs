@@ -65,6 +65,8 @@ const PLAYER_POSITION_HISTORY_LIMIT: usize = 50;
 const BALL_POSITION_HISTORY_LIMIT: usize = 50;
 const CONTROLLER_INPUT_YIELD_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
 const CONTROLLER_INPUT_COALESCE_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
+const CONTROLLER_INPUT_LATE_YIELD_SLICE_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 1;
+const CONTROLLER_INPUT_LATE_YIELD_BUDGET_MS: u64 = CONTROLLER_INPUT_YIELD_MS;
 const FIRST_TOUCH_WINDOW_TICKS: u64 = 3;
 const PITCH_FINE_GRID_COLUMNS: usize = 12;
 const PITCH_FINE_GRID_ROWS: usize = 16;
@@ -8849,7 +8851,12 @@ pub struct ControllerYieldStats {
     pub notified_waits: u64,
     pub timed_out_waits: u64,
     pub immediate_pending_waits: u64,
+    pub late_wait_attempts: u64,
+    pub late_notified_waits: u64,
+    pub late_timed_out_waits: u64,
+    pub late_immediate_pending_waits: u64,
     pub skipped_no_assignment: u64,
+    pub last_wait_late: bool,
     pub last_notified: bool,
     pub last_immediate_pending: bool,
     pub last_queued_before: usize,
@@ -8906,6 +8913,7 @@ impl ControllerYieldStats {
     fn record_no_assignment(&mut self, queued: usize, version: u64) {
         self.assigned_players = 0;
         self.skipped_no_assignment = self.skipped_no_assignment.saturating_add(1);
+        self.last_wait_late = false;
         self.last_notified = false;
         self.last_immediate_pending = false;
         self.last_queued_before = queued;
@@ -8916,6 +8924,25 @@ impl ControllerYieldStats {
     }
 
     fn record_wait(&mut self, assigned_players: usize, result: HumanInputWaitResult, wait_ms: f64) {
+        self.record_wait_with_kind(assigned_players, result, wait_ms, false);
+    }
+
+    fn record_late_wait(
+        &mut self,
+        assigned_players: usize,
+        result: HumanInputWaitResult,
+        wait_ms: f64,
+    ) {
+        self.record_wait_with_kind(assigned_players, result, wait_ms, true);
+    }
+
+    fn record_wait_with_kind(
+        &mut self,
+        assigned_players: usize,
+        result: HumanInputWaitResult,
+        wait_ms: f64,
+        late: bool,
+    ) {
         let wait_ms = finite_metric(wait_ms.max(0.0));
         self.assigned_players = assigned_players;
         self.wait_attempts = self.wait_attempts.saturating_add(1);
@@ -8926,6 +8953,18 @@ impl ControllerYieldStats {
         } else {
             self.timed_out_waits = self.timed_out_waits.saturating_add(1);
         }
+        if late {
+            self.late_wait_attempts = self.late_wait_attempts.saturating_add(1);
+            if result.immediate_pending {
+                self.late_immediate_pending_waits =
+                    self.late_immediate_pending_waits.saturating_add(1);
+            } else if result.notified || result.queued_after > 0 {
+                self.late_notified_waits = self.late_notified_waits.saturating_add(1);
+            } else {
+                self.late_timed_out_waits = self.late_timed_out_waits.saturating_add(1);
+            }
+        }
+        self.last_wait_late = late;
         self.last_notified = result.notified || result.queued_after > result.queued_before;
         self.last_immediate_pending = result.immediate_pending;
         self.last_queued_before = result.queued_before;
@@ -30467,6 +30506,39 @@ impl SoccerMatch {
         thread::yield_now();
     }
 
+    fn late_yield_for_controller_slot(
+        &mut self,
+        controller_slot: usize,
+        assigned_players: usize,
+        remaining_budget: &mut Duration,
+    ) {
+        if remaining_budget.is_zero()
+            || self.human_inputs.queued_len_for_slots(&[controller_slot]) > 0
+        {
+            return;
+        }
+        let wait_for =
+            (*remaining_budget).min(Duration::from_millis(CONTROLLER_INPUT_LATE_YIELD_SLICE_MS));
+        if wait_for.is_zero() {
+            return;
+        }
+
+        let wait_started = Instant::now();
+        let result = self
+            .human_inputs
+            .wait_for_pending_input_for_slots_result(&[controller_slot], wait_for);
+        let elapsed = wait_started.elapsed();
+        *remaining_budget = remaining_budget.saturating_sub(elapsed);
+        self.controller_yield_stats.record_late_wait(
+            assigned_players,
+            result,
+            soccer_live_duration_ms(elapsed),
+        );
+        if result.pending() {
+            thread::yield_now();
+        }
+    }
+
     fn player_index_for_id(&self, player_id: usize) -> Option<usize> {
         if self
             .players
@@ -30556,6 +30628,16 @@ impl SoccerMatch {
                 adversarial_embedding_signals.as_ref(),
             );
         self.yield_for_controller_threads();
+        let controller_late_yield_enabled = self.controller_yield_stats.assigned_players > 0
+            && !self.controller_yield_stats.last_immediate_pending
+            && !self.controller_yield_stats.last_notified
+            && self.controller_yield_stats.last_queued_after == 0;
+        let controller_late_yield_assigned_players = self.controller_yield_stats.assigned_players;
+        let mut controller_late_yield_budget = if controller_late_yield_enabled {
+            Duration::from_millis(CONTROLLER_INPUT_LATE_YIELD_BUDGET_MS)
+        } else {
+            Duration::from_secs(0)
+        };
         let tick_start_snapshot = WorldSnapshot::from_match_for_learning(self);
         let ball_velocity_before = self.ball.velocity;
         let ball_acceleration_before = self.ball.acceleration;
@@ -30594,8 +30676,19 @@ impl SoccerMatch {
                     };
                     field_snapshot_elapsed += phase_started.elapsed();
                     let phase_started = Instant::now();
-                    let input_frame = self.players[actor]
-                        .controller_slot
+                    let controller_slot = self.players[actor].controller_slot;
+                    if let Some(slot) = controller_slot {
+                        if controller_late_yield_enabled
+                            && controller_late_yield_budget > Duration::from_secs(0)
+                        {
+                            self.late_yield_for_controller_slot(
+                                slot,
+                                controller_late_yield_assigned_players,
+                                &mut controller_late_yield_budget,
+                            );
+                        }
+                    }
+                    let input_frame = controller_slot
                         .and_then(|slot| self.human_inputs.drain_latest_for_slot_with_age(slot))
                         .filter(|frame| {
                             frame.input.player_id.is_none()
@@ -50413,6 +50506,11 @@ mod tests {
         assert_eq!(stats.immediate_pending_waits, 1);
         assert_eq!(stats.notified_waits, 0);
         assert_eq!(stats.timed_out_waits, 0);
+        assert_eq!(stats.late_wait_attempts, 0);
+        assert_eq!(stats.late_immediate_pending_waits, 0);
+        assert_eq!(stats.late_notified_waits, 0);
+        assert_eq!(stats.late_timed_out_waits, 0);
+        assert!(!stats.last_wait_late);
         assert!(stats.last_immediate_pending);
         assert_eq!(stats.last_queued_before, 1);
         assert_eq!(stats.last_queued_after, 1);
@@ -50436,6 +50534,63 @@ mod tests {
         assert!(observation.human_controlled);
         assert!(observation.human_input_present);
         assert_eq!(observation.human_input_seq, Some(1));
+    }
+
+    #[test]
+    fn late_controller_slot_yield_captures_input_from_controller_thread() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 780,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0");
+        let input_queue = sim.human_inputs.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let mut remaining_budget = Duration::from_millis(CONTROLLER_INPUT_LATE_YIELD_BUDGET_MS);
+            ready_tx.send(()).expect("late yield ready signal");
+            sim.late_yield_for_controller_slot(0, 1, &mut remaining_budget);
+            (sim, remaining_budget)
+        });
+
+        ready_rx.recv().expect("late yield helper started");
+        thread::sleep(Duration::from_millis(1));
+        assert!(input_queue.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 42,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let (sim, remaining_budget) = handle.join().expect("late yield helper joins");
+        let stats = sim.controller_yield_stats();
+        assert_eq!(stats.assigned_players, 1);
+        assert_eq!(stats.wait_attempts, 1);
+        assert_eq!(stats.notified_waits, 1);
+        assert_eq!(stats.timed_out_waits, 0);
+        assert_eq!(stats.late_wait_attempts, 1);
+        assert_eq!(stats.late_notified_waits, 1);
+        assert_eq!(stats.late_timed_out_waits, 0);
+        assert_eq!(stats.late_immediate_pending_waits, 0);
+        assert!(stats.last_wait_late);
+        assert!(stats.last_notified);
+        assert_eq!(stats.last_queued_after, 1);
+        assert!(remaining_budget < Duration::from_millis(CONTROLLER_INPUT_LATE_YIELD_BUDGET_MS));
+        let drained = sim
+            .human_inputs
+            .drain_latest_for_slot(0)
+            .expect("late controller input queued");
+        assert_eq!(drained.seq, 42);
     }
 
     #[test]
@@ -50574,10 +50729,15 @@ mod tests {
 
         let stats = sim.controller_yield_stats();
         assert_eq!(stats.assigned_players, 1);
-        assert_eq!(stats.wait_attempts, 1);
+        assert_eq!(stats.wait_attempts, 2);
         assert_eq!(stats.immediate_pending_waits, 0);
         assert_eq!(stats.notified_waits, 0);
-        assert_eq!(stats.timed_out_waits, 1);
+        assert_eq!(stats.timed_out_waits, 2);
+        assert_eq!(stats.late_wait_attempts, 1);
+        assert_eq!(stats.late_notified_waits, 0);
+        assert_eq!(stats.late_timed_out_waits, 1);
+        assert_eq!(stats.late_immediate_pending_waits, 0);
+        assert!(stats.last_wait_late);
         assert!(!stats.last_immediate_pending);
         assert_eq!(stats.last_queued_before, 0);
         assert_eq!(stats.last_queued_after, 0);
@@ -65405,6 +65565,10 @@ mod tests {
         assert!(html.body.contains("totalWaitMs"));
         assert!(html.body.contains("lastWaitMs"));
         assert!(html.body.contains("maxWaitMs"));
+        assert!(html.body.contains("lateWaitAttempts"));
+        assert!(html.body.contains("lateNotifiedWaits"));
+        assert!(html.body.contains("lateTimedOutWaits"));
+        assert!(html.body.contains("lastWaitLate"));
         assert!(html.body.contains("totalDebounceMs"));
         assert!(html.body.contains("lastDebounceMs"));
         assert!(html.body.contains("maxDebounceMs"));
@@ -65632,6 +65796,10 @@ mod tests {
         assert_eq!(value["queuedHumanInputs"], 0);
         assert_eq!(value["controllerYield"]["assignedPlayers"], 0);
         assert_eq!(value["controllerYield"]["waitAttempts"], 0);
+        assert_eq!(value["controllerYield"]["lateWaitAttempts"], 0);
+        assert_eq!(value["controllerYield"]["lateNotifiedWaits"], 0);
+        assert_eq!(value["controllerYield"]["lateTimedOutWaits"], 0);
+        assert_eq!(value["controllerYield"]["lastWaitLate"], false);
         assert_eq!(value["controllerYield"]["skippedNoAssignment"], 2);
         assert_eq!(value["controllerYield"]["lastWaitMs"], 0.0);
         assert_eq!(value["controllerYield"]["totalWaitMs"], 0.0);
@@ -67198,6 +67366,8 @@ mod tests {
         );
         assert_eq!(value["controllerYield"]["assignedPlayers"], 4);
         assert_eq!(value["controllerYield"]["waitAttempts"], 1);
+        assert_eq!(value["controllerYield"]["lateWaitAttempts"], 0);
+        assert_eq!(value["controllerYield"]["lastWaitLate"], false);
         assert_eq!(value["controllerYield"]["lastQueuedAfter"], 4);
         assert_eq!(value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
         assert!(
@@ -67536,6 +67706,8 @@ mod tests {
         );
         assert_eq!(step_value["controllerYield"]["assignedPlayers"], 1);
         assert_eq!(step_value["controllerYield"]["waitAttempts"], 1);
+        assert_eq!(step_value["controllerYield"]["lateWaitAttempts"], 0);
+        assert_eq!(step_value["controllerYield"]["lastWaitLate"], false);
         assert_eq!(step_value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
         assert_eq!(step_value["controllerLatencyBudget"]["consumedInputs"], 1);
         let budget_slots = step_value["controllerLatencyBudget"]["slots"]

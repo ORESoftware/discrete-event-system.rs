@@ -15200,6 +15200,12 @@ impl WorldSnapshot {
                 (m.clock_seconds - start_clock).max(0.0)
             })
             .unwrap_or(0.0);
+        let mut ball = m.ball.to_state();
+        ball.scheduled_index = m
+            .last_agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+
         WorldSnapshot {
             tick: m.tick,
             clock_seconds: m.clock_seconds,
@@ -15207,7 +15213,7 @@ impl WorldSnapshot {
             field_length: m.config.field_length_yards,
             field_width: m.config.field_width_yards,
             goal_width: m.config.goal_width_yards,
-            ball: m.ball.to_state(),
+            ball,
             ball_history: if options.include_ball_history {
                 m.ball.position_history.iter().cloned().collect()
             } else {
@@ -46437,8 +46443,10 @@ mod tests {
             .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
             .expect("ball scheduled");
         let decision = frame.ball.last_decision.expect("ball decision trace");
+        let snapshot = WorldSnapshot::from_match(&sim);
 
         assert_eq!(frame.ball.scheduled_index, Some(ball_schedule_index));
+        assert_eq!(snapshot.ball.scheduled_index, Some(ball_schedule_index));
         assert_eq!(decision.scheduled_index, Some(ball_schedule_index));
         assert_eq!(decision.tick, 0);
         assert!(!decision.action.is_empty());

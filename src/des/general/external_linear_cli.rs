@@ -5840,11 +5840,13 @@ fn solve_native_lp_solve_cli_model(
     let mut command = Command::new(&command_path);
     command
         .arg("-timeout")
-        .arg(glpk_time_limit_arg(opts.time_limit_secs))
-        .arg("-presolve");
+        .arg(glpk_time_limit_arg(opts.time_limit_secs));
     if kind == ExternalLinearCliKind::Lp {
         command.arg("-S4").arg("-wbas").arg(&basis_path);
     } else if kind == ExternalLinearCliKind::Mip {
+        if !matches!(opts.presolve, Some(ExternalLinearCliPresolve::Off)) {
+            command.arg("-presolve");
+        }
         command.arg("-v5").arg("-S2");
         if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
             command.arg("-gr").arg(format!("{relative_gap:.17}"));
@@ -8009,7 +8011,13 @@ fn solve_native_lindo_gams_model(
             return failure;
         }
     };
-    let parsed = parse_native_lindo_gams_solution_text(&solution_text, model.c.len(), &listing);
+    let parsed = parse_native_lindo_gams_solution_text(
+        &solution_text,
+        model.c.len(),
+        model.le_rows.len(),
+        model.eq_rows.len(),
+        &listing,
+    );
     cleanup_native_lindo_temp_files(&cleanup_paths);
 
     let status = ExternalLinearCliStatus::from_str(&parsed.status);
@@ -8071,9 +8079,15 @@ fn solve_native_lindo_gams_model(
         node_selection: None,
         mip_start_accepted: None,
         mip_start_objective,
-        dual_ub: None,
-        dual_eq: None,
-        reduced_costs: None,
+        dual_ub: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_ub)
+            .flatten(),
+        dual_eq: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.dual_eq)
+            .flatten(),
+        reduced_costs: (kind == ExternalLinearCliKind::Lp)
+            .then_some(parsed.reduced_costs)
+            .flatten(),
         var_basis: None,
         row_basis: None,
         iterations: parse_gams_iteration_count(&listing),
@@ -8159,12 +8173,6 @@ fn gams_lindo_model_text(
         out.push_str(&format!("option reslim = {};\n", fmt_lp_number(seconds)));
     }
     if kind == ExternalLinearCliKind::Mip {
-        if let Some(max_nodes) = opts
-            .max_nodes
-            .or_else(|| opts.node_limit.map(|limit| limit as u64))
-        {
-            out.push_str(&format!("option nodlim = {max_nodes};\n"));
-        }
         if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
             out.push_str(&format!(
                 "option optcr = {};\n",
@@ -8195,6 +8203,17 @@ fn gams_lindo_model_text(
     out.push_str("put 'objective ' z.l:0:17 /;\n");
     for i in 0..model.c.len() {
         out.push_str(&format!("put 'x{i} ' x{i}.l:0:17 /;\n"));
+    }
+    if kind == ExternalLinearCliKind::Lp {
+        for i in 0..model.le_rows.len() {
+            out.push_str(&format!("put 'le{i}.m ' le{i}.m:0:17 /;\n"));
+        }
+        for i in 0..model.eq_rows.len() {
+            out.push_str(&format!("put 'eq{i}.m ' eq{i}.m:0:17 /;\n"));
+        }
+        for i in 0..model.c.len() {
+            out.push_str(&format!("put 'x{i}.m ' x{i}.m:0:17 /;\n"));
+        }
     }
     out.push_str("putclose result;\n");
     out
@@ -8281,9 +8300,14 @@ fn gams_single_quoted_path(path: &Path) -> String {
 fn parse_native_lindo_gams_solution_text(
     text: &str,
     variable_count: usize,
+    le_count: usize,
+    eq_count: usize,
     listing: &str,
 ) -> ParsedNativeNamedSolution {
     let mut x = vec![0.0; variable_count];
+    let mut reduced_costs = vec![None::<f64>; variable_count];
+    let mut dual_ub = vec![None::<f64>; le_count];
+    let mut dual_eq = vec![None::<f64>; eq_count];
     let mut modelstat = None;
     for line in text.lines() {
         let mut parts = line.split_whitespace();
@@ -8295,6 +8319,30 @@ fn parse_native_lindo_gams_solution_text(
         };
         if key.eq_ignore_ascii_case("modelstat") {
             modelstat = Some(value.round() as i32);
+            continue;
+        }
+
+        let key = key.to_ascii_lowercase();
+        if let Some(name) = key.strip_suffix(".m") {
+            if let Some(index_text) = name.strip_prefix('x') {
+                if let Ok(index) = index_text.parse::<usize>() {
+                    if index < reduced_costs.len() {
+                        reduced_costs[index] = Some(clean_certificate_value(value));
+                    }
+                }
+            } else if let Some(index_text) = name.strip_prefix("le") {
+                if let Ok(index) = index_text.parse::<usize>() {
+                    if index < dual_ub.len() {
+                        dual_ub[index] = Some(clean_certificate_value(value));
+                    }
+                }
+            } else if let Some(index_text) = name.strip_prefix("eq") {
+                if let Ok(index) = index_text.parse::<usize>() {
+                    if index < dual_eq.len() {
+                        dual_eq[index] = Some(clean_certificate_value(value));
+                    }
+                }
+            }
         } else if let Some(index_text) = key.strip_prefix('x') {
             if let Ok(index) = index_text.parse::<usize>() {
                 if index < x.len() {
@@ -8306,6 +8354,9 @@ fn parse_native_lindo_gams_solution_text(
     ParsedNativeNamedSolution {
         status: gams_model_status(modelstat, listing).to_string(),
         x,
+        reduced_costs: all_some_f64(&reduced_costs),
+        dual_ub: all_some_f64(&dual_ub),
+        dual_eq: all_some_f64(&dual_eq),
     }
 }
 
@@ -8693,6 +8744,9 @@ struct ParsedNativeHighsSolution {
 struct ParsedNativeNamedSolution {
     status: String,
     x: Vec<f64>,
+    reduced_costs: Option<Vec<f64>>,
+    dual_ub: Option<Vec<f64>>,
+    dual_eq: Option<Vec<f64>>,
 }
 
 #[derive(Default)]
@@ -10267,7 +10321,11 @@ fn parse_native_cplex_solution_text(
     }
 
     if saw_cplex_xml {
-        ParsedNativeNamedSolution { status, x }
+        ParsedNativeNamedSolution {
+            status,
+            x,
+            ..Default::default()
+        }
     } else {
         parse_native_named_solution_text(text, variable_count, "optimal")
     }
@@ -10442,7 +10500,11 @@ fn parse_native_xpress_solution_text(
             break;
         }
     }
-    ParsedNativeNamedSolution { status, x }
+    ParsedNativeNamedSolution {
+        status,
+        x,
+        ..Default::default()
+    }
 }
 
 fn split_xpress_solution_line(line: &str) -> Vec<String> {
@@ -10528,7 +10590,11 @@ fn parse_native_lindo_solution_text(
             x[index] = value;
         }
     }
-    ParsedNativeNamedSolution { status, x }
+    ParsedNativeNamedSolution {
+        status,
+        x,
+        ..Default::default()
+    }
 }
 
 fn parse_native_named_solution_file(
@@ -10567,7 +10633,11 @@ fn parse_native_named_solution_text(
             x[index] = value;
         }
     }
-    ParsedNativeNamedSolution { status, x }
+    ParsedNativeNamedSolution {
+        status,
+        x,
+        ..Default::default()
+    }
 }
 
 fn parse_named_variable_value_line(line: &str, variable_count: usize) -> Option<(usize, f64)> {
@@ -14036,8 +14106,8 @@ x9 99
         assert!(text.contains("x1.l = 1;"));
         assert!(text.contains("x2.l = 1;"));
         assert!(text.contains("option reslim = 2.5;"));
-        assert!(text.contains("option nodlim = 3;"));
         assert!(text.contains("option optcr = 0.25;"));
+        assert!(!text.contains("nodlim"));
         assert!(text.contains("Solve m using mip maximizing z;"));
         assert_eq!(
             super::native_lindo_gams_mip_start_objective(
@@ -14061,6 +14131,76 @@ x9 99
             ),
             Err("mip_start length 1 does not match variable count 3".to_string())
         );
+    }
+
+    #[test]
+    fn gams_lindo_lp_model_emits_certificate_marginal_fields() {
+        let model = super::PlainLinearCliModel {
+            sense: Sense::Max,
+            c: vec![3.0, 4.0],
+            le_rows: vec![vec![1.0, 2.0], vec![-3.0, 1.0], vec![1.0, -1.0]],
+            le_rhs: vec![14.0, 0.0, 2.0],
+            eq_rows: vec![vec![1.0, 0.0]],
+            eq_rhs: vec![6.0],
+            lbs: vec![Some(0.0), Some(0.0)],
+            ubs: vec![None, None],
+            integer_vars: vec![false, false],
+        };
+        let text = super::gams_lindo_model_text(
+            ExternalLinearCliKind::Lp,
+            &model,
+            std::path::Path::new("/tmp/des-rs-lindo-solution.txt"),
+            &ExternalLinearCliOptions {
+                solver: ExternalLinearCliSolver::Lindo,
+                ..Default::default()
+            },
+        );
+
+        assert!(text.contains("Solve m using lp maximizing z;"));
+        assert!(text.contains("put 'le0.m ' le0.m:0:17 /;"));
+        assert!(text.contains("put 'le1.m ' le1.m:0:17 /;"));
+        assert!(text.contains("put 'le2.m ' le2.m:0:17 /;"));
+        assert!(text.contains("put 'eq0.m ' eq0.m:0:17 /;"));
+        assert!(text.contains("put 'x0.m ' x0.m:0:17 /;"));
+        assert!(text.contains("put 'x1.m ' x1.m:0:17 /;"));
+    }
+
+    #[test]
+    fn native_lindo_gams_solution_parser_reads_lp_marginals() {
+        let row_senses = "\
+modelstat 1
+objective 34
+x0 6
+x1 4
+le0.m 2.333333333333333
+le1.m 0
+le2.m 0.666666666666667
+x0.m 0
+x1.m 0
+";
+        let parsed = super::parse_native_lindo_gams_solution_text(row_senses, 2, 3, 0, "");
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![6.0, 4.0]);
+        let dual_ub = parsed.dual_ub.unwrap();
+        assert!((dual_ub[0] - 7.0 / 3.0).abs() <= 1.0e-12);
+        assert_eq!(dual_ub[1], 0.0);
+        assert!((dual_ub[2] - 2.0 / 3.0).abs() <= 1.0e-12);
+        assert_eq!(parsed.dual_eq, Some(Vec::new()));
+        assert_eq!(parsed.reduced_costs, Some(vec![0.0, 0.0]));
+
+        let equality = "\
+modelstat 1
+objective 2
+x0 2
+eq0.m 1
+x0.m 0
+";
+        let parsed = super::parse_native_lindo_gams_solution_text(equality, 1, 0, 1, "");
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x, vec![2.0]);
+        assert_eq!(parsed.dual_ub, Some(Vec::new()));
+        assert_eq!(parsed.dual_eq, Some(vec![1.0]));
+        assert_eq!(parsed.reduced_costs, Some(vec![0.0]));
     }
 
     #[test]
@@ -14129,6 +14269,44 @@ x1                              0 -0.5
         assert_eq!(fields.reduced_costs, Some(vec![0.25, -0.5]));
         assert_eq!(fields.var_basis, None);
         assert_eq!(fields.row_basis, None);
+    }
+
+    #[test]
+    fn native_lp_solve_lp_certificate_parser_reads_equality_sensitivity_output() {
+        let stdout = "\
+Value of objective function: 2.00000000
+
+Actual values of the variables:
+x0                              2
+
+Actual values of the constraints:
+e0                              2
+
+Objective function limits:
+                                 From            Till       FromValue
+x0                             -1e+30           1e+30          -1e+30
+
+Dual values with from - till limits:
+                           Dual value            From            Till
+e0                                  1               0           1e+30
+x0                                  0          -1e+30           1e+30
+";
+        let basis_text = "\
+NAME           Rows 1 Cols 1 Iters 1
+ XL x0        e0
+ENDATA
+";
+        let basis_path = super::native_lp_solve_temp_path("test-eq-basis", "bas");
+        std::fs::write(&basis_path, basis_text).unwrap();
+        let fields =
+            super::parse_native_lp_solve_lp_certificate_fields(stdout, &basis_path, 1, 0, 1);
+        let _ = std::fs::remove_file(&basis_path);
+
+        assert_eq!(fields.dual_ub, Some(Vec::new()));
+        assert_eq!(fields.dual_eq, Some(vec![1.0]));
+        assert_eq!(fields.reduced_costs, Some(vec![0.0]));
+        assert_eq!(fields.var_basis, Some(vec!["basic".to_string()]));
+        assert_eq!(fields.row_basis, Some(vec!["fixed".to_string()]));
     }
 
     #[test]

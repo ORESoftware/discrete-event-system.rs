@@ -268,7 +268,7 @@ pub fn problem_to_json(p: &ComputerNetworkProblem) -> JsonValue {
     JsonValue::Object(obj)
 }
 
-fn result_to_reference_json(r: &ComputerNetworkResult) -> JsonValue {
+pub fn result_to_reference_json(r: &ComputerNetworkResult) -> JsonValue {
     let flow_stats = r
         .flow_stats
         .iter()

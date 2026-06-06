@@ -304,9 +304,9 @@ fn do_register() -> Result<(), String> {
     register_external_module(ExternalProgramModule {
         id: COMPUTER_NETWORK_REFERENCE_ID.to_string(),
         kind: ExternalModuleKind::Validator,
-        description: "Dependency-free Python reference simulator for computer-network topology, queueing, drops, and bottleneck metrics.".to_string(),
-        source_path: "external-references/computer-network/network_reference.py".to_string(),
-        interpreter: python3(),
+        description: "Rust source-only reference simulator for computer-network topology, queueing, drops, and bottleneck metrics.".to_string(),
+        source_path: "src/bin/computer_network_reference.rs".to_string(),
+        interpreter: rust_cargo(),
         default_params: params(&[("builtin", s("bottleneck-lab"))]),
         timeout_ms: None,
         max_buffer_bytes: None,
@@ -400,6 +400,10 @@ mod tests {
             (
                 NEURAL_NETWORK_REFERENCE_ID,
                 "src/bin/neural_network_reference.rs",
+            ),
+            (
+                COMPUTER_NETWORK_REFERENCE_ID,
+                "src/bin/computer_network_reference.rs",
             ),
             (IP_MIP_REFERENCE_ID, "src/bin/ip_mip_reference.rs"),
         ] {

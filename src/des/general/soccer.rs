@@ -8438,6 +8438,8 @@ impl SharedHumanInputStore {
         {
             return false;
         }
+        self.pending
+            .retain(|queued| queued.input.controller_slot != input.controller_slot);
         self.latest_seq_by_slot
             .insert(input.controller_slot, input.seq);
         self.pending.push_back(QueuedHumanInputFrame {
@@ -9393,11 +9395,28 @@ pub struct PlayerPositionSample {
     pub jerk: Vec2,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialPositionSample {
+    pub official_id: usize,
+    pub kind: OfficialKind,
+    pub tick: u64,
+    pub clock_seconds: f64,
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub acceleration: Vec2,
+    pub jerk: Vec2,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedPlayerPositionSnapshot {
     pub latest: Vec<PlayerPositionSample>,
     pub histories: HashMap<usize, Vec<PlayerPositionSample>>,
+    #[serde(default)]
+    pub official_latest: Vec<OfficialPositionSample>,
+    #[serde(default)]
+    pub official_histories: HashMap<usize, Vec<OfficialPositionSample>>,
     #[serde(default)]
     pub ball_latest: Option<BallPositionSample>,
     #[serde(default)]
@@ -9414,6 +9433,18 @@ impl SharedPlayerPositionSnapshot {
     pub fn history_for(&self, player_id: usize) -> Option<&[PlayerPositionSample]> {
         self.histories
             .get(&player_id)
+            .map(|history| history.as_slice())
+    }
+
+    pub fn official_latest_for(&self, official_id: usize) -> Option<&OfficialPositionSample> {
+        self.official_latest
+            .iter()
+            .find(|sample| sample.official_id == official_id)
+    }
+
+    pub fn official_history_for(&self, official_id: usize) -> Option<&[OfficialPositionSample]> {
+        self.official_histories
+            .get(&official_id)
             .map(|history| history.as_slice())
     }
 
@@ -9446,6 +9477,8 @@ impl SharedPlayerPositionSnapshot {
         SharedPlayerPositionSnapshot {
             latest,
             histories,
+            official_latest: Vec::new(),
+            official_histories: HashMap::new(),
             ball_latest: None,
             ball_history: Vec::new(),
         }
@@ -9457,6 +9490,8 @@ struct SharedPlayerPositionStore {
     capacity: usize,
     latest: Vec<PlayerPositionSample>,
     histories: HashMap<usize, VecDeque<PlayerPositionSample>>,
+    official_latest: Vec<OfficialPositionSample>,
+    official_histories: HashMap<usize, VecDeque<OfficialPositionSample>>,
     ball_latest: Option<BallPositionSample>,
     ball_history: VecDeque<BallPositionSample>,
 }
@@ -9467,6 +9502,8 @@ impl SharedPlayerPositionStore {
             capacity: capacity.max(1),
             latest: Vec::new(),
             histories: HashMap::new(),
+            official_latest: Vec::new(),
+            official_histories: HashMap::new(),
             ball_latest: None,
             ball_history: VecDeque::new(),
         }
@@ -9478,9 +9515,16 @@ impl SharedPlayerPositionStore {
             .find(|sample| sample.player_id == player_id)
     }
 
+    fn official_latest_for(&self, official_id: usize) -> Option<&OfficialPositionSample> {
+        self.official_latest
+            .iter()
+            .find(|sample| sample.official_id == official_id)
+    }
+
     fn sync_from_players_and_ball(
         &mut self,
         players: &[PlayerAgent],
+        officials: &[OfficialAgent],
         ball: &BallAgent,
         tick: u64,
         clock_seconds: f64,
@@ -9499,6 +9543,38 @@ impl SharedPlayerPositionStore {
             .collect();
         for sample in &self.latest {
             let history = self.histories.entry(sample.player_id).or_default();
+            if history
+                .back()
+                .is_some_and(|last| last.tick == tick && last.clock_seconds == clock_seconds)
+            {
+                if let Some(last) = history.back_mut() {
+                    *last = sample.clone();
+                }
+            } else {
+                history.push_back(sample.clone());
+            }
+            while history.len() > self.capacity {
+                history.pop_front();
+            }
+        }
+        self.official_latest = officials
+            .iter()
+            .map(|official| OfficialPositionSample {
+                official_id: official.id,
+                kind: official.kind,
+                tick,
+                clock_seconds,
+                position: official.position,
+                velocity: official.velocity,
+                acceleration: official.acceleration,
+                jerk: official.jerk,
+            })
+            .collect();
+        for sample in &self.official_latest {
+            let history = self
+                .official_histories
+                .entry(sample.official_id)
+                .or_default();
             if history
                 .back()
                 .is_some_and(|last| last.tick == tick && last.clock_seconds == clock_seconds)
@@ -9534,6 +9610,7 @@ impl SharedPlayerPositionStore {
     fn snapshot_with_current_players(
         &self,
         players: &[PlayerAgent],
+        officials: &[OfficialAgent],
         ball: &BallAgent,
         tick: u64,
         clock_seconds: f64,
@@ -9592,6 +9669,59 @@ impl SharedPlayerPositionStore {
             }
         }
 
+        let official_latest = officials
+            .iter()
+            .map(|official| {
+                let prev_velocity = self
+                    .official_latest_for(official.id)
+                    .map(|sample| sample.velocity)
+                    .unwrap_or(official.velocity);
+                let acceleration = if dt_seconds > 0.0 {
+                    (official.velocity - prev_velocity) / dt_seconds
+                } else {
+                    official.acceleration
+                };
+                let prev_acceleration = self
+                    .official_latest_for(official.id)
+                    .map(|sample| sample.acceleration)
+                    .unwrap_or(official.acceleration);
+                let jerk = if dt_seconds > 0.0 {
+                    (acceleration - prev_acceleration) / dt_seconds
+                } else {
+                    official.jerk
+                };
+                OfficialPositionSample {
+                    official_id: official.id,
+                    kind: official.kind,
+                    tick,
+                    clock_seconds,
+                    position: official.position,
+                    velocity: official.velocity,
+                    acceleration,
+                    jerk,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut official_histories = self
+            .official_histories
+            .iter()
+            .map(|(id, history)| (*id, history.iter().cloned().collect::<Vec<_>>()))
+            .collect::<HashMap<_, _>>();
+        for sample in &official_latest {
+            let history = official_histories.entry(sample.official_id).or_default();
+            if history.last().is_some_and(|last| last.tick == tick) {
+                if let Some(last) = history.last_mut() {
+                    *last = sample.clone();
+                }
+            } else {
+                history.push(sample.clone());
+            }
+            while history.len() > self.capacity {
+                history.remove(0);
+            }
+        }
+
         let ball_sample = ball_position_sample_from_agent(ball, tick, clock_seconds);
         let mut ball_history = self.ball_history.iter().cloned().collect::<Vec<_>>();
         if ball_history.last().is_some_and(|last| last.tick == tick) {
@@ -9608,6 +9738,8 @@ impl SharedPlayerPositionStore {
         SharedPlayerPositionSnapshot {
             latest,
             histories,
+            official_latest,
+            official_histories,
             ball_latest: Some(ball_sample),
             ball_history,
         }
@@ -9616,6 +9748,7 @@ impl SharedPlayerPositionStore {
     fn latest_snapshot_with_current_players(
         &self,
         players: &[PlayerAgent],
+        officials: &[OfficialAgent],
         ball: &BallAgent,
         tick: u64,
         clock_seconds: f64,
@@ -9653,9 +9786,44 @@ impl SharedPlayerPositionStore {
                 }
             })
             .collect::<Vec<_>>();
+        let official_latest = officials
+            .iter()
+            .map(|official| {
+                let prev_velocity = self
+                    .official_latest_for(official.id)
+                    .map(|sample| sample.velocity)
+                    .unwrap_or(official.velocity);
+                let acceleration = if dt_seconds > 0.0 {
+                    (official.velocity - prev_velocity) / dt_seconds
+                } else {
+                    official.acceleration
+                };
+                let prev_acceleration = self
+                    .official_latest_for(official.id)
+                    .map(|sample| sample.acceleration)
+                    .unwrap_or(official.acceleration);
+                let jerk = if dt_seconds > 0.0 {
+                    (acceleration - prev_acceleration) / dt_seconds
+                } else {
+                    official.jerk
+                };
+                OfficialPositionSample {
+                    official_id: official.id,
+                    kind: official.kind,
+                    tick,
+                    clock_seconds,
+                    position: official.position,
+                    velocity: official.velocity,
+                    acceleration,
+                    jerk,
+                }
+            })
+            .collect::<Vec<_>>();
         SharedPlayerPositionSnapshot {
             latest,
             histories: HashMap::new(),
+            official_latest,
+            official_histories: HashMap::new(),
             ball_latest: Some(ball_position_sample_from_agent(ball, tick, clock_seconds)),
             ball_history: Vec::new(),
         }
@@ -9666,6 +9834,12 @@ impl SharedPlayerPositionStore {
             latest: self.latest.clone(),
             histories: self
                 .histories
+                .iter()
+                .map(|(id, history)| (*id, history.iter().cloned().collect()))
+                .collect(),
+            official_latest: self.official_latest.clone(),
+            official_histories: self
+                .official_histories
                 .iter()
                 .map(|(id, history)| (*id, history.iter().cloned().collect()))
                 .collect(),
@@ -9713,6 +9887,23 @@ impl SharedPlayerPositions {
             .map(|history| history.iter().cloned().collect())
     }
 
+    pub fn official_latest_for(&self, official_id: usize) -> Option<OfficialPositionSample> {
+        self.inner
+            .read()
+            .expect("shared player position lock poisoned")
+            .official_latest_for(official_id)
+            .cloned()
+    }
+
+    pub fn official_history_for(&self, official_id: usize) -> Option<Vec<OfficialPositionSample>> {
+        self.inner
+            .read()
+            .expect("shared player position lock poisoned")
+            .official_histories
+            .get(&official_id)
+            .map(|history| history.iter().cloned().collect())
+    }
+
     pub fn ball_latest(&self) -> Option<BallPositionSample> {
         self.inner
             .read()
@@ -9734,6 +9925,7 @@ impl SharedPlayerPositions {
     fn sync_from_players_and_ball(
         &self,
         players: &[PlayerAgent],
+        officials: &[OfficialAgent],
         ball: &BallAgent,
         tick: u64,
         clock_seconds: f64,
@@ -9741,12 +9933,13 @@ impl SharedPlayerPositions {
         self.inner
             .write()
             .expect("shared player position lock poisoned")
-            .sync_from_players_and_ball(players, ball, tick, clock_seconds);
+            .sync_from_players_and_ball(players, officials, ball, tick, clock_seconds);
     }
 
     fn snapshot_with_current_players(
         &self,
         players: &[PlayerAgent],
+        officials: &[OfficialAgent],
         ball: &BallAgent,
         tick: u64,
         clock_seconds: f64,
@@ -9755,12 +9948,20 @@ impl SharedPlayerPositions {
         self.inner
             .read()
             .expect("shared player position lock poisoned")
-            .snapshot_with_current_players(players, ball, tick, clock_seconds, dt_seconds)
+            .snapshot_with_current_players(
+                players,
+                officials,
+                ball,
+                tick,
+                clock_seconds,
+                dt_seconds,
+            )
     }
 
     fn latest_snapshot_with_current_players(
         &self,
         players: &[PlayerAgent],
+        officials: &[OfficialAgent],
         ball: &BallAgent,
         tick: u64,
         clock_seconds: f64,
@@ -9769,7 +9970,14 @@ impl SharedPlayerPositions {
         self.inner
             .read()
             .expect("shared player position lock poisoned")
-            .latest_snapshot_with_current_players(players, ball, tick, clock_seconds, dt_seconds)
+            .latest_snapshot_with_current_players(
+                players,
+                officials,
+                ball,
+                tick,
+                clock_seconds,
+                dt_seconds,
+            )
     }
 }
 
@@ -14898,6 +15106,7 @@ impl WorldSnapshot {
         let shared_positions = if options.include_shared_histories {
             m.shared_positions.snapshot_with_current_players(
                 &m.players,
+                &m.officials,
                 &m.ball,
                 m.tick,
                 m.clock_seconds,
@@ -14906,6 +15115,7 @@ impl WorldSnapshot {
         } else {
             m.shared_positions.latest_snapshot_with_current_players(
                 &m.players,
+                &m.officials,
                 &m.ball,
                 m.tick,
                 m.clock_seconds,
@@ -28972,6 +29182,7 @@ impl SoccerMatch {
         soccer_match.arrange_kickoff_shape(Team::Home, kickoff, center);
         soccer_match.shared_positions.sync_from_players_and_ball(
             &soccer_match.players,
+            &soccer_match.officials,
             &soccer_match.ball,
             0,
             0.0,
@@ -29209,6 +29420,7 @@ impl SoccerMatch {
         self.pending_shot = None;
         self.shared_positions.sync_from_players_and_ball(
             &self.players,
+            &self.officials,
             &self.ball,
             self.tick,
             self.clock_seconds,
@@ -30445,6 +30657,7 @@ impl SoccerMatch {
         self.record_ball_position_history();
         self.shared_positions.sync_from_players_and_ball(
             &self.players,
+            &self.officials,
             &self.ball,
             self.tick,
             self.clock_seconds,
@@ -33167,6 +33380,7 @@ impl SoccerMatch {
             .record_decision(self.tick, restart_kind_action(restart.kind), None);
         self.shared_positions.sync_from_players_and_ball(
             &self.players,
+            &self.officials,
             &self.ball,
             self.tick,
             self.clock_seconds,
@@ -34005,6 +34219,7 @@ impl SoccerMatch {
         self.pending_shot = None;
         self.shared_positions.sync_from_players_and_ball(
             &self.players,
+            &self.officials,
             &self.ball,
             self.tick,
             self.clock_seconds,
@@ -34265,6 +34480,7 @@ impl SoccerMatch {
         self.defensive_clear_hold_trackers.clear();
         self.shared_positions.sync_from_players_and_ball(
             &self.players,
+            &self.officials,
             &self.ball,
             self.tick,
             self.clock_seconds,
@@ -34336,6 +34552,7 @@ impl SoccerMatch {
         self.defensive_clear_hold_trackers.clear();
         self.shared_positions.sync_from_players_and_ball(
             &self.players,
+            &self.officials,
             &self.ball,
             self.tick,
             self.clock_seconds,
@@ -45500,6 +45717,7 @@ mod tests {
         sim.ball.last_touch_team = Some(Team::Home);
         sim.shared_positions.sync_from_players_and_ball(
             &sim.players,
+            &sim.officials,
             &sim.ball,
             sim.tick,
             sim.clock_seconds,
@@ -48719,13 +48937,30 @@ mod tests {
             .is_finite());
 
         let shared = sim.shared_positions.clone();
-        let (history_len, ball_history_len, ball_latest_position) = std::thread::spawn(move || {
+        let (
+            history_len,
+            ball_history_len,
+            ball_latest_position,
+            official_latest_len,
+            official_history_len,
+            center_ref_position,
+        ) = std::thread::spawn(move || {
             let snapshot = shared.snapshot();
             assert_eq!(snapshot.latest.len(), 22);
+            assert_eq!(snapshot.official_latest.len(), 3);
             (
                 snapshot.history_for(0).expect("player history").len(),
                 snapshot.ball_history().len(),
                 snapshot.ball_latest().expect("ball latest").position,
+                snapshot.official_latest.len(),
+                snapshot
+                    .official_history_for(22)
+                    .expect("center ref history")
+                    .len(),
+                snapshot
+                    .official_latest_for(22)
+                    .expect("center ref latest")
+                    .position,
             )
         })
         .join()
@@ -48733,6 +48968,9 @@ mod tests {
         assert_eq!(history_len, PLAYER_POSITION_HISTORY_LIMIT);
         assert_eq!(ball_history_len, BALL_POSITION_HISTORY_LIMIT);
         assert_eq!(ball_latest_position, sim.ball.position);
+        assert_eq!(official_latest_len, 3);
+        assert_eq!(official_history_len, PLAYER_POSITION_HISTORY_LIMIT);
+        assert_eq!(center_ref_position, sim.officials[0].position);
         assert_eq!(
             sim.shared_positions
                 .ball_latest()
@@ -48743,6 +48981,20 @@ mod tests {
         assert_eq!(
             sim.shared_positions.ball_history().len(),
             BALL_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            sim.shared_positions
+                .official_latest_for(22)
+                .expect("shared center ref latest")
+                .position,
+            sim.officials[0].position
+        );
+        assert_eq!(
+            sim.shared_positions
+                .official_history_for(22)
+                .expect("shared center ref history")
+                .len(),
+            PLAYER_POSITION_HISTORY_LIMIT
         );
 
         let snapshot = WorldSnapshot::from_match(&sim);
@@ -48757,6 +49009,23 @@ mod tests {
         assert_eq!(
             snapshot.shared_positions.ball_history().len(),
             BALL_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(snapshot.shared_positions.official_latest.len(), 3);
+        assert_eq!(
+            snapshot
+                .shared_positions
+                .official_latest_for(22)
+                .expect("snapshot center ref latest")
+                .position,
+            sim.officials[0].position
+        );
+        assert_eq!(
+            snapshot
+                .shared_positions
+                .official_history_for(22)
+                .expect("snapshot center ref history")
+                .len(),
+            PLAYER_POSITION_HISTORY_LIMIT
         );
         assert_eq!(
             snapshot
@@ -49483,6 +49752,47 @@ mod tests {
         let latest = q.drain_latest_by_slot();
         assert_eq!(latest.get(&0).unwrap().seq, 2);
         assert!(latest.get(&0).unwrap().sprint);
+    }
+
+    #[test]
+    fn human_input_queue_coalesces_bursts_without_evicting_other_slots() {
+        let q = SharedHumanInputs::new();
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 1,
+            player_id: Some(1),
+            seq: 1,
+            axis: Vec2::new(0.0, 1.0),
+            sprint: false,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        for seq in 1..=(HUMAN_INPUT_QUEUE_LIMIT as u64 + 10) {
+            assert!(q.push(HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq,
+                axis: Vec2::new(seq as f64, 0.0),
+                sprint: seq % 2 == 0,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }));
+        }
+
+        assert_eq!(q.queued_len(), 2);
+        assert_eq!(q.queued_len_for_slots(&[0]), 1);
+        assert_eq!(q.queued_len_for_slots(&[1]), 1);
+
+        let slot_one = q.drain_latest_for_slot(1).expect("slot 1 input");
+        assert_eq!(slot_one.seq, 1);
+        let slot_zero = q.drain_latest_for_slot(0).expect("slot 0 input");
+        assert_eq!(slot_zero.seq, HUMAN_INPUT_QUEUE_LIMIT as u64 + 10);
     }
 
     #[test]
@@ -61698,6 +62008,7 @@ mod tests {
             }
             sim.shared_positions.sync_from_players_and_ball(
                 &sim.players,
+                &sim.officials,
                 &sim.ball,
                 sim.tick,
                 sim.clock_seconds,
@@ -63050,6 +63361,7 @@ mod tests {
         sim.ball.last_touch_team = Some(Team::Home);
         sim.shared_positions.sync_from_players_and_ball(
             &sim.players,
+            &sim.officials,
             &sim.ball,
             sim.tick,
             sim.clock_seconds,
@@ -63129,6 +63441,7 @@ mod tests {
         sim.ball.last_touch_team = Some(Team::Home);
         sim.shared_positions.sync_from_players_and_ball(
             &sim.players,
+            &sim.officials,
             &sim.ball,
             sim.tick,
             sim.clock_seconds,
@@ -63254,6 +63567,7 @@ mod tests {
         sim.ball.last_touch_team = Some(Team::Home);
         sim.shared_positions.sync_from_players_and_ball(
             &sim.players,
+            &sim.officials,
             &sim.ball,
             sim.tick,
             sim.clock_seconds,
@@ -64782,6 +65096,15 @@ mod tests {
         assert!(
             frame.shared_positions.ball_history().is_empty(),
             "live HTTP frames should keep shared ball latest without duplicate shared ball history"
+        );
+        assert_eq!(
+            frame.shared_positions.official_latest.len(),
+            3,
+            "live HTTP frames should keep current official positions"
+        );
+        assert!(
+            frame.shared_positions.official_histories.is_empty(),
+            "live HTTP frames should not clone duplicate official position histories"
         );
         assert!(
             frame

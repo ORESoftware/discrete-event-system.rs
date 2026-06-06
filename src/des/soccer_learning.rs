@@ -785,6 +785,87 @@ fn search_soccer_tactical_genome_blend_candidates<F>(
     visit(extrapolate_soccer_tactical_learning_weights(
         base, &centroid, scale,
     ));
+    search_soccer_tactical_genome_archetype_candidates(
+        &centroid,
+        weighted_summary,
+        pressure,
+        &mut visit,
+    );
+}
+
+fn search_soccer_tactical_genome_archetype_candidates<F>(
+    centroid: &SoccerTacticalLearningWeights,
+    weighted_summary: &SoccerTacticalLearningSummary,
+    pressure: f64,
+    visit: &mut F,
+) where
+    F: FnMut(SoccerTacticalLearningWeights),
+{
+    let attack_width_gap = (1.0 - weighted_summary.mean_attack_width_score).clamp(0.0, 1.0);
+    let attack_flank_gap = (1.0 - weighted_summary.mean_attack_flank_lane_score).clamp(0.0, 1.0);
+    let attack_spacing_gap = (1.0 - weighted_summary.mean_attack_spacing_score).clamp(0.0, 1.0);
+    let defense_contract_gap = (1.0 - weighted_summary.mean_defense_contract_score).clamp(0.0, 1.0);
+    let defense_spacing_gap = (1.0 - weighted_summary.mean_defense_spacing_score).clamp(0.0, 1.0);
+    let defense_ball_gap = (1.0 - weighted_summary.mean_defense_ball_gap_score).clamp(0.0, 1.0);
+    let press_gap = (1.0 - weighted_summary.mean_defense_role_press_score).clamp(0.0, 1.0);
+    let attack_pressure =
+        (attack_width_gap * 0.42 + attack_flank_gap * 0.42 + attack_spacing_gap * 0.16)
+            .clamp(0.0, 1.0);
+    let defense_pressure = (defense_contract_gap * 0.50
+        + defense_spacing_gap * 0.18
+        + defense_ball_gap * 0.16
+        + press_gap * 0.16)
+        .clamp(0.0, 1.0);
+
+    if attack_pressure > 1e-12 {
+        let mut flank_switch = centroid.clone();
+        flank_switch.attack_width_delta_weight += attack_width_gap * (0.16 + pressure * 0.10);
+        flank_switch.attack_flank_lane_weight += attack_flank_gap * (0.26 + pressure * 0.16);
+        flank_switch.attack_spacing_delta_weight +=
+            attack_spacing_gap * (0.10 + attack_pressure * 0.08);
+        flank_switch.attack_spacing_score_weight += attack_spacing_gap * 0.05;
+        visit(clamp_soccer_tactical_learning_weights(&flank_switch));
+
+        let mut support_spread = centroid.clone();
+        support_spread.attack_spacing_delta_weight += attack_spacing_gap * (0.22 + pressure * 0.08);
+        support_spread.attack_spacing_score_weight += attack_spacing_gap * 0.10;
+        support_spread.attack_width_delta_weight += attack_width_gap * 0.10;
+        support_spread.attack_flank_lane_weight += attack_flank_gap * 0.14;
+        visit(clamp_soccer_tactical_learning_weights(&support_spread));
+    }
+
+    if defense_pressure > 1e-12 {
+        let mut compact_block = centroid.clone();
+        compact_block.defense_contract_delta_weight +=
+            defense_contract_gap * (0.26 + pressure * 0.14);
+        compact_block.defense_compactness_score_weight +=
+            defense_contract_gap * (0.18 + defense_pressure * 0.08);
+        compact_block.defense_spacing_delta_weight += defense_spacing_gap * 0.08;
+        compact_block.defense_ball_depth_score_weight +=
+            defense_ball_gap * (0.08 + defense_pressure * 0.04);
+        visit(clamp_soccer_tactical_learning_weights(&compact_block));
+
+        let mut press_contract = centroid.clone();
+        press_contract.defense_contract_delta_weight +=
+            defense_contract_gap * (0.18 + press_gap * 0.10);
+        press_contract.defender_midfielder_press_weight +=
+            press_gap * (0.09 + defense_pressure * 0.04);
+        press_contract.midfielder_press_weight += press_gap * (0.08 + defense_pressure * 0.03);
+        press_contract.defense_ball_depth_score_weight += defense_ball_gap * 0.05;
+        visit(clamp_soccer_tactical_learning_weights(&press_contract));
+    }
+
+    if attack_pressure > 1e-12 && defense_pressure > 1e-12 {
+        let mut two_phase_shape = centroid.clone();
+        two_phase_shape.attack_width_delta_weight += attack_width_gap * 0.13;
+        two_phase_shape.attack_flank_lane_weight += attack_flank_gap * (0.20 + pressure * 0.10);
+        two_phase_shape.attack_spacing_delta_weight += attack_spacing_gap * 0.08;
+        two_phase_shape.defense_contract_delta_weight +=
+            defense_contract_gap * (0.21 + pressure * 0.11);
+        two_phase_shape.defense_compactness_score_weight += defense_contract_gap * 0.14;
+        two_phase_shape.defense_spacing_delta_weight += defense_spacing_gap * 0.06;
+        visit(clamp_soccer_tactical_learning_weights(&two_phase_shape));
+    }
 }
 
 fn keep_best_soccer_tactical_candidate(
@@ -3103,7 +3184,7 @@ mod tests {
             |candidate| candidates.push(candidate),
         );
 
-        assert_eq!(candidates.len(), 2);
+        assert!(candidates.len() >= 7);
         assert!((candidates[0].attack_width_delta_weight - 1.50).abs() < 1e-12);
         assert!((candidates[0].attack_flank_lane_weight - 1.40).abs() < 1e-12);
         assert!((candidates[0].defense_contract_delta_weight - 1.55).abs() < 1e-12);
@@ -3113,6 +3194,20 @@ mod tests {
             candidates[1].defense_contract_delta_weight
                 > candidates[0].defense_contract_delta_weight
         );
+        assert!(candidates[2..].iter().any(|candidate| {
+            candidate.attack_flank_lane_weight > candidates[0].attack_flank_lane_weight
+                && candidate.attack_spacing_delta_weight > candidates[0].attack_spacing_delta_weight
+        }));
+        assert!(candidates[2..].iter().any(|candidate| {
+            candidate.defense_contract_delta_weight > candidates[0].defense_contract_delta_weight
+                && candidate.defense_compactness_score_weight
+                    > candidates[0].defense_compactness_score_weight
+        }));
+        assert!(candidates[2..].iter().any(|candidate| {
+            candidate.attack_flank_lane_weight > candidates[0].attack_flank_lane_weight
+                && candidate.defense_contract_delta_weight
+                    > candidates[0].defense_contract_delta_weight
+        }));
     }
 
     #[test]

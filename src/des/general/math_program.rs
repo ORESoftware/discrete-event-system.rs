@@ -9610,7 +9610,7 @@ fn solve_math_program_external_quadratic_rust_reference(
     if program.has_conic_constraints() {
         if program.has_quadratic_constraints() || program.has_quadratic_objective() {
             return Ok(unsupported(
-                "Rust mixed-integer SOCP reference currently accepts linear objectives with SOC constraints only"
+                "Rust SOCP reference currently accepts linear objectives with SOC constraints only"
                     .to_string(),
             ));
         }
@@ -21731,15 +21731,13 @@ mod tests {
     fn external_math_program_default_continuous_qp_uses_rust_reference_without_python() {
         let mut qp = MathProgram::new(ObjectiveSense::Min);
         let x = qp
-            .add_continuous_var("x", 0.0, Some(0.0), Some(5.0))
+            .add_continuous_var("x", -2.0, Some(0.0), Some(5.0))
             .unwrap();
         let y = qp
-            .add_continuous_var("y", 0.0, Some(0.0), Some(5.0))
+            .add_continuous_var("y", -4.0, Some(0.0), Some(5.0))
             .unwrap();
         qp.add_quadratic_objective_term(x, x, 2.0).unwrap();
         qp.add_quadratic_objective_term(y, y, 2.0).unwrap();
-        qp.add_linear_objective_term(x, -2.0).unwrap();
-        qp.add_linear_objective_term(y, -4.0).unwrap();
 
         let solution =
             solve_math_program_external(&qp, &ExternalMathProgramOptions::default()).unwrap();
@@ -21749,6 +21747,27 @@ mod tests {
         assert_close(solution.x[x], 0.5);
         assert_close(solution.x[y], 1.0);
         assert_close(solution.objective, -2.5);
+    }
+
+    #[test]
+    fn external_math_program_default_continuous_qcp_uses_rust_reference_without_python() {
+        let mut qcp = MathProgram::new(ObjectiveSense::Min);
+        let x = qcp
+            .add_continuous_var("x", -1.0, Some(0.0), Some(5.0))
+            .unwrap();
+        qcp.add_quadratic_constraint("radius", vec![(x, x, 1.0)], Vec::new(), RowSense::Le, 4.0)
+            .unwrap();
+
+        let solution =
+            solve_math_program_external(&qcp, &ExternalMathProgramOptions::default()).unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::Optimal);
+        assert_eq!(solution.solver, "rust:qcp-pattern-search");
+        assert!((solution.x[x] - 2.0).abs() <= 1e-4, "solution={solution:?}");
+        assert!(
+            (solution.objective + 2.0).abs() <= 1e-4,
+            "solution={solution:?}"
+        );
     }
 
     #[test]

@@ -499,20 +499,20 @@ fn optional_external_error(e: &str) -> bool {
         || lower.contains("unavailable")
 }
 
-fn computer_network_python_reference_requested() -> bool {
+fn computer_network_external_reference_requested() -> bool {
     [
         "COMPUTER_NETWORK_REFERENCE_BACKEND",
         "COMPUTER_NETWORK_EXTERNAL_REFERENCE",
     ]
     .iter()
     .filter_map(|name| std::env::var(name).ok())
-    .any(|value| computer_network_python_reference_value_requested(&value))
+    .any(|value| computer_network_external_reference_value_requested(&value))
 }
 
-fn computer_network_python_reference_value_requested(value: &str) -> bool {
+fn computer_network_external_reference_value_requested(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "python" | "py" | "external"
+        "1" | "true" | "yes" | "rust" | "cargo" | "external" | "python" | "py"
     )
 }
 
@@ -811,20 +811,20 @@ pub fn run() -> i32 {
     println!("Computer-network DES: framework vs Rust reference");
     println!("====================================================================");
 
-    let (external_enabled, external_skip_detail) = if computer_network_python_reference_requested()
+    let (external_enabled, external_skip_detail) = if computer_network_external_reference_requested()
     {
         match register_built_in_external_modules() {
-            Ok(()) => (true, "external Python reference enabled".to_string()),
+            Ok(()) => (true, "external Rust reference enabled".to_string()),
             Err(e) => {
                 eprintln!("external modules unavailable; running Rust-only checks: {e}");
                 (false, format!("external modules unavailable: {e}"))
             }
         }
     } else {
-        println!("SKIP external Python reference (set COMPUTER_NETWORK_REFERENCE_BACKEND=python)");
+        println!("SKIP external reference module (set COMPUTER_NETWORK_REFERENCE_BACKEND=rust)");
         (
             false,
-            "set COMPUTER_NETWORK_REFERENCE_BACKEND=python".to_string(),
+            "set COMPUTER_NETWORK_REFERENCE_BACKEND=rust".to_string(),
         )
     };
 
@@ -879,12 +879,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_reference_switch_only_accepts_explicit_opt_in_values() {
-        for value in ["1", "true", "YES", "python", "py", "external"] {
-            assert!(computer_network_python_reference_value_requested(value));
+    fn external_reference_switch_accepts_rust_first_and_legacy_opt_in_values() {
+        for value in [
+            "1", "true", "YES", "rust", "cargo", "external", "python", "py",
+        ] {
+            assert!(computer_network_external_reference_value_requested(value));
         }
-        for value in ["", "0", "false", "rust", "none", "skip"] {
-            assert!(!computer_network_python_reference_value_requested(value));
+        for value in ["", "0", "false", "none", "skip"] {
+            assert!(!computer_network_external_reference_value_requested(value));
         }
     }
 }

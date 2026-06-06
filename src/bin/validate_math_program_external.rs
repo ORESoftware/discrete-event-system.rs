@@ -275,12 +275,14 @@ fn external_methods_for_case_with_python_bridges(
 fn validate_math_program_python_bridges_enabled() -> bool {
     std::env::var(ENABLE_PYTHON_BRIDGES_ENV)
         .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        .is_some_and(|value| validate_math_program_python_bridge_flag_value_enabled(&value))
+}
+
+fn validate_math_program_python_bridge_flag_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
 }
 
 fn default_rust_linear_method() -> (&'static str, Option<String>) {
@@ -2445,6 +2447,32 @@ mod tests {
     }
 
     #[test]
+    fn python_bridge_matrix_requires_explicit_boolean_opt_in() {
+        for value in ["1", "true", "TRUE", " yes ", "y", "on"] {
+            assert!(
+                super::validate_math_program_python_bridge_flag_value_enabled(value),
+                "{value:?} should enable optional Python bridges"
+            );
+        }
+        for value in [
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+            "python",
+            "legacy-python",
+            "auto",
+            "fallback",
+        ] {
+            assert!(
+                !super::validate_math_program_python_bridge_flag_value_enabled(value),
+                "{value:?} should keep the Rust-first validation matrix"
+            );
+        }
+    }
+
+    #[test]
     fn continuous_lp_matrix_includes_rust_first_ortools_linear_fallbacks() {
         let lp = super::build_lp_case();
         let methods =
@@ -2457,6 +2485,12 @@ mod tests {
             .iter()
             .any(|(label, method)| *label == "ortools-pdlp"
                 && method.as_deref() == Some("ortools:PDLP")));
+        assert!(
+            methods
+                .iter()
+                .any(|(label, method)| *label == "lindo-cli"
+                    && method.as_deref() == Some("lindo-cli"))
+        );
         assert_eq!(
             methods
                 .last()
@@ -2479,6 +2513,12 @@ mod tests {
             .iter()
             .any(|(label, method)| *label == "ortools-pdlp"
                 && method.as_deref() == Some("ortools:PDLP")));
+        assert!(
+            methods
+                .iter()
+                .any(|(label, method)| *label == "lindo-cli"
+                    && method.as_deref() == Some("lindo-cli"))
+        );
         assert_eq!(
             methods
                 .last()
@@ -2503,6 +2543,12 @@ mod tests {
             .iter()
             .any(|(label, method)| *label == "ortools-cp-sat"
                 && method.as_deref() == Some("ortools:CP-SAT")));
+        assert!(
+            mip_methods
+                .iter()
+                .any(|(label, method)| *label == "lindo-cli"
+                    && method.as_deref() == Some("lindo-cli"))
+        );
         assert_eq!(
             mip_methods
                 .last()
@@ -2557,6 +2603,12 @@ mod tests {
             .iter()
             .any(|(label, method)| *label == "ortools-pdlp"
                 && method.as_deref() == Some("ortools:PDLP")));
+        assert!(
+            lp_methods
+                .iter()
+                .any(|(label, method)| *label == "lindo-cli"
+                    && method.as_deref() == Some("lindo-cli"))
+        );
         assert!(!lp_methods.iter().any(|(label, _)| *label == "scipy-highs"));
     }
 

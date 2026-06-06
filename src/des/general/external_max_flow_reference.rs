@@ -41,12 +41,15 @@ fn max_flow_reference_force_python_value(value: &str) -> bool {
         normalized.as_str(),
         "1" | "true"
             | "yes"
+            | "y"
             | "on"
-            | "python"
-            | "py"
+            | "bridge"
             | "legacy-python"
             | "python-reference"
             | "python-bridge"
+            | "legacy"
+            | "compat"
+            | "compatibility"
     )
 }
 
@@ -824,6 +827,36 @@ mod tests {
         .into_iter()
         .map(|key| EnvVarGuard::set(key, "0"))
         .collect()
+    }
+
+    #[test]
+    fn max_flow_force_python_requires_explicit_compatibility_value() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "python_reference",
+            "python-bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
+        ] {
+            assert!(
+                max_flow_reference_force_python_value(value),
+                "{value:?} should enable the max-flow compatibility bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !max_flow_reference_force_python_value(value),
+                "{value:?} should keep Rust max-flow fallback active"
+            );
+        }
     }
 
     #[test]

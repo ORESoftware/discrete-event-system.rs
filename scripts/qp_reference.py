@@ -221,7 +221,22 @@ def auto_prefers_rust_reference() -> bool:
 def truthy_python_reference_override(value: Optional[str]) -> bool:
     if value is None:
         return False
-    return value.strip().lower() in ("1", "true", "yes", "on", "python", "scipy", "slsqp")
+    return value.strip().lower().replace("_", "-") in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+        "bridge",
+        "scipy",
+        "slsqp",
+        "legacy",
+        "legacy-python",
+        "python-reference",
+        "python-bridge",
+        "compat",
+        "compatibility",
+    }
 
 
 def scipy_python_reference_forced() -> bool:

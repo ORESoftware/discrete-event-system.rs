@@ -182,12 +182,15 @@ fn nonlinear_reference_force_python_value(value: &str) -> bool {
         normalized.as_str(),
         "1" | "true"
             | "yes"
+            | "y"
             | "on"
-            | "python"
-            | "py"
+            | "bridge"
             | "legacy-python"
             | "python-reference"
             | "python-bridge"
+            | "legacy"
+            | "compat"
+            | "compatibility"
     )
 }
 
@@ -1040,7 +1043,7 @@ pub fn solve_global_benchmark_with_external_reference(
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_nonlinear_reference_output;
+    use super::{nonlinear_reference_force_python_value, wait_for_nonlinear_reference_output};
     use crate::des::general::external_nonlinear_reference::{
         solve_exponential_fit_with_external_reference,
         solve_global_benchmark_with_external_reference,
@@ -1087,6 +1090,36 @@ mod tests {
         .into_iter()
         .map(|key| EnvVarGuard::set(key, "0"))
         .collect()
+    }
+
+    #[test]
+    fn nonlinear_force_python_requires_explicit_compatibility_value() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "python_reference",
+            "python-bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
+        ] {
+            assert!(
+                nonlinear_reference_force_python_value(value),
+                "{value:?} should enable the nonlinear compatibility bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !nonlinear_reference_force_python_value(value),
+                "{value:?} should keep Rust nonlinear fallback active"
+            );
+        }
     }
 
     #[test]

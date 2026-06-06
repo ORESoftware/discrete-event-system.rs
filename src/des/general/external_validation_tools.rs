@@ -18088,14 +18088,25 @@ fn simulation_validation_python_reference_forced() -> bool {
     .into_iter()
     .any(|key| {
         env::var(key)
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on" | "python" | "legacy-python"
-                )
-            })
+            .map(|value| simulation_validation_force_python_value_enabled(&value))
             .unwrap_or(false)
     })
+}
+
+fn simulation_validation_force_python_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "1" | "true"
+            | "yes"
+            | "y"
+            | "on"
+            | "bridge"
+            | "python-bridge"
+            | "legacy-python"
+            | "legacy"
+            | "compat"
+            | "compatibility"
+    )
 }
 
 pub fn run_simulation_validation_json_with_python_reference(
@@ -20777,7 +20788,7 @@ fn external_validation_python_import_probes_enabled() -> bool {
 fn external_validation_python_import_probe_value_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
-        "1" | "true" | "yes" | "y" | "on" | "python" | "python-imports" | "imports"
+        "1" | "true" | "yes" | "y" | "on" | "python-imports" | "imports"
     )
 }
 
@@ -20915,7 +20926,7 @@ mod tests {
         probe_java_classpath_validation_tool, probe_node_validation_package_with_command,
         probe_python_validation_package_with_command, probe_rust_crate_validation_tool,
         probe_unconfigured_proof_or_formal_rust_reference_tool,
-        wait_for_external_validation_output,
+        simulation_validation_force_python_value_enabled, wait_for_external_validation_output,
     };
     use crate::des::general::external_validation_tools::{
         dimacs_cnf_to_string, dimacs_wcnf_to_string, external_benchmark_manifest_to_json,
@@ -21017,22 +21028,14 @@ mod tests {
 
     #[test]
     fn validation_python_import_probes_are_explicit_opt_in() {
-        for value in [
-            "1",
-            "true",
-            "YES",
-            "on",
-            "python",
-            "python_imports",
-            "imports",
-        ] {
+        for value in ["1", "true", "YES", "on", "python_imports", "imports"] {
             assert!(
                 external_validation_python_import_probe_value_enabled(value),
                 "{value:?} should opt into Python import probes"
             );
         }
 
-        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+        for value in ["", "0", "false", "off", "python", "auto", "rust", "native"] {
             assert!(
                 !external_validation_python_import_probe_value_enabled(value),
                 "{value:?} should keep Python import probes disabled"
@@ -25560,6 +25563,35 @@ mod tests {
             .simulator
             .starts_with("rust:single-station-des-for-simpy"));
         assert_eq!(run.metrics.get("jobs_completed").copied(), Some(2.0));
+    }
+
+    #[test]
+    fn simulation_validation_force_python_requires_explicit_compatibility_value() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "python_bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
+        ] {
+            assert!(
+                simulation_validation_force_python_value_enabled(value),
+                "{value:?} should enable the legacy simulation validation bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !simulation_validation_force_python_value_enabled(value),
+                "{value:?} should keep Rust simulation validation active"
+            );
+        }
     }
 
     #[test]

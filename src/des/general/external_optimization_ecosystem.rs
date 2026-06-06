@@ -1400,7 +1400,7 @@ fn external_optimization_ecosystem_python_import_probes_enabled() -> bool {
 fn external_optimization_ecosystem_python_import_probe_value_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
-        "1" | "true" | "yes" | "y" | "on" | "python" | "python-imports" | "imports"
+        "1" | "true" | "yes" | "y" | "on" | "python-imports" | "imports"
     )
 }
 
@@ -1981,22 +1981,14 @@ mod tests {
 
     #[test]
     fn python_import_probes_are_explicit_opt_in() {
-        for value in [
-            "1",
-            "true",
-            "YES",
-            "on",
-            "python",
-            "python_imports",
-            "imports",
-        ] {
+        for value in ["1", "true", "YES", "on", "python_imports", "imports"] {
             assert!(
                 external_optimization_ecosystem_python_import_probe_value_enabled(value),
                 "{value:?} should opt into Python import probes"
             );
         }
 
-        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+        for value in ["", "0", "false", "off", "python", "auto", "rust", "native"] {
             assert!(
                 !external_optimization_ecosystem_python_import_probe_value_enabled(value),
                 "{value:?} should keep Python import probes disabled"

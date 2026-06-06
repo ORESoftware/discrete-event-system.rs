@@ -3833,13 +3833,25 @@ fn lp_external_bridge_forced_python() -> bool {
     std::env::var("LP_EXTERNAL_BRIDGE")
         .or_else(|_| std::env::var("ORES_LP_EXTERNAL_BRIDGE"))
         .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "python" | "py" | "legacy-python" | "legacy"
-            )
-        })
+        .map(|value| lp_external_bridge_force_python_value_enabled(&value))
         .unwrap_or(false)
+}
+
+fn lp_external_bridge_force_python_value_enabled(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "1" | "true"
+            | "yes"
+            | "y"
+            | "on"
+            | "bridge"
+            | "python-bridge"
+            | "legacy-python"
+            | "legacy"
+            | "compat"
+            | "compatibility"
+    )
 }
 
 fn rust_external_lp_cli_options(
@@ -4050,7 +4062,7 @@ impl ExternalSolver {
         if !explicit_lp_python_bridge_requested(&self.opts) {
             return numerical_error(
                 format!(
-                    "no Rust LP route is registered for {requested_solver}; set ExternalSolverOptions::python/script or LP_EXTERNAL_BRIDGE=python to use the legacy Python bridge"
+                    "no Rust LP route is registered for {requested_solver}; set ExternalSolverOptions::python/script or LP_EXTERNAL_BRIDGE=legacy-python to use the legacy Python bridge"
                 ),
                 t0,
             );
@@ -4899,6 +4911,35 @@ mod tests {
     }
 
     #[test]
+    fn lp_external_bridge_env_requires_explicit_legacy_opt_in() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "python_bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
+        ] {
+            assert!(
+                lp_external_bridge_force_python_value_enabled(value),
+                "{value:?} should enable the legacy LP bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !lp_external_bridge_force_python_value_enabled(value),
+                "{value:?} should keep Rust LP routing active"
+            );
+        }
+    }
+
+    #[test]
     fn lp_external_wait_enforces_timeout() {
         let child = Command::new("sleep")
             .arg("1")
@@ -4916,7 +4957,7 @@ mod tests {
     #[test]
     fn rust_external_lp_cli_options_cover_local_solvers_without_python_override() {
         if lp_external_bridge_forced_python() {
-            eprintln!("skipping Rust LP CLI option test because LP_EXTERNAL_BRIDGE=python");
+            eprintln!("skipping Rust LP CLI option test because legacy LP bridge is enabled");
             return;
         }
 
@@ -4999,13 +5040,17 @@ mod tests {
             script.contains("LP_SOLVE_REFERENCE_FORCE_PYTHON"),
             "{DEFAULT_SCRIPT} should retain an explicit SciPy compatibility opt-in"
         );
+        assert!(
+            !script.contains("\"python\",") && !script.contains("\"py\","),
+            "{DEFAULT_SCRIPT} should not treat plain python/py as compatibility opt-ins"
+        );
     }
 
     #[test]
     fn default_external_lp_options_resolve_to_rust_highs_cli() {
         if lp_external_bridge_forced_python() {
             eprintln!(
-                "skipping default Rust LP CLI resolver test because LP_EXTERNAL_BRIDGE=python"
+                "skipping default Rust LP CLI resolver test because legacy LP bridge is enabled"
             );
             return;
         }
@@ -5027,7 +5072,7 @@ mod tests {
     #[test]
     fn ortools_and_legacy_scipy_lp_aliases_use_rust_fallback_without_python_override() {
         if lp_external_bridge_forced_python() {
-            eprintln!("skipping Rust LP fallback test because LP_EXTERNAL_BRIDGE=python");
+            eprintln!("skipping Rust LP fallback test because legacy LP bridge is enabled");
             return;
         }
         let p = LPProblem {
@@ -5103,7 +5148,9 @@ mod tests {
     #[test]
     fn unmapped_external_lp_method_requires_explicit_python_bridge() {
         if lp_external_bridge_forced_python() {
-            eprintln!("skipping Rust-first LP bridge gate test because LP_EXTERNAL_BRIDGE=python");
+            eprintln!(
+                "skipping Rust-first LP bridge gate test because legacy LP bridge is enabled"
+            );
             return;
         }
         let p = LPProblem {
@@ -5132,7 +5179,7 @@ mod tests {
     #[test]
     fn external_solver_can_call_installed_highs_cli_without_python_bridge() {
         if lp_external_bridge_forced_python() {
-            eprintln!("skipping real HiGHS CLI check because LP_EXTERNAL_BRIDGE=python");
+            eprintln!("skipping real HiGHS CLI check because legacy LP bridge is enabled");
             return;
         }
         let Ok(output) = std::process::Command::new("highs")

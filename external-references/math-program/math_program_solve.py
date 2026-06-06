@@ -578,13 +578,30 @@ def _quadratic_reference_command() -> tuple[list[str], str | None]:
     return ["cargo", "run", "--quiet", "--bin", "qp_reference", "--"], repo_root
 
 
+def _force_python_reference_value(value: str) -> bool:
+    return value.strip().lower().replace("_", "-") in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+        "bridge",
+        "legacy",
+        "legacy-python",
+        "python-reference",
+        "python-bridge",
+        "compat",
+        "compatibility",
+    }
+
+
 def _quadratic_reference_python_forced() -> bool:
     for env_var in (
         "MATH_PROGRAM_REFERENCE_FORCE_PYTHON",
         "MATH_PROGRAM_QP_REFERENCE_FORCE_PYTHON",
     ):
         value = os.environ.get(env_var, "")
-        if value.strip().lower() in ("1", "true", "yes", "on", "python"):
+        if _force_python_reference_value(value):
             return True
     return False
 
@@ -597,7 +614,7 @@ def _linear_reference_python_forced() -> bool:
         "MATH_PROGRAM_ORTOOLS_REFERENCE_FORCE_PYTHON",
     ):
         value = os.environ.get(env_var, "")
-        if value.strip().lower() in ("1", "true", "yes", "on", "python"):
+        if _force_python_reference_value(value):
             return True
     return False
 
@@ -612,7 +629,7 @@ def _mip_reference_python_forced() -> bool:
         "MATH_PROGRAM_ORTOOLS_REFERENCE_FORCE_PYTHON",
     ):
         value = os.environ.get(env_var, "")
-        if value.strip().lower() in ("1", "true", "yes", "on", "python"):
+        if _force_python_reference_value(value):
             return True
     return False
 

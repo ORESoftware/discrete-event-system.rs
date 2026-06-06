@@ -20685,6 +20685,8 @@ impl Driver {
             1e-6,
         );
         self.max_abs_close("SOCP x", &socp_internal.x, &socp_reference.x, 1e-6);
+        let previous_registered_fallback = std::env::var_os("QP_REFERENCE_REGISTERED_FALLBACK");
+        std::env::set_var("QP_REFERENCE_REGISTERED_FALLBACK", "rust");
         for solver in [
             ExternalQuadraticReferenceSolver::Qpoases,
             ExternalQuadraticReferenceSolver::Proxqp,
@@ -20809,6 +20811,11 @@ impl Driver {
             );
             let x_check = format!("QCP registered {} x", solver.as_arg());
             self.max_abs_close(&x_check, &qcp_internal.x, &optional_qcp_reference.x, 1e-6);
+        }
+        if let Some(value) = previous_registered_fallback {
+            std::env::set_var("QP_REFERENCE_REGISTERED_FALLBACK", value);
+        } else {
+            std::env::remove_var("QP_REFERENCE_REGISTERED_FALLBACK");
         }
         let external_qcp = solve_qcp_with_external_reference(
             &qcp,

@@ -1560,13 +1560,15 @@ fn use_python_optimization_ecosystem_reference_bridge() -> bool {
     ]
     .into_iter()
     .find_map(|name| env::var(name).ok())
-    .map(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "python" | "py" | "script" | "python-script"
-        )
-    })
+    .map(|value| external_optimization_ecosystem_reference_bridge_value_enabled(&value))
     .unwrap_or(false)
+}
+
+fn external_optimization_ecosystem_reference_bridge_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on" | "script" | "python-script"
+    )
 }
 
 pub fn external_optimization_ecosystem_reference_options(
@@ -5067,7 +5069,7 @@ fn external_optimization_python_import_probes_enabled() -> bool {
 fn external_optimization_python_import_probe_value_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
-        "1" | "true" | "yes" | "y" | "on" | "python" | "python-imports" | "imports"
+        "1" | "true" | "yes" | "y" | "on" | "python-imports" | "imports"
     )
 }
 
@@ -5274,6 +5276,7 @@ fn numeric_vector_from_value(value: &Value) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::{
+        external_optimization_ecosystem_reference_bridge_value_enabled,
         external_optimization_python_import_probe_value_enabled, python_import_probe_code,
         python_probe_command_from_env, python_probe_command_from_env_or_path,
         wait_for_external_optimization_adapter_output,
@@ -5625,22 +5628,14 @@ mod tests {
 
     #[test]
     fn python_import_probes_are_explicit_opt_in() {
-        for value in [
-            "1",
-            "true",
-            "YES",
-            "on",
-            "python",
-            "python_imports",
-            "imports",
-        ] {
+        for value in ["1", "true", "YES", "on", "python_imports", "imports"] {
             assert!(
                 external_optimization_python_import_probe_value_enabled(value),
                 "{value:?} should opt into Python import probes"
             );
         }
 
-        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+        for value in ["", "0", "false", "off", "python", "auto", "rust", "native"] {
             assert!(
                 !external_optimization_python_import_probe_value_enabled(value),
                 "{value:?} should keep Python import probes disabled"
@@ -6709,6 +6704,35 @@ mod tests {
             ExternalOptimizationTool::Jacop,
         );
         assert!(!external_optimization_adapter_options_use_rust_ecosystem_reference(&python_opts));
+    }
+
+    #[test]
+    fn ecosystem_reference_bridge_requires_explicit_script_opt_in() {
+        for value in ["1", "true", "yes", "y", "on", "script", "python-script"] {
+            assert!(
+                external_optimization_ecosystem_reference_bridge_value_enabled(value),
+                "{value}"
+            );
+        }
+
+        for value in [
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+            "python",
+            "py",
+            "legacy-python",
+            "auto",
+            "rust",
+            "cargo",
+        ] {
+            assert!(
+                !external_optimization_ecosystem_reference_bridge_value_enabled(value),
+                "{value}"
+            );
+        }
     }
 
     #[test]

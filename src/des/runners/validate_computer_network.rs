@@ -512,7 +512,7 @@ fn computer_network_external_reference_requested() -> bool {
 fn computer_network_external_reference_value_requested(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "rust" | "cargo" | "external" | "python" | "py"
+        "1" | "true" | "yes" | "rust" | "cargo" | "external"
     )
 }
 
@@ -881,13 +881,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn external_reference_switch_accepts_rust_first_and_legacy_opt_in_values() {
-        for value in [
-            "1", "true", "YES", "rust", "cargo", "external", "python", "py",
-        ] {
+    fn external_reference_switch_accepts_rust_first_opt_in_values() {
+        for value in ["1", "true", "YES", "rust", "cargo", "external"] {
             assert!(computer_network_external_reference_value_requested(value));
         }
-        for value in ["", "0", "false", "none", "skip"] {
+        for value in ["", "0", "false", "none", "skip", "python", "py"] {
             assert!(!computer_network_external_reference_value_requested(value));
         }
     }

@@ -40,14 +40,17 @@ fn stochastic_lp_reference_force_python_value(value: &str) -> bool {
         normalized.as_str(),
         "1" | "true"
             | "yes"
+            | "y"
             | "on"
-            | "python"
-            | "py"
+            | "bridge"
             | "scipy"
             | "external"
             | "legacy-python"
             | "python-reference"
             | "python-bridge"
+            | "legacy"
+            | "compat"
+            | "compatibility"
     )
 }
 
@@ -703,6 +706,38 @@ mod tests {
         .into_iter()
         .map(|key| EnvVarGuard::set(key, "0"))
         .collect()
+    }
+
+    #[test]
+    fn stochastic_lp_force_python_requires_explicit_compatibility_value() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "scipy",
+            "external",
+            "python_reference",
+            "python-bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
+        ] {
+            assert!(
+                stochastic_lp_reference_force_python_value(value),
+                "{value:?} should enable the stochastic LP compatibility bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !stochastic_lp_reference_force_python_value(value),
+                "{value:?} should keep Rust stochastic LP fallback active"
+            );
+        }
     }
 
     #[test]

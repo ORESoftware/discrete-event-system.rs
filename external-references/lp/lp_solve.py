@@ -23,8 +23,6 @@ def _truthy_python_override(value: str | None) -> bool:
         "true",
         "yes",
         "on",
-        "python",
-        "py",
         "scipy",
         "legacy-python",
     }

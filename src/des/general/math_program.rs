@@ -9282,13 +9282,16 @@ fn external_math_program_python_bridge_env_enabled(name: &str) -> bool {
 
 fn external_math_program_python_bridge_value_enabled(value: &str) -> bool {
     matches!(
-        value
-            .trim()
-            .to_ascii_lowercase()
-            .replace('_', "-")
-            .as_str(),
-        "1" | "true" | "yes" | "y" | "on" | "python" | "python-bridge" | "legacy-python"
-            | "compat" | "compatibility"
+        value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "1" | "true"
+            | "yes"
+            | "y"
+            | "on"
+            | "bridge"
+            | "python-bridge"
+            | "legacy-python"
+            | "compat"
+            | "compatibility"
     )
 }
 
@@ -9800,7 +9803,9 @@ fn solve_math_program_external_native_mip_reference(
             .solution_limit
             .and_then(|limit| usize::try_from(limit).ok()),
         objective_limit: opts.objective_limit,
-        branch_rule: opts.branch_rule.map(external_math_program_branch_rule_to_native),
+        branch_rule: opts
+            .branch_rule
+            .map(external_math_program_branch_rule_to_native),
         node_selection: opts
             .node_selection
             .map(external_math_program_node_selection_to_native),
@@ -9810,7 +9815,8 @@ fn solve_math_program_external_native_mip_reference(
         mip_opts.mip_start = Some(canonical_mip_start(program, &compiled, start)?);
     }
     if let Some(priorities) = &opts.branch_priorities {
-        mip_opts.branch_priorities = Some(canonical_branch_priorities(program, &compiled, priorities)?);
+        mip_opts.branch_priorities =
+            Some(canonical_branch_priorities(program, &compiled, priorities)?);
     }
 
     let mip = solve_ipmip_with_des(compiled.problem.clone(), mip_opts);
@@ -22586,6 +22592,52 @@ mod tests {
         assert_close(solution.x[x], 4.0);
         assert_close(solution.x[y], 0.0);
         assert!(solution.x[x] + solution.x[y] <= 4.0 + 1e-7);
+    }
+
+    #[test]
+    fn external_math_program_python_bridge_requires_explicit_compatibility_value() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "python_bridge",
+            "legacy-python",
+            "compatibility",
+        ] {
+            assert!(
+                external_math_program_python_bridge_value_enabled(value),
+                "{value:?} should enable the legacy math-program bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !external_math_program_python_bridge_value_enabled(value),
+                "{value:?} should keep Rust math-program routing active"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_math_program_script_force_switch_requires_explicit_compatibility_value() {
+        let script_path = "external-references/math-program/math_program_solve.py";
+        let script = std::fs::read_to_string(script_path).expect("read math-program bridge script");
+        assert!(
+            script.contains("_force_python_reference_value"),
+            "{script_path} should centralize compatibility bridge env parsing"
+        );
+        assert!(
+            script.contains("\"legacy-python\"") && script.contains("\"python-bridge\""),
+            "{script_path} should retain explicit compatibility opt-ins"
+        );
+        assert!(
+            !script.contains("\"python\"") && !script.contains("\"py\""),
+            "{script_path} should not treat plain python/py as compatibility opt-ins"
+        );
     }
 
     #[test]

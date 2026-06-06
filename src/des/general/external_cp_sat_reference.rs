@@ -246,15 +246,18 @@ fn cp_sat_reference_force_python_value(value: &str) -> bool {
         normalized.as_str(),
         "1" | "true"
             | "yes"
+            | "y"
             | "on"
-            | "python"
-            | "py"
+            | "bridge"
             | "ortools"
             | "ortools-cp-sat"
             | "external"
             | "legacy-python"
+            | "legacy"
             | "python-reference"
             | "python-bridge"
+            | "compat"
+            | "compatibility"
     )
 }
 
@@ -2504,6 +2507,39 @@ mod tests {
         .into_iter()
         .map(|key| EnvVarGuard::set(key, "0"))
         .collect()
+    }
+
+    #[test]
+    fn cp_sat_force_python_requires_explicit_compatibility_value() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "ortools",
+            "ortools-cp-sat",
+            "external",
+            "python_reference",
+            "python-bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
+        ] {
+            assert!(
+                cp_sat_reference_force_python_value(value),
+                "{value:?} should enable the CP-SAT compatibility bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !cp_sat_reference_force_python_value(value),
+                "{value:?} should keep Rust CP-SAT fallback active"
+            );
+        }
     }
 
     fn tiny_cp_sat_model() -> Value {

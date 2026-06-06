@@ -12002,7 +12002,7 @@ fn external_linear_cli_python_bridge_value_enabled(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     matches!(
         normalized.as_str(),
-        "1" | "true" | "yes" | "y" | "on" | "python" | "python-bridge" | "compat" | "compatibility"
+        "1" | "true" | "yes" | "y" | "on" | "bridge" | "python-bridge" | "compat" | "compatibility"
     )
 }
 
@@ -13001,7 +13001,7 @@ mod tests {
             "true",
             " yes ",
             "ON",
-            "python",
+            "bridge",
             "python_bridge",
             "compatibility",
         ] {
@@ -13011,7 +13011,7 @@ mod tests {
             );
         }
 
-        for value in ["", "0", "false", "off", "auto", "rust", "native"] {
+        for value in ["", "0", "false", "off", "python", "auto", "rust", "native"] {
             assert!(
                 !super::external_linear_cli_python_bridge_value_enabled(value),
                 "{value:?} should keep the Rust direct path strict"

@@ -440,15 +440,18 @@ fn quadratic_reference_force_python_value(value: &str) -> bool {
         normalized.as_str(),
         "1" | "true"
             | "yes"
+            | "y"
             | "on"
-            | "python"
-            | "py"
+            | "bridge"
             | "scipy"
             | "slsqp"
             | "external"
             | "legacy-python"
             | "python-reference"
             | "python-bridge"
+            | "legacy"
+            | "compat"
+            | "compatibility"
     )
 }
 
@@ -2071,7 +2074,7 @@ pub fn solve_miqcp_with_external_reference(
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_quadratic_reference_output;
+    use super::{quadratic_reference_force_python_value, wait_for_quadratic_reference_output};
     use crate::des::general::qp::{
         QuadraticConstraint, QuadraticProgram, SecondOrderCone, SecondOrderConeProgram,
     };
@@ -2123,6 +2126,57 @@ mod tests {
         .into_iter()
         .map(|key| EnvVarGuard::set(key, "0"))
         .collect()
+    }
+
+    #[test]
+    fn quadratic_force_python_requires_explicit_compatibility_value() {
+        for value in [
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
+            "scipy",
+            "slsqp",
+            "external",
+            "python_reference",
+            "python-bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
+        ] {
+            assert!(
+                quadratic_reference_force_python_value(value),
+                "{value:?} should enable the quadratic compatibility bridge"
+            );
+        }
+
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "rust", "native",
+        ] {
+            assert!(
+                !quadratic_reference_force_python_value(value),
+                "{value:?} should keep Rust quadratic fallback active"
+            );
+        }
+    }
+
+    #[test]
+    fn qp_reference_script_force_switch_requires_explicit_compatibility_value() {
+        let script_path = "scripts/qp_reference.py";
+        let script = std::fs::read_to_string(script_path).expect("read QP bridge script");
+        assert!(
+            script.contains("truthy_python_reference_override"),
+            "{script_path} should centralize compatibility bridge env parsing"
+        );
+        assert!(
+            script.contains("\"legacy-python\"") && script.contains("\"python-bridge\""),
+            "{script_path} should retain explicit compatibility opt-ins"
+        );
+        assert!(
+            !script.contains("\"python\",") && !script.contains("\"py\","),
+            "{script_path} should not treat plain python/py as compatibility opt-ins"
+        );
     }
 
     #[test]

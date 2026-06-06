@@ -4,7 +4,7 @@
 //! The default path uses the Rust `external_linear_cli` adapter to serialize the
 //! same source model and call installed open-source/commercial CLIs. The older
 //! `scripts/ip_mip_reference.py` bridge remains only behind the explicit
-//! `IP_MIP_EXTERNAL_BRIDGE=python` compatibility switch.
+//! `IP_MIP_EXTERNAL_BRIDGE=legacy-python` compatibility switch.
 
 #![allow(dead_code)]
 
@@ -222,7 +222,7 @@ impl Driver {
                     status: "unavailable".to_string(),
                     solver: solver.to_string(),
                     message: Some(if is_auto_solver_request(solver) {
-                        "no installed Rust CLI solver found; set IP_MIP_EXTERNAL_BRIDGE=python to use the compatibility Python reference".to_string()
+                        "no installed Rust CLI solver found; set IP_MIP_EXTERNAL_BRIDGE=legacy-python to use the compatibility Python reference".to_string()
                     } else {
                         format!("no installed command found for requested solver `{solver}`")
                     }),
@@ -850,7 +850,17 @@ fn force_python_reference_value(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     matches!(
         normalized.as_str(),
-        "python" | "python-reference" | "python-bridge"
+        "1" | "true"
+            | "yes"
+            | "y"
+            | "on"
+            | "bridge"
+            | "python-reference"
+            | "python-bridge"
+            | "legacy-python"
+            | "legacy"
+            | "compat"
+            | "compatibility"
     )
 }
 
@@ -1014,13 +1024,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ip_mip_external_bridge_switch_only_accepts_explicit_python_values() {
+    fn ip_mip_external_bridge_switch_requires_explicit_compatibility_values() {
         for value in [
-            "python",
-            "Python",
-            " python ",
+            "1",
+            "true",
+            " yes ",
+            "ON",
+            "bridge",
             "python-reference",
             "python_bridge",
+            "legacy-python",
+            "legacy",
+            "compatibility",
         ] {
             assert!(
                 force_python_reference_value(value),
@@ -1028,7 +1043,9 @@ mod tests {
             );
         }
 
-        for value in ["", "auto", "fallback", "rust", "native", "true", "1"] {
+        for value in [
+            "", "0", "false", "off", "python", "py", "auto", "fallback", "rust", "native",
+        ] {
             assert!(
                 !force_python_reference_value(value),
                 "{value:?} should keep the Rust CLI-first bridge"

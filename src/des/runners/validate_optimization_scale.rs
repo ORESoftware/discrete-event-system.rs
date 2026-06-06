@@ -629,8 +629,10 @@ fn cp_reference_solver_from_name(name: &str) -> Option<ExternalCpSatReferenceSol
         | "rust_fallback" | "native" | "native-rust" | "native_rust" => {
             ExternalCpSatReferenceSolver::RustEnumeration
         }
-        "python" | "python-enumeration" | "python_enumeration" | "python-fallback"
-        | "python_fallback" => ExternalCpSatReferenceSolver::PythonEnumeration,
+        "python" | "py" => ExternalCpSatReferenceSolver::RustEnumeration,
+        "python-enumeration" | "python_enumeration" | "python-fallback" | "python_fallback" => {
+            ExternalCpSatReferenceSolver::PythonEnumeration
+        }
         "ortools" | "ortools-cp-sat" | "ortools_cp_sat" | "cp-sat" | "cp_sat" => {
             ExternalCpSatReferenceSolver::OrToolsCpSat
         }
@@ -955,8 +957,15 @@ mod tests {
 
     #[test]
     fn cp_scale_python_aliases_are_native_rust_compatibility_labels() {
+        for alias in ["python", "py"] {
+            assert_eq!(
+                cp_reference_solver_from_name(alias),
+                Some(ExternalCpSatReferenceSolver::RustEnumeration),
+                "{alias}"
+            );
+        }
+
         for alias in [
-            "python",
             "python-enumeration",
             "python_enumeration",
             "python-fallback",

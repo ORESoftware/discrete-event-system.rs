@@ -18982,6 +18982,9 @@ pub fn external_validation_tool_rust_reference_kind(
     tool: &ExternalValidationToolSpec,
 ) -> Option<&'static str> {
     let id = normalize_tool_id(tool.id);
+    if external_validation_formal_model_tool_has_rust_reference(&id) {
+        return Some("formal-model-validation");
+    }
     if external_validation_model_tool_has_rust_reference(&id) {
         return Some("model-validation");
     }
@@ -19057,6 +19060,13 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
     )
 }
 
+fn external_validation_formal_model_tool_has_rust_reference(id: &str) -> bool {
+    matches!(
+        id,
+        "tlc" | "apalache" | "alloy" | "kodkod" | "spin" | "nuxmv" | "prism" | "storm"
+    )
+}
+
 fn external_validation_output_tool_has_rust_reference(id: &str) -> bool {
     matches!(
         id,
@@ -19104,7 +19114,10 @@ fn external_validation_simulation_tool_has_rust_reference(id: &str) -> bool {
 }
 
 fn external_validation_proof_tool_has_rust_reference(id: &str) -> bool {
-    matches!(id, "drat-trim" | "lrat" | "cake-lpr" | "frat" | "veripb")
+    matches!(
+        id,
+        "drat-trim" | "lrat" | "lrat-check" | "cake-lpr" | "frat" | "veripb"
+    )
 }
 
 pub fn external_validation_adapter_env_names(tool: &ExternalValidationToolSpec) -> Vec<String> {

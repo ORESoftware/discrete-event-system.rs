@@ -1283,6 +1283,8 @@ pub struct SoccerPomdpObservation {
     #[serde(default)]
     pub human_input_seq: Option<u64>,
     #[serde(default)]
+    pub human_input_queue_age_ms: Option<u64>,
+    #[serde(default)]
     pub movement_gait: MovementGait,
     #[serde(default)]
     pub actor_speed_yps: f64,
@@ -8319,14 +8321,34 @@ pub struct HumanInputFrame {
 
 const HUMAN_INPUT_QUEUE_LIMIT: usize = 256;
 
+fn soccer_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Debug, Default)]
 struct SharedHumanInputStore {
-    pending: VecDeque<HumanInputFrame>,
+    pending: VecDeque<QueuedHumanInputFrame>,
     latest_seq_by_slot: HashMap<usize, u64>,
 }
 
+#[derive(Clone, Debug)]
+struct QueuedHumanInputFrame {
+    input: HumanInputFrame,
+    enqueued_unix_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct HumanInputDrainResult {
+    pub input: HumanInputFrame,
+    pub enqueued_unix_ms: u64,
+    pub queue_age_ms: u64,
+}
+
 impl SharedHumanInputStore {
-    fn push(&mut self, input: HumanInputFrame) -> bool {
+    fn push(&mut self, input: HumanInputFrame, enqueued_unix_ms: u64) -> bool {
         if self
             .latest_seq_by_slot
             .get(&input.controller_slot)
@@ -8336,7 +8358,10 @@ impl SharedHumanInputStore {
         }
         self.latest_seq_by_slot
             .insert(input.controller_slot, input.seq);
-        self.pending.push_back(input);
+        self.pending.push_back(QueuedHumanInputFrame {
+            input,
+            enqueued_unix_ms,
+        });
         while self.pending.len() > HUMAN_INPUT_QUEUE_LIMIT {
             self.pending.pop_front();
         }
@@ -8345,41 +8370,59 @@ impl SharedHumanInputStore {
 
     fn drain_latest_by_slot(&mut self) -> HashMap<usize, HumanInputFrame> {
         let mut latest = HashMap::new();
-        for input in self.pending.drain(..) {
+        for queued in self.pending.drain(..) {
             latest
-                .entry(input.controller_slot)
-                .and_modify(|current: &mut HumanInputFrame| {
-                    if input.seq > current.seq {
-                        *current = input.clone();
+                .entry(queued.input.controller_slot)
+                .and_modify(|current: &mut QueuedHumanInputFrame| {
+                    if queued.input.seq > current.input.seq {
+                        *current = queued.clone();
                     }
                 })
-                .or_insert(input);
+                .or_insert(queued);
         }
         latest
+            .into_iter()
+            .map(|(slot, queued)| (slot, queued.input))
+            .collect()
     }
 
     fn drain_latest_for_slot(&mut self, controller_slot: usize) -> Option<HumanInputFrame> {
+        self.drain_latest_for_slot_with_age(controller_slot, soccer_unix_millis())
+            .map(|result| result.input)
+    }
+
+    fn drain_latest_for_slot_with_age(
+        &mut self,
+        controller_slot: usize,
+        consumed_unix_ms: u64,
+    ) -> Option<HumanInputDrainResult> {
         let mut latest = None;
         let mut retained = VecDeque::with_capacity(self.pending.len());
-        while let Some(input) = self.pending.pop_front() {
-            if input.controller_slot == controller_slot {
+        while let Some(queued) = self.pending.pop_front() {
+            if queued.input.controller_slot == controller_slot {
                 if latest
                     .as_ref()
-                    .map_or(true, |current: &HumanInputFrame| input.seq > current.seq)
+                    .map_or(true, |current: &QueuedHumanInputFrame| {
+                        queued.input.seq > current.input.seq
+                    })
                 {
-                    latest = Some(input);
+                    latest = Some(queued);
                 }
             } else {
-                retained.push_back(input);
+                retained.push_back(queued);
             }
         }
         self.pending = retained;
-        latest
+        latest.map(|queued| HumanInputDrainResult {
+            queue_age_ms: consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms),
+            enqueued_unix_ms: queued.enqueued_unix_ms,
+            input: queued.input,
+        })
     }
 
     fn clear_slot(&mut self, controller_slot: usize) {
         self.pending
-            .retain(|input| input.controller_slot != controller_slot);
+            .retain(|queued| queued.input.controller_slot != controller_slot);
         self.latest_seq_by_slot.remove(&controller_slot);
     }
 
@@ -8389,7 +8432,7 @@ impl SharedHumanInputStore {
         }
         self.pending
             .iter()
-            .filter(|input| controller_slots.contains(&input.controller_slot))
+            .filter(|queued| controller_slots.contains(&queued.input.controller_slot))
             .count()
     }
 }
@@ -8455,12 +8498,16 @@ impl SharedHumanInputs {
     }
 
     pub fn push(&self, input: HumanInputFrame) -> bool {
+        self.push_with_enqueue_unix_ms(input, soccer_unix_millis())
+    }
+
+    fn push_with_enqueue_unix_ms(&self, input: HumanInputFrame, enqueued_unix_ms: u64) -> bool {
         let controller_slot = input.controller_slot;
         let accepted = self
             .inner
             .write()
             .expect("human input queue lock poisoned")
-            .push(input);
+            .push(input, enqueued_unix_ms);
         if accepted {
             let (lock, condvar) = &*self.notifier;
             let mut notifier = lock.lock().expect("human input notifier lock poisoned");
@@ -8482,6 +8529,16 @@ impl SharedHumanInputs {
             .write()
             .expect("human input queue lock poisoned")
             .drain_latest_for_slot(controller_slot)
+    }
+
+    pub fn drain_latest_for_slot_with_age(
+        &self,
+        controller_slot: usize,
+    ) -> Option<HumanInputDrainResult> {
+        self.inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .drain_latest_for_slot_with_age(controller_slot, soccer_unix_millis())
     }
 
     pub fn clear_slot(&self, controller_slot: usize) {
@@ -15210,6 +15267,7 @@ impl WorldSnapshot {
                 human_controlled: false,
                 human_input_present: false,
                 human_input_seq: None,
+                human_input_queue_age_ms: None,
                 movement_gait: MovementGait::Stand,
                 actor_speed_yps: 0.0,
                 actor_acceleration_yps2: 0.0,
@@ -15778,6 +15836,7 @@ impl WorldSnapshot {
             human_controlled: me.controller_slot.is_some(),
             human_input_present: false,
             human_input_seq: None,
+            human_input_queue_age_ms: None,
             movement_gait: me.movement_gait,
             actor_speed_yps: me.velocity.len(),
             actor_acceleration_yps2: me.acceleration.len(),
@@ -29681,12 +29740,17 @@ impl SoccerMatch {
                     let phase_started = Instant::now();
                     let input_frame = self.players[actor]
                         .controller_slot
-                        .and_then(|slot| self.human_inputs.drain_latest_for_slot(slot))
+                        .and_then(|slot| self.human_inputs.drain_latest_for_slot_with_age(slot))
                         .filter(|frame| {
-                            frame.player_id.is_none() || frame.player_id == Some(scheduled.id)
+                            frame.input.player_id.is_none()
+                                || frame.input.player_id == Some(scheduled.id)
                         });
                     let mdp_state = snapshot.mdp_state_for_player(scheduled.id);
-                    let observation = snapshot.observation_for(scheduled.id);
+                    let mut observation = snapshot.observation_for(scheduled.id);
+                    if let Some(input_frame) = input_frame.as_ref() {
+                        observation.human_input_queue_age_ms =
+                            Some(input_frame.queue_age_ms.min(60_000));
+                    }
                     let learned_plan = if self.config.learning_enabled {
                         self.learned_action_for_player_with_context(
                             &snapshot,
@@ -29701,7 +29765,7 @@ impl SoccerMatch {
                         &snapshot,
                         mdp_state,
                         observation,
-                        input_frame.as_ref(),
+                        input_frame.as_ref().map(|frame| &frame.input),
                         learned_plan.as_ref(),
                         &mut self.rng,
                     );
@@ -49013,6 +49077,57 @@ mod tests {
         assert!(observation.human_controlled);
         assert!(observation.human_input_present);
         assert_eq!(observation.human_input_seq, Some(1));
+    }
+
+    #[test]
+    fn consumed_controller_input_reports_queue_age_in_observation() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 781,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0");
+        let input_queue = sim.human_inputs.clone();
+        let enqueued_unix_ms = soccer_unix_millis().saturating_sub(137);
+        assert!(input_queue.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            enqueued_unix_ms,
+        ));
+
+        sim.run_time_step();
+
+        let observation = &sim.players[0]
+            .last_decision
+            .as_ref()
+            .expect("controlled player decision")
+            .observation;
+        assert!(observation.human_input_present);
+        assert_eq!(observation.human_input_seq, Some(1));
+        let age = observation
+            .human_input_queue_age_ms
+            .expect("human input queue age");
+        assert!(
+            age >= 100,
+            "queue age should expose stale-ish controller frames, got {age}ms"
+        );
+        assert!(
+            age <= 60_000,
+            "queue age should be clamped for UI safety, got {age}ms"
+        );
     }
 
     #[test]

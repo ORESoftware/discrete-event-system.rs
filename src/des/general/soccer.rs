@@ -279,7 +279,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 96;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 99;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -317,7 +317,10 @@ const SOCCER_NEURAL_FEATURE_LOOSE_BALL_PLAYER_TIME_TO_BALL: usize = 92;
 const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_AVAILABLE: usize = 93;
 const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_PROXIMITY: usize = 94;
 const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_FIT: usize = 95;
-const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87, 89, 93];
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_AVAILABLE: usize = 96;
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_PROXIMITY: usize = 97;
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_FIT: usize = 98;
+const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87, 89, 93, 96];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
@@ -1340,6 +1343,12 @@ pub struct SoccerPomdpObservation {
     pub flank_cross_arrival_distance_yards: f64,
     #[serde(default)]
     pub flank_cross_arrival_fit: f64,
+    #[serde(default)]
+    pub defensive_cross_arrival_threat_available: bool,
+    #[serde(default)]
+    pub defensive_cross_arrival_threat_distance_yards: f64,
+    #[serde(default)]
+    pub defensive_cross_arrival_threat_fit: f64,
     #[serde(default)]
     pub team_brain_defensive_cover_target: usize,
     #[serde(default)]
@@ -2385,6 +2394,12 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub flank_cross_arrival_fit_bin: u8,
     #[serde(default)]
+    pub defensive_cross_arrival_threat_available: bool,
+    #[serde(default)]
+    pub defensive_cross_arrival_threat_distance_bin: u8,
+    #[serde(default)]
+    pub defensive_cross_arrival_threat_fit_bin: u8,
+    #[serde(default)]
     pub team_brain_cover_target_bin: u8,
     #[serde(default)]
     pub team_brain_cover_actual_bin: u8,
@@ -2669,6 +2684,16 @@ impl SoccerQStateKey {
             ),
             flank_cross_arrival_fit_bin: distance_bucket(
                 observation.flank_cross_arrival_fit,
+                &[0.15, 0.35, 0.60, 0.82],
+            ),
+            defensive_cross_arrival_threat_available: observation
+                .defensive_cross_arrival_threat_available,
+            defensive_cross_arrival_threat_distance_bin: distance_bucket(
+                observation.defensive_cross_arrival_threat_distance_yards,
+                &[3.0, 7.0, 13.0, 22.0],
+            ),
+            defensive_cross_arrival_threat_fit_bin: distance_bucket(
+                observation.defensive_cross_arrival_threat_fit,
                 &[0.15, 0.35, 0.60, 0.82],
             ),
             team_brain_cover_target_bin: observation.team_brain_defensive_cover_target.min(4) as u8,
@@ -2971,6 +2996,12 @@ impl SoccerQStateKey {
             && self.flank_cross_arrival_available == other.flank_cross_arrival_available
             && self.flank_cross_arrival_distance_bin == other.flank_cross_arrival_distance_bin
             && self.flank_cross_arrival_fit_bin == other.flank_cross_arrival_fit_bin
+            && self.defensive_cross_arrival_threat_available
+                == other.defensive_cross_arrival_threat_available
+            && self.defensive_cross_arrival_threat_distance_bin
+                == other.defensive_cross_arrival_threat_distance_bin
+            && self.defensive_cross_arrival_threat_fit_bin
+                == other.defensive_cross_arrival_threat_fit_bin
             && self.team_brain_cover_target_bin == other.team_brain_cover_target_bin
             && self.team_brain_cover_actual_bin == other.team_brain_cover_actual_bin
             && self.team_centroid_ball_distance_bin == other.team_centroid_ball_distance_bin
@@ -3081,6 +3112,8 @@ impl SoccerQStateKey {
             && self.loose_ball_team_time_advantage_bin == other.loose_ball_team_time_advantage_bin
             && self.loose_ball_player_time_bin == other.loose_ball_player_time_bin
             && self.flank_cross_arrival_available == other.flank_cross_arrival_available
+            && self.defensive_cross_arrival_threat_available
+                == other.defensive_cross_arrival_threat_available
             && self.first_touch_kind == other.first_touch_kind
             && self.receiving_pending_pass == other.receiving_pending_pass
     }
@@ -13643,6 +13676,20 @@ fn soccer_defensive_mark_target(
         }
     }
 
+    if let Some((cross_mark, cross_score)) =
+        soccer_defensive_cross_arrival_mark_target(snapshot, team, defender_role, zone)
+    {
+        let cross_priority_margin = match defender_role {
+            PlayerRole::Defender => 3.0,
+            PlayerRole::Midfielder => 1.8,
+            PlayerRole::Forward => 0.6,
+            PlayerRole::Goalkeeper => 0.0,
+        };
+        if best_mark.is_none() || cross_score <= best_score + cross_priority_margin {
+            return Some(cross_mark);
+        }
+    }
+
     let (mark, mark_role) = best_mark?;
     let goal_side = (own_goal - mark).normalized();
     let mark_distance = match defender_role {
@@ -13655,6 +13702,138 @@ fn soccer_defensive_mark_target(
         PlayerRole::Goalkeeper => 1.0,
     };
     Some((mark + goal_side * mark_distance).clamp_to_pitch(width, length))
+}
+
+fn soccer_defensive_cross_arrival_mark_target(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    defender_role: PlayerRole,
+    zone: Vec2,
+) -> Option<(Vec2, f64)> {
+    if !matches!(defender_role, PlayerRole::Defender | PlayerRole::Midfielder)
+        || snapshot.controlled_possession_team() != Some(team.other())
+    {
+        return None;
+    }
+
+    let (width, length) = sane_pitch_dimensions(snapshot.field_width, snapshot.field_length);
+    let zone = finite_pitch_point(zone, width, length, Vec2::new(width * 0.5, length * 0.5));
+    let attacking_team = team.other();
+    let directive = snapshot.tactical_directive(attacking_team);
+    if !directive.flank_attack_policy.is_flank() {
+        return None;
+    }
+
+    let crosser_position = snapshot
+        .ball
+        .holder
+        .and_then(|holder| {
+            snapshot
+                .players
+                .iter()
+                .find(|player| player.id == holder && player.team == attacking_team)
+        })
+        .and_then(|player| snapshot.player_position(player.id))
+        .unwrap_or(snapshot.ball.position);
+    if flank_lane_score(crosser_position, width) < 0.42 {
+        return None;
+    }
+
+    let own_goal = Vec2::new(width * 0.5, team.other().goal_y(length));
+    let center_x = width * 0.5;
+    let mut best = None;
+    let mut best_score = f64::INFINITY;
+
+    for opponent in snapshot.players.iter().filter(|player| {
+        player.team == attacking_team
+            && matches!(player.role, PlayerRole::Forward | PlayerRole::Midfielder)
+    }) {
+        let Some(arrival) =
+            snapshot.flank_cross_arrival_target_for(opponent.id, opponent.home_position)
+        else {
+            continue;
+        };
+        let arrival = finite_pitch_point(arrival, width, length, arrival);
+        let distance_to_goal = arrival.distance(own_goal);
+        if distance_to_goal > 24.0 {
+            continue;
+        }
+
+        let runner_position = snapshot
+            .player_position(opponent.id)
+            .unwrap_or(opponent.position);
+        let runner_distance = runner_position.distance(arrival);
+        let goal_side = (own_goal - arrival).normalized();
+        let mark_distance = match defender_role {
+            PlayerRole::Defender => {
+                if directive.flank_attack_policy.prefers_high_cross() {
+                    1.8
+                } else {
+                    2.2
+                }
+            }
+            PlayerRole::Midfielder => 3.0,
+            PlayerRole::Forward | PlayerRole::Goalkeeper => 4.0,
+        };
+        let coverage = (arrival + goal_side * mark_distance).clamp_to_pitch(width, length);
+        let lane_clear_threat = if snapshot.clear_line(
+            crosser_position,
+            arrival,
+            team,
+            if directive.flank_attack_policy.prefers_high_cross() {
+                1.2
+            } else {
+                2.1
+            },
+        ) {
+            1.35
+        } else if directive.flank_attack_policy.prefers_high_cross() {
+            0.55
+        } else {
+            -0.18
+        };
+        let role_threat = match opponent.role {
+            PlayerRole::Forward => 3.0,
+            PlayerRole::Midfielder => 1.65,
+            PlayerRole::Defender => 0.45,
+            PlayerRole::Goalkeeper => 0.0,
+        };
+        let centrality = (1.0 - ((arrival.x - center_x).abs() / center_x.max(1.0))).clamp(0.0, 1.0);
+        let goalmouth_threat = ((24.0 - distance_to_goal) / 24.0).clamp(0.0, 1.0);
+        let runner_commitment = ((18.0 - runner_distance) / 18.0).clamp(0.0, 1.0);
+        let policy_threat = if directive.flank_attack_policy.prefers_high_cross() {
+            match opponent.role {
+                PlayerRole::Forward => 1.15,
+                PlayerRole::Midfielder => 0.62,
+                _ => 0.0,
+            }
+        } else {
+            match opponent.role {
+                PlayerRole::Forward => 0.78,
+                PlayerRole::Midfielder => 0.90,
+                _ => 0.0,
+            }
+        };
+        let role_coverage_fit = match defender_role {
+            PlayerRole::Defender => 1.10,
+            PlayerRole::Midfielder => 0.52,
+            PlayerRole::Forward | PlayerRole::Goalkeeper => 0.0,
+        };
+        let score = coverage.distance(zone) * 0.76 + runner_distance * 0.055
+            - role_threat
+            - policy_threat
+            - role_coverage_fit
+            - lane_clear_threat
+            - centrality * 0.48
+            - goalmouth_threat * 1.25
+            - runner_commitment * 0.55;
+        if score < best_score {
+            best = Some(coverage);
+            best_score = score;
+        }
+    }
+
+    best.map(|target| (target, best_score))
 }
 
 fn soccer_formation_lp_anchor(
@@ -15427,6 +15606,9 @@ impl WorldSnapshot {
                 flank_cross_arrival_available: false,
                 flank_cross_arrival_distance_yards: 0.0,
                 flank_cross_arrival_fit: 0.0,
+                defensive_cross_arrival_threat_available: false,
+                defensive_cross_arrival_threat_distance_yards: 0.0,
+                defensive_cross_arrival_threat_fit: 0.0,
                 team_brain_defensive_cover_target: 0,
                 team_brain_defensive_cover_actual: 0,
                 team_centroid_to_ball_yards: 0.0,
@@ -15666,6 +15848,40 @@ impl WorldSnapshot {
                 let space_fit = (self.space_score_at(target, me.team) / 18.0).clamp(0.0, 1.0);
                 let urgency_fit = team_directive.flank_overlap_run_probability.clamp(0.0, 1.0);
                 (distance_fit * 0.50 + lane_fit * 0.20 + space_fit * 0.20 + urgency_fit * 0.10)
+                    .clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0);
+        let defensive_cross_arrival_target =
+            if matches!(me.role, PlayerRole::Defender | PlayerRole::Midfielder) {
+                let defensive_zone = self.defensive_shape_for(player_id, me.home_position);
+                soccer_defensive_cross_arrival_mark_target(self, me.team, me.role, defensive_zone)
+                    .map(|(target, _score)| target)
+            } else {
+                None
+            };
+        let defensive_cross_arrival_threat_distance_yards = defensive_cross_arrival_target
+            .map(|target| me_position.distance(target))
+            .unwrap_or(0.0);
+        let defensive_cross_arrival_threat_fit = defensive_cross_arrival_target
+            .map(|target| {
+                let distance_fit =
+                    (1.0 - defensive_cross_arrival_threat_distance_yards / 14.0).clamp(0.0, 1.0);
+                let own_goal_y = me.team.other().goal_y(self.field_length);
+                let goal_side_fit = if goal_side_between_y(me_position.y, target.y, own_goal_y) {
+                    1.0
+                } else {
+                    0.22
+                };
+                let tracking_fit = ability01(me.skills.defensive_tracking) * 0.18
+                    + ability01(me.skills.defending) * 0.12;
+                let opponent_flank_urgency = self
+                    .tactical_directive(me.team.other())
+                    .flank_overlap_run_probability
+                    .clamp(0.0, 1.0);
+                (distance_fit * 0.50
+                    + goal_side_fit * 0.20
+                    + tracking_fit
+                    + opponent_flank_urgency * 0.12)
                     .clamp(0.0, 1.0)
             })
             .unwrap_or(0.0);
@@ -16026,6 +16242,9 @@ impl WorldSnapshot {
             flank_cross_arrival_available: flank_cross_arrival_target.is_some(),
             flank_cross_arrival_distance_yards,
             flank_cross_arrival_fit,
+            defensive_cross_arrival_threat_available: defensive_cross_arrival_target.is_some(),
+            defensive_cross_arrival_threat_distance_yards,
+            defensive_cross_arrival_threat_fit,
             team_brain_defensive_cover_target: team_directive.defensive_cover_target,
             team_brain_defensive_cover_actual: team_directive.defensive_cover_actual,
             team_centroid_to_ball_yards: team_shape.centroid_to_ball_yards,
@@ -20900,6 +21119,9 @@ fn dense_soccer_transition_reward(
         reward +=
             (before_distance - after_distance).clamp(-6.0, 6.0) * (0.055 + tracking_skill * 0.045);
         reward += defensive_goal_side_reward(player.team, before_pos, before);
+        reward += defensive_cross_arrival_coverage_learning_reward(
+            player, action, before, before_pos, after_pos,
+        );
         let before_goal_line_shape =
             defensive_goal_line_spacing_score(player.team, before_pos, before);
         let after_goal_line_shape =
@@ -21267,6 +21489,55 @@ fn flank_cross_arrival_support_learning_reward(
         + action_fit
         - (-closing_yards).max(0.0) * 0.085)
         .clamp(-0.80, 1.25)
+}
+
+fn defensive_cross_arrival_coverage_learning_reward(
+    player: &PlayerAgent,
+    action: &str,
+    before: &WorldSnapshot,
+    before_pos: Vec2,
+    after_pos: Vec2,
+) -> f64 {
+    if !matches!(player.role, PlayerRole::Defender | PlayerRole::Midfielder)
+        || before.controlled_possession_team() != Some(player.team.other())
+    {
+        return 0.0;
+    }
+
+    let zone = before.defensive_shape_for(player.id, player.home_position);
+    let Some((coverage_target, _score)) =
+        soccer_defensive_cross_arrival_mark_target(before, player.team, player.role, zone)
+    else {
+        return 0.0;
+    };
+
+    let before_distance = before_pos.distance(coverage_target);
+    let after_distance = after_pos.distance(coverage_target);
+    let closing_yards = (before_distance - after_distance).clamp(-8.0, 8.0);
+    let before_fit = (1.0 - before_distance / 12.0).clamp(0.0, 1.0);
+    let after_fit = (1.0 - after_distance / 12.0).clamp(0.0, 1.0);
+    let fit_delta = (after_fit - before_fit).clamp(-1.0, 1.0);
+    let policy = before
+        .tactical_directive(player.team.other())
+        .flank_attack_policy;
+    let role_fit = match (player.role, policy) {
+        (PlayerRole::Defender, FlankAttackPolicy::PlayDownFlankHighCross) => 0.18,
+        (PlayerRole::Defender, FlankAttackPolicy::PlayDownFlankLowCross) => 0.14,
+        (PlayerRole::Midfielder, FlankAttackPolicy::PlayDownFlankLowCross) => 0.12,
+        (PlayerRole::Midfielder, FlankAttackPolicy::PlayDownFlankHighCross) => 0.08,
+        _ => 0.0,
+    };
+    let action_fit = match action {
+        "defend-shape" => 0.12,
+        "defend-roam" => 0.06,
+        "tackle" => -0.03,
+        "defend" => 0.08,
+        _ => 0.0,
+    };
+
+    (closing_yards * 0.090 + fit_delta * 0.58 + after_fit * 0.16 + role_fit + action_fit
+        - (-closing_yards).max(0.0) * 0.075)
+        .clamp(-0.70, 1.10)
 }
 
 fn tactical_shape_reward(
@@ -28437,6 +28708,9 @@ fn soccer_neural_transition_features(
         soccer_neural_bool(state.flank_cross_arrival_available),
         1.0 - soccer_neural_bin(state.flank_cross_arrival_distance_bin, 5.0),
         soccer_neural_bin(state.flank_cross_arrival_fit_bin, 5.0),
+        soccer_neural_bool(state.defensive_cross_arrival_threat_available),
+        1.0 - soccer_neural_bin(state.defensive_cross_arrival_threat_distance_bin, 5.0),
+        soccer_neural_bin(state.defensive_cross_arrival_threat_fit_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -47491,6 +47765,107 @@ mod tests {
     }
 
     #[test]
+    fn pomdp_q_state_and_neural_features_track_defensive_cross_arrival_threat() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14232,
+            ..Default::default()
+        });
+        let crosser = 8;
+        let striker = 9;
+        let defender = 13;
+        sim.ball.holder = Some(crosser);
+        sim.ball.position = Vec2::new(72.0, 116.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[crosser].position = sim.ball.position;
+        sim.players[striker].position = Vec2::new(38.0, 99.0);
+        sim.players[striker].home_position = sim.players[striker].position;
+        sim.players[striker].skills.height = 8.8;
+        sim.players[striker].skills.strength = 8.4;
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(18.0 + (away - 11) as f64 * 3.5, 116.4);
+        }
+        sim.players[defender].position = Vec2::new(42.0, 111.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+
+        let mut directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        directive.flank_attack_policy = FlankAttackPolicy::PlayDownFlankHighCross;
+        directive.flank_overlap_run_probability = 0.46;
+        sim.central_brain.home_directive = directive;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(defender);
+        let mdp_state = snapshot.mdp_state_for_player(defender);
+        let threat_state = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &observation,
+            Team::Away,
+            sim.players[defender].role,
+        );
+        let mut ordinary_observation = observation.clone();
+        ordinary_observation.defensive_cross_arrival_threat_available = false;
+        ordinary_observation.defensive_cross_arrival_threat_distance_yards = 0.0;
+        ordinary_observation.defensive_cross_arrival_threat_fit = 0.0;
+        let ordinary_state = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &ordinary_observation,
+            Team::Away,
+            sim.players[defender].role,
+        );
+
+        assert!(observation.defensive_cross_arrival_threat_available);
+        assert!(observation.defensive_cross_arrival_threat_distance_yards > 1.0);
+        assert!(observation.defensive_cross_arrival_threat_fit > 0.25);
+        assert!(threat_state.defensive_cross_arrival_threat_available);
+        assert!(threat_state.defensive_cross_arrival_threat_distance_bin > 0);
+        assert!(threat_state.defensive_cross_arrival_threat_fit_bin > 0);
+        assert_ne!(threat_state, ordinary_state);
+
+        let mut policy = SoccerQPolicy::default();
+        policy.set_action_value(threat_state.clone(), "defend-shape", 3.75);
+        assert_eq!(
+            policy.best_action_hierarchical(&threat_state).as_deref(),
+            Some("defend-shape")
+        );
+        assert!(
+            policy.best_action_hierarchical(&ordinary_state).is_none(),
+            "defensive cross-threat policy should not be reused for ordinary defensive states"
+        );
+
+        let decision = test_decision_trace(&snapshot, defender, "defend-shape");
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: defender,
+            team: Team::Away,
+            role: sim.players[defender].role,
+            state: decision.mdp_state.clone(),
+            observation,
+            belief: decision.belief.clone(),
+            action: decision.action.clone(),
+            action_target: decision.action_target.clone(),
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 1.0,
+            next_state: snapshot.mdp_state_for_player(defender),
+            next_observation: snapshot.observation_for(defender),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
+        assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_AVAILABLE],
+            1.0
+        );
+        assert!(features[SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_PROXIMITY] > 0.0);
+        assert!(features[SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_FIT] > 0.0);
+    }
+
+    #[test]
     fn q_policy_keys_separate_same_action_by_goal_attack_window() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -55089,6 +55464,61 @@ mod tests {
     }
 
     #[test]
+    fn neural_learning_pads_previous_snapshot_defensive_cross_arrival_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15085,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_AVAILABLE;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous defensive-cross-arrival neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        for index in previous_dim..SOCCER_NEURAL_FEATURE_DIM {
+            assert_eq!(
+                resumed_snapshot.layers[0].weights[0][index], 0.0,
+                "new defensive cross-arrival input weights should start neutral"
+            );
+        }
+    }
+
+    #[test]
     fn neural_learning_trains_on_threaded_backend() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.4,
@@ -58784,6 +59214,153 @@ mod tests {
                 start + toward * 6.0,
             ) > 0.5,
             "direct cross-arrival support signal should be positive"
+        );
+    }
+
+    #[test]
+    fn defenders_cover_flank_cross_arrival_lanes_goal_side() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let crosser = 8;
+        let striker = 9;
+        let defender = 13;
+        sim.ball.holder = Some(crosser);
+        sim.ball.position = Vec2::new(72.0, 116.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[crosser].position = sim.ball.position;
+        sim.players[striker].position = Vec2::new(38.0, 99.0);
+        sim.players[striker].home_position = sim.players[striker].position;
+        sim.players[striker].skills.height = 8.8;
+        sim.players[striker].skills.strength = 8.4;
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(18.0 + (away - 11) as f64 * 3.5, 116.4);
+        }
+        sim.players[defender].position = Vec2::new(42.0, 111.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+
+        let mut directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        directive.flank_attack_policy = FlankAttackPolicy::PlayDownFlankHighCross;
+        directive.flank_overlap_run_probability = 0.46;
+        sim.central_brain.home_directive = directive;
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let arrival = snapshot
+            .flank_cross_arrival_target_for(striker, sim.players[striker].home_position)
+            .expect("attacking policy should expose far-post arrival lane");
+        let zone = snapshot.defensive_shape_for(defender, sim.players[defender].home_position);
+        let (cross_mark, _cross_score) = soccer_defensive_cross_arrival_mark_target(
+            &snapshot,
+            Team::Away,
+            PlayerRole::Defender,
+            zone,
+        )
+        .expect("defense should identify cross-arrival coverage target");
+        let mark = snapshot.mark_or_zone_for(defender, sim.players[defender].home_position);
+        let assignment =
+            snapshot.defensive_assignment_for(defender, sim.players[defender].home_position, false);
+
+        assert!(
+            cross_mark.distance(arrival) < zone.distance(arrival),
+            "cross mark should close the far-post arrival lane: mark={cross_mark:?} zone={zone:?} arrival={arrival:?}"
+        );
+        assert!(
+            cross_mark.y > arrival.y,
+            "away defender should cover goal-side of home cross arrival: mark={cross_mark:?} arrival={arrival:?}"
+        );
+        assert!(
+            mark.distance(arrival) < zone.distance(arrival),
+            "man-zone blend should still move toward the cross-arrival lane: mark={mark:?} zone={zone:?} arrival={arrival:?}"
+        );
+        assert!(
+            assignment.distance(arrival) < zone.distance(arrival),
+            "defensive assignment should carry the cross coverage through role clamps: assignment={assignment:?} zone={zone:?} arrival={arrival:?}"
+        );
+        assert!(
+            assignment.y > zone.y,
+            "defender should drop goal-side toward the cross lane when the ball is at the endline: assignment={assignment:?} zone={zone:?}"
+        );
+    }
+
+    #[test]
+    fn defensive_cross_arrival_reward_prefers_closing_coverage_lane() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let crosser = 8;
+        let striker = 9;
+        let defender = 13;
+        sim.ball.holder = Some(crosser);
+        sim.ball.position = Vec2::new(72.0, 116.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[crosser].position = sim.ball.position;
+        sim.players[striker].position = Vec2::new(38.0, 99.0);
+        sim.players[striker].home_position = sim.players[striker].position;
+        sim.players[striker].skills.height = 8.8;
+        sim.players[striker].skills.strength = 8.4;
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(18.0 + (away - 11) as f64 * 3.5, 116.4);
+        }
+        sim.players[defender].position = Vec2::new(42.0, 111.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+
+        let mut directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        directive.flank_attack_policy = FlankAttackPolicy::PlayDownFlankHighCross;
+        directive.flank_overlap_run_probability = 0.46;
+        sim.central_brain.home_directive = directive;
+        let before = WorldSnapshot::from_match(&sim);
+        let zone = before.defensive_shape_for(defender, sim.players[defender].home_position);
+        let coverage = soccer_defensive_cross_arrival_mark_target(
+            &before,
+            Team::Away,
+            PlayerRole::Defender,
+            zone,
+        )
+        .expect("defense should identify cross-arrival coverage target")
+        .0;
+        let start = sim.players[defender].position;
+        let toward = (coverage - start).normalized();
+        let mut close_after = before.clone();
+        close_after.set_player_position(defender, start + toward * 5.0);
+        let mut away_after = before.clone();
+        away_after.set_player_position(defender, start - toward * 3.0);
+        let decision = test_decision_trace(&before, defender, "defend-shape");
+
+        let closing_reward = dense_soccer_transition_reward(
+            &sim.players[defender],
+            &decision,
+            &before,
+            &close_after,
+            "defend-shape",
+            &SoccerTacticalLearningWeights::default(),
+        );
+        let drifting_reward = dense_soccer_transition_reward(
+            &sim.players[defender],
+            &decision,
+            &before,
+            &away_after,
+            "defend-shape",
+            &SoccerTacticalLearningWeights::default(),
+        );
+
+        assert!(
+            closing_reward > drifting_reward + 0.60,
+            "closing cross-arrival coverage should beat drifting away: closing={closing_reward} drifting={drifting_reward}"
+        );
+        assert!(
+            defensive_cross_arrival_coverage_learning_reward(
+                &sim.players[defender],
+                "defend-shape",
+                &before,
+                start,
+                start + toward * 5.0,
+            ) > 0.45,
+            "direct defensive cross-arrival signal should be positive"
         );
     }
 

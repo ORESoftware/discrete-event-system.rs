@@ -48641,6 +48641,71 @@ mod tests {
     }
 
     #[test]
+    fn possession_run_time_step_randomizes_internal_operation_order() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_512,
+            ..Default::default()
+        });
+        let holder = 6;
+        park_players_except(&mut sim, &[holder]);
+        sim.active_set_play = None;
+        sim.pending_pass = None;
+        sim.pending_shot = None;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 58.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[holder].home_position = sim.ball.position;
+        sim.players[holder].incoming_ball = None;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(holder);
+        assert!(observation.has_ball);
+        assert!(!observation.first_touch_available);
+        assert!(
+            !goal_attack_shot_is_required(&observation, sim.players[holder].role),
+            "test setup should exercise the ordinary in-possession decision branch"
+        );
+
+        let mut first_ops = std::collections::BTreeSet::new();
+        let mut full_orders = std::collections::BTreeSet::new();
+        for seed in 0..40 {
+            let mut player = sim.players[holder].clone();
+            let _intent =
+                player.run_time_step(&snapshot, None, None, &mut mulberry32(22_600 + seed));
+            let decision = player.last_decision.expect("possession decision trace");
+            assert!(
+                decision.action_options.len() >= 8,
+                "ordinary possession branch should expose the full action-choice surface: {decision:?}"
+            );
+            assert!(
+                !decision.operation_order.is_empty(),
+                "decision trace should record the weighted Fisher-Yates operation order"
+            );
+            assert!(
+                decision
+                    .action_options
+                    .iter()
+                    .any(|option| option.label == "dribble"),
+                "possession branch should include dribble as a scored option"
+            );
+            first_ops.insert(decision.operation_order[0].clone());
+            full_orders.insert(decision.operation_order.join(">"));
+        }
+
+        assert!(
+            first_ops.len() >= 2,
+            "different RNG draws should vary the first internal operation: {first_ops:?}"
+        );
+        assert!(
+            full_orders.len() >= 3,
+            "run_time_step should not use one rigid in-possession operation order"
+        );
+    }
+
+    #[test]
     fn completed_pass_reward_prioritizes_forward_progression() {
         let field_length = 120.0;
         let short_forward = completed_pass_reward(

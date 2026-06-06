@@ -11857,11 +11857,26 @@ fn first_float(text: &str) -> Option<f64> {
 }
 
 fn parse_f64_token(token: &str) -> Option<f64> {
-    token
+    let token = token
         .trim()
-        .trim_matches(|ch: char| matches!(ch, '%' | ',' | '(' | ')' | '[' | ']' | '*'))
-        .parse::<f64>()
-        .ok()
+        .trim_matches(|ch: char| matches!(ch, '%' | ',' | '(' | ')' | '[' | ']' | '*'));
+    if let Ok(value) = token.parse::<f64>() {
+        return Some(value);
+    }
+
+    let mut rational_parts = token.split('/');
+    let numerator = rational_parts.next()?;
+    let denominator = rational_parts.next()?;
+    if rational_parts.next().is_some() {
+        return None;
+    }
+    let numerator = numerator.parse::<f64>().ok()?;
+    let denominator = denominator.parse::<f64>().ok()?;
+    if denominator == 0.0 {
+        return None;
+    }
+    let value = numerator / denominator;
+    value.is_finite().then_some(value)
 }
 
 fn dot_f64(left: &[f64], right: &[f64]) -> f64 {
@@ -14008,6 +14023,28 @@ e0 -1
     }
 
     #[test]
+    fn native_qsopt_ex_solution_parser_reads_exact_rational_values() {
+        let solution_text = "\
+status OPTIMAL
+\tValue = 0
+VARS:
+x1 = 499999987/125000000
+REDUCED COST:
+x0 = -1
+PI:
+SLACK:
+c0 = 13/125000000
+";
+        let parsed = super::parse_native_qsopt_ex_solution_text(solution_text, 2, 2, 0, "", "");
+
+        assert_eq!(parsed.status, "optimal");
+        assert_eq!(parsed.x[0], 0.0);
+        assert!((parsed.x[1] - 3.999999896).abs() <= 1.0e-12);
+        assert_eq!(parsed.reduced_costs, Some(vec![-1.0, 0.0]));
+        assert_eq!(parsed.dual_ub, Some(vec![0.0, 0.0]));
+    }
+
+    #[test]
     fn native_qsopt_ex_solution_basis_infers_from_certificates() {
         let solution_text = "\
 status optimal
@@ -14253,6 +14290,10 @@ e0                                                  1*
         assert_eq!(super::parse_f64_token("(7.5%),"), Some(7.5));
         assert_eq!(super::parse_f64_token("[3.25]"), Some(3.25));
         assert_eq!(super::parse_f64_token("2*"), Some(2.0));
+        assert_eq!(
+            super::parse_f64_token("499999987/125000000"),
+            Some(3.999999896)
+        );
         assert_eq!(super::percent_gap_from_line("Gap: (7.5%),"), Some(0.075));
     }
 

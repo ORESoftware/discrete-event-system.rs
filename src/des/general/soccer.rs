@@ -299,6 +299,9 @@ const SOCCER_NEURAL_FEATURE_TEAM_CENTROID_BALL_DISTANCE: usize = 61;
 const SOCCER_NEURAL_FEATURE_TEAM_SPREAD: usize = 62;
 const SOCCER_NEURAL_FEATURE_TEAM_PLAYERS_NEAR_BALL: usize = 63;
 const SOCCER_NEURAL_FEATURE_TEAM_FORWARD_VELOCITY: usize = 64;
+const SOCCER_NEURAL_FEATURE_FORMATION_LP_ALIGNMENT: usize = 74;
+const SOCCER_NEURAL_FEATURE_FORMATION_LP_PRESSURE_WEIGHT: usize = 77;
+const SOCCER_NEURAL_FEATURE_FORMATION_LP_SPEED_MATCH_WEIGHT: usize = 78;
 const SOCCER_NEURAL_FEATURE_TEAM_FLANK_POLICY: usize = 81;
 const SOCCER_NEURAL_FEATURE_TEAM_FLANK_OVERLAP: usize = 82;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81];
@@ -2963,6 +2966,30 @@ pub struct SoccerQPolicyOptions {
     pub gamma: f64,
 }
 
+const SOCCER_Q_VALUE_LIMIT: f64 = 1_000_000.0;
+
+fn soccer_q_sanitized_value(value: f64) -> Option<f64> {
+    value
+        .is_finite()
+        .then(|| value.clamp(-SOCCER_Q_VALUE_LIMIT, SOCCER_Q_VALUE_LIMIT))
+}
+
+fn soccer_q_sanitized_alpha(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        SoccerQPolicyOptions::default().alpha
+    }
+}
+
+fn soccer_q_sanitized_gamma(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 0.999)
+    } else {
+        SoccerQPolicyOptions::default().gamma
+    }
+}
+
 impl Default for SoccerQPolicyOptions {
     fn default() -> Self {
         SoccerQPolicyOptions {
@@ -3134,8 +3161,9 @@ impl SoccerQPolicy {
                 state: entry.state.clone(),
                 action,
             };
-            policy.insert_q_value(key.clone(), entry.value);
-            policy.visits.insert(key, entry.visits);
+            if policy.insert_q_value(key.clone(), entry.value) {
+                policy.visits.insert(key, entry.visits);
+            }
         }
         for entry in target_entries {
             if !entry.value.is_finite() {
@@ -3153,8 +3181,9 @@ impl SoccerQPolicy {
                 target_macro_cell_id: entry.target_macro_cell_id,
                 target_root_cell_id: entry.target_root_cell_id,
             };
-            policy.insert_target_value(key.clone(), entry.value);
-            policy.target_visits.insert(key, entry.visits);
+            if policy.insert_target_value(key.clone(), entry.value) {
+                policy.target_visits.insert(key, entry.visits);
+            }
         }
         Ok(policy)
     }
@@ -3307,11 +3336,18 @@ impl SoccerQPolicy {
         }
     }
 
-    fn insert_q_value(&mut self, key: SoccerQActionKey, value: f64) {
+    fn insert_q_value(&mut self, key: SoccerQActionKey, value: f64) -> bool {
+        let Some(value) = soccer_q_sanitized_value(value) else {
+            return false;
+        };
+        if key.action.trim().is_empty() {
+            return false;
+        }
         if !self.q_values.contains_key(&key) {
             self.index_action_key(&key);
         }
         self.q_values.insert(key, value);
+        true
     }
 
     fn index_target_key(&mut self, key: &SoccerQTargetKey) {
@@ -3329,11 +3365,18 @@ impl SoccerQPolicy {
         }
     }
 
-    fn insert_target_value(&mut self, key: SoccerQTargetKey, value: f64) {
+    fn insert_target_value(&mut self, key: SoccerQTargetKey, value: f64) -> bool {
+        let Some(value) = soccer_q_sanitized_value(value) else {
+            return false;
+        };
+        if key.action.trim().is_empty() {
+            return false;
+        }
         if !self.target_values.contains_key(&key) {
             self.index_target_key(&key);
         }
         self.target_values.insert(key, value);
+        true
     }
 
     pub fn train(&mut self, transitions: &[SoccerLearningTransition]) {
@@ -3347,25 +3390,37 @@ impl SoccerQPolicy {
     }
 
     fn update_with_reward(&mut self, transition: &SoccerLearningTransition, reward: f64) {
+        let Some(reward) = soccer_q_sanitized_value(reward) else {
+            return;
+        };
         let state = SoccerQStateKey::from_transition(transition);
         let next_state = SoccerQStateKey::from_next_transition(transition);
         let action = normalize_soccer_action_label(&transition.action).to_string();
+        if action.trim().is_empty() {
+            return;
+        }
         let key = SoccerQActionKey {
             state: state.clone(),
             action: action.clone(),
         };
-        let old = self.q_values.get(&key).copied().unwrap_or(0.0);
+        let old = self
+            .q_values
+            .get(&key)
+            .copied()
+            .and_then(soccer_q_sanitized_value)
+            .unwrap_or(0.0);
         let max_next = if transition.done {
             0.0
         } else {
             self.best_value_hierarchical(&next_state).unwrap_or(0.0)
         };
-        let alpha = self.options.alpha.clamp(0.0, 1.0);
-        let gamma = self.options.gamma.clamp(0.0, 0.999);
+        let alpha = soccer_q_sanitized_alpha(self.options.alpha);
+        let gamma = soccer_q_sanitized_gamma(self.options.gamma);
         let target = reward + gamma * max_next;
         let updated = old + alpha * (target - old);
-        self.insert_q_value(key.clone(), updated);
-        *self.visits.entry(key).or_insert(0) += 1;
+        if self.insert_q_value(key.clone(), updated) {
+            *self.visits.entry(key).or_insert(0) += 1;
+        }
 
         if let Some(grid) = transition
             .action_target
@@ -3373,10 +3428,16 @@ impl SoccerQPolicy {
             .and_then(|target| target.grid)
         {
             let target_key = SoccerQTargetKey::from_state_action_grid(state, &action, grid);
-            let old_target = self.target_values.get(&target_key).copied().unwrap_or(0.0);
+            let old_target = self
+                .target_values
+                .get(&target_key)
+                .copied()
+                .and_then(soccer_q_sanitized_value)
+                .unwrap_or(0.0);
             let updated_target = old_target + alpha * (target - old_target);
-            self.insert_target_value(target_key.clone(), updated_target);
-            *self.target_visits.entry(target_key).or_insert(0) += 1;
+            if self.insert_target_value(target_key.clone(), updated_target) {
+                *self.target_visits.entry(target_key).or_insert(0) += 1;
+            }
         }
     }
 
@@ -3435,8 +3496,8 @@ impl SoccerQPolicy {
         self.q_values
             .iter()
             .filter(|(key, _)| &key.state == state)
-            .map(|(_, value)| *value)
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .filter_map(|(_, value)| soccer_q_sanitized_value(*value))
+            .max_by(|a, b| a.total_cmp(b))
     }
 
     pub fn best_value_hierarchical(&self, state: &SoccerQStateKey) -> Option<f64> {
@@ -3450,7 +3511,10 @@ impl SoccerQPolicy {
             state: state.clone(),
             action: normalize_soccer_action_label(action).to_string(),
         };
-        self.q_values.get(&key).copied()
+        self.q_values
+            .get(&key)
+            .copied()
+            .and_then(soccer_q_sanitized_value)
     }
 
     pub fn set_action_value(&mut self, state: SoccerQStateKey, action: &str, value: f64) {
@@ -3458,8 +3522,9 @@ impl SoccerQPolicy {
             state,
             action: normalize_soccer_action_label(action).to_string(),
         };
-        self.insert_q_value(key.clone(), value);
-        self.visits.entry(key).or_insert(1);
+        if self.insert_q_value(key.clone(), value) {
+            self.visits.entry(key).or_insert(1);
+        }
     }
 
     pub fn set_action_value_for_snapshot(
@@ -3490,8 +3555,9 @@ impl SoccerQPolicy {
         value: f64,
     ) {
         let key = SoccerQTargetKey::from_state_action_grid(state, action, grid);
-        self.insert_target_value(key.clone(), value);
-        self.target_visits.entry(key).or_insert(1);
+        if self.insert_target_value(key.clone(), value) {
+            self.target_visits.entry(key).or_insert(1);
+        }
     }
 
     pub fn set_target_value_for_snapshot(
@@ -3524,11 +3590,14 @@ impl SoccerQPolicy {
         let mut entries = self
             .q_values
             .iter()
-            .map(|(key, value)| SoccerQEntry {
-                state: key.state.clone(),
-                action: key.action.clone(),
-                value: *value,
-                visits: self.visits.get(key).copied().unwrap_or(0),
+            .filter_map(|(key, value)| {
+                let value = soccer_q_sanitized_value(*value)?;
+                Some(SoccerQEntry {
+                    state: key.state.clone(),
+                    action: key.action.clone(),
+                    value,
+                    visits: self.visits.get(key).copied().unwrap_or(0),
+                })
             })
             .collect::<Vec<_>>();
         entries.sort_by(|a, b| {
@@ -3548,15 +3617,18 @@ impl SoccerQPolicy {
         let mut entries = self
             .target_values
             .iter()
-            .map(|(key, value)| SoccerQTargetEntry {
-                state: key.state.clone(),
-                action: key.action.clone(),
-                target_fine_cell_id: key.target_fine_cell_id,
-                target_tactical_cell_id: key.target_tactical_cell_id,
-                target_macro_cell_id: key.target_macro_cell_id,
-                target_root_cell_id: key.target_root_cell_id,
-                value: *value,
-                visits: self.target_visits.get(key).copied().unwrap_or(0),
+            .filter_map(|(key, value)| {
+                let value = soccer_q_sanitized_value(*value)?;
+                Some(SoccerQTargetEntry {
+                    state: key.state.clone(),
+                    action: key.action.clone(),
+                    target_fine_cell_id: key.target_fine_cell_id,
+                    target_tactical_cell_id: key.target_tactical_cell_id,
+                    target_macro_cell_id: key.target_macro_cell_id,
+                    target_root_cell_id: key.target_root_cell_id,
+                    value,
+                    visits: self.target_visits.get(key).copied().unwrap_or(0),
+                })
             })
             .collect::<Vec<_>>();
         entries.sort_by(|a, b| {
@@ -3584,12 +3656,15 @@ impl SoccerQPolicy {
         let mut by_state: HashMap<SoccerQStateKey, Vec<SoccerQActionProbabilityEntry>> =
             HashMap::new();
         for (key, value) in &self.q_values {
+            let Some(value) = soccer_q_sanitized_value(*value) else {
+                continue;
+            };
             by_state
                 .entry(key.state.clone())
                 .or_default()
                 .push(SoccerQActionProbabilityEntry {
                     action: key.action.clone(),
-                    value: *value,
+                    value,
                     visits: self.visits.get(key).copied().unwrap_or(0),
                     probability: 0.0,
                 });
@@ -3688,8 +3763,9 @@ impl SoccerQPolicy {
                 .q_values
                 .iter()
                 .filter_map(|(key, value)| {
+                    let value = soccer_q_sanitized_value(*value)?;
                     let visits = self.visits.get(key).copied().unwrap_or(0);
-                    (visits >= min_visits).then(|| (key.clone(), *value, visits))
+                    (visits >= min_visits).then(|| (key.clone(), value, visits))
                 })
                 .collect::<Vec<_>>();
             kept_actions.sort_by(|(a_key, a_value, a_visits), (b_key, b_value, b_visits)| {
@@ -3714,8 +3790,9 @@ impl SoccerQPolicy {
             self.action_spatial_index.clear();
             self.action_relaxed_spatial_index.clear();
             for (key, value, visits) in kept_actions {
-                self.insert_q_value(key.clone(), value);
-                self.visits.insert(key, visits);
+                if self.insert_q_value(key.clone(), value) {
+                    self.visits.insert(key, visits);
+                }
             }
         }
 
@@ -3724,8 +3801,9 @@ impl SoccerQPolicy {
                 .target_values
                 .iter()
                 .filter_map(|(key, value)| {
+                    let value = soccer_q_sanitized_value(*value)?;
                     let visits = self.target_visits.get(key).copied().unwrap_or(0);
-                    (visits >= min_visits).then(|| (key.clone(), *value, visits))
+                    (visits >= min_visits).then(|| (key.clone(), value, visits))
                 })
                 .collect::<Vec<_>>();
             kept_targets.sort_by(|(a_key, a_value, a_visits), (b_key, b_value, b_visits)| {
@@ -3756,8 +3834,9 @@ impl SoccerQPolicy {
             self.target_index_keys.clear();
             self.target_spatial_index.clear();
             for (key, value, visits) in kept_targets {
-                self.insert_target_value(key.clone(), value);
-                self.target_visits.insert(key, visits);
+                if self.insert_target_value(key.clone(), value) {
+                    self.target_visits.insert(key, visits);
+                }
             }
         }
 
@@ -3792,7 +3871,12 @@ impl SoccerQPolicy {
                     if key.action != action || !key.state.matches_spatial_level(state, *level) {
                         continue;
                     }
-                    let Some(value) = self.target_values.get(key).copied() else {
+                    let Some(value) = self
+                        .target_values
+                        .get(key)
+                        .copied()
+                        .and_then(soccer_q_sanitized_value)
+                    else {
                         continue;
                     };
                     let visits = self.target_visits.get(key).copied().unwrap_or(0);
@@ -3904,7 +3988,12 @@ impl SoccerQPolicy {
             if !is_legal(&key.action) {
                 continue;
             }
-            let Some(value) = self.q_values.get(key).copied() else {
+            let Some(value) = self
+                .q_values
+                .get(key)
+                .copied()
+                .and_then(soccer_q_sanitized_value)
+            else {
                 continue;
             };
             let visits = self.visits.get(key).copied().unwrap_or(0);
@@ -3991,7 +4080,12 @@ impl SoccerQPolicy {
                 {
                     continue;
                 }
-                let Some(value) = self.q_values.get(key).copied() else {
+                let Some(value) = self
+                    .q_values
+                    .get(key)
+                    .copied()
+                    .and_then(soccer_q_sanitized_value)
+                else {
                     continue;
                 };
                 let visits = self.visits.get(key).copied().unwrap_or(0);
@@ -4027,7 +4121,12 @@ impl SoccerQPolicy {
                 if !context_matches || !is_legal(&key.action) {
                     continue;
                 }
-                let Some(value) = self.q_values.get(key).copied() else {
+                let Some(value) = self
+                    .q_values
+                    .get(key)
+                    .copied()
+                    .and_then(soccer_q_sanitized_value)
+                else {
                     continue;
                 };
                 let visits = self.visits.get(key).copied().unwrap_or(0);
@@ -4071,7 +4170,12 @@ impl SoccerQPolicy {
                     if !key.state.matches_spatial_level(state, level) {
                         continue;
                     }
-                    let Some(value) = self.q_values.get(key).copied() else {
+                    let Some(value) = self
+                        .q_values
+                        .get(key)
+                        .copied()
+                        .and_then(soccer_q_sanitized_value)
+                    else {
                         continue;
                     };
                     let visits = self.visits.get(key).copied().unwrap_or(0);
@@ -4163,7 +4267,12 @@ impl SoccerQPolicy {
                 if !key.state.matches_spatial_level(state, level) {
                     continue;
                 }
-                let Some(value) = self.q_values.get(key).copied() else {
+                let Some(value) = self
+                    .q_values
+                    .get(key)
+                    .copied()
+                    .and_then(soccer_q_sanitized_value)
+                else {
                     continue;
                 };
                 let replace = best
@@ -4210,7 +4319,12 @@ impl SoccerQPolicy {
                     {
                         continue;
                     }
-                    let Some(value) = self.target_values.get(key).copied() else {
+                    let Some(value) = self
+                        .target_values
+                        .get(key)
+                        .copied()
+                        .and_then(soccer_q_sanitized_value)
+                    else {
                         continue;
                     };
                     let weight = if key.target_matches_grid(grid, PitchGridLevel::Fine) {
@@ -4265,7 +4379,12 @@ impl SoccerQPolicy {
                     if key.action != action || !context_matches {
                         continue;
                     }
-                    let Some(value) = self.target_values.get(key).copied() else {
+                    let Some(value) = self
+                        .target_values
+                        .get(key)
+                        .copied()
+                        .and_then(soccer_q_sanitized_value)
+                    else {
                         continue;
                     };
                     let weight = if key.target_matches_grid(grid, PitchGridLevel::Fine) {
@@ -4408,13 +4527,14 @@ impl SoccerTeamQPolicies {
         let mut tick_rewards: HashMap<u64, (f64, u32, f64, u32)> = HashMap::new();
         for transition in transitions {
             let entry = tick_rewards.entry(transition.tick).or_default();
+            let reward = finite_metric(transition.reward);
             match transition.team {
                 Team::Home => {
-                    entry.0 += transition.reward;
+                    entry.0 += reward;
                     entry.1 += 1;
                 }
                 Team::Away => {
-                    entry.2 += transition.reward;
+                    entry.2 += reward;
                     entry.3 += 1;
                 }
             }
@@ -4441,8 +4561,9 @@ impl SoccerTeamQPolicies {
                 Team::Home => away_avg,
                 Team::Away => home_avg,
             };
+            let reward = finite_metric(transition.reward) - opponent_avg;
             self.policy_mut(transition.team)
-                .update_with_reward(transition, transition.reward - opponent_avg);
+                .update_with_reward(transition, reward);
         }
     }
 
@@ -12815,25 +12936,52 @@ fn apply_formation_lp_directive_signal(
     if snapshot.status != "optimal" || guidance.is_empty() {
         return;
     }
-    let pressure_guidance = guidance
+    let finite_guidance = guidance
         .iter()
-        .filter(|entry| entry.pressure_weight > 0.12)
+        .filter(|entry| entry.pressure_weight.is_finite() && entry.pair_error_yards.is_finite())
+        .collect::<Vec<_>>();
+    if finite_guidance.is_empty() {
+        return;
+    }
+    let pressure_guidance = finite_guidance
+        .iter()
+        .filter(|entry| entry.pressure_weight.clamp(0.0, 1.0) > 0.12)
         .count();
     directive.defensive_cover_actual = directive.defensive_cover_actual.max(pressure_guidance);
-    let mean_pressure_weight = guidance
+    let mean_pressure_weight = finite_guidance
         .iter()
-        .map(|entry| entry.pressure_weight)
+        .map(|entry| entry.pressure_weight.clamp(0.0, 1.0))
         .sum::<f64>()
-        / guidance.len() as f64;
-    let mean_pair_error = guidance
+        / finite_guidance.len() as f64;
+    let mean_pair_error = finite_guidance
         .iter()
-        .map(|entry| entry.pair_error_yards)
+        .map(|entry| entry.pair_error_yards.max(0.0))
         .sum::<f64>()
-        / guidance.len() as f64;
+        / finite_guidance.len() as f64;
+    let current_press = if directive.press_intensity.is_finite() {
+        directive.press_intensity
+    } else {
+        TeamTacticalDirective::neutral(
+            directive.team,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        )
+        .press_intensity
+    };
+    let current_risk = if directive.risk_tolerance.is_finite() {
+        directive.risk_tolerance
+    } else {
+        TeamTacticalDirective::neutral(
+            directive.team,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        )
+        .risk_tolerance
+    };
     directive.press_intensity =
-        (directive.press_intensity * 0.92 + mean_pressure_weight * 0.08).clamp(0.0, 1.0);
+        (current_press * 0.92 + mean_pressure_weight * 0.08).clamp(0.0, 1.0);
     directive.risk_tolerance =
-        (directive.risk_tolerance - (mean_pair_error / 40.0).clamp(0.0, 0.08)).clamp(0.0, 1.0);
+        (current_risk - (mean_pair_error / 40.0).clamp(0.0, 0.08)).clamp(0.0, 1.0);
 }
 
 fn soccer_lp_scaled(value: f64, scale: f64) -> f64 {
@@ -12849,6 +12997,14 @@ fn soccer_lp_unit(value: f64) -> f64 {
         value.clamp(0.0, 1.0)
     } else {
         0.0
+    }
+}
+
+fn soccer_lp_clamped(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback.clamp(min, max)
     }
 }
 
@@ -13087,32 +13243,49 @@ fn soccer_formation_lp_anchor(
     player: &PlayerSnapshot,
     weights: &SoccerFormationLpObjectiveWeights,
 ) -> Vec2 {
-    let width = snapshot.field_width.max(1.0);
-    let length = snapshot.field_length.max(1.0);
+    let (width, length) = sane_pitch_dimensions(snapshot.field_width, snapshot.field_length);
     let attack_dir = team.attack_dir();
     let own_goal_y = team.other().goal_y(length);
     let home_lane = ((player.home_position.x - width * 0.5) / (width * 0.5)).clamp(-1.0, 1.0);
-    let mut x = width * 0.5 + home_lane * directive.width_yards.clamp(14.0, width) * 0.5;
-    let ball = snapshot.ball.position;
+    let directive_width = soccer_lp_clamped(directive.width_yards, 14.0, width, width * 0.62);
+    let defensive_line_y = soccer_lp_clamped(
+        directive.defensive_line_y,
+        0.0,
+        length,
+        match team {
+            Team::Home => length * 0.40,
+            Team::Away => length * 0.60,
+        },
+    );
+    let support_depth_yards =
+        soccer_lp_clamped(directive.support_depth_yards, 2.0, length * 0.5, 11.0);
+    let press_intensity = soccer_lp_unit(directive.press_intensity);
+    let mut x = width * 0.5 + home_lane * directive_width * 0.5;
+    let ball = finite_pitch_point(
+        snapshot.ball.position,
+        width,
+        length,
+        Vec2::new(width * 0.5, length * 0.5),
+    );
     let possession = snapshot
         .controlled_possession_team()
         .or_else(|| snapshot.possession_team());
     let y = match possession {
         Some(possessing) if possessing == team => match player.role {
             PlayerRole::Goalkeeper => own_goal_y + attack_dir * 7.0,
-            PlayerRole::Defender => directive.defensive_line_y - attack_dir * 2.0,
-            PlayerRole::Midfielder => ball.y - attack_dir * directive.support_depth_yards * 0.42,
-            PlayerRole::Forward => ball.y + attack_dir * directive.support_depth_yards * 0.72,
+            PlayerRole::Defender => defensive_line_y - attack_dir * 2.0,
+            PlayerRole::Midfielder => ball.y - attack_dir * support_depth_yards * 0.42,
+            PlayerRole::Forward => ball.y + attack_dir * support_depth_yards * 0.72,
         },
         Some(possessing) if possessing == team.other() => match player.role {
             PlayerRole::Goalkeeper => own_goal_y + attack_dir * 6.0,
-            PlayerRole::Defender => directive.defensive_line_y,
+            PlayerRole::Defender => defensive_line_y,
             PlayerRole::Midfielder => {
-                let drop = 4.0 + (1.0 - directive.press_intensity).clamp(0.0, 1.0) * 8.0;
+                let drop = 4.0 + (1.0 - press_intensity) * 8.0;
                 ball.y - attack_dir * drop
             }
             PlayerRole::Forward => {
-                let drop = 1.5 + (1.0 - directive.press_intensity).clamp(0.0, 1.0) * 5.0;
+                let drop = 1.5 + (1.0 - press_intensity) * 5.0;
                 ball.y - attack_dir * drop
             }
         },
@@ -13165,10 +13338,16 @@ fn soccer_formation_lp_slot_inputs(
             .iter()
             .find(|player| player.id == holder_id)?;
         (holder.team == team.other()).then(|| {
-            let holder_position = snapshot
-                .player_position(holder.id)
-                .unwrap_or(holder.position);
-            (holder.id, holder_position, holder.velocity)
+            let holder_position = finite_pitch_point(
+                snapshot
+                    .player_position(holder.id)
+                    .unwrap_or(holder.position),
+                snapshot.field_width,
+                snapshot.field_length,
+                holder.position,
+            );
+            let holder_velocity = finite_vec2(holder.velocity, Vec2::zero());
+            (holder.id, holder_position, holder_velocity)
         })
     });
     let mut pressure_ranks = HashMap::new();
@@ -13177,9 +13356,14 @@ fn soccer_formation_lp_slot_inputs(
             .iter()
             .filter(|player| player.role != PlayerRole::Goalkeeper)
             .map(|player| {
-                let position = snapshot
-                    .player_position(player.id)
-                    .unwrap_or(player.position);
+                let position = finite_pitch_point(
+                    snapshot
+                        .player_position(player.id)
+                        .unwrap_or(player.position),
+                    snapshot.field_width,
+                    snapshot.field_length,
+                    player.position,
+                );
                 (player.id, position.distance(holder_position))
             })
             .collect::<Vec<_>>();
@@ -13192,15 +13376,21 @@ fn soccer_formation_lp_slot_inputs(
     let mut slots = Vec::with_capacity(SOCCER_FORMATION_LP_PLAYER_CAPACITY);
     for slot in 0..SOCCER_FORMATION_LP_PLAYER_CAPACITY {
         if let Some(player) = players.get(slot).copied() {
-            let current = snapshot
-                .player_position(player.id)
-                .unwrap_or(player.position)
-                .clamp_to_pitch(snapshot.field_width, snapshot.field_length);
+            let current = finite_pitch_point(
+                snapshot
+                    .player_position(player.id)
+                    .unwrap_or(player.position),
+                snapshot.field_width,
+                snapshot.field_length,
+                player.position,
+            );
+            let velocity = finite_vec2(player.velocity, Vec2::zero());
+            let acceleration = finite_vec2(player.acceleration, Vec2::zero());
             let anchor = soccer_formation_lp_anchor(snapshot, team, directive, player, weights);
             let mut pressure_target = None;
             let mut pressure_weight = 0.0;
             let mut speed_match_weight = 0.0;
-            let mut speed_match_velocity_yps = player.velocity.y;
+            let mut speed_match_velocity_yps = velocity.y;
             if let Some((_holder_id, holder_position, holder_velocity)) = opponent_holder {
                 if let Some(rank) = pressure_ranks.get(&player.id).copied() {
                     let target_count = directive.defensive_cover_target.clamp(1, 4);
@@ -13219,7 +13409,7 @@ fn soccer_formation_lp_slot_inputs(
                     let pressure_need = (0.36
                         + weights.expected_goals_against * 0.34
                         + weights.opponent_progression * 0.22
-                        + directive.press_intensity.clamp(0.0, 1.0) * 0.24)
+                        + soccer_lp_unit(directive.press_intensity) * 0.24)
                         .clamp(0.0, 1.2);
                     pressure_weight = (rank_factor * role_factor * pressure_need).clamp(0.0, 1.4);
                     speed_match_weight =
@@ -13234,7 +13424,7 @@ fn soccer_formation_lp_slot_inputs(
                     pressure_target = Some(
                         (holder_position
                             + approach * SOCCER_FORMATION_LP_PRESS_DISTANCE_YARDS
-                            + holder_velocity * (snapshot.dt_seconds * 0.45))
+                            + holder_velocity * (snapshot.dt_seconds.max(0.0) * 0.45))
                             .clamp_to_pitch(snapshot.field_width, snapshot.field_length),
                     );
                 }
@@ -13249,13 +13439,23 @@ fn soccer_formation_lp_slot_inputs(
                 player_id: player.id,
                 role: player.role,
                 current,
-                velocity: player.velocity,
-                acceleration: player.acceleration,
+                velocity,
+                acceleration,
                 home_position: player.home_position,
-                top_speed: player_top_speed_yps(player.role, &player.skills),
-                max_acceleration: acceleration_yps2_from_score(player.skills.acceleration)
-                    * strength_to_weight_acceleration_multiplier(&player.skills),
-                fatigue: player.fatigue.clamp(0.0, 1.0),
+                top_speed: soccer_lp_clamped(
+                    player_top_speed_yps(player.role, &player.skills),
+                    0.0,
+                    20.0,
+                    0.0,
+                ),
+                max_acceleration: soccer_lp_clamped(
+                    acceleration_yps2_from_score(player.skills.acceleration)
+                        * strength_to_weight_acceleration_multiplier(&player.skills),
+                    0.0,
+                    30.0,
+                    0.0,
+                ),
+                fatigue: soccer_lp_unit(player.fatigue),
                 anchor,
                 pressure_target,
                 speed_match_velocity_yps,
@@ -27016,6 +27216,22 @@ fn soccer_neural_scaled(value: f64, scale: f64) -> f64 {
     (value / scale).clamp(-1.0, 1.0)
 }
 
+fn soccer_neural_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn soccer_neural_signed_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 fn soccer_neural_target_and_priority(
     adjusted_reward: f64,
     gamma: f64,
@@ -27281,10 +27497,7 @@ fn soccer_neural_transition_features(
             transition.tactical_trace.formation_lp_disagreement_yards,
             8.0,
         ),
-        transition
-            .tactical_trace
-            .formation_lp_alignment_score
-            .clamp(-1.0, 1.0),
+        soccer_neural_signed_unit(transition.tactical_trace.formation_lp_alignment_score),
         soccer_neural_scaled(
             transition.tactical_trace.formation_lp_recommended_speed_yps,
             10.0,
@@ -27295,14 +27508,8 @@ fn soccer_neural_transition_features(
                 .formation_lp_recommended_acceleration_yps2,
             18.0,
         ),
-        transition
-            .tactical_trace
-            .formation_lp_pressure_weight
-            .clamp(0.0, 1.0),
-        transition
-            .tactical_trace
-            .formation_lp_speed_match_weight
-            .clamp(0.0, 1.0),
+        soccer_neural_unit(transition.tactical_trace.formation_lp_pressure_weight),
+        soccer_neural_unit(transition.tactical_trace.formation_lp_speed_match_weight),
         soccer_neural_scaled(
             transition.tactical_trace.formation_lp_pressure_error_yards,
             8.0,
@@ -28652,13 +28859,14 @@ impl SoccerMatch {
         if self.team_policies.is_some() {
             for transition in transitions {
                 let entry = tick_rewards.entry(transition.tick).or_default();
+                let reward = finite_metric(transition.reward);
                 match transition.team {
                     Team::Home => {
-                        entry.0 += transition.reward;
+                        entry.0 += reward;
                         entry.1 += 1;
                     }
                     Team::Away => {
-                        entry.2 += transition.reward;
+                        entry.2 += reward;
                         entry.3 += 1;
                     }
                 }
@@ -28666,7 +28874,8 @@ impl SoccerMatch {
         }
         transitions
             .iter()
-            .map(|transition| {
+            .filter_map(|transition| {
+                let reward = finite_metric(transition.reward);
                 let adjusted_reward = if let Some((home_sum, home_count, away_sum, away_count)) =
                     tick_rewards.get(&transition.tick).copied()
                 {
@@ -28684,9 +28893,9 @@ impl SoccerMatch {
                         Team::Home => away_avg,
                         Team::Away => home_avg,
                     };
-                    transition.reward - opponent_avg
+                    reward - opponent_avg
                 } else {
-                    transition.reward
+                    reward
                 };
                 let next_state = SoccerQStateKey::from_next_transition(transition);
                 let (gamma, max_next) = self
@@ -28724,11 +28933,12 @@ impl SoccerMatch {
                     target_scale,
                     target_clip,
                 );
-                SoccerNeuralTrainingSample {
+                let sample = SoccerNeuralTrainingSample {
                     input: soccer_neural_transition_features(transition),
                     target,
                     priority,
-                }
+                };
+                soccer_neural_sample_is_valid(&sample).then_some(sample)
             })
             .collect()
     }
@@ -45531,8 +45741,12 @@ mod tests {
         let snapshot = WorldSnapshot::from_match(&sim);
         let observation = snapshot.observation_for(actor);
         let mdp_state = snapshot.mdp_state_for_player(actor);
-        let sprint_key =
-            SoccerQStateKey::from_parts(&mdp_state, &observation, Team::Home, sim.players[actor].role);
+        let sprint_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
 
         assert_eq!(observation.movement_gait, MovementGait::Sprint);
         assert!(observation.actor_speed_yps > 8.0);
@@ -45634,6 +45848,98 @@ mod tests {
             policy.best_action_hierarchical(&patient_state).is_none(),
             "team brain directive bins should prevent reusing urgent policy in patient state"
         );
+    }
+
+    #[test]
+    fn q_policy_rejects_non_finite_updates_and_reads() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14232,
+            ..Default::default()
+        });
+        let player_id = 5;
+        sim.ball.holder = Some(player_id);
+        sim.ball.position = sim.players[player_id].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let decision = test_decision_trace(&snapshot, player_id, "pass");
+        let state = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(player_id),
+            &snapshot.observation_for(player_id),
+            Team::Home,
+            sim.players[player_id].role,
+        );
+
+        let mut policy = SoccerQPolicy::default();
+        policy.set_action_value(state.clone(), "shoot", f64::NAN);
+        policy.set_action_value(state.clone(), "pass", f64::INFINITY);
+        policy.set_target_value(
+            state.clone(),
+            "pass",
+            pitch_grid_address(
+                sim.players[7].position,
+                snapshot.field_width,
+                snapshot.field_length,
+            ),
+            f64::NEG_INFINITY,
+        );
+
+        assert!(policy.q_value(&state, "shoot").is_none());
+        assert!(policy.q_value(&state, "pass").is_none());
+        assert!(policy.entries().is_empty());
+        assert!(policy.target_entries().is_empty());
+        assert!(policy.best_action_hierarchical(&state).is_none());
+
+        policy.set_action_value(state.clone(), "dribble", SOCCER_Q_VALUE_LIMIT * 10.0);
+        assert_eq!(
+            policy.q_value(&state, "dribble"),
+            Some(SOCCER_Q_VALUE_LIMIT)
+        );
+        assert_eq!(
+            policy.best_action_hierarchical(&state).as_deref(),
+            Some("dribble")
+        );
+
+        let shoot_key = SoccerQActionKey {
+            state: state.clone(),
+            action: "shoot".to_string(),
+        };
+        policy.set_action_value(state.clone(), "shoot", 4.0);
+        policy.q_values.insert(shoot_key, f64::NAN);
+        assert!(policy.q_value(&state, "shoot").is_none());
+        assert_eq!(
+            policy.best_action_hierarchical(&state).as_deref(),
+            Some("dribble"),
+            "indexed stale non-finite values should be skipped during action selection"
+        );
+        assert!(policy.entries().iter().all(|entry| entry.value.is_finite()));
+
+        let mut transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id,
+            team: Team::Home,
+            role: sim.players[player_id].role,
+            state: decision.mdp_state.clone(),
+            observation: decision.observation.clone(),
+            belief: decision.belief.clone(),
+            action: decision.action.clone(),
+            action_target: decision.action_target.clone(),
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: f64::NAN,
+            next_state: snapshot.mdp_state_for_player(player_id),
+            next_observation: snapshot.observation_for(player_id),
+            done: false,
+        };
+        let mut update_policy = SoccerQPolicy::default();
+        update_policy.update(&transition);
+        assert!(update_policy.entries().is_empty());
+        assert_eq!(update_policy.visit_count(), 0);
+
+        transition.reward = f64::INFINITY;
+        update_policy.update(&transition);
+        assert!(update_policy.entries().is_empty());
+        assert_eq!(update_policy.visit_count(), 0);
     }
 
     #[test]
@@ -46076,6 +46382,71 @@ mod tests {
                 && guidance.recommended_acceleration_yps2.is_finite()
                 && guidance.solver_objective == 0.0
         }));
+    }
+
+    #[test]
+    fn formation_lp_directive_signal_ignores_non_finite_guidance() {
+        let mut directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        );
+        directive.press_intensity = f64::NAN;
+        directive.risk_tolerance = f64::NAN;
+        directive.defensive_cover_actual = 0;
+        let snapshot = SoccerFormationLpTeamSnapshot {
+            team: Team::Home,
+            status: "optimal".to_string(),
+            guided_players: 2,
+            ..SoccerFormationLpTeamSnapshot::default()
+        };
+        let valid_guidance = SoccerFormationLpPlayerGuidance {
+            team: Team::Home,
+            player_id: 4,
+            slot: 0,
+            current: Vec2::new(30.0, 44.0),
+            target: Vec2::new(31.0, 45.0),
+            formation_anchor: Vec2::new(32.0, 46.0),
+            pressure_target: Some(Vec2::new(31.5, 45.5)),
+            recommended_move: Vec2::new(1.0, 1.0),
+            target_velocity: Vec2::new(0.5, 0.5),
+            target_acceleration: Vec2::new(0.1, 0.1),
+            recommended_move_yards: 1.4,
+            recommended_speed_yps: 0.7,
+            recommended_acceleration_yps2: 0.14,
+            formation_error_yards: 1.0,
+            movement_error_yards: 1.4,
+            pair_error_yards: 4.0,
+            pressure_error_yards: 1.0,
+            fore_aft_speed_error_yps: 0.2,
+            pressure_weight: 0.60,
+            speed_match_weight: 0.40,
+            alignment_weight: 1.0,
+            reduced_cost_target_x: 0.0,
+            reduced_cost_target_y: 0.0,
+            solver_status: "optimal".to_string(),
+            solver_objective: 12.0,
+            solver_iterations: Some(4),
+            solver_elapsed_ms: 0.3,
+            variable_count: 512,
+            constraint_count: 700,
+        };
+        let mut bad_guidance = valid_guidance.clone();
+        bad_guidance.player_id = 5;
+        bad_guidance.pressure_weight = f64::NAN;
+        bad_guidance.pair_error_yards = f64::INFINITY;
+
+        apply_formation_lp_directive_signal(
+            &mut directive,
+            &snapshot,
+            &[bad_guidance, valid_guidance],
+        );
+
+        assert!(directive.press_intensity.is_finite());
+        assert!(directive.risk_tolerance.is_finite());
+        assert_eq!(directive.defensive_cover_actual, 1);
+        assert!((directive.press_intensity - 0.4896).abs() < 1e-9);
+        assert!((directive.risk_tolerance - 0.42).abs() < 1e-9);
     }
 
     #[test]
@@ -51128,6 +51499,87 @@ mod tests {
     }
 
     #[test]
+    fn pass_interception_requires_defender_to_face_ball_path() {
+        let sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1773,
+            ..Default::default()
+        });
+        let mut defender = sim.players[12].clone();
+        defender.position = Vec2::new(41.1, 55.0);
+        defender.velocity = Vec2::zero();
+        defender.action_facing = FacingBucket::West;
+        defender.receive_facing = FacingBucket::West;
+        defender.skills.first_touch = 7.0;
+        defender.skills.defending = 7.0;
+        let mut pass = PendingPass {
+            team: Team::Home,
+            from: 7,
+            target: Some(9),
+            flight: PassFlight::Floor,
+            is_cross: false,
+            launch_tick: 0,
+            origin: Vec2::new(40.0, 50.0),
+            intended_target: Vec2::new(40.0, 60.0),
+            distance_yards: 10.0,
+            receiver_openness: 0.90,
+            passer_skill: 0.75,
+            launch_speed_yps: 14.0,
+            receiver_position_at_launch: Some(Vec2::new(40.0, 60.0)),
+            receiver_velocity_at_launch: Some(Vec2::zero()),
+            offside: None,
+        };
+        let previous_ball_pos = Vec2::new(40.0, 50.0);
+        let ball_pos = Vec2::new(40.0, 60.0);
+        let ball_velocity = Vec2::new(0.0, 14.0);
+
+        assert_eq!(
+            player_facing_ball_control_multiplier(&defender, Vec2::new(40.0, 55.0)),
+            1.0
+        );
+        let facing_result = nearest_ball_controller_for_segment(
+            1,
+            previous_ball_pos,
+            ball_pos,
+            ball_velocity,
+            &[defender.clone()],
+            Some(&pass),
+            None,
+            None,
+            0.0,
+            &mut mulberry32(17_730),
+        );
+        assert_eq!(
+            facing_result.map(|(id, team, _)| (id, team)),
+            Some((defender.id, defender.team))
+        );
+
+        defender.action_facing = FacingBucket::East;
+        defender.receive_facing = FacingBucket::East;
+        pass.launch_tick = 0;
+        assert_eq!(
+            player_facing_ball_control_multiplier(&defender, Vec2::new(40.0, 55.0)),
+            NOT_FACING_BALL_INTERCEPTION_MULTIPLIER
+        );
+        let back_turned_result = nearest_ball_controller_for_segment(
+            1,
+            previous_ball_pos,
+            ball_pos,
+            ball_velocity,
+            &[defender],
+            Some(&pass),
+            None,
+            None,
+            0.0,
+            &mut mulberry32(17_731),
+        );
+        assert!(
+            back_turned_result.is_none(),
+            "same geometry should be outside the shrunken not-facing interception radius"
+        );
+    }
+
+    #[test]
     fn aerial_cross_reception_exposes_first_touch_header_and_control_choices() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -52187,6 +52639,55 @@ mod tests {
             features[SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_FORWARD_CLASS] > 0.90,
             "dribble touch forward/backward class feature should be present"
         );
+    }
+
+    #[test]
+    fn neural_training_samples_sanitize_non_finite_lp_trace_features() {
+        let sim = SoccerMatch::default_11v11(MatchConfig {
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            duration_seconds: 0.1,
+            seed: 15078,
+            ..Default::default()
+        });
+        let player_id = 7;
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let decision = test_decision_trace(&snapshot, player_id, "carry-forward");
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id,
+            team: sim.players[player_id].team,
+            role: sim.players[player_id].role,
+            state: decision.mdp_state.clone(),
+            observation: decision.observation.clone(),
+            belief: decision.belief.clone(),
+            action: decision.action.clone(),
+            action_target: decision.action_target.clone(),
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace {
+                formation_lp_guidance: true,
+                formation_lp_alignment_score: f64::NAN,
+                formation_lp_pressure_weight: f64::INFINITY,
+                formation_lp_speed_match_weight: f64::NEG_INFINITY,
+                formation_lp_pressure_error_yards: f64::NAN,
+                formation_lp_fore_aft_speed_error_yps: f64::INFINITY,
+                ..SoccerTacticalLearningTrace::default()
+            },
+            reward: f64::NAN,
+            next_state: snapshot.mdp_state_for_player(player_id),
+            next_observation: snapshot.observation_for(player_id),
+            done: false,
+        };
+
+        let features = soccer_neural_transition_features(&transition);
+        assert!(features.iter().all(|value| value.is_finite()));
+
+        let samples = sim.neural_training_samples_for(&[transition]);
+        assert_eq!(samples.len(), 1);
+        assert!(soccer_neural_sample_is_valid(&samples[0]));
+        assert_eq!(samples[0].target, 0.0);
     }
 
     #[test]

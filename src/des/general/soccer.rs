@@ -279,7 +279,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 89;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 93;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -310,7 +310,11 @@ const SOCCER_NEURAL_FEATURE_BALL_FORWARD_VELOCITY: usize = 85;
 const SOCCER_NEURAL_FEATURE_BALL_LATERAL_SPEED: usize = 86;
 const SOCCER_NEURAL_FEATURE_BALL_ALTITUDE: usize = 87;
 const SOCCER_NEURAL_FEATURE_BALL_AIRBORNE: usize = 88;
-const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87];
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL: usize = 89;
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL_FIFTY_FIFTY: usize = 90;
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL_TEAM_TIME_ADVANTAGE: usize = 91;
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL_PLAYER_TIME_TO_BALL: usize = 92;
+const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87, 89];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
@@ -1300,6 +1304,14 @@ pub struct SoccerPomdpObservation {
     pub ball_altitude_yards: f64,
     #[serde(default)]
     pub ball_airborne: bool,
+    #[serde(default)]
+    pub loose_ball: bool,
+    #[serde(default)]
+    pub loose_ball_fifty_fifty: bool,
+    #[serde(default)]
+    pub loose_ball_team_time_advantage_seconds: f64,
+    #[serde(default)]
+    pub loose_ball_player_time_to_ball_seconds: f64,
     pub ball_distance: f64,
     pub nearest_opponent_distance: f64,
     pub nearest_teammate_distance: f64,
@@ -1592,6 +1604,14 @@ pub struct SoccerDecisionContext {
     pub ball_altitude_yards: f64,
     #[serde(default)]
     pub ball_airborne: bool,
+    #[serde(default)]
+    pub loose_ball: bool,
+    #[serde(default)]
+    pub loose_ball_fifty_fifty: bool,
+    #[serde(default)]
+    pub loose_ball_team_time_advantage_seconds: f64,
+    #[serde(default)]
+    pub loose_ball_player_time_to_ball_seconds: f64,
     #[serde(default)]
     pub target_point: Option<Vec2>,
     #[serde(default)]
@@ -2325,6 +2345,14 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub ball_airborne: bool,
     #[serde(default)]
+    pub loose_ball: bool,
+    #[serde(default)]
+    pub loose_ball_fifty_fifty: bool,
+    #[serde(default)]
+    pub loose_ball_team_time_advantage_bin: u8,
+    #[serde(default)]
+    pub loose_ball_player_time_bin: u8,
+    #[serde(default)]
     pub receive_facing: FacingBucket,
     #[serde(default)]
     pub action_facing: FacingBucket,
@@ -2591,6 +2619,15 @@ impl SoccerQStateKey {
                 &[BALL_ROLLING_ALTITUDE_YARDS, 0.5, 2.0, 6.0, 12.0],
             ),
             ball_airborne: observation.ball_airborne,
+            loose_ball: observation.loose_ball,
+            loose_ball_fifty_fifty: observation.loose_ball_fifty_fifty,
+            loose_ball_team_time_advantage_bin: loose_ball_time_advantage_bucket(
+                observation.loose_ball_team_time_advantage_seconds,
+            ),
+            loose_ball_player_time_bin: distance_bucket(
+                observation.loose_ball_player_time_to_ball_seconds,
+                &[0.45, 0.90, 1.60, 2.80, 4.50],
+            ),
             receive_facing,
             action_facing,
             score_diff_bucket: score_diff_for_team.clamp(-2, 2) as i8,
@@ -2895,6 +2932,10 @@ impl SoccerQStateKey {
             && self.ball_lateral_speed_bin == other.ball_lateral_speed_bin
             && self.ball_altitude_bin == other.ball_altitude_bin
             && self.ball_airborne == other.ball_airborne
+            && self.loose_ball == other.loose_ball
+            && self.loose_ball_fifty_fifty == other.loose_ball_fifty_fifty
+            && self.loose_ball_team_time_advantage_bin == other.loose_ball_team_time_advantage_bin
+            && self.loose_ball_player_time_bin == other.loose_ball_player_time_bin
             && self.score_diff_bucket == other.score_diff_bucket
             && self.team_brain_mode == other.team_brain_mode
             && self.team_brain_press_bin == other.team_brain_press_bin
@@ -3006,6 +3047,10 @@ impl SoccerQStateKey {
             && self.possession_relative == other.possession_relative
             && self.has_ball == other.has_ball
             && self.visible_ball == other.visible_ball
+            && self.loose_ball == other.loose_ball
+            && self.loose_ball_fifty_fifty == other.loose_ball_fifty_fifty
+            && self.loose_ball_team_time_advantage_bin == other.loose_ball_team_time_advantage_bin
+            && self.loose_ball_player_time_bin == other.loose_ball_player_time_bin
             && self.first_touch_kind == other.first_touch_kind
             && self.receiving_pending_pass == other.receiving_pending_pass
     }
@@ -15176,6 +15221,10 @@ impl WorldSnapshot {
                 ball_lateral_speed_yps: 0.0,
                 ball_altitude_yards: 0.0,
                 ball_airborne: false,
+                loose_ball: false,
+                loose_ball_fifty_fifty: false,
+                loose_ball_team_time_advantage_seconds: 0.0,
+                loose_ball_player_time_to_ball_seconds: 0.0,
                 ball_distance: 0.0,
                 nearest_opponent_distance: 0.0,
                 nearest_teammate_distance: 0.0,
@@ -15317,6 +15366,7 @@ impl WorldSnapshot {
         );
         let has_ball = self.ball.holder == Some(player_id);
         let visible_ball = has_ball || self.player_can_see_point(me.id, self.ball.position);
+        let loose_ball_race = loose_ball_race_context_for_snapshot(self, player_id);
         let ball_position_confidence = if has_ball {
             1.0
         } else {
@@ -15739,6 +15789,10 @@ impl WorldSnapshot {
             ball_lateral_speed_yps: self.ball.velocity.x.abs(),
             ball_altitude_yards: self.ball.altitude_yards.max(0.0),
             ball_airborne: self.ball.altitude_yards > BALL_ROLLING_ALTITUDE_YARDS,
+            loose_ball: loose_ball_race.loose_ball,
+            loose_ball_fifty_fifty: loose_ball_race.fifty_fifty,
+            loose_ball_team_time_advantage_seconds: loose_ball_race.team_time_advantage_seconds,
+            loose_ball_player_time_to_ball_seconds: loose_ball_race.player_time_to_ball_seconds,
             ball_distance: if visible_ball {
                 me_position.distance(self.ball.position)
             } else {
@@ -19426,6 +19480,7 @@ fn soccer_decision_context_for(
         team_kinematic_average(before, team);
     let (defending_team_speed_yps, defending_team_acceleration_yps2) =
         team_kinematic_average(before, team.other());
+    let loose_ball_race = loose_ball_race_context_for_snapshot(before, player_id);
 
     let mut nearest_defenders = before
         .players
@@ -19501,6 +19556,10 @@ fn soccer_decision_context_for(
         ball_lateral_speed_yps: before.ball.velocity.x.abs(),
         ball_altitude_yards: before.ball.altitude_yards.max(0.0),
         ball_airborne: before.ball.altitude_yards > BALL_ROLLING_ALTITUDE_YARDS,
+        loose_ball: loose_ball_race.loose_ball,
+        loose_ball_fifty_fifty: loose_ball_race.fifty_fifty,
+        loose_ball_team_time_advantage_seconds: loose_ball_race.team_time_advantage_seconds,
+        loose_ball_player_time_to_ball_seconds: loose_ball_race.player_time_to_ball_seconds,
         target_point,
         target_player,
         target_player_position,
@@ -20536,6 +20595,9 @@ fn dense_soccer_transition_reward(
         let before_distance = before_pos.distance(before.ball.position);
         let after_distance = after_pos.distance(after.ball.position);
         reward += (before_distance - after_distance).clamp(-8.0, 8.0) * 0.10;
+        reward += loose_ball_contest_learning_reward(
+            player, action, before, after, before_obs, before_pos, after_pos,
+        );
         if loose_ball_fifty_fifty_duel_for(before, player.id) {
             reward += if after_distance < before_distance {
                 0.75
@@ -20565,6 +20627,76 @@ fn dense_soccer_transition_reward(
     }
 
     reward.clamp(-4.0, 4.0)
+}
+
+fn loose_ball_contest_learning_reward(
+    player: &PlayerAgent,
+    action: &str,
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+    before_obs: &SoccerPomdpObservation,
+    before_pos: Vec2,
+    after_pos: Vec2,
+) -> f64 {
+    if before.ball.holder.is_some() || !before_obs.loose_ball {
+        return 0.0;
+    }
+    let target = before.loose_ball_recovery_target_for(player.id);
+    let before_target_distance = before_pos.distance(target);
+    let after_target_distance = after_pos.distance(target);
+    let closing_yards = (before_target_distance - after_target_distance).clamp(-10.0, 10.0);
+    let time_advantage = before_obs
+        .loose_ball_team_time_advantage_seconds
+        .clamp(-3.0, 3.0);
+    let player_time_fit =
+        (1.0 - before_obs.loose_ball_player_time_to_ball_seconds / 4.5).clamp(0.0, 1.0);
+    let race_urgency = if before_obs.loose_ball_fifty_fifty {
+        1.0
+    } else if time_advantage >= 0.0 {
+        (0.62 + time_advantage / 2.5).clamp(0.62, 1.0)
+    } else {
+        (0.38 + (-time_advantage) / 4.0).clamp(0.38, 0.82)
+    };
+    let mut reward = closing_yards * (0.10 + race_urgency * 0.08 + player_time_fit * 0.05);
+
+    if action == "recover" {
+        reward += 0.12 + race_urgency * 0.20 + player_time_fit * 0.16;
+    } else if action == "hold" && (before_obs.loose_ball_fifty_fifty || time_advantage > 0.10) {
+        reward -= 0.18 + race_urgency * 0.24 + player_time_fit * 0.18;
+    }
+
+    match after.controlled_possession_team() {
+        Some(team) if team == player.team => {
+            reward += if after.ball.holder == Some(player.id) {
+                0.88 + race_urgency * 0.44 + player_time_fit * 0.24
+            } else {
+                0.34 + race_urgency * 0.22
+            };
+        }
+        Some(team) if team == player.team.other() => {
+            let favored_loss = if time_advantage > 0.12 {
+                0.50 + time_advantage.clamp(0.0, 2.0) * 0.25
+            } else {
+                0.0
+            };
+            let duel_loss = if before_obs.loose_ball_fifty_fifty {
+                0.42
+            } else {
+                0.0
+            };
+            reward -= 0.36 + favored_loss + duel_loss + player_time_fit * 0.18;
+        }
+        _ => {
+            if closing_yards < 0.10
+                && before_target_distance > 4.0
+                && (before_obs.loose_ball_fifty_fifty || time_advantage > 0.10)
+            {
+                reward -= 0.20 + race_urgency * 0.20;
+            }
+        }
+    }
+
+    reward.clamp(-3.0, 3.4)
 }
 
 fn goalmouth_dribble_learning_reward(
@@ -21296,6 +21428,79 @@ fn loose_ball_fifty_fifty_duel(snapshot: &WorldSnapshot) -> Option<(usize, usize
     let distance_even = (home.1 - away.1).abs() <= 2.8;
     let velocity_even = (home.2 - away.2).abs() <= 0.55;
     (distance_close && distance_even && velocity_even).then_some((home.0, away.0))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LooseBallRaceContext {
+    loose_ball: bool,
+    fifty_fifty: bool,
+    team_time_advantage_seconds: f64,
+    player_time_to_ball_seconds: f64,
+}
+
+fn loose_ball_race_context_for_snapshot(
+    snapshot: &WorldSnapshot,
+    player_id: usize,
+) -> LooseBallRaceContext {
+    if snapshot.ball.holder.is_some() {
+        return LooseBallRaceContext::default();
+    }
+    let Some(me) = snapshot
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+    else {
+        return LooseBallRaceContext::default();
+    };
+    let target = snapshot.loose_ball_recovery_target_for(player_id);
+    let player_time_to_ball_seconds =
+        loose_ball_arrival_time_seconds(snapshot, me, target).clamp(0.0, 8.0);
+    let mut own_best = f64::INFINITY;
+    let mut opponent_best = f64::INFINITY;
+    for player in &snapshot.players {
+        let arrival = loose_ball_arrival_time_seconds(snapshot, player, target);
+        if player.team == me.team {
+            own_best = own_best.min(arrival);
+        } else {
+            opponent_best = opponent_best.min(arrival);
+        }
+    }
+    let team_time_advantage_seconds = if own_best.is_finite() && opponent_best.is_finite() {
+        (opponent_best - own_best).clamp(-3.0, 3.0)
+    } else {
+        0.0
+    };
+    LooseBallRaceContext {
+        loose_ball: true,
+        fifty_fifty: loose_ball_fifty_fifty_duel(snapshot).is_some()
+            || team_time_advantage_seconds.abs() <= 0.12,
+        team_time_advantage_seconds,
+        player_time_to_ball_seconds,
+    }
+}
+
+fn loose_ball_arrival_time_seconds(
+    snapshot: &WorldSnapshot,
+    player: &PlayerSnapshot,
+    target: Vec2,
+) -> f64 {
+    let position = snapshot
+        .player_position(player.id)
+        .unwrap_or(player.position);
+    let distance = position.distance(target);
+    if distance <= 0.05 {
+        return 0.0;
+    }
+    let to_target = (target - position).normalized();
+    let velocity = snapshot
+        .player_velocity(player.id)
+        .unwrap_or(player.velocity);
+    let closing_speed = velocity.dot(to_target).max(0.0);
+    let sprint_speed = player_top_speed_yps(player.role, &player.skills)
+        * MovementGait::Sprint.speed_multiplier()
+        * fatigue_speed_factor(player.skills.stamina, player.fatigue);
+    let effective_speed = (sprint_speed * 0.78 + closing_speed.min(sprint_speed) * 0.22).max(0.85);
+    distance / effective_speed
 }
 
 impl SoccerPomdpObservation {
@@ -27825,6 +28030,10 @@ fn soccer_neural_transition_features(
         soccer_neural_scaled(context.ball_lateral_speed_yps, 24.0),
         soccer_neural_scaled(context.ball_altitude_yards, 12.0),
         soccer_neural_bool(context.ball_airborne),
+        soccer_neural_bool(context.loose_ball),
+        soccer_neural_bool(context.loose_ball_fifty_fifty),
+        soccer_neural_scaled(context.loose_ball_team_time_advantage_seconds, 2.0),
+        1.0 - soccer_neural_scaled(context.loose_ball_player_time_to_ball_seconds, 5.0).abs(),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -43476,6 +43685,13 @@ fn fatigue_advantage_bucket(value: f64) -> u8 {
     distance_bucket(value.clamp(-1.0, 1.0), &[-0.45, -0.15, 0.15, 0.45])
 }
 
+fn loose_ball_time_advantage_bucket(value: f64) -> u8 {
+    distance_bucket(
+        value.clamp(-3.0, 3.0),
+        &[-1.20, -0.40, -0.12, 0.12, 0.40, 1.20],
+    )
+}
+
 fn fatigue_speed_factor(stamina: f64, fatigue: f64) -> f64 {
     let cardio = ability01(stamina);
     let fatigue = fatigue.clamp(0.0, 1.0);
@@ -46223,6 +46439,135 @@ mod tests {
                 .is_none(),
             "ball travel direction should prevent reusing forward-ball policy for a backward ball"
         );
+
+        let mut loose_observation = observation.clone();
+        loose_observation.has_ball = false;
+        loose_observation.loose_ball = true;
+        loose_observation.loose_ball_fifty_fifty = false;
+        loose_observation.loose_ball_team_time_advantage_seconds = 0.55;
+        loose_observation.loose_ball_player_time_to_ball_seconds = 0.65;
+        let loose_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &loose_observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
+        let mut late_loose_observation = loose_observation.clone();
+        late_loose_observation.loose_ball_team_time_advantage_seconds = -0.80;
+        late_loose_observation.loose_ball_player_time_to_ball_seconds = 3.25;
+        let late_loose_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &late_loose_observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
+        let mut level_loose_observation = loose_observation.clone();
+        level_loose_observation.loose_ball_fifty_fifty = true;
+        level_loose_observation.loose_ball_team_time_advantage_seconds = 0.04;
+        let level_loose_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &level_loose_observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
+        assert!(loose_key.loose_ball);
+        assert!(
+            loose_key.loose_ball_team_time_advantage_bin
+                > late_loose_key.loose_ball_team_time_advantage_bin
+        );
+        assert!(late_loose_key.loose_ball_player_time_bin > loose_key.loose_ball_player_time_bin);
+        assert!(level_loose_key.loose_ball_fifty_fifty);
+        assert_ne!(loose_key, late_loose_key);
+        assert_ne!(loose_key, level_loose_key);
+        policy.set_action_value(loose_key.clone(), "contest-loose-ball", 4.0);
+        assert_eq!(
+            policy.best_action_hierarchical(&loose_key).as_deref(),
+            Some("contest-loose-ball")
+        );
+        assert!(
+            policy.best_action_hierarchical(&late_loose_key).is_none(),
+            "loose-ball policies should distinguish first-to-ball races from late chases"
+        );
+        assert!(
+            policy.best_action_hierarchical(&level_loose_key).is_none(),
+            "loose-ball policies should distinguish clean races from 50:50 duels"
+        );
+    }
+
+    #[test]
+    fn pomdp_and_q_state_track_loose_ball_race_advantage() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14233,
+            ..Default::default()
+        });
+        let home_runner_id = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Midfielder)
+            .map(|player| player.id)
+            .expect("home runner");
+        let away_runner_id = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Away && player.role == PlayerRole::Midfielder)
+            .map(|player| player.id)
+            .expect("away runner");
+        let ball_position = Vec2::new(40.0, 55.0);
+        for player in &mut sim.players {
+            player.position = if player.team == Team::Home {
+                Vec2::new(8.0, 10.0)
+            } else {
+                Vec2::new(72.0, 110.0)
+            };
+            player.velocity = Vec2::zero();
+            player.acceleration = Vec2::zero();
+            player.jerk = Vec2::zero();
+            player.movement_gait = MovementGait::Stand;
+        }
+        sim.players[home_runner_id].position = Vec2::new(40.0, 53.2);
+        sim.players[home_runner_id].velocity = Vec2::new(0.0, 3.2);
+        sim.players[away_runner_id].position = Vec2::new(40.0, 62.5);
+        sim.players[away_runner_id].velocity = Vec2::new(0.0, -0.3);
+        sim.ball.holder = None;
+        sim.ball.position = ball_position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.acceleration = Vec2::zero();
+        sim.ball.jerk = Vec2::zero();
+        sim.ball.altitude_yards = BALL_ROLLING_ALTITUDE_YARDS;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let home_observation = snapshot.observation_for(home_runner_id);
+        let away_observation = snapshot.observation_for(away_runner_id);
+        let home_key = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(home_runner_id),
+            &home_observation,
+            Team::Home,
+            sim.players[home_runner_id].role,
+        );
+        let away_key = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(away_runner_id),
+            &away_observation,
+            Team::Away,
+            sim.players[away_runner_id].role,
+        );
+
+        assert!(home_observation.loose_ball);
+        assert!(away_observation.loose_ball);
+        assert!(!home_observation.loose_ball_fifty_fifty);
+        assert!(home_observation.loose_ball_team_time_advantage_seconds > 0.25);
+        assert!(away_observation.loose_ball_team_time_advantage_seconds < -0.25);
+        assert!(
+            home_observation.loose_ball_player_time_to_ball_seconds
+                < away_observation.loose_ball_player_time_to_ball_seconds
+        );
+        assert!(home_key.loose_ball);
+        assert!(away_key.loose_ball);
+        assert!(
+            home_key.loose_ball_team_time_advantage_bin
+                > away_key.loose_ball_team_time_advantage_bin
+        );
+        assert!(away_key.loose_ball_player_time_bin > home_key.loose_ball_player_time_bin);
     }
 
     #[test]
@@ -53171,6 +53516,10 @@ mod tests {
                 ball_lateral_speed_yps: 9.0,
                 ball_altitude_yards: 4.8,
                 ball_airborne: true,
+                loose_ball: true,
+                loose_ball_fifty_fifty: true,
+                loose_ball_team_time_advantage_seconds: 0.72,
+                loose_ball_player_time_to_ball_seconds: 1.35,
                 attacking_team_speed_yps: 4.2,
                 defending_team_speed_yps: 5.1,
                 dribble_touch_angle_bucket: Some(2),
@@ -53240,6 +53589,22 @@ mod tests {
         assert_eq!(
             features[SOCCER_NEURAL_FEATURE_BALL_AIRBORNE], 1.0,
             "ball airborne feature should be present"
+        );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_LOOSE_BALL], 1.0,
+            "loose-ball feature should be present"
+        );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_LOOSE_BALL_FIFTY_FIFTY], 1.0,
+            "loose-ball 50:50 feature should be present"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_LOOSE_BALL_TEAM_TIME_ADVANTAGE] > 0.30,
+            "team time-to-ball advantage should be visible to the neural learner"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_LOOSE_BALL_PLAYER_TIME_TO_BALL] > 0.70,
+            "short actor time-to-ball should be visible to the neural learner"
         );
         assert!(
             features[SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING] > 0.0,
@@ -53889,6 +54254,61 @@ mod tests {
     }
 
     #[test]
+    fn neural_learning_pads_previous_snapshot_loose_ball_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15083,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_LOOSE_BALL;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous loose-ball neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        for index in previous_dim..SOCCER_NEURAL_FEATURE_DIM {
+            assert_eq!(
+                resumed_snapshot.layers[0].weights[0][index], 0.0,
+                "new loose-ball input weights should start neutral"
+            );
+        }
+    }
+
+    #[test]
     fn neural_learning_trains_on_threaded_backend() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.4,
@@ -54226,6 +54646,92 @@ mod tests {
             false,
         );
         assert!(reward > 0.8, "50:50 contest reward: {reward}");
+    }
+
+    #[test]
+    fn loose_ball_race_reward_prefers_recovering_favored_free_ball() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1511,
+            ..Default::default()
+        });
+        let runner = 6;
+        let opponent = 12;
+        let ball_position = Vec2::new(40.0, 60.0);
+        park_players_except(&mut sim, &[runner, opponent]);
+        sim.ball.holder = None;
+        sim.ball.position = ball_position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[runner].position = Vec2::new(40.0, 56.0);
+        sim.players[runner].velocity = Vec2::new(0.0, 3.0);
+        sim.players[opponent].position = Vec2::new(40.0, 71.0);
+        sim.players[opponent].velocity = Vec2::zero();
+        let before = WorldSnapshot::from_match(&sim);
+        let before_obs = before.observation_for(runner);
+        assert!(before_obs.loose_ball);
+        assert!(before_obs.loose_ball_team_time_advantage_seconds > 0.35);
+
+        let mut recovered = before.clone();
+        recovered.set_player_position(runner, ball_position);
+        recovered.ball.position = ball_position;
+        recovered.ball.holder = Some(runner);
+        recovered.ball.last_touch_team = Some(Team::Home);
+
+        let mut lost = before.clone();
+        lost.set_player_position(opponent, ball_position);
+        lost.ball.position = ball_position;
+        lost.ball.holder = Some(opponent);
+        lost.ball.last_touch_team = Some(Team::Away);
+
+        let recover_decision = test_decision_trace(&before, runner, "recover");
+        let hold_decision = test_decision_trace(&before, runner, "hold");
+        let recover_reward = soccer_transition_reward(
+            &sim.players[runner],
+            &recover_decision,
+            &before,
+            &recovered,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+        let hold_reward = soccer_transition_reward(
+            &sim.players[runner],
+            &hold_decision,
+            &before,
+            &recovered,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+        let lost_reward = soccer_transition_reward(
+            &sim.players[runner],
+            &recover_decision,
+            &before,
+            &lost,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+
+        assert!(
+            recover_reward > hold_reward + 0.45,
+            "recover reward {recover_reward} should beat hold reward {hold_reward}"
+        );
+        assert!(
+            recover_reward > lost_reward + 2.0,
+            "recover reward {recover_reward} should strongly beat lost-race reward {lost_reward}"
+        );
+        assert!(
+            lost_reward < 0.0,
+            "favored lost race should be penalized: {lost_reward}"
+        );
     }
 
     #[test]

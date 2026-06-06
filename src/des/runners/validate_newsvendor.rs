@@ -2,8 +2,7 @@
 //!
 //! Validates the newsvendor and multi-period inventory MDP: critical-fractile ≡
 //! brute search ≡ value iteration; γ→0 reduction; (s,S) vs base-stock structure;
-//! simulation ≈ Bellman value; and native shadow references with an optional
-//! Python (scipy/numpy) sidecar cross-check.
+//! simulation ≈ Bellman value; and native Rust shadow references.
 //! Driver → [`run`].
 //!
 //! PORT NOTES:
@@ -15,16 +14,8 @@
 //!   * `crate::des::general::value_iteration::{value_iteration, q_value,
 //!     VIOptions, MDPSpec}`
 //!     (present).
-//!   * Optional Python reference via `std::process::Command` is only attempted
-//!     when `NEWSVENDOR_PY` is explicitly set. The default path stays Rust-only
-//!     and validates against native reference projections.
 
 #![allow(dead_code, unused_variables, unused_mut, unused_imports)]
-
-use std::path::PathBuf;
-use std::process::{Child, Command, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::des::general::value_iteration::{q_value, value_iteration, MDPSpec, VIOptions};
 use crate::des::main_inventory_mdp::{
@@ -38,7 +29,6 @@ use crate::des::main_newsvendor::{
     demand_uniform_pmf as newsvendor_demand_uniform_pmf, expected_profit, mdp_optimal_q,
     DemandDist as NewsvendorDemandDist, NewsvendorParams,
 };
-use crate::des::observability::logger::{parse_json, JsonValue};
 
 fn inventory_demand_from_newsvendor(demand: &NewsvendorDemandDist) -> InventoryDemandDist {
     InventoryDemandDist {
@@ -99,173 +89,6 @@ fn max_bellman_residual(spec: &MDPSpec, v: &[f64], gamma: f64) -> f64 {
         max_residual = max_residual.max((v[s] - best).abs());
     }
     max_residual
-}
-
-// Optional Python reference.
-struct PyNewsvendor {
-    q_star: i64,
-    expected_profit_at_qstar: f64,
-}
-struct PyInventory {
-    v_at_zero: f64,
-    policy_first_20: Vec<i64>,
-}
-struct PyJson {
-    newsvendor: PyNewsvendor,
-    inventory_mdp: PyInventory,
-}
-
-fn get_any<'a>(value: &'a JsonValue, names: &[&str]) -> Option<&'a JsonValue> {
-    names.iter().find_map(|name| value.get(name))
-}
-
-fn number_field(value: &JsonValue, names: &[&str], label: &str) -> Result<f64, String> {
-    get_any(value, names)
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| format!("missing numeric field {label}"))
-}
-
-fn i64_field(value: &JsonValue, names: &[&str], label: &str) -> Result<i64, String> {
-    let n = number_field(value, names, label)?;
-    if n.is_finite() && n.fract() == 0.0 {
-        Ok(n as i64)
-    } else {
-        Err(format!("{label} must be an integer"))
-    }
-}
-
-fn i64_array_field(value: &JsonValue, names: &[&str], label: &str) -> Result<Vec<i64>, String> {
-    get_any(value, names)
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| format!("missing array field {label}"))?
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            let Some(n) = v.as_f64() else {
-                return Err(format!("{label}[{i}] must be numeric"));
-            };
-            if n.is_finite() && n.fract() == 0.0 {
-                Ok(n as i64)
-            } else {
-                Err(format!("{label}[{i}] must be an integer"))
-            }
-        })
-        .collect()
-}
-
-fn parse_python_reference(text: &str) -> Result<PyJson, String> {
-    let line = text
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| "Python reference produced no JSON output".to_string())?;
-    let root = parse_json(line.trim())?;
-    let newsvendor =
-        get_any(&root, &["newsvendor"]).ok_or_else(|| "missing newsvendor result".to_string())?;
-    let inventory = get_any(&root, &["inventoryMdp", "inventory_mdp"])
-        .ok_or_else(|| "missing inventory_mdp result".to_string())?;
-    Ok(PyJson {
-        newsvendor: PyNewsvendor {
-            q_star: i64_field(newsvendor, &["qStar", "q_star"], "newsvendor.qStar")?,
-            expected_profit_at_qstar: number_field(
-                newsvendor,
-                &["expectedProfitAtQstar", "expected_profit_at_qstar"],
-                "newsvendor.expectedProfitAtQstar",
-            )?,
-        },
-        inventory_mdp: PyInventory {
-            v_at_zero: number_field(inventory, &["vAtZero", "v_at_zero"], "inventoryMdp.vAtZero")?,
-            policy_first_20: i64_array_field(
-                inventory,
-                &["policyFirst20", "policy_first_20"],
-                "inventoryMdp.policyFirst20",
-            )?,
-        },
-    })
-}
-
-fn newsvendor_python_timeout_ms() -> u64 {
-    std::env::var("NEWSVENDOR_PY_TIMEOUT_MS")
-        .ok()
-        .or_else(|| std::env::var("PYTHON_REFERENCE_TIMEOUT_MS").ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(120_000)
-}
-
-fn wait_for_newsvendor_python_output(
-    mut child: Child,
-    timeout_ms: u64,
-) -> Result<(Output, bool), String> {
-    let timeout = Duration::from_millis(timeout_ms);
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map(|output| (output, false))
-                    .map_err(|err| format!("failed to wait for Python reference: {err}"));
-            }
-            Ok(None) => {}
-            Err(err) => return Err(format!("failed to poll Python reference: {err}")),
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            return child
-                .wait_with_output()
-                .map(|output| (output, true))
-                .map_err(|err| format!("failed to collect timed-out Python reference: {err}"));
-        }
-
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn run_python(args: &[&str]) -> Result<Option<PyJson>, String> {
-    let Some(python) = std::env::var("NEWSVENDOR_PY").ok() else {
-        return Ok(None);
-    };
-    let script: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("external-references")
-        .join("newsvendor")
-        .join("newsvendor.py");
-    let mut cmd = Command::new(python);
-    cmd.arg(&script);
-    for a in args {
-        cmd.arg(a);
-    }
-    let timeout_ms = newsvendor_python_timeout_ms();
-    let child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to start Python reference: {e}"))?;
-    match wait_for_newsvendor_python_output(child, timeout_ms) {
-        Ok((out, timed_out)) if out.status.success() && !timed_out => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            parse_python_reference(&stdout).map(Some)
-        }
-        Ok((mut out, timed_out)) => {
-            if timed_out {
-                let timeout_message = format!("Python reference timed out after {timeout_ms}ms");
-                if out.stderr.is_empty() {
-                    out.stderr = timeout_message.into_bytes();
-                } else {
-                    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    stderr.push_str("; ");
-                    stderr.push_str(&timeout_message);
-                    out.stderr = stderr.into_bytes();
-                }
-            }
-            Err(format!(
-                "Python reference exited with status {:?}: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
-        }
-        Err(e) => Err(format!("failed to run Python reference: {e}")),
-    }
 }
 
 // =============================================================================
@@ -582,7 +405,7 @@ pub fn run() {
         );
     }
 
-    println!("\nStudy 5  Native reference validation with optional Python sidecar");
+    println!("\nStudy 5  Native Rust shadow-reference validation");
     println!("==========================================================================");
     {
         let params = &scenarios[0].1;
@@ -604,40 +427,6 @@ pub fn run() {
             approx(ep_library, ep_direct, 1e-12),
             &format!("|diff|={:.2e}", (ep_library - ep_direct).abs()),
         );
-
-        let py = run_python(&["--lambda", "50", "--c", "0.5", "--p", "1.0", "--s", "0.1"]);
-        match py {
-            Ok(None) => println!(
-                "  SKIP    optional Python newsvendor sidecar not configured (set NEWSVENDOR_PY)"
-            ),
-            Err(e) => c.check(
-                "optional Python newsvendor reference runs and emits JSON",
-                false,
-                &e,
-            ),
-            Ok(Some(py)) => {
-                println!(
-                    "  newsvendor sidecar: Rust q*={} EP={:.4};  Py q*={} EP={:.4}",
-                    analytical.q_star,
-                    ep_library,
-                    py.newsvendor.q_star,
-                    py.newsvendor.expected_profit_at_qstar
-                );
-                c.check(
-                    "newsvendor q* matches optional Python sidecar",
-                    i64::try_from(analytical.q_star).ok() == Some(py.newsvendor.q_star),
-                    "",
-                );
-                c.check(
-                    "newsvendor E[profit] matches optional Python sidecar within 1e-6",
-                    approx(ep_library, py.newsvendor.expected_profit_at_qstar, 1e-6),
-                    &format!(
-                        "|diff|={:.2e}",
-                        (ep_library - py.newsvendor.expected_profit_at_qstar).abs()
-                    ),
-                );
-            }
-        }
     }
 
     {
@@ -698,61 +487,6 @@ pub fn run() {
             ts_policy.iter().take(20).eq(shadow_policy.iter().take(20)),
             "",
         );
-        let py = run_python(&[
-            "--multi", "--lambda", "20", "--c", "1.0", "--K", "10", "--p", "2.0", "--h", "0.1",
-            "--L", "0.5", "--gamma", "0.95", "--x-max", "50", "--a-max", "50",
-        ]);
-        match py {
-            Ok(None) => println!("  SKIP    optional Python inventory sidecar not configured"),
-            Err(e) => c.check(
-                "optional Python inventory reference runs and emits JSON",
-                false,
-                &e,
-            ),
-            Ok(Some(py)) => {
-                let ts_v0 = ts_result.v[0];
-                let py_v0 = py.inventory_mdp.v_at_zero;
-                println!(
-                    "  multi-period sidecar: Rust V(0)={:.4},  Py V(0)={:.4}",
-                    ts_v0, py_v0
-                );
-                let ts_head: Vec<String> =
-                    ts_policy.iter().take(20).map(|v| v.to_string()).collect();
-                let py_head: Vec<String> = py
-                    .inventory_mdp
-                    .policy_first_20
-                    .iter()
-                    .take(20)
-                    .map(|v| v.to_string())
-                    .collect();
-                println!("  Rust policy[0..19] = [{}]", ts_head.join(", "));
-                println!("  Py policy[0..19] = [{}]", py_head.join(", "));
-                c.check(
-                    "multi-period V(0) matches optional Python sidecar within 1e-3",
-                    approx(ts_v0, py_v0, 1e-3),
-                    &format!("|diff|={:.2e}", (ts_v0 - py_v0).abs()),
-                );
-                let mut policy_match = true;
-                for x in 0..20 {
-                    if ts_policy.get(x).copied().unwrap_or(0)
-                        != py
-                            .inventory_mdp
-                            .policy_first_20
-                            .get(x)
-                            .copied()
-                            .unwrap_or(0)
-                    {
-                        policy_match = false;
-                        break;
-                    }
-                }
-                c.check(
-                    "multi-period policy[0..19] matches optional Python sidecar",
-                    policy_match,
-                    "",
-                );
-            }
-        }
     }
 
     println!("\nsummary: {} pass, {} fail", c.pass, c.fail);
@@ -764,20 +498,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn newsvendor_python_sidecar_wait_enforces_timeout() {
-        let child = Command::new("sleep")
-            .arg("1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn sleep");
+    fn newsvendor_direct_expected_profit_matches_library_reference() {
+        let params = NewsvendorParams {
+            unit_cost: 0.5,
+            unit_price: 1.0,
+            unit_salvage: 0.1,
+            demand: newsvendor_demand_poisson_pmf(50.0, 125),
+            q_max: 125,
+        };
+        let analytical = analytical_optimal_q(&params);
 
-        let (output, timed_out) =
-            wait_for_newsvendor_python_output(child, 10).expect("timeout output");
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let library = expected_profit(analytical.q_star, &params);
+        let direct = direct_expected_profit(analytical.q_star, &params);
 
-        assert!(timed_out);
-        assert!(!output.status.success());
-        assert!(stderr.is_empty());
+        assert!((library - direct).abs() <= 1e-12);
     }
 }

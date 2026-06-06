@@ -48,6 +48,8 @@ const DEFAULT_SOCCER_QUEUE_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM: bool =
 const DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS: usize = 10;
 const DEFAULT_SOCCER_QUEUE_EVOLUTION_ENABLED: bool = true;
 const DEFAULT_SOCCER_QUEUE_EVOLUTION_ELITE_GAMES: usize = 4;
+const SOCCER_QUEUE_POLICY_SOURCE_MERGE: &str = "merge";
+const SOCCER_QUEUE_POLICY_SOURCE_EVOLUTION: &str = "evolution";
 
 #[derive(Clone, Debug)]
 struct TacticalEvolutionSample {
@@ -539,6 +541,14 @@ fn default_postgres_completed_run_batch_games(parallel_games: usize) -> usize {
 
 fn default_queue_evolution_interval_games(parallel_games: usize) -> usize {
     parallel_games.max(10)
+}
+
+fn queue_policy_version_source_kind(policy_evolved: bool, tactical_evolved: bool) -> &'static str {
+    if policy_evolved || tactical_evolved {
+        SOCCER_QUEUE_POLICY_SOURCE_EVOLUTION
+    } else {
+        SOCCER_QUEUE_POLICY_SOURCE_MERGE
+    }
 }
 
 fn take_episode_starting_policy_version(
@@ -1528,6 +1538,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             || queue_completed_games_seen >= games
                             || queue_completed_games_seen % evolution_interval_games == 0);
                     let mut policy_evolved_fitness = None::<f64>;
+                    let mut tactical_evolved_fitness = None::<f64>;
                     if should_evolve_tactical && !policy_evolution_samples.is_empty() {
                         let mut ranked_policy_samples = policy_evolution_samples
                             .iter()
@@ -1630,6 +1641,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 .map_err(|err| err.to_string())?;
                             active_config.tactical_learning = tactical_learning.clone();
                             local_tactical_evolved_since_pg_refresh = true;
+                            tactical_evolved_fitness = Some(best_fitness);
                             println!(
                                 "queue_tactical_weights_evolved completed_games={} elite_games={} best_fitness={:.4} population_size={} attack_width_delta={:.3}->{:.3} attack_flank_lane={:.3}->{:.3} defense_contract_delta={:.3}->{:.3}",
                                 queue_completed_games_seen,
@@ -1671,11 +1683,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                             parent_policy_version_id: pg_batch_base_policy_version_id.clone(),
                             generation: next_generation,
                             version_label,
-                            source_kind: if policy_evolved_fitness.is_some() {
-                                "mutation"
-                            } else {
-                                "merge"
-                            },
+                            source_kind: queue_policy_version_source_kind(
+                                policy_evolved_fitness.is_some(),
+                                tactical_evolved_fitness.is_some(),
+                            ),
                             status: "active",
                             config: active_config.clone(),
                             home_options: options.clone(),
@@ -1928,6 +1939,26 @@ mod tests {
     }
 
     #[test]
+    fn queue_policy_version_source_kind_tracks_tactical_and_policy_evolution() {
+        assert_eq!(
+            queue_policy_version_source_kind(false, false),
+            SOCCER_QUEUE_POLICY_SOURCE_MERGE
+        );
+        assert_eq!(
+            queue_policy_version_source_kind(true, false),
+            SOCCER_QUEUE_POLICY_SOURCE_EVOLUTION
+        );
+        assert_eq!(
+            queue_policy_version_source_kind(false, true),
+            SOCCER_QUEUE_POLICY_SOURCE_EVOLUTION
+        );
+        assert_eq!(
+            queue_policy_version_source_kind(true, true),
+            SOCCER_QUEUE_POLICY_SOURCE_EVOLUTION
+        );
+    }
+
+    #[test]
     fn queue_completed_game_uses_episode_starting_policy_snapshot() {
         let mut episode_versions = HashMap::new();
         episode_versions.insert(7, (Some("episode-v7".to_string()), 4));
@@ -1998,6 +2029,82 @@ mod tests {
                     .abs()
                     < 1e-12
             );
+        }
+    }
+
+    #[test]
+    fn queue_new_sims_apply_postgres_weights_before_each_enqueued_game() {
+        let options = SoccerQPolicyOptions::default();
+        let mut active_weights = SoccerTacticalLearningWeights::default();
+        let mut completed_weights = Vec::new();
+        let report = run_soccer_learning_queue_with_events(
+            SoccerLearningQueueRunnerConfig {
+                games: 3,
+                parallel_games: 3,
+                base_seed: 2089,
+                match_config: MatchConfig {
+                    duration_seconds: 0.0,
+                    half_duration_seconds: 0.0,
+                    learning_logging_enabled: false,
+                    max_human_players: 0,
+                    ..Default::default()
+                },
+                initial_neural_network: None,
+                neural_drain_timeout: Duration::from_millis(0),
+                options: options.clone(),
+                prune_action_entries_per_team: 0,
+                prune_target_entries_per_team: 0,
+                min_policy_visits: 0,
+            },
+            SoccerTeamQPolicies::new(options),
+            |event| {
+                match event {
+                    SoccerLearningQueueEvent::StartingBatch {
+                        next_episode,
+                        match_config,
+                        ..
+                    } => {
+                        let mut postgres_weights = SoccerTacticalLearningWeights::default();
+                        postgres_weights.attack_flank_lane_weight =
+                            1.05 + next_episode as f64 * 0.11;
+                        postgres_weights.defense_contract_delta_weight =
+                            0.82 + next_episode as f64 * 0.07;
+                        postgres_weights.formation_lp_alignment_weight =
+                            0.18 + next_episode as f64 * 0.05;
+                        maybe_apply_postgres_tactical_learning(
+                            "test_postgres_refresh_tactical_learning_for_queue",
+                            next_episode + 1,
+                            &format!("pg-v-{next_episode}"),
+                            next_episode as i32,
+                            match_config,
+                            &mut active_weights,
+                            Some(postgres_weights),
+                        )?;
+                    }
+                    SoccerLearningQueueEvent::CompletedGame { game, .. } => {
+                        completed_weights.push((
+                            game.episode,
+                            game.starting_tactical_learning.attack_flank_lane_weight,
+                            game.starting_tactical_learning
+                                .defense_contract_delta_weight,
+                            game.starting_tactical_learning
+                                .formation_lp_alignment_weight,
+                        ));
+                    }
+                }
+                Ok(())
+            },
+        )
+        .expect("queue run");
+
+        assert_eq!(report.completed_games, 3);
+        assert_eq!(report.failed_games, 0);
+        completed_weights.sort_by_key(|(episode, _, _, _)| *episode);
+        assert_eq!(completed_weights.len(), 3);
+        for (episode, attack_flank, defense_contract, lp_alignment) in completed_weights {
+            assert!((attack_flank - (1.05 + episode as f64 * 0.11)).abs() < 1e-12);
+            assert!((defense_contract - (0.82 + episode as f64 * 0.07)).abs() < 1e-12);
+            assert!((lp_alignment - (0.18 + episode as f64 * 0.05)).abs() < 1e-12);
         }
     }
 

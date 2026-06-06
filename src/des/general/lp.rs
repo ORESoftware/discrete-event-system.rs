@@ -3726,7 +3726,7 @@ fn pivot(t: &mut Vec<Vec<f64>>, basis: &mut [usize], pivot_row: usize, pivot_col
 /// Default path to the repository-local Python LP bridge. This is retained for
 /// explicit SciPy/OR-Tools compatibility; supported calls use Rust CLI/internal
 /// validation paths by default when no Python/script override is supplied.
-const DEFAULT_SCRIPT: &str = "scripts/lp_solve.py";
+const DEFAULT_SCRIPT: &str = "external-references/lp/lp_solve.py";
 
 fn ortools_linear_method(method: &str) -> Option<&'static str> {
     let normalized = method.to_ascii_lowercase().replace('_', "-");
@@ -3954,11 +3954,17 @@ fn lp_solution_from_external_cli(
 /// `std::process::Command` captures the full output.
 #[derive(Clone, Debug, Default)]
 pub struct ExternalSolverOptions {
-    /// External LP method: SciPy linprog methods (`"highs"`, `"highs-ds"`, `"highs-ipm"`) or OR-Tools `"glop"`/`"pdlp"`. Default `"highs"`.
+    /// External LP method. Defaults to local HiGHS via the Rust CLI bridge.
+    /// Supported local CLI aliases include HiGHS, GLPK, SCIP, CBC, CLP,
+    /// SoPlex, lp_solve, Gurobi, CPLEX, Xpress, and LINDO. Legacy SciPy and
+    /// OR-Tools names are accepted for compatibility and use Rust fallback
+    /// paths unless a Python executable/script override is supplied.
     pub method: Option<String>,
-    /// Override the python executable. Defaults to `PYTHON`, then `PYTHON_BIN`, then `"python3"`.
+    /// Override the Python executable for the explicit legacy Python bridge.
+    /// Defaults to `PYTHON`, then `PYTHON_BIN`, then `"python3"`.
     pub python: Option<String>,
-    /// Override the script path. Defaults to `scripts/lp_solve.py`.
+    /// Override the legacy Python bridge script path. Defaults to
+    /// `external-references/lp/lp_solve.py`.
     pub script: Option<String>,
     /// Accepted for parity with the TS `maxBuffer`; unused in the Rust port.
     pub max_buffer: Option<usize>,
@@ -4146,7 +4152,9 @@ impl Transform<LPProblem, LPSolution> for ExternalSolver {
     }
 }
 
-/// Solve via an external scipy.optimize.linprog process. (Kept as the stable
+/// Solve via the external LP bridge. Rust local CLI / internal validation paths
+/// are preferred by default; the legacy Python bridge is used only for explicit
+/// Python/script overrides or methods without a Rust path. (Kept as the stable
 /// public free-function API; prefer `ExternalSolver` for new code.)
 pub fn solve_lp_external(p: &LPProblem, opts: &ExternalSolverOptions) -> LPSolution {
     ExternalSolver::new(opts.clone()).run(p)
@@ -4907,10 +4915,42 @@ mod tests {
         assert!(rust_external_lp_cli_options("highs", &python_opts).is_none());
 
         let script_opts = ExternalSolverOptions {
-            script: Some("scripts/lp_solve.py".to_string()),
+            script: Some(DEFAULT_SCRIPT.to_string()),
             ..Default::default()
         };
         assert!(rust_external_lp_cli_options("highs", &script_opts).is_none());
+    }
+
+    #[test]
+    fn default_legacy_lp_python_bridge_path_is_checked_in() {
+        assert_eq!(DEFAULT_SCRIPT, "external-references/lp/lp_solve.py");
+        assert!(
+            std::path::Path::new(DEFAULT_SCRIPT).is_file(),
+            "{DEFAULT_SCRIPT} should stay available for explicit Python compatibility"
+        );
+    }
+
+    #[test]
+    fn default_external_lp_options_resolve_to_rust_highs_cli() {
+        if lp_external_bridge_forced_python() {
+            eprintln!(
+                "skipping default Rust LP CLI resolver test because LP_EXTERNAL_BRIDGE=python"
+            );
+            return;
+        }
+
+        let opts = ExternalSolverOptions::default();
+        let method = opts.method.clone().unwrap_or_else(|| "highs".to_string());
+        let cli = rust_external_lp_cli_options(&method, &opts)
+            .expect("default external LP method should map before Python bridge");
+
+        assert_eq!(method, "highs");
+        assert_eq!(cli.solver, ExternalLinearCliSolver::Highs);
+        assert_eq!(cli.lp_algorithm, None);
+        assert!(!explicit_lp_python_bridge_requested(&opts));
+        assert!(!should_use_rust_external_lp_internal_fallback(
+            &method, &opts
+        ));
     }
 
     #[test]

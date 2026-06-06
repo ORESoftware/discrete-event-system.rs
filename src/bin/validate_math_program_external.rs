@@ -267,9 +267,13 @@ fn external_methods_for_case(
     };
     if program.has_discrete_features() && !mixed_integer_nonlinear && !direct_mixed_integer_qp {
         external_methods.push(("ortools-cp-sat", Some("ortools:CP-SAT".to_string())));
-        external_methods.push(("scipy-highs", None));
+        external_methods.push(default_rust_linear_method());
     }
     external_methods
+}
+
+fn default_rust_linear_method() -> (&'static str, Option<String>) {
+    ("default-rust-linear", None)
 }
 
 fn mixed_integer_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<String>)> {
@@ -305,7 +309,7 @@ fn continuous_linear_methods(ortools_method: &str) -> Vec<(&'static str, Option<
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
-        ("scipy-highs", None),
+        default_rust_linear_method(),
     ]
 }
 
@@ -409,7 +413,7 @@ fn external_certificates_required(_name: &str, label: &str) -> bool {
     let base = label.strip_suffix("/des-simplex").unwrap_or(label);
     matches!(
         base,
-        "scipy-highs"
+        "default-rust-linear"
             | "highs-cli"
             | "cbc-cli"
             | "clp-cli"
@@ -487,7 +491,10 @@ fn mip_quality_case_ok(name: &str, label: &str, report: &MathProgramCrossCheck) 
 
 fn external_quality_required(label: &str) -> bool {
     let base = label.strip_suffix("/des-simplex").unwrap_or(label);
-    matches!(base, "scipy-highs" | "ortools-cp-sat" | "gurobi" | "cplex")
+    matches!(
+        base,
+        "default-rust-linear" | "ortools-cp-sat" | "gurobi" | "cplex"
+    )
 }
 
 fn quality_metadata_consistent(solution: &MathProgramSolution) -> bool {
@@ -552,7 +559,7 @@ fn run_mip_start_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        ("scipy-highs", None),
+        default_rust_linear_method(),
     ];
 
     let mut ok = true;
@@ -603,7 +610,7 @@ fn run_external_mip_options_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        ("scipy-highs", None),
+        default_rust_linear_method(),
     ];
 
     let mut ok = true;
@@ -662,7 +669,7 @@ fn run_conflict_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        ("scipy-highs", None),
+        default_rust_linear_method(),
     ];
     let conflict_opts = MathProgramConflictOptions::default();
 
@@ -721,7 +728,7 @@ fn run_assumption_core_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        ("scipy-highs", None),
+        default_rust_linear_method(),
     ];
     let core_opts = MathProgramAssumptionCoreOptions::default();
 
@@ -768,7 +775,7 @@ fn run_feas_relax_case() -> Result<bool, String> {
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
-        ("scipy-highs", None),
+        default_rust_linear_method(),
     ];
     let relax_opts = MathProgramFeasRelaxOptions {
         linear_penalty: 10.0,
@@ -825,7 +832,7 @@ fn run_solution_pool_case() -> Result<bool, String> {
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
         ("ortools-cp-sat", Some("ortools:CP-SAT".to_string())),
-        ("scipy-highs", None),
+        default_rust_linear_method(),
     ];
     let pool_opts = MathProgramSolutionPoolOptions {
         max_solutions: 3,
@@ -2497,11 +2504,15 @@ mod tests {
             .iter()
             .any(|(label, method)| *label == "ortools-pdlp"
                 && method.as_deref() == Some("ortools:PDLP")));
-        assert_eq!(methods.last().map(|(label, _)| *label), Some("scipy-highs"));
+        assert_eq!(
+            methods.last().map(|(label, method)| (*label, method.as_ref())),
+            Some(("default-rust-linear", None))
+        );
+        assert!(!methods.iter().any(|(label, _)| *label == "scipy-highs"));
     }
 
     #[test]
-    fn linear_external_matrices_keep_scipy_as_compatibility_oracle() {
+    fn linear_external_matrices_keep_omitted_method_as_rust_default() {
         let mip = super::build_binary_mip_case();
         let mip_methods = super::external_methods_for_case("binary-mip", &mip);
         assert_eq!(
@@ -2511,15 +2522,16 @@ mod tests {
         assert!(mip_methods
             .iter()
             .any(|(label, _)| *label == "ortools-cp-sat"));
-        let scipy_position = mip_methods
+        let default_rust_position = mip_methods
             .iter()
-            .position(|(label, _)| *label == "scipy-highs")
-            .expect("scipy compatibility oracle");
+            .position(|(label, method)| *label == "default-rust-linear" && method.is_none())
+            .expect("default Rust linear oracle");
         let cp_sat_position = mip_methods
             .iter()
             .position(|(label, _)| *label == "ortools-cp-sat")
             .expect("cp-sat oracle");
-        assert!(scipy_position > cp_sat_position);
+        assert!(default_rust_position > cp_sat_position);
+        assert!(!mip_methods.iter().any(|(label, _)| *label == "scipy-highs"));
 
         let lp_methods = super::continuous_linear_methods("ortools:GLOP");
         assert_eq!(
@@ -2527,9 +2539,10 @@ mod tests {
             Some("highs-cli")
         );
         assert_eq!(
-            lp_methods.last().map(|(label, _)| *label),
-            Some("scipy-highs")
+            lp_methods.last().map(|(label, method)| (*label, method.as_ref())),
+            Some(("default-rust-linear", None))
         );
+        assert!(!lp_methods.iter().any(|(label, _)| *label == "scipy-highs"));
     }
 
     #[test]

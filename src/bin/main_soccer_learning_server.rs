@@ -312,6 +312,30 @@ fn postgres_import_enabled() -> Result<bool, Box<dyn Error>> {
     }
 }
 
+fn postgres_database_url_present() -> bool {
+    [
+        "SOCCER_DATABASE_URL",
+        "AGENT_TASKS_RDS_DATABASE_URL",
+        "RDS_DATABASE_URL",
+        "DATABASE_URL",
+        "PG_DATABASE_URL",
+    ]
+    .into_iter()
+    .any(|name| env_value(name).is_some())
+}
+
+fn default_server_request_games(
+    total_episodes: usize,
+    postgres_database_url_present: bool,
+    postgres_resume_enabled: bool,
+) -> usize {
+    if postgres_database_url_present && postgres_resume_enabled {
+        1
+    } else {
+        total_episodes
+    }
+}
+
 fn postgres_resume_metadata_from_payload(payload: &Value) -> Option<PostgresResumeMetadata> {
     let resume = payload.get("postgresResume")?;
     let experiment_id = resume.get("experimentId")?.as_str()?.trim();
@@ -1033,10 +1057,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     let args = parse_args()?;
     let total_episodes = env_usize("SOCCER_GAMES", 100)?;
     let base_seed = env_u32("SOCCER_SEED", 2026)?;
+    let default_request_games = default_server_request_games(
+        total_episodes,
+        postgres_database_url_present(),
+        postgres_resume_enabled()?,
+    );
     let episodes_per_request = env_usize_alias(
         "SOCCER_SERVER_REQUEST_GAMES",
         "SOCCER_SERVER_CHUNK_GAMES",
-        total_episodes,
+        default_request_games,
     )?;
     let chunks = server_request_chunks(total_episodes, episodes_per_request, base_seed)?;
     if chunks.len() > 1 {
@@ -1124,6 +1153,14 @@ mod tests {
         assert!(label.ends_with("-server-e000123"));
         assert!(!label.contains(' '));
         assert!(!label.contains('!'));
+    }
+
+    #[test]
+    fn default_server_request_games_refreshes_each_episode_when_postgres_resume_is_live() {
+        assert_eq!(default_server_request_games(100, true, true), 1);
+        assert_eq!(default_server_request_games(1, true, true), 1);
+        assert_eq!(default_server_request_games(100, false, true), 100);
+        assert_eq!(default_server_request_games(100, true, false), 100);
     }
 
     #[test]

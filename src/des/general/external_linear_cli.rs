@@ -3,9 +3,10 @@
 //! This module exposes a Rust-facing interface for solver executables that are
 //! installed locally (for example through Homebrew) without vendoring any
 //! external binaries into the repository. Plain LP/MIP solves for the common
-//! open-source CLIs run through native Rust paths where practical; the broader
-//! solver-specific command lines and parsers still live in
-//! `scripts/linear_cli_reference.py` as a compatibility bridge.
+//! open-source and commercial CLIs run through native Rust model writers and
+//! parser paths where practical. `scripts/linear_cli_reference.py` remains an
+//! explicit compatibility bridge for solver options or source features that do
+//! not yet have a Rust direct path.
 
 use std::collections::HashSet;
 use std::fs;
@@ -679,8 +680,9 @@ pub struct ExternalLinearCliOptions {
     pub node_selection: Option<ExternalLinearCliNodeSelection>,
     /// Optional MIP incumbent start in the bridge model's variable order.
     pub mip_start: Option<Vec<f64>>,
-    /// Python executable for the bridge. Defaults to `PYTHON_BIN`, then
-    /// `PYTHON`, then `python3`.
+    /// Python executable for the explicit compatibility bridge. Native Rust
+    /// direct paths ignore this. Defaults to `PYTHON_BIN`, then `PYTHON`, then
+    /// `python3` only when the compatibility bridge is reached.
     pub python: Option<String>,
     /// Optional explicit solver executable path/name. When set, this is passed
     /// to the bridge through a per-solver environment override instead of
@@ -903,8 +905,7 @@ struct PlainLinearCliModel {
     integer_vars: Vec<bool>,
 }
 
-/// Serialize an [`LPProblem`] into the JSON contract accepted by
-/// `scripts/linear_cli_reference.py`.
+/// Serialize an [`LPProblem`] into the shared linear-CLI JSON contract.
 pub fn lp_problem_to_cli_json(problem: &LPProblem) -> Value {
     json!({
         "lp": {
@@ -922,8 +923,7 @@ pub fn lp_problem_to_cli_json(problem: &LPProblem) -> Value {
     })
 }
 
-/// Serialize an [`IPMIPProblem`] into the JSON contract accepted by
-/// `scripts/linear_cli_reference.py`.
+/// Serialize an [`IPMIPProblem`] into the shared linear-CLI JSON contract.
 pub fn ipmip_problem_to_cli_json(problem: &IPMIPProblem) -> Value {
     json!({
         "sense": problem.sense.as_str(),
@@ -2079,9 +2079,9 @@ pub fn probe_external_linear_cli_solvers(
         .collect()
 }
 
-/// Solve a raw bridge-compatible JSON payload through a locally installed
-/// command-line solver. This is useful for source-level features that compile
-/// through the Python reference bridge before writing the solver LP file.
+/// Solve a raw linear-CLI JSON payload through a locally installed command-line
+/// solver. Rust direct paths are attempted first; the Python compatibility
+/// bridge is used only when no native route supports the requested shape.
 pub fn solve_linear_cli_json(
     kind: ExternalLinearCliKind,
     problem_json: Value,

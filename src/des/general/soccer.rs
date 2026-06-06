@@ -45531,8 +45531,12 @@ mod tests {
         let snapshot = WorldSnapshot::from_match(&sim);
         let observation = snapshot.observation_for(actor);
         let mdp_state = snapshot.mdp_state_for_player(actor);
-        let sprint_key =
-            SoccerQStateKey::from_parts(&mdp_state, &observation, Team::Home, sim.players[actor].role);
+        let sprint_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
 
         assert_eq!(observation.movement_gait, MovementGait::Sprint);
         assert!(observation.actor_speed_yps > 8.0);

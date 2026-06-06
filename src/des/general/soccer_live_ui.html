@@ -457,6 +457,8 @@
       <div class="metric"><span>Timing</span><b id="runtimeTiming">0ms</b></div>
       <div class="metric"><span>Main Loop</span><b id="controllerYield">idle</b></div>
       <div class="metric"><span>Input Queue</span><b id="inputQueue">0 pending</b></div>
+      <div class="metric"><span>Input Age</span><b id="controllerLatency">none</b></div>
+      <div class="metric"><span>Control Budget</span><b id="controllerBudget">100ms ok</b></div>
       <div class="row"><button id="inspectMode" type="button" aria-pressed="false">Inspect</button></div>
       <div id="slots"></div>
       <div class="row">
@@ -556,6 +558,8 @@ const liveHttp = document.getElementById("liveHttp");
 const runtimeTiming = document.getElementById("runtimeTiming");
 const controllerYield = document.getElementById("controllerYield");
 const inputQueue = document.getElementById("inputQueue");
+const controllerLatency = document.getElementById("controllerLatency");
+const controllerBudget = document.getElementById("controllerBudget");
 const inspectModeButton = document.getElementById("inspectMode");
 const learningEnabled = document.getElementById("learningEnabled");
 const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
@@ -1126,9 +1130,14 @@ function controllerThreadLabel(threads = state?.controllerThreads || []) {
   const accepted = threads.reduce((sum, thread) => sum + Number(thread.acceptedFrames ?? 0), 0);
   const pushed = threads.reduce((sum, thread) => sum + Number(thread.pushedFrames ?? 0), 0);
   const stale = threads.reduce((sum, thread) => sum + Number(thread.rejectedStaleFrames ?? 0), 0);
+  const debounced = threads.reduce((sum, thread) => sum + Number(thread.debouncedFrames ?? 0), 0);
+  const totalDebounce = threads.reduce((sum, thread) => sum + Number(thread.totalDebounceMs ?? 0), 0);
+  const lastDebounce = threads.reduce((max, thread) => Math.max(max, Number(thread.lastDebounceMs ?? 0)), 0);
+  const maxDebounce = threads.reduce((max, thread) => Math.max(max, Number(thread.maxDebounceMs ?? 0)), 0);
+  const avgDebounce = debounced > 0 ? totalDebounce / debounced : 0;
   const closed = threads.filter(thread => thread.closed).length;
   const closedSuffix = closed ? ` ${closed} closed` : "";
-  return `${threads.length} native P${pending} A${accepted} D${pushed} S${stale}${closedSuffix}`;
+  return `${threads.length} native P${pending} A${accepted} D${pushed} S${stale} Db${avgDebounce.toFixed(1)}/${lastDebounce.toFixed(1)}/${maxDebounce.toFixed(1)}ms${closedSuffix}`;
 }
 function liveHttpLabel(http = state?.liveHttp) {
   if (!http) return "pool ?";
@@ -1171,12 +1180,45 @@ function controllerYieldLabel(stats = state?.controllerYield) {
   const queuedBefore = Number(stats.lastQueuedBefore ?? 0);
   const queuedAfter = Number(stats.lastQueuedAfter ?? 0);
   const last = stats.lastImmediatePending ? "ready" : stats.lastNotified ? "notify" : "timeout";
-  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} ${last} Q${queuedBefore}->${queuedAfter}`;
+  const avgWait = waits > 0 ? Number(stats.totalWaitMs ?? 0) / waits : 0;
+  const lastWait = Number(stats.lastWaitMs ?? 0);
+  const maxWait = Number(stats.maxWaitMs ?? 0);
+  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} ${last} Q${queuedBefore}->${queuedAfter} wait ${avgWait.toFixed(1)}/${lastWait.toFixed(1)}/${maxWait.toFixed(1)}ms`;
 }
 function queuedHumanInputsLabel() {
   const queued = Number(state?.queuedHumanInputs ?? 0);
   const assigned = Array.isArray(state?.controllerAssignments) ? state.controllerAssignments.length : 0;
   return `${queued} pending ${assigned}/${humanSlotCount()} assigned`;
+}
+function formatInputAgeMs(ageMs) {
+  const age = Number(ageMs);
+  if (!Number.isFinite(age) || age < 0) return "-";
+  if (age < 1) return "<1ms";
+  if (age < 1000) return `${age.toFixed(0)}ms`;
+  return `${(age / 1000).toFixed(age < 10_000 ? 1 : 0)}s`;
+}
+function consumedHumanInputAgeLabel() {
+  const ages = (state?.frame?.players || [])
+    .map(player => player?.lastDecision?.observation)
+    .filter(o => o?.humanInputPresent && o.humanInputQueueAgeMs != null)
+    .map(o => Number(o.humanInputQueueAgeMs))
+    .filter(age => Number.isFinite(age) && age >= 0);
+  if (!ages.length) return "none";
+  const latest = Math.min(...ages);
+  const oldest = Math.max(...ages);
+  const spread = oldest > latest ? ` max ${formatInputAgeMs(oldest)}` : "";
+  return `${formatInputAgeMs(latest)}${spread}`;
+}
+function controllerLatencyBudgetLabel(b = state?.controllerLatencyBudget) {
+  if (!b) return "100ms ok";
+  const budget = Number(b.tickBudgetMs ?? 100);
+  const estimated = Number(b.estimatedControlLatencyMs ?? 0);
+  const consumed = Number(b.consumedInputs ?? 0);
+  const status = b.overBudget ? "over" : "ok";
+  const queue = Number(b.maxQueueAgeMs ?? 0);
+  const debounce = Number(b.lastDebounceMs ?? 0);
+  const yieldWait = Number(b.lastYieldWaitMs ?? 0);
+  return `${estimated.toFixed(1)}/${budget.toFixed(0)}ms ${status} C${consumed} Q${queue.toFixed(0)} Db${debounce.toFixed(1)} Y${yieldWait.toFixed(1)}`;
 }
 function policyAutosaveLabel(a) {
   if (!a) return "Off";
@@ -1442,7 +1484,7 @@ function agentPomdpLabel(d) {
   const controllerSlot = o.controllerSlot ?? null;
   const controlText = controllerSlot == null
     ? "AI"
-    : `H${controllerSlot}${o.humanInputPresent ? `!${o.humanInputSeq ?? ""}` : ""}`;
+    : `H${controllerSlot}${o.humanInputPresent ? `!${o.humanInputSeq ?? ""}@${formatInputAgeMs(o.humanInputQueueAgeMs)}` : ""}`;
   const options = Number(o.visiblePassOptions ?? 0);
   const passQ = Number(o.expectedPassCompletion ?? 0);
   const goalWindow = Number(o.goalAttackWindowScore ?? 0);
@@ -1712,6 +1754,7 @@ function decisionTelemetryItems(d) {
     {label: "Grid", value: gridCellLabel(o.playerGrid || s.playerGrid)},
     {label: "Facing", value: `R${facingShort(s.receiveFacing || o.receiveFacing)} A${facingShort(s.actionFacing || o.actionFacing)}`},
     {label: "Pressure", value: `${Number(o.realPressure ?? 0).toFixed(2)} / ${Number(o.perceivedPressure ?? 0).toFixed(2)}`, score: Number(o.perceivedPressure ?? 0), min: 0, max: 1},
+    {label: "Input", value: o.humanInputPresent ? `H${o.controllerSlot ?? "-"} #${o.humanInputSeq ?? "-"} ${formatInputAgeMs(o.humanInputQueueAgeMs)}` : "AI"},
     {label: "On ball", value: `${Number(o.realTimeOnBallSeconds ?? 0).toFixed(1)} / ${Number(o.perceivedTimeOnBallSeconds ?? 0).toFixed(1)}s`},
     {label: "Goal", value: `${Number(o.yardsToGoal ?? 0).toFixed(1)}y ${Number(o.opponentGoalAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
@@ -2397,6 +2440,8 @@ function render() {
   runtimeTiming.textContent = runtimeTimingLabel();
   controllerYield.textContent = controllerYieldLabel();
   inputQueue.textContent = queuedHumanInputsLabel();
+  controllerLatency.textContent = consumedHumanInputAgeLabel();
+  controllerBudget.textContent = controllerLatencyBudgetLabel();
   tickReward.textContent = tickRewardLabel();
   recentActions.textContent = recentActionLabel();
   recentMoments.textContent = recentMomentLabel();

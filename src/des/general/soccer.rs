@@ -8736,7 +8736,7 @@ impl SharedHumanInputs {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HumanControllerThreadStats {
     pub controller_slot: usize,
@@ -8747,9 +8747,13 @@ pub struct HumanControllerThreadStats {
     pub overwritten_frames: u64,
     pub rejected_stale_frames: u64,
     pub latest_seq_seen: Option<u64>,
+    pub debounced_frames: u64,
+    pub total_debounce_ms: f64,
+    pub last_debounce_ms: f64,
+    pub max_debounce_ms: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerYieldStats {
     pub assigned_players: usize,
@@ -8764,6 +8768,25 @@ pub struct ControllerYieldStats {
     pub last_queued_after: usize,
     pub last_version_before: u64,
     pub last_version_after: u64,
+    pub total_wait_ms: f64,
+    pub last_wait_ms: f64,
+    pub max_wait_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerControllerLatencyBudget {
+    pub tick_budget_ms: f64,
+    pub consumed_inputs: usize,
+    pub min_queue_age_ms: f64,
+    pub avg_queue_age_ms: f64,
+    pub max_queue_age_ms: f64,
+    pub last_debounce_ms: f64,
+    pub max_debounce_ms: f64,
+    pub last_yield_wait_ms: f64,
+    pub max_yield_wait_ms: f64,
+    pub estimated_control_latency_ms: f64,
+    pub over_budget: bool,
 }
 
 impl ControllerYieldStats {
@@ -8776,9 +8799,11 @@ impl ControllerYieldStats {
         self.last_queued_after = queued;
         self.last_version_before = version;
         self.last_version_after = version;
+        self.last_wait_ms = 0.0;
     }
 
-    fn record_wait(&mut self, assigned_players: usize, result: HumanInputWaitResult) {
+    fn record_wait(&mut self, assigned_players: usize, result: HumanInputWaitResult, wait_ms: f64) {
+        let wait_ms = finite_metric(wait_ms.max(0.0));
         self.assigned_players = assigned_players;
         self.wait_attempts = self.wait_attempts.saturating_add(1);
         if result.immediate_pending {
@@ -8794,6 +8819,9 @@ impl ControllerYieldStats {
         self.last_queued_after = result.queued_after;
         self.last_version_before = result.version_before;
         self.last_version_after = result.version_after;
+        self.total_wait_ms += wait_ms;
+        self.last_wait_ms = wait_ms;
+        self.max_wait_ms = self.max_wait_ms.max(wait_ms);
     }
 }
 
@@ -8806,6 +8834,10 @@ struct HumanControllerMailboxState {
     overwritten_frames: u64,
     rejected_stale_frames: u64,
     latest_seq_seen: Option<u64>,
+    debounced_frames: u64,
+    total_debounce_ms: f64,
+    last_debounce_ms: f64,
+    max_debounce_ms: f64,
 }
 
 #[derive(Clone, Default)]
@@ -8858,8 +8890,10 @@ impl HumanControllerMailbox {
                 return None;
             }
 
+            let debounce_started = Instant::now();
+            let mut debounce_wait_ms = 0.0;
             if debounce_interval > Duration::from_millis(0) {
-                let deadline = Instant::now() + debounce_interval;
+                let deadline = debounce_started + debounce_interval;
                 loop {
                     let now = Instant::now();
                     if now >= deadline || state.closed {
@@ -8871,9 +8905,15 @@ impl HumanControllerMailbox {
                         .expect("human controller mailbox debounce wait poisoned");
                     state = next_state;
                 }
+                debounce_wait_ms = soccer_live_duration_ms(debounce_started.elapsed());
             }
 
             if let Some(input) = state.latest.take() {
+                let debounce_wait_ms = finite_metric(debounce_wait_ms.max(0.0));
+                state.debounced_frames = state.debounced_frames.saturating_add(1);
+                state.total_debounce_ms += debounce_wait_ms;
+                state.last_debounce_ms = debounce_wait_ms;
+                state.max_debounce_ms = state.max_debounce_ms.max(debounce_wait_ms);
                 return Some(input);
             }
             if state.closed {
@@ -8917,6 +8957,10 @@ impl HumanControllerMailbox {
             overwritten_frames: state.overwritten_frames,
             rejected_stale_frames: state.rejected_stale_frames,
             latest_seq_seen: state.latest_seq_seen,
+            debounced_frames: state.debounced_frames,
+            total_debounce_ms: state.total_debounce_ms,
+            last_debounce_ms: state.last_debounce_ms,
+            max_debounce_ms: state.max_debounce_ms,
         }
     }
 }
@@ -25396,6 +25440,8 @@ pub struct SoccerStepResponse {
     pub controller_threads: Vec<HumanControllerThreadStats>,
     pub controller_yield: ControllerYieldStats,
     #[serde(default)]
+    pub controller_latency_budget: SoccerControllerLatencyBudget,
+    #[serde(default)]
     pub queued_human_inputs: usize,
     #[serde(default)]
     pub live_http: SoccerLiveHttpStatus,
@@ -25433,6 +25479,8 @@ pub struct SoccerLiveStateResponse {
     #[serde(default)]
     pub controller_threads: Vec<HumanControllerThreadStats>,
     pub controller_yield: ControllerYieldStats,
+    #[serde(default)]
+    pub controller_latency_budget: SoccerControllerLatencyBudget,
     #[serde(default)]
     pub queued_human_inputs: usize,
     #[serde(default)]
@@ -29602,12 +29650,14 @@ impl SoccerMatch {
             .collect::<Vec<_>>();
         assigned_slots.sort_unstable();
         assigned_slots.dedup();
+        let wait_started = Instant::now();
         let result = self.human_inputs.wait_for_pending_input_for_slots_result(
             &assigned_slots,
             Duration::from_millis(CONTROLLER_INPUT_YIELD_MS),
         );
+        let wait_ms = soccer_live_duration_ms(wait_started.elapsed());
         self.controller_yield_stats
-            .record_wait(assigned_players, result);
+            .record_wait(assigned_players, result, wait_ms);
         thread::yield_now();
     }
 
@@ -34158,6 +34208,67 @@ impl SoccerRealtimeSession {
             .collect()
     }
 
+    fn controller_latency_budget_for(
+        &self,
+        frame: &MatchFrame,
+        controller_threads: &[HumanControllerThreadStats],
+        controller_yield: ControllerYieldStats,
+    ) -> SoccerControllerLatencyBudget {
+        let tick_budget_ms = finite_metric((self.sim.config.dt_seconds * 1000.0).max(0.0));
+        let mut consumed_inputs = 0usize;
+        let mut min_queue_age_ms = f64::INFINITY;
+        let mut max_queue_age_ms: f64 = 0.0;
+        let mut total_queue_age_ms = 0.0;
+        for age_ms in frame.players.iter().filter_map(|player| {
+            player
+                .last_decision
+                .as_ref()
+                .and_then(|decision| decision.observation.human_input_queue_age_ms)
+        }) {
+            let age_ms = finite_metric(age_ms as f64).max(0.0);
+            consumed_inputs += 1;
+            total_queue_age_ms += age_ms;
+            min_queue_age_ms = min_queue_age_ms.min(age_ms);
+            max_queue_age_ms = max_queue_age_ms.max(age_ms);
+        }
+        if consumed_inputs == 0 {
+            min_queue_age_ms = 0.0;
+        }
+        let avg_queue_age_ms = if consumed_inputs > 0 {
+            total_queue_age_ms / consumed_inputs as f64
+        } else {
+            0.0
+        };
+        let last_debounce_ms = controller_threads
+            .iter()
+            .map(|thread| finite_metric(thread.last_debounce_ms).max(0.0))
+            .fold(0.0, f64::max);
+        let max_debounce_ms = controller_threads
+            .iter()
+            .map(|thread| finite_metric(thread.max_debounce_ms).max(0.0))
+            .fold(0.0, f64::max);
+        let last_yield_wait_ms = finite_metric(controller_yield.last_wait_ms).max(0.0);
+        let max_yield_wait_ms = finite_metric(controller_yield.max_wait_ms).max(0.0);
+        let estimated_control_latency_ms = if consumed_inputs > 0 {
+            max_queue_age_ms + last_debounce_ms
+        } else {
+            last_yield_wait_ms.max(last_debounce_ms)
+        };
+        SoccerControllerLatencyBudget {
+            tick_budget_ms,
+            consumed_inputs,
+            min_queue_age_ms,
+            avg_queue_age_ms,
+            max_queue_age_ms,
+            last_debounce_ms,
+            max_debounce_ms,
+            last_yield_wait_ms,
+            max_yield_wait_ms,
+            estimated_control_latency_ms,
+            over_budget: tick_budget_ms > 0.0 && estimated_control_latency_ms > tick_budget_ms,
+        }
+    }
+
     pub fn queued_human_input_count(&self) -> usize {
         self.controller_input_router.queued_len()
     }
@@ -34567,8 +34678,13 @@ impl SoccerRealtimeSession {
             self.sim.learning_transitions[self.emitted_learning_cursor..].to_vec();
         self.emitted_learning_cursor = self.sim.learning_transitions.len();
 
+        let frame = self.sim.to_frame();
+        let controller_threads = self.controller_thread_stats();
+        let controller_yield = self.sim.controller_yield_stats();
+        let controller_latency_budget =
+            self.controller_latency_budget_for(&frame, &controller_threads, controller_yield);
         SoccerStepResponse {
-            frame: self.sim.to_frame(),
+            frame,
             frames,
             events,
             learning_transitions,
@@ -34583,8 +34699,9 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
-            controller_threads: self.controller_thread_stats(),
-            controller_yield: self.sim.controller_yield_stats(),
+            controller_threads,
+            controller_yield,
+            controller_latency_budget,
             queued_human_inputs: self.queued_human_input_count(),
             live_http: self.live_http.clone(),
             accepted_inputs,
@@ -34612,8 +34729,13 @@ impl SoccerRealtimeSession {
         self.emitted_event_cursor = self.sim.events.len();
         self.emitted_learning_cursor = self.sim.learning_transitions.len();
 
+        let frame = self.sim.to_live_http_frame();
+        let controller_threads = self.controller_thread_stats();
+        let controller_yield = self.sim.controller_yield_stats();
+        let controller_latency_budget =
+            self.controller_latency_budget_for(&frame, &controller_threads, controller_yield);
         SoccerStepResponse {
-            frame: self.sim.to_live_http_frame(),
+            frame,
             frames: Vec::new(),
             events,
             learning_transitions: Vec::new(),
@@ -34628,8 +34750,9 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
-            controller_threads: self.controller_thread_stats(),
-            controller_yield: self.sim.controller_yield_stats(),
+            controller_threads,
+            controller_yield,
+            controller_latency_budget,
             queued_human_inputs: self.queued_human_input_count(),
             live_http: self.live_http.clone(),
             accepted_inputs,
@@ -35166,9 +35289,14 @@ impl SoccerRealtimeSession {
     }
 
     pub fn state_response(&self) -> SoccerLiveStateResponse {
+        let frame = self.sim.to_frame();
+        let controller_threads = self.controller_thread_stats();
+        let controller_yield = self.sim.controller_yield_stats();
+        let controller_latency_budget =
+            self.controller_latency_budget_for(&frame, &controller_threads, controller_yield);
         SoccerLiveStateResponse {
             config: self.sim.config.clone(),
-            frame: self.sim.to_frame(),
+            frame,
             learning: self.sim.learning_stats_snapshot(),
             recent_moments: self.recent_moment_summaries(),
             moment_storage: self.moment_storage_status(),
@@ -35180,8 +35308,9 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
-            controller_threads: self.controller_thread_stats(),
-            controller_yield: self.sim.controller_yield_stats(),
+            controller_threads,
+            controller_yield,
+            controller_latency_budget,
             queued_human_inputs: self.queued_human_input_count(),
             live_http: self.live_http.clone(),
             done: self.sim.is_done(),
@@ -63455,7 +63584,22 @@ mod tests {
         assert!(html.body.contains("ballScheduleOrder"));
         assert!(html.body.contains("preB"));
         assert!(html.body.contains("humanInputPresent"));
+        assert!(html.body.contains("humanInputQueueAgeMs"));
         assert!(html.body.contains("controllerSlot"));
+        assert!(html.body.contains("id=\"controllerLatency\""));
+        assert!(html.body.contains("function consumedHumanInputAgeLabel"));
+        assert!(html
+            .body
+            .contains("formatInputAgeMs(o.humanInputQueueAgeMs)"));
+        assert!(html.body.contains("totalWaitMs"));
+        assert!(html.body.contains("lastWaitMs"));
+        assert!(html.body.contains("maxWaitMs"));
+        assert!(html.body.contains("totalDebounceMs"));
+        assert!(html.body.contains("lastDebounceMs"));
+        assert!(html.body.contains("maxDebounceMs"));
+        assert!(html.body.contains("id=\"controllerBudget\""));
+        assert!(html.body.contains("function controllerLatencyBudgetLabel"));
+        assert!(html.body.contains("estimatedControlLatencyMs"));
         assert!(html.body.contains("ballLastAction"));
         assert!(html.body.contains("brain.ballLastAction"));
         assert!(html.body.contains("drawGoalPosts"));
@@ -63607,6 +63751,9 @@ mod tests {
             2
         );
         assert_eq!(state_value["controllerThreads"][0]["controllerSlot"], 0);
+        assert_eq!(state_value["controllerThreads"][0]["debouncedFrames"], 0);
+        assert_eq!(state_value["controllerThreads"][0]["lastDebounceMs"], 0.0);
+        assert_eq!(state_value["controllerThreads"][0]["totalDebounceMs"], 0.0);
         assert_eq!(state_value["liveHttp"]["workerModel"], "worker-pool");
         assert_eq!(
             state_value["liveHttp"]["workerThreads"].as_u64().unwrap(),
@@ -63617,6 +63764,12 @@ mod tests {
         assert_eq!(state_value["liveHttp"]["batchesStepTicks"], true);
         assert_eq!(state_value["stepTiming"]["ticks"], 0);
         assert_eq!(state_value["stepTiming"]["totalMs"], 0.0);
+        assert_eq!(
+            state_value["controllerLatencyBudget"]["tickBudgetMs"],
+            100.0
+        );
+        assert_eq!(state_value["controllerLatencyBudget"]["consumedInputs"], 0);
+        assert_eq!(state_value["controllerLatencyBudget"]["overBudget"], false);
         assert_eq!(state_value["queuedHumanInputs"], 0);
         assert_eq!(state_value["episodeIndex"], 0);
         assert!(state_value["completedEpisodes"]
@@ -63656,6 +63809,11 @@ mod tests {
         assert_eq!(value["controllerYield"]["assignedPlayers"], 0);
         assert_eq!(value["controllerYield"]["waitAttempts"], 0);
         assert_eq!(value["controllerYield"]["skippedNoAssignment"], 2);
+        assert_eq!(value["controllerYield"]["lastWaitMs"], 0.0);
+        assert_eq!(value["controllerYield"]["totalWaitMs"], 0.0);
+        assert_eq!(value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
+        assert_eq!(value["controllerLatencyBudget"]["consumedInputs"], 0);
+        assert_eq!(value["controllerLatencyBudget"]["overBudget"], false);
         assert!(
             value["frames"].as_array().unwrap().is_empty(),
             "live HTTP step response should avoid duplicating the current frame"
@@ -65116,6 +65274,10 @@ mod tests {
         assert_eq!(observation["humanControlled"], true);
         assert_eq!(observation["humanInputPresent"], true);
         assert_eq!(observation["humanInputSeq"].as_u64(), Some(1));
+        assert!(
+            observation["humanInputQueueAgeMs"].as_u64().is_some(),
+            "live step JSON should expose consumed controller queue age"
+        );
         assert!(session.lock().unwrap().match_ref().players[5].position.x > start_x);
     }
 
@@ -65205,6 +65367,28 @@ mod tests {
         assert_eq!(value["controllerYield"]["assignedPlayers"], 4);
         assert_eq!(value["controllerYield"]["waitAttempts"], 1);
         assert_eq!(value["controllerYield"]["lastQueuedAfter"], 4);
+        assert_eq!(value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
+        assert!(
+            value["controllerLatencyBudget"]["consumedInputs"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
+        assert!(
+            value["controllerLatencyBudget"]["estimatedControlLatencyMs"]
+                .as_f64()
+                .unwrap()
+                <= value["controllerLatencyBudget"]["tickBudgetMs"]
+                    .as_f64()
+                    .unwrap()
+        );
+        assert_eq!(value["controllerLatencyBudget"]["overBudget"], false);
+        assert!(value["controllerYield"]["lastWaitMs"].as_f64().unwrap() >= 0.0);
+        assert!(value["controllerYield"]["totalWaitMs"].as_f64().unwrap() >= 0.0);
+        assert!(
+            value["controllerYield"]["maxWaitMs"].as_f64().unwrap()
+                >= value["controllerYield"]["lastWaitMs"].as_f64().unwrap()
+        );
 
         for slot in 0..4 {
             let thread_stats = value["controllerThreads"]
@@ -65215,6 +65399,13 @@ mod tests {
                 .expect("controller thread stats");
             assert_eq!(thread_stats["acceptedFrames"], 1);
             assert_eq!(thread_stats["pushedFrames"], 1);
+            assert_eq!(thread_stats["debouncedFrames"], 1);
+            assert!(thread_stats["lastDebounceMs"].as_f64().unwrap() >= 0.0);
+            assert!(thread_stats["totalDebounceMs"].as_f64().unwrap() >= 0.0);
+            assert!(
+                thread_stats["maxDebounceMs"].as_f64().unwrap()
+                    >= thread_stats["lastDebounceMs"].as_f64().unwrap()
+            );
             assert!(value["controllerAssignments"]
                 .as_array()
                 .unwrap()
@@ -65463,8 +65654,63 @@ mod tests {
                 .unwrap()
                 >= 1
         );
+        assert!(
+            step_value["controllerThreads"][0]["debouncedFrames"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
+        assert!(
+            step_value["controllerThreads"][0]["lastDebounceMs"]
+                .as_f64()
+                .unwrap()
+                >= 0.0
+        );
+        assert!(
+            step_value["controllerThreads"][0]["totalDebounceMs"]
+                .as_f64()
+                .unwrap()
+                >= 0.0
+        );
+        assert!(
+            step_value["controllerThreads"][0]["maxDebounceMs"]
+                .as_f64()
+                .unwrap()
+                >= step_value["controllerThreads"][0]["lastDebounceMs"]
+                    .as_f64()
+                    .unwrap()
+        );
         assert_eq!(step_value["controllerYield"]["assignedPlayers"], 1);
         assert_eq!(step_value["controllerYield"]["waitAttempts"], 1);
+        assert_eq!(step_value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
+        assert_eq!(step_value["controllerLatencyBudget"]["consumedInputs"], 1);
+        assert!(
+            step_value["controllerLatencyBudget"]["estimatedControlLatencyMs"]
+                .as_f64()
+                .unwrap()
+                <= step_value["controllerLatencyBudget"]["tickBudgetMs"]
+                    .as_f64()
+                    .unwrap()
+        );
+        assert_eq!(step_value["controllerLatencyBudget"]["overBudget"], false);
+        assert!(
+            step_value["controllerYield"]["lastWaitMs"]
+                .as_f64()
+                .unwrap()
+                >= 0.0
+        );
+        assert!(
+            step_value["controllerYield"]["totalWaitMs"]
+                .as_f64()
+                .unwrap()
+                >= 0.0
+        );
+        assert!(
+            step_value["controllerYield"]["maxWaitMs"].as_f64().unwrap()
+                >= step_value["controllerYield"]["lastWaitMs"]
+                    .as_f64()
+                    .unwrap()
+        );
         assert!(
             step_value["controllerYield"]["notifiedWaits"]
                 .as_u64()

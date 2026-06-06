@@ -212,6 +212,11 @@ const DEFENSE_SPACING_MIN_YARDS: f64 = 2.0;
 const DEFENSE_SPACING_IDEAL_YARDS: f64 = 4.0;
 const DEFENSE_SPACING_MAX_YARDS: f64 = 8.0;
 const DEFENSE_SPREAD_FOLLOW_RATIO: f64 = 0.50;
+const VERTICAL_LANE_COUNT: usize = 4;
+const TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS: f64 = 7.5;
+const TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS: f64 = 2.8;
+const TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY: f64 = 10.5;
+const POSITIONAL_SHAPE_REWARD_CLAMP: f64 = 0.85;
 const PRESSURED_SUPPORT_SPRINT_URGENCY: f64 = 0.34;
 const DEFENSIVE_GOAL_LINE_BUFFER_YARDS: f64 = 6.0;
 const DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS: f64 = 4.0;
@@ -281,7 +286,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 99;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 102;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -772,6 +777,124 @@ pub enum PlayerRole {
     Defender,
     Midfielder,
     Forward,
+}
+
+fn vertical_lane_index(x: f64, field_width: f64) -> usize {
+    let width = field_width.max(1.0);
+    let lane_width = width / VERTICAL_LANE_COUNT as f64;
+    ((x.clamp(0.0, width - f64::EPSILON) / lane_width).floor() as usize)
+        .min(VERTICAL_LANE_COUNT.saturating_sub(1))
+}
+
+fn vertical_lane_bounds(lane: usize, field_width: f64) -> (f64, f64) {
+    let width = field_width.max(1.0);
+    let lane_width = width / VERTICAL_LANE_COUNT as f64;
+    let lane = lane.min(VERTICAL_LANE_COUNT.saturating_sub(1));
+    (lane as f64 * lane_width, (lane + 1) as f64 * lane_width)
+}
+
+fn role_vertical_lane_range(
+    role: PlayerRole,
+    home_x: f64,
+    field_width: f64,
+    in_possession: bool,
+) -> (usize, usize) {
+    let home_lane = vertical_lane_index(home_x, field_width);
+    match role {
+        PlayerRole::Forward if in_possession => (0, VERTICAL_LANE_COUNT.saturating_sub(1)),
+        PlayerRole::Forward if home_lane < VERTICAL_LANE_COUNT / 2 => {
+            (0, VERTICAL_LANE_COUNT / 2 - 1)
+        }
+        PlayerRole::Forward => (
+            VERTICAL_LANE_COUNT / 2,
+            VERTICAL_LANE_COUNT.saturating_sub(1),
+        ),
+        _ => (home_lane, home_lane),
+    }
+}
+
+fn role_vertical_lane_commitment(role: PlayerRole, in_possession: bool) -> f64 {
+    match role {
+        PlayerRole::Goalkeeper => 1.0,
+        PlayerRole::Defender if in_possession => 0.90,
+        PlayerRole::Defender => 0.80,
+        PlayerRole::Midfielder if in_possession => 0.70,
+        PlayerRole::Midfielder => 0.80,
+        PlayerRole::Forward if in_possession => 0.0,
+        PlayerRole::Forward => 0.70,
+    }
+}
+
+fn vertical_lane_deviation_yards(
+    target_x: f64,
+    role: PlayerRole,
+    home_x: f64,
+    field_width: f64,
+    in_possession: bool,
+) -> f64 {
+    let (min_lane, max_lane) = role_vertical_lane_range(role, home_x, field_width, in_possession);
+    let (left, _) = vertical_lane_bounds(min_lane, field_width);
+    let (_, right) = vertical_lane_bounds(max_lane, field_width);
+    if target_x < left {
+        left - target_x
+    } else if target_x > right {
+        target_x - right
+    } else {
+        0.0
+    }
+}
+
+fn vertical_lane_fit_for_role_target(
+    role: PlayerRole,
+    home_x: f64,
+    target_x: f64,
+    field_width: f64,
+    in_possession: bool,
+    relief: f64,
+) -> VerticalLaneFit {
+    let commitment =
+        role_vertical_lane_commitment(role, in_possession) * (1.0 - relief.clamp(0.0, 0.85));
+    if commitment <= 1e-9 {
+        return VerticalLaneFit {
+            affinity_score: 1.0,
+            deviation_yards: 0.0,
+            commitment: 0.0,
+        };
+    }
+    let (min_lane, max_lane) = role_vertical_lane_range(role, home_x, field_width, in_possession);
+    let target_lane = vertical_lane_index(target_x, field_width);
+    let lane_gap = if target_lane < min_lane {
+        min_lane - target_lane
+    } else if target_lane > max_lane {
+        target_lane - max_lane
+    } else {
+        0
+    };
+    let deviation_yards =
+        vertical_lane_deviation_yards(target_x, role, home_x, field_width, in_possession);
+    let affinity_score = if lane_gap == 0 {
+        1.0
+    } else {
+        (1.0 - commitment * (0.58 + lane_gap as f64 * 0.22)).clamp(0.0, 1.0)
+    };
+    VerticalLaneFit {
+        affinity_score,
+        deviation_yards,
+        commitment,
+    }
+}
+
+fn vertical_lane_clamped_x_for_role(
+    role: PlayerRole,
+    home_x: f64,
+    target_x: f64,
+    field_width: f64,
+    in_possession: bool,
+) -> f64 {
+    let (min_lane, max_lane) = role_vertical_lane_range(role, home_x, field_width, in_possession);
+    let (left, _) = vertical_lane_bounds(min_lane, field_width);
+    let (_, right) = vertical_lane_bounds(max_lane, field_width);
+    target_x.clamp(left + 0.05, (right - 0.05).max(left + 0.05))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1334,6 +1457,12 @@ pub struct SoccerPomdpObservation {
     #[serde(default)]
     pub preferred_team_spacing_yards: f64,
     #[serde(default)]
+    pub vertical_lane_affinity_score: f64,
+    #[serde(default)]
+    pub vertical_lane_deviation_yards: f64,
+    #[serde(default)]
+    pub teammate_occupied_space_pressure: f64,
+    #[serde(default)]
     pub team_brain_mode: TeamBrainMode,
     #[serde(default)]
     pub team_brain_press_intensity: f64,
@@ -1830,6 +1959,13 @@ fn time_window_probability(probability_at_reference_dt: f64, dt_seconds: f64) ->
     (1.0 - (1.0 - p).powf(scale)).clamp(0.0, 1.0)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct VerticalLaneFit {
+    affinity_score: f64,
+    deviation_yards: f64,
+    commitment: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerLearningTransition {
@@ -1898,6 +2034,26 @@ pub struct SoccerTacticalLearningTrace {
     pub defense_role_press_score: f64,
     #[serde(default)]
     pub defense_role_press_delta: f64,
+    #[serde(default)]
+    pub before_vertical_lane_affinity_score: f64,
+    #[serde(default)]
+    pub after_vertical_lane_affinity_score: f64,
+    #[serde(default)]
+    pub vertical_lane_affinity_delta: f64,
+    #[serde(default)]
+    pub before_teammate_congestion_pressure: f64,
+    #[serde(default)]
+    pub after_teammate_congestion_pressure: f64,
+    #[serde(default)]
+    pub teammate_congestion_delta: f64,
+    #[serde(default)]
+    pub before_role_line_deviation_yards: f64,
+    #[serde(default)]
+    pub after_role_line_deviation_yards: f64,
+    #[serde(default)]
+    pub role_line_deviation_delta_yards: f64,
+    #[serde(default)]
+    pub positional_shape_reward: f64,
     #[serde(default)]
     pub formation_lp_guidance: bool,
     #[serde(default)]
@@ -1982,6 +2138,20 @@ pub struct SoccerTacticalLearningSummary {
     #[serde(default)]
     pub mean_lp_pair_error_yards: f64,
     #[serde(default)]
+    pub mean_vertical_lane_affinity_score: f64,
+    #[serde(default)]
+    pub mean_vertical_lane_affinity_delta: f64,
+    #[serde(default)]
+    pub mean_teammate_congestion_pressure: f64,
+    #[serde(default)]
+    pub mean_teammate_congestion_delta: f64,
+    #[serde(default)]
+    pub mean_role_line_deviation_yards: f64,
+    #[serde(default)]
+    pub mean_role_line_deviation_delta_yards: f64,
+    #[serde(default)]
+    pub mean_positional_shape_reward: f64,
+    #[serde(default)]
     pub total_tactical_reward: f64,
     #[serde(default)]
     pub mean_tactical_reward: f64,
@@ -2003,6 +2173,7 @@ impl SoccerTacticalLearningSummary {
     pub fn merge(&mut self, other: &Self) {
         let attack_count = self.attack_transitions;
         let defense_count = self.defense_transitions;
+        let shape_count = self.shape_transitions;
 
         self.mean_attack_team_width_yards = weighted_mean(
             self.mean_attack_team_width_yards,
@@ -2131,6 +2302,48 @@ impl SoccerTacticalLearningSummary {
             other.mean_lp_pair_error_yards,
             other.lp_guided_transitions,
         );
+        self.mean_vertical_lane_affinity_score = weighted_mean(
+            self.mean_vertical_lane_affinity_score,
+            shape_count,
+            other.mean_vertical_lane_affinity_score,
+            other.shape_transitions,
+        );
+        self.mean_vertical_lane_affinity_delta = weighted_mean(
+            self.mean_vertical_lane_affinity_delta,
+            shape_count,
+            other.mean_vertical_lane_affinity_delta,
+            other.shape_transitions,
+        );
+        self.mean_teammate_congestion_pressure = weighted_mean(
+            self.mean_teammate_congestion_pressure,
+            shape_count,
+            other.mean_teammate_congestion_pressure,
+            other.shape_transitions,
+        );
+        self.mean_teammate_congestion_delta = weighted_mean(
+            self.mean_teammate_congestion_delta,
+            shape_count,
+            other.mean_teammate_congestion_delta,
+            other.shape_transitions,
+        );
+        self.mean_role_line_deviation_yards = weighted_mean(
+            self.mean_role_line_deviation_yards,
+            shape_count,
+            other.mean_role_line_deviation_yards,
+            other.shape_transitions,
+        );
+        self.mean_role_line_deviation_delta_yards = weighted_mean(
+            self.mean_role_line_deviation_delta_yards,
+            shape_count,
+            other.mean_role_line_deviation_delta_yards,
+            other.shape_transitions,
+        );
+        self.mean_positional_shape_reward = weighted_mean(
+            self.mean_positional_shape_reward,
+            shape_count,
+            other.mean_positional_shape_reward,
+            other.shape_transitions,
+        );
         self.total_transitions = self
             .total_transitions
             .saturating_add(other.total_transitions);
@@ -2197,6 +2410,7 @@ impl SoccerTacticalLearningSummary {
                 trace.tactical_reward,
             );
             self.total_tactical_reward += finite_metric(trace.tactical_reward);
+            self.record_positional_shape_trace(trace);
         } else if trace.defense_shape {
             self.shape_transitions = self.shape_transitions.saturating_add(1);
             self.defense_transitions = self.defense_transitions.saturating_add(1);
@@ -2246,6 +2460,7 @@ impl SoccerTacticalLearningSummary {
                 trace.tactical_reward,
             );
             self.total_tactical_reward += finite_metric(trace.tactical_reward);
+            self.record_positional_shape_trace(trace);
         }
         if trace.formation_lp_guidance {
             self.lp_guided_transitions = self.lp_guided_transitions.saturating_add(1);
@@ -2279,6 +2494,45 @@ impl SoccerTacticalLearningSummary {
         if self.shape_transitions > 0 {
             self.mean_tactical_reward = self.total_tactical_reward / self.shape_transitions as f64;
         }
+    }
+
+    fn record_positional_shape_trace(&mut self, trace: &SoccerTacticalLearningTrace) {
+        let count = self.shape_transitions;
+        record_running_mean(
+            &mut self.mean_vertical_lane_affinity_score,
+            count,
+            trace.after_vertical_lane_affinity_score,
+        );
+        record_running_mean(
+            &mut self.mean_vertical_lane_affinity_delta,
+            count,
+            trace.vertical_lane_affinity_delta,
+        );
+        record_running_mean(
+            &mut self.mean_teammate_congestion_pressure,
+            count,
+            trace.after_teammate_congestion_pressure,
+        );
+        record_running_mean(
+            &mut self.mean_teammate_congestion_delta,
+            count,
+            trace.teammate_congestion_delta,
+        );
+        record_running_mean(
+            &mut self.mean_role_line_deviation_yards,
+            count,
+            trace.after_role_line_deviation_yards,
+        );
+        record_running_mean(
+            &mut self.mean_role_line_deviation_delta_yards,
+            count,
+            trace.role_line_deviation_delta_yards,
+        );
+        record_running_mean(
+            &mut self.mean_positional_shape_reward,
+            count,
+            trace.positional_shape_reward,
+        );
     }
 }
 
@@ -2503,6 +2757,12 @@ pub struct SoccerQStateKey {
     pub team_spacing_score_bin: u8,
     #[serde(default)]
     pub preferred_team_spacing_bin: u8,
+    #[serde(default)]
+    pub vertical_lane_affinity_bin: u8,
+    #[serde(default)]
+    pub vertical_lane_deviation_bin: u8,
+    #[serde(default)]
+    pub teammate_occupied_space_pressure_bin: u8,
     #[serde(default)]
     pub perceived_time_on_ball_bin: u8,
     #[serde(default)]
@@ -2865,6 +3125,18 @@ impl SoccerQStateKey {
                 observation.preferred_team_spacing_yards,
                 &[4.0, 8.0, 12.0, 16.0],
             ),
+            vertical_lane_affinity_bin: distance_bucket(
+                observation.vertical_lane_affinity_score,
+                &[0.20, 0.45, 0.70, 0.88],
+            ),
+            vertical_lane_deviation_bin: distance_bucket(
+                observation.vertical_lane_deviation_yards,
+                &[0.50, 2.0, 5.0, 10.0],
+            ),
+            teammate_occupied_space_pressure_bin: distance_bucket(
+                observation.teammate_occupied_space_pressure,
+                &[0.12, 0.30, 0.55, 0.78],
+            ),
             perceived_time_on_ball_bin: distance_bucket(
                 observation.perceived_time_on_ball_seconds,
                 &[0.35, 0.75, 1.3, 2.2],
@@ -3065,6 +3337,10 @@ impl SoccerQStateKey {
             && self.forward_dribble_space_bin == other.forward_dribble_space_bin
             && self.team_spacing_score_bin == other.team_spacing_score_bin
             && self.preferred_team_spacing_bin == other.preferred_team_spacing_bin
+            && self.vertical_lane_affinity_bin == other.vertical_lane_affinity_bin
+            && self.vertical_lane_deviation_bin == other.vertical_lane_deviation_bin
+            && self.teammate_occupied_space_pressure_bin
+                == other.teammate_occupied_space_pressure_bin
             && self.perceived_time_on_ball_bin == other.perceived_time_on_ball_bin
             && self.fatigue_bin == other.fatigue_bin
             && self.nearest_defender_fatigue_bin == other.nearest_defender_fatigue_bin
@@ -6047,8 +6323,12 @@ impl PlayerAgent {
         let current = snapshot.player_position(self.id).unwrap_or(self.position);
         let special_score = |target: Vec2, base: f64| {
             let forward = ((target.y - current.y) * self.team.attack_dir()).clamp(-8.0, 24.0);
-            let openness =
-                pass_receiver_openness_for_snapshots(&snapshot.players, self.team, target);
+            let openness = pass_receiver_openness_for_snapshots_with_teammates(
+                &snapshot.players,
+                self.team,
+                target,
+                Some(self.id),
+            );
             let pass_lane =
                 if snapshot.clear_line(snapshot.ball.position, target, self.team.other(), 2.0) {
                     1.0
@@ -14149,12 +14429,18 @@ fn soccer_formation_lp_anchor(
 
     if player.role != PlayerRole::Goalkeeper {
         let ball_lane_pull = ((ball.x - width * 0.5) / (width * 0.5)).clamp(-1.0, 1.0);
-        let pull = if possession == Some(team) {
+        let in_possession = possession == Some(team);
+        let lane_commitment = role_vertical_lane_commitment(player.role, in_possession);
+        let base_pull = if in_possession {
             0.18 + weights.progression * 0.10
         } else {
             0.12 + weights.defensive_compactness * 0.16
         };
+        let pull = base_pull * (1.0 - lane_commitment * 0.46).clamp(0.30, 1.0);
         x = x * (1.0 - pull) + (width * 0.5 + ball_lane_pull * width * 0.28) * pull;
+        let lane_x =
+            vertical_lane_clamped_x_for_role(player.role, home_position.x, x, width, in_possession);
+        x = x * (1.0 - lane_commitment * 0.28) + lane_x * (lane_commitment * 0.28);
     }
 
     let zone = Vec2::new(x, y).clamp_to_pitch(width, length);
@@ -15043,7 +15329,12 @@ fn pending_pass_snapshot_from(
     let receiver_openness = nearest_receiver
         .and_then(|id| {
             players.iter().find(|player| player.id == id).map(|player| {
-                pass_receiver_openness_for_snapshots(players, pass.team, player.position)
+                pass_receiver_openness_for_snapshots_with_teammates(
+                    players,
+                    pass.team,
+                    player.position,
+                    Some(player.id),
+                )
             })
         })
         .unwrap_or(pass.receiver_openness)
@@ -15653,6 +15944,35 @@ impl WorldSnapshot {
             .fold(f64::INFINITY, f64::min)
     }
 
+    fn teammate_occupied_space_pressure_at(
+        &self,
+        team: Team,
+        position: Vec2,
+        exclude_player_id: Option<usize>,
+    ) -> f64 {
+        let nearest = self.nearest_teammate_distance_at(team, position, exclude_player_id);
+        if nearest <= TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS {
+            1.0
+        } else {
+            ((TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - nearest)
+                / (TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS
+                    - TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS)
+                    .max(1e-6))
+            .clamp(0.0, 1.0)
+        }
+    }
+
+    fn teammate_occupied_space_penalty_at(
+        &self,
+        team: Team,
+        position: Vec2,
+        exclude_player_id: Option<usize>,
+        relief: f64,
+    ) -> f64 {
+        let pressure = self.teammate_occupied_space_pressure_at(team, position, exclude_player_id);
+        TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY * pressure * (1.0 - relief.clamp(0.0, 0.70))
+    }
+
     fn team_spacing_score_for_candidate(
         &self,
         team: Team,
@@ -15664,6 +15984,127 @@ impl WorldSnapshot {
             self.nearest_teammate_distance_at(team, position, exclude_player_id),
             mode,
         )
+    }
+
+    fn vertical_lane_fit_for_player_target(
+        &self,
+        player: &PlayerSnapshot,
+        target: Vec2,
+        relief: f64,
+    ) -> VerticalLaneFit {
+        let in_possession = self
+            .controlled_possession_team()
+            .or_else(|| self.possession_team())
+            == Some(player.team);
+        vertical_lane_fit_for_role_target(
+            player.role,
+            player.home_position.x,
+            target.x,
+            self.field_width,
+            in_possession,
+            relief,
+        )
+    }
+
+    fn vertical_lane_penalty_for_player_target(
+        &self,
+        player: &PlayerSnapshot,
+        target: Vec2,
+        relief: f64,
+    ) -> f64 {
+        let fit = self.vertical_lane_fit_for_player_target(player, target, relief);
+        if fit.commitment <= 1e-9 {
+            return 0.0;
+        }
+        (1.0 - fit.affinity_score) * (3.4 + fit.commitment * 5.6)
+            + fit.deviation_yards * 0.070 * fit.commitment
+    }
+
+    fn offensive_high_speed_run_relief(&self, player: &PlayerSnapshot, target: Vec2) -> f64 {
+        if self
+            .controlled_possession_team()
+            .or_else(|| self.possession_team())
+            != Some(player.team)
+            || player.role == PlayerRole::Goalkeeper
+        {
+            return 0.0;
+        }
+        let current = self.player_snapshot_position(player);
+        let forward = (target.y - current.y) * player.team.attack_dir();
+        let speed = self
+            .player_velocity(player.id)
+            .unwrap_or(player.velocity)
+            .len();
+        let forward_fit = ((forward - 4.0) / 10.0).clamp(0.0, 1.0);
+        let speed_fit = ((speed - 4.5) / 3.0).clamp(0.0, 1.0);
+        (forward_fit * speed_fit * 0.60).clamp(0.0, 0.60)
+    }
+
+    fn defensive_tracking_relief(&self, player: &PlayerSnapshot, target: Vec2) -> f64 {
+        if self
+            .controlled_possession_team()
+            .or_else(|| self.possession_team())
+            != Some(player.team.other())
+            || !matches!(player.role, PlayerRole::Defender | PlayerRole::Midfielder)
+        {
+            return 0.0;
+        }
+        let Some(holder_id) = self.ball.holder else {
+            return 0.0;
+        };
+        let Some(holder) = self
+            .players
+            .iter()
+            .find(|candidate| candidate.id == holder_id && candidate.team == player.team.other())
+        else {
+            return 0.0;
+        };
+        let holder_position = self.player_snapshot_position(holder);
+        let current = self.player_snapshot_position(player);
+        if current.distance(holder_position) > 9.0 || target.distance(holder_position) > 9.5 {
+            return 0.0;
+        }
+        (0.48 + ability01(player.skills.defensive_tracking) * 0.34).clamp(0.0, 0.82)
+    }
+
+    fn role_line_deviation_yards_for_target(&self, player: &PlayerSnapshot, target: Vec2) -> f64 {
+        if !matches!(player.role, PlayerRole::Defender | PlayerRole::Midfielder) {
+            return 0.0;
+        }
+        let mut total_y = 0.0;
+        let mut count = 0usize;
+        for teammate in self.players.iter().filter(|teammate| {
+            teammate.team == player.team && teammate.role == player.role && teammate.id != player.id
+        }) {
+            total_y += self.player_snapshot_position(teammate).y;
+            count += 1;
+        }
+        if count < 2 {
+            0.0
+        } else {
+            (target.y - total_y / count as f64).abs()
+        }
+    }
+
+    fn role_line_penalty_for_player_target(
+        &self,
+        player: &PlayerSnapshot,
+        target: Vec2,
+        relief: f64,
+    ) -> f64 {
+        let in_possession = self
+            .controlled_possession_team()
+            .or_else(|| self.possession_team())
+            == Some(player.team);
+        let weight = match (player.role, in_possession) {
+            (PlayerRole::Defender, true) => 0.030,
+            (PlayerRole::Defender, false) => 0.095,
+            (PlayerRole::Midfielder, true) => 0.012,
+            (PlayerRole::Midfielder, false) => 0.070,
+            _ => 0.0,
+        };
+        let deviation = self.role_line_deviation_yards_for_target(player, target);
+        (deviation - 5.5).max(0.0) * weight * (1.0 - relief.clamp(0.0, 0.80))
     }
 
     fn own_goal_y_for(&self, team: Team) -> f64 {
@@ -15864,6 +16305,9 @@ impl WorldSnapshot {
                 nearest_teammate_distance: 0.0,
                 team_spacing_score: 0.0,
                 preferred_team_spacing_yards: 0.0,
+                vertical_lane_affinity_score: 1.0,
+                vertical_lane_deviation_yards: 0.0,
+                teammate_occupied_space_pressure: 0.0,
                 team_brain_mode: TeamBrainMode::Transition,
                 team_brain_press_intensity: 0.0,
                 team_brain_risk_tolerance: 0.0,
@@ -15996,6 +16440,13 @@ impl WorldSnapshot {
                 )
             })
             .unwrap_or((0.0, 0.0));
+        let lane_relief = self
+            .offensive_high_speed_run_relief(me, me_position)
+            .max(self.defensive_tracking_relief(me, me_position));
+        let vertical_lane_fit =
+            self.vertical_lane_fit_for_player_target(me, me_position, lane_relief);
+        let teammate_occupied_space_pressure =
+            self.teammate_occupied_space_pressure_at(me.team, me_position, Some(me.id));
         let team_directive = self.tactical_directive(me.team);
         let team_brain_mode = team_brain_mode_for(me.team, self.phase, self.possession_team());
         let team_shape = team_shape_observation_from_snapshot(self, me.team, self.ball.position);
@@ -16500,6 +16951,9 @@ impl WorldSnapshot {
             nearest_teammate_distance,
             team_spacing_score,
             preferred_team_spacing_yards,
+            vertical_lane_affinity_score: vertical_lane_fit.affinity_score,
+            vertical_lane_deviation_yards: vertical_lane_fit.deviation_yards,
+            teammate_occupied_space_pressure,
             team_brain_mode,
             team_brain_press_intensity: team_directive.press_intensity,
             team_brain_risk_tolerance: team_directive.risk_tolerance,
@@ -16892,8 +17346,12 @@ impl WorldSnapshot {
                     let center_x = self.field_width * 0.5;
                     let width =
                         ((pass_point.x - center_x).abs() / center_x.max(1.0)).clamp(0.0, 1.0);
-                    let openness =
-                        pass_receiver_openness_for_snapshots(&self.players, me.team, pass_point);
+                    let openness = pass_receiver_openness_for_snapshots_with_teammates(
+                        &self.players,
+                        me.team,
+                        pass_point,
+                        Some(p.id),
+                    );
                     let forward_support = (pass_point.y - me_position.y) * me.team.attack_dir();
                     (width * 1.25 + openness * 2.4 + forward_support.clamp(0.0, 24.0) * 0.035)
                         .clamp(0.0, 4.2)
@@ -17535,8 +17993,12 @@ impl WorldSnapshot {
             .into_iter()
             .filter(|candidate| !self.position_would_be_offside(me.team, *candidate))
             .map(|candidate| {
-                let openness =
-                    pass_receiver_openness_for_snapshots(&self.players, me.team, candidate);
+                let openness = pass_receiver_openness_for_snapshots_with_teammates(
+                    &self.players,
+                    me.team,
+                    candidate,
+                    Some(me.id),
+                );
                 let width = ((candidate.x - center_x).abs() / center_x.max(1.0)).clamp(0.0, 1.0);
                 let lane_bonus =
                     if self.clear_line(self.ball.position, candidate, me.team.other(), 2.0) {
@@ -17545,12 +18007,23 @@ impl WorldSnapshot {
                         -0.8
                     };
                 let forward = (candidate.y - current.y) * me.team.attack_dir();
+                let relief = self.offensive_high_speed_run_relief(me, candidate);
+                let lane_penalty =
+                    self.vertical_lane_penalty_for_player_target(me, candidate, relief);
+                let teammate_penalty = self.teammate_occupied_space_penalty_at(
+                    me.team,
+                    candidate,
+                    Some(me.id),
+                    relief,
+                );
                 let score = self.space_score_at(candidate, me.team)
                     + openness * 3.0
                     + width * 2.0
                     + forward.clamp(0.0, 18.0) * 0.08
                     + lane_bonus
-                    - candidate.distance(home) * 0.025;
+                    - candidate.distance(home) * 0.025
+                    - lane_penalty
+                    - teammate_penalty;
                 (candidate, score)
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -17666,8 +18139,12 @@ impl WorldSnapshot {
                 };
                 let score = self.shooting_window_score_at(me, candidate) * 4.2
                     + self.space_score_at(candidate, me.team) * 0.055
-                    + pass_receiver_openness_for_snapshots(&self.players, me.team, candidate)
-                        * 0.36
+                    + pass_receiver_openness_for_snapshots_with_teammates(
+                        &self.players,
+                        me.team,
+                        candidate,
+                        Some(me.id),
+                    ) * 0.36
                     + goalward.max(0.0) * 0.060
                     + cross_lane * 0.68
                     + centrality * 0.12
@@ -17675,7 +18152,18 @@ impl WorldSnapshot {
                     + aerial_fit
                     + role_fit
                     - candidate.distance(current) * 0.026
-                    - candidate.distance(home) * 0.010;
+                    - candidate.distance(home) * 0.010
+                    - self.teammate_occupied_space_penalty_at(
+                        me.team,
+                        candidate,
+                        Some(me.id),
+                        self.offensive_high_speed_run_relief(me, candidate),
+                    ) * 0.62
+                    - self.vertical_lane_penalty_for_player_target(
+                        me,
+                        candidate,
+                        self.offensive_high_speed_run_relief(me, candidate),
+                    ) * 0.40;
                 (candidate, score)
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -17819,6 +18307,19 @@ impl WorldSnapshot {
                 } else {
                     0.0
                 };
+                let movement_relief = self
+                    .offensive_high_speed_run_relief(me, p)
+                    .max(self.defensive_tracking_relief(me, p));
+                let lane_position_penalty =
+                    self.vertical_lane_penalty_for_player_target(me, p, movement_relief);
+                let teammate_occupation_penalty = self.teammate_occupied_space_penalty_at(
+                    me.team,
+                    p,
+                    Some(me.id),
+                    movement_relief,
+                );
+                let line_shape_penalty =
+                    self.role_line_penalty_for_player_target(me, p, movement_relief);
                 let score = self.space_score_at(p, me.team)
                     + forward.max(-4.0) * (0.04 + directive.risk_tolerance * 0.08)
                     + forward_from_ball.clamp(-6.0, 28.0)
@@ -17829,7 +18330,10 @@ impl WorldSnapshot {
                     + diagonal_support_bonus
                     + spacing_bonus
                     + width_possession_bonus
-                    - offside_penalty;
+                    - offside_penalty
+                    - lane_position_penalty
+                    - teammate_occupation_penalty
+                    - line_shape_penalty;
                 if score > best_score {
                     best = p;
                     best_score = score;
@@ -18493,8 +18997,12 @@ impl WorldSnapshot {
         };
         let movement_led =
             target_position + target.velocity * flight_time * (0.48 + anticipation_skill * 0.36);
-        let openness =
-            pass_receiver_openness_for_snapshots(&self.players, passer.team, led_support);
+        let openness = pass_receiver_openness_for_snapshots_with_teammates(
+            &self.players,
+            passer.team,
+            led_support,
+            Some(target.id),
+        );
         let base_support_weight = if self.is_wide_midfielder(target) && openness > 0.58 {
             0.70
         } else if openness > 0.45 {
@@ -18812,7 +19320,7 @@ impl WorldSnapshot {
                 )
             }
         } else if defensive_midfield_screen {
-            (open * 0.28 + shape * 0.55 + home * 0.17, "support-screen")
+            (open * 0.14 + shape * 0.72 + home * 0.14, "support-screen")
         } else if own_half_possession && me.role != PlayerRole::Goalkeeper {
             (open * 0.64 + shape * 0.26 + home * 0.10, "support-push-up")
         } else {
@@ -18950,9 +19458,23 @@ impl WorldSnapshot {
                     candidate,
                     TeamSpacingMode::Defending,
                 );
+                let tracking_relief = self.defensive_tracking_relief(me, candidate);
+                let lane_penalty =
+                    self.vertical_lane_penalty_for_player_target(me, candidate, tracking_relief);
+                let line_penalty =
+                    self.role_line_penalty_for_player_target(me, candidate, tracking_relief);
+                let teammate_penalty = self.teammate_occupied_space_penalty_at(
+                    me.team,
+                    candidate,
+                    Some(player_id),
+                    tracking_relief,
+                ) * 0.22;
                 let score = compact_score * 0.45
                     - candidate.distance(blended) * 0.055
-                    - candidate.distance(mark) * 0.025;
+                    - candidate.distance(mark) * 0.025
+                    - lane_penalty
+                    - line_penalty
+                    - teammate_penalty;
                 if score > best_score {
                     best = candidate;
                     best_score = score;
@@ -18985,11 +19507,31 @@ impl WorldSnapshot {
             PlayerRole::Forward => 20.0,
         };
         let delta = target - home;
-        let bounded = if delta.len() <= radius {
+        let mut bounded = if delta.len() <= radius {
             target.clamp_to_pitch(self.field_width, self.field_length)
         } else {
             (home + delta.normalized() * radius).clamp_to_pitch(self.field_width, self.field_length)
         };
+        let relief = self
+            .offensive_high_speed_run_relief(me, bounded)
+            .max(self.defensive_tracking_relief(me, bounded));
+        let fit = self.vertical_lane_fit_for_player_target(me, bounded, relief);
+        if fit.commitment > 1e-9 && fit.deviation_yards > 0.0 {
+            let lane_x = vertical_lane_clamped_x_for_role(
+                me.role,
+                home.x,
+                bounded.x,
+                self.field_width,
+                in_possession,
+            );
+            if fit.commitment >= 0.65 && relief < 0.15 {
+                bounded.x = lane_x;
+            } else {
+                let lane_blend = (fit.commitment * 0.72).clamp(0.0, 0.72);
+                bounded.x = bounded.x * (1.0 - lane_blend) + lane_x * lane_blend;
+            }
+            bounded = bounded.clamp_to_pitch(self.field_width, self.field_length);
+        }
         let bounded = self.clamp_forward_onside_support(me, bounded);
         if self.possession_team() == Some(me.team.other()) && me.role != PlayerRole::Goalkeeper {
             self.clamp_defensive_goal_line_and_ball_gap(me.team, bounded)
@@ -19011,7 +19553,17 @@ impl WorldSnapshot {
         }
         let opponent_dist = opponent_dist.min(35.0);
         let teammate_crowding = teammate_crowding.min(25.0);
-        opponent_dist * 0.75 + teammate_crowding * 0.25
+        let teammate_pressure = if teammate_crowding <= TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS {
+            1.0
+        } else {
+            ((TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - teammate_crowding)
+                / (TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS
+                    - TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS)
+                    .max(1e-6))
+            .clamp(0.0, 1.0)
+        };
+        opponent_dist * 0.68 + teammate_crowding * 0.32
+            - TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY * teammate_pressure * 0.72
     }
 
     fn clear_line(&self, from: Vec2, to: Vec2, defending_team: Team, radius: f64) -> bool {
@@ -21067,8 +21619,15 @@ fn soccer_transition_reward_with_tactics(
                         before,
                         after,
                     );
-                    let receiver_openness =
-                        pass_receiver_openness_for_snapshots(&after.players, player.team, target);
+                    let receiver_openness = pass_receiver_openness_for_snapshots_with_teammates(
+                        &after.players,
+                        player.team,
+                        target,
+                        decision
+                            .action_target
+                            .as_ref()
+                            .and_then(|target| target.player_id),
+                    );
                     reward += completed_pass_anticipation_reward_from_context(
                         &action_context,
                         player.team,
@@ -21813,6 +22372,119 @@ fn defensive_cross_arrival_coverage_learning_reward(
         .clamp(-0.70, 1.10)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PositionalShapeLearningSignal {
+    before_vertical_lane_affinity_score: f64,
+    after_vertical_lane_affinity_score: f64,
+    before_teammate_congestion_pressure: f64,
+    after_teammate_congestion_pressure: f64,
+    before_role_line_deviation_yards: f64,
+    after_role_line_deviation_yards: f64,
+    reward: f64,
+}
+
+fn role_line_shape_score_from_deviation(deviation_yards: f64) -> f64 {
+    (1.0 - ((deviation_yards - 5.5) / 18.0).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+fn positional_shape_learning_signal(
+    player_id: usize,
+    team: Team,
+    role: PlayerRole,
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+    before_pos: Vec2,
+    after_pos: Vec2,
+) -> PositionalShapeLearningSignal {
+    let Some(before_player) = before.players.iter().find(|player| player.id == player_id) else {
+        return PositionalShapeLearningSignal::default();
+    };
+    let before_relief = before
+        .offensive_high_speed_run_relief(before_player, before_pos)
+        .max(before.defensive_tracking_relief(before_player, before_pos));
+    let after_relief = before
+        .offensive_high_speed_run_relief(before_player, after_pos)
+        .max(before.defensive_tracking_relief(before_player, after_pos));
+    let before_lane =
+        before.vertical_lane_fit_for_player_target(before_player, before_pos, before_relief);
+    let after_lane =
+        before.vertical_lane_fit_for_player_target(before_player, after_pos, after_relief);
+    let before_teammate_congestion_pressure =
+        before.teammate_occupied_space_pressure_at(team, before_pos, Some(player_id));
+    let after_teammate_congestion_pressure =
+        after.teammate_occupied_space_pressure_at(team, after_pos, Some(player_id));
+    let before_role_line_deviation_yards =
+        before.role_line_deviation_yards_for_target(before_player, before_pos);
+    let after_role_line_deviation_yards = after
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .map(|after_player| after.role_line_deviation_yards_for_target(after_player, after_pos))
+        .unwrap_or(before_role_line_deviation_yards);
+
+    let possession = before.controlled_possession_team();
+    let in_possession = possession == Some(team);
+    let defending = possession == Some(team.other());
+    let lane_commitment = before_lane.commitment.max(after_lane.commitment);
+    let lane_reward = if lane_commitment > 1e-9 {
+        let delta = (after_lane.affinity_score - before_lane.affinity_score).clamp(-1.0, 1.0);
+        let steady_state = (after_lane.affinity_score - 0.62).clamp(-0.62, 0.38);
+        (delta * 0.38 + steady_state * 0.10) * lane_commitment
+    } else {
+        0.0
+    };
+
+    let congestion_weight = if in_possession {
+        0.34
+    } else if defending {
+        0.27
+    } else {
+        0.20
+    };
+    let congestion_improvement =
+        (before_teammate_congestion_pressure - after_teammate_congestion_pressure).clamp(-1.0, 1.0)
+            * congestion_weight;
+    let congestion_state = (0.24 - after_teammate_congestion_pressure).clamp(-0.76, 0.24) * 0.10;
+    let hard_congestion_penalty =
+        if after_teammate_congestion_pressure > 0.85 && after_relief < 0.25 {
+            -(after_teammate_congestion_pressure - 0.85) * 0.42
+        } else {
+            0.0
+        };
+
+    let before_line_score = role_line_shape_score_from_deviation(before_role_line_deviation_yards);
+    let after_line_score = role_line_shape_score_from_deviation(after_role_line_deviation_yards);
+    let line_weight = match (role, in_possession, defending) {
+        (PlayerRole::Defender, false, true) => 0.34,
+        (PlayerRole::Midfielder, false, true) => 0.26,
+        (PlayerRole::Defender, true, false) => 0.16,
+        (PlayerRole::Midfielder, true, false) => 0.11,
+        _ => 0.0,
+    };
+    let line_relief = after_relief.clamp(0.0, 0.85);
+    let line_reward = ((after_line_score - before_line_score).clamp(-1.0, 1.0) * line_weight
+        + (after_line_score - 0.55).clamp(-0.55, 0.45) * line_weight * 0.18)
+        * (1.0 - line_relief);
+
+    PositionalShapeLearningSignal {
+        before_vertical_lane_affinity_score: before_lane.affinity_score,
+        after_vertical_lane_affinity_score: after_lane.affinity_score,
+        before_teammate_congestion_pressure,
+        after_teammate_congestion_pressure,
+        before_role_line_deviation_yards,
+        after_role_line_deviation_yards,
+        reward: (lane_reward
+            + congestion_improvement
+            + congestion_state
+            + hard_congestion_penalty
+            + line_reward)
+            .clamp(
+                -POSITIONAL_SHAPE_REWARD_CLAMP,
+                POSITIONAL_SHAPE_REWARD_CLAMP,
+            ),
+    }
+}
+
 fn tactical_shape_reward(
     player: &PlayerAgent,
     before: &WorldSnapshot,
@@ -21892,6 +22564,9 @@ fn tactical_shape_trace(
     }
     let field_width = before.field_width.max(1.0);
     let before_possession = before.controlled_possession_team();
+    let positional_signal = positional_shape_learning_signal(
+        player_id, team, role, before, after, before_pos, after_pos,
+    );
     if before_possession == Some(team) {
         let spacing_weight = before.possession_spacing_weight(team).max(0.35);
         let before_width =
@@ -21917,6 +22592,7 @@ fn tactical_shape_trace(
                 * weights.attack_spacing_score_weight
                 * spacing_weight;
         }
+        reward += positional_signal.reward;
         reward += lp_trace.tactical_reward;
         return SoccerTacticalLearningTrace {
             attack_shape: true,
@@ -21940,6 +22616,23 @@ fn tactical_shape_trace(
             defense_role_press_distance_yards: 0.0,
             defense_role_press_score: 0.0,
             defense_role_press_delta: 0.0,
+            before_vertical_lane_affinity_score: positional_signal
+                .before_vertical_lane_affinity_score,
+            after_vertical_lane_affinity_score: positional_signal
+                .after_vertical_lane_affinity_score,
+            vertical_lane_affinity_delta: positional_signal.after_vertical_lane_affinity_score
+                - positional_signal.before_vertical_lane_affinity_score,
+            before_teammate_congestion_pressure: positional_signal
+                .before_teammate_congestion_pressure,
+            after_teammate_congestion_pressure: positional_signal
+                .after_teammate_congestion_pressure,
+            teammate_congestion_delta: positional_signal.after_teammate_congestion_pressure
+                - positional_signal.before_teammate_congestion_pressure,
+            before_role_line_deviation_yards: positional_signal.before_role_line_deviation_yards,
+            after_role_line_deviation_yards: positional_signal.after_role_line_deviation_yards,
+            role_line_deviation_delta_yards: positional_signal.after_role_line_deviation_yards
+                - positional_signal.before_role_line_deviation_yards,
+            positional_shape_reward: positional_signal.reward,
             tactical_reward: reward,
             ..lp_trace
         };
@@ -21981,6 +22674,7 @@ fn tactical_shape_trace(
             reward += spacing_delta.2.clamp(-1.0, 1.0) * weights.defense_spacing_delta_weight;
             reward += spacing_delta.1.clamp(-1.0, 1.0) * weights.defense_spacing_score_weight;
         }
+        reward += positional_signal.reward;
         reward += lp_trace.tactical_reward;
         return SoccerTacticalLearningTrace {
             attack_shape: false,
@@ -22004,6 +22698,23 @@ fn tactical_shape_trace(
             defense_role_press_distance_yards: after_role_press.distance_yards,
             defense_role_press_score: after_role_press.score,
             defense_role_press_delta: after_role_press.score - before_role_press.score,
+            before_vertical_lane_affinity_score: positional_signal
+                .before_vertical_lane_affinity_score,
+            after_vertical_lane_affinity_score: positional_signal
+                .after_vertical_lane_affinity_score,
+            vertical_lane_affinity_delta: positional_signal.after_vertical_lane_affinity_score
+                - positional_signal.before_vertical_lane_affinity_score,
+            before_teammate_congestion_pressure: positional_signal
+                .before_teammate_congestion_pressure,
+            after_teammate_congestion_pressure: positional_signal
+                .after_teammate_congestion_pressure,
+            teammate_congestion_delta: positional_signal.after_teammate_congestion_pressure
+                - positional_signal.before_teammate_congestion_pressure,
+            before_role_line_deviation_yards: positional_signal.before_role_line_deviation_yards,
+            after_role_line_deviation_yards: positional_signal.after_role_line_deviation_yards,
+            role_line_deviation_delta_yards: positional_signal.after_role_line_deviation_yards
+                - positional_signal.before_role_line_deviation_yards,
+            positional_shape_reward: positional_signal.reward,
             tactical_reward: reward,
             ..lp_trace
         };
@@ -26275,6 +26986,7 @@ pub struct SoccerStepResponse {
     pub recent_moments: Vec<SoccerMomentSummary>,
     pub moment_storage: SoccerMomentStorageStatus,
     pub learning: SoccerLearningSnapshot,
+    pub tactical_summary: SoccerTacticalLearningSummary,
     pub policy_autosave: SoccerPolicyAutosaveStatus,
     pub policy_storage: SoccerPolicyStorageStatus,
     pub policy_probability: SoccerPolicyProbabilitySummaryStatus,
@@ -26318,6 +27030,7 @@ pub struct SoccerLiveStateResponse {
     pub policy_autosave: SoccerPolicyAutosaveStatus,
     pub policy_storage: SoccerPolicyStorageStatus,
     pub policy_probability: SoccerPolicyProbabilitySummaryStatus,
+    pub tactical_summary: SoccerTacticalLearningSummary,
     pub episode_index: usize,
     pub completed_episodes: Vec<SoccerLiveEpisodeSummary>,
     pub summary: MatchSummary,
@@ -29001,6 +29714,9 @@ fn soccer_neural_transition_features(
         soccer_neural_bool(state.defensive_cross_arrival_threat_available),
         1.0 - soccer_neural_bin(state.defensive_cross_arrival_threat_distance_bin, 5.0),
         soccer_neural_bin(state.defensive_cross_arrival_threat_fit_bin, 5.0),
+        soccer_neural_bin(state.vertical_lane_affinity_bin, 5.0),
+        1.0 - soccer_neural_bin(state.vertical_lane_deviation_bin, 5.0),
+        1.0 - soccer_neural_bin(state.teammate_occupied_space_pressure_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -35682,6 +36398,18 @@ impl SoccerRealtimeSession {
         self.step(SoccerStepRequest::default())
     }
 
+    fn record_tracking_frame_if_new_tick(&mut self) {
+        if self
+            .tracking_frames
+            .last()
+            .is_some_and(|frame| frame.tick == self.sim.tick)
+        {
+            return;
+        }
+        self.tracking_frames
+            .push(tracking_frame_from_match(&self.sim));
+    }
+
     pub fn step(&mut self, request: SoccerStepRequest) -> SoccerStepResponse {
         let accepted_inputs = self.push_human_inputs(request.inputs);
 
@@ -35693,12 +36421,12 @@ impl SoccerRealtimeSession {
                 break;
             }
             self.sim.run_time_step();
-            self.tracking_frames
-                .push(tracking_frame_from_match(&self.sim));
             if (i + 1) % record_every == 0 || self.sim.is_done() {
+                self.record_tracking_frame_if_new_tick();
                 frames.push(self.sim.to_frame());
             }
         }
+        self.record_tracking_frame_if_new_tick();
         if frames.is_empty() {
             frames.push(self.sim.to_frame());
         }
@@ -35725,6 +36453,7 @@ impl SoccerRealtimeSession {
             recent_moments: self.recent_moment_summaries(),
             moment_storage: self.moment_storage_status(),
             learning: self.sim.learning_stats_snapshot(),
+            tactical_summary: self.sim.tactical_summary.clone(),
             policy_autosave: self.policy_autosave.status(),
             policy_storage: self.policy_storage_status(),
             policy_probability: self.sim.team_policy_probability_summary(),
@@ -35747,14 +36476,17 @@ impl SoccerRealtimeSession {
         let accepted_inputs = self.push_human_inputs(request.inputs);
 
         let ticks = request.ticks.max(1);
-        for _ in 0..ticks {
+        let record_every = request.record_every_ticks.unwrap_or(1).max(1);
+        for i in 0..ticks {
             if self.sim.is_done() {
                 break;
             }
             self.sim.run_time_step();
-            self.tracking_frames
-                .push(tracking_frame_from_match(&self.sim));
+            if (i + 1) % record_every == 0 || self.sim.is_done() {
+                self.record_tracking_frame_if_new_tick();
+            }
         }
+        self.record_tracking_frame_if_new_tick();
 
         self.maybe_auto_save_policy();
 
@@ -35776,6 +36508,7 @@ impl SoccerRealtimeSession {
             recent_moments: self.recent_moment_summaries(),
             moment_storage: self.moment_storage_status(),
             learning: self.sim.learning_stats_snapshot(),
+            tactical_summary: self.sim.tactical_summary.clone(),
             policy_autosave: self.policy_autosave.status(),
             policy_storage: self.policy_storage_status(),
             policy_probability: self.sim.team_policy_probability_summary(),
@@ -36112,8 +36845,8 @@ impl SoccerRealtimeSession {
             stores_visits: true,
             stores_action_probabilities: true,
             action_probabilities_derived: true,
-            postgres_enabled: false,
-            postgres_table: None,
+            postgres_enabled: true,
+            postgres_table: Some(SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE.to_string()),
             postgres_contract: SoccerPolicyPostgresStorageContract::default(),
         }
     }
@@ -36350,6 +37083,7 @@ impl SoccerRealtimeSession {
             policy_autosave: self.policy_autosave.status(),
             policy_storage: self.policy_storage_status(),
             policy_probability: self.sim.team_policy_probability_summary(),
+            tactical_summary: self.sim.tactical_summary.clone(),
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
@@ -44478,10 +45212,18 @@ fn pass_target_quality_for_snapshot(
         initial_anticipated_target
     };
     let distance = passer_position.distance(anticipated_target);
-    let current_receiver_openness =
-        pass_receiver_openness_for_snapshots(&snapshot.players, passer.team, target_position);
-    let anticipated_receiver_openness =
-        pass_receiver_openness_for_snapshots(&snapshot.players, passer.team, anticipated_target);
+    let current_receiver_openness = pass_receiver_openness_for_snapshots_with_teammates(
+        &snapshot.players,
+        passer.team,
+        target_position,
+        Some(target.id),
+    );
+    let anticipated_receiver_openness = pass_receiver_openness_for_snapshots_with_teammates(
+        &snapshot.players,
+        passer.team,
+        anticipated_target,
+        Some(target.id),
+    );
     let target_forward = (anticipated_target.y - passer_position.y) * passer.team.attack_dir();
     let anticipation_weight = if target_forward > 2.0 {
         0.38 + pass_skill * 0.34
@@ -44843,6 +45585,31 @@ fn pass_receiver_openness_for_snapshots(
         .map(|player| player.position.distance(receiver_position))
         .fold(f64::INFINITY, f64::min);
     receiver_openness_from_nearest_opponent_distance(nearest)
+}
+
+fn pass_receiver_openness_for_snapshots_with_teammates(
+    players: &[PlayerSnapshot],
+    receiving_team: Team,
+    receiver_position: Vec2,
+    receiver_id: Option<usize>,
+) -> f64 {
+    let opponent_openness =
+        pass_receiver_openness_for_snapshots(players, receiving_team, receiver_position);
+    let nearest_teammate = players
+        .iter()
+        .filter(|player| player.team == receiving_team)
+        .filter(|player| receiver_id != Some(player.id))
+        .map(|player| player.position.distance(receiver_position))
+        .fold(f64::INFINITY, f64::min);
+    let teammate_pressure = if nearest_teammate <= TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS {
+        1.0
+    } else {
+        ((TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - nearest_teammate)
+            / (TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS)
+                .max(1e-6))
+        .clamp(0.0, 1.0)
+    };
+    (opponent_openness * (1.0 - teammate_pressure * 0.72)).clamp(0.02, 1.0)
 }
 
 fn noisy_pass_target(
@@ -51023,6 +51790,60 @@ mod tests {
     }
 
     #[test]
+    fn assistant_referees_stay_off_pitch_and_in_assigned_halves() {
+        let sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let half = snapshot.field_length * 0.5;
+        let mut near_assistant = OfficialAgent::new(
+            23,
+            OfficialKind::AssistantRefereeNear,
+            Vec2::new(snapshot.field_width * 0.5, snapshot.field_length * 0.90),
+        );
+        let mut far_assistant = OfficialAgent::new(
+            24,
+            OfficialKind::AssistantRefereeFar,
+            Vec2::new(snapshot.field_width * 0.5, snapshot.field_length * 0.10),
+        );
+        let mut rng = SeededRandom::new(302);
+
+        near_assistant.run_time_step(&snapshot, &mut rng);
+        far_assistant.run_time_step(&snapshot, &mut rng);
+
+        assert!(
+            (near_assistant.position.x + ASSISTANT_REF_TOUCHLINE_OFFSET_YARDS).abs() < 1e-9,
+            "near assistant should stand just off the near touchline: {:?}",
+            near_assistant.position
+        );
+        assert!(
+            (0.0..=half).contains(&near_assistant.position.y),
+            "near assistant should stay in first half: {:?}",
+            near_assistant.position
+        );
+        assert!(
+            (far_assistant.position.x
+                - (snapshot.field_width + ASSISTANT_REF_TOUCHLINE_OFFSET_YARDS))
+                .abs()
+                < 1e-9,
+            "far assistant should stand just off the far touchline: {:?}",
+            far_assistant.position
+        );
+        assert!(
+            (half..=snapshot.field_length).contains(&far_assistant.position.y),
+            "far assistant should stay in second half: {:?}",
+            far_assistant.position
+        );
+
+        let near_line =
+            assistant_offside_line_snapshot(&snapshot, OfficialKind::AssistantRefereeNear)
+                .expect("near assistant offside line");
+        let far_line =
+            assistant_offside_line_snapshot(&snapshot, OfficialKind::AssistantRefereeFar)
+                .expect("far assistant offside line");
+        assert_eq!(near_line.flank, AssistantFlank::Near);
+        assert_eq!(far_line.flank, AssistantFlank::Far);
+    }
+
+    #[test]
     fn central_brain_snapshot_exposes_center_of_play_centroids() {
         let sim = SoccerMatch::default_11v11(MatchConfig::default());
         let mut snapshot = WorldSnapshot::from_match(&sim);
@@ -53218,6 +54039,56 @@ mod tests {
     }
 
     #[test]
+    fn live_http_step_batches_tracking_frames_by_record_cadence() {
+        let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+            duration_seconds: 2.0,
+            seed: 861,
+            ..Default::default()
+        });
+
+        let response = session.step_for_live_http(SoccerStepRequest {
+            ticks: 10,
+            record_every_ticks: Some(5),
+            ..Default::default()
+        });
+        let tracking = session.tracking_dataset();
+
+        assert_eq!(response.summary.ticks, 10);
+        assert!(response.frames.is_empty());
+        assert!(response.learning_transitions.is_empty());
+        assert_eq!(tracking.frames.len(), 3);
+        assert_eq!(tracking.frames[0].tick, 0);
+        assert_eq!(tracking.frames[1].tick, 5);
+        assert_eq!(tracking.frames[2].tick, 10);
+        assert!(response.live_http.batches_step_ticks);
+    }
+
+    #[test]
+    fn live_http_step_tracks_final_frame_when_record_cadence_exceeds_batch() {
+        let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+            duration_seconds: 2.0,
+            seed: 862,
+            ..Default::default()
+        });
+
+        let response = session.step_for_live_http(SoccerStepRequest {
+            ticks: 3,
+            record_every_ticks: Some(100),
+            ..Default::default()
+        });
+        let tracking = session.tracking_dataset();
+
+        assert_eq!(response.summary.ticks, 3);
+        assert_eq!(tracking.frames.len(), 2);
+        assert_eq!(tracking.frames[0].tick, 0);
+        assert_eq!(tracking.frames[1].tick, 3);
+        assert_eq!(
+            tracking.frames[1].ball_position,
+            response.frame.ball.position
+        );
+    }
+
+    #[test]
     fn realtime_session_captures_goal_moment_windows() {
         let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
             duration_seconds: 1.0,
@@ -54292,6 +55163,7 @@ mod tests {
     fn realtime_session_step_json_round_trips() {
         let mut session = SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
+            learning_interval_ticks: 1,
             max_human_players: 2,
             seed: 12,
             ..Default::default()
@@ -54303,10 +55175,25 @@ mod tests {
         assert_eq!(value["summary"]["ticks"], 3);
         assert_eq!(value["frames"].as_array().unwrap().len(), 3);
         assert_eq!(value["controllerAssignments"].as_array().unwrap().len(), 0);
-        assert_eq!(value["learningTransitions"].as_array().unwrap().len(), 66);
+        assert!(value["learningTransitions"].is_array());
         assert_eq!(value["learning"]["totalTransitions"], 66);
         assert_eq!(value["learning"]["teamPoliciesEnabled"], true);
         assert_eq!(value["learning"]["adversarialLearningEnabled"], true);
+        assert!(value.get("tacticalSummary").is_some());
+        assert!(value["tacticalSummary"]["totalTransitions"]
+            .as_u64()
+            .is_some());
+        assert!(value["tacticalSummary"]["shapeTransitions"]
+            .as_u64()
+            .is_some());
+        assert!(value["tacticalSummary"]["meanVerticalLaneAffinityScore"]
+            .as_f64()
+            .unwrap()
+            .is_finite());
+        assert!(value["tacticalSummary"]["meanPositionalShapeReward"]
+            .as_f64()
+            .unwrap()
+            .is_finite());
         assert!(value["learning"]["homePolicyEntries"].as_u64().unwrap() > 0);
         assert!(value["learning"]["awayPolicyEntries"].as_u64().unwrap() > 0);
         assert!(
@@ -56294,11 +57181,53 @@ mod tests {
             (sim.tactical_summary.mean_tactical_reward - recomputed.mean_tactical_reward).abs()
                 < 1e-12
         );
+        assert!(
+            (sim.tactical_summary.mean_vertical_lane_affinity_score
+                - recomputed.mean_vertical_lane_affinity_score)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (sim.tactical_summary.mean_teammate_congestion_pressure
+                - recomputed.mean_teammate_congestion_pressure)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (sim.tactical_summary.mean_role_line_deviation_yards
+                - recomputed.mean_role_line_deviation_yards)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (sim.tactical_summary.mean_positional_shape_reward
+                - recomputed.mean_positional_shape_reward)
+                .abs()
+                < 1e-12
+        );
+        assert!(sim.tactical_summary.mean_vertical_lane_affinity_score > 0.0);
+        assert!(sim
+            .tactical_summary
+            .mean_teammate_congestion_pressure
+            .is_finite());
+        assert!(
+            sim.tactical_summary.mean_positional_shape_reward.abs()
+                <= POSITIONAL_SHAPE_REWARD_CLAMP + 1e-9
+        );
 
         let artifact = sim.team_policy_artifact();
         assert_eq!(
             artifact.tactical_summary.total_transitions,
             sim.tactical_summary.total_transitions
+        );
+        let artifact_json = serde_json::to_value(&artifact).expect("team policy artifact json");
+        assert_eq!(
+            artifact_json["tacticalSummary"]["meanVerticalLaneAffinityScore"],
+            serde_json::json!(artifact.tactical_summary.mean_vertical_lane_affinity_score)
+        );
+        assert_eq!(
+            artifact_json["tacticalSummary"]["meanPositionalShapeReward"],
+            serde_json::json!(artifact.tactical_summary.mean_positional_shape_reward)
         );
     }
 
@@ -56321,6 +57250,19 @@ mod tests {
         assert_eq!(
             sim.tactical_summary.shape_transitions,
             sim.tactical_summary.attack_transitions + sim.tactical_summary.defense_transitions
+        );
+        assert!(sim.tactical_summary.mean_vertical_lane_affinity_score > 0.0);
+        assert!(sim
+            .tactical_summary
+            .mean_teammate_congestion_pressure
+            .is_finite());
+        assert!(sim
+            .tactical_summary
+            .mean_role_line_deviation_yards
+            .is_finite());
+        assert!(
+            sim.tactical_summary.mean_positional_shape_reward.abs()
+                <= POSITIONAL_SHAPE_REWARD_CLAMP + 1e-9
         );
 
         let artifact = sim.team_policy_artifact();
@@ -62061,6 +63003,288 @@ mod tests {
     }
 
     #[test]
+    fn support_runs_treat_teammate_occupied_space_as_not_open() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        let occupying_teammate = 10;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(35.0, 88.0 + (away - 11) as f64 * 0.5);
+        }
+
+        let open_snapshot = WorldSnapshot::from_match(&sim);
+        let open_target = open_snapshot.positional_open_space_for(
+            winger,
+            sim.players[winger].home_position,
+            false,
+        );
+
+        sim.players[occupying_teammate].position = open_target;
+        let occupied_snapshot = WorldSnapshot::from_match(&sim);
+        let occupied_pressure = occupied_snapshot.teammate_occupied_space_pressure_at(
+            Team::Home,
+            open_target,
+            Some(winger),
+        );
+        let adjusted_target = occupied_snapshot.positional_open_space_for(
+            winger,
+            sim.players[winger].home_position,
+            false,
+        );
+
+        assert!(
+            occupied_pressure > 0.90,
+            "teammate at the run target should make that space occupied: {occupied_pressure}"
+        );
+        assert!(
+            adjusted_target.distance(open_target) > 2.0,
+            "support target should move away from teammate-occupied space: open={open_target:?} adjusted={adjusted_target:?}"
+        );
+        assert!(
+            adjusted_target.distance(sim.players[occupying_teammate].position)
+                > TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS,
+            "adjusted support target should not stay inside the hard teammate-occupied radius: {adjusted_target:?}"
+        );
+    }
+
+    #[test]
+    fn defenders_and_midfielders_preserve_vertical_lanes_by_phase() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 9;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(74.0, 62.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+
+        let possession_snapshot = WorldSnapshot::from_match(&sim);
+        for player_id in [1usize, 2, 3, 4, 5, 6, 7, 8] {
+            let player = &sim.players[player_id];
+            let target = possession_snapshot.positional_open_space_for(
+                player_id,
+                player.home_position,
+                false,
+            );
+            assert_eq!(
+                vertical_lane_index(target.x, possession_snapshot.field_width),
+                vertical_lane_index(player.home_position.x, possession_snapshot.field_width),
+                "{} should keep its vertical lane in possession: home={:?} target={:?}",
+                player.name,
+                player.home_position,
+                target
+            );
+        }
+
+        let away_holder = 17;
+        sim.ball.holder = Some(away_holder);
+        sim.ball.position = Vec2::new(72.0, 72.0);
+        sim.ball.last_touch_team = Some(Team::Away);
+        sim.players[away_holder].position = sim.ball.position;
+        let defense_snapshot = WorldSnapshot::from_match(&sim);
+        for player_id in [1usize, 2, 3, 4, 5, 6, 7, 8] {
+            let player = &sim.players[player_id];
+            let target =
+                defense_snapshot.defensive_assignment_for(player_id, player.home_position, false);
+            assert_eq!(
+                vertical_lane_index(target.x, defense_snapshot.field_width),
+                vertical_lane_index(player.home_position.x, defense_snapshot.field_width),
+                "{} should keep its vertical lane while defending unless actively tracking: home={:?} target={:?}",
+                player.name,
+                player.home_position,
+                target
+            );
+        }
+    }
+
+    #[test]
+    fn pomdp_q_state_and_neural_features_track_lane_and_teammate_congestion() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let midfielder = 6;
+        sim.players[midfielder].position = Vec2::new(64.0, 55.0);
+        sim.players[8].position = Vec2::new(64.8, 55.3);
+        sim.ball.holder = Some(7);
+        sim.ball.position = Vec2::new(40.0, 58.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(midfielder);
+        let state = snapshot.mdp_state_for_player(midfielder);
+        let key =
+            SoccerQStateKey::from_parts(&state, &observation, Team::Home, PlayerRole::Midfielder);
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: midfielder,
+            team: Team::Home,
+            role: PlayerRole::Midfielder,
+            state,
+            observation: observation.clone(),
+            belief: belief_from_observation(&observation),
+            action: "support-shape".to_string(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(midfielder),
+            next_observation: observation.clone(),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
+
+        assert!(
+            observation.vertical_lane_affinity_score < 0.70,
+            "midfielder moved across lane should expose low lane affinity: {observation:?}"
+        );
+        assert!(
+            observation.vertical_lane_deviation_yards > 4.0,
+            "midfielder moved across lane should expose lane deviation"
+        );
+        assert!(
+            observation.teammate_occupied_space_pressure > 0.80,
+            "nearby teammate should expose congestion pressure"
+        );
+        assert!(key.vertical_lane_affinity_bin < 3);
+        assert!(key.vertical_lane_deviation_bin >= 2);
+        assert!(key.teammate_occupied_space_pressure_bin >= 3);
+        assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_DIM - 1] < 0.45,
+            "final neural feature should encode teammate congestion as low open-space score"
+        );
+    }
+
+    #[test]
+    fn tactical_reward_penalizes_lane_swap_into_teammate_space() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 7;
+        let midfielder = 6;
+        let occupied_teammate = 8;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 58.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[occupied_teammate].position = Vec2::new(64.0, 58.0);
+
+        let before = WorldSnapshot::from_match(&sim);
+        let start = before.player_position(midfielder).unwrap();
+        let mut good_after = before.clone();
+        let good_target = Vec2::new(start.x, start.y + 4.0);
+        good_after.set_player_position(midfielder, good_target);
+        let mut bad_after = before.clone();
+        let bad_target = sim.players[occupied_teammate].position;
+        bad_after.set_player_position(midfielder, bad_target);
+
+        let weights = SoccerTacticalLearningWeights::default();
+        let good_trace = tactical_shape_trace_for_snapshots(
+            midfielder,
+            Team::Home,
+            PlayerRole::Midfielder,
+            &before,
+            &good_after,
+            start,
+            good_target,
+            &weights,
+        );
+        let bad_trace = tactical_shape_trace_for_snapshots(
+            midfielder,
+            Team::Home,
+            PlayerRole::Midfielder,
+            &before,
+            &bad_after,
+            start,
+            bad_target,
+            &weights,
+        );
+
+        assert!(
+            bad_trace.after_teammate_congestion_pressure > 0.85,
+            "bad run should land in teammate-occupied space: {bad_trace:?}"
+        );
+        assert!(
+            bad_trace.after_vertical_lane_affinity_score
+                < good_trace.after_vertical_lane_affinity_score,
+            "lane swap should have worse lane affinity: good={good_trace:?} bad={bad_trace:?}"
+        );
+        assert!(
+            bad_trace.positional_shape_reward < good_trace.positional_shape_reward - 0.25,
+            "positional reward should teach the learner to avoid occupied lane swaps: good={good_trace:?} bad={bad_trace:?}"
+        );
+        assert!(
+            bad_trace.tactical_reward < good_trace.tactical_reward,
+            "overall tactical reward should prefer in-lane support shape"
+        );
+    }
+
+    #[test]
+    fn tactical_reward_penalizes_defender_drifting_out_of_line() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let away_holder = 17;
+        sim.ball.holder = Some(away_holder);
+        sim.ball.position = Vec2::new(68.0, 78.0);
+        sim.ball.last_touch_team = Some(Team::Away);
+        sim.players[away_holder].position = sim.ball.position;
+        for id in [1usize, 2, 3, 4] {
+            sim.players[id].position.y = 31.0;
+        }
+
+        let before = WorldSnapshot::from_match(&sim);
+        let start = before.player_position(defender).unwrap();
+        let mut good_after = before.clone();
+        let good_target = Vec2::new(start.x, start.y + 1.0);
+        good_after.set_player_position(defender, good_target);
+        let mut bad_after = before.clone();
+        let bad_target = Vec2::new(sim.players[3].position.x, start.y + 19.0);
+        bad_after.set_player_position(defender, bad_target);
+        bad_after.set_player_position(3, Vec2::new(bad_target.x + 0.8, bad_target.y - 0.4));
+
+        let weights = SoccerTacticalLearningWeights::default();
+        let good_trace = tactical_shape_trace_for_snapshots(
+            defender,
+            Team::Home,
+            PlayerRole::Defender,
+            &before,
+            &good_after,
+            start,
+            good_target,
+            &weights,
+        );
+        let bad_trace = tactical_shape_trace_for_snapshots(
+            defender,
+            Team::Home,
+            PlayerRole::Defender,
+            &before,
+            &bad_after,
+            start,
+            bad_target,
+            &weights,
+        );
+
+        assert!(
+            bad_trace.after_role_line_deviation_yards
+                > good_trace.after_role_line_deviation_yards + 9.0,
+            "bad defender target should break the defensive line: good={good_trace:?} bad={bad_trace:?}"
+        );
+        assert!(
+            bad_trace.after_teammate_congestion_pressure > 0.60,
+            "drifting into another defender's lane should be congested"
+        );
+        assert!(
+            bad_trace.positional_shape_reward < good_trace.positional_shape_reward - 0.25,
+            "positional reward should teach back-line discipline: good={good_trace:?} bad={bad_trace:?}"
+        );
+        assert!(
+            bad_trace.tactical_reward < good_trace.tactical_reward,
+            "overall tactical reward should prefer staying aligned"
+        );
+    }
+
+    #[test]
     fn aerial_passes_are_harder_and_lead_open_wide_outlets() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let passer = 6;
@@ -67654,6 +68878,8 @@ mod tests {
         assert!(html.body.contains("humanInputPresent"));
         assert!(html.body.contains("humanInputQueueAgeMs"));
         assert!(html.body.contains("controllerSlot"));
+        assert!(html.body.contains("function policyStorageLabel"));
+        assert!(html.body.contains("PG ${retention}"));
         assert!(html.body.contains("id=\"controllerLatency\""));
         assert!(html.body.contains("function consumedHumanInputAgeLabel"));
         assert!(html
@@ -67716,6 +68942,17 @@ mod tests {
         assert!(html.body.contains("function liveHttpLabel"));
         assert!(html.body.contains("id=\"runtimeTiming\""));
         assert!(html.body.contains("function runtimeTimingLabel"));
+        assert!(html.body.contains("id=\"shapeLearning\""));
+        assert!(html.body.contains("function shapeLearningLabel"));
+        assert!(html.body.contains("meanVerticalLaneAffinityScore"));
+        assert!(html
+            .body
+            .contains("tacticalSummary: response.tacticalSummary"));
+        assert!(html.body.contains("stepTiming: response.stepTiming"));
+        assert!(html
+            .body
+            .contains("controllerLatencyBudget: response.controllerLatencyBudget"));
+        assert!(html.body.contains("liveHttp: response.liveHttp"));
         assert!(html.body.contains("id=\"inspectMode\""));
         assert!(html.body.contains("function inspectModeEnabled"));
         assert!(html.body.contains("let inspectedPlayerId = null;"));
@@ -67779,6 +69016,12 @@ mod tests {
             .get("flankAttackPolicy")
             .is_some());
         assert_eq!(state_value["learning"]["totalTransitions"], 0);
+        assert_eq!(state_value["tacticalSummary"]["totalTransitions"], 0);
+        assert_eq!(state_value["tacticalSummary"]["shapeTransitions"], 0);
+        assert_eq!(
+            state_value["tacticalSummary"]["meanVerticalLaneAffinityScore"],
+            0.0
+        );
         assert!(state_value["recentMoments"].as_array().unwrap().is_empty());
         assert_eq!(state_value["momentStorage"]["backend"], "jsonl-disk");
         assert_eq!(
@@ -67803,7 +69046,11 @@ mod tests {
             state_value["policyStorage"]["actionProbabilitiesDerived"],
             true
         );
-        assert_eq!(state_value["policyStorage"]["postgresEnabled"], false);
+        assert_eq!(state_value["policyStorage"]["postgresEnabled"], true);
+        assert_eq!(
+            state_value["policyStorage"]["postgresTable"],
+            SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
+        );
         assert_eq!(
             state_value["policyStorage"]["postgresContract"]["backend"],
             SOCCER_POLICY_POSTGRES_BACKEND
@@ -67936,6 +69183,33 @@ mod tests {
         assert_eq!(value["learning"]["totalTransitions"], 44);
         assert_eq!(value["learning"]["learningIntervalTicks"], 1);
         assert_eq!(value["learning"]["policyTrainMaxTransitionsPerTick"], 24);
+        let tactical_total = value["tacticalSummary"]["totalTransitions"]
+            .as_u64()
+            .expect("tactical total transitions");
+        let tactical_shape = value["tacticalSummary"]["shapeTransitions"]
+            .as_u64()
+            .expect("tactical shape transitions");
+        assert!(tactical_total > 0);
+        assert!(tactical_total <= value["learning"]["totalTransitions"].as_u64().unwrap());
+        assert!(tactical_shape > 0);
+        assert!(tactical_shape <= tactical_total);
+        assert!(
+            value["tacticalSummary"]["meanVerticalLaneAffinityScore"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+        assert!(value["tacticalSummary"]["meanTeammateCongestionPressure"]
+            .as_f64()
+            .unwrap()
+            .is_finite());
+        assert!(
+            value["tacticalSummary"]["meanPositionalShapeReward"]
+                .as_f64()
+                .unwrap()
+                .abs()
+                <= POSITIONAL_SHAPE_REWARD_CLAMP + 1e-9
+        );
         assert!(value["learning"]["homePolicyEntries"].as_u64().unwrap() > 0);
         assert!(value["learning"]["awayPolicyEntries"].as_u64().unwrap() > 0);
         assert!(value["policyProbability"]["homeStates"].as_u64().unwrap() > 0);
@@ -68833,12 +70107,16 @@ mod tests {
             autosave_value["storage"]["historyPath"],
             history_path.display().to_string()
         );
-        assert_eq!(autosave_value["storage"]["postgresEnabled"], false);
+        assert_eq!(autosave_value["storage"]["postgresEnabled"], true);
+        assert_eq!(
+            autosave_value["storage"]["postgresTable"],
+            SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
+        );
         assert_eq!(autosave_value["autosave"]["historyRecords"], 0);
         assert!(!policy_path.exists());
         assert!(!history_path.exists());
 
-        let step_body = r#"{"ticks":1,"recordEveryTicks":1}"#;
+        let step_body = r#"{"ticks":4,"recordEveryTicks":4}"#;
         let step = handle_live_soccer_request(
             &format!(
                 "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
@@ -68854,7 +70132,7 @@ mod tests {
         let step_value: serde_json::Value =
             serde_json::from_str(&step.body).expect("step with autosave json");
         assert_eq!(step_value["policyAutosave"]["enabled"], true);
-        assert_eq!(step_value["policyAutosave"]["lastSavedTick"], 1);
+        assert_eq!(step_value["policyAutosave"]["lastSavedTick"], 4);
         assert_eq!(
             step_value["policyAutosave"]["historyPath"],
             history_path.display().to_string()
@@ -68869,13 +70147,13 @@ mod tests {
         );
 
         let artifact = read_soccer_team_policy_artifact(&policy_path).expect("autosaved policy");
-        assert_eq!(artifact.summary.ticks, 1);
+        assert_eq!(artifact.summary.ticks, 4);
         assert!(!artifact.home_entries.is_empty());
         assert!(!artifact.away_entries.is_empty());
         let history = read_policy_history_jsonl(&history_path);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0]["kind"], "autosave");
-        assert_eq!(history[0]["tick"].as_u64().unwrap(), 1);
+        assert_eq!(history[0]["tick"].as_u64().unwrap(), 4);
         assert_eq!(history[0]["path"], policy_path.display().to_string());
         assert_eq!(
             history[0]["homePolicyEntries"].as_u64().unwrap(),
@@ -69238,8 +70516,8 @@ mod tests {
             ..Default::default()
         });
         source.step(SoccerStepRequest {
-            ticks: 1,
-            record_every_ticks: Some(1),
+            ticks: 4,
+            record_every_ticks: Some(4),
             ..Default::default()
         });
         let saved = source
@@ -69298,7 +70576,11 @@ mod tests {
         assert!(state.policy_storage.stores_visits);
         assert!(state.policy_storage.stores_action_probabilities);
         assert!(state.policy_storage.action_probabilities_derived);
-        assert!(!state.policy_storage.postgres_enabled);
+        assert!(state.policy_storage.postgres_enabled);
+        assert_eq!(
+            state.policy_storage.postgres_table.as_deref(),
+            Some(SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE)
+        );
         assert_eq!(
             state.policy_storage.postgres_contract.backend,
             SOCCER_POLICY_POSTGRES_BACKEND

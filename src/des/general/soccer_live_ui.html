@@ -403,6 +403,7 @@
         </select>
       </div>
       <div class="metric"><span>Learning</span><b id="learning">T0 H0 A0</b></div>
+      <div class="metric"><span>Shape Learn</span><b id="shapeLearning">L0.00 C0.00 D0.0 R0.00</b></div>
       <div class="metric"><span>Policy Save</span><b id="policyAutosave">Off</b></div>
       <div class="metric"><span>Policy Store</span><b id="policyStorage">JSON</b></div>
       <div class="metric"><span>Policy Prob</span><b id="policyProbability">H0/0 A0/0</b></div>
@@ -595,6 +596,7 @@ const matchStep = document.getElementById("matchStep");
 const simSpeed = document.getElementById("simSpeed");
 const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const learning = document.getElementById("learning");
+const shapeLearning = document.getElementById("shapeLearning");
 const policyAutosave = document.getElementById("policyAutosave");
 const policyStorage = document.getElementById("policyStorage");
 const policyProbability = document.getElementById("policyProbability");
@@ -1019,6 +1021,19 @@ function learningLabel(l) {
   const deferred = Math.max(0, Math.round(Number(l.deferredRewardTransitions ?? 0)));
   const deferredText = deferred ? ` Q${deferred}` : "";
   return `${mode}${log} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
+}
+function shapeLearningLabel(summary = state?.tacticalSummary) {
+  if (!summary) return "L0.00 C0.00 D0.0 R0.00";
+  const lane = Number(summary.meanVerticalLaneAffinityScore ?? 0);
+  const laneDelta = Number(summary.meanVerticalLaneAffinityDelta ?? 0);
+  const congestion = Number(summary.meanTeammateCongestionPressure ?? 0);
+  const congestionDelta = Number(summary.meanTeammateCongestionDelta ?? 0);
+  const line = Number(summary.meanRoleLineDeviationYards ?? 0);
+  const reward = Number(summary.meanPositionalShapeReward ?? 0);
+  const shapeTransitions = Math.max(0, Math.round(Number(summary.shapeTransitions ?? 0)));
+  const laneDeltaText = laneDelta ? `${laneDelta >= 0 ? "+" : ""}${laneDelta.toFixed(2)}` : "+0.00";
+  const congestionDeltaText = congestionDelta ? `${congestionDelta >= 0 ? "+" : ""}${congestionDelta.toFixed(2)}` : "+0.00";
+  return `L${lane.toFixed(2)}(${laneDeltaText}) C${congestion.toFixed(2)}(${congestionDeltaText}) D${line.toFixed(1)} R${reward.toFixed(2)} S${shapeTransitions}`;
 }
 function ballAgentLabel(ball = state?.frame?.ball) {
   const decision = ball?.lastDecision;
@@ -2653,6 +2668,7 @@ function render() {
   matchStep.textContent = matchStepLabel();
   simSpeed.textContent = simSpeedLabel();
   learning.textContent = learningLabel(state.learning);
+  shapeLearning.textContent = shapeLearningLabel(state.tacticalSummary);
   policyAutosave.textContent = policyAutosaveLabel(state.policyAutosave);
   policyStorage.textContent = policyStorageLabel(state.policyStorage);
   policyProbability.textContent = policyProbabilityLabel();
@@ -3710,6 +3726,7 @@ async function stepOnce(options = {}) {
       config: state.config,
       frame: response.frame,
       learning: response.learning,
+      tacticalSummary: response.tacticalSummary,
       recentMoments: response.recentMoments || [],
       momentStorage: response.momentStorage,
       policyAutosave: response.policyAutosave,
@@ -3718,10 +3735,13 @@ async function stepOnce(options = {}) {
       episodeIndex: response.episodeIndex,
       completedEpisodes: response.completedEpisodes,
       summary: response.summary,
+      stepTiming: response.stepTiming,
       controllerAssignments: response.controllerAssignments,
       controllerThreads: response.controllerThreads || [],
       controllerYield: response.controllerYield,
+      controllerLatencyBudget: response.controllerLatencyBudget,
       queuedHumanInputs: response.queuedHumanInputs ?? 0,
+      liveHttp: response.liveHttp,
       done: response.done,
       policyHistory: previousPolicyHistory
     };

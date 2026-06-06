@@ -37341,6 +37341,50 @@ pub fn soccer_live_page_html() -> String {
     include_str!("soccer_live_ui.html").to_string()
 }
 
+pub fn soccer_simulation_trace_jsonl(trace: &SimulationTrace) -> String {
+    let mut lines = Vec::with_capacity(trace.frames.len() + trace.events.len() + 2);
+    lines.push(
+        serde_json::to_string(&serde_json::json!({
+            "kind": "soccer-sim-header",
+            "schema": "dd.des.soccer.sim.trace.v1",
+            "config": &trace.config,
+            "frameCount": trace.frames.len(),
+            "eventCount": trace.events.len()
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
+    );
+    for (index, frame) in trace.frames.iter().enumerate() {
+        lines.push(
+            serde_json::to_string(&serde_json::json!({
+                "kind": "soccer-sim-frame",
+                "index": index,
+                "frame": frame
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
+    for (index, event) in trace.events.iter().enumerate() {
+        lines.push(
+            serde_json::to_string(&serde_json::json!({
+                "kind": "soccer-sim-event",
+                "index": index,
+                "event": event
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
+    lines.push(
+        serde_json::to_string(&serde_json::json!({
+            "kind": "soccer-sim-summary",
+            "summary": &trace.summary
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
+    );
+    let mut jsonl = lines.join("\n");
+    jsonl.push('\n');
+    jsonl
+}
+
 #[derive(Clone, Debug)]
 pub struct SoccerArtifactPaths {
     pub ui_path: PathBuf,
@@ -46403,6 +46447,49 @@ mod tests {
         assert_eq!(stats.skipped_no_assignment, 1);
         assert_eq!(stats.last_queued_before, 0);
         assert_eq!(stats.last_queued_after, 0);
+    }
+
+    #[test]
+    fn soccer_simulation_trace_exports_json_and_jsonl_records() {
+        let trace = run_simulation(
+            MatchConfig {
+                duration_seconds: 1.0,
+                seed: 101,
+                ..Default::default()
+            },
+            2,
+        );
+        let pretty_json = serde_json::to_string_pretty(&trace).expect("trace json");
+        let trace_value: serde_json::Value =
+            serde_json::from_str(&pretty_json).expect("parse trace json");
+        assert_eq!(
+            trace_value["frames"].as_array().unwrap().len(),
+            trace.frames.len()
+        );
+        assert_eq!(trace_value["summary"]["ticks"], trace.summary.ticks);
+
+        let jsonl = soccer_simulation_trace_jsonl(&trace);
+        let records = jsonl
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("jsonl record"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.first().unwrap()["kind"], "soccer-sim-header");
+        assert_eq!(
+            records.first().unwrap()["frameCount"],
+            trace.frames.len() as u64
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["kind"] == "soccer-sim-frame")
+                .count(),
+            trace.frames.len()
+        );
+        assert_eq!(records.last().unwrap()["kind"], "soccer-sim-summary");
+        assert_eq!(
+            records.last().unwrap()["summary"]["ticks"],
+            trace.summary.ticks
+        );
     }
 
     #[test]

@@ -67631,6 +67631,14 @@ mod tests {
         assert!(html.body.contains("id=\"seed\""));
         assert!(html.body.contains("id=\"seedInput\""));
         assert!(html.body.contains("id=\"replaySeed\""));
+        assert!(html.body.contains("height: 100dvh;"));
+        assert!(html.body.contains("overflow: hidden;"));
+        assert!(html.body.contains("const FIELD_RENDER_ASPECT = 2;"));
+        assert!(html
+            .body
+            .contains("<canvas id=\"pitch\" width=\"1280\" height=\"720\"></canvas>"));
+        assert!(html.body.contains("drawW = drawH * FIELD_RENDER_ASPECT"));
+        assert!(html.body.contains("x: r.x + Number(p.y || 0)"));
         assert!(html.body.contains("state.config.seed"));
         assert!(html.body.contains("function seedResetValue"));
         assert!(html.body.contains("resetMatch({seed: seedResetValue()})"));

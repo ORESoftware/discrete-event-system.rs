@@ -20,7 +20,8 @@ use des_engine::des::general::soccer::{
 use des_engine::des::soccer_learning::{
     evolve_soccer_tactical_learning_weights_from_genomes, evolve_soccer_team_policies,
     soccer_learning_run_score, soccer_policy_delta_entries,
-    soccer_policy_version_insert_status_after_active_head, soccer_postgres_policy_refresh_decision,
+    soccer_policy_version_insert_status_after_active_head, soccer_postgres_new_sim_refresh_plan,
+    soccer_postgres_policy_refresh_decision,
     soccer_should_flush_postgres_policy_versions_for_new_sim,
     soccer_should_refresh_postgres_for_new_sim, SoccerEvolutionOptions,
     SoccerLearningCompletedGame, SoccerPostgresPolicyRefreshCheck,
@@ -2348,21 +2349,24 @@ fn run() -> Result<(), Box<dyn Error>> {
         for offset in 0..batch_size {
             let episode = batch_start_episode + offset;
             if pg_refresh_for_new_sims {
-                let mut pending_async_pg_batches =
-                    if let Some(writer) = pg_completed_writer.as_mut() {
-                        pg_persisted_games += writer.drain_finished().map_err(invalid_data)?;
-                        writer.pending_batches
-                    } else {
-                        0
-                    };
+                let mut pending_async_pg_batches = 0usize;
+                let mut pending_async_policy_version_batches = 0usize;
+                if let Some(writer) = pg_completed_writer.as_mut() {
+                    pg_persisted_games += writer.drain_finished().map_err(invalid_data)?;
+                    pending_async_pg_batches = writer.pending_batches;
+                    pending_async_policy_version_batches = writer.pending_policy_version_batches;
+                }
+                let new_sim_refresh_plan = soccer_postgres_new_sim_refresh_plan(
+                    resume_artifact.is_some(),
+                    pg_refresh_with_resume_artifact,
+                    pg_flush_policy_versions_before_new_sim,
+                    pg_policy_version_buffer.len(),
+                    pending_async_policy_version_batches,
+                );
                 if let (Some(experiment_id), Some(store)) =
                     (pg_experiment_id.as_deref(), pg_store.as_mut())
                 {
-                    if soccer_should_flush_postgres_policy_versions_for_new_sim(
-                        pg_refresh_for_new_sims,
-                        pg_flush_policy_versions_before_new_sim,
-                        pg_policy_version_buffer.len(),
-                    ) {
+                    if new_sim_refresh_plan.flush_pending_policy_versions {
                         flush_postgres_policy_versions_for_new_sims(
                             store,
                             experiment_id,
@@ -2372,7 +2376,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             shard_count,
                         )?;
                     }
-                    if pg_flush_policy_versions_before_new_sim {
+                    if new_sim_refresh_plan.wait_for_async_policy_versions {
                         if let Some(writer) = pg_completed_writer.as_mut() {
                             pg_persisted_games += writer
                                 .drain_policy_versions_finished()
@@ -3261,6 +3265,21 @@ mod tests {
             true,
             DEFAULT_SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT
         ));
+    }
+
+    #[test]
+    fn default_postgres_new_sim_plan_publishes_evolved_heads_before_reads() {
+        let plan = soccer_postgres_new_sim_refresh_plan(
+            true,
+            DEFAULT_SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT,
+            DEFAULT_SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM,
+            1,
+            1,
+        );
+
+        assert!(plan.refresh_from_postgres);
+        assert!(plan.flush_pending_policy_versions);
+        assert!(plan.wait_for_async_policy_versions);
     }
 
     #[test]

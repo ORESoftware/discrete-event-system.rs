@@ -227,6 +227,13 @@ pub struct SoccerPostgresPolicyRefreshDecision {
     pub same_policy_newer_revision: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoccerPostgresNewSimRefreshPlan {
+    pub refresh_from_postgres: bool,
+    pub flush_pending_policy_versions: bool,
+    pub wait_for_async_policy_versions: bool,
+}
+
 pub fn soccer_postgres_policy_refresh_decision(
     check: SoccerPostgresPolicyRefreshCheck<'_>,
 ) -> SoccerPostgresPolicyRefreshDecision {
@@ -274,6 +281,33 @@ pub fn soccer_should_flush_postgres_policy_versions_for_new_sim(
     pending_policy_versions: usize,
 ) -> bool {
     refresh_for_new_sims && flush_policy_versions_before_new_sim && pending_policy_versions > 0
+}
+
+pub fn soccer_postgres_new_sim_refresh_plan(
+    resume_artifact_present: bool,
+    refresh_with_resume_artifact: bool,
+    flush_policy_versions_before_new_sim: bool,
+    pending_policy_versions: usize,
+    pending_async_policy_version_batches: usize,
+) -> SoccerPostgresNewSimRefreshPlan {
+    let refresh_from_postgres = soccer_should_refresh_postgres_for_new_sim(
+        resume_artifact_present,
+        refresh_with_resume_artifact,
+    );
+    let flush_pending_policy_versions = soccer_should_flush_postgres_policy_versions_for_new_sim(
+        refresh_from_postgres,
+        flush_policy_versions_before_new_sim,
+        pending_policy_versions,
+    );
+    let wait_for_async_policy_versions = refresh_from_postgres
+        && flush_policy_versions_before_new_sim
+        && pending_async_policy_version_batches > 0;
+
+    SoccerPostgresNewSimRefreshPlan {
+        refresh_from_postgres,
+        flush_pending_policy_versions,
+        wait_for_async_policy_versions,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2410,6 +2444,33 @@ mod tests {
         assert!(soccer_should_flush_postgres_policy_versions_for_new_sim(
             true, true, 2
         ));
+    }
+
+    #[test]
+    fn postgres_new_sim_refresh_plan_makes_evolved_heads_durable_before_reads() {
+        let plan = soccer_postgres_new_sim_refresh_plan(false, false, true, 2, 1);
+
+        assert!(plan.refresh_from_postgres);
+        assert!(plan.flush_pending_policy_versions);
+        assert!(plan.wait_for_async_policy_versions);
+    }
+
+    #[test]
+    fn postgres_new_sim_refresh_plan_respects_resume_and_flush_opt_outs() {
+        let resume_plan = soccer_postgres_new_sim_refresh_plan(true, true, true, 1, 0);
+        assert!(resume_plan.refresh_from_postgres);
+        assert!(resume_plan.flush_pending_policy_versions);
+        assert!(!resume_plan.wait_for_async_policy_versions);
+
+        let stale_resume_plan = soccer_postgres_new_sim_refresh_plan(true, false, true, 1, 1);
+        assert!(!stale_resume_plan.refresh_from_postgres);
+        assert!(!stale_resume_plan.flush_pending_policy_versions);
+        assert!(!stale_resume_plan.wait_for_async_policy_versions);
+
+        let no_flush_plan = soccer_postgres_new_sim_refresh_plan(false, false, false, 1, 1);
+        assert!(no_flush_plan.refresh_from_postgres);
+        assert!(!no_flush_plan.flush_pending_policy_versions);
+        assert!(!no_flush_plan.wait_for_async_policy_versions);
     }
 
     #[test]

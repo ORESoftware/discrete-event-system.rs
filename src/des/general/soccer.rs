@@ -5551,6 +5551,19 @@ impl PlayerAgent {
                 true,
             ));
         }
+        if directive.flank_attack_policy.prefers_low_cross() {
+            ensure_min_legal_option_probability(
+                &mut options,
+                "flank-low-cross",
+                (0.18 + directive.flank_overlap_run_probability * 0.10).clamp(0.18, 0.30),
+            );
+        } else if directive.flank_attack_policy.prefers_high_cross() {
+            ensure_min_legal_option_probability(
+                &mut options,
+                "flank-high-cross",
+                (0.18 + directive.flank_overlap_run_probability * 0.10).clamp(0.18, 0.30),
+            );
+        }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
         options
@@ -5605,6 +5618,10 @@ impl PlayerAgent {
     }
 
     fn support_action_context(&self, snapshot: &WorldSnapshot) -> SupportActionContext {
+        let directive = snapshot.tactical_directive(self.team);
+        let possession_team = snapshot.controlled_possession_team();
+        let flank_policy_active =
+            possession_team == Some(self.team) && directive.flank_attack_policy.is_flank();
         let striker_attack = snapshot
             .striker_holder_in_opponent_half(self.team)
             .is_some();
@@ -5617,7 +5634,7 @@ impl PlayerAgent {
         let current_x = self.position.x.clamp(0.0, snapshot.field_width);
         let wide_midfielder = attacking_midfielder
             && (current_x < snapshot.field_width * 0.30 || current_x > snapshot.field_width * 0.70);
-        let roam_weight = if striker_attack && wide_midfielder {
+        let mut roam_weight = if striker_attack && wide_midfielder {
             0.46
         } else if striker_attack && attacking_midfielder {
             0.34
@@ -5626,6 +5643,10 @@ impl PlayerAgent {
         } else {
             0.10
         };
+        if flank_policy_active {
+            roam_weight =
+                (roam_weight + directive.flank_overlap_run_probability * 0.18).clamp(0.10, 0.72);
+        }
         let special_targets = SupportSpecialTargets {
             check_to_ball: snapshot.check_to_ball_target_for(self.id, self.home_position),
             in_behind: snapshot.in_behind_run_target_for(self.id),
@@ -5696,7 +5717,12 @@ impl PlayerAgent {
                     target,
                     0.46 + touchline_fit * 0.18
                         + shape_support_urgency * 0.14
-                        + holder_pressure_urgency * 0.30,
+                        + holder_pressure_urgency * 0.30
+                        + if flank_policy_active {
+                            0.24 + directive.flank_overlap_run_probability * 0.18
+                        } else {
+                            0.0
+                        },
                 ),
                 true,
             ));
@@ -5707,20 +5733,57 @@ impl PlayerAgent {
             false,
             &special_targets,
         );
-        if natural_support.action_label == "overlap-run" {
+        let home_x = self.home_position.x.clamp(0.0, snapshot.field_width);
+        let wide_home =
+            home_x < snapshot.field_width * 0.34 || home_x > snapshot.field_width * 0.66;
+        let policy_overlap_candidate = flank_policy_active
+            && self.role != PlayerRole::Goalkeeper
+            && (wide_home
+                || wide_midfielder
+                || attacking_midfielder
+                || self.role == PlayerRole::Forward);
+        if natural_support.action_label == "overlap-run" || policy_overlap_candidate {
+            let overlap_support = if natural_support.action_label == "overlap-run" {
+                natural_support
+            } else {
+                let mut target = snapshot.attacking_support_movement_for_with_targets(
+                    self.id,
+                    self.home_position,
+                    true,
+                    &special_targets,
+                );
+                target.action_label = "overlap-run";
+                target
+            };
+            let touchline_fit = ((overlap_support.point.x - snapshot.field_width * 0.5).abs()
+                / (snapshot.field_width * 0.5).max(1.0))
+            .clamp(0.0, 1.0);
+            let forward =
+                ((overlap_support.point.y - current.y) * self.team.attack_dir()).clamp(-4.0, 24.0);
             options.push(AgentActionOptionTrace::new(
                 "overlap-run",
                 special_score(
-                    natural_support.point,
-                    0.56 + shape_support_urgency * 0.18 + holder_pressure_urgency * 0.22,
+                    overlap_support.point,
+                    0.56 + touchline_fit * 0.12
+                        + forward.max(0.0) * 0.010
+                        + shape_support_urgency * 0.18
+                        + holder_pressure_urgency * 0.22
+                        + if flank_policy_active {
+                            directive.flank_overlap_run_probability * 0.30
+                        } else {
+                            0.0
+                        },
                 ),
                 true,
             ));
-            ensure_min_legal_option_probability(
-                &mut options,
-                "overlap-run",
-                FLANK_OVERLAP_MIN_OPTION_SHARE,
-            );
+            let min_share = if flank_policy_active {
+                directive
+                    .flank_overlap_run_probability
+                    .clamp(FLANK_OVERLAP_MIN_OPTION_SHARE, 0.72)
+            } else {
+                FLANK_OVERLAP_MIN_OPTION_SHARE
+            };
+            ensure_min_legal_option_probability(&mut options, "overlap-run", min_share);
         }
         let options = normalize_action_options(options);
         SupportActionContext {
@@ -7138,6 +7201,16 @@ impl PlayerAgent {
                             action_label: "wide-outlet",
                         }
                     }),
+                    "overlap-run" => {
+                        let mut target = snapshot.attacking_support_movement_for_with_targets(
+                            self.id,
+                            self.home_position,
+                            true,
+                            &support_context.special_targets,
+                        );
+                        target.action_label = "overlap-run";
+                        Some(target)
+                    }
                     "support-roam" => Some(snapshot.attacking_support_movement_for_with_targets(
                         self.id,
                         self.home_position,
@@ -7155,7 +7228,7 @@ impl PlayerAgent {
                     snapshot.attacking_support_movement_for_with_targets(
                         self.id,
                         self.home_position,
-                        first_support_label.as_str() == "support-roam",
+                        matches!(first_support_label.as_str(), "support-roam" | "overlap-run"),
                         &support_context.special_targets,
                     )
                 });
@@ -7730,7 +7803,7 @@ impl PlayerAgent {
             | "support-shape" | "support-roam"
                 if !observation.has_ball =>
             {
-                let roam = label == "support-roam";
+                let roam = matches!(label, "support-roam" | "overlap-run");
                 let support_target =
                     snapshot.attacking_support_movement_for(self.id, self.home_position, roam);
                 Some((
@@ -15352,6 +15425,21 @@ impl WorldSnapshot {
                 } else {
                     0.0
                 };
+                let is_cross = pass_would_be_cross(
+                    me_position,
+                    pass_point,
+                    me.team,
+                    self.field_width,
+                    self.field_length,
+                );
+                let low_cross_policy_bonus =
+                    if is_cross && directive.flank_attack_policy.prefers_low_cross() {
+                        1.15 + directive.flank_overlap_run_probability * 0.75
+                    } else if is_cross && directive.flank_attack_policy.is_flank() {
+                        0.38
+                    } else {
+                        0.0
+                    };
                 let score = forward * forward_weight + self.space_score_at(position, me.team)
                     - dist * 0.010
                     - support_fit * 0.020
@@ -15363,7 +15451,8 @@ impl WorldSnapshot {
                     + (p.velocity.y * me.team.attack_dir()).max(0.0).min(5.5) * 0.12
                     + finishing_window_bonus
                     + keeper_distribution_bonus;
-                let score = score - blind_backward_penalty - lateral_penalty;
+                let score =
+                    score + low_cross_policy_bonus - blind_backward_penalty - lateral_penalty;
                 (p.id, score)
             })
             .collect::<Vec<_>>();
@@ -15460,7 +15549,17 @@ impl WorldSnapshot {
                 } else {
                     1.8
                 };
-                let cross_bonus = if is_cross { 1.3 } else { 0.0 };
+                let cross_bonus = if is_cross {
+                    1.3 + if directive.flank_attack_policy.prefers_high_cross() {
+                        1.20 + directive.flank_overlap_run_probability * 0.80
+                    } else if directive.flank_attack_policy.is_flank() {
+                        0.35
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
                 let wide_outlet_bonus = if self.is_wide_midfielder(p) {
                     let center_x = self.field_width * 0.5;
                     let width =
@@ -18590,9 +18689,9 @@ fn soccer_decision_target_point(
                 before.field_width * 0.5,
                 team.goal_y(before.field_length),
             )),
-            "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass"
-            | "clearance" | "route-one"
-                if after.ball.position.distance(before.ball.position) > 0.25 =>
+            action
+                if (is_pass_like_action(action) || matches!(action, "clearance" | "route-one"))
+                    && after.ball.position.distance(before.ball.position) > 0.25 =>
             {
                 Some(after.ball.position)
             }
@@ -19094,6 +19193,8 @@ fn soccer_goal_credit_action_is_relevant(action: &str) -> bool {
             | "first-time-header"
             | "pass"
             | "aerial-pass"
+            | "flank-low-cross"
+            | "flank-high-cross"
             | "first-time-pass"
             | "dribble"
             | "carry-forward"
@@ -20920,7 +21021,9 @@ fn playback_intent_priority(
     };
     match action {
         "shoot" | "first-time-shot" | "first-time-header" => Some(110.0 + holder_bonus),
-        "pass" | "aerial-pass" | "first-time-pass" => Some(104.0 + holder_bonus),
+        "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass" => {
+            Some(104.0 + holder_bonus)
+        }
         "clearance" | "route-one" => Some(98.0 + holder_bonus),
         "left-cut"
         | "carry-forward"
@@ -20947,11 +21050,10 @@ fn playback_intent_priority(
 }
 
 fn playback_pass_flight_for_action(action: &str) -> Option<PassFlight> {
-    match action {
-        "aerial-pass" | "clearance" | "route-one" => Some(PassFlight::Aerial),
-        "pass" | "first-time-pass" => Some(PassFlight::Floor),
+    pass_like_action_flight(action).or(match action {
+        "clearance" | "route-one" => Some(PassFlight::Aerial),
         _ => None,
-    }
+    })
 }
 
 fn playback_intents_from_frame(frame: &MatchFrame) -> Vec<SoccerPlaybackIntentFrame> {
@@ -38977,8 +39079,9 @@ fn tracking_explicit_holder_action(
     let action = normalize_tracking_ball_action(raw_action).ok().flatten()?;
     match action.as_str() {
         "pass" => Some(tracking_pass_label(before_frame, after_frame, before, after).to_string()),
-        "aerial-pass" | "first-time-pass" | "clearance" | "route-one" | "shoot"
-        | "first-time-shot" | "first-time-header" | "control-touch" => Some(action),
+        "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass"
+        | "clearance" | "route-one" | "shoot" | "first-time-shot" | "first-time-header"
+        | "control-touch" => Some(action),
         action if is_dribble_action_label(action) => Some(action.to_string()),
         _ => None,
     }
@@ -39033,7 +39136,7 @@ fn tracking_action_target_trace(
         player.team.goal_y(before.field_length),
     );
     let (point, target_player) = match normalize_soccer_action_label(action) {
-        "pass" | "aerial-pass" => {
+        "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" => {
             let holder_teammate = after.ball.holder.and_then(|holder| {
                 after
                     .players
@@ -39321,7 +39424,7 @@ fn soccer_moment_action_target_trace(
     );
     let marker_target = marker.and_then(|marker| marker.target_player);
     let (point, target_player) = match normalized {
-        "pass" | "aerial-pass" => {
+        "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" => {
             let target_player = marker_target.or(after.ball.holder);
             let point = target_player
                 .and_then(|id| {

@@ -3,7 +3,8 @@
 //! Sanctioned external-program invocation helpers and a module registry for
 //! validators / reference solvers. Rules (unchanged from TS):
 //!
-//!   * source scripts must live under `external-references/`
+//!   * source scripts must live under `external-references/`; Rust reference
+//!     sources may live under `src/bin/` and are invoked through Cargo
 //!   * no shell is used; arguments are passed as an argv array
 //!   * the interpreter is explicit (env-var override, stable default)
 //!   * stdout/stderr are captured for diagnostics
@@ -29,7 +30,7 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -126,18 +127,51 @@ pub fn repo_root_from_runner() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+fn relative_source_has_parent_or_root(relative_source: &str) -> bool {
+    Path::new(relative_source)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+}
+
+fn rust_cargo_bin_name(relative_source: &str) -> Option<String> {
+    let path = Path::new(relative_source);
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::Normal(part)) if part == "src") {
+        return None;
+    }
+    if !matches!(components.next(), Some(Component::Normal(part)) if part == "bin") {
+        return None;
+    }
+    if components.clone().count() != 1 {
+        return None;
+    }
+    if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        return None;
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+}
+
 /// `resolveExternalScript(root, relativeScript)`.
 fn validate_external_script_location(
     root: &Path,
     relative_script: &str,
 ) -> Result<PathBuf, String> {
-    let external_root = root.join("external-references");
-    let script = root.join(relative_script);
-    let prefix = format!("{}{}", external_root.display(), std::path::MAIN_SEPARATOR);
-    if !script.display().to_string().starts_with(&prefix) {
+    if relative_source_has_parent_or_root(relative_script) {
         return Err(format!(
-            "external script must live under {}: {}",
+            "external source must be a repo-relative path without `..`: {relative_script}"
+        ));
+    }
+    let external_root = root.join("external-references");
+    let rust_bin_root = root.join("src").join("bin");
+    let script = root.join(relative_script);
+    if !script.starts_with(&external_root) && !script.starts_with(&rust_bin_root) {
+        return Err(format!(
+            "external source must live under {} or {}: {}",
             external_root.display(),
+            rust_bin_root.display(),
             script.display()
         ));
     }
@@ -201,6 +235,26 @@ where
 
 fn resolve_external_module_timeout_ms(module: &ExternalProgramModule) -> Option<u64> {
     resolve_external_module_timeout_ms_with_lookup(module, |name| std::env::var(name).ok())
+}
+
+fn external_module_invocation_args(
+    module: &ExternalProgramModule,
+    source: &Path,
+    module_args: Vec<String>,
+) -> Vec<String> {
+    let mut args = if let Some(bin_name) = rust_cargo_bin_name(&module.source_path) {
+        vec![
+            "run".to_string(),
+            "--quiet".to_string(),
+            "--bin".to_string(),
+            bin_name,
+            "--".to_string(),
+        ]
+    } else {
+        vec![source.display().to_string()]
+    };
+    args.extend(module_args);
+    args
 }
 
 /// `registerExternalModule(module)`.
@@ -343,8 +397,7 @@ pub fn run_external_module(
         out_root,
         module_out_dir,
     };
-    let mut args: Vec<String> = vec![script.display().to_string()];
-    args.extend((module.build_args)(&merged, &ctx)?);
+    let args = external_module_invocation_args(&module, &script, (module.build_args)(&merged, &ctx)?);
 
     run_external_program(
         &command,
@@ -385,6 +438,80 @@ mod tests {
             max_buffer_bytes: None,
             build_args: empty_build_args,
         }
+    }
+
+    #[test]
+    fn external_source_location_allows_external_references_and_rust_bins() {
+        let root = PathBuf::from("/repo");
+
+        assert_eq!(
+            validate_external_script_location(&root, "external-references/foo/reference.py")
+                .expect("external reference path"),
+            root.join("external-references/foo/reference.py")
+        );
+        assert_eq!(
+            validate_external_script_location(&root, "src/bin/ip_mip_reference.rs")
+                .expect("rust bin reference path"),
+            root.join("src/bin/ip_mip_reference.rs")
+        );
+        assert!(
+            validate_external_script_location(&root, "src/lib.rs").is_err(),
+            "library sources should not be registered as external modules"
+        );
+        assert!(
+            validate_external_script_location(
+                &root,
+                "external-references/../src/bin/ip_mip_reference.rs"
+            )
+            .is_err(),
+            "path traversal should not bypass source roots"
+        );
+    }
+
+    #[test]
+    fn rust_bin_external_module_invocation_uses_cargo_run() {
+        let mut module = timeout_test_module("ip-mip-reference", None);
+        module.source_path = "src/bin/ip_mip_reference.rs".to_string();
+        module.interpreter = ExternalInterpreterSpec {
+            env_var: "CARGO".to_string(),
+            default_command: "cargo".to_string(),
+            label: "Cargo/Rust".to_string(),
+        };
+
+        let args = external_module_invocation_args(
+            &module,
+            Path::new("/repo/src/bin/ip_mip_reference.rs"),
+            vec!["--solver".to_string(), "auto".to_string()],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "--quiet",
+                "--bin",
+                "ip_mip_reference",
+                "--",
+                "--solver",
+                "auto"
+            ]
+        );
+    }
+
+    #[test]
+    fn script_external_module_invocation_keeps_source_as_first_arg() {
+        let module = timeout_test_module("timeout-test", None);
+
+        let args = external_module_invocation_args(
+            &module,
+            Path::new("/repo/external-references/timeout-test.py"),
+            vec!["--flag".to_string()],
+        );
+
+        assert_eq!(
+            args,
+            vec!["/repo/external-references/timeout-test.py", "--flag"]
+        );
     }
 
     #[test]

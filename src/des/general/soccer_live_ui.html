@@ -1218,10 +1218,19 @@ function seedResetValue() {
   }
   return Math.floor(value);
 }
+function effectiveMatchDurationSeconds(config = state?.config) {
+  if (!config) return 600;
+  const halfDuration = Number(config.halfDurationSeconds ?? 0);
+  const halves = Math.max(1, Number(config.halves ?? 1));
+  if (Number.isFinite(halfDuration) && halfDuration > 0) {
+    return halfDuration * halves;
+  }
+  return Number(config.durationSeconds ?? 600);
+}
 function matchStepLabel(config = state?.config) {
   if (!config) return "dt 0.1s 10:00";
   const dt = Number(config.dtSeconds ?? 0.1);
-  const duration = Number(config.durationSeconds ?? 600);
+  const duration = effectiveMatchDurationSeconds(config);
   const totalTicks = dt > 0 ? Math.round(duration / dt) : 0;
   return `dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t`;
 }
@@ -2357,7 +2366,10 @@ function render() {
   episode.textContent = episodeLabel();
   seed.textContent = state.config.seed ?? "-";
   syncSeedInput();
-  ticks.textContent = `${state.summary.ticks} / ${Math.round(state.config.durationSeconds / state.config.dtSeconds)}`;
+  const totalTicks = Math.round(
+    effectiveMatchDurationSeconds(state.config) / state.config.dtSeconds
+  );
+  ticks.textContent = `${state.summary.ticks} / ${totalTicks}`;
   matchStep.textContent = matchStepLabel();
   simSpeed.textContent = simSpeedLabel();
   learning.textContent = learningLabel(state.learning);

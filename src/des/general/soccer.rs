@@ -141,6 +141,8 @@ const DEFENSIVE_CLEAR_AND_HOLD_SECOND_REWARD_POINTS: f64 = 20.0;
 const DEFENSIVE_DISPOSSESSION_REWARD_POINTS: f64 = 10.0;
 const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 2.0;
 const BEATEN_BY_DRIBBLE_PENALTY_POINTS: f64 = 3.0;
+// A defender is beaten by dribble only from a close challenge: the ballholder is
+// not already past the defender, starts within this radius, then gets in behind.
 const DRIBBLE_BEAT_CONTACT_RADIUS_YARDS: f64 = 3.0;
 const DRIBBLE_BEAT_FRONT_LINE_TOLERANCE_YARDS: f64 = 0.35;
 const DRIBBLE_BEAT_BEHIND_LINE_TOLERANCE_YARDS: f64 = 0.35;
@@ -600,6 +602,31 @@ fn finite_pitch_point(point: Vec2, field_width: f64, field_length: f64, fallback
         },
     )
     .clamp_to_pitch(width, length)
+}
+
+fn finite_vec2(vector: Vec2, fallback: Vec2) -> Vec2 {
+    Vec2::new(
+        if vector.x.is_finite() {
+            vector.x
+        } else {
+            fallback.x
+        },
+        if vector.y.is_finite() {
+            vector.y
+        } else {
+            fallback.y
+        },
+    )
+}
+
+fn limit_vec2_len(vector: Vec2, max_len: f64) -> Vec2 {
+    if !max_len.is_finite() || max_len <= 1e-9 {
+        Vec2::zero()
+    } else if vector.len() > max_len {
+        vector.normalized() * max_len
+    } else {
+        vector
+    }
 }
 
 impl std::ops::Add for Vec2 {
@@ -8018,6 +8045,12 @@ impl HumanControllerMailbox {
         condvar.notify_all();
     }
 
+    fn pending_len(&self) -> usize {
+        let (lock, _) = &*self.inner;
+        let state = lock.lock().expect("human controller mailbox lock poisoned");
+        usize::from(state.latest.is_some())
+    }
+
     fn stats(&self, controller_slot: usize) -> HumanControllerThreadStats {
         let (lock, _) = &*self.inner;
         let state = lock.lock().expect("human controller mailbox lock poisoned");
@@ -8331,6 +8364,11 @@ impl HumanControllerInputRouter {
 
     pub fn queued_len(&self) -> usize {
         self.input_queue.queued_len()
+            + self
+                .controller_sinks
+                .iter()
+                .map(|controller| controller.mailbox.pending_len())
+                .sum::<usize>()
     }
 
     pub fn assignments(&self) -> SharedControllerAssignments {
@@ -11795,6 +11833,8 @@ impl SoccerFormationLpBrain {
         let solution = solve_lp_internal(&self.problem, &opts);
         if solution.status == LPStatus::Optimal {
             self.basis_start = LPBasisWarmStart::from_solution(&solution);
+        } else {
+            self.basis_start = None;
         }
         self.capture_solution(snapshot, objective_weights, &slots, &solution);
     }
@@ -11992,7 +12032,14 @@ impl SoccerFormationLpBrain {
         let mut guidance = Vec::new();
         let mut pair_error_sum_by_slot = vec![0.0; SOCCER_FORMATION_LP_PLAYER_CAPACITY];
         let mut pair_count_by_slot = vec![0usize; SOCCER_FORMATION_LP_PLAYER_CAPACITY];
-        if solution.status == LPStatus::Optimal {
+        let has_complete_finite_solution = solution.status == LPStatus::Optimal
+            && solution.x.len() >= variables
+            && solution
+                .x
+                .iter()
+                .take(variables)
+                .all(|value| value.is_finite());
+        if has_complete_finite_solution {
             for pair in &self.pair_vars {
                 let pair_error = solution.x[pair.separation_slack_x].abs()
                     + solution.x[pair.separation_slack_y].abs();
@@ -12009,10 +12056,23 @@ impl SoccerFormationLpBrain {
                 let target = Vec2::new(solution.x[vars.target_x], solution.x[vars.target_y])
                     .clamp_to_pitch(snapshot.field_width, snapshot.field_length);
                 let recommended_move = target - input.current;
-                let target_velocity =
-                    Vec2::new(solution.x[vars.target_vx], solution.x[vars.target_vy]);
-                let target_acceleration =
-                    Vec2::new(solution.x[vars.target_ax], solution.x[vars.target_ay]);
+                let target_velocity = limit_vec2_len(
+                    finite_vec2(
+                        Vec2::new(solution.x[vars.target_vx], solution.x[vars.target_vy]),
+                        input.velocity,
+                    ),
+                    input.top_speed.max(input.velocity.len()).max(0.0),
+                );
+                let target_acceleration = limit_vec2_len(
+                    finite_vec2(
+                        Vec2::new(solution.x[vars.target_ax], solution.x[vars.target_ay]),
+                        input.acceleration,
+                    ),
+                    input
+                        .max_acceleration
+                        .max(input.acceleration.len())
+                        .max(0.0),
+                );
                 let pair_error_yards = if pair_count_by_slot[slot] > 0 {
                     pair_error_sum_by_slot[slot] / pair_count_by_slot[slot] as f64
                 } else {
@@ -12060,7 +12120,11 @@ impl SoccerFormationLpBrain {
                         .copied()
                         .unwrap_or(0.0),
                     solver_status: status.clone(),
-                    solver_objective: solution.objective,
+                    solver_objective: if solution.objective.is_finite() {
+                        solution.objective
+                    } else {
+                        0.0
+                    },
                     solver_iterations: solution.iters,
                     solver_elapsed_ms: solution.elapsed_ms,
                     variable_count: variables,
@@ -12068,7 +12132,11 @@ impl SoccerFormationLpBrain {
                 });
             }
         } else {
-            status = format!("fallback-{status}");
+            status = if solution.status == LPStatus::Optimal {
+                "fallback-malformed-optimal".to_string()
+            } else {
+                format!("fallback-{status}")
+            };
             let dt = snapshot.dt_seconds.max(1e-6);
             for (slot, input) in slots.iter().enumerate() {
                 if !input.active {
@@ -12420,6 +12488,71 @@ fn soccer_formation_lp_objective_weights(
     }
 }
 
+fn soccer_defensive_mark_target(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    defender_role: PlayerRole,
+    zone: Vec2,
+) -> Option<Vec2> {
+    let (width, length) = sane_pitch_dimensions(snapshot.field_width, snapshot.field_length);
+    let zone = finite_pitch_point(zone, width, length, Vec2::new(width * 0.5, length * 0.5));
+    let own_goal = Vec2::new(width * 0.5, team.other().goal_y(length));
+    let mut best_mark = None;
+    let mut best_score = f64::INFINITY;
+    for opponent in snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team.other() && player.role != PlayerRole::Goalkeeper)
+    {
+        let opponent_position = finite_pitch_point(
+            snapshot
+                .player_position(opponent.id)
+                .unwrap_or(opponent.position),
+            width,
+            length,
+            opponent.position,
+        );
+        let zone_distance = opponent_position.distance(zone);
+        let distance_to_goal = opponent_position.distance(own_goal);
+        let role_threat = match opponent.role {
+            PlayerRole::Forward => 2.4,
+            PlayerRole::Midfielder => 1.4,
+            PlayerRole::Defender => 0.4,
+            PlayerRole::Goalkeeper => 0.0,
+        };
+        let holder_bonus = if snapshot.ball.holder == Some(opponent.id) {
+            5.0
+        } else {
+            0.0
+        };
+        let goal_lane_bonus = if snapshot.clear_line(opponent_position, own_goal, team, 2.4) {
+            1.2
+        } else {
+            0.0
+        };
+        let goal_threat_bonus = (70.0 - distance_to_goal).max(0.0) * 0.025;
+        let score =
+            zone_distance - role_threat - holder_bonus - goal_lane_bonus - goal_threat_bonus;
+        if score < best_score {
+            best_mark = Some((opponent_position, opponent.role));
+            best_score = score;
+        }
+    }
+
+    let (mark, mark_role) = best_mark?;
+    let goal_side = (own_goal - mark).normalized();
+    let mark_distance = match defender_role {
+        PlayerRole::Defender if mark_role == PlayerRole::Midfielder => {
+            DEFENDER_PRESS_MIDFIELDER_IDEAL_YARDS
+        }
+        PlayerRole::Defender => 2.4,
+        PlayerRole::Midfielder => 3.4,
+        PlayerRole::Forward => 4.8,
+        PlayerRole::Goalkeeper => 1.0,
+    };
+    Some((mark + goal_side * mark_distance).clamp_to_pitch(width, length))
+}
+
 fn soccer_formation_lp_anchor(
     snapshot: &WorldSnapshot,
     team: Team,
@@ -12469,7 +12602,13 @@ fn soccer_formation_lp_anchor(
         x = x * (1.0 - pull) + (width * 0.5 + ball_lane_pull * width * 0.28) * pull;
     }
 
-    Vec2::new(x, y).clamp_to_pitch(width, length)
+    let zone = Vec2::new(x, y).clamp_to_pitch(width, length);
+    if possession == Some(team.other()) && player.role != PlayerRole::Goalkeeper {
+        if let Some(mark_target) = soccer_defensive_mark_target(snapshot, team, player.role, zone) {
+            return (mark_target * 0.5 + zone * 0.5).clamp_to_pitch(width, length);
+        }
+    }
+    zone
 }
 
 fn soccer_formation_lp_slot_inputs(
@@ -16852,64 +16991,10 @@ impl WorldSnapshot {
         }
 
         let zone = self.defensive_shape_for(player_id, home);
-        let own_goal = Vec2::new(
-            self.field_width * 0.5,
-            me.team.other().goal_y(self.field_length),
-        );
-        let mut best_mark = None;
-        let mut best_score = f64::NEG_INFINITY;
-        for opponent in self.players.iter().filter(|p| p.team == me.team.other()) {
-            let opponent_position = self
-                .player_position(opponent.id)
-                .unwrap_or(opponent.position);
-            let distance_to_goal = opponent_position.distance(own_goal);
-            let ball_distance = opponent_position.distance(self.ball.position);
-            let zone_distance = opponent_position.distance(zone);
-            let role_threat = match (me.role, opponent.role) {
-                (PlayerRole::Defender, PlayerRole::Midfielder) => 6.2,
-                (_, PlayerRole::Forward) => 7.0,
-                (_, PlayerRole::Midfielder) => 4.0,
-                (_, PlayerRole::Defender) => 1.5,
-                (_, PlayerRole::Goalkeeper) => -8.0,
-            };
-            let holder_bonus = if self.ball.holder == Some(opponent.id) {
-                9.0
-            } else {
-                0.0
-            };
-            let lane_threat = if self.clear_line(opponent_position, own_goal, me.team, 2.4) {
-                4.0
-            } else {
-                0.0
-            };
-            let score = (70.0 - distance_to_goal).max(0.0) * 0.18
-                + (32.0 - ball_distance).max(0.0) * 0.15
-                - zone_distance * 0.055
-                + role_threat
-                + holder_bonus
-                + lane_threat;
-            if score > best_score {
-                best_mark = Some((opponent_position, opponent.role));
-                best_score = score;
-            }
-        }
-
-        let Some((mark, mark_role)) = best_mark else {
+        let Some(mark_target) = soccer_defensive_mark_target(self, me.team, me.role, zone) else {
             return zone;
         };
-        let goal_side = (own_goal - mark).normalized();
-        let mark_distance = match me.role {
-            PlayerRole::Defender if mark_role == PlayerRole::Midfielder => {
-                DEFENDER_PRESS_MIDFIELDER_IDEAL_YARDS
-            }
-            PlayerRole::Defender => 2.4,
-            PlayerRole::Midfielder => 3.4,
-            PlayerRole::Forward => 4.8,
-            PlayerRole::Goalkeeper => 1.0,
-        };
-        let mark_target =
-            (mark + goal_side * mark_distance).clamp_to_pitch(self.field_width, self.field_length);
-        (mark_target * 0.72 + zone * 0.28).clamp_to_pitch(self.field_width, self.field_length)
+        (mark_target * 0.5 + zone * 0.5).clamp_to_pitch(self.field_width, self.field_length)
     }
 
     pub fn defensive_assignment_for(&self, player_id: usize, home: Vec2, roam: bool) -> Vec2 {
@@ -19997,6 +20082,10 @@ pub struct SoccerPlaybackBallFrame {
     pub velocity: Vec2,
     pub acceleration: Vec2,
     #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<String>,
+    #[serde(default)]
     pub altitude_yards: f64,
     #[serde(default)]
     pub holder: Option<usize>,
@@ -20522,6 +20611,15 @@ impl SoccerPlaybackFrame {
                 position: sim.ball.position,
                 velocity: sim.ball.velocity,
                 acceleration: sim.ball.acceleration,
+                scheduled_index: sim
+                    .last_agent_schedule
+                    .iter()
+                    .position(|entry| entry.kind == AgentScheduleKind::Ball),
+                last_action: sim
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.action.clone()),
                 altitude_yards: sim.ball.altitude_yards,
                 holder: sim.ball.holder,
                 last_touch_team: sim.ball.last_touch_team,
@@ -20592,6 +20690,12 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                 position: frame.ball.position,
                 velocity: frame.ball.velocity,
                 acceleration: frame.ball.acceleration,
+                scheduled_index: frame.ball.scheduled_index,
+                last_action: frame
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.action.clone()),
                 altitude_yards: frame.ball.altitude_yards,
                 holder: frame.ball.holder,
                 last_touch_team: frame.ball.last_touch_team,
@@ -32428,7 +32532,7 @@ impl SoccerRealtimeSession {
     }
 
     pub fn queued_human_input_count(&self) -> usize {
-        self.input_queue.queued_len()
+        self.controller_input_router.queued_len()
     }
 
     pub fn set_live_http_worker_threads(&mut self, worker_threads: usize) {
@@ -34988,7 +35092,7 @@ fn handle_live_soccer_request_inner(
                         let count = router.push_human_inputs(inputs);
                         (count, router.queued_len())
                     }
-                    LiveInputDispatch::SessionLockedFallback(input_queue) => {
+                    LiveInputDispatch::SessionLockedFallback(_input_queue) => {
                         let guard = match session.lock() {
                             Ok(guard) => guard,
                             Err(_) => {
@@ -35000,7 +35104,7 @@ fn handle_live_soccer_request_inner(
                             }
                         };
                         let count = guard.push_human_inputs(inputs);
-                        let queued_human_inputs = input_queue.queued_len();
+                        let queued_human_inputs = guard.queued_human_input_count();
                         (count, queued_human_inputs)
                     }
                 };
@@ -44648,6 +44752,53 @@ mod tests {
     }
 
     #[test]
+    fn formation_lp_falls_back_when_optimal_solution_is_malformed() {
+        let sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            formation_lp_enabled: true,
+            max_human_players: 0,
+            ..Default::default()
+        });
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let directive =
+            TeamTacticalDirective::neutral(Team::Home, snapshot.field_width, snapshot.field_length);
+        let weights = soccer_formation_lp_objective_weights(&snapshot, Team::Home, &directive);
+        let slots = soccer_formation_lp_slot_inputs(&snapshot, Team::Home, &directive, &weights);
+        let mut brain = SoccerFormationLpBrain::new(Team::Home);
+        brain.update_problem_for_tick(&snapshot, &directive, &weights, &slots);
+        let malformed = crate::des::general::lp::LPSolution {
+            status: LPStatus::Optimal,
+            x: Vec::new(),
+            objective: f64::NAN,
+            dual_ub: None,
+            dual_eq: None,
+            reduced_costs: None,
+            var_basis: None,
+            row_basis: None,
+            unbounded_ray: None,
+            infeasibility_certificate: None,
+            iters: Some(0),
+            solver: "test".to_string(),
+            elapsed_ms: 0.0,
+            message: Some("malformed".to_string()),
+        };
+
+        brain.capture_solution(&snapshot, weights, &slots, &malformed);
+
+        assert_eq!(brain.last_snapshot.status, "fallback-malformed-optimal");
+        assert_eq!(brain.last_guidance.len(), 11);
+        assert!(brain.last_guidance.iter().all(|guidance| {
+            guidance.target.x.is_finite()
+                && guidance.target.y.is_finite()
+                && guidance.recommended_speed_yps.is_finite()
+                && guidance.recommended_acceleration_yps2.is_finite()
+                && guidance.solver_objective == 0.0
+        }));
+    }
+
+    #[test]
     fn pomdp_observation_tracks_player_visibility() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let observer = 6;
@@ -46472,6 +46623,56 @@ mod tests {
                 .map(String::as_str),
             Some("human-input"),
             "controller thread should remain alive after clearing stale pending input"
+        );
+    }
+
+    #[test]
+    fn realtime_session_reports_native_mailbox_input_as_queued() {
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 787,
+            ..Default::default()
+        });
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("assign human controller");
+
+        assert_eq!(
+            session.push_human_inputs([HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }]),
+            1
+        );
+
+        assert_eq!(
+            session.queued_human_input_count(),
+            1,
+            "pending input should be visible while it is still in the native controller mailbox"
+        );
+        assert_eq!(session.controller_thread_stats()[0].accepted_frames, 1);
+
+        let step = session.step_once();
+        assert_eq!(step.queued_human_inputs, 0);
+        assert_eq!(
+            session.match_ref().players[0]
+                .last_decision
+                .as_ref()
+                .and_then(|decision| decision.operation_order.first())
+                .map(String::as_str),
+            Some("human-input")
         );
     }
 
@@ -56403,6 +56604,34 @@ mod tests {
     }
 
     #[test]
+    fn defensive_mark_or_zone_uses_equal_mark_zone_blend() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let threat = 17;
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(72.0, 96.0);
+        }
+        sim.players[threat].position = Vec2::new(32.0, 34.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let zone = snapshot.defensive_shape_for(defender, sim.players[defender].home_position);
+        let mark_target =
+            soccer_defensive_mark_target(&snapshot, Team::Home, PlayerRole::Defender, zone)
+                .expect("mark target");
+        let expected = (mark_target * 0.5 + zone * 0.5)
+            .clamp_to_pitch(snapshot.field_width, snapshot.field_length);
+        let blended = snapshot.mark_or_zone_for(defender, sim.players[defender].home_position);
+
+        assert!(
+            blended.distance(expected) < 1e-9,
+            "defensive helper should use a 50:50 mark/zone blend: blended={blended:?} expected={expected:?}"
+        );
+    }
+
+    #[test]
     fn tactical_learning_scores_prefer_flanks_and_defensive_contraction() {
         let field_width = DEFAULT_FIELD_WIDTH_YARDS;
 
@@ -57507,6 +57736,20 @@ mod tests {
 
     #[test]
     fn dribble_beat_geometry_requires_close_front_to_behind_transition() {
+        assert!(dribble_beat_geometry_is_valid(
+            Team::Home,
+            Vec2::new(40.0, 57.0),
+            Vec2::new(40.0, 61.0),
+            Vec2::new(40.0, 60.0),
+            Vec2::new(40.0, 60.0),
+        ));
+        assert!(!dribble_beat_geometry_is_valid(
+            Team::Home,
+            Vec2::new(40.0, 56.99),
+            Vec2::new(40.0, 61.0),
+            Vec2::new(40.0, 60.0),
+            Vec2::new(40.0, 60.0),
+        ));
         assert!(dribble_beat_geometry_is_valid(
             Team::Home,
             Vec2::new(40.0, 58.8),
@@ -61565,6 +61808,7 @@ mod tests {
         let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(ack_value["acceptedInputs"], 1);
         assert_eq!(ack_value["queued"], true);
+        assert_eq!(ack_value["queuedHumanInputs"], 1);
 
         let step_body = r#"{"ticks":1}"#;
         let step = handle_live_soccer_request(
@@ -63113,6 +63357,14 @@ mod tests {
         assert!(html.contains("B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}"));
         assert!(html.contains("brain.teamCentroid"));
         assert!(html.contains("playersNearBall"));
+        assert!(html.contains("id=\"agentOrder\""));
+        assert!(html.contains("function agentScheduleEntriesForFrame"));
+        assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));
+        assert!(html.contains("f?.ball?.scheduledIndex"));
+        assert!(html.contains("id=\"ballAgent\""));
+        assert!(html.contains("function playbackBallAgentLabel"));
+        assert!(html.contains("ball?.lastAction"));
+        assert!(html.contains("ballAgent.textContent = playbackBallAgentLabel(f.ball)"));
         assert!(html.contains("id=\"clearances\""));
         assert!(html.contains("id=\"routeOne\""));
         assert!(html.contains("id=\"tackles\""));
@@ -63324,6 +63576,13 @@ mod tests {
         assert!(html.contains("response.physicsSmoke"));
         assert!(html.contains("physics ok"));
         assert!(html.contains("physics ${warnings} warnings"));
+        assert!(html.contains("function effectiveMatchDurationSeconds"));
+        assert!(html.contains("config.halfDurationSeconds"));
+        assert!(html.contains("config.halves"));
+        assert!(html.contains("const duration = effectiveMatchDurationSeconds(config)"));
+        assert!(
+            html.contains("effectiveMatchDurationSeconds(state.config) / state.config.dtSeconds")
+        );
         assert!(html.contains("id=\"allowTrackingPhysicsWarnings\""));
         assert!(html.contains("allowPhysicsWarnings"));
         assert!(html.contains("response.trainingSkipped"));
@@ -63441,6 +63700,10 @@ mod tests {
             .unwrap()
             .iter()
             .all(|official| official["scheduledIndex"].as_u64().is_some()));
+        assert!(scheduled_frame["ball"]["scheduledIndex"].as_u64().is_some());
+        assert!(scheduled_frame["ball"]["lastAction"]
+            .as_str()
+            .is_some_and(|action| !action.is_empty()));
         let intent_frame = frames
             .iter()
             .find(|frame| {

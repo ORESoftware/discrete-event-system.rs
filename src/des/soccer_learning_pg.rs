@@ -99,12 +99,25 @@ fn soccer_policy_version_metrics(
     neural_network: Option<&SoccerNeuralNetworkSnapshot>,
     tactical_learning: Option<&SoccerTacticalLearningWeights>,
 ) -> Result<Value, String> {
-    let mut metrics = json!({ "fitness": fitness });
+    let mut metrics = json!({
+        "fitness": fitness,
+        "learningComponents": {
+            "mdpPolicyEntries": true,
+            "pomdpStateKeyFeatures": true,
+            "mpcFormationLpWeights": tactical_learning.is_some(),
+            "lpAlignmentWeight": tactical_learning
+                .map(|weights| weights.formation_lp_alignment_weight)
+                .unwrap_or(0.0),
+            "neuralNetworkSnapshot": neural_network.is_some()
+        }
+    });
     if let Some(neural_network) = neural_network {
+        validate_soccer_neural_network_snapshot_for_pg(neural_network)?;
         metrics["neuralNetwork"] = serde_json::to_value(neural_network)
             .map_err(|err| format!("serialize soccer neural network snapshot: {err}"))?;
     }
     if let Some(tactical_learning) = tactical_learning {
+        validate_soccer_tactical_learning_weights_for_pg(tactical_learning)?;
         metrics["tacticalLearning"] = serde_json::to_value(tactical_learning)
             .map_err(|err| format!("serialize soccer tactical learning weights: {err}"))?;
     }
@@ -133,9 +146,10 @@ fn soccer_policy_version_neural_network_from_metrics(
     let Some(neural_network) = metrics.get("neuralNetwork") else {
         return Ok(None);
     };
-    serde_json::from_value(neural_network.clone())
-        .map(Some)
-        .map_err(|err| format!("decode soccer neural network snapshot: {err}"))
+    let snapshot = serde_json::from_value::<SoccerNeuralNetworkSnapshot>(neural_network.clone())
+        .map_err(|err| format!("decode soccer neural network snapshot: {err}"))?;
+    validate_soccer_neural_network_snapshot_for_pg(&snapshot)?;
+    Ok(Some(snapshot))
 }
 
 fn soccer_policy_version_tactical_learning_from_values(
@@ -207,12 +221,92 @@ fn validate_soccer_tactical_learning_weights_for_pg(
             weights.defender_midfielder_press_weight,
         ),
         ("midfielderPressWeight", weights.midfielder_press_weight),
+        (
+            "formationLpAlignmentWeight",
+            weights.formation_lp_alignment_weight,
+        ),
     ] {
         if !value.is_finite() {
             return Err(format!(
                 "{name} must be finite in soccer tactical learning weights"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_soccer_neural_network_snapshot_for_pg(
+    snapshot: &SoccerNeuralNetworkSnapshot,
+) -> Result<(), String> {
+    if snapshot.input_dim == 0 {
+        return Err("soccer neural network snapshot input_dim must be positive".to_string());
+    }
+    if snapshot.output_dim == 0 {
+        return Err("soccer neural network snapshot output_dim must be positive".to_string());
+    }
+    if snapshot.layers.is_empty() {
+        return Err("soccer neural network snapshot must contain layers".to_string());
+    }
+    if !snapshot.l2_norm.is_finite() {
+        return Err("soccer neural network snapshot l2_norm must be finite".to_string());
+    }
+    let mut expected_input_dim = snapshot.input_dim;
+    let mut parameter_count = 0usize;
+    for (layer_idx, layer) in snapshot.layers.iter().enumerate() {
+        let activation = layer.activation.to_ascii_lowercase();
+        if !matches!(activation.as_str(), "linear" | "sigmoid" | "tanh" | "relu") {
+            return Err(format!(
+                "soccer neural network snapshot layer {layer_idx} has unsupported activation {:?}",
+                layer.activation
+            ));
+        }
+        let output_dim = layer.biases.len();
+        if output_dim == 0 {
+            return Err(format!(
+                "soccer neural network snapshot layer {layer_idx} has no biases"
+            ));
+        }
+        if layer.weights.len() != output_dim {
+            return Err(format!(
+                "soccer neural network snapshot layer {layer_idx} has {} weight rows for {} biases",
+                layer.weights.len(),
+                output_dim
+            ));
+        }
+        for (row_idx, row) in layer.weights.iter().enumerate() {
+            if row.len() != expected_input_dim {
+                return Err(format!(
+                    "soccer neural network snapshot layer {layer_idx} row {row_idx} has input dim {}, expected {}",
+                    row.len(),
+                    expected_input_dim
+                ));
+            }
+            if row.iter().any(|value| !value.is_finite()) {
+                return Err(format!(
+                    "soccer neural network snapshot layer {layer_idx} row {row_idx} has non-finite weights"
+                ));
+            }
+            parameter_count = parameter_count.saturating_add(row.len());
+        }
+        if layer.biases.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "soccer neural network snapshot layer {layer_idx} has non-finite biases"
+            ));
+        }
+        parameter_count = parameter_count.saturating_add(layer.biases.len());
+        expected_input_dim = output_dim;
+    }
+    if expected_input_dim != snapshot.output_dim {
+        return Err(format!(
+            "soccer neural network snapshot final output dim {expected_input_dim} does not match declared {}",
+            snapshot.output_dim
+        ));
+    }
+    if snapshot.parameter_count != 0 && snapshot.parameter_count != parameter_count {
+        return Err(format!(
+            "soccer neural network snapshot parameter_count {} does not match decoded {}",
+            snapshot.parameter_count, parameter_count
+        ));
     }
     Ok(())
 }
@@ -2451,7 +2545,7 @@ mod tests {
         SoccerNeuralNetworkSnapshot {
             input_dim: 2,
             output_dim: 1,
-            parameter_count: 4,
+            parameter_count: 3,
             l2_norm: 0.5,
             layers: vec![crate::des::general::soccer::SoccerNeuralLayerSnapshot {
                 activation: "linear".to_string(),
@@ -2495,11 +2589,32 @@ mod tests {
     #[test]
     fn policy_version_metrics_round_trip_neural_snapshot() {
         let snapshot = tiny_neural_snapshot();
-        let tactical_learning = SoccerTacticalLearningWeights::default();
+        let mut tactical_learning = SoccerTacticalLearningWeights::default();
+        tactical_learning.formation_lp_alignment_weight = 0.37;
         let metrics =
             soccer_policy_version_metrics(1.25, Some(&snapshot), Some(&tactical_learning))
                 .expect("metrics");
         assert_eq!(metrics["fitness"], json!(1.25));
+        assert_eq!(
+            metrics["learningComponents"]["mdpPolicyEntries"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningComponents"]["pomdpStateKeyFeatures"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningComponents"]["mpcFormationLpWeights"],
+            json!(true)
+        );
+        assert_eq!(
+            metrics["learningComponents"]["lpAlignmentWeight"],
+            json!(0.37)
+        );
+        assert_eq!(
+            metrics["learningComponents"]["neuralNetworkSnapshot"],
+            json!(true)
+        );
 
         let decoded =
             soccer_policy_version_neural_network_from_metrics(&metrics).expect("decode snapshot");
@@ -2520,6 +2635,106 @@ mod tests {
             decoded_weights.defense_contract_delta_weight,
             tactical_learning.defense_contract_delta_weight
         );
+        assert_eq!(
+            decoded_weights.formation_lp_alignment_weight,
+            tactical_learning.formation_lp_alignment_weight
+        );
+    }
+
+    #[test]
+    fn policy_version_tactical_learning_falls_back_to_config_lp_weight() {
+        let mut tactical_learning = SoccerTacticalLearningWeights::default();
+        tactical_learning.formation_lp_alignment_weight = 0.42;
+        let config = json!({
+            "tacticalLearning": serde_json::to_value(&tactical_learning).expect("weights json")
+        });
+        let decoded = soccer_policy_version_tactical_learning_from_values(&config, &json!({}))
+            .expect("decode tactical learning")
+            .expect("tactical learning present");
+
+        assert_eq!(decoded.formation_lp_alignment_weight, 0.42);
+    }
+
+    #[test]
+    fn postgres_rejects_non_finite_lp_alignment_weight() {
+        let mut tactical_learning = SoccerTacticalLearningWeights::default();
+        tactical_learning.formation_lp_alignment_weight = f64::INFINITY;
+
+        assert!(
+            validate_soccer_tactical_learning_weights_for_pg(&tactical_learning)
+                .expect_err("non-finite LP alignment weight should be rejected")
+                .contains("formationLpAlignmentWeight")
+        );
+    }
+
+    #[test]
+    fn postgres_rejects_malformed_neural_snapshot_metrics() {
+        let metrics = json!({
+            "neuralNetwork": {
+                "inputDim": 2,
+                "outputDim": 1,
+                "parameterCount": 2,
+                "l2Norm": 0.4,
+                "layers": [{
+                    "activation": "linear",
+                    "weights": [[0.25]],
+                    "biases": [0.1]
+                }]
+            }
+        });
+
+        assert!(soccer_policy_version_neural_network_from_metrics(&metrics)
+            .expect_err("malformed neural snapshot should be rejected")
+            .contains("expected 2"));
+    }
+
+    #[test]
+    fn postgres_policy_state_json_preserves_mdp_pomdp_and_lp_bins() {
+        let state_json = json!({
+            "phase": "HomeBuildUp",
+            "role": "Defender",
+            "possessionRelative": -1,
+            "ballZoneX": 3,
+            "ballZoneY": 4,
+            "playerTacticalCellId": 77,
+            "scoreDiffBucket": 0,
+            "teamBrainPressBin": 4,
+            "teamBrainRiskBin": 2,
+            "teamCentroidBallDistanceBin": 3,
+            "teamSpreadBin": 2,
+            "formationLpGuidance": true,
+            "formationLpMoveBin": 3,
+            "formationLpPairErrorBin": 2,
+            "formationLpPressureBin": 4,
+            "formationLpSpeedMatchBin": 1,
+            "hasBall": false,
+            "visibleBall": true,
+            "shotLaneOpen": false,
+            "visiblePassOptionsBin": 2,
+            "ballDistanceBin": 1,
+            "yardsToGoalBin": 4,
+            "pressureBin": 3,
+            "openSpaceBin": 2
+        });
+        let state: SoccerQStateKey =
+            serde_json::from_value(state_json).expect("state key decodes with defaults");
+        let persisted_state_json =
+            serde_json::to_value(&state).expect("state key serializes for postgres jsonb");
+
+        assert_eq!(persisted_state_json["playerTacticalCellId"], json!(77));
+        assert_eq!(persisted_state_json["teamBrainPressBin"], json!(4));
+        assert_eq!(
+            persisted_state_json["teamCentroidBallDistanceBin"],
+            json!(3)
+        );
+        assert_eq!(persisted_state_json["formationLpGuidance"], json!(true));
+        assert_eq!(persisted_state_json["formationLpMoveBin"], json!(3));
+        assert_eq!(persisted_state_json["formationLpPairErrorBin"], json!(2));
+        assert_eq!(persisted_state_json["formationLpPressureBin"], json!(4));
+        assert_eq!(persisted_state_json["formationLpSpeedMatchBin"], json!(1));
+        let hash = state_hash(&persisted_state_json);
+        assert_eq!(hash.len(), 16);
+        assert!(hash.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 
     #[test]

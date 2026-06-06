@@ -280,10 +280,12 @@
       <div class="section">Match</div>
       <div class="metric"><span>Phase</span><b id="phase">Kickoff</b></div>
       <div class="metric"><span>Central Brain</span><b id="centralBrain">22p 3o Loose</b></div>
+      <div class="metric"><span>Agent Order</span><b id="agentOrder">shuffle pending</b></div>
       <div class="metric"><span>Home Brain</span><b id="homeBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Away Brain</span><b id="awayBrain">P0.00 R0.00</b></div>
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
       <div class="metric"><span>Ball Hist</span><b id="ballKinematics">H0 V0.0 A0.0 J0.0</b></div>
+      <div class="metric"><span>Ball Agent</span><b id="ballAgent">waiting</b></div>
       <div class="metric"><span>Intent</span><b id="actionIntent">Idle</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
@@ -398,10 +400,12 @@ const awayScore = document.getElementById("awayScore");
 const clock = document.getElementById("clock");
 const phase = document.getElementById("phase");
 const centralBrain = document.getElementById("centralBrain");
+const agentOrder = document.getElementById("agentOrder");
 const homeBrain = document.getElementById("homeBrain");
 const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
 const ballKinematics = document.getElementById("ballKinematics");
+const ballAgent = document.getElementById("ballAgent");
 const actionIntent = document.getElementById("actionIntent");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
@@ -613,6 +617,50 @@ function centralBrainLabel(b) {
   const ballZ = Number(b.ballAltitudeYards ?? 0);
   const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)} z${ballZ.toFixed(1)}`;
   return `${players}p ${officials}o ${possession}${holder}${centerText}${ballText}`;
+}
+function agentScheduleGlyph(entry) {
+  if (!entry) return "?";
+  if (entry.kind === "centralBrain") return "C";
+  if (entry.kind === "player") return `P${entry.id}`;
+  if (entry.kind === "official") return `O${entry.id}`;
+  if (entry.kind === "ball") return "B";
+  return String(entry.id ?? "?");
+}
+function agentScheduleEntriesForFrame(f) {
+  if (Array.isArray(f?.agentSchedule) && f.agentSchedule.length) return f.agentSchedule;
+  const entries = [];
+  for (const p of f?.players || []) {
+    if (Number.isInteger(p.scheduledIndex)) {
+      entries.push({kind: "player", id: p.id, scheduledIndex: p.scheduledIndex});
+    }
+  }
+  for (const o of f?.officials || []) {
+    if (Number.isInteger(o.scheduledIndex)) {
+      entries.push({kind: "official", id: o.id, scheduledIndex: o.scheduledIndex});
+    }
+  }
+  if (Number.isInteger(f?.ball?.scheduledIndex)) {
+    entries.push({kind: "ball", id: 0, scheduledIndex: f.ball.scheduledIndex});
+  }
+  entries.sort((a, b) => Number(a.scheduledIndex ?? 0) - Number(b.scheduledIndex ?? 0));
+  return entries;
+}
+function agentScheduleLabel(f) {
+  const schedule = agentScheduleEntriesForFrame(f);
+  if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
+  const prefix = schedule.slice(0, 6).map(agentScheduleGlyph).join(" ");
+  const ball = schedule.find(entry => entry.kind === "ball");
+  const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
+  return `${prefix}${suffix}`;
+}
+function playbackScheduleSlotLabel(value) {
+  return Number.isInteger(value) ? ` S${value}` : "";
+}
+function playbackBallAgentLabel(ball) {
+  const action = String(ball?.lastAction || "waiting");
+  const schedule = playbackScheduleSlotLabel(ball?.scheduledIndex);
+  const holder = ball?.holder == null ? "" : ` #${ball.holder}`;
+  return `${action}${schedule}${holder}`;
 }
 function primaryIntent(f) {
   const intents = Array.isArray(f?.intents) ? f.intents : [];
@@ -981,10 +1029,12 @@ function render() {
   clock.textContent = fmtClock(f.clockSeconds);
   phase.textContent = phaseLabel(f.phase);
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
+  agentOrder.textContent = agentScheduleLabel(f);
   homeBrain.textContent = teamBrainLabel(f.homeBrain, f.homeDirective);
   awayBrain.textContent = teamBrainLabel(f.awayBrain, f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2 z${ballAltitudeYards(f.ball).toFixed(1)}y`;
   ballKinematics.textContent = ballHistoryKinematicsLabel(f, trace.config?.dtSeconds);
+  ballAgent.textContent = playbackBallAgentLabel(f.ball);
   actionIntent.textContent = intentLabel(primaryIntent(f));
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
   updateAgentStatePanel();

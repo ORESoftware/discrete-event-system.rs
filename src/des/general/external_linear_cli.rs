@@ -1942,7 +1942,8 @@ fn gams_lindo_command_with_options(opts: &ExternalLinearCliOptions) -> Option<Pa
         || opts.command_path.is_some()
         || external_linear_cli_env_configured(ExternalLinearCliSolver::Lindo.command_env_vars())
         || external_linear_cli_env_configured(ExternalLinearCliSolver::Lindo.command_dir_env_vars())
-        || external_linear_cli_command(ExternalLinearCliSolver::Lindo).is_some()
+        || (external_linear_cli_command(ExternalLinearCliSolver::Lindo).is_some()
+            && !lindo_gams_control_options_requested(opts))
     {
         return None;
     }
@@ -1957,6 +1958,13 @@ fn gams_lindo_command_with_options(opts: &ExternalLinearCliOptions) -> Option<Pa
         ],
         &["gams"],
     )
+}
+
+fn lindo_gams_control_options_requested(opts: &ExternalLinearCliOptions) -> bool {
+    opts.mip_start.is_some()
+        || opts.max_nodes.is_some()
+        || opts.node_limit.is_some()
+        || opts.relative_gap.is_some()
 }
 
 /// Probe one solver for installation, bridge support, and a tiny smoke solve.
@@ -2646,11 +2654,7 @@ fn should_use_native_lindo_cli(
         || opts.branch_rule.is_some()
         || opts.branch_priorities.is_some()
         || opts.node_selection.is_some()
-        || opts.mip_start.is_some()
-        || opts.max_nodes.is_some()
-        || opts.node_limit.is_some()
         || opts.solution_limit.is_some()
-        || opts.relative_gap.is_some()
         || opts.absolute_gap.is_some()
         || opts.objective_limit.is_some()
         || opts.primal_feasibility_tolerance.is_some()
@@ -2659,6 +2663,10 @@ fn should_use_native_lindo_cli(
         || opts.threads.is_some()
         || opts.random_seed.is_some()
         || opts.presolve.is_some()
+    {
+        return false;
+    }
+    if lindo_gams_control_options_requested(opts) && gams_lindo_command_with_options(opts).is_none()
     {
         return false;
     }
@@ -7899,6 +7907,22 @@ fn solve_native_lindo_gams_model(
         listing_path.clone(),
     ];
 
+    let mip_start_objective = match native_lindo_gams_mip_start_objective(
+        kind,
+        model.c.len(),
+        objective_coefficients,
+        opts,
+    ) {
+        Ok(objective) => objective,
+        Err(message) => {
+            return external_cli_failure(
+                ExternalLinearCliStatus::NumericalError,
+                bridge_solver,
+                message,
+                elapsed_ms(t0),
+            );
+        }
+    };
     let model_text = gams_lindo_model_text(kind, model, &solution_path, opts);
     if let Err(err) = fs::write(&model_path, model_text) {
         cleanup_native_lindo_temp_files(&cleanup_paths);
@@ -8046,7 +8070,7 @@ fn solve_native_lindo_gams_model(
         branch_priority_count: None,
         node_selection: None,
         mip_start_accepted: None,
-        mip_start_objective: None,
+        mip_start_objective,
         dual_ub: None,
         dual_eq: None,
         reduced_costs: None,
@@ -8121,11 +8145,32 @@ fn gams_lindo_model_text(
             }
         }
     }
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(mip_start) = opts.mip_start.as_deref() {
+            for (i, value) in mip_start.iter().copied().enumerate() {
+                out.push_str(&format!("x{i}.l = {};\n", fmt_lp_number(value)));
+            }
+        }
+    }
     if let Some(seconds) = opts
         .time_limit_secs
         .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
     {
         out.push_str(&format!("option reslim = {};\n", fmt_lp_number(seconds)));
+    }
+    if kind == ExternalLinearCliKind::Mip {
+        if let Some(max_nodes) = opts
+            .max_nodes
+            .or_else(|| opts.node_limit.map(|limit| limit as u64))
+        {
+            out.push_str(&format!("option nodlim = {max_nodes};\n"));
+        }
+        if let Some(relative_gap) = normalized_relative_gap(opts.relative_gap) {
+            out.push_str(&format!(
+                "option optcr = {};\n",
+                fmt_lp_number(relative_gap)
+            ));
+        }
     }
     out.push_str("option lp = lindo;\n");
     out.push_str("option mip = lindo;\n");
@@ -8153,6 +8198,35 @@ fn gams_lindo_model_text(
     }
     out.push_str("putclose result;\n");
     out
+}
+
+fn native_lindo_gams_mip_start_objective(
+    kind: ExternalLinearCliKind,
+    variable_count: usize,
+    objective_coefficients: &[f64],
+    opts: &ExternalLinearCliOptions,
+) -> Result<Option<f64>, String> {
+    if kind != ExternalLinearCliKind::Mip {
+        return Ok(None);
+    }
+    let Some(mip_start) = opts.mip_start.as_deref() else {
+        return Ok(None);
+    };
+    if mip_start.len() != variable_count {
+        return Err(format!(
+            "mip_start length {} does not match variable count {}",
+            mip_start.len(),
+            variable_count
+        ));
+    }
+    if mip_start.iter().any(|value| !value.is_finite()) {
+        return Err("mip_start values must be finite".to_string());
+    }
+    let objective = dot_f64(objective_coefficients, mip_start);
+    if !objective.is_finite() {
+        return Err("mip_start objective must be finite".to_string());
+    }
+    Ok(Some(objective))
 }
 
 fn push_gams_declaration(out: &mut String, keyword: &str, names: &[String]) {
@@ -13926,6 +14000,66 @@ x9 99
         assert_eq!(
             super::parse_lindo_solver_version("LINDO Optimizer 14.0"),
             Some("LINDO 14.0".to_string())
+        );
+    }
+
+    #[test]
+    fn gams_lindo_mip_model_emits_start_and_basic_controls() {
+        let model = super::PlainLinearCliModel {
+            sense: Sense::Max,
+            c: vec![60.0, 100.0, 120.0],
+            le_rows: vec![vec![10.0, 20.0, 30.0]],
+            le_rhs: vec![50.0],
+            eq_rows: Vec::new(),
+            eq_rhs: Vec::new(),
+            lbs: vec![Some(0.0), Some(0.0), Some(0.0)],
+            ubs: vec![Some(1.0), Some(1.0), Some(1.0)],
+            integer_vars: vec![true, true, true],
+        };
+        let opts = ExternalLinearCliOptions {
+            solver: ExternalLinearCliSolver::Lindo,
+            time_limit_secs: Some(2.5),
+            node_limit: Some(3),
+            relative_gap: Some(0.25),
+            mip_start: Some(vec![0.0, 1.0, 1.0]),
+            ..Default::default()
+        };
+        let text = super::gams_lindo_model_text(
+            ExternalLinearCliKind::Mip,
+            &model,
+            std::path::Path::new("/tmp/des-rs-lindo-solution.txt"),
+            &opts,
+        );
+
+        assert!(text.contains("Binary Variables x0, x1, x2;"));
+        assert!(text.contains("x0.l = 0;"));
+        assert!(text.contains("x1.l = 1;"));
+        assert!(text.contains("x2.l = 1;"));
+        assert!(text.contains("option reslim = 2.5;"));
+        assert!(text.contains("option nodlim = 3;"));
+        assert!(text.contains("option optcr = 0.25;"));
+        assert!(text.contains("Solve m using mip maximizing z;"));
+        assert_eq!(
+            super::native_lindo_gams_mip_start_objective(
+                ExternalLinearCliKind::Mip,
+                model.c.len(),
+                &model.c,
+                &opts
+            ),
+            Ok(Some(220.0))
+        );
+        assert_eq!(
+            super::native_lindo_gams_mip_start_objective(
+                ExternalLinearCliKind::Mip,
+                model.c.len(),
+                &model.c,
+                &ExternalLinearCliOptions {
+                    solver: ExternalLinearCliSolver::Lindo,
+                    mip_start: Some(vec![1.0]),
+                    ..Default::default()
+                }
+            ),
+            Err("mip_start length 1 does not match variable count 3".to_string())
         );
     }
 

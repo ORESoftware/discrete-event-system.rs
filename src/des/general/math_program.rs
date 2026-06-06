@@ -640,6 +640,32 @@ impl MathProgram {
         Ok(self.quadratic_objective.len() - 1)
     }
 
+    pub fn add_linear_objective_term(
+        &mut self,
+        var: usize,
+        coeff: f64,
+    ) -> Result<(), MathProgramError> {
+        if var >= self.variables.len() {
+            return Err(MathProgramError::BadIndex(format!(
+                "linear objective references {var} with {} variables",
+                self.variables.len()
+            )));
+        }
+        if !coeff.is_finite() {
+            return Err(MathProgramError::NonFinite(
+                "linear objective coefficient".to_string(),
+            ));
+        }
+        let next = self.variables[var].obj + coeff;
+        if !next.is_finite() {
+            return Err(MathProgramError::NonFinite(
+                "linear objective coefficient sum".to_string(),
+            ));
+        }
+        self.variables[var].obj = next;
+        Ok(())
+    }
+
     pub fn add_quadratic_constraint(
         &mut self,
         name: impl Into<String>,
@@ -5875,6 +5901,16 @@ where
         if solution.status != MathProgramStatus::Optimal {
             return Ok(solution);
         }
+        let stage_violation =
+            solution_max_violation(&working, &solution.x, 1e-6).unwrap_or(f64::INFINITY);
+        if stage_violation > 1e-6 {
+            return Ok(hierarchical_stage_violation_solution(
+                solver_prefix,
+                &stage.name,
+                solution,
+                stage_violation,
+            ));
+        }
 
         let stage_score = eval_sparse_affine(&stage.coeffs, 0.0, &solution.x);
         for member in &stage.members {
@@ -5900,6 +5936,25 @@ where
         None => format!("hierarchical objectives: {}", objective_report.join(", ")),
     });
     Ok(solution)
+}
+
+fn hierarchical_stage_violation_solution(
+    solver_prefix: &str,
+    stage_name: &str,
+    mut solution: MathProgramSolution,
+    stage_violation: f64,
+) -> MathProgramSolution {
+    solution.status = MathProgramStatus::NumericalError;
+    solution.objective = f64::NAN;
+    solution.solver = format!("{solver_prefix}({})", solution.solver);
+    let stage_message = format!(
+        "hierarchical stage {stage_name} returned a solution violating the active stage model by {stage_violation:.3e}"
+    );
+    solution.message = Some(match solution.message {
+        Some(message) => format!("{stage_message}; {message}"),
+        None => stage_message,
+    });
+    solution
 }
 
 fn objective_stages(program: &MathProgram) -> Result<Vec<ObjectiveStage>, MathProgramError> {
@@ -19204,6 +19259,60 @@ mod tests {
     }
 
     #[test]
+    fn hierarchical_objective_rejects_stage_solution_that_violates_prior_lock() {
+        let mut p = MathProgram::new(ObjectiveSense::Max);
+        let x = p
+            .add_continuous_var("x", 1.0, Some(0.0), Some(4.0))
+            .unwrap();
+        let y = p
+            .add_continuous_var("y", 1.0, Some(0.0), Some(4.0))
+            .unwrap();
+        p.add_constraint("budget", vec![(x, 1.0), (y, 1.0)], RowSense::Le, 4.0)
+            .unwrap();
+        p.add_secondary_objective("prefer-y", ObjectiveSense::Min, 10, 1.0, vec![(x, 1.0)])
+            .unwrap();
+
+        let mut calls = 0usize;
+        let sol = solve_hierarchical_math_program_with(&p, "fake-hierarchical", |_stage| {
+            calls += 1;
+            let x = if calls == 1 {
+                vec![4.0, 0.0]
+            } else {
+                vec![0.0, 0.0]
+            };
+            Ok(MathProgramSolution {
+                status: MathProgramStatus::Optimal,
+                x,
+                objective: 0.0,
+                best_bound: None,
+                mip_gap: None,
+                nodes_explored: None,
+                first_branch_variable: None,
+                solver_version: None,
+                iterations: None,
+                control_feedback: None,
+                dual_ub: None,
+                dual_eq: None,
+                reduced_costs: None,
+                var_basis: None,
+                row_basis: None,
+                unbounded_ray: None,
+                infeasibility_certificate: None,
+                solver: "bad-stage".to_string(),
+                message: None,
+            })
+        })
+        .unwrap();
+
+        assert_eq!(calls, 2);
+        assert_eq!(sol.status, MathProgramStatus::NumericalError);
+        assert!(sol
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("violating the active stage model")));
+    }
+
+    #[test]
     fn hierarchical_objective_tolerance_allows_controlled_degradation() {
         let mut p = MathProgram::new(ObjectiveSense::Max);
         let y = p
@@ -21730,8 +21839,12 @@ mod tests {
     #[test]
     fn external_math_program_default_continuous_qp_uses_rust_reference_without_python() {
         let mut qp = MathProgram::new(ObjectiveSense::Min);
-        let x = qp.add_continuous_var("x", 0.0, Some(0.0), Some(5.0)).unwrap();
-        let y = qp.add_continuous_var("y", 0.0, Some(0.0), Some(5.0)).unwrap();
+        let x = qp
+            .add_continuous_var("x", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
+        let y = qp
+            .add_continuous_var("y", 0.0, Some(0.0), Some(5.0))
+            .unwrap();
         qp.add_quadratic_objective_term(x, x, 2.0).unwrap();
         qp.add_quadratic_objective_term(y, y, 2.0).unwrap();
         qp.add_linear_objective_term(x, -2.0).unwrap();

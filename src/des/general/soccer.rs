@@ -279,7 +279,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 83;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 89;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -304,7 +304,13 @@ const SOCCER_NEURAL_FEATURE_FORMATION_LP_PRESSURE_WEIGHT: usize = 77;
 const SOCCER_NEURAL_FEATURE_FORMATION_LP_SPEED_MATCH_WEIGHT: usize = 78;
 const SOCCER_NEURAL_FEATURE_TEAM_FLANK_POLICY: usize = 81;
 const SOCCER_NEURAL_FEATURE_TEAM_FLANK_OVERLAP: usize = 82;
-const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81];
+const SOCCER_NEURAL_FEATURE_BALL_ACCELERATION: usize = 83;
+const SOCCER_NEURAL_FEATURE_BALL_JERK: usize = 84;
+const SOCCER_NEURAL_FEATURE_BALL_FORWARD_VELOCITY: usize = 85;
+const SOCCER_NEURAL_FEATURE_BALL_LATERAL_SPEED: usize = 86;
+const SOCCER_NEURAL_FEATURE_BALL_ALTITUDE: usize = 87;
+const SOCCER_NEURAL_FEATURE_BALL_AIRBORNE: usize = 88;
+const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
@@ -1248,6 +1254,20 @@ pub struct SoccerPomdpObservation {
     pub actor_acceleration_yps2: f64,
     #[serde(default)]
     pub actor_jerk_yps3: f64,
+    #[serde(default)]
+    pub ball_speed_yps: f64,
+    #[serde(default)]
+    pub ball_acceleration_yps2: f64,
+    #[serde(default)]
+    pub ball_jerk_yps3: f64,
+    #[serde(default)]
+    pub ball_forward_velocity_yps: f64,
+    #[serde(default)]
+    pub ball_lateral_speed_yps: f64,
+    #[serde(default)]
+    pub ball_altitude_yards: f64,
+    #[serde(default)]
+    pub ball_airborne: bool,
     pub ball_distance: f64,
     pub nearest_opponent_distance: f64,
     pub nearest_teammate_distance: f64,
@@ -1528,6 +1548,18 @@ pub struct SoccerDecisionContext {
     pub ball_position: Vec2,
     #[serde(default)]
     pub ball_velocity: Vec2,
+    #[serde(default)]
+    pub ball_acceleration: Vec2,
+    #[serde(default)]
+    pub ball_jerk: Vec2,
+    #[serde(default)]
+    pub ball_forward_velocity_yps: f64,
+    #[serde(default)]
+    pub ball_lateral_speed_yps: f64,
+    #[serde(default)]
+    pub ball_altitude_yards: f64,
+    #[serde(default)]
+    pub ball_airborne: bool,
     #[serde(default)]
     pub target_point: Option<Vec2>,
     #[serde(default)]
@@ -2247,6 +2279,20 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub actor_jerk_bin: u8,
     #[serde(default)]
+    pub ball_speed_bin: u8,
+    #[serde(default)]
+    pub ball_acceleration_bin: u8,
+    #[serde(default)]
+    pub ball_jerk_bin: u8,
+    #[serde(default)]
+    pub ball_forward_velocity_bin: u8,
+    #[serde(default)]
+    pub ball_lateral_speed_bin: u8,
+    #[serde(default)]
+    pub ball_altitude_bin: u8,
+    #[serde(default)]
+    pub ball_airborne: bool,
+    #[serde(default)]
     pub receive_facing: FacingBucket,
     #[serde(default)]
     pub action_facing: FacingBucket,
@@ -2488,6 +2534,31 @@ impl SoccerQStateKey {
                 observation.actor_jerk_yps3,
                 &[1.5, 4.0, 8.0, 14.0, 22.0],
             ),
+            ball_speed_bin: distance_bucket(
+                observation.ball_speed_yps,
+                &[1.5, 6.0, 12.0, 22.0, 32.0],
+            ),
+            ball_acceleration_bin: distance_bucket(
+                observation.ball_acceleration_yps2,
+                &[0.5, 2.0, 5.0, 10.0, 18.0],
+            ),
+            ball_jerk_bin: distance_bucket(
+                observation.ball_jerk_yps3,
+                &[1.0, 4.0, 10.0, 22.0, 40.0],
+            ),
+            ball_forward_velocity_bin: distance_bucket(
+                observation.ball_forward_velocity_yps,
+                &[-12.0, -3.0, 3.0, 12.0, 24.0],
+            ),
+            ball_lateral_speed_bin: distance_bucket(
+                observation.ball_lateral_speed_yps,
+                &[1.0, 4.0, 9.0, 16.0, 26.0],
+            ),
+            ball_altitude_bin: distance_bucket(
+                observation.ball_altitude_yards,
+                &[BALL_ROLLING_ALTITUDE_YARDS, 0.5, 2.0, 6.0, 12.0],
+            ),
+            ball_airborne: observation.ball_airborne,
             receive_facing,
             action_facing,
             score_diff_bucket: score_diff_for_team.clamp(-2, 2) as i8,
@@ -2785,6 +2856,13 @@ impl SoccerQStateKey {
             && self.actor_speed_bin == other.actor_speed_bin
             && self.actor_acceleration_bin == other.actor_acceleration_bin
             && self.actor_jerk_bin == other.actor_jerk_bin
+            && self.ball_speed_bin == other.ball_speed_bin
+            && self.ball_acceleration_bin == other.ball_acceleration_bin
+            && self.ball_jerk_bin == other.ball_jerk_bin
+            && self.ball_forward_velocity_bin == other.ball_forward_velocity_bin
+            && self.ball_lateral_speed_bin == other.ball_lateral_speed_bin
+            && self.ball_altitude_bin == other.ball_altitude_bin
+            && self.ball_airborne == other.ball_airborne
             && self.score_diff_bucket == other.score_diff_bucket
             && self.team_brain_mode == other.team_brain_mode
             && self.team_brain_press_bin == other.team_brain_press_bin
@@ -14939,6 +15017,13 @@ impl WorldSnapshot {
                 actor_speed_yps: 0.0,
                 actor_acceleration_yps2: 0.0,
                 actor_jerk_yps3: 0.0,
+                ball_speed_yps: 0.0,
+                ball_acceleration_yps2: 0.0,
+                ball_jerk_yps3: 0.0,
+                ball_forward_velocity_yps: 0.0,
+                ball_lateral_speed_yps: 0.0,
+                ball_altitude_yards: 0.0,
+                ball_airborne: false,
                 ball_distance: 0.0,
                 nearest_opponent_distance: 0.0,
                 nearest_teammate_distance: 0.0,
@@ -15495,6 +15580,13 @@ impl WorldSnapshot {
             actor_speed_yps: me.velocity.len(),
             actor_acceleration_yps2: me.acceleration.len(),
             actor_jerk_yps3: me.jerk.len(),
+            ball_speed_yps: self.ball.velocity.len(),
+            ball_acceleration_yps2: self.ball.acceleration.len(),
+            ball_jerk_yps3: self.ball.jerk.len(),
+            ball_forward_velocity_yps: self.ball.velocity.y * me.team.attack_dir(),
+            ball_lateral_speed_yps: self.ball.velocity.x.abs(),
+            ball_altitude_yards: self.ball.altitude_yards.max(0.0),
+            ball_airborne: self.ball.altitude_yards > BALL_ROLLING_ALTITUDE_YARDS,
             ball_distance: if visible_ball {
                 me_position.distance(self.ball.position)
             } else {
@@ -19251,6 +19343,12 @@ fn soccer_decision_context_for(
         actor_acceleration,
         ball_position: before.ball.position,
         ball_velocity: before.ball.velocity,
+        ball_acceleration: before.ball.acceleration,
+        ball_jerk: before.ball.jerk,
+        ball_forward_velocity_yps: before.ball.velocity.y * team.attack_dir(),
+        ball_lateral_speed_yps: before.ball.velocity.x.abs(),
+        ball_altitude_yards: before.ball.altitude_yards.max(0.0),
+        ball_airborne: before.ball.altitude_yards > BALL_ROLLING_ALTITUDE_YARDS,
         target_point,
         target_player,
         target_player_position,
@@ -27556,6 +27654,12 @@ fn soccer_neural_transition_features(
         ),
         soccer_neural_flank_policy_feature(state.team_flank_attack_policy),
         soccer_neural_bin(state.team_flank_overlap_bin, 5.0),
+        soccer_neural_scaled(context.ball_acceleration.len(), 24.0),
+        soccer_neural_scaled(context.ball_jerk.len(), 80.0),
+        soccer_neural_scaled(context.ball_forward_velocity_yps, 36.0),
+        soccer_neural_scaled(context.ball_lateral_speed_yps, 24.0),
+        soccer_neural_scaled(context.ball_altitude_yards, 12.0),
+        soccer_neural_bool(context.ball_airborne),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -45516,7 +45620,7 @@ mod tests {
         sim.players[12].position = Vec2::new(42.0, 90.0);
         sim.ball.holder = None;
         sim.ball.position = Vec2::new(40.0, 42.0);
-        sim.ball.velocity = Vec2::new(0.0, 18.0);
+        sim.ball.velocity = Vec2::new(8.0, 18.0);
         sim.ball.altitude_yards = 0.05;
         sim.ball.last_touch_team = Some(Team::Home);
         sim.ball.last_decision = Some(BallDecisionTrace {
@@ -45833,6 +45937,10 @@ mod tests {
         }
         sim.ball.holder = Some(actor);
         sim.ball.position = sim.players[actor].position;
+        sim.ball.velocity = Vec2::new(8.0, 18.0);
+        sim.ball.acceleration = Vec2::new(0.0, 6.0);
+        sim.ball.jerk = Vec2::new(0.0, 24.0);
+        sim.ball.altitude_yards = 4.2;
         sim.ball.last_touch_team = Some(Team::Home);
         sim.players[actor].velocity = Vec2::new(0.8, 8.2);
         sim.players[actor].acceleration = Vec2::new(0.4, 5.4);
@@ -45853,10 +45961,24 @@ mod tests {
         assert!(observation.actor_speed_yps > 8.0);
         assert!(observation.actor_acceleration_yps2 > 5.0);
         assert!(observation.actor_jerk_yps3 > 13.0);
+        assert!(observation.ball_speed_yps > 17.0);
+        assert!(observation.ball_acceleration_yps2 > 5.0);
+        assert!(observation.ball_jerk_yps3 > 23.0);
+        assert!(observation.ball_forward_velocity_yps > 17.0);
+        assert!(observation.ball_lateral_speed_yps > 7.0);
+        assert!(observation.ball_altitude_yards > 4.0);
+        assert!(observation.ball_airborne);
         assert_eq!(sprint_key.movement_gait, MovementGait::Sprint);
         assert!(sprint_key.actor_speed_bin >= 4);
         assert!(sprint_key.actor_acceleration_bin >= 3);
         assert!(sprint_key.actor_jerk_bin >= 3);
+        assert!(sprint_key.ball_speed_bin >= 3);
+        assert!(sprint_key.ball_acceleration_bin >= 3);
+        assert!(sprint_key.ball_jerk_bin >= 3);
+        assert!(sprint_key.ball_forward_velocity_bin >= 4);
+        assert!(sprint_key.ball_lateral_speed_bin >= 2);
+        assert!(sprint_key.ball_altitude_bin >= 3);
+        assert!(sprint_key.ball_airborne);
 
         let mut standing_observation = observation.clone();
         standing_observation.movement_gait = MovementGait::Stand;
@@ -45876,6 +45998,42 @@ mod tests {
         assert!(sprint_key.actor_jerk_bin > standing_key.actor_jerk_bin);
         assert_ne!(sprint_key, standing_key);
 
+        let mut dead_ball_observation = observation.clone();
+        dead_ball_observation.ball_speed_yps = 0.0;
+        dead_ball_observation.ball_acceleration_yps2 = 0.0;
+        dead_ball_observation.ball_jerk_yps3 = 0.0;
+        dead_ball_observation.ball_forward_velocity_yps = 0.0;
+        dead_ball_observation.ball_lateral_speed_yps = 0.0;
+        dead_ball_observation.ball_altitude_yards = 0.0;
+        dead_ball_observation.ball_airborne = false;
+        let dead_ball_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &dead_ball_observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
+        assert!(sprint_key.ball_speed_bin > dead_ball_key.ball_speed_bin);
+        assert!(sprint_key.ball_acceleration_bin > dead_ball_key.ball_acceleration_bin);
+        assert!(sprint_key.ball_jerk_bin > dead_ball_key.ball_jerk_bin);
+        assert!(sprint_key.ball_forward_velocity_bin > dead_ball_key.ball_forward_velocity_bin);
+        assert!(sprint_key.ball_lateral_speed_bin > dead_ball_key.ball_lateral_speed_bin);
+        assert!(sprint_key.ball_altitude_bin > dead_ball_key.ball_altitude_bin);
+        assert_ne!(sprint_key.ball_airborne, dead_ball_key.ball_airborne);
+        assert_ne!(sprint_key, dead_ball_key);
+
+        let mut backward_ball_observation = observation.clone();
+        backward_ball_observation.ball_forward_velocity_yps = -18.0;
+        backward_ball_observation.ball_lateral_speed_yps = 0.2;
+        let backward_ball_key = SoccerQStateKey::from_parts(
+            &mdp_state,
+            &backward_ball_observation,
+            Team::Home,
+            sim.players[actor].role,
+        );
+        assert!(sprint_key.ball_forward_velocity_bin > backward_ball_key.ball_forward_velocity_bin);
+        assert!(sprint_key.ball_lateral_speed_bin > backward_ball_key.ball_lateral_speed_bin);
+        assert_ne!(sprint_key, backward_ball_key);
+
         let mut policy = SoccerQPolicy::default();
         policy.set_action_value(sprint_key.clone(), "overlap-run", 5.0);
         assert_eq!(
@@ -45885,6 +46043,16 @@ mod tests {
         assert!(
             policy.best_action_hierarchical(&standing_key).is_none(),
             "actor motion bins should prevent reusing sprint overlap policy for a standing player"
+        );
+        assert!(
+            policy.best_action_hierarchical(&dead_ball_key).is_none(),
+            "ball motion bins should prevent reusing a live-ball sprint policy for a dead ball"
+        );
+        assert!(
+            policy
+                .best_action_hierarchical(&backward_ball_key)
+                .is_none(),
+            "ball travel direction should prevent reusing forward-ball policy for a backward ball"
         );
     }
 
@@ -52655,6 +52823,12 @@ mod tests {
                 action_ball_speed_yps: 18.0,
                 actor_velocity: Vec2::new(3.4, 1.2),
                 actor_acceleration: Vec2::new(2.0, 0.5),
+                ball_acceleration: Vec2::new(0.0, 12.0),
+                ball_jerk: Vec2::new(0.0, 44.0),
+                ball_forward_velocity_yps: 20.0,
+                ball_lateral_speed_yps: 9.0,
+                ball_altitude_yards: 4.8,
+                ball_airborne: true,
                 attacking_team_speed_yps: 4.2,
                 defending_team_speed_yps: 5.1,
                 dribble_touch_angle_bucket: Some(2),
@@ -52700,6 +52874,30 @@ mod tests {
         assert!(
             features[SOCCER_NEURAL_FEATURE_BALL_SPEED] > 0.40,
             "ball speed feature should be present"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_BALL_ACCELERATION] > 0.40,
+            "ball acceleration feature should be present"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_BALL_JERK] > 0.40,
+            "ball jerk feature should be present"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_BALL_FORWARD_VELOCITY] > 0.40,
+            "ball forward velocity feature should be present"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_BALL_LATERAL_SPEED] > 0.30,
+            "ball lateral speed feature should be present"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_BALL_ALTITUDE] > 0.30,
+            "ball altitude feature should be present"
+        );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_BALL_AIRBORNE], 1.0,
+            "ball airborne feature should be present"
         );
         assert!(
             features[SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING] > 0.0,
@@ -53179,6 +53377,171 @@ mod tests {
             assert_eq!(
                 resumed_snapshot.layers[0].weights[0][index], 0.0,
                 "new flank-policy input weights should start neutral"
+            );
+        }
+    }
+
+    #[test]
+    fn neural_learning_pads_previous_snapshot_ball_motion_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15080,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_BALL_ACCELERATION;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous ball-motion neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        for index in previous_dim..SOCCER_NEURAL_FEATURE_DIM {
+            assert_eq!(
+                resumed_snapshot.layers[0].weights[0][index], 0.0,
+                "new ball-motion input weights should start neutral"
+            );
+        }
+    }
+
+    #[test]
+    fn neural_learning_pads_previous_snapshot_ball_direction_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15081,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_BALL_FORWARD_VELOCITY;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous ball-direction neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        for index in previous_dim..SOCCER_NEURAL_FEATURE_DIM {
+            assert_eq!(
+                resumed_snapshot.layers[0].weights[0][index], 0.0,
+                "new ball-direction input weights should start neutral"
+            );
+        }
+    }
+
+    #[test]
+    fn neural_learning_pads_previous_snapshot_ball_altitude_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15082,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_BALL_ALTITUDE;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous ball-altitude neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        for index in previous_dim..SOCCER_NEURAL_FEATURE_DIM {
+            assert_eq!(
+                resumed_snapshot.layers[0].weights[0][index], 0.0,
+                "new ball-altitude input weights should start neutral"
             );
         }
     }
@@ -55367,6 +55730,12 @@ mod tests {
         assert!((transition.decision_context.actor_velocity.y - 3.0).abs() < 1e-9);
         assert!((transition.decision_context.actor_acceleration.y - 20.0).abs() < 1e-9);
         assert!((transition.decision_context.ball_velocity.y - 8.0).abs() < 1e-9);
+        assert!((transition.decision_context.ball_acceleration.y - 40.0).abs() < 1e-9);
+        assert!((transition.decision_context.ball_jerk.y - 400.0).abs() < 1e-9);
+        assert!((transition.decision_context.ball_forward_velocity_yps - 8.0).abs() < 1e-9);
+        assert!(transition.decision_context.ball_lateral_speed_yps.abs() < 1e-9);
+        assert!(transition.decision_context.ball_altitude_yards.abs() < 1e-9);
+        assert!(!transition.decision_context.ball_airborne);
     }
 
     #[test]

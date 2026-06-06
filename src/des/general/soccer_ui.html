@@ -289,12 +289,19 @@
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
+      <div class="metric"><span>Dribble Beats</span><b id="dribbleBeats">0 - 0</b></div>
+      <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
+      <div class="metric"><span>Route 1</span><b id="routeOne">0 - 0</b></div>
+      <div class="metric"><span>Tackles</span><b id="tackles">0 - 0</b></div>
+      <div class="metric"><span>Interceptions</span><b id="interceptions">0 - 0</b></div>
+      <div class="metric"><span>Shot Blocks</span><b id="shotBlocks">0 - 0</b></div>
       <div class="metric"><span>Recoveries</span><b id="recoveries">0 - 0</b></div>
       <div class="metric"><span>Offside</span><b id="offsides">0 - 0</b></div>
       <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Seed</span><b id="seed">-</b></div>
+      <div class="metric"><span>Run ID</span><b id="runId">-</b></div>
       <div class="section">Controller Slots</div>
       <div id="slots"></div>
       <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
@@ -327,7 +334,7 @@
 <script>
 const TRACE_META_URL = "__SOCCER_TRACE_META_URL__";
 const TRACE_FRAMES_URL = "__SOCCER_TRACE_FRAMES_URL__";
-const RUN_NEW_SIM_URL = "../simulations/main_soccer/run?exact=1";
+const RUN_NEW_SIM_URL = "../simulations/main_soccer/run?exact=1&fresh=1";
 const FALLBACK_CONFIG = {
   fieldWidthYards: 80,
   fieldLengthYards: 120,
@@ -347,6 +354,19 @@ function emptyStats() {
     passesCompletedAway: 0,
     passesAttemptedHome: 0,
     passesAttemptedAway: 0,
+    clearancesHome: 0,
+    clearancesAway: 0,
+    routeOneBallsHome: 0,
+    routeOneBallsAway: 0,
+    dribbleBeatsHome: 0,
+    dribbleBeatsAway: 0,
+    tacklesHome: 0,
+    tacklesAway: 0,
+    tackles: 0,
+    interceptionsHome: 0,
+    interceptionsAway: 0,
+    shotBlocksHome: 0,
+    shotBlocksAway: 0,
     looseBallRecoveriesHome: 0,
     looseBallRecoveriesAway: 0,
     offsidesHome: 0,
@@ -367,7 +387,9 @@ const trace = {
   config: {...FALLBACK_CONFIG},
   summary: {ticks: 0, stats: emptyStats()},
   frames: [],
-  events: []
+  events: [],
+  runId: null,
+  generatedAtUnixMs: null
 };
 const canvas = document.getElementById("pitch");
 const ctx = canvas.getContext("2d");
@@ -385,12 +407,19 @@ const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
 const passes = document.getElementById("passes");
+const dribbleBeats = document.getElementById("dribbleBeats");
+const clearances = document.getElementById("clearances");
+const routeOne = document.getElementById("routeOne");
+const tackles = document.getElementById("tackles");
+const interceptions = document.getElementById("interceptions");
+const shotBlocks = document.getElementById("shotBlocks");
 const recoveries = document.getElementById("recoveries");
 const offsides = document.getElementById("offsides");
 const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const seed = document.getElementById("seed");
+const runId = document.getElementById("runId");
 const scrub = document.getElementById("scrub");
 const play = document.getElementById("play");
 const runNewSimButton = document.getElementById("runNewSim");
@@ -483,12 +512,22 @@ function resetTraceState() {
   trace.summary = {ticks: 0, stats: emptyStats()};
   trace.frames = [];
   trace.events = [];
+  trace.runId = null;
+  trace.generatedAtUnixMs = null;
   slots.innerHTML = "";
   passTarget.innerHTML = "";
   scrub.value = 0;
   scrub.max = 0;
   keys.clear();
   updateMetrics();
+}
+function runIdLabel() {
+  const id = trace.runId == null ? "" : String(trace.runId);
+  if (!id) return "-";
+  const generated = Number(trace.generatedAtUnixMs || 0);
+  const at = generated > 0 ? new Date(generated).toLocaleTimeString() : "";
+  const shortId = id.length > 18 ? id.slice(-18) : id;
+  return at ? `${shortId} ${at}` : shortId;
 }
 function updatePlaybackAvailability() {
   const enabled = canStartPlayback();
@@ -957,6 +996,12 @@ function updateMetrics() {
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
+  dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
+  clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
+  routeOne.textContent = `${s.routeOneBallsHome ?? 0} - ${s.routeOneBallsAway ?? 0}`;
+  tackles.textContent = `${s.tacklesHome ?? 0} - ${s.tacklesAway ?? 0}`;
+  interceptions.textContent = `${s.interceptionsHome ?? 0} - ${s.interceptionsAway ?? 0}`;
+  shotBlocks.textContent = `${s.shotBlocksHome ?? 0} - ${s.shotBlocksAway ?? 0}`;
   recoveries.textContent = `${s.looseBallRecoveriesHome ?? 0} - ${s.looseBallRecoveriesAway ?? 0}`;
   offsides.textContent = `${s.offsidesHome ?? 0} - ${s.offsidesAway ?? 0}`;
   const homeRestarts = (s.throwInsHome ?? 0) + (s.goalKicksHome ?? 0) + (s.cornerKicksHome ?? 0) + (s.freeKicksHome ?? 0);
@@ -964,6 +1009,7 @@ function updateMetrics() {
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
   seed.textContent = trace.config?.seed ?? "-";
+  runId.textContent = runIdLabel();
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function tick(ts) {
@@ -1129,6 +1175,8 @@ async function loadTraceMeta(signal) {
   trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
   trace.summary.stats = trace.summary.stats || emptyStats();
   trace.events = Array.isArray(meta.events) ? meta.events : [];
+  trace.runId = meta.runId || null;
+  trace.generatedAtUnixMs = meta.generatedAtUnixMs || null;
   updateMetrics();
 }
 

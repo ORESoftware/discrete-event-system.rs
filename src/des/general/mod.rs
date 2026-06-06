@@ -113,6 +113,7 @@ pub mod external_linear_cli;
 pub mod external_max_flow_reference;
 pub mod external_min_cost_flow_reference;
 pub mod external_minimum_spanning_tree_reference;
+pub mod external_neos_probe;
 pub mod external_nonlinear_reference;
 pub mod external_nonlinear_validation_reference;
 pub mod external_optimization_ecosystem;

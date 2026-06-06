@@ -347,6 +347,7 @@ fn payload_match_config(
     period_break_recovery_seconds: f64,
     dt_seconds: f64,
     learning_interval_ticks: usize,
+    formation_lp_enabled: bool,
     seed: u32,
     tactical_learning: SoccerTacticalLearningWeights,
 ) -> MatchConfig {
@@ -356,6 +357,7 @@ fn payload_match_config(
         period_break_recovery_seconds,
         dt_seconds,
         learning_interval_ticks,
+        formation_lp_enabled,
         seed,
         learning_enabled: true,
         learning_logging_enabled: false,
@@ -420,6 +422,11 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
     let period_break_recovery_seconds = env_f64("SOCCER_PERIOD_BREAK_RECOVERY_SECONDS", 900.0)?;
     let dt_seconds = env_f64("SOCCER_DT_SECONDS", 0.2)?;
     let learning_interval_ticks = env_usize("SOCCER_LEARNING_INTERVAL_TICKS", 4)?;
+    let default_config = MatchConfig::default();
+    let formation_lp_enabled = env_bool(
+        "SOCCER_FORMATION_LP_ENABLED",
+        default_config.formation_lp_enabled,
+    )?;
     let seed = env_u32("SOCCER_SEED", 2026)?;
     let alpha = env_f64("SOCCER_ALPHA", 0.20)?;
     let gamma = env_f64("SOCCER_GAMMA", 0.96)?;
@@ -441,6 +448,7 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
     let defender_midfielder_press_weight =
         env_f64("SOCCER_DEFENDER_MIDFIELDER_PRESS_WEIGHT", 0.18)?;
     let midfielder_press_weight = env_f64("SOCCER_MIDFIELDER_PRESS_WEIGHT", 0.20)?;
+    let formation_lp_alignment_weight = env_f64("SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT", 0.16)?;
     let tactical_weights = [
         (
             "SOCCER_ATTACK_SPACING_DELTA_WEIGHT",
@@ -492,6 +500,10 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
             defender_midfielder_press_weight,
         ),
         ("SOCCER_MIDFIELDER_PRESS_WEIGHT", midfielder_press_weight),
+        (
+            "SOCCER_FORMATION_LP_ALIGNMENT_WEIGHT",
+            formation_lp_alignment_weight,
+        ),
     ];
     validate_payload_settings(
         episodes,
@@ -520,6 +532,7 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
         defense_endline_hard_penalty_weight,
         defender_midfielder_press_weight,
         midfielder_press_weight,
+        formation_lp_alignment_weight,
     };
     let config = payload_match_config(
         minutes,
@@ -527,6 +540,7 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
         period_break_recovery_seconds,
         dt_seconds,
         learning_interval_ticks,
+        formation_lp_enabled,
         seed,
         tactical_learning.clone(),
     );
@@ -538,6 +552,7 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
         "periodBreakRecoverySeconds": period_break_recovery_seconds,
         "dtSeconds": dt_seconds,
         "learningIntervalTicks": learning_interval_ticks,
+        "formationLpEnabled": formation_lp_enabled,
         "seed": seed,
         "options": {
             "alpha": alpha,
@@ -558,6 +573,7 @@ fn build_payload(args: &Args) -> Result<Value, Box<dyn Error>> {
             "defenseEndlineHardPenaltyWeight": defense_endline_hard_penalty_weight,
             "defenderMidfielderPressWeight": defender_midfielder_press_weight,
             "midfielderPressWeight": midfielder_press_weight,
+            "formationLpAlignmentWeight": formation_lp_alignment_weight,
         },
         "artifactPath": &args.server_artifact_path,
         "learnedParamsPath": &args.server_learned_params_path,

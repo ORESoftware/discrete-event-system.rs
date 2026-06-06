@@ -330,8 +330,12 @@
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
+      <div class="metric"><span>Dribble Beats</span><b id="dribbleBeats">0 - 0</b></div>
       <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
       <div class="metric"><span>Route 1</span><b id="routeOne">0 - 0</b></div>
+      <div class="metric"><span>Tackles</span><b id="tackles">0 - 0</b></div>
+      <div class="metric"><span>Interceptions</span><b id="interceptions">0 - 0</b></div>
+      <div class="metric"><span>Shot Blocks</span><b id="shotBlocks">0 - 0</b></div>
       <div class="metric"><span>Recoveries</span><b id="recoveries">0 - 0</b></div>
       <div class="metric"><span>Offside</span><b id="offsides">0 - 0</b></div>
       <div class="metric"><span>Offside Line</span><b id="offsideLine">none</b></div>
@@ -521,8 +525,12 @@ const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
 const passes = document.getElementById("passes");
+const dribbleBeats = document.getElementById("dribbleBeats");
 const clearances = document.getElementById("clearances");
 const routeOne = document.getElementById("routeOne");
+const tackles = document.getElementById("tackles");
+const interceptions = document.getElementById("interceptions");
+const shotBlocks = document.getElementById("shotBlocks");
 const recoveries = document.getElementById("recoveries");
 const offsides = document.getElementById("offsides");
 const offsideLine = document.getElementById("offsideLine");
@@ -2332,8 +2340,12 @@ function render() {
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
+  dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
   clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
   routeOne.textContent = `${s.routeOneBallsHome ?? 0} - ${s.routeOneBallsAway ?? 0}`;
+  tackles.textContent = `${s.tacklesHome ?? 0} - ${s.tacklesAway ?? 0}`;
+  interceptions.textContent = `${s.interceptionsHome ?? 0} - ${s.interceptionsAway ?? 0}`;
+  shotBlocks.textContent = `${s.shotBlocksHome ?? 0} - ${s.shotBlocksAway ?? 0}`;
   recoveries.textContent = `${s.looseBallRecoveriesHome ?? 0} - ${s.looseBallRecoveriesAway ?? 0}`;
   offsides.textContent = `${s.offsidesHome ?? 0} - ${s.offsidesAway ?? 0}`;
   offsideLine.textContent = offsideLineLabel();

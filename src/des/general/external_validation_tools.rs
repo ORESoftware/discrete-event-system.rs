@@ -33,7 +33,9 @@ use crate::des::general::external_graph_coloring_reference::{
     solve_graph_coloring_with_external_reference, ExternalGraphColoringReferenceOptions,
     ExternalGraphColoringReferenceSolver, ExternalGraphColoringReferenceStatus,
 };
-use crate::des::general::external_hexaly_probe::probe_external_hexaly_command;
+use crate::des::general::external_hexaly_probe::{
+    hexaly_configuration_hint, hexaly_smoke_failure_message, probe_external_hexaly_command,
+};
 use crate::des::general::external_knapsack_reference::{
     solve_knapsack_with_external_reference, ExternalKnapsackReferenceOptions,
     ExternalKnapsackReferenceSolver, ExternalKnapsackReferenceStatus,
@@ -55,6 +57,7 @@ use crate::des::general::external_minimum_spanning_tree_reference::{
     ExternalMinimumSpanningTreeReferenceOptions, ExternalMinimumSpanningTreeReferenceSolver,
     ExternalMinimumSpanningTreeReferenceStatus,
 };
+use crate::des::general::external_neos_probe::probe_external_neos_server;
 use crate::des::general::external_nonlinear_validation_reference::{
     solve_nonlinear_validation_json_with_external_reference,
     ExternalNonlinearValidationReferenceOptions, ExternalNonlinearValidationReferenceSolver,
@@ -19068,7 +19071,11 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "lindo-cli" => names.push("LINDOAPI_CMD".to_string()),
         "ampl" => names.push("AMPL_HOME".to_string()),
         "gams" => names.push("GAMS_HOME".to_string()),
-        "hexaly" => names.push("HEXALY_HOME".to_string()),
+        "hexaly" => {
+            names.push("HEXALY_HOME".to_string());
+            names.push("LOCALSOLVER_HOME".to_string());
+            names.push("LOCALSOLVER_DIR".to_string());
+        }
         "jump" => names.push("JULIA_PROJECT".to_string()),
         "neos" => names.push("NEOS_EMAIL".to_string()),
         "pddl-val" => names.push("VAL_HOME".to_string()),
@@ -19193,7 +19200,12 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "lindo-cli" => &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"],
         "ampl" => &["AMPL_HOME", "AMPL_DIR"],
         "gams" => &["GAMS_HOME", "GAMS_DIR"],
-        "hexaly" => &["HEXALY_HOME", "HEXALY_DIR", "LOCALSOLVER_HOME"],
+        "hexaly" => &[
+            "HEXALY_HOME",
+            "HEXALY_DIR",
+            "LOCALSOLVER_HOME",
+            "LOCALSOLVER_DIR",
+        ],
         "jump" => &["JUMP_HOME", "JULIA_HOME", "JULIA_DIR"],
         "neos" => &["NEOS_HOME", "NEOS_DIR"],
         "pddl-val" => &["VAL_HOME", "VAL_DIR", "PDDL_VAL_HOME", "PDDL_VAL_DIR"],
@@ -19335,10 +19347,7 @@ pub fn probe_external_validation_tool(
                     ExternalValidationProbeStatus::NotConfigured
                 },
                 command: Some(command),
-                message: format!(
-                    "{} command was found but the local HXM smoke solve did not succeed: {}",
-                    tool.display_name, probe.message
-                ),
+                message: hexaly_smoke_failure_message(tool.display_name, &probe.message),
             };
         }
         return ExternalValidationProbe {
@@ -19429,7 +19438,55 @@ pub fn probe_external_validation_tool(
         };
     }
 
+    if tool.id == "neos" {
+        let probe = probe_external_neos_server(10_000);
+        if probe.ready {
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: ExternalValidationProbeStatus::Ready,
+                command: None,
+                message: format!(
+                    "{} service readiness probe passed: {}; set NEOS_EMAIL plus GAMS/Kestrel for job-submission validation",
+                    tool.display_name, probe.message
+                ),
+            };
+        }
+        return ExternalValidationProbe {
+            tool_id: tool.id.to_string(),
+            status: ExternalValidationProbeStatus::NotConfigured,
+            command: None,
+            message: format!(
+                "{} is not configured and the read-only NEOS XML-RPC service probe did not succeed: {}; set {}, NEOS_EMAIL, or ORES_NEOS_XMLRPC_URL",
+                tool.display_name,
+                probe.message,
+                external_validation_adapter_env_names(tool)[0]
+            ),
+        };
+    }
+
     let artifact = first_configured_env_value(&external_validation_artifact_env_names(tool));
+    if tool.id == "hexaly" {
+        if let Some(value) = artifact.as_ref() {
+            let path = PathBuf::from(value);
+            return ExternalValidationProbe {
+                tool_id: tool.id.to_string(),
+                status: if path.exists() {
+                    ExternalValidationProbeStatus::RuntimeMissing
+                } else {
+                    ExternalValidationProbeStatus::ArtifactMissing
+                },
+                command: None,
+                message: format!(
+                    "{} installation was configured at {}, but no Hexaly/LocalSolver executable was found under {}; set {} directly or point {} at the install directory",
+                    tool.display_name,
+                    path.display(),
+                    external_validation_command_dir_env_names(tool).join(", "),
+                    external_validation_adapter_env_names(tool)[0],
+                    external_validation_artifact_hint(tool)
+                ),
+            };
+        }
+    }
     if let Some(value) = artifact {
         return probe_configured_artifact(tool, value);
     }
@@ -19445,16 +19502,23 @@ pub fn probe_external_validation_tool(
         return probe_node_validation_package(tool, None);
     }
 
+    let hint = if tool.id == "hexaly" {
+        hexaly_configuration_hint(
+            &external_validation_adapter_env_names(tool)[0],
+            &external_validation_artifact_hint(tool),
+        )
+    } else {
+        format!(
+            "{} or {}",
+            external_validation_adapter_env_names(tool)[0],
+            external_validation_artifact_hint(tool)
+        )
+    };
     ExternalValidationProbe {
         tool_id: tool.id.to_string(),
         status: ExternalValidationProbeStatus::NotConfigured,
         command: None,
-        message: format!(
-            "{} is not configured; set {} or {}",
-            tool.display_name,
-            external_validation_adapter_env_names(tool)[0],
-            external_validation_artifact_hint(tool)
-        ),
+        message: format!("{} is not configured; set {}", tool.display_name, hint),
     }
 }
 
@@ -23218,8 +23282,13 @@ mod tests {
         assert!(external_validation_command_dir_env_names(ampl).contains(&"AMPL_HOME".to_string()));
         let hexaly = find_external_validation_tool("hexaly").unwrap();
         assert!(
+            external_validation_artifact_env_names(hexaly).contains(&"LOCALSOLVER_DIR".to_string())
+        );
+        assert!(
             external_validation_command_dir_env_names(hexaly).contains(&"HEXALY_HOME".to_string())
         );
+        assert!(external_validation_command_dir_env_names(hexaly)
+            .contains(&"LOCALSOLVER_DIR".to_string()));
         let cvxopt = find_external_validation_tool("cvxopt").unwrap();
         assert_eq!(
             external_validation_artifact_env_names(cvxopt)[0],

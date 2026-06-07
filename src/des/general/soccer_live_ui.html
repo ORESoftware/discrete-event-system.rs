@@ -3698,11 +3698,12 @@ async function importTrackingFile(file) {
   const aActions = Number(response.importedAwayEntries ?? response.learning?.awayPolicyEntries ?? 0);
   const hTargets = Number(response.importedHomeTargetEntries ?? response.learning?.homePolicyTargetEntries ?? 0);
   const aTargets = Number(response.importedAwayTargetEntries ?? response.learning?.awayPolicyTargetEntries ?? 0);
+  const neuralSamples = Number(response.importedNeuralSamples ?? 0);
   const physics = trackingPhysicsSmokeLabel(response.physicsSmoke);
   const reason = response.rejectionReason ? `; ${response.rejectionReason}` : "";
   statusEl.textContent = response.trainingSkipped
-    ? `tracking rejected H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}${reason}`
-    : `tracking trained ${response.importedTransitions} transitions H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}`;
+    ? `tracking rejected N${neuralSamples} H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}${reason}`
+    : `tracking trained ${response.importedTransitions} transitions N${neuralSamples} H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}`;
   render();
 }
 async function loadState() {

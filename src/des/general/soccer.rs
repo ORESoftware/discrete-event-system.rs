@@ -76552,6 +76552,8 @@ mod tests {
         assert!(html.contains("lower.endsWith(\".jsonl\") || lower.endsWith(\".ndjson\")"));
         assert!(html.contains("format = lower.endsWith(\".jsonl\")"));
         assert!(html.contains("response.physicsSmoke"));
+        assert!(html.contains("response.importedNeuralSamples"));
+        assert!(html.contains("transitions N${neuralSamples}"));
         assert!(html.contains("physics ok"));
         assert!(html.contains("physics ${warnings} warnings"));
         assert!(html.contains("function effectiveMatchDurationSeconds"));

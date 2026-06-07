@@ -159,6 +159,15 @@
     font-size: 11px;
     line-height: 1.25;
   }
+  .slot .input-status {
+    grid-column: 2;
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.25;
+  }
+  .slot .input-status.warn { color: #a66b13; }
+  .slot .input-status.bad { color: var(--away); }
   .legend {
     display: flex;
     gap: 10px;
@@ -526,10 +535,12 @@ let controllerAssignmentSyncSeq = 0;
 let inputFlushTimer = null;
 let inputFlushInFlight = false;
 let inputFlushRetryAttempt = 0;
+let lastInputAck = {acceptedInputs: 0, queuedHumanInputs: 0, error: "", at: 0};
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
   if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
+  updateInputStatusLabels();
   scheduleInputFlush(0);
 };
 
@@ -1771,20 +1782,62 @@ function scheduleInputFlush(delayMs = LIVE_INPUT_FLUSH_INTERVAL_MS) {
 }
 function scheduleInputRetry() {
   inputFlushRetryAttempt = Math.min(inputFlushRetryAttempt + 1, 6);
+  updateInputStatusLabels();
   const delay = Math.min(
     LIVE_INPUT_RETRY_MAX_MS,
     LIVE_INPUT_RETRY_MIN_MS * inputFlushRetryAttempt
   );
   scheduleInputFlush(delay);
 }
+function slotQueuedInputCount(slot) {
+  return window.__humanInputQueue.filter(input => Number(input.controllerSlot) === slot).length;
+}
+function latestQueuedInputSeq(slot) {
+  return window.__humanInputQueue.reduce((max, input) => {
+    if (Number(input.controllerSlot) !== slot) return max;
+    return Math.max(max, Number(input.seq || 0));
+  }, 0);
+}
+function inputStatusLabel(slot) {
+  const queued = slotQueuedInputCount(slot);
+  const latestSeq = latestQueuedInputSeq(slot);
+  const sending = inputFlushInFlight ? " sending" : "";
+  const retry = inputFlushRetryAttempt > 0 ? ` retry${inputFlushRetryAttempt}` : "";
+  const offline = lastInputAck.error ? " offline" : "";
+  const serverQueued = Number(lastInputAck.queuedHumanInputs || 0);
+  const accepted = Number(lastInputAck.acceptedInputs || 0);
+  if (queued > 0) return `Input Q${queued}${latestSeq ? ` #${latestSeq}` : ""}${sending}${retry}${offline}`;
+  if (serverQueued > 0) return `Input server Q${serverQueued}${sending}${retry}${offline}`;
+  if (accepted > 0 && performance.now() - Number(lastInputAck.at || 0) < 2500) {
+    return `Input ok +${accepted}`;
+  }
+  return "Input ready";
+}
+function updateInputStatusLabels() {
+  for (let slot = 0; slot < visibleHumanSlotCount(); slot++) {
+    const status = document.getElementById(`slot-input-${slot}`);
+    if (!status) continue;
+    const label = inputStatusLabel(slot);
+    status.textContent = label;
+    status.classList.toggle("bad", label.includes("offline"));
+    status.classList.toggle("warn", label.includes("Q") || label.includes("retry"));
+  }
+}
 async function flushQueuedInputsToInputApi() {
   inputFlushTimer = null;
   if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
   inputFlushInFlight = true;
+  updateInputStatusLabels();
   const inputs = window.__humanInputQueue.slice();
   let accepted = false;
   try {
     const ack = await postSoccerJson("/api/input", inputs, "input");
+    lastInputAck = {
+      acceptedInputs: Number(ack?.acceptedInputs || 0),
+      queuedHumanInputs: Number(ack?.queuedHumanInputs || 0),
+      error: "",
+      at: performance.now()
+    };
     if (Number(ack?.acceptedInputs ?? 0) > 0 || ack?.queued) {
       const newestSeq = inputs.reduce((max, input) => Math.max(max, Number(input.seq || 0)), 0);
       window.__humanInputQueue = window.__humanInputQueue.filter(input => Number(input.seq || 0) > newestSeq);
@@ -1792,6 +1845,11 @@ async function flushQueuedInputsToInputApi() {
       accepted = true;
     }
   } catch (err) {
+    lastInputAck = {
+      ...lastInputAck,
+      error: String(err?.message || err || "input sync unavailable"),
+      at: performance.now()
+    };
     console.warn("live input sync unavailable; keeping local input queue", err);
   } finally {
     inputFlushInFlight = false;
@@ -1800,6 +1858,7 @@ async function flushQueuedInputsToInputApi() {
     } else if (!accepted && window.__humanInputQueue.length > 0) {
       scheduleInputRetry();
     }
+    updateInputStatusLabels();
   }
 }
 function updateAgentStatePanel() {
@@ -1953,6 +2012,10 @@ function buildSlots() {
     const keymap = document.createElement("div");
     keymap.className = "keymap";
     keymap.textContent = controllerKeymapLabel(i);
+    const inputStatus = document.createElement("div");
+    inputStatus.className = "input-status";
+    inputStatus.id = `slot-input-${i}`;
+    inputStatus.textContent = "Input ready";
     select.addEventListener("focus", () => { setActiveSlot(i); syncStaticSlotAvailability(); });
     select.addEventListener("change", () => {
       setActiveSlot(i);
@@ -1968,11 +2031,12 @@ function buildSlots() {
       render();
       syncControllerAssignment(i, selected);
     });
-    row.append(label, select, keymap);
+    row.append(label, select, keymap, inputStatus);
     slots.appendChild(row);
   }
   refreshActiveSlotRows();
   syncStaticSlotAvailability();
+  updateInputStatusLabels();
   rebuildPassTargets();
 }
 

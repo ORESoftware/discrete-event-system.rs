@@ -77294,6 +77294,9 @@ mod tests {
         assert!(html.contains("p?.positionHistory"));
         assert!(html.contains("frame.players?.find(player => player.id === playerId)?.position"));
         assert!(html.contains("H${k.samples} V${vecLen(velocity).toFixed(1)}"));
+        assert!(html.contains("function pointSegmentDistance"));
+        assert!(html.contains("function staticShotLaneOpen"));
+        assert!(html.contains("return nearGoal && staticShotLaneOpen(frame, p, goal)"));
         assert!(html.contains("drawGaitCue"));
         assert!(html.contains("movementGait"));
         assert!(html.contains("HUMAN_ACTION_KEY_CODES"));

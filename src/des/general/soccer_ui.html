@@ -824,6 +824,25 @@ function vecSub(a, b) {
 function vecScale(v, scale) {
   return {x: Number(v?.x ?? 0) * scale, y: Number(v?.y ?? 0) * scale};
 }
+function vecDot(a, b) {
+  return Number(a?.x ?? 0) * Number(b?.x ?? 0) + Number(a?.y ?? 0) * Number(b?.y ?? 0);
+}
+function pointSegmentDistance(point, a, b) {
+  const ab = vecSub(b, a);
+  const len2 = Math.max(1e-9, vecDot(ab, ab));
+  const t = Math.max(0, Math.min(1, vecDot(vecSub(point, a), ab) / len2));
+  const closest = {x: Number(a?.x ?? 0) + ab.x * t, y: Number(a?.y ?? 0) + ab.y * t};
+  return vecLen(vecSub(point, closest));
+}
+function staticShotLaneOpen(frame, player, goal) {
+  if (!frame || !player || !Array.isArray(frame.players)) return true;
+  const blockRadiusYards = 2.2;
+  return !frame.players.some(other =>
+    other.team !== player.team
+      && pointSegmentDistance(other.position, player.position, goal) <= blockRadiusYards
+      && vecDot(vecSub(other.position, player.position), vecSub(goal, player.position)) > 0
+  );
+}
 function historyKinematicsFromPositions(history, dtSeconds) {
   const samples = Array.isArray(history) ? history.map(finiteVec2) : [];
   const dt = Math.max(1e-6, Number(dtSeconds || trace.config?.dtSeconds || 0.1));
@@ -1262,7 +1281,9 @@ function selectedPlayerCanShoot() {
   if (!frame || !p || frame.ball?.holder !== p.id) return false;
   const config = trace.config || FALLBACK_CONFIG;
   const goalY = p.team === "Home" ? Number(config.fieldLengthYards || 120) : 0;
-  return Math.abs(goalY - Number(p.position?.y || 0)) <= 20;
+  const goal = {x: Number(config.fieldWidthYards || 80) * 0.5, y: goalY};
+  const nearGoal = Math.abs(goalY - Number(p.position?.y || 0)) <= 20;
+  return nearGoal && staticShotLaneOpen(frame, p, goal);
 }
 function pushActionInput(forceShoot = false) {
   if (selectedPlayer(activeSlot) == null) return false;

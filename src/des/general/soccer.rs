@@ -12071,14 +12071,11 @@ impl MatchConfig {
 
     pub fn live_gameplay() -> Self {
         MatchConfig {
-            learning_enabled: false,
-            learning_logging_enabled: false,
-            formation_lp_enabled: false,
             neural_learning: SoccerNeuralLearningConfig {
-                enabled: false,
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Threaded,
                 ..SoccerNeuralLearningConfig::default()
             },
-            adversarial_embedding_exploitation_enabled: false,
             max_human_players: 4,
             ..MatchConfig::default()
         }
@@ -29605,7 +29602,7 @@ impl Default for SoccerLiveServerConfig {
             policy_disk_path: DEFAULT_LIVE_TEAM_POLICY_PATH.to_string(),
             moment_disk_path: DEFAULT_LIVE_MOMENT_WINDOWS_PATH.to_string(),
             autoload_team_policy: true,
-            autosave_team_policy: false,
+            autosave_team_policy: true,
             policy_autosave_interval_ticks: DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS,
         }
     }
@@ -32303,30 +32300,10 @@ impl SoccerMatch {
 
         if let Some(target_idx) = target_idx {
             self.players[target_idx].controller_slot = Some(controller_slot);
-            self.disable_learning_for_human_gameplay();
         }
         self.human_inputs.clear_slot(controller_slot);
 
         Ok(())
-    }
-
-    fn human_controller_assigned(&self) -> bool {
-        self.players
-            .iter()
-            .any(|player| player.controller_slot.is_some())
-    }
-
-    fn disable_learning_for_human_gameplay(&mut self) {
-        if !self.human_controller_assigned() {
-            return;
-        }
-        self.config.learning_enabled = false;
-        self.config.learning_logging_enabled = false;
-        self.config.full_game_learning_enabled = false;
-        self.config.formation_lp_enabled = false;
-        self.config.neural_learning.enabled = false;
-        self.config.adversarial_embedding_exploitation_enabled = false;
-        self.neural_learner = None;
     }
 
     pub fn clear_controller_assignments(&mut self) {
@@ -32354,7 +32331,7 @@ impl SoccerMatch {
         request: SoccerLearningRuntimeRequest,
     ) -> Result<SoccerLearningRuntimeResponse, String> {
         if let Some(enabled) = request.learning_enabled {
-            self.config.learning_enabled = enabled && !self.human_controller_assigned();
+            self.config.learning_enabled = enabled;
             if !enabled {
                 self.config.neural_learning.enabled = false;
                 self.neural_learner = None;
@@ -32387,7 +32364,6 @@ impl SoccerMatch {
                 self.neural_learner = None;
             }
         }
-        self.disable_learning_for_human_gameplay();
         Ok(SoccerLearningRuntimeResponse {
             config: self.config.clone(),
             learning: self.learning_stats_snapshot(),
@@ -54873,11 +54849,16 @@ mod tests {
         assert_eq!(config.total_ticks(), 6_000);
         assert_eq!(config.max_human_players, 4);
         assert_eq!(config.human_slots(), 4);
-        assert!(!config.learning_enabled);
-        assert!(!config.learning_logging_enabled);
-        assert!(!config.formation_lp_enabled);
-        assert!(!config.neural_learning.enabled);
-        assert!(!config.adversarial_embedding_exploitation_enabled);
+        assert!(config.learning_enabled);
+        assert!(config.learning_logging_enabled);
+        assert!(config.full_game_learning_enabled);
+        assert!(config.formation_lp_enabled);
+        assert!(config.neural_learning.enabled);
+        assert_eq!(
+            config.neural_learning.backend,
+            SoccerNeuralLearningBackend::Threaded
+        );
+        assert!(config.adversarial_embedding_exploitation_enabled);
 
         let mut session = SoccerRealtimeSession::new(config);
         assert_eq!(session.owned_controller_thread_count(), 4);
@@ -61760,26 +61741,35 @@ mod tests {
     }
 
     #[test]
-    fn live_gameplay_defaults_disable_learning_work() {
-        let config = SoccerLiveServerConfig::default().match_config;
+    fn live_gameplay_defaults_keep_learning_threaded_and_bounded() {
+        let live_config = SoccerLiveServerConfig::default();
+        let config = live_config.match_config;
 
         assert_eq!(config.dt_seconds, DEFAULT_DT_SECONDS);
         assert_eq!(config.duration_seconds, DEFAULT_DURATION_SECONDS);
         assert_eq!(config.total_ticks(), 6_000);
         assert_eq!(config.human_slots(), 4);
-        assert!(!config.learning_enabled);
+        assert!(config.learning_enabled);
         assert!(!config.learning_logging_enabled);
+        assert!(!config.full_game_learning_enabled);
         assert!(!config.formation_lp_enabled);
-        assert!(!config.neural_learning.enabled);
+        assert!(config.neural_learning.enabled);
+        assert_eq!(
+            config.neural_learning.backend,
+            SoccerNeuralLearningBackend::Threaded
+        );
         assert!(!config.adversarial_embedding_exploitation_enabled);
+        assert!(live_config.autosave_team_policy);
     }
 
     #[test]
-    fn human_controller_assignment_forces_learning_work_off() {
+    fn human_controller_assignment_keeps_learning_operator_controlled() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             max_human_players: 1,
             learning_enabled: true,
             learning_logging_enabled: true,
+            full_game_learning_enabled: true,
+            formation_lp_enabled: true,
             neural_learning: SoccerNeuralLearningConfig {
                 enabled: true,
                 backend: SoccerNeuralLearningBackend::Threaded,
@@ -61794,21 +61784,23 @@ mod tests {
             .expect("assign human controller");
 
         let learning = sim.learning_snapshot();
-        assert!(!sim.config.learning_enabled);
-        assert!(!sim.config.learning_logging_enabled);
-        assert!(!sim.config.full_game_learning_enabled);
-        assert!(!sim.config.formation_lp_enabled);
-        assert!(!sim.config.neural_learning.enabled);
-        assert!(!sim.config.adversarial_embedding_exploitation_enabled);
-        assert!(!learning.learning_enabled);
-        assert!(!learning.learning_logging_enabled);
-        assert!(!learning.adversarial_learning_enabled);
-        assert!(!learning.neural_learning_enabled);
+        assert!(sim.config.learning_enabled);
+        assert!(sim.config.learning_logging_enabled);
+        assert!(sim.config.full_game_learning_enabled);
+        assert!(sim.config.formation_lp_enabled);
+        assert!(sim.config.neural_learning.enabled);
+        assert!(sim.config.adversarial_embedding_exploitation_enabled);
+        assert!(learning.learning_enabled);
+        assert!(learning.learning_logging_enabled);
+        assert!(learning.adversarial_learning_enabled);
+        assert!(learning.adversarial_embedding_exploitation_enabled);
+        assert!(learning.neural_learning_enabled);
+        assert_eq!(learning.neural_learning_backend, "threaded");
 
         let response = sim
             .update_learning_runtime(SoccerLearningRuntimeRequest {
-                learning_enabled: Some(true),
-                learning_logging_enabled: Some(true),
+                learning_enabled: Some(false),
+                learning_logging_enabled: Some(false),
                 learning_interval_ticks: Some(6),
                 policy_train_max_transitions_per_tick: Some(12),
                 neural_learning_enabled: Some(true),
@@ -61819,13 +61811,33 @@ mod tests {
         assert!(!response.config.learning_logging_enabled);
         assert_eq!(response.config.learning_interval_ticks, 6);
         assert_eq!(response.config.policy_train_max_transitions_per_tick, 12);
-        assert!(!response.config.full_game_learning_enabled);
-        assert!(!response.config.formation_lp_enabled);
         assert!(!response.config.neural_learning.enabled);
         assert!(!response.learning.learning_enabled);
         assert_eq!(response.learning.learning_interval_ticks, 6);
         assert_eq!(response.learning.policy_train_max_transitions_per_tick, 12);
         assert!(!response.learning.neural_learning_enabled);
+
+        let response = sim
+            .update_learning_runtime(SoccerLearningRuntimeRequest {
+                learning_enabled: Some(true),
+                learning_logging_enabled: Some(true),
+                learning_interval_ticks: None,
+                policy_train_max_transitions_per_tick: None,
+                neural_learning_enabled: Some(true),
+                neural_learning_backend: Some(SoccerNeuralLearningBackend::Inline),
+            })
+            .expect("runtime learning re-enable");
+        assert!(response.config.learning_enabled);
+        assert!(response.config.learning_logging_enabled);
+        assert!(response.config.neural_learning.enabled);
+        assert_eq!(
+            response.config.neural_learning.backend,
+            SoccerNeuralLearningBackend::Inline
+        );
+        assert!(response.learning.learning_enabled);
+        assert!(response.learning.learning_logging_enabled);
+        assert!(response.learning.neural_learning_enabled);
+        assert_eq!(response.learning.neural_learning_backend, "inline");
     }
 
     #[test]

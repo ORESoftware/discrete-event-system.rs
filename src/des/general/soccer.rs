@@ -27503,6 +27503,10 @@ pub struct SoccerAccountingSmokeReport {
     pub home_possession_frames: usize,
     pub away_possession_frames: usize,
     pub fifty_fifty_duel_frames: usize,
+    pub moving_player_count: usize,
+    pub player_movement_yards: f64,
+    pub ball_movement_yards: f64,
+    pub ball_active_frames: usize,
     pub score_home_from_goal_events: u32,
     pub score_away_from_goal_events: u32,
     pub violation_count: usize,
@@ -27660,6 +27664,71 @@ fn soccer_accounting_check_frames(
     }
 
     soccer_accounting_check_frame_buckets(trace, report);
+    soccer_accounting_check_frame_liveness(trace, report);
+}
+
+fn soccer_accounting_check_frame_liveness(
+    trace: &SimulationTrace,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    if trace.frames.len() < 2 || trace.summary.ticks == 0 {
+        return;
+    }
+
+    let mut previous_players = HashMap::<usize, Vec2>::new();
+    let mut previous_ball = None::<Vec2>;
+    let mut moving_players = HashSet::<usize>::new();
+    for frame in &trace.frames {
+        if let Some(prev_ball) = previous_ball {
+            let movement = frame.ball.position.distance(prev_ball);
+            if movement.is_finite() {
+                report.ball_movement_yards += movement;
+            }
+        }
+        if frame.ball.holder.is_some() || frame.ball.velocity.len() > 0.05 {
+            report.ball_active_frames = report.ball_active_frames.saturating_add(1);
+        }
+        previous_ball = Some(frame.ball.position);
+
+        for player in &frame.players {
+            if let Some(prev) = previous_players.insert(player.id, player.position) {
+                let movement = player.position.distance(prev);
+                if movement.is_finite() {
+                    report.player_movement_yards += movement;
+                    if movement > 0.025 {
+                        moving_players.insert(player.id);
+                    }
+                }
+            }
+        }
+    }
+    report.moving_player_count = moving_players.len();
+
+    let expected_movers = if trace.summary.ticks >= 5 { 6 } else { 2 };
+    if report.moving_player_count < expected_movers {
+        report.push_violation(
+            trace.summary.ticks,
+            "liveness",
+            "movingPlayers",
+            format!(">= {expected_movers}"),
+            report.moving_player_count.to_string(),
+            "multi-frame soccer simulation should have active player movement",
+        );
+    }
+
+    if report.ball_active_frames == 0 && report.ball_movement_yards <= 0.025 {
+        report.push_violation(
+            trace.summary.ticks,
+            "liveness",
+            "ballActivity",
+            "controlled ball or movement",
+            format!(
+                "activeFrames={} movement={:.6}",
+                report.ball_active_frames, report.ball_movement_yards
+            ),
+            "multi-frame soccer simulation should keep the ball active or controlled",
+        );
+    }
 }
 
 fn soccer_accounting_check_frame_roster(
@@ -61278,6 +61347,19 @@ mod tests {
         );
         assert!(report.fifty_fifty_duel_frames <= report.non_possession_frames);
         assert!(
+            report.moving_player_count >= 6,
+            "accounting smoke should observe active player movement, got {}",
+            report.moving_player_count
+        );
+        assert!(
+            report.player_movement_yards > 0.0,
+            "accounting smoke should observe player displacement"
+        );
+        assert!(
+            report.ball_active_frames > 0 || report.ball_movement_yards > 0.025,
+            "accounting smoke should observe an active or moving ball"
+        );
+        assert!(
             report.ok(),
             "accounting smoke violations: {:?}",
             report.violations
@@ -61310,6 +61392,38 @@ mod tests {
         }));
         assert!(report.violations.iter().any(|violation| {
             violation.subject == "agentSchedule" && violation.metric == "length"
+        }));
+    }
+
+    #[test]
+    fn accounting_smoke_report_flags_frozen_multi_frame_match() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                seed: 13_079,
+                ..MatchConfig::playback_trace(0.8)
+            },
+            1,
+        );
+        let first = trace.frames.first().expect("initial frame").clone();
+        for frame in &mut trace.frames {
+            frame.players = first.players.clone();
+            frame.ball.position = first.ball.position;
+            frame.ball.velocity = Vec2::zero();
+            frame.ball.holder = None;
+            frame.central_brain.ball_position = frame.ball.position;
+            frame.central_brain.ball_velocity = Vec2::zero();
+            frame.central_brain.ball_holder = None;
+            frame.shared_positions = first.shared_positions.clone();
+        }
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "liveness" && violation.metric == "movingPlayers"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "liveness" && violation.metric == "ballActivity"
         }));
     }
 

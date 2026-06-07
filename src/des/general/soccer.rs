@@ -28976,6 +28976,8 @@ pub struct SoccerTrackingImportResponse {
     #[serde(default)]
     pub imported_away_target_entries: usize,
     #[serde(default)]
+    pub imported_neural_samples: usize,
+    #[serde(default)]
     pub physics_smoke: SoccerPhysicsSmokeReport,
     #[serde(default)]
     pub training_skipped: bool,
@@ -31679,6 +31681,7 @@ impl SoccerMatch {
                 imported_away_entries,
                 imported_home_target_entries,
                 imported_away_target_entries,
+                imported_neural_samples: 0,
                 physics_smoke,
                 training_skipped: true,
                 physics_rejected: true,
@@ -31688,14 +31691,32 @@ impl SoccerMatch {
             });
         }
         let dataset = tracking.to_learning_dataset()?;
-        let policies = self
-            .team_policies
-            .get_or_insert_with(|| SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
-        policies.train_adversarial(&dataset.transitions);
-        let imported_home_entries = policies.home.q_values.len();
-        let imported_away_entries = policies.away.q_values.len();
-        let imported_home_target_entries = policies.home.target_values.len();
-        let imported_away_target_entries = policies.away.target_values.len();
+        let (
+            imported_home_entries,
+            imported_away_entries,
+            imported_home_target_entries,
+            imported_away_target_entries,
+        ) = {
+            let policies = self
+                .team_policies
+                .get_or_insert_with(|| SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+            policies.train_adversarial(&dataset.transitions);
+            (
+                policies.home.q_values.len(),
+                policies.away.q_values.len(),
+                policies.home.target_values.len(),
+                policies.away.target_values.len(),
+            )
+        };
+        let imported_neural_samples =
+            if self.config.learning_enabled && self.config.neural_learning.enabled {
+                let neural_samples = self.neural_training_samples_for(&dataset.transitions);
+                let imported_neural_samples = neural_samples.len();
+                self.train_neural_value_model(neural_samples);
+                imported_neural_samples
+            } else {
+                0
+            };
         let learning = self.learning_stats_snapshot();
 
         Ok(SoccerTrackingImportResponse {
@@ -31709,6 +31730,7 @@ impl SoccerMatch {
             imported_away_entries,
             imported_home_target_entries,
             imported_away_target_entries,
+            imported_neural_samples,
             physics_smoke,
             training_skipped: false,
             physics_rejected: false,
@@ -64336,6 +64358,7 @@ mod tests {
         assert_eq!(value["format"], "json");
         assert_eq!(value["frames"], 2);
         assert_eq!(value["importedTransitions"], 3);
+        assert_eq!(value["importedNeuralSamples"], 0);
         assert_eq!(value["trainingSkipped"], false);
         assert_eq!(value["physicsRejected"], false);
         assert_eq!(value["physicsSmoke"]["framesAnalyzed"], 2);
@@ -64363,6 +64386,49 @@ mod tests {
             value["importedHomeTargetEntries"]
         );
         assert!(value["learning"]["homePolicyEntries"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn tracking_import_trains_neural_learner_when_enabled() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                batch_size: 2,
+                max_batches_per_tick: 2,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 115,
+            ..Default::default()
+        });
+        let tracking = sample_tracking_pass_dataset();
+        let tracking_json = serde_json::to_string(&tracking).expect("tracking json");
+
+        let response = sim
+            .import_tracking_for_team_policy(SoccerTrackingImportRequest {
+                source: "unit-neural-tracking.json".to_string(),
+                format: Some("json".to_string()),
+                allow_physics_warnings: true,
+                content: tracking_json,
+            })
+            .expect("tracking import");
+
+        assert_eq!(response.imported_transitions, 3);
+        assert_eq!(
+            response.imported_neural_samples,
+            response.imported_transitions
+        );
+        assert!(response.learning.neural_learning_enabled);
+        assert_eq!(response.learning.neural_learning_backend, "inline");
+        assert!(response.learning.neural_learning_training_steps > 0);
+        assert!(
+            response.learning.neural_learning_samples >= response.imported_neural_samples,
+            "neural learner should train on imported tracking samples"
+        );
+        assert!(response.learning.home_policy_entries > 0);
     }
 
     #[test]

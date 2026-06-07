@@ -42669,16 +42669,7 @@ fn handle_live_soccer_request_inner(
                     }
                 }
             };
-            let mut guard = match session.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return LiveHttpResponse::error(
-                        500,
-                        "Internal Server Error",
-                        "soccer session lock poisoned",
-                    )
-                }
-            };
+            let mut guard = soccer_mutex_lock(session, "soccer_live_session");
             match guard.import_moment_replay_for_team_policy(replay_req) {
                 Ok(response) => LiveHttpResponse::json(&response),
                 Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
@@ -42729,16 +42720,7 @@ fn handle_live_soccer_request_inner(
                     )
                 }
             };
-            let mut guard = match session.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return LiveHttpResponse::error(
-                        500,
-                        "Internal Server Error",
-                        "soccer session lock poisoned",
-                    )
-                }
-            };
+            let mut guard = soccer_mutex_lock(session, "soccer_live_session");
             match guard.import_team_policy_artifact(artifact) {
                 Ok(response) => LiveHttpResponse::json(&response),
                 Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
@@ -43155,16 +43137,7 @@ fn handle_live_soccer_request_inner(
                     )
                 }
             };
-            let mut guard = match session.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return LiveHttpResponse::error(
-                        500,
-                        "Internal Server Error",
-                        "soccer session lock poisoned",
-                    )
-                }
-            };
+            let mut guard = soccer_mutex_lock(session, "soccer_live_session");
             match guard.update_ball_surface(surface_req) {
                 Ok(response) => LiveHttpResponse::json(&response),
                 Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
@@ -43182,16 +43155,7 @@ fn handle_live_soccer_request_inner(
                     )
                 }
             };
-            let mut guard = match session.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return LiveHttpResponse::error(
-                        500,
-                        "Internal Server Error",
-                        "soccer session lock poisoned",
-                    )
-                }
-            };
+            let mut guard = soccer_mutex_lock(session, "soccer_live_session");
             match guard.update_learning_runtime(learning_req) {
                 Ok(response) => LiveHttpResponse::json(&response),
                 Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
@@ -85615,6 +85579,59 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(response.status, 400);
         assert!(response.body.contains("learningIntervalTicks"));
+    }
+
+    #[test]
+    fn live_http_surface_and_learning_recover_from_poisoned_session_lock() {
+        let realtime = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            seed: 593,
+            ..Default::default()
+        });
+        let input_queue = realtime.input_queue();
+        let session = Arc::new(Mutex::new(realtime));
+        let poisoner = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let _guard = session.lock().expect("test poison live session lock");
+                panic!("poison soccer live surface learning session lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+
+        let surface_body = r#"{"ballDragPerTick":0.044,"ballStopSpeedYps":0.66}"#;
+        let surface = handle_live_soccer_request(
+            &format!(
+                "POST /api/surface HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\n\r\n{}",
+                surface_body.len(),
+                surface_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(surface.status, 200);
+        let surface_value: serde_json::Value =
+            serde_json::from_str(&surface.body).expect("recovered surface json");
+        assert_eq!(surface_value["config"]["ballDragPerTick"], 0.044);
+        assert_eq!(surface_value["config"]["ballStopSpeedYps"], 0.66);
+
+        let learning_body =
+            r#"{"learningEnabled":false,"learningLoggingEnabled":false,"learningIntervalTicks":7}"#;
+        let learning = handle_live_soccer_request(
+            &format!(
+                "POST /api/learning HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\n\r\n{}",
+                learning_body.len(),
+                learning_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(learning.status, 200);
+        let learning_value: serde_json::Value =
+            serde_json::from_str(&learning.body).expect("recovered learning json");
+        assert_eq!(learning_value["config"]["learningEnabled"], false);
+        assert_eq!(learning_value["config"]["learningIntervalTicks"], 7);
+        assert_eq!(learning_value["learning"]["learningEnabled"], false);
     }
 
     #[test]

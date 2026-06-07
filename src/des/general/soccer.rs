@@ -24742,6 +24742,15 @@ fn dense_soccer_transition_reward(
                 reward -= 0.42;
             }
         }
+        if is_dribble_action_label(action) {
+            reward -= pressured_stale_dribble_learning_penalty_points(
+                before_obs,
+                ability01(player.skills.dribbling),
+                ball_forward,
+                player_forward,
+                after_possession == Some(player.team),
+            );
+        }
         if matches!(
             action,
             "dribble"
@@ -49456,6 +49465,48 @@ fn excessive_hold_penalty_points(observation: &SoccerPomdpObservation, dribbling
         * hold_pressure
         * (0.35 + non_elite_fit * 0.52 + urgency_fit * 0.30))
         .clamp(0.0, EXCESSIVE_HOLD_PENALTY_POINTS * 1.25)
+}
+
+fn pressured_stale_dribble_learning_penalty_points(
+    observation: &SoccerPomdpObservation,
+    dribbling: f64,
+    ball_forward_yards: f64,
+    player_forward_yards: f64,
+    retained_team_possession: bool,
+) -> f64 {
+    let hold_pressure = excessive_hold_pressure(observation, dribbling);
+    let danger_pressure = observation
+        .pressure_urgency
+        .max(observation.perceived_pressure)
+        .max(observation.immediate_dispossession_risk)
+        .clamp(0.0, 1.0);
+    if hold_pressure < 0.12 || danger_pressure < 0.38 {
+        return 0.0;
+    }
+
+    let progress = ball_forward_yards.max(player_forward_yards);
+    let progress_relief = (progress / 7.0).clamp(0.0, 1.0);
+    if dribbling >= NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF
+        && (hold_pressure < 0.70 || progress_relief >= 0.35)
+    {
+        return 0.0;
+    }
+
+    let non_elite_fit =
+        ((NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF - dribbling.clamp(0.0, 1.0)) / 0.34).clamp(0.0, 1.0);
+    let skill_multiplier = if dribbling >= NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF {
+        0.18
+    } else {
+        0.42 + non_elite_fit * 0.72
+    };
+    let possession_multiplier = if retained_team_possession { 0.78 } else { 1.12 };
+    (EXCESSIVE_HOLD_PENALTY_POINTS
+        * hold_pressure
+        * (0.44 + danger_pressure * 0.56)
+        * skill_multiplier
+        * possession_multiplier
+        * (1.0 - progress_relief * 0.74).clamp(0.20, 1.0))
+    .clamp(0.0, EXCESSIVE_HOLD_PENALTY_POINTS * 1.35)
 }
 
 fn immediate_dispossession_risk_for_player(
@@ -82729,6 +82780,92 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             non_elite_release > elite_release + 0.80,
             "overheld non-elite carries should boost pass/clear release more than elite carries: non_elite={non_elite_release} elite={elite_release}"
+        );
+    }
+
+    #[test]
+    fn stale_pressured_dribble_is_penalized_in_learning_reward() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 22_683,
+            ..Default::default()
+        });
+        let holder = 7;
+        let pressure = 14;
+        park_players_except(&mut sim, &[holder, pressure]);
+        sim.players[holder].position = Vec2::new(38.0, 42.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].skills.dribbling = 7.8;
+        sim.players[pressure].position = Vec2::new(35.0, 40.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let before = WorldSnapshot::from_match(&sim);
+        let mut stale_observation = before.observation_for(holder);
+        stale_observation.actual_time_on_ball_seconds = 3.5;
+        stale_observation.perceived_pressure = 0.88;
+        stale_observation.pressure_urgency = 0.90;
+        stale_observation.immediate_dispossession_risk = 0.78;
+        stale_observation.excessive_hold_pressure = excessive_hold_pressure(
+            &stale_observation,
+            ability01(sim.players[holder].skills.dribbling),
+        );
+        let stale_penalty = pressured_stale_dribble_learning_penalty_points(
+            &stale_observation,
+            ability01(sim.players[holder].skills.dribbling),
+            0.35,
+            0.35,
+            true,
+        );
+        let elite_penalty = pressured_stale_dribble_learning_penalty_points(
+            &stale_observation,
+            ability01(9.4),
+            0.35,
+            0.35,
+            true,
+        );
+
+        assert!(
+            stale_penalty >= 0.80,
+            "non-elite overheld pressured carry should get a strong learning penalty, got {stale_penalty}"
+        );
+        assert_eq!(
+            elite_penalty, 0.0,
+            "9+/10 dribblers should be exempt unless the hold is extreme"
+        );
+
+        let mut stale_decision = test_decision_trace(&before, holder, "carry-forward");
+        stale_decision.observation = stale_observation.clone();
+        let mut fresh_decision = stale_decision.clone();
+        fresh_decision.observation.actual_time_on_ball_seconds = 0.6;
+        fresh_decision.observation.excessive_hold_pressure = excessive_hold_pressure(
+            &fresh_decision.observation,
+            ability01(sim.players[holder].skills.dribbling),
+        );
+
+        sim.players[holder].position = Vec2::new(38.0, 42.35);
+        sim.ball.position = sim.players[holder].position;
+        let after = WorldSnapshot::from_match(&sim);
+        let stale_reward = dense_soccer_transition_reward(
+            &sim.players[holder],
+            &stale_decision,
+            &before,
+            &after,
+            "carry-forward",
+            &SoccerTacticalLearningWeights::default(),
+        );
+        let fresh_reward = dense_soccer_transition_reward(
+            &sim.players[holder],
+            &fresh_decision,
+            &before,
+            &after,
+            "carry-forward",
+            &SoccerTacticalLearningWeights::default(),
+        );
+
+        assert!(
+            stale_reward < fresh_reward - 0.65,
+            "stale pressured carry should train below a fresh carry: stale={stale_reward} fresh={fresh_reward}"
         );
     }
 

@@ -12768,6 +12768,7 @@ struct PossessionProgressTracker {
     start_y: f64,
     start_clock_seconds: f64,
     best_gain_yards: f64,
+    best_completed_pass_chain_gain_yards: f64,
     completed_passes: usize,
     rewarded_milestones: usize,
 }
@@ -12783,6 +12784,7 @@ impl PossessionProgressTracker {
             start_y: start_position.y,
             start_clock_seconds: clock_seconds.max(0.0),
             best_gain_yards: 0.0,
+            best_completed_pass_chain_gain_yards: 0.0,
             completed_passes: 0,
             rewarded_milestones: 0,
         }
@@ -12791,6 +12793,12 @@ impl PossessionProgressTracker {
     fn update_gain(&mut self, ball_position: Vec2) {
         let gain = ((ball_position.y - self.start_y) * self.team.attack_dir()).max(0.0);
         self.best_gain_yards = self.best_gain_yards.max(gain);
+    }
+
+    fn update_completed_pass_chain_gain(&mut self, controlled_end: Vec2) {
+        let gain = ((controlled_end.y - self.start_y) * self.team.attack_dir()).max(0.0);
+        self.best_completed_pass_chain_gain_yards =
+            self.best_completed_pass_chain_gain_yards.max(gain);
     }
 
     fn qualifies_for_stall_penalty(&self) -> bool {
@@ -34685,6 +34693,7 @@ impl SoccerMatch {
         if let Some(tracker) = self.possession_progress_tracker.as_mut() {
             tracker.completed_passes = tracker.completed_passes.saturating_add(1);
             tracker.update_gain(controlled_end);
+            tracker.update_completed_pass_chain_gain(controlled_end);
         }
     }
 
@@ -34711,8 +34720,9 @@ impl SoccerMatch {
         let mut earned = 0usize;
         if let Some(tracker) = self.possession_progress_tracker.as_mut() {
             tracker.update_gain(after.ball.position);
-            let milestone_count =
-                (tracker.best_gain_yards / POSSESSION_PROGRESS_MILESTONE_YARDS).floor() as usize;
+            let milestone_count = (tracker.best_completed_pass_chain_gain_yards
+                / POSSESSION_PROGRESS_MILESTONE_YARDS)
+                .floor() as usize;
             if milestone_count > tracker.rewarded_milestones {
                 earned = milestone_count - tracker.rewarded_milestones;
                 tracker.rewarded_milestones = milestone_count;
@@ -65069,6 +65079,8 @@ mod tests {
 
         sim.ball.holder = Some(receiver);
         sim.ball.position = sim.players[receiver].position;
+        sim.record_possession_touch(receiver);
+        sim.note_completed_possession_pass(Team::Home, Vec2::new(40.0, 30.0), sim.ball.position);
         let after = WorldSnapshot::from_match(&sim);
         let event_start = sim.reward_events.len();
 
@@ -65105,6 +65117,58 @@ mod tests {
                 .map(|tracker| tracker.rewarded_milestones),
             Some(1)
         );
+        assert_eq!(
+            sim.possession_progress_tracker
+                .as_ref()
+                .map(|tracker| tracker.best_completed_pass_chain_gain_yards),
+            Some(31.0)
+        );
+    }
+
+    #[test]
+    fn solo_controlled_carry_does_not_collect_possession_chain_milestone() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 15083,
+            ..Default::default()
+        });
+        let holder = 5;
+        park_players_except(&mut sim, &[holder]);
+        sim.tick = 46;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 30.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        sim.possession_chain.clear();
+        sim.possession_chain.push_back(holder);
+        sim.possession_progress_tracker = Some(PossessionProgressTracker::new(
+            Team::Home,
+            Vec2::new(40.0, 30.0),
+        ));
+        let before = WorldSnapshot::from_match(&sim);
+
+        sim.ball.position = Vec2::new(40.0, 66.0);
+        sim.players[holder].position = sim.ball.position;
+        let after = WorldSnapshot::from_match(&sim);
+        let event_start = sim.reward_events.len();
+
+        sim.update_possession_progress_milestones(&before, &after, true);
+
+        assert_eq!(
+            sim.reward_events.len(),
+            event_start,
+            "a solo carry should keep dense carry rewards separate from the 30-point team-chain milestone"
+        );
+        let tracker = sim
+            .possession_progress_tracker
+            .as_ref()
+            .expect("progress tracker");
+        assert!(
+            tracker.best_gain_yards >= 36.0,
+            "solo carry should still update broad possession progress for stall logic"
+        );
+        assert_eq!(tracker.best_completed_pass_chain_gain_yards, 0.0);
+        assert_eq!(tracker.rewarded_milestones, 0);
     }
 
     #[test]

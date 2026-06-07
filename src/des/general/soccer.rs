@@ -26242,6 +26242,8 @@ pub struct SoccerPlaybackFrame {
     pub score_away: u32,
     pub phase: TacticalPhase,
     pub central_brain: SoccerPlaybackCentralBrainFrame,
+    #[serde(default)]
+    pub agent_schedule_summary: AgentScheduleSummary,
     pub home_directive: SoccerPlaybackDirectiveFrame,
     pub away_directive: SoccerPlaybackDirectiveFrame,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -26506,6 +26508,11 @@ impl SoccerPlaybackFrame {
                 tracked_players: sim.players.iter().map(|player| player.id).collect(),
                 tracked_officials: sim.officials.len(),
             },
+            agent_schedule_summary: agent_schedule_summary_for(
+                &sim.last_agent_schedule,
+                sim.players.len(),
+                sim.officials.len(),
+            ),
             home_directive: SoccerPlaybackDirectiveFrame {
                 press_intensity: sim.central_brain.home_directive.press_intensity,
                 risk_tolerance: sim.central_brain.home_directive.risk_tolerance,
@@ -26610,6 +26617,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     .collect(),
                 tracked_officials: frame.central_brain.tracked_officials,
             },
+            agent_schedule_summary: frame.agent_schedule_summary.clone(),
             home_directive: SoccerPlaybackDirectiveFrame {
                 press_intensity: frame.home_directive.press_intensity,
                 risk_tolerance: frame.home_directive.risk_tolerance,
@@ -26640,7 +26648,7 @@ pub struct AssistantOffsideLineSnapshot {
     pub players_beyond_line: Vec<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentScheduleKind {
     CentralBrain,
@@ -26655,6 +26663,87 @@ pub struct AgentScheduleEntry {
     pub kind: AgentScheduleKind,
     pub id: usize,
     pub label: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentScheduleSummary {
+    pub total_agents: usize,
+    pub expected_total_agents: usize,
+    pub unique_agents: usize,
+    pub duplicate_agents: usize,
+    pub central_brain_count: usize,
+    pub player_count: usize,
+    pub expected_player_count: usize,
+    pub official_count: usize,
+    pub expected_official_count: usize,
+    pub ball_count: usize,
+    pub central_brain_first: bool,
+    #[serde(default)]
+    pub ball_scheduled_index: Option<usize>,
+    pub complete: bool,
+}
+
+fn agent_schedule_summary_for(
+    schedule: &[AgentScheduleEntry],
+    expected_player_count: usize,
+    expected_official_count: usize,
+) -> AgentScheduleSummary {
+    let central_brain_count = schedule
+        .iter()
+        .filter(|entry| entry.kind == AgentScheduleKind::CentralBrain)
+        .count();
+    let player_count = schedule
+        .iter()
+        .filter(|entry| entry.kind == AgentScheduleKind::Player)
+        .count();
+    let official_count = schedule
+        .iter()
+        .filter(|entry| entry.kind == AgentScheduleKind::Official)
+        .count();
+    let ball_count = schedule
+        .iter()
+        .filter(|entry| entry.kind == AgentScheduleKind::Ball)
+        .count();
+    let mut seen = HashSet::new();
+    let mut duplicate_agents = 0usize;
+    for entry in schedule {
+        if !seen.insert((entry.kind.clone(), entry.id)) {
+            duplicate_agents = duplicate_agents.saturating_add(1);
+        }
+    }
+    let expected_total_agents = 1 + expected_player_count + expected_official_count + 1;
+    let central_brain_first = schedule
+        .first()
+        .is_some_and(|entry| entry.kind == AgentScheduleKind::CentralBrain);
+    let ball_scheduled_index = schedule
+        .iter()
+        .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+    let complete = schedule.len() == expected_total_agents
+        && seen.len() == expected_total_agents
+        && duplicate_agents == 0
+        && central_brain_count == 1
+        && player_count == expected_player_count
+        && official_count == expected_official_count
+        && ball_count == 1
+        && central_brain_first
+        && ball_scheduled_index.is_some();
+
+    AgentScheduleSummary {
+        total_agents: schedule.len(),
+        expected_total_agents,
+        unique_agents: seen.len(),
+        duplicate_agents,
+        central_brain_count,
+        player_count,
+        expected_player_count,
+        official_count,
+        expected_official_count,
+        ball_count,
+        central_brain_first,
+        ball_scheduled_index,
+        complete,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26743,6 +26832,8 @@ pub struct MatchFrame {
     pub officials: Vec<OfficialSnapshot>,
     #[serde(default)]
     pub agent_schedule: Vec<AgentScheduleEntry>,
+    #[serde(default)]
+    pub agent_schedule_summary: AgentScheduleSummary,
     #[serde(default)]
     pub active_set_play: Option<SoccerSetPlayCall>,
     pub score_home: u32,
@@ -35114,6 +35205,10 @@ impl SoccerMatch {
         let mut ball = self.ball.to_state();
         ball.scheduled_index = ball_scheduled_index;
 
+        let agent_schedule = self.last_agent_schedule.clone();
+        let agent_schedule_summary =
+            agent_schedule_summary_for(&agent_schedule, self.players.len(), self.officials.len());
+
         MatchFrame {
             tick: self.tick,
             clock_seconds: self.clock_seconds,
@@ -35123,7 +35218,8 @@ impl SoccerMatch {
             players,
             shared_positions: snapshot.shared_positions,
             officials,
-            agent_schedule: self.last_agent_schedule.clone(),
+            agent_schedule,
+            agent_schedule_summary,
             active_set_play: self.active_set_play.clone(),
             score_home: self.score_home,
             score_away: self.score_away,
@@ -62747,6 +62843,47 @@ mod tests {
     }
 
     #[test]
+    fn agent_schedule_summary_exposes_full_runtime_loop_contract() {
+        let trace = run_simulation(
+            MatchConfig {
+                seed: 13_083,
+                ..MatchConfig::playback_trace(0.2)
+            },
+            1,
+        );
+        let initial = trace.frames.first().expect("initial frame");
+        assert_eq!(initial.agent_schedule_summary.expected_player_count, 22);
+        assert_eq!(initial.agent_schedule_summary.expected_official_count, 3);
+        assert_eq!(initial.agent_schedule_summary.expected_total_agents, 27);
+        assert_eq!(initial.agent_schedule_summary.total_agents, 0);
+        assert!(!initial.agent_schedule_summary.complete);
+
+        let scheduled = trace
+            .frames
+            .iter()
+            .find(|frame| frame.tick > 0)
+            .expect("post-tick scheduled frame");
+        let summary = &scheduled.agent_schedule_summary;
+        assert_eq!(summary.expected_player_count, 22);
+        assert_eq!(summary.expected_official_count, 3);
+        assert_eq!(summary.expected_total_agents, 27);
+        assert_eq!(summary.total_agents, 27);
+        assert_eq!(summary.unique_agents, 27);
+        assert_eq!(summary.duplicate_agents, 0);
+        assert_eq!(summary.central_brain_count, 1);
+        assert_eq!(summary.player_count, 22);
+        assert_eq!(summary.official_count, 3);
+        assert_eq!(summary.ball_count, 1);
+        assert!(summary.central_brain_first);
+        assert_eq!(summary.ball_scheduled_index, scheduled.ball.scheduled_index);
+        assert!(summary.complete);
+
+        let playback = SoccerPlaybackFrame::from(scheduled);
+        assert!(playback.agent_schedule_summary.complete);
+        assert_eq!(playback.agent_schedule_summary.total_agents, 27);
+    }
+
+    #[test]
     fn accounting_smoke_report_flags_frozen_multi_frame_match() {
         let mut trace = run_simulation(
             MatchConfig {
@@ -85343,8 +85480,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("HighX"));
         assert!(html.contains("id=\"agentOrder\""));
         assert!(html.contains("function agentScheduleEntriesForFrame"));
+        assert!(html.contains("function agentScheduleSummaryForFrame"));
+        assert!(html.contains("function agentScheduleSummaryLabel"));
         assert!(html.contains("function agentScheduleCoverageLabel"));
         assert!(html.contains("function agentScheduleFullLabel"));
+        assert!(html.contains("agentScheduleSummary"));
+        assert!(html.contains("${central}${Number(s.playerCount || 0)}p/"));
         assert!(html.contains("${hasCentral ? \"C+\" : \"\"}${players}p/${officials}o"));
         assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));
         assert!(html.contains("agentOrder.title = agentScheduleFullLabel(f)"));
@@ -85800,6 +85941,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(!first_frame["players"][0].get("lastDecision").is_some());
         assert!(!first_frame.get("sharedPositions").is_some());
         assert!(!first_frame.get("agentSchedule").is_some());
+        assert!(first_frame.get("agentScheduleSummary").is_some());
         let frames = jsonl
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("playback json"))
@@ -85825,6 +85967,26 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .iter()
             .all(|official| official["scheduledIndex"].as_u64().is_some()));
         assert!(scheduled_frame["ball"]["scheduledIndex"].as_u64().is_some());
+        assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["totalAgents"].as_u64(),
+            Some(27)
+        );
+        assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["playerCount"].as_u64(),
+            Some(22)
+        );
+        assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["officialCount"].as_u64(),
+            Some(3)
+        );
+        assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["ballCount"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["complete"].as_bool(),
+            Some(true)
+        );
         assert!(scheduled_frame["ball"]["lastAction"]
             .as_str()
             .is_some_and(|action| !action.is_empty()));

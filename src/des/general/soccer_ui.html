@@ -812,6 +812,28 @@ function agentScheduleEntriesForFrame(f) {
   entries.sort((a, b) => Number(a.scheduledIndex ?? 0) - Number(b.scheduledIndex ?? 0));
   return entries;
 }
+function agentScheduleSummaryForFrame(f) {
+  const summary = f?.agentScheduleSummary;
+  if (summary && Number.isFinite(Number(summary.totalAgents))) return summary;
+  const schedule = agentScheduleEntriesForFrame(f);
+  const players = schedule.filter(entry => entry.kind === "player").length;
+  const officials = schedule.filter(entry => entry.kind === "official").length;
+  const hasBall = schedule.some(entry => entry.kind === "ball");
+  const hasCentral = schedule.some(entry => entry.kind === "centralBrain");
+  return {
+    totalAgents: schedule.length,
+    expectedTotalAgents: schedule.length,
+    playerCount: players,
+    expectedPlayerCount: players,
+    officialCount: officials,
+    expectedOfficialCount: officials,
+    ballCount: hasBall ? 1 : 0,
+    centralBrainCount: hasCentral ? 1 : 0,
+    duplicateAgents: 0,
+    centralBrainFirst: schedule[0]?.kind === "centralBrain",
+    complete: schedule.length > 0 && hasBall && hasCentral
+  };
+}
 function agentScheduleCoverageLabel(schedule) {
   const players = schedule.filter(entry => entry.kind === "player").length;
   const officials = schedule.filter(entry => entry.kind === "official").length;
@@ -819,18 +841,28 @@ function agentScheduleCoverageLabel(schedule) {
   const hasCentral = schedule.some(entry => entry.kind === "centralBrain");
   return `${hasCentral ? "C+" : ""}${players}p/${officials}o${hasBall ? "/B" : ""}`;
 }
+function agentScheduleSummaryLabel(f) {
+  const s = agentScheduleSummaryForFrame(f);
+  if (!s || Number(s.totalAgents || 0) <= 0) return "shuffle pending";
+  const central = Number(s.centralBrainCount || 0) > 0 ? "C+" : "";
+  const ball = Number(s.ballCount || 0) > 0 ? "/B" : "";
+  const expected = Number(s.expectedTotalAgents || 0);
+  const total = Number(s.totalAgents || 0);
+  const complete = s.complete ? " ok" : ` ${total}/${expected || "?"}`;
+  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${complete}`;
+}
 function agentScheduleFullLabel(f) {
   const schedule = agentScheduleEntriesForFrame(f);
-  if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
-  return `${agentScheduleCoverageLabel(schedule)} ${schedule.map(agentScheduleGlyph).join(" ")}`;
+  if (!Array.isArray(schedule) || schedule.length === 0) return agentScheduleSummaryLabel(f);
+  return `${agentScheduleSummaryLabel(f)} ${schedule.map(agentScheduleGlyph).join(" ")}`;
 }
 function agentScheduleLabel(f) {
   const schedule = agentScheduleEntriesForFrame(f);
-  if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
+  if (!Array.isArray(schedule) || schedule.length === 0) return agentScheduleSummaryLabel(f);
   const prefix = schedule.slice(0, 6).map(agentScheduleGlyph).join(" ");
   const ball = schedule.find(entry => entry.kind === "ball");
   const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
-  return `${agentScheduleCoverageLabel(schedule)} ${prefix}${suffix}`;
+  return `${agentScheduleSummaryLabel(f)} ${prefix}${suffix}`;
 }
 function playbackScheduleSlotLabel(value) {
   return Number.isInteger(value) ? ` S${value}` : "";

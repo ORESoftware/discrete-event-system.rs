@@ -2318,6 +2318,12 @@ pub struct SoccerTacticalLearningSummary {
     #[serde(default)]
     pub mean_positional_shape_reward: f64,
     #[serde(default)]
+    pub look_behind_scan_transitions: usize,
+    #[serde(default)]
+    pub mean_look_behind_drift_risk: f64,
+    #[serde(default)]
+    pub mean_look_behind_shape_penalty: f64,
+    #[serde(default)]
     pub total_tactical_reward: f64,
     #[serde(default)]
     pub mean_tactical_reward: f64,
@@ -2554,6 +2560,19 @@ impl SoccerTacticalLearningSummary {
             other.mean_positional_shape_reward,
             other.shape_transitions,
         );
+        let look_behind_count = self.look_behind_scan_transitions;
+        self.mean_look_behind_drift_risk = weighted_mean(
+            self.mean_look_behind_drift_risk,
+            look_behind_count,
+            other.mean_look_behind_drift_risk,
+            other.look_behind_scan_transitions,
+        );
+        self.mean_look_behind_shape_penalty = weighted_mean(
+            self.mean_look_behind_shape_penalty,
+            look_behind_count,
+            other.mean_look_behind_shape_penalty,
+            other.look_behind_scan_transitions,
+        );
         self.total_transitions = self
             .total_transitions
             .saturating_add(other.total_transitions);
@@ -2575,6 +2594,9 @@ impl SoccerTacticalLearningSummary {
         self.lp_guided_transitions = self
             .lp_guided_transitions
             .saturating_add(other.lp_guided_transitions);
+        self.look_behind_scan_transitions = self
+            .look_behind_scan_transitions
+            .saturating_add(other.look_behind_scan_transitions);
         self.total_tactical_reward =
             finite_metric(self.total_tactical_reward) + finite_metric(other.total_tactical_reward);
         self.mean_tactical_reward = if self.shape_transitions > 0 {
@@ -2798,6 +2820,19 @@ impl SoccerTacticalLearningSummary {
             count,
             trace.positional_shape_reward,
         );
+        if trace.look_behind_scan_active {
+            self.look_behind_scan_transitions = self.look_behind_scan_transitions.saturating_add(1);
+            record_running_mean(
+                &mut self.mean_look_behind_drift_risk,
+                self.look_behind_scan_transitions,
+                trace.look_behind_drift_risk,
+            );
+            record_running_mean(
+                &mut self.mean_look_behind_shape_penalty,
+                self.look_behind_scan_transitions,
+                trace.look_behind_shape_penalty,
+            );
+        }
     }
 }
 
@@ -63345,6 +63380,17 @@ mod tests {
             .as_f64()
             .unwrap()
             .is_finite());
+        assert!(value["tacticalSummary"]["lookBehindScanTransitions"]
+            .as_u64()
+            .is_some());
+        assert!(value["tacticalSummary"]["meanLookBehindDriftRisk"]
+            .as_f64()
+            .unwrap()
+            .is_finite());
+        assert!(value["tacticalSummary"]["meanLookBehindShapePenalty"]
+            .as_f64()
+            .unwrap()
+            .is_finite());
         assert!(value["learning"]["homePolicyEntries"].as_u64().unwrap() > 0);
         assert!(value["learning"]["awayPolicyEntries"].as_u64().unwrap() > 0);
         assert!(
@@ -64996,6 +65042,31 @@ mod tests {
             scanning_trace.tactical_reward,
             facing_ball_trace.tactical_reward
         );
+
+        let transition = SoccerLearningTransition {
+            tick: scanning_snapshot.tick,
+            player_id: defender,
+            team: Team::Home,
+            role: PlayerRole::Defender,
+            state: scanning_snapshot.mdp_state_for_player(defender),
+            observation: scanning_observation,
+            belief: belief_from_observation(&scanning_snapshot.observation_for(defender)),
+            action: "defend-shape".to_string(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: scanning_trace.clone(),
+            reward: scanning_trace.tactical_reward,
+            next_state: scanning_snapshot.mdp_state_for_player(defender),
+            next_observation: scanning_snapshot.observation_for(defender),
+            done: false,
+        };
+        let summary = SoccerTacticalLearningSummary::from_transitions(&[transition]);
+        assert_eq!(summary.look_behind_scan_transitions, 1);
+        assert!(summary.mean_look_behind_drift_risk > 0.45);
+        assert!(
+            summary.mean_look_behind_shape_penalty < -0.18,
+            "summary should expose aggregate scan penalty: {summary:?}"
+        );
     }
 
     #[test]
@@ -66022,6 +66093,22 @@ mod tests {
                 < 1e-12
         );
         assert_eq!(
+            sim.tactical_summary.look_behind_scan_transitions,
+            recomputed.look_behind_scan_transitions
+        );
+        assert!(
+            (sim.tactical_summary.mean_look_behind_drift_risk
+                - recomputed.mean_look_behind_drift_risk)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (sim.tactical_summary.mean_look_behind_shape_penalty
+                - recomputed.mean_look_behind_shape_penalty)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(
             sim.tactical_summary.goalkeeper_line_alignment_transitions,
             recomputed.goalkeeper_line_alignment_transitions
         );
@@ -66061,6 +66148,11 @@ mod tests {
             sim.tactical_summary.mean_positional_shape_reward.abs()
                 <= POSITIONAL_SHAPE_REWARD_CLAMP + 1e-9
         );
+        assert!(sim.tactical_summary.mean_look_behind_drift_risk.is_finite());
+        assert!(sim
+            .tactical_summary
+            .mean_look_behind_shape_penalty
+            .is_finite());
 
         let artifact = sim.team_policy_artifact();
         assert_eq!(
@@ -66075,6 +66167,18 @@ mod tests {
         assert_eq!(
             artifact_json["tacticalSummary"]["meanPositionalShapeReward"],
             serde_json::json!(artifact.tactical_summary.mean_positional_shape_reward)
+        );
+        assert_eq!(
+            artifact_json["tacticalSummary"]["lookBehindScanTransitions"],
+            serde_json::json!(artifact.tactical_summary.look_behind_scan_transitions)
+        );
+        assert_eq!(
+            artifact_json["tacticalSummary"]["meanLookBehindDriftRisk"],
+            serde_json::json!(artifact.tactical_summary.mean_look_behind_drift_risk)
+        );
+        assert_eq!(
+            artifact_json["tacticalSummary"]["meanLookBehindShapePenalty"],
+            serde_json::json!(artifact.tactical_summary.mean_look_behind_shape_penalty)
         );
         assert_eq!(
             artifact_json["tacticalSummary"]["meanGoalkeeperBallGoalLineAlignmentScore"],
@@ -66133,6 +66237,11 @@ mod tests {
             sim.tactical_summary.mean_positional_shape_reward.abs()
                 <= POSITIONAL_SHAPE_REWARD_CLAMP + 1e-9
         );
+        assert!(sim.tactical_summary.mean_look_behind_drift_risk.is_finite());
+        assert!(sim
+            .tactical_summary
+            .mean_look_behind_shape_penalty
+            .is_finite());
 
         let artifact = sim.team_policy_artifact();
         assert_eq!(artifact.learning.total_transitions, 0);

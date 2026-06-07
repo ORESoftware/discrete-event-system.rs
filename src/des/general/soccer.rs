@@ -26611,6 +26611,7 @@ fn soccer_accounting_check_frames(
 
         soccer_accounting_check_frame_roster(frame, report);
         soccer_accounting_check_frame_ball_accounting(frame, report);
+        soccer_accounting_check_frame_shared_positions(frame, report);
         soccer_accounting_check_agent_schedule(frame, report);
     }
 
@@ -26754,6 +26755,111 @@ fn soccer_accounting_record_frame_possession_bucket(
         }
     } else {
         report.non_possession_frames += 1;
+    }
+}
+
+fn soccer_accounting_check_frame_shared_positions(
+    frame: &MatchFrame,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    const POSITION_EPSILON_YARDS: f64 = 1e-6;
+    const CLOCK_EPSILON_SECONDS: f64 = 1e-9;
+
+    for player in &frame.players {
+        let Some(sample) = frame.shared_positions.latest_for(player.id) else {
+            report.push_violation(
+                frame.tick,
+                "sharedPositions",
+                "playerLatest",
+                format!("player {}", player.id),
+                "missing".to_string(),
+                "shared position data should expose every player's latest x/y position",
+            );
+            continue;
+        };
+        if sample.tick != frame.tick
+            || (sample.clock_seconds - frame.clock_seconds).abs() > CLOCK_EPSILON_SECONDS
+            || sample.position.distance(player.position) > POSITION_EPSILON_YARDS
+        {
+            report.push_violation(
+                frame.tick,
+                "sharedPositions",
+                "playerLatestConsistency",
+                format!(
+                    "id {} tick {} clock {:.6} pos {:?}",
+                    player.id, frame.tick, frame.clock_seconds, player.position
+                ),
+                format!(
+                    "id {} tick {} clock {:.6} pos {:?}",
+                    sample.player_id, sample.tick, sample.clock_seconds, sample.position
+                ),
+                "shared player position sample should match the authoritative player state",
+            );
+        }
+    }
+
+    for official in &frame.officials {
+        let Some(sample) = frame.shared_positions.official_latest_for(official.id) else {
+            report.push_violation(
+                frame.tick,
+                "sharedPositions",
+                "officialLatest",
+                format!("official {}", official.id),
+                "missing".to_string(),
+                "shared position data should expose every official's latest x/y position",
+            );
+            continue;
+        };
+        if sample.tick != frame.tick
+            || (sample.clock_seconds - frame.clock_seconds).abs() > CLOCK_EPSILON_SECONDS
+            || sample.position.distance(official.position) > POSITION_EPSILON_YARDS
+        {
+            report.push_violation(
+                frame.tick,
+                "sharedPositions",
+                "officialLatestConsistency",
+                format!(
+                    "id {} tick {} clock {:.6} pos {:?}",
+                    official.id, frame.tick, frame.clock_seconds, official.position
+                ),
+                format!(
+                    "id {} tick {} clock {:.6} pos {:?}",
+                    sample.official_id, sample.tick, sample.clock_seconds, sample.position
+                ),
+                "shared official position sample should match the authoritative official state",
+            );
+        }
+    }
+
+    let Some(ball_sample) = frame.shared_positions.ball_latest() else {
+        report.push_violation(
+            frame.tick,
+            "sharedPositions",
+            "ballLatest",
+            "ball latest sample",
+            "missing".to_string(),
+            "shared position data should expose the ball's latest x/y position",
+        );
+        return;
+    };
+    if ball_sample.tick != frame.tick
+        || (ball_sample.clock_seconds - frame.clock_seconds).abs() > CLOCK_EPSILON_SECONDS
+        || ball_sample.position.distance(frame.ball.position) > POSITION_EPSILON_YARDS
+    {
+        report.push_violation(
+            frame.tick,
+            "sharedPositions",
+            "ballLatestConsistency",
+            format!(
+                "tick {} clock {:.6} pos {:?}",
+                frame.tick, frame.clock_seconds, frame.ball.position
+            ),
+            format!(
+                "tick {} clock {:.6} pos {:?}",
+                ball_sample.tick, ball_sample.clock_seconds, ball_sample.position
+            ),
+            "shared ball position sample should match the authoritative ball state",
+        );
     }
 }
 
@@ -58501,6 +58607,40 @@ mod tests {
             .violations
             .iter()
             .any(|violation| violation.metric == "ballHolderConsistency"));
+    }
+
+    #[test]
+    fn accounting_smoke_report_flags_stale_shared_positions() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                duration_seconds: 0.2,
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                max_human_players: 0,
+                seed: 13_109,
+                ..Default::default()
+            },
+            1,
+        );
+        let frame = trace
+            .frames
+            .iter_mut()
+            .find(|frame| frame.tick > 0)
+            .expect("post-tick frame with shared positions");
+        frame.shared_positions.latest[0].position += Vec2::new(2.0, 0.0);
+        if let Some(ball_latest) = frame.shared_positions.ball_latest.as_mut() {
+            ball_latest.position += Vec2::new(0.0, 2.0);
+        }
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "sharedPositions" && violation.metric == "playerLatestConsistency"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "sharedPositions" && violation.metric == "ballLatestConsistency"
+        }));
     }
 
     #[test]

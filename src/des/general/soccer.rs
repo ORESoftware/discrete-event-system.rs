@@ -34841,9 +34841,18 @@ impl SoccerMatch {
         };
         let outcome = self.ball.run_time_step(context, &mut self.rng);
         let loose_after_step = matches!(outcome, BallStepOutcome::None);
+        let controlled_after_step = matches!(outcome, BallStepOutcome::Controlled { .. });
+        if controlled_after_step
+            && self.call_pending_offside_interference_before_control_if_needed(
+                previous_position,
+                self.ball.position,
+            )
+        {
+            return;
+        }
         self.apply_ball_outcome(outcome);
-        if loose_after_step {
-            self.call_pending_offside_interference_if_needed(previous_position);
+        if loose_after_step && self.call_pending_offside_interference_if_needed(previous_position) {
+            return;
         }
         self.ball.update_kinematics_from(
             previous_velocity,
@@ -34872,8 +34881,27 @@ impl SoccerMatch {
         &self,
         previous_ball_position: Vec2,
         current_ball_position: Vec2,
+        ignore_current_holder: bool,
     ) -> Option<PendingOffside> {
-        if self.ball.holder.is_some() {
+        self.pending_offside_interference_for_segment_until(
+            previous_ball_position,
+            current_ball_position,
+            1.0,
+            ignore_current_holder,
+        )
+    }
+
+    fn pending_offside_interference_for_segment_until(
+        &self,
+        previous_ball_position: Vec2,
+        current_ball_position: Vec2,
+        max_projection: f64,
+        ignore_current_holder: bool,
+    ) -> Option<PendingOffside> {
+        if self.ball.holder.is_some() && !ignore_current_holder {
+            return None;
+        }
+        if !vec2_is_finite(previous_ball_position) || !vec2_is_finite(current_ball_position) {
             return None;
         }
         let offside = self
@@ -34885,24 +34913,56 @@ impl SoccerMatch {
             .iter()
             .find(|player| player.id == offside.target)
             .map(|player| player.position)?;
-        let near_segment = segment_distance_to_point(
+        if !vec2_is_finite(target_position) {
+            return None;
+        }
+        let max_projection = max_projection.clamp(0.0, 1.0);
+        let target_projection = segment_projection_factor(
             previous_ball_position,
             current_ball_position,
             target_position,
-        ) <= OFFSIDE_INTERFERENCE_RADIUS_YARDS;
-        let near_current =
-            target_position.distance(current_ball_position) <= OFFSIDE_INTERFERENCE_RADIUS_YARDS;
+        );
+        let projection = previous_ball_position
+            + (current_ball_position - previous_ball_position) * target_projection;
+        let near_segment = target_projection <= max_projection
+            && target_position.distance(projection) <= OFFSIDE_INTERFERENCE_RADIUS_YARDS;
+        let near_current = max_projection >= 1.0 - 1e-9
+            && target_position.distance(current_ball_position) <= OFFSIDE_INTERFERENCE_RADIUS_YARDS;
         (near_segment || near_current).then_some(offside)
     }
 
-    fn call_pending_offside_interference_if_needed(&mut self, previous_ball_position: Vec2) {
-        let Some(offside) = self
-            .pending_offside_interference_for_segment(previous_ball_position, self.ball.position)
-        else {
-            return;
+    fn call_pending_offside_interference_before_control_if_needed(
+        &mut self,
+        previous_ball_position: Vec2,
+        control_position: Vec2,
+    ) -> bool {
+        let Some(offside) = self.pending_offside_interference_for_segment_until(
+            previous_ball_position,
+            control_position,
+            1.0 - 1e-6,
+            true,
+        ) else {
+            return false;
         };
         self.pending_pass = None;
         self.call_offside(offside);
+        true
+    }
+
+    fn call_pending_offside_interference_if_needed(
+        &mut self,
+        previous_ball_position: Vec2,
+    ) -> bool {
+        let Some(offside) = self.pending_offside_interference_for_segment(
+            previous_ball_position,
+            self.ball.position,
+            false,
+        ) else {
+            return false;
+        };
+        self.pending_pass = None;
+        self.call_offside(offside);
+        true
     }
 
     fn apply_ball_outcome(&mut self, outcome: BallStepOutcome) {
@@ -64854,7 +64914,116 @@ mod tests {
         assert_eq!(sim.stats.offsides_home, 1);
         assert!(sim.pending_pass.is_none());
         assert_eq!(sim.ball.last_touch_team, Some(Team::Away));
+        assert_eq!(sim.ball.velocity, Vec2::zero());
+        assert_eq!(sim.ball.acceleration, Vec2::zero());
+        assert_eq!(sim.ball.jerk, Vec2::zero());
         assert!(sim.events.iter().any(|event| event.kind == "offside"));
+    }
+
+    #[test]
+    fn offside_runner_near_ball_path_is_flagged_before_later_control_touch() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 5;
+        let runner = 9;
+        let later_teammate = 8;
+        sim.players[passer].position = Vec2::new(40.0, 70.0);
+        sim.players[runner].position = Vec2::new(42.0, 98.0);
+        sim.players[later_teammate].position = Vec2::new(40.0, 104.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(8.0 + away as f64, 82.0);
+        }
+        sim.players[11].position = Vec2::new(40.0, 118.0);
+        sim.players[12].position = Vec2::new(42.0, 96.0);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.holder = Some(passer);
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: passer,
+            action: SoccerAction::Pass {
+                target_player: Some(runner),
+                power: 1.0,
+                flight: PassFlight::Floor,
+            },
+            sprint: false,
+        });
+        assert!(sim
+            .pending_pass
+            .as_ref()
+            .and_then(|pass| pass.offside.as_ref())
+            .is_some());
+
+        let previous_ball_position = sim.players[passer].position;
+        sim.ball.holder = Some(later_teammate);
+        sim.ball.position = sim.players[later_teammate].position;
+
+        assert!(
+            sim.call_pending_offside_interference_before_control_if_needed(
+                previous_ball_position,
+                sim.ball.position
+            )
+        );
+        assert_eq!(sim.stats.offsides_home, 1);
+        assert!(sim.pending_pass.is_none());
+        assert_eq!(sim.ball.last_touch_team, Some(Team::Away));
+        assert_eq!(sim.ball.velocity, Vec2::zero());
+        assert_eq!(sim.ball.acceleration, Vec2::zero());
+        assert_eq!(sim.ball.jerk, Vec2::zero());
+        assert!(sim.events.iter().any(|event| event.kind == "offside"));
+    }
+
+    #[test]
+    fn teammate_touch_before_offside_runner_involvement_resets_pending_offside() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 5;
+        let runner = 9;
+        let receiving_teammate = 8;
+        sim.players[passer].position = Vec2::new(40.0, 70.0);
+        sim.players[runner].position = Vec2::new(42.0, 108.0);
+        sim.players[receiving_teammate].position = Vec2::new(40.0, 108.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(8.0 + away as f64, 82.0);
+        }
+        sim.players[11].position = Vec2::new(40.0, 118.0);
+        sim.players[12].position = Vec2::new(42.0, 96.0);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.holder = Some(passer);
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: passer,
+            action: SoccerAction::Pass {
+                target_player: Some(runner),
+                power: 1.0,
+                flight: PassFlight::Floor,
+            },
+            sprint: false,
+        });
+        assert!(sim
+            .pending_pass
+            .as_ref()
+            .and_then(|pass| pass.offside.as_ref())
+            .is_some());
+
+        let previous_ball_position = sim.players[passer].position;
+        sim.ball.holder = Some(receiving_teammate);
+        sim.ball.position = sim.players[receiving_teammate].position;
+
+        assert!(
+            !sim.call_pending_offside_interference_before_control_if_needed(
+                previous_ball_position,
+                sim.ball.position
+            )
+        );
+        sim.apply_ball_outcome(BallStepOutcome::Controlled {
+            holder: receiving_teammate,
+            holder_team: Team::Home,
+            possession_result: BallPossessionResult::PassCompleted(Team::Home),
+        });
+
+        assert_eq!(sim.stats.offsides_home, 0);
+        assert_eq!(sim.stats.passes_completed_home, 1);
+        assert!(sim.pending_pass.is_none());
+        assert_eq!(sim.ball.holder, Some(receiving_teammate));
+        assert!(!sim.events.iter().any(|event| event.kind == "offside"));
     }
 
     #[test]

@@ -493,6 +493,9 @@ let activeSlot = 0;
 let traceFramesComplete = false;
 let uiReady = false;
 let loadStartedAt = performance.now();
+let recentLoadSamples = [];
+let lastFrameLoadSampleAt = performance.now();
+let lastFrameLoadSampleCount = 0;
 let traceLoadController = null;
 let runningNewSimulation = false;
 window.__humanInputQueue = [];
@@ -589,6 +592,29 @@ function loadedFrameRate() {
   const seconds = Math.max(.25, (performance.now() - loadStartedAt) / 1000);
   return trace.frames.length / seconds;
 }
+function resetRecentLoadRate() {
+  recentLoadSamples = [];
+  lastFrameLoadSampleAt = performance.now();
+  lastFrameLoadSampleCount = trace.frames.length;
+}
+function recordRecentLoadRateSample() {
+  const now = performance.now();
+  const frameDelta = trace.frames.length - lastFrameLoadSampleCount;
+  const msDelta = now - lastFrameLoadSampleAt;
+  if (frameDelta > 0 && msDelta >= 120) {
+    recentLoadSamples.push({frames: frameDelta, ms: msDelta, at: now});
+    const cutoff = now - 3500;
+    recentLoadSamples = recentLoadSamples.filter(sample => sample.at >= cutoff);
+    lastFrameLoadSampleAt = now;
+    lastFrameLoadSampleCount = trace.frames.length;
+  }
+}
+function recentLoadedFrameRate() {
+  const frames = recentLoadSamples.reduce((sum, sample) => sum + sample.frames, 0);
+  const ms = recentLoadSamples.reduce((sum, sample) => sum + sample.ms, 0);
+  if (frames <= 0 || ms <= 0) return loadedFrameRate();
+  return frames / Math.max(.25, ms / 1000);
+}
 function expectedFrameCount() {
   const ticks = Number(trace.summary?.ticks || 0);
   return Math.max(ticks + 1, trace.frames.length, 0);
@@ -606,7 +632,7 @@ function canStartPlayback() {
   if (trace.frames.length < 2) return false;
   if (traceFramesComplete) return true;
   const fps = 10 * Number(speed.value || 1);
-  return bufferedSeconds() >= 3 && loadedFrameRate() > fps * 1.25;
+  return bufferedSeconds() >= 3 && recentLoadedFrameRate() > fps * 1.25;
 }
 function setControlsEnabled(enabled) {
   play.disabled = !enabled;
@@ -634,6 +660,7 @@ function resetTraceState() {
   trace.events = [];
   trace.runId = null;
   trace.generatedAtUnixMs = null;
+  resetRecentLoadRate();
   slots.innerHTML = "";
   passTarget.innerHTML = "";
   scrub.value = 0;
@@ -672,8 +699,8 @@ function updateLoadingProgress(loadedBytes = 0, totalBytes = 0, message = "Loadi
   loadingBar.style.width = `${Math.max(percent, trace.frames.length ? 4 : 1).toFixed(1)}%`;
   const ready = canStartPlayback() && !traceFramesComplete ? "Playback ready" : message;
   setLoadingTitle(ready);
-  const rate = loadedFrameRate();
-  loadingStatus.textContent = `${ready}; ${trace.frames.length}/${expectedFrames || "?"} frames; ${bufferedSeconds().toFixed(1)}s ahead; ${totalLoadedSeconds().toFixed(1)}s loaded; ${rate.toFixed(1)} fps incoming`;
+  const rate = recentLoadedFrameRate();
+  loadingStatus.textContent = `${ready}; ${trace.frames.length}/${expectedFrames || "?"} frames; ${bufferedSeconds().toFixed(1)}s ahead; ${totalLoadedSeconds().toFixed(1)}s loaded; ${rate.toFixed(1)} fps recent`;
   const frameProgress = expectedFrames > 0 ? `${trace.frames.length} / ${expectedFrames} frames` : `${trace.frames.length} frames`;
   loadingBytes.textContent = totalBytes > 0
     ? `${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)}; ${frameProgress}`
@@ -1487,6 +1514,7 @@ function appendFrameLine(line) {
   const raw = line.trim();
   if (!raw) return;
   trace.frames.push(JSON.parse(raw));
+  recordRecentLoadRateSample();
   scrub.max = Math.max(0, trace.frames.length - 1);
   initializeUiWhenReady();
   if (!playing && frameIndex >= trace.frames.length - 2) render();
@@ -1515,6 +1543,7 @@ async function loadTraceFrames(signal) {
   let loadedBytes = 0;
   let buffer = "";
   loadStartedAt = performance.now();
+  resetRecentLoadRate();
 
   if (!response.body || !response.body.getReader) {
     updateLoadingProgress(0, totalBytes, "Downloading frames");

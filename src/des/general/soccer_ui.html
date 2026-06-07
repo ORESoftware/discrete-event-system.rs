@@ -767,13 +767,25 @@ function agentScheduleEntriesForFrame(f) {
   entries.sort((a, b) => Number(a.scheduledIndex ?? 0) - Number(b.scheduledIndex ?? 0));
   return entries;
 }
+function agentScheduleCoverageLabel(schedule) {
+  const players = schedule.filter(entry => entry.kind === "player").length;
+  const officials = schedule.filter(entry => entry.kind === "official").length;
+  const hasBall = schedule.some(entry => entry.kind === "ball");
+  const hasCentral = schedule.some(entry => entry.kind === "centralBrain");
+  return `${hasCentral ? "C+" : ""}${players}p/${officials}o${hasBall ? "/B" : ""}`;
+}
+function agentScheduleFullLabel(f) {
+  const schedule = agentScheduleEntriesForFrame(f);
+  if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
+  return `${agentScheduleCoverageLabel(schedule)} ${schedule.map(agentScheduleGlyph).join(" ")}`;
+}
 function agentScheduleLabel(f) {
   const schedule = agentScheduleEntriesForFrame(f);
   if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
   const prefix = schedule.slice(0, 6).map(agentScheduleGlyph).join(" ");
   const ball = schedule.find(entry => entry.kind === "ball");
   const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
-  return `${prefix}${suffix}`;
+  return `${agentScheduleCoverageLabel(schedule)} ${prefix}${suffix}`;
 }
 function playbackScheduleSlotLabel(value) {
   return Number.isInteger(value) ? ` S${value}` : "";
@@ -1157,6 +1169,7 @@ function render() {
   phase.textContent = phaseLabel(f.phase);
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
   agentOrder.textContent = agentScheduleLabel(f);
+  agentOrder.title = agentScheduleFullLabel(f);
   homeBrain.textContent = teamBrainLabel(f.homeBrain, f.homeDirective);
   awayBrain.textContent = teamBrainLabel(f.awayBrain, f.awayDirective);
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2 z${ballAltitudeYards(f.ball).toFixed(1)}y`;

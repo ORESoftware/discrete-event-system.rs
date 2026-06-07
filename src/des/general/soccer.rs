@@ -77263,7 +77263,11 @@ mod tests {
         assert!(html.contains("HighX"));
         assert!(html.contains("id=\"agentOrder\""));
         assert!(html.contains("function agentScheduleEntriesForFrame"));
+        assert!(html.contains("function agentScheduleCoverageLabel"));
+        assert!(html.contains("function agentScheduleFullLabel"));
+        assert!(html.contains("${hasCentral ? \"C+\" : \"\"}${players}p/${officials}o"));
         assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));
+        assert!(html.contains("agentOrder.title = agentScheduleFullLabel(f)"));
         assert!(html.contains("f?.ball?.scheduledIndex"));
         assert!(html.contains("id=\"ballAgent\""));
         assert!(html.contains("function playbackBallAgentLabel"));

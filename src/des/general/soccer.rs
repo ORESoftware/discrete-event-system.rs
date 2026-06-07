@@ -54061,6 +54061,88 @@ mod tests {
     }
 
     #[test]
+    fn shared_position_board_reads_stay_coherent_during_main_loop_syncs() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 212,
+            ..MatchConfig::playback_trace(1.2)
+        });
+        let shared = sim.shared_positions.clone();
+        let running = Arc::new(AtomicBool::new(true));
+        let start = Arc::new(std::sync::Barrier::new(2));
+
+        let reader_running = running.clone();
+        let reader_start = start.clone();
+        let reader = std::thread::spawn(move || {
+            reader_start.wait();
+            let mut reads = 0usize;
+            let mut last_tick = 0u64;
+            let mut max_tick = 0u64;
+
+            while reader_running.load(Ordering::Acquire) {
+                let snapshot = shared.snapshot();
+                let ball_tick = snapshot.ball_latest().expect("shared ball latest").tick;
+                assert!(
+                    ball_tick >= last_tick,
+                    "shared position ticks should be monotonic for concurrent readers"
+                );
+                assert_eq!(snapshot.latest.len(), 22);
+                assert_eq!(snapshot.official_latest.len(), 3);
+                assert!(snapshot
+                    .latest
+                    .iter()
+                    .all(|sample| sample.tick == ball_tick));
+                assert!(snapshot
+                    .official_latest
+                    .iter()
+                    .all(|sample| sample.tick == ball_tick));
+                assert_eq!(
+                    snapshot.ball_history().last().map(|sample| sample.tick),
+                    Some(ball_tick)
+                );
+                last_tick = ball_tick;
+                max_tick = max_tick.max(ball_tick);
+                reads += 1;
+                std::thread::yield_now();
+            }
+
+            let snapshot = shared.snapshot();
+            let final_tick = snapshot
+                .ball_latest()
+                .expect("shared final ball latest")
+                .tick;
+            assert_eq!(snapshot.latest.len(), 22);
+            assert_eq!(snapshot.official_latest.len(), 3);
+            assert!(snapshot
+                .latest
+                .iter()
+                .all(|sample| sample.tick == final_tick));
+            assert!(snapshot
+                .official_latest
+                .iter()
+                .all(|sample| sample.tick == final_tick));
+            (reads, max_tick.max(final_tick))
+        });
+
+        start.wait();
+        for _ in 0..12 {
+            sim.run_time_step();
+            std::thread::yield_now();
+        }
+        running.store(false, Ordering::Release);
+
+        let (reads, max_tick) = reader.join().expect("shared position reader joins");
+        assert!(reads > 0);
+        assert_eq!(max_tick, sim.tick);
+        assert_eq!(
+            sim.shared_positions
+                .ball_latest()
+                .expect("shared ball latest after syncs")
+                .tick,
+            sim.tick
+        );
+    }
+
+    #[test]
     fn agent_decision_snapshot_sees_current_positions_without_mutating_shared_histories() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             seed: 211,

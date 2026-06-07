@@ -499,6 +499,7 @@ let lastFrameLoadSampleAt = performance.now();
 let lastFrameLoadSampleCount = 0;
 let traceLoadController = null;
 let runningNewSimulation = false;
+let controllerAssignmentSyncSeq = 0;
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
@@ -558,6 +559,22 @@ function fetchOptions(accept, signal) {
   const token = sessionAuthToken();
   if (token) headers[AUTH_HEADER_NAME] = token;
   return {headers, cache: "no-store", signal};
+}
+function soccerApiUrl(path) {
+  const current = new URL(window.location.href);
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const liveIdx = current.pathname.indexOf("/soccer/live");
+  const outIdx = current.pathname.indexOf("/out/");
+  const desIdx = current.pathname.indexOf("/des-rs");
+  let prefix = "";
+  if (outIdx >= 0) {
+    prefix = current.pathname.slice(0, outIdx);
+  } else if (liveIdx >= 0) {
+    prefix = current.pathname.slice(0, liveIdx);
+  } else if (desIdx >= 0) {
+    prefix = current.pathname.slice(0, desIdx + "/des-rs".length);
+  }
+  return new URL(`${prefix}${normalizedPath}`, current.href).toString();
 }
 class AuthRequiredError extends Error {
   constructor(resource, status, detail) {
@@ -1423,6 +1440,50 @@ function syncStaticSlotAvailability() {
     }
   }
 }
+function applyControllerAssignments(assignments) {
+  const normalized = Array.isArray(assignments) ? assignments : [];
+  const byPlayer = new Map();
+  for (const assignment of normalized) {
+    const playerId = Number(assignment.playerId);
+    const slot = Number(assignment.controllerSlot);
+    if (Number.isInteger(playerId) && Number.isInteger(slot)) byPlayer.set(playerId, slot);
+  }
+  for (const frame of trace.frames) {
+    for (const player of frame.players || []) {
+      if (byPlayer.has(Number(player.id))) {
+        player.controllerSlot = byPlayer.get(Number(player.id));
+      } else {
+        player.controllerSlot = null;
+      }
+    }
+    if (frame.centralBrain) {
+      frame.centralBrain.controllerAssignments = normalized;
+      frame.centralBrain.controlledHumanPlayers = normalized.length;
+    }
+  }
+}
+async function syncControllerAssignment(slot, playerId) {
+  const requestId = ++controllerAssignmentSyncSeq;
+  const payload = {controllerSlot: slot, playerId: playerId == null ? null : playerId};
+  try {
+    const options = fetchOptions("application/json");
+    options.method = "POST";
+    options.headers = {...options.headers, "Content-Type": "application/json"};
+    options.body = JSON.stringify(payload);
+    const response = await fetch(cacheBustUrl(soccerApiUrl("/api/assign")), options);
+    if (!response.ok) throw new Error(`assign ${response.status}`);
+    const data = await response.json();
+    if (requestId !== controllerAssignmentSyncSeq) return;
+    if (Array.isArray(data.controllerAssignments)) {
+      applyControllerAssignments(data.controllerAssignments);
+      syncStaticSlotAvailability();
+      rebuildPassTargets();
+      render();
+    }
+  } catch (err) {
+    console.warn("controller assignment sync unavailable; keeping local selection", err);
+  }
+}
 function updateAgentStatePanel() {
   const p = selectedPlayerSnapshot();
   if (!p) {
@@ -1553,7 +1614,20 @@ function buildSlots() {
       select.appendChild(opt);
     }
     select.addEventListener("focus", () => { activeSlot = i; syncStaticSlotAvailability(); rebuildPassTargets(); });
-    select.addEventListener("change", () => { activeSlot = i; syncStaticSlotAvailability(); rebuildPassTargets(); render(); });
+    select.addEventListener("change", () => {
+      activeSlot = i;
+      syncStaticSlotAvailability();
+      const selected = selectedPlayer(i);
+      applyControllerAssignments(
+        Array.from({length: visibleHumanSlotCount()}, (_, slot) => {
+          const playerId = selectedPlayer(slot);
+          return playerId == null ? null : {controllerSlot: slot, playerId};
+        }).filter(Boolean)
+      );
+      rebuildPassTargets();
+      render();
+      syncControllerAssignment(i, selected);
+    });
     row.append(label, select);
     slots.appendChild(row);
   }

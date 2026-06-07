@@ -43867,6 +43867,12 @@ struct TrackingJsonResolvedCoordinateCalibration {
 }
 
 impl TrackingJsonResolvedCoordinateCalibration {
+    fn required_pixel_dimensions(self, context: &str) -> Result<Vec2, String> {
+        self.image_dimensions.ok_or_else(|| {
+            format!("{context}: pixel coordinate calibration requires imageWidth and imageHeight")
+        })
+    }
+
     fn map_point(self, point: Vec2, config: &MatchConfig, context: &str) -> Result<Vec2, String> {
         if let Some(homography) = self.homography {
             return homography.map_point(point, context).map(|point| {
@@ -43886,8 +43892,7 @@ impl TrackingJsonResolvedCoordinateCalibration {
             }
             TrackingJsonCoordinateSpace::Pixels => Ok(self.calibration.map_pixel(
                 point,
-                self.image_dimensions
-                    .expect("pixel coordinate calibration requires image dimensions"),
+                self.required_pixel_dimensions(context)?,
                 config,
             )),
         }
@@ -43918,8 +43923,7 @@ impl TrackingJsonResolvedCoordinateCalibration {
             }
             TrackingJsonCoordinateSpace::Pixels => Ok(self.calibration.map_pixel_vector(
                 vector,
-                self.image_dimensions
-                    .expect("pixel coordinate calibration requires image dimensions"),
+                self.required_pixel_dimensions(context)?,
                 config,
             )),
         }
@@ -70627,6 +70631,38 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .transitions
                 .is_empty(),
             "calibrated pixel JSONL should train into transitions"
+        );
+    }
+
+    #[test]
+    fn pixel_tracking_calibration_without_dimensions_returns_error() {
+        let calibration = TrackingJsonResolvedCoordinateCalibration {
+            coordinate_space: TrackingJsonCoordinateSpace::Pixels,
+            calibration: TrackingCsvCoordinateCalibration::default(),
+            image_dimensions: None,
+            homography: None,
+        };
+        let config = MatchConfig::default();
+
+        let point_err = calibration
+            .map_point(Vec2::new(200.0, 240.0), &config, "unit pixel point")
+            .expect_err("missing pixel dimensions should not panic for points");
+        assert!(
+            point_err.contains("requires imageWidth and imageHeight"),
+            "unexpected point error: {point_err}"
+        );
+
+        let vector_err = calibration
+            .map_vector_at(
+                Vec2::new(200.0, 240.0),
+                Vec2::new(40.0, 60.0),
+                &config,
+                "unit pixel vector",
+            )
+            .expect_err("missing pixel dimensions should not panic for vectors");
+        assert!(
+            vector_err.contains("requires imageWidth and imageHeight"),
+            "unexpected vector error: {vector_err}"
         );
     }
 

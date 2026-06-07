@@ -9680,9 +9680,20 @@ impl SharedHumanInputStore {
         true
     }
 
-    fn drain_latest_by_slot(&mut self) -> HashMap<usize, HumanInputFrame> {
+    fn drain_latest_by_slot_with_age(
+        &mut self,
+        consumed_unix_ms: u64,
+    ) -> HashMap<usize, HumanInputFrame> {
         let mut latest = HashMap::new();
         for queued in self.pending.drain(..) {
+            let queue_age_ms = consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms);
+            if queue_age_ms > HUMAN_INPUT_MAX_QUEUE_AGE_MS {
+                *self
+                    .expired_frames_by_slot
+                    .entry(queued.input.controller_slot)
+                    .or_default() += 1;
+                continue;
+            }
             latest
                 .entry(queued.input.controller_slot)
                 .and_modify(|current: &mut QueuedHumanInputFrame| {
@@ -9696,6 +9707,10 @@ impl SharedHumanInputStore {
             .into_iter()
             .map(|(slot, queued)| (slot, queued.input))
             .collect()
+    }
+
+    fn drain_latest_by_slot(&mut self) -> HashMap<usize, HumanInputFrame> {
+        self.drain_latest_by_slot_with_age(soccer_unix_millis())
     }
 
     fn drain_latest_for_slot(&mut self, controller_slot: usize) -> Option<HumanInputFrame> {
@@ -60321,6 +60336,58 @@ mod tests {
             .expect("fresh input at the age boundary should still be accepted");
         assert_eq!(fresh.input.seq, 1);
         assert_eq!(fresh.queue_age_ms, HUMAN_INPUT_MAX_QUEUE_AGE_MS);
+        assert_eq!(q.expired_len_for_slot(1), 0);
+        assert_eq!(q.expired_len(), 1);
+        assert_eq!(q.queued_len(), 0);
+    }
+
+    #[test]
+    fn human_input_bulk_drain_drops_stale_soft_realtime_frames() {
+        let q = SharedHumanInputs::new();
+        let consumed_at = 20_000;
+        assert!(q.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            consumed_at - HUMAN_INPUT_MAX_QUEUE_AGE_MS - 1,
+        ));
+        assert!(q.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 1,
+                player_id: Some(1),
+                seq: 1,
+                axis: Vec2::new(0.0, 1.0),
+                sprint: false,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            consumed_at - HUMAN_INPUT_MAX_QUEUE_AGE_MS,
+        ));
+
+        let latest = q
+            .inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .drain_latest_by_slot_with_age(consumed_at);
+
+        assert!(
+            !latest.contains_key(&0),
+            "bulk drains should not apply stale controller input"
+        );
+        assert_eq!(latest.get(&1).expect("fresh slot input").seq, 1);
+        assert_eq!(q.expired_len_for_slot(0), 1);
         assert_eq!(q.expired_len_for_slot(1), 0);
         assert_eq!(q.expired_len(), 1);
         assert_eq!(q.queued_len(), 0);

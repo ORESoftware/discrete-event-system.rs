@@ -9892,6 +9892,32 @@ where
         })
 }
 
+fn soccer_condvar_wait<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    lock_name: &str,
+) -> MutexGuard<'a, T> {
+    condvar.wait(guard).unwrap_or_else(|poisoned| {
+        recover_poisoned_soccer_lock(lock_name, "condvar-wait");
+        poisoned.into_inner()
+    })
+}
+
+fn soccer_condvar_wait_timeout<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+    lock_name: &str,
+) -> MutexGuard<'a, T> {
+    condvar
+        .wait_timeout(guard, timeout)
+        .map(|(guard, _)| guard)
+        .unwrap_or_else(|poisoned| {
+            recover_poisoned_soccer_lock(lock_name, "condvar-wait-timeout");
+            poisoned.into_inner().0
+        })
+}
+
 impl Default for SharedHumanInputs {
     fn default() -> Self {
         SharedHumanInputs {
@@ -10340,7 +10366,7 @@ struct HumanControllerMailbox {
 impl HumanControllerMailbox {
     fn send(&self, input: HumanInputFrame) -> Result<bool, String> {
         let (lock, condvar) = &*self.inner;
-        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        let mut state = soccer_mutex_lock(lock, "human_controller_mailbox");
         if state.closed {
             return Err("controller mailbox is closed".to_string());
         }
@@ -10365,7 +10391,7 @@ impl HumanControllerMailbox {
 
     fn close(&self) {
         let (lock, condvar) = &*self.inner;
-        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        let mut state = soccer_mutex_lock(lock, "human_controller_mailbox");
         state.closed = true;
         condvar.notify_all();
     }
@@ -10373,11 +10399,9 @@ impl HumanControllerMailbox {
     fn wait_for_debounced_input(&self, debounce_interval: Duration) -> Option<HumanInputFrame> {
         let (lock, condvar) = &*self.inner;
         loop {
-            let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+            let mut state = soccer_mutex_lock(lock, "human_controller_mailbox");
             while state.latest.is_none() && !state.closed {
-                state = condvar
-                    .wait(state)
-                    .expect("human controller mailbox wait poisoned");
+                state = soccer_condvar_wait(condvar, state, "human_controller_mailbox");
             }
             if state.closed {
                 return None;
@@ -10394,10 +10418,12 @@ impl HumanControllerMailbox {
                         break;
                     }
                     let wait_for = quiet_deadline.saturating_duration_since(now);
-                    let (next_state, _) = condvar
-                        .wait_timeout(state, wait_for)
-                        .expect("human controller mailbox debounce wait poisoned");
-                    state = next_state;
+                    state = soccer_condvar_wait_timeout(
+                        condvar,
+                        state,
+                        wait_for,
+                        "human_controller_mailbox",
+                    );
                     if state.version != observed_version {
                         observed_version = state.version;
                         quiet_deadline = Instant::now() + debounce_interval;
@@ -10425,13 +10451,13 @@ impl HumanControllerMailbox {
             return;
         }
         let (lock, _) = &*self.inner;
-        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        let mut state = soccer_mutex_lock(lock, "human_controller_mailbox");
         state.pushed_frames = state.pushed_frames.saturating_add(1);
     }
 
     fn clear_pending(&self) {
         let (lock, condvar) = &*self.inner;
-        let mut state = lock.lock().expect("human controller mailbox lock poisoned");
+        let mut state = soccer_mutex_lock(lock, "human_controller_mailbox");
         state.latest = None;
         state.latest_seq_seen = None;
         state.version = state.version.saturating_add(1);
@@ -10440,13 +10466,13 @@ impl HumanControllerMailbox {
 
     fn pending_len(&self) -> usize {
         let (lock, _) = &*self.inner;
-        let state = lock.lock().expect("human controller mailbox lock poisoned");
+        let state = soccer_mutex_lock(lock, "human_controller_mailbox");
         usize::from(state.latest.is_some())
     }
 
     fn stats(&self, controller_slot: usize) -> HumanControllerThreadStats {
         let (lock, _) = &*self.inner;
-        let state = lock.lock().expect("human controller mailbox lock poisoned");
+        let state = soccer_mutex_lock(lock, "human_controller_mailbox");
         HumanControllerThreadStats {
             controller_slot,
             pending: state.latest.is_some(),
@@ -60197,6 +60223,60 @@ mod tests {
         assert!(!pushed_stats.pending);
 
         controller.stop().expect("controller stops");
+    }
+
+    #[test]
+    fn controller_mailbox_recovers_from_poisoned_lock() {
+        let mailbox = HumanControllerMailbox::default();
+        let poisoner = {
+            let mailbox = mailbox.clone();
+            std::thread::spawn(move || {
+                let (lock, _) = &*mailbox.inner;
+                let _guard = lock.lock().expect("test poison mailbox lock");
+                panic!("poison human controller mailbox lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+
+        assert!(
+            mailbox
+                .send(HumanInputFrame {
+                    controller_slot: 0,
+                    player_id: Some(0),
+                    seq: 1,
+                    axis: Vec2::new(1.0, 0.0),
+                    sprint: true,
+                    pass: false,
+                    pass_flight: PassFlight::Floor,
+                    shoot: false,
+                    action: None,
+                    target_player: None,
+                })
+                .expect("poisoned mailbox should still accept input"),
+            "mailbox should recover and accept a fresh controller frame"
+        );
+        assert_eq!(mailbox.pending_len(), 1);
+        let stats = mailbox.stats(0);
+        assert!(stats.pending);
+        assert_eq!(stats.accepted_frames, 1);
+
+        mailbox.clear_pending();
+        assert_eq!(mailbox.pending_len(), 0);
+        mailbox.close();
+        assert!(mailbox
+            .send(HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 2,
+                axis: Vec2::new(0.0, 1.0),
+                sprint: false,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            })
+            .is_err());
     }
 
     #[test]

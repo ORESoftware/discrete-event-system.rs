@@ -6729,13 +6729,13 @@ impl PlayerAgent {
         }
         if clearance_legal {
             let hold_pressure = excessive_hold_pressure(observation, dribbling);
-            let min_clearance_probability = (0.18
+            let min_clearance_probability = (0.22
                 + clearance_pressure_signal * 0.28
                 + defensive_urgency * 0.16
                 + defensive_third_pressure * 0.12
                 + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.12
                 + hold_pressure * 0.34)
-                .clamp(0.32, 0.78);
+                .clamp(0.36, 0.82);
             ensure_min_legal_option_probability(
                 &mut options,
                 "clearance",
@@ -6760,6 +6760,11 @@ impl PlayerAgent {
                 + observation.expected_pass_completion.clamp(0.0, 1.0) * 0.10)
                 .clamp(0.28, 0.68);
             ensure_min_legal_option_probability(&mut options, "pass1", release_floor);
+        }
+        if clearance_legal && hold_pressure >= 0.16 && release_pressure >= 0.42 {
+            let danger_clearance_floor =
+                (0.30 + hold_pressure * 0.22 + release_pressure * 0.10).clamp(0.34, 0.72);
+            ensure_min_legal_option_probability(&mut options, "clearance", danger_clearance_floor);
         }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
@@ -8258,11 +8263,16 @@ impl PlayerAgent {
                         {
                             chosen = Some((
                                 SoccerAction::RouteOne {
-                                    target: route_one_target_for_player(
-                                        self.team,
-                                        self.position,
-                                        snapshot.field_width,
-                                        snapshot.field_length,
+                                    target: snapshot.route_one_target_for(self.id).unwrap_or_else(
+                                        || {
+                                            route_one_target_for_actor(
+                                                self.team,
+                                                self.position,
+                                                snapshot.field_width,
+                                                snapshot.field_length,
+                                                self.role,
+                                            )
+                                        },
                                     ),
                                     power: 0.76
                                         + 0.18 * passing_skill.max(ability01(self.skills.strength)),
@@ -9030,12 +9040,15 @@ impl PlayerAgent {
             )),
             "route-one" if observation.has_ball => Some((
                 SoccerAction::RouteOne {
-                    target: route_one_target_for_player(
-                        self.team,
-                        self.position,
-                        snapshot.field_width,
-                        snapshot.field_length,
-                    ),
+                    target: snapshot.route_one_target_for(self.id).unwrap_or_else(|| {
+                        route_one_target_for_actor(
+                            self.team,
+                            self.position,
+                            snapshot.field_width,
+                            snapshot.field_length,
+                            self.role,
+                        )
+                    }),
                     power: 0.88,
                 },
                 "route-one".to_string(),
@@ -19412,6 +19425,73 @@ impl WorldSnapshot {
                 (target_position + runner_lead).clamp_to_pitch(self.field_width, self.field_length)
                     * 0.72
                     + base * 0.28
+            })
+            .map(|target| target.clamp_to_pitch(self.field_width, self.field_length))
+    }
+
+    pub fn route_one_target_for(&self, player_id: usize) -> Option<Vec2> {
+        let me = self.players.iter().find(|player| player.id == player_id)?;
+        let from = self.player_snapshot_position(me);
+        let base =
+            route_one_target_for_actor(me.team, from, self.field_width, self.field_length, me.role);
+        let attack_dir = me.team.attack_dir();
+        let nominal_speed = pass_speed_yps_from_power(0.88, PassFlight::Aerial, false, &me.skills);
+        let outlet = self
+            .ranked_visible_aerial_pass_targets(player_id, 7)
+            .into_iter()
+            .filter_map(|target_id| {
+                let target = self.players.iter().find(|player| player.id == target_id)?;
+                if target.role == PlayerRole::Goalkeeper
+                    || self
+                        .pending_offside_for_pass(player_id, target_id)
+                        .is_some()
+                {
+                    return None;
+                }
+                let target_position = self
+                    .anticipated_pass_reception_point(
+                        player_id,
+                        target_id,
+                        PassFlight::Aerial,
+                        nominal_speed,
+                    )
+                    .or_else(|| self.player_position(target_id))
+                    .unwrap_or_else(|| self.player_snapshot_position(target));
+                let forward = (target_position.y - from.y) * attack_dir;
+                if forward < 18.0 {
+                    return None;
+                }
+                let role_bonus = match target.role {
+                    PlayerRole::Forward => 14.0,
+                    PlayerRole::Midfielder => 7.0,
+                    PlayerRole::Defender => 1.5,
+                    PlayerRole::Goalkeeper => -10.0,
+                };
+                let runner_bonus = if self.player_is_recent_forward_runner(target) {
+                    9.0
+                } else {
+                    0.0
+                };
+                let base_fit = (1.0 - target_position.distance(base) / 62.0).clamp(0.0, 1.0) * 9.0;
+                Some((
+                    target_position,
+                    forward * 0.58 + role_bonus + runner_bonus + base_fit,
+                ))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(target_position, _)| target_position);
+        outlet
+            .map(|target_position| {
+                let runner_lead = Vec2::new(0.0, attack_dir * 12.0);
+                let mut target = (target_position + runner_lead)
+                    .clamp_to_pitch(self.field_width, self.field_length)
+                    * 0.68
+                    + base * 0.32;
+                target.y = match me.team {
+                    Team::Home => target.y.max(self.field_length * 0.56),
+                    Team::Away => target.y.min(self.field_length * 0.44),
+                };
+                target
             })
             .map(|target| target.clamp_to_pitch(self.field_width, self.field_length))
     }
@@ -74050,6 +74130,98 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             sim.events.last().map(|event| event.kind.as_str()),
             Some("route-one")
         );
+    }
+
+    #[test]
+    fn route_one_target_bends_toward_visible_forward_runner_path() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        let runner = 9;
+        park_players_except(&mut sim, &[holder, runner]);
+        sim.players[holder].position = Vec2::new(30.0, 34.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].action_facing = FacingBucket::South;
+        sim.players[holder].receive_facing = FacingBucket::South;
+        sim.players[holder].skills.passing_completion_rate = 7.8;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(58.0, 70.0);
+        sim.players[runner].home_position = sim.players[runner].position;
+        sim.players[runner].velocity = Vec2::new(0.0, 4.5);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let base = route_one_target_for_player(
+            Team::Home,
+            sim.players[holder].position,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let target = snapshot
+            .route_one_target_for(holder)
+            .expect("visible forward runner should shape route-one target");
+
+        assert!(
+            target.y > sim.config.field_length_yards * 0.56,
+            "route-one should still be a long ball into the opponent half: target={target:?}"
+        );
+        assert!(
+            target.x > base.x + 8.0,
+            "route-one target should bend toward the runner lane instead of the static channel: base={base:?} target={target:?}"
+        );
+        let runner_path =
+            sim.players[runner].position + sim.players[runner].velocity.normalized() * 12.0;
+        assert!(
+            target.distance(runner_path) < base.distance(runner_path),
+            "teammate-shaped route-one should land closer to the runner path: base={base:?} target={target:?} path={runner_path:?}"
+        );
+    }
+
+    #[test]
+    fn learned_route_one_uses_visible_runner_shaped_landing_zone() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        let runner = 9;
+        park_players_except(&mut sim, &[holder, runner]);
+        sim.players[holder].position = Vec2::new(30.0, 34.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].action_facing = FacingBucket::South;
+        sim.players[holder].receive_facing = FacingBucket::South;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(58.0, 70.0);
+        sim.players[runner].home_position = sim.players[runner].position;
+        sim.players[runner].velocity = Vec2::new(0.0, 4.5);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(holder);
+        let base = route_one_target_for_player(
+            Team::Home,
+            sim.players[holder].position,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let plan = SoccerLearnedPlan {
+            action: "route-one".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let (action, label) = sim.players[holder]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("learned route-one should resolve");
+
+        assert_eq!(label, "route-one");
+        let SoccerAction::RouteOne { target, .. } = action else {
+            panic!("expected route-one action, got {action:?}");
+        };
+        assert!(
+            target.x > base.x + 8.0,
+            "learned route-one should use the runner-shaped landing zone: base={base:?} target={target:?}"
+        );
+        assert!(target.y > sim.config.field_length_yards * 0.56);
     }
 
     #[test]

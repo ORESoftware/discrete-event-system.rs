@@ -328,61 +328,64 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 111;
-const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
-const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
-const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
-const SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING: usize = 45;
-const SOCCER_NEURAL_FEATURE_GOAL_ATTACK_WINDOW: usize = 50;
-const SOCCER_NEURAL_FEATURE_GOAL_PROXIMITY: usize = 51;
-const SOCCER_NEURAL_FEATURE_GOAL_ANGLE: usize = 52;
-const SOCCER_NEURAL_FEATURE_TEAMMATES_AHEAD: usize = 53;
-const SOCCER_NEURAL_FEATURE_VISIBLE_FORWARD_OPTIONS: usize = 54;
-const SOCCER_NEURAL_FEATURE_BEST_FORWARD_OPENNESS: usize = 55;
-const SOCCER_NEURAL_FEATURE_FORWARD_SUPPORT_PROXIMITY: usize = 56;
-const SOCCER_NEURAL_FEATURE_STRENGTH_TO_WEIGHT: usize = 57;
-const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_ANGLE: usize = 58;
-const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_DISTANCE: usize = 59;
-const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_FORWARD_CLASS: usize = 60;
-const SOCCER_NEURAL_FEATURE_TEAM_CENTROID_BALL_DISTANCE: usize = 61;
-const SOCCER_NEURAL_FEATURE_TEAM_SPREAD: usize = 62;
-const SOCCER_NEURAL_FEATURE_TEAM_PLAYERS_NEAR_BALL: usize = 63;
-const SOCCER_NEURAL_FEATURE_TEAM_FORWARD_VELOCITY: usize = 64;
-const SOCCER_NEURAL_FEATURE_FORMATION_LP_ALIGNMENT: usize = 74;
-const SOCCER_NEURAL_FEATURE_FORMATION_LP_PRESSURE_WEIGHT: usize = 77;
-const SOCCER_NEURAL_FEATURE_FORMATION_LP_SPEED_MATCH_WEIGHT: usize = 78;
-const SOCCER_NEURAL_FEATURE_TEAM_FLANK_POLICY: usize = 81;
-const SOCCER_NEURAL_FEATURE_TEAM_FLANK_OVERLAP: usize = 82;
-const SOCCER_NEURAL_FEATURE_BALL_ACCELERATION: usize = 83;
-const SOCCER_NEURAL_FEATURE_BALL_JERK: usize = 84;
-const SOCCER_NEURAL_FEATURE_BALL_FORWARD_VELOCITY: usize = 85;
-const SOCCER_NEURAL_FEATURE_BALL_LATERAL_SPEED: usize = 86;
-const SOCCER_NEURAL_FEATURE_BALL_ALTITUDE: usize = 87;
-const SOCCER_NEURAL_FEATURE_BALL_AIRBORNE: usize = 88;
-const SOCCER_NEURAL_FEATURE_LOOSE_BALL: usize = 89;
-const SOCCER_NEURAL_FEATURE_LOOSE_BALL_FIFTY_FIFTY: usize = 90;
-const SOCCER_NEURAL_FEATURE_LOOSE_BALL_TEAM_TIME_ADVANTAGE: usize = 91;
-const SOCCER_NEURAL_FEATURE_LOOSE_BALL_PLAYER_TIME_TO_BALL: usize = 92;
-const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_AVAILABLE: usize = 93;
-const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_PROXIMITY: usize = 94;
-const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_FIT: usize = 95;
-const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_AVAILABLE: usize = 96;
-const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_PROXIMITY: usize = 97;
-const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_FIT: usize = 98;
-const SOCCER_NEURAL_FEATURE_VERTICAL_LANE_AFFINITY: usize = 99;
-const SOCCER_NEURAL_FEATURE_VERTICAL_LANE_PROXIMITY: usize = 100;
-const SOCCER_NEURAL_FEATURE_TEAMMATE_SPACE: usize = 101;
-const SOCCER_NEURAL_FEATURE_ROLE_LINE_COHESION: usize = 102;
-const SOCCER_NEURAL_FEATURE_ROLE_LINE_PROXIMITY: usize = 103;
-const SOCCER_NEURAL_FEATURE_EFFECTIVE_TEAMMATE_SPACE: usize = 104;
-const SOCCER_NEURAL_FEATURE_POSITIONAL_EXCEPTION_RELIEF: usize = 105;
-const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_SCAN: usize = 106;
-const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_DRIFT_RISK: usize = 107;
-const SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT: usize = 108;
-const SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT: usize = 109;
-const SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE: usize = 110;
-const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] =
-    &[61, 81, 83, 85, 87, 89, 93, 96, 102, 106, 108, 109, 110];
+const SOCCER_NEURAL_FEATURE_DIM: usize = 112;
+const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
+const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
+const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
+const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 43;
+const SOCCER_NEURAL_FEATURE_DEFENDER_CLOSING: usize = 46;
+const SOCCER_NEURAL_FEATURE_GOAL_ATTACK_WINDOW: usize = 51;
+const SOCCER_NEURAL_FEATURE_GOAL_PROXIMITY: usize = 52;
+const SOCCER_NEURAL_FEATURE_GOAL_ANGLE: usize = 53;
+const SOCCER_NEURAL_FEATURE_TEAMMATES_AHEAD: usize = 54;
+const SOCCER_NEURAL_FEATURE_VISIBLE_FORWARD_OPTIONS: usize = 55;
+const SOCCER_NEURAL_FEATURE_BEST_FORWARD_OPENNESS: usize = 56;
+const SOCCER_NEURAL_FEATURE_FORWARD_SUPPORT_PROXIMITY: usize = 57;
+const SOCCER_NEURAL_FEATURE_STRENGTH_TO_WEIGHT: usize = 58;
+const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_ANGLE: usize = 59;
+const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_DISTANCE: usize = 60;
+const SOCCER_NEURAL_FEATURE_DRIBBLE_TOUCH_FORWARD_CLASS: usize = 61;
+const SOCCER_NEURAL_FEATURE_TEAM_CENTROID_BALL_DISTANCE: usize = 62;
+const SOCCER_NEURAL_FEATURE_TEAM_SPREAD: usize = 63;
+const SOCCER_NEURAL_FEATURE_TEAM_PLAYERS_NEAR_BALL: usize = 64;
+const SOCCER_NEURAL_FEATURE_TEAM_FORWARD_VELOCITY: usize = 65;
+const SOCCER_NEURAL_FEATURE_FORMATION_LP_ALIGNMENT: usize = 75;
+const SOCCER_NEURAL_FEATURE_FORMATION_LP_PRESSURE_WEIGHT: usize = 78;
+const SOCCER_NEURAL_FEATURE_FORMATION_LP_SPEED_MATCH_WEIGHT: usize = 79;
+const SOCCER_NEURAL_FEATURE_TEAM_FLANK_POLICY: usize = 82;
+const SOCCER_NEURAL_FEATURE_TEAM_FLANK_OVERLAP: usize = 83;
+const SOCCER_NEURAL_FEATURE_BALL_ACCELERATION: usize = 84;
+const SOCCER_NEURAL_FEATURE_BALL_JERK: usize = 85;
+const SOCCER_NEURAL_FEATURE_BALL_FORWARD_VELOCITY: usize = 86;
+const SOCCER_NEURAL_FEATURE_BALL_LATERAL_SPEED: usize = 87;
+const SOCCER_NEURAL_FEATURE_BALL_ALTITUDE: usize = 88;
+const SOCCER_NEURAL_FEATURE_BALL_AIRBORNE: usize = 89;
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL: usize = 90;
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL_FIFTY_FIFTY: usize = 91;
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL_TEAM_TIME_ADVANTAGE: usize = 92;
+const SOCCER_NEURAL_FEATURE_LOOSE_BALL_PLAYER_TIME_TO_BALL: usize = 93;
+const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_AVAILABLE: usize = 94;
+const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_PROXIMITY: usize = 95;
+const SOCCER_NEURAL_FEATURE_FLANK_CROSS_ARRIVAL_FIT: usize = 96;
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_AVAILABLE: usize = 97;
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_PROXIMITY: usize = 98;
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_CROSS_ARRIVAL_THREAT_FIT: usize = 99;
+const SOCCER_NEURAL_FEATURE_VERTICAL_LANE_AFFINITY: usize = 100;
+const SOCCER_NEURAL_FEATURE_VERTICAL_LANE_PROXIMITY: usize = 101;
+const SOCCER_NEURAL_FEATURE_TEAMMATE_SPACE: usize = 102;
+const SOCCER_NEURAL_FEATURE_ROLE_LINE_COHESION: usize = 103;
+const SOCCER_NEURAL_FEATURE_ROLE_LINE_PROXIMITY: usize = 104;
+const SOCCER_NEURAL_FEATURE_EFFECTIVE_TEAMMATE_SPACE: usize = 105;
+const SOCCER_NEURAL_FEATURE_POSITIONAL_EXCEPTION_RELIEF: usize = 106;
+const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_SCAN: usize = 107;
+const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_DRIFT_RISK: usize = 108;
+const SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT: usize = 109;
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT: usize = 110;
+const SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE: usize = 111;
+const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
+    61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
+    110, 111,
+];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
@@ -1707,6 +1710,8 @@ pub struct SoccerPomdpObservation {
     pub skill_passing_completion_rate: f64,
     #[serde(default)]
     pub skill_flair_passing: f64,
+    #[serde(default)]
+    pub skill_vision: f64,
     #[serde(default)]
     pub skill_crossing_left: f64,
     #[serde(default)]
@@ -3075,6 +3080,8 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub skill_flair_passing_bin: u8,
     #[serde(default)]
+    pub skill_vision_bin: u8,
+    #[serde(default)]
     pub skill_crossing_bin: u8,
     #[serde(default)]
     pub skill_crossing_left_bin: u8,
@@ -3499,6 +3506,7 @@ impl SoccerQStateKey {
             skill_left_foot_shot_bin: skill_bucket(observation.skill_left_foot_shot_power),
             skill_passing_completion_bin: skill_bucket(observation.skill_passing_completion_rate),
             skill_flair_passing_bin: skill_bucket(observation.skill_flair_passing),
+            skill_vision_bin: skill_bucket(observation.skill_vision),
             skill_crossing_bin: skill_bucket(
                 observation
                     .skill_crossing_left
@@ -3669,6 +3677,7 @@ impl SoccerQStateKey {
             && self.skill_left_foot_shot_bin == other.skill_left_foot_shot_bin
             && self.skill_passing_completion_bin == other.skill_passing_completion_bin
             && self.skill_flair_passing_bin == other.skill_flair_passing_bin
+            && self.skill_vision_bin == other.skill_vision_bin
             && self.skill_crossing_bin == other.skill_crossing_bin
             && self.skill_crossing_left_bin == other.skill_crossing_left_bin
             && self.skill_crossing_right_bin == other.skill_crossing_right_bin
@@ -18001,6 +18010,7 @@ impl WorldSnapshot {
                 skill_left_foot_shot_power: 0.0,
                 skill_passing_completion_rate: 0.0,
                 skill_flair_passing: 0.0,
+                skill_vision: 0.0,
                 skill_crossing_left: 0.0,
                 skill_crossing_right: 0.0,
                 skill_goalkeeping: 0.0,
@@ -18731,6 +18741,7 @@ impl WorldSnapshot {
             skill_left_foot_shot_power: me.skills.left_foot_shot_power,
             skill_passing_completion_rate: me.skills.passing_completion_rate,
             skill_flair_passing: me.skills.flair_passing,
+            skill_vision: me.skills.vision,
             skill_crossing_left: me.skills.crossing_left,
             skill_crossing_right: me.skills.crossing_right,
             skill_goalkeeping: me.skills.goalkeeping,
@@ -32135,6 +32146,7 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.skill_stamina_bin, 5.0),
         soccer_neural_bin(state.skill_dribbling_bin, 5.0),
         soccer_neural_bin(state.skill_defending_bin, 5.0),
+        soccer_neural_bin(state.skill_vision_bin, 5.0),
         soccer_neural_action_hash(&transition.action),
         action_attack,
         action_defense,
@@ -67095,6 +67107,7 @@ mod tests {
         assert_eq!(passer.observation.skill_crossing_right, 8.7);
         assert_eq!(passer.observation.skill_defending, 3.3);
         assert_eq!(passer.observation.skill_defensive_tracking, 5.2);
+        assert_eq!(passer.observation.skill_vision, 9.1);
         let state = SoccerQStateKey::from_transition(passer);
         assert_eq!(state.skill_top_speed_bin, skill_bucket(skills.top_speed));
         assert_eq!(
@@ -67110,6 +67123,27 @@ mod tests {
             skill_bucket(skills.crossing_right)
         );
         assert_eq!(state.skill_defending_bin, skill_bucket(skills.defending));
+        assert_eq!(state.skill_vision_bin, skill_bucket(skills.vision));
+
+        let features = soccer_neural_transition_features(passer);
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_VISION_SKILL],
+            soccer_neural_bin(state.skill_vision_bin, 5.0)
+        );
+
+        let mut lower_vision = passer.clone();
+        lower_vision.observation.skill_vision = 2.1;
+        let lower_state = SoccerQStateKey::from_transition(&lower_vision);
+        let lower_features = soccer_neural_transition_features(&lower_vision);
+        assert!(
+            state.skill_vision_bin > lower_state.skill_vision_bin,
+            "high-vision and low-vision imported players should learn from different Q buckets"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_VISION_SKILL]
+                > lower_features[SOCCER_NEURAL_FEATURE_VISION_SKILL],
+            "neural learner should receive the same vision distinction as the Q state"
+        );
     }
 
     #[test]

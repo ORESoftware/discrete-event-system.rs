@@ -9470,6 +9470,35 @@ impl SharedHumanInputStore {
         removed_pending || removed_watermark
     }
 
+    fn prune_expired_for_slots(
+        &mut self,
+        controller_slots: Option<&[usize]>,
+        consumed_unix_ms: u64,
+    ) -> u64 {
+        if controller_slots.is_some_and(|slots| slots.is_empty()) {
+            return 0;
+        }
+        let mut expired = 0u64;
+        let mut retained = VecDeque::with_capacity(self.pending.len());
+        while let Some(queued) = self.pending.pop_front() {
+            let slot_matches = controller_slots
+                .map(|slots| slots.contains(&queued.input.controller_slot))
+                .unwrap_or(true);
+            let queue_age_ms = consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms);
+            if slot_matches && queue_age_ms > HUMAN_INPUT_MAX_QUEUE_AGE_MS {
+                *self
+                    .expired_frames_by_slot
+                    .entry(queued.input.controller_slot)
+                    .or_default() += 1;
+                expired = expired.saturating_add(1);
+            } else {
+                retained.push_back(queued);
+            }
+        }
+        self.pending = retained;
+        expired
+    }
+
     fn pending_len_for_slots(&self, controller_slots: &[usize]) -> usize {
         if controller_slots.is_empty() {
             return 0;
@@ -9572,6 +9601,20 @@ impl SharedHumanInputs {
         accepted
     }
 
+    pub fn prune_expired(&self) -> u64 {
+        self.inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .prune_expired_for_slots(None, soccer_unix_millis())
+    }
+
+    pub fn prune_expired_for_slots(&self, controller_slots: &[usize]) -> u64 {
+        self.inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .prune_expired_for_slots(Some(controller_slots), soccer_unix_millis())
+    }
+
     pub fn drain_latest_by_slot(&self) -> HashMap<usize, HumanInputFrame> {
         self.inner
             .write()
@@ -9651,6 +9694,7 @@ impl SharedHumanInputs {
 
     pub fn wait_for_pending_input_result(&self, timeout: Duration) -> HumanInputWaitResult {
         let version = self.notification_version();
+        self.prune_expired();
         let queued_before = self.queued_len();
         if queued_before > 0 {
             return HumanInputWaitResult {
@@ -9663,6 +9707,7 @@ impl SharedHumanInputs {
             };
         }
         let next_version = self.wait_for_change_since(version, timeout);
+        self.prune_expired();
         let queued_after = self.queued_len();
         HumanInputWaitResult {
             version_before: version,
@@ -9691,6 +9736,7 @@ impl SharedHumanInputs {
             };
         }
 
+        self.prune_expired_for_slots(controller_slots);
         let queued_before = self.queued_len_for_slots(controller_slots);
         if queued_before > 0 {
             return HumanInputWaitResult {
@@ -9715,6 +9761,7 @@ impl SharedHumanInputs {
                 observed_version,
                 deadline.saturating_duration_since(now),
             );
+            self.prune_expired_for_slots(controller_slots);
             let queued_after = self.queued_len_for_slots(controller_slots);
             if queued_after > 0 {
                 let coalesce_deadline =
@@ -9731,6 +9778,7 @@ impl SharedHumanInputs {
                         coalesced_version,
                         coalesce_deadline.saturating_duration_since(coalesce_now),
                     );
+                    self.prune_expired_for_slots(controller_slots);
                     let next_coalesced_queued = self.queued_len_for_slots(controller_slots);
                     if next_coalesced_version <= coalesced_version {
                         coalesced_queued = next_coalesced_queued;
@@ -9763,6 +9811,7 @@ impl SharedHumanInputs {
         }
 
         let version_after = self.notification_version();
+        self.prune_expired_for_slots(controller_slots);
         let queued_after = self.queued_len_for_slots(controller_slots);
         HumanInputWaitResult {
             version_before: version,
@@ -58163,6 +58212,41 @@ mod tests {
         assert!(immediate.immediate_pending);
         assert_eq!(immediate.queued_before, 1);
         assert!(q.wait_for_pending_input(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn shared_human_inputs_wait_prunes_expired_assigned_slot_frames() {
+        let q = SharedHumanInputs::new();
+        let stale_enqueued_at = soccer_unix_millis()
+            .saturating_sub(HUMAN_INPUT_MAX_QUEUE_AGE_MS)
+            .saturating_sub(50);
+        assert!(q.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            stale_enqueued_at,
+        ));
+
+        let wait_result = q.wait_for_pending_input_for_slots_result(&[0], Duration::from_millis(0));
+
+        assert!(
+            !wait_result.pending(),
+            "expired assigned-slot input should not wake/yield as immediately pending: {wait_result:?}"
+        );
+        assert_eq!(wait_result.queued_before, 0);
+        assert_eq!(wait_result.queued_after, 0);
+        assert_eq!(q.queued_len_for_slots(&[0]), 0);
+        assert_eq!(q.expired_len_for_slot(0), 1);
+        assert_eq!(q.expired_len(), 1);
     }
 
     #[test]

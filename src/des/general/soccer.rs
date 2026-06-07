@@ -7021,6 +7021,26 @@ impl PlayerAgent {
             };
             ensure_min_legal_option_probability(&mut options, "overlap-run", min_share);
         }
+        if holder_pressure_urgency >= PRESSURED_SUPPORT_SPRINT_URGENCY {
+            if options
+                .iter()
+                .any(|option| option.legal && option.label == "check-to-ball")
+            {
+                let check_floor =
+                    (0.24 + holder_pressure_urgency * 0.26 + shape_support_urgency * 0.08)
+                        .clamp(0.30, 0.58);
+                ensure_min_legal_option_probability(&mut options, "check-to-ball", check_floor);
+            } else if options
+                .iter()
+                .any(|option| option.legal && option.label == "wide-outlet")
+            {
+                let wide_floor = (0.20
+                    + holder_pressure_urgency * 0.20
+                    + if flank_policy_active { 0.08 } else { 0.0 })
+                .clamp(0.26, 0.48);
+                ensure_min_legal_option_probability(&mut options, "wide-outlet", wide_floor);
+            }
+        }
         let options = normalize_action_options(options);
         SupportActionContext {
             options,
@@ -75405,6 +75425,56 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .last_decision
             .as_ref()
             .is_some_and(|decision| is_attacking_support_action_label(&decision.action)));
+    }
+
+    #[test]
+    fn pressured_holder_gives_check_to_ball_support_a_probability_floor() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        let runner = 9;
+        let marker = 15;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 58.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        for id in 11..22 {
+            sim.players[id].position = Vec2::new(72.0, 98.0);
+        }
+        sim.players[holder].position = sim.ball.position;
+        sim.players[runner].position = Vec2::new(31.0, 74.0);
+        sim.players[marker].position = Vec2::new(32.0, 74.0);
+        sim.players[12].position = Vec2::new(43.0, 58.0);
+        sim.players[13].position = Vec2::new(41.5, 55.5);
+        sim.players[14].position = Vec2::new(43.0, 60.0);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let holder_urgency = holder_pressure_support_urgency(&snapshot, Team::Home);
+        assert!(
+            holder_urgency >= PRESSURED_SUPPORT_SPRINT_URGENCY,
+            "test setup should crowd the ballholder enough to force support urgency: {holder_urgency}"
+        );
+        let options = sim.players[runner].support_action_options(&snapshot);
+        let check = options
+            .iter()
+            .find(|option| option.label == "check-to-ball")
+            .expect("pressured marked runner should expose check-to-ball");
+        let shape = options
+            .iter()
+            .find(|option| option.label == "support-shape")
+            .expect("support shape option");
+        let roam = options
+            .iter()
+            .find(|option| option.label == "support-roam")
+            .expect("support roam option");
+
+        assert!(check.legal);
+        assert!(
+            check.probability >= 0.30,
+            "under-pressure holders need a reliable check-to-ball outlet, got {check:?}; options={options:?}"
+        );
+        assert!(
+            check.probability > shape.probability.max(roam.probability),
+            "checking to the ball should outrank passive support under holder pressure: check={check:?} shape={shape:?} roam={roam:?}"
+        );
     }
 
     #[test]

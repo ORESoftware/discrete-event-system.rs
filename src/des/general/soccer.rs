@@ -8629,6 +8629,10 @@ impl PlayerAgent {
                     && matches!(self.role, PlayerRole::Defender | PlayerRole::Midfielder)
                     && self.position.distance(*target) > 2.5
             }
+            SoccerAction::MoveTo(target) if action_label == "recover" => {
+                snapshot.rebound_recovery_sprint_active(self.id)
+                    && self.position.distance(*target) > 0.75
+            }
             _ => false,
         };
         PlayerIntent {
@@ -12735,6 +12739,16 @@ struct PendingOffside {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PendingRebound {
+    pub attacking_team: Team,
+    pub shooter: usize,
+    pub keeper_id: usize,
+    pub launch_tick: u64,
+    pub parry_position: Vec2,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingOffsideSnapshot {
     pub team: Team,
     pub passer: usize,
@@ -16219,6 +16233,8 @@ pub struct WorldSnapshot {
     #[serde(default)]
     pub pending_pass: Option<PendingPassSnapshot>,
     #[serde(default)]
+    pub pending_rebound: Option<PendingRebound>,
+    #[serde(default)]
     pub active_set_play: Option<SoccerSetPlayCall>,
     pub players: Vec<PlayerSnapshot>,
     pub shared_positions: SharedPlayerPositionSnapshot,
@@ -16678,6 +16694,7 @@ impl WorldSnapshot {
                 Vec::new()
             },
             pending_pass,
+            pending_rebound: m.pending_rebound.clone(),
             active_set_play: m.active_set_play.clone(),
             players,
             shared_positions,
@@ -19420,7 +19437,29 @@ impl WorldSnapshot {
         )
     }
 
+    fn active_rebound_for_player(&self, player_id: usize) -> Option<&PendingRebound> {
+        let player = self.players.iter().find(|player| player.id == player_id)?;
+        let rebound = self.pending_rebound.as_ref()?;
+        if self.ball.holder.is_some()
+            || player.team != rebound.attacking_team
+            || self.tick.saturating_sub(rebound.launch_tick) > 16
+        {
+            return None;
+        }
+        Some(rebound)
+    }
+
+    fn rebound_recovery_sprint_active(&self, player_id: usize) -> bool {
+        self.active_rebound_for_player(player_id).is_some()
+    }
+
     fn loose_ball_recovery_target_for(&self, player_id: usize) -> Vec2 {
+        if self.active_rebound_for_player(player_id).is_some() {
+            return self
+                .projected_loose_ball_target()
+                .unwrap_or(self.ball.position)
+                .clamp_to_pitch(self.field_width, self.field_length);
+        }
         let target = self
             .projected_loose_ball_target()
             .unwrap_or(self.ball.position);
@@ -32028,6 +32067,7 @@ pub struct SoccerMatch {
     rng: SeededRandom,
     pending_pass: Option<PendingPass>,
     pending_shot: Option<PendingShot>,
+    pending_rebound: Option<PendingRebound>,
     coach_set_play_hints: HashMap<Team, SoccerSetPlayVectorHint>,
     reward_events: Vec<SoccerRewardEvent>,
     episode_learning_transitions: Vec<SoccerLearningTransition>,
@@ -32235,6 +32275,7 @@ impl SoccerMatch {
             rng,
             pending_pass: None,
             pending_shot: None,
+            pending_rebound: None,
             coach_set_play_hints: HashMap::new(),
             reward_events: Vec::new(),
             episode_learning_transitions: Vec::new(),
@@ -36415,6 +36456,7 @@ impl SoccerMatch {
                 possession_result,
             } => {
                 let pending_pass_for_reward = self.pending_pass.clone();
+                self.pending_rebound = None;
                 let incoming_context = self.pending_pass.as_ref().map(|pass| {
                     incoming_context_from_pass(pass, holder, self.ball.velocity.len(), self.tick)
                 });
@@ -36465,6 +36507,7 @@ impl SoccerMatch {
                 save_position,
             } => {
                 self.pending_shot = None;
+                self.pending_rebound = None;
                 self.ball.altitude_yards = 0.0;
                 self.ball.untargeted_long_ball_flight = None;
                 self.ball.untargeted_long_ball_launcher = None;
@@ -36513,6 +36556,13 @@ impl SoccerMatch {
                 velocity,
             } => {
                 self.pending_shot = None;
+                self.pending_rebound = Some(PendingRebound {
+                    attacking_team: shot.team,
+                    shooter: shot.shooter,
+                    keeper_id,
+                    launch_tick: self.tick,
+                    parry_position,
+                });
                 self.ball.holder = None;
                 self.ball.position = parry_position;
                 self.ball.velocity = velocity;
@@ -36556,6 +36606,7 @@ impl SoccerMatch {
                 });
             }
             BallStepOutcome::Goal { scoring_team, shot } => {
+                self.pending_rebound = None;
                 if let Some(shot) = shot.as_ref() {
                     self.record_shot_on_target_rewards(shot.team, shot.shooter);
                 }
@@ -36571,6 +36622,7 @@ impl SoccerMatch {
             }
             BallStepOutcome::Miss { shot } => {
                 self.pending_shot = None;
+                self.pending_rebound = None;
                 self.ball.altitude_yards = 0.0;
                 self.ball.untargeted_long_ball_flight = None;
                 self.ball.untargeted_long_ball_launcher = None;
@@ -36600,6 +36652,7 @@ impl SoccerMatch {
                 restart,
             } => {
                 self.pending_pass = None;
+                self.pending_rebound = None;
                 self.pending_shot = if keep_shot_active {
                     Some(shot.clone())
                 } else {
@@ -36649,6 +36702,7 @@ impl SoccerMatch {
             BallStepOutcome::OutOfPlay { restart, shot } => {
                 self.pending_pass = None;
                 self.pending_shot = None;
+                self.pending_rebound = None;
                 self.ball.altitude_yards = 0.0;
                 self.ball.untargeted_long_ball_flight = None;
                 self.ball.untargeted_long_ball_launcher = None;
@@ -36705,6 +36759,7 @@ impl SoccerMatch {
         };
         self.pending_pass = None;
         self.pending_shot = None;
+        self.pending_rebound = None;
         self.stat_restart(restart.kind, restart.awarded_team);
         let restart_holder = self.nearest_player_on_team(restart.awarded_team, restart.position);
         if let Some(holder_id) = restart_holder {
@@ -45994,6 +46049,7 @@ fn tracking_frame_to_world_snapshot(
             last_touch_team,
         }],
         pending_pass: None,
+        pending_rebound: None,
         active_set_play: None,
         players,
         shared_positions,
@@ -76359,6 +76415,54 @@ mod tests {
             .events
             .iter()
             .any(|event| event.kind == "keeper-parry" && event.player_id == Some(keeper_id)));
+    }
+
+    #[test]
+    fn attacking_players_sprint_to_keeper_parry_rebound() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let attacker = 9;
+        let keeper_id = sim.goalkeeper_for(Team::Away).expect("away keeper");
+        park_players_except(&mut sim, &[attacker, keeper_id]);
+        sim.players[attacker].position = Vec2::new(40.4, 113.8);
+        sim.players[attacker].velocity = Vec2::zero();
+        let parry_position = Vec2::new(41.4, 115.2);
+        let shot = PendingShot {
+            team: Team::Home,
+            shooter: attacker,
+            origin: Vec2::new(40.0, 104.0),
+        };
+
+        sim.apply_ball_outcome(BallStepOutcome::KeeperParry {
+            shot,
+            defending_team: Team::Away,
+            keeper_id,
+            save_position: Vec2::new(40.0, 118.4),
+            parry_position,
+            velocity: Vec2::zero(),
+        });
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert_eq!(snapshot.controlled_possession_team(), None);
+        assert!(snapshot.pending_rebound.is_some());
+        assert!(snapshot.rebound_recovery_sprint_active(attacker));
+        assert_eq!(
+            snapshot.loose_ball_recovery_target_for(attacker),
+            parry_position
+        );
+
+        let mut player = sim.players[attacker].clone();
+        let intent = player.run_time_step(&snapshot, None, None, &mut SeededRandom::new(76_324));
+        let SoccerAction::MoveTo(target) = intent.action else {
+            panic!("rebound attacker should recover the loose ball, got {intent:?}");
+        };
+        assert!(
+            target.distance(parry_position) < 1e-9,
+            "rebound attacker should target the parried ball: target={target:?} parry={parry_position:?}"
+        );
+        assert!(
+            intent.sprint,
+            "attacker should sprint to a keeper parry rebound: {intent:?}"
+        );
     }
 
     #[test]

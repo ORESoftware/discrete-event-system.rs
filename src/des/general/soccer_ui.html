@@ -331,6 +331,7 @@
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Cadence</span><b id="cadence">0.1s x 6001</b></div>
+      <div class="metric"><span>Step Budget</span><b id="stepBudget">100ms ok</b></div>
       <div class="metric"><span>Seed</span><b id="seed">-</b></div>
       <div class="metric"><span>Run ID</span><b id="runId">-</b></div>
       <div class="section">Controller Slots</div>
@@ -377,6 +378,9 @@ const FALLBACK_CONFIG = {
   maxHumanPlayers: 4,
   dtSeconds: 0.1
 };
+const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
+const LIVE_INPUT_RETRY_MIN_MS = 120;
+const LIVE_INPUT_RETRY_MAX_MS = 1000;
 function emptyStats() {
   return {
     shotsHome: 0,
@@ -421,6 +425,8 @@ function emptyStats() {
 const trace = {
   config: {...FALLBACK_CONFIG},
   summary: {ticks: 0, stats: emptyStats()},
+  cadence: null,
+  stepTiming: null,
   frames: [],
   events: [],
   runId: null,
@@ -457,6 +463,7 @@ const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const cadence = document.getElementById("cadence");
+const stepBudget = document.getElementById("stepBudget");
 const seed = document.getElementById("seed");
 const runId = document.getElementById("runId");
 const scrub = document.getElementById("scrub");
@@ -498,10 +505,15 @@ let lastFrameLoadSampleAt = performance.now();
 let lastFrameLoadSampleCount = 0;
 let traceLoadController = null;
 let runningNewSimulation = false;
+let controllerAssignmentSyncSeq = 0;
+let inputFlushTimer = null;
+let inputFlushInFlight = false;
+let inputFlushRetryAttempt = 0;
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
   if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
+  scheduleInputFlush(0);
 };
 
 function formatBytes(bytes) {
@@ -557,6 +569,40 @@ function fetchOptions(accept, signal) {
   const token = sessionAuthToken();
   if (token) headers[AUTH_HEADER_NAME] = token;
   return {headers, cache: "no-store", signal};
+}
+function soccerApiUrl(path) {
+  const current = new URL(window.location.href);
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const liveIdx = current.pathname.indexOf("/soccer/live");
+  const outIdx = current.pathname.indexOf("/out/");
+  const desIdx = current.pathname.indexOf("/des-rs");
+  let prefix = "";
+  if (outIdx >= 0) {
+    prefix = current.pathname.slice(0, outIdx);
+  } else if (liveIdx >= 0) {
+    prefix = current.pathname.slice(0, liveIdx);
+  } else if (desIdx >= 0) {
+    prefix = current.pathname.slice(0, desIdx + "/des-rs".length);
+  }
+  return new URL(`${prefix}${normalizedPath}`, current.href).toString();
+}
+async function postSoccerJson(path, payload, resource = "api") {
+  const options = fetchOptions("application/json");
+  options.method = "POST";
+  options.headers = {...options.headers, "Content-Type": "application/json"};
+  options.body = JSON.stringify(payload);
+  const response = await fetch(cacheBustUrl(soccerApiUrl(path)), options);
+  if (response.status === 401 || response.status === 403) {
+    let detail = "";
+    try {
+      detail = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 180);
+    } catch (_) {
+      detail = "";
+    }
+    throw new AuthRequiredError(resource, response.status, detail);
+  }
+  if (!response.ok) throw new Error(`${resource} ${response.status}`);
+  return response.json();
 }
 class AuthRequiredError extends Error {
   constructor(resource, status, detail) {
@@ -616,17 +662,86 @@ function recentLoadedFrameRate() {
   return frames / Math.max(.25, ms / 1000);
 }
 function expectedFrameCount() {
+  const cadenceFrames = Number(trace.cadence?.expectedFrameCount || 0);
+  if (cadenceFrames > 0) return cadenceFrames;
   const ticks = Number(trace.summary?.ticks || 0);
   return Math.max(ticks + 1, trace.frames.length, 0);
 }
+function cadenceDtSeconds() {
+  return Number(trace.cadence?.dtSeconds || trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
+}
+function stepTimingTelemetry() {
+  return trace.stepTiming || trace.summary?.stepTiming || trace.cadence?.stepTiming || null;
+}
+function timingNumber(timing, ...keys) {
+  for (const key of keys) {
+    const value = Number(timing?.[key]);
+    if (Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+function stepBudgetStatus() {
+  const timing = stepTimingTelemetry();
+  const cadenceBudget = cadenceDtSeconds() * 1000;
+  if (!timing) {
+    return {
+      total: 0,
+      learning: 0,
+      budget: cadenceBudget,
+      learningBudget: cadenceBudget * 0.35,
+      over: false,
+      learningOver: false,
+      overTicks: 0,
+      learningOverTicks: 0,
+      ticks: 0,
+      maxOver: 0,
+      maxLearningOver: 0
+    };
+  }
+  const budget = timingNumber(timing, "tickBudgetMs", "tick_budget_ms") || cadenceBudget;
+  const learningBudget = timingNumber(timing, "learningBudgetMs", "learning_budget_ms") || budget * 0.35;
+  const learning = timingNumber(timing, "learningMs", "learning_ms")
+    || timingNumber(timing, "learningDefenseMs") + timingNumber(timing, "learningTransitionsMs")
+    + timingNumber(timing, "recentLearningMs") + timingNumber(timing, "neuralSamplesMs")
+    + timingNumber(timing, "policyTrainMs") + timingNumber(timing, "learningLogMs")
+    + timingNumber(timing, "fullGameLearningMs");
+  const total = timingNumber(timing, "totalMs", "total_ms");
+  const overTicks = timingNumber(timing, "overBudgetTicks", "over_budget_ticks");
+  const learningOverTicks = timingNumber(timing, "learningOverBudgetTicks", "learning_over_budget_ticks");
+  return {
+    total,
+    learning,
+    budget,
+    learningBudget,
+    over: Boolean(timing.overBudget ?? timing.over_budget ?? (budget > 0 && total > budget)),
+    learningOver: Boolean(timing.learningOverBudget ?? timing.learning_over_budget ?? (learningBudget > 0 && learning > learningBudget)),
+    overTicks,
+    learningOverTicks,
+    ticks: timingNumber(timing, "ticks"),
+    maxOver: timingNumber(timing, "maxBudgetOverrunMs", "max_budget_overrun_ms"),
+    maxLearningOver: timingNumber(timing, "maxLearningBudgetOverrunMs", "max_learning_budget_overrun_ms")
+  };
+}
+function stepBudgetLabel() {
+  const status = stepBudgetStatus();
+  const label = status.over ? "over" : status.learningOver ? "learn" : "ok";
+  const total = status.ticks > 0 ? status.total.toFixed(1) : status.budget.toFixed(0);
+  const learning = status.ticks > 0 ? status.learning.toFixed(1) : "0.0";
+  return `${total}/${status.budget.toFixed(0)}ms ${learning}/${status.learningBudget.toFixed(0)}L ${label}`;
+}
+function stepBudgetTitle() {
+  const status = stepBudgetStatus();
+  if (status.ticks <= 0) return `tick budget ${status.budget.toFixed(0)}ms; learning ${status.learningBudget.toFixed(0)}ms`;
+  return `${status.ticks} ticks; over ${status.overTicks}; learning over ${status.learningOverTicks}; max ${status.maxOver.toFixed(1)}ms; learning max ${status.maxLearningOver.toFixed(1)}ms`;
+}
 function totalLoadedSeconds() {
-  return Math.max(0, trace.frames.length - 1) * Number(trace.config.dtSeconds || 0.1);
+  return Math.max(0, trace.frames.length - 1) * cadenceDtSeconds();
 }
 function bufferedFrameCountAhead() {
   return Math.max(0, trace.frames.length - 1 - frameIndex);
 }
 function bufferedSeconds() {
-  return bufferedFrameCountAhead() * Number(trace.config.dtSeconds || 0.1);
+  return bufferedFrameCountAhead() * cadenceDtSeconds();
 }
 function canStartPlayback() {
   if (trace.frames.length < 2) return false;
@@ -656,6 +771,8 @@ function resetTraceState() {
   uiReady = false;
   trace.config = {...FALLBACK_CONFIG};
   trace.summary = {ticks: 0, stats: emptyStats()};
+  trace.cadence = null;
+  trace.stepTiming = null;
   trace.frames = [];
   trace.events = [];
   trace.runId = null;
@@ -812,6 +929,28 @@ function agentScheduleEntriesForFrame(f) {
   entries.sort((a, b) => Number(a.scheduledIndex ?? 0) - Number(b.scheduledIndex ?? 0));
   return entries;
 }
+function agentScheduleSummaryForFrame(f) {
+  const summary = f?.agentScheduleSummary;
+  if (summary && Number.isFinite(Number(summary.totalAgents))) return summary;
+  const schedule = agentScheduleEntriesForFrame(f);
+  const players = schedule.filter(entry => entry.kind === "player").length;
+  const officials = schedule.filter(entry => entry.kind === "official").length;
+  const hasBall = schedule.some(entry => entry.kind === "ball");
+  const hasCentral = schedule.some(entry => entry.kind === "centralBrain");
+  return {
+    totalAgents: schedule.length,
+    expectedTotalAgents: schedule.length,
+    playerCount: players,
+    expectedPlayerCount: players,
+    officialCount: officials,
+    expectedOfficialCount: officials,
+    ballCount: hasBall ? 1 : 0,
+    centralBrainCount: hasCentral ? 1 : 0,
+    duplicateAgents: 0,
+    centralBrainFirst: schedule[0]?.kind === "centralBrain",
+    complete: schedule.length > 0 && hasBall && hasCentral
+  };
+}
 function agentScheduleCoverageLabel(schedule) {
   const players = schedule.filter(entry => entry.kind === "player").length;
   const officials = schedule.filter(entry => entry.kind === "official").length;
@@ -819,18 +958,28 @@ function agentScheduleCoverageLabel(schedule) {
   const hasCentral = schedule.some(entry => entry.kind === "centralBrain");
   return `${hasCentral ? "C+" : ""}${players}p/${officials}o${hasBall ? "/B" : ""}`;
 }
+function agentScheduleSummaryLabel(f) {
+  const s = agentScheduleSummaryForFrame(f);
+  if (!s || Number(s.totalAgents || 0) <= 0) return "shuffle pending";
+  const central = Number(s.centralBrainCount || 0) > 0 ? "C+" : "";
+  const ball = Number(s.ballCount || 0) > 0 ? "/B" : "";
+  const expected = Number(s.expectedTotalAgents || 0);
+  const total = Number(s.totalAgents || 0);
+  const complete = s.complete ? " ok" : ` ${total}/${expected || "?"}`;
+  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${complete}`;
+}
 function agentScheduleFullLabel(f) {
   const schedule = agentScheduleEntriesForFrame(f);
-  if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
-  return `${agentScheduleCoverageLabel(schedule)} ${schedule.map(agentScheduleGlyph).join(" ")}`;
+  if (!Array.isArray(schedule) || schedule.length === 0) return agentScheduleSummaryLabel(f);
+  return `${agentScheduleSummaryLabel(f)} ${schedule.map(agentScheduleGlyph).join(" ")}`;
 }
 function agentScheduleLabel(f) {
   const schedule = agentScheduleEntriesForFrame(f);
-  if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
+  if (!Array.isArray(schedule) || schedule.length === 0) return agentScheduleSummaryLabel(f);
   const prefix = schedule.slice(0, 6).map(agentScheduleGlyph).join(" ");
   const ball = schedule.find(entry => entry.kind === "ball");
   const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
-  return `${agentScheduleCoverageLabel(schedule)} ${prefix}${suffix}`;
+  return `${agentScheduleSummaryLabel(f)} ${prefix}${suffix}`;
 }
 function playbackScheduleSlotLabel(value) {
   return Number.isInteger(value) ? ` S${value}` : "";
@@ -844,8 +993,12 @@ function playbackBallAgentLabel(ball) {
   const action = String(ball?.lastAction || "waiting");
   const schedule = playbackScheduleSlotLabel(ball?.scheduledIndex);
   const holder = ball?.holder == null ? "" : ` #${ball.holder}`;
+  const decisionSpeed = Number(ball?.decisionSpeedYps ?? vecLen(ball?.velocity || {x: 0, y: 0}));
+  const decisionAltitude = Number(ball?.decisionAltitudeYards ?? ball?.altitudeYards ?? 0);
+  const decisionCurl = Number(ball?.decisionCurlYps2 ?? 0);
+  const physics = ` v${decisionSpeed.toFixed(1)} z${decisionAltitude.toFixed(1)} c${decisionCurl.toFixed(1)}`;
   const ops = operationOrderLabel(ball?.operationOrder, 2);
-  return `${action}${schedule}${holder}${ops ? ` ${ops}` : ""}`;
+  return `${action}${schedule}${holder}${physics}${ops ? ` ${ops}` : ""}`;
 }
 function officialKindShortLabel(kind) {
   if (kind === "centerReferee") return "CR";
@@ -880,7 +1033,13 @@ function intentLabel(i) {
   if (!i) return "Idle";
   const action = String(i.action || "move").replace(/-/g, " ");
   const flight = i.flight === "aerial" ? " A" : "";
-  return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}`;
+  const actionProbability = Number(i.actionProbability ?? 0);
+  const tickProbability = Number(i.actionTickProbability ?? actionProbability);
+  const considered = Number(i.consideredActions ?? 0);
+  const probabilityLabel = considered > 0
+    ? ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}`
+    : "";
+  return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}${probabilityLabel}`;
 }
 function vecLen(v) {
   if (!v) return 0;
@@ -1298,10 +1457,14 @@ function updateMetrics() {
   const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
-  const dt = Number(trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
+  const dt = cadenceDtSeconds();
   const expectedFrames = expectedFrameCount();
-  const duration = Math.max(0, expectedFrames - 1) * dt;
-  cadence.textContent = `${dt.toFixed(2)}s; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f`;
+  const duration = Number(trace.cadence?.durationSeconds || Math.max(0, expectedFrames - 1) * dt);
+  const tickHz = Number(trace.cadence?.tickHz || (dt > 0 ? 1 / dt : 0));
+  const contract = trace.cadence?.defaultTenMinuteContract ? " ok" : "";
+  cadence.textContent = `${dt.toFixed(2)}s/${tickHz.toFixed(0)}Hz; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f${contract}`;
+  stepBudget.textContent = stepBudgetLabel();
+  stepBudget.title = stepBudgetTitle();
   seed.textContent = trace.config?.seed ?? "-";
   runId.textContent = runIdLabel();
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
@@ -1369,6 +1532,84 @@ function syncStaticSlotAvailability() {
       opt.disabled = assignedElsewhere;
       const baseLabel = opt.dataset.baseLabel || opt.textContent;
       opt.textContent = assignedElsewhere ? `${baseLabel} - S${assignedSlot + 1}` : baseLabel;
+    }
+  }
+}
+function applyControllerAssignments(assignments) {
+  const normalized = Array.isArray(assignments) ? assignments : [];
+  const byPlayer = new Map();
+  for (const assignment of normalized) {
+    const playerId = Number(assignment.playerId);
+    const slot = Number(assignment.controllerSlot);
+    if (Number.isInteger(playerId) && Number.isInteger(slot)) byPlayer.set(playerId, slot);
+  }
+  for (const frame of trace.frames) {
+    for (const player of frame.players || []) {
+      if (byPlayer.has(Number(player.id))) {
+        player.controllerSlot = byPlayer.get(Number(player.id));
+      } else {
+        player.controllerSlot = null;
+      }
+    }
+    if (frame.centralBrain) {
+      frame.centralBrain.controllerAssignments = normalized;
+      frame.centralBrain.controlledHumanPlayers = normalized.length;
+    }
+  }
+}
+async function syncControllerAssignment(slot, playerId) {
+  const requestId = ++controllerAssignmentSyncSeq;
+  const payload = {controllerSlot: slot, playerId: playerId == null ? null : playerId};
+  try {
+    const data = await postSoccerJson("/api/assign", payload, "assign");
+    if (requestId !== controllerAssignmentSyncSeq) return;
+    if (Array.isArray(data.controllerAssignments)) {
+      applyControllerAssignments(data.controllerAssignments);
+      syncStaticSlotAvailability();
+      rebuildPassTargets();
+      render();
+    }
+  } catch (err) {
+    console.warn("controller assignment sync unavailable; keeping local selection", err);
+  }
+}
+function scheduleInputFlush(delayMs = LIVE_INPUT_FLUSH_INTERVAL_MS) {
+  if (inputFlushTimer != null || inputFlushInFlight) return;
+  inputFlushTimer = window.setTimeout(
+    flushQueuedInputsToInputApi,
+    Math.max(0, Number(delayMs || 0))
+  );
+}
+function scheduleInputRetry() {
+  inputFlushRetryAttempt = Math.min(inputFlushRetryAttempt + 1, 6);
+  const delay = Math.min(
+    LIVE_INPUT_RETRY_MAX_MS,
+    LIVE_INPUT_RETRY_MIN_MS * inputFlushRetryAttempt
+  );
+  scheduleInputFlush(delay);
+}
+async function flushQueuedInputsToInputApi() {
+  inputFlushTimer = null;
+  if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
+  inputFlushInFlight = true;
+  const inputs = window.__humanInputQueue.slice();
+  let accepted = false;
+  try {
+    const ack = await postSoccerJson("/api/input", inputs, "input");
+    if (Number(ack?.acceptedInputs ?? 0) > 0 || ack?.queued) {
+      const newestSeq = inputs.reduce((max, input) => Math.max(max, Number(input.seq || 0)), 0);
+      window.__humanInputQueue = window.__humanInputQueue.filter(input => Number(input.seq || 0) > newestSeq);
+      inputFlushRetryAttempt = 0;
+      accepted = true;
+    }
+  } catch (err) {
+    console.warn("live input sync unavailable; keeping local input queue", err);
+  } finally {
+    inputFlushInFlight = false;
+    if (window.__humanInputQueue.length > inputs.length) {
+      scheduleInputFlush(0);
+    } else if (!accepted && window.__humanInputQueue.length > 0) {
+      scheduleInputRetry();
     }
   }
 }
@@ -1502,7 +1743,20 @@ function buildSlots() {
       select.appendChild(opt);
     }
     select.addEventListener("focus", () => { activeSlot = i; syncStaticSlotAvailability(); rebuildPassTargets(); });
-    select.addEventListener("change", () => { activeSlot = i; syncStaticSlotAvailability(); rebuildPassTargets(); render(); });
+    select.addEventListener("change", () => {
+      activeSlot = i;
+      syncStaticSlotAvailability();
+      const selected = selectedPlayer(i);
+      applyControllerAssignments(
+        Array.from({length: visibleHumanSlotCount()}, (_, slot) => {
+          const playerId = selectedPlayer(slot);
+          return playerId == null ? null : {controllerSlot: slot, playerId};
+        }).filter(Boolean)
+      );
+      rebuildPassTargets();
+      render();
+      syncControllerAssignment(i, selected);
+    });
     row.append(label, select);
     slots.appendChild(row);
   }
@@ -1526,6 +1780,8 @@ async function loadTraceMeta(signal) {
   trace.config = meta.config || trace.config || {...FALLBACK_CONFIG};
   trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
   trace.summary.stats = trace.summary.stats || emptyStats();
+  trace.cadence = meta.cadence || meta.playback?.cadence || null;
+  trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;
   trace.generatedAtUnixMs = meta.generatedAtUnixMs || null;

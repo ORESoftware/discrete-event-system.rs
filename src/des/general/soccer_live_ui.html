@@ -332,7 +332,7 @@
     <div class="stage"><canvas id="pitch" width="1280" height="720"></canvas></div>
     <aside>
       <div class="row">
-        <button id="run">Run</button>
+        <button id="run" aria-label="Run live simulation">Run</button>
         <button id="step">Step</button>
         <button id="resetMatch">New Match</button>
         <a id="freshMatchLink" class="control-link" href="/fresh">Fresh</a>
@@ -709,6 +709,7 @@ let stepping = false;
 let resetting = false;
 let inputFlushInFlight = false;
 let inputFlushTimer = null;
+let inputFlushRetryAttempt = 0;
 let surfaceTimer = null;
 let syncingSurface = false;
 let syncingLearning = false;
@@ -719,6 +720,8 @@ let inspectedPlayerId = null;
 let lastSemanticBallAction = null;
 const LIVE_STEP_INTERVAL_MS = 100;
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
+const LIVE_INPUT_RETRY_MIN_MS = 120;
+const LIVE_INPUT_RETRY_MAX_MS = 1000;
 const LIVE_ROUTE_MARKER = "/soccer/live";
 const LIVE_FRESH_MATCH_ALIASES = [
   "/fresh",
@@ -1556,19 +1559,26 @@ function fullTimeLabel() {
   if (!state?.frame) return "full time";
   return `full time ${state.frame.scoreHome}-${state.frame.scoreAway}`;
 }
+function setRunButtonLabel(text, ariaLabel) {
+  runButton.textContent = text;
+  runButton.setAttribute("aria-label", ariaLabel || text);
+}
 function updateRunButton() {
   if (state?.done) {
     const autoEpisodes = autoEpisodeEnabled.checked;
     if (!autoEpisodes) running = false;
     runButton.classList.toggle("active", running && autoEpisodes);
-    runButton.textContent = running && autoEpisodes ? "Auto Next" : "Full Time";
+    setRunButtonLabel(
+      running && autoEpisodes ? "Auto Next" : "Full Time",
+      running && autoEpisodes ? "Queue next soccer match" : "Match full time"
+    );
     statusEl.textContent = running && autoEpisodes
       ? `${fullTimeLabel()} next match`
       : fullTimeLabel();
     return;
   }
   runButton.classList.toggle("active", running);
-  runButton.textContent = running ? "Pause" : "Run";
+  setRunButtonLabel(running ? "Pause" : "Run", running ? "Pause live simulation" : "Run live simulation");
 }
 function shortTeam(v) {
   return v === "Home" ? "H" : v === "Away" ? "A" : "-";
@@ -3937,17 +3947,37 @@ function scheduleInputFlush(delayMs = 0) {
     flushQueuedInputsToInputApi().catch(e => statusEl.textContent = e.message);
   }, Math.max(0, delayMs));
 }
+function scheduleInputRetry() {
+  inputFlushRetryAttempt = Math.min(inputFlushRetryAttempt + 1, 6);
+  const delay = Math.min(
+    LIVE_INPUT_RETRY_MAX_MS,
+    LIVE_INPUT_RETRY_MIN_MS * inputFlushRetryAttempt
+  );
+  scheduleInputFlush(delay);
+}
 async function flushQueuedInputsToInputApi() {
   if (!state || resetting || inputFlushInFlight || !queuedInputs.length) return;
   inputFlushInFlight = true;
   const inputs = queuedInputs.splice(0, queuedInputs.length);
+  let delivered = false;
   try {
     const ack = await postJson("/api/input", inputs);
     applyInputAck(ack, inputs.length);
+    inputFlushRetryAttempt = 0;
+    delivered = true;
     render();
+  } catch (err) {
+    queuedInputs = inputs.concat(queuedInputs);
+    statusEl.textContent = err.message;
   } finally {
     inputFlushInFlight = false;
-    if (queuedInputs.length) scheduleInputFlush(LIVE_INPUT_FLUSH_INTERVAL_MS);
+    if (queuedInputs.length) {
+      if (delivered) {
+        scheduleInputFlush(LIVE_INPUT_FLUSH_INTERVAL_MS);
+      } else {
+        scheduleInputRetry();
+      }
+    }
   }
 }
 async function submitInputOnly(pass = false, shoot = false, action = null) {

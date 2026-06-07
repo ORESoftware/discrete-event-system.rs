@@ -9731,7 +9731,12 @@ impl SharedHumanInputStore {
             enqueued_unix_ms,
         });
         while self.pending.len() > HUMAN_INPUT_QUEUE_LIMIT {
-            self.pending.pop_front();
+            if let Some(evicted) = self.pending.pop_front() {
+                *self
+                    .expired_frames_by_slot
+                    .entry(evicted.input.controller_slot)
+                    .or_default() += 1;
+            }
         }
         true
     }
@@ -61350,6 +61355,31 @@ mod tests {
             assert!(input.sprint);
             assert_eq!(q.last_seq_for_slot(slot), Some(3));
         }
+    }
+
+    #[test]
+    fn human_input_queue_limit_evictions_are_counted_in_slot_telemetry() {
+        let q = SharedHumanInputs::new();
+
+        for seq in 1..=HUMAN_INPUT_QUEUE_LIMIT as u64 {
+            assert!(q.push(test_human_input(seq as usize, Some(0), seq)));
+        }
+        assert_eq!(q.queued_len(), HUMAN_INPUT_QUEUE_LIMIT);
+        assert_eq!(q.expired_len(), 0);
+
+        assert!(q.push(test_human_input(
+            HUMAN_INPUT_QUEUE_LIMIT + 1,
+            Some(0),
+            HUMAN_INPUT_QUEUE_LIMIT as u64 + 1,
+        )));
+
+        assert_eq!(q.queued_len(), HUMAN_INPUT_QUEUE_LIMIT);
+        assert_eq!(
+            q.expired_len_for_slot(1),
+            1,
+            "evicting an old controller frame should be visible in per-slot telemetry"
+        );
+        assert_eq!(q.expired_len(), 1);
     }
 
     #[test]

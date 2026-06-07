@@ -23003,6 +23003,7 @@ fn dense_soccer_transition_reward(
             player, action, before_obs, &after_obs, before, after, before_pos, after_pos,
         );
         if is_dribble_action_label(action) && after_possession == Some(player.team) {
+            reward -= excessive_hold_penalty_points(before_obs, ability01(player.skills.dribbling));
             let carry_progress = ball_forward.max(player_forward).clamp(-4.0, 18.0);
             if carry_progress > 0.0 {
                 let role_multiplier = match player.role {
@@ -50600,7 +50601,10 @@ mod tests {
             central_decision.possession_team,
             frame.central_brain.possession_team
         );
-        assert_eq!(central_decision.ball_holder, frame.central_brain.ball_holder);
+        assert_eq!(
+            central_decision.ball_holder,
+            frame.central_brain.ball_holder
+        );
         assert_eq!(central_decision.tracked_players, 22);
         assert_eq!(central_decision.tracked_officials, 3);
         assert!(central_decision.action.starts_with("directives-"));
@@ -71744,6 +71748,76 @@ mod tests {
     }
 
     #[test]
+    fn non_elite_overheld_carry_gets_dense_learning_penalty() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_108,
+            ..Default::default()
+        });
+        let holder = 6;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].skills.dribbling = 7.0;
+        sim.players[holder].skills.passing_completion_rate = 7.5;
+        let target = sim.players[holder].position + Vec2::new(0.0, Team::Home.attack_dir() * 0.7);
+
+        let before = WorldSnapshot::from_match(&sim);
+        let mut after = before.clone();
+        after.ball.holder = Some(holder);
+        after.ball.position = target;
+        if let Some(player) = after.players.iter_mut().find(|player| player.id == holder) {
+            player.position = target;
+        }
+
+        let mut fresh_decision = test_decision_trace(&before, holder, "carry-forward");
+        fresh_decision.observation.has_ball = true;
+        fresh_decision.observation.perceived_pressure = 0.72;
+        fresh_decision.observation.pressure_urgency = 0.78;
+        fresh_decision.observation.immediate_dispossession_risk = 0.66;
+        fresh_decision.observation.forward_dribble_space_yards = 8.0;
+        fresh_decision.observation.actual_time_on_ball_seconds = 0.8;
+        let mut overheld_decision = fresh_decision.clone();
+        overheld_decision.observation.actual_time_on_ball_seconds = 7.1;
+
+        let hold_penalty = excessive_hold_penalty_points(
+            &overheld_decision.observation,
+            ability01(sim.players[holder].skills.dribbling),
+        );
+        let fresh_reward = soccer_transition_reward(
+            &sim.players[holder],
+            &fresh_decision,
+            &before,
+            &after,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+        let overheld_reward = soccer_transition_reward(
+            &sim.players[holder],
+            &overheld_decision,
+            &before,
+            &after,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+
+        assert!(
+            hold_penalty > 0.70,
+            "pressured non-elite overhold should produce a material learning penalty: {hold_penalty}"
+        );
+        assert!(
+            overheld_reward < fresh_reward - 0.65,
+            "dense learner should punish overheld carry: fresh={fresh_reward} overheld={overheld_reward}"
+        );
+    }
+
+    #[test]
     fn non_elite_close_pressure_makes_release_beat_dribble_family_after_long_hold() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -71809,8 +71883,10 @@ mod tests {
         .fold(0.0, f64::max);
 
         assert!(
-            excessive_hold_pressure(&observation, ability01(sim.players[holder].skills.dribbling))
-                >= 0.70
+            excessive_hold_pressure(
+                &observation,
+                ability01(sim.players[holder].skills.dribbling)
+            ) >= 0.70
         );
         assert!(
             release_score > dribble_family_score * 1.20,
@@ -77554,7 +77630,9 @@ mod tests {
         assert!(html.contains("function selectedPlayerShotContext"));
         assert!(html.contains("function selectedPlayerShotLaneLabel"));
         assert!(html.contains("agentShotLane.textContent = selectedPlayerShotLaneLabel()"));
-        assert!(html.contains("context.kind === \"holder\" && context.nearGoal && context.laneOpen"));
+        assert!(
+            html.contains("context.kind === \"holder\" && context.nearGoal && context.laneOpen")
+        );
         assert!(html.contains("drawGaitCue"));
         assert!(html.contains("movementGait"));
         assert!(html.contains("HUMAN_ACTION_KEY_CODES"));

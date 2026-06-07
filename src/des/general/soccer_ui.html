@@ -919,7 +919,13 @@ function intentLabel(i) {
   if (!i) return "Idle";
   const action = String(i.action || "move").replace(/-/g, " ");
   const flight = i.flight === "aerial" ? " A" : "";
-  return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}`;
+  const actionProbability = Number(i.actionProbability ?? 0);
+  const tickProbability = Number(i.actionTickProbability ?? actionProbability);
+  const considered = Number(i.consideredActions ?? 0);
+  const probabilityLabel = considered > 0
+    ? ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}`
+    : "";
+  return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}${probabilityLabel}`;
 }
 function vecLen(v) {
   if (!v) return 0;

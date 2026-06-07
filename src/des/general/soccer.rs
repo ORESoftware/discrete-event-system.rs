@@ -26226,6 +26226,14 @@ pub struct SoccerPlaybackIntentFrame {
     pub flight: Option<PassFlight>,
     #[serde(default)]
     pub urgency: f64,
+    #[serde(default)]
+    pub action_score: f64,
+    #[serde(default)]
+    pub action_probability: f64,
+    #[serde(default)]
+    pub action_tick_probability: f64,
+    #[serde(default)]
+    pub considered_actions: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26300,6 +26308,76 @@ fn playback_pass_flight_for_action(action: &str) -> Option<PassFlight> {
     })
 }
 
+fn playback_selected_action_option_stats(
+    decision: &AgentDecisionTrace,
+    action: &str,
+) -> (f64, f64, f64, usize) {
+    let considered_actions = decision
+        .action_options
+        .iter()
+        .filter(|option| option.legal)
+        .count();
+    let selected = decision
+        .action_options
+        .iter()
+        .find(|option| normalize_soccer_action_label(&option.label) == action)
+        .or_else(|| {
+            decision
+                .action_options
+                .iter()
+                .find(|option| option.label == decision.action)
+        });
+    selected
+        .map(|option| {
+            (
+                option.score,
+                option.probability.clamp(0.0, 1.0),
+                option.tick_probability.clamp(0.0, 1.0),
+                considered_actions,
+            )
+        })
+        .unwrap_or((0.0, 0.0, 0.0, considered_actions))
+}
+
+fn playback_intent_from_decision(
+    player_id: usize,
+    team: Team,
+    role: PlayerRole,
+    decision: &AgentDecisionTrace,
+    possession_team: Option<Team>,
+    ball_holder: Option<usize>,
+) -> Option<(f64, usize, SoccerPlaybackIntentFrame)> {
+    let action = normalize_soccer_action_label(&decision.action).to_string();
+    let priority =
+        playback_intent_priority(player_id, team, role, &action, possession_team, ball_holder)?;
+    let action_target = decision.action_target.as_ref();
+    let target_point = action_target.and_then(|target| target.point);
+    if target_point.is_none() {
+        return None;
+    }
+    let urgency = decision.observation.decision_urgency.clamp(0.0, 1.0);
+    let (action_score, action_probability, action_tick_probability, considered_actions) =
+        playback_selected_action_option_stats(decision, &action);
+    Some((
+        priority + urgency * 4.0,
+        player_id,
+        SoccerPlaybackIntentFrame {
+            player_id,
+            team,
+            role,
+            action: action.clone(),
+            target_point,
+            target_player: action_target.and_then(|target| target.player_id),
+            flight: playback_pass_flight_for_action(&action),
+            urgency,
+            action_score,
+            action_probability,
+            action_tick_probability,
+            considered_actions,
+        },
+    ))
+}
+
 fn playback_intents_from_frame(frame: &MatchFrame) -> Vec<SoccerPlaybackIntentFrame> {
     let possession_team = frame.central_brain.possession_team.or_else(|| {
         frame
@@ -26313,35 +26391,14 @@ fn playback_intents_from_frame(frame: &MatchFrame) -> Vec<SoccerPlaybackIntentFr
         .iter()
         .filter_map(|player| {
             let decision = player.last_decision.as_ref()?;
-            let action = normalize_soccer_action_label(&decision.action).to_string();
-            let priority = playback_intent_priority(
+            playback_intent_from_decision(
                 player.id,
                 player.team,
                 player.role,
-                &action,
+                decision,
                 possession_team,
                 frame.ball.holder,
-            )?;
-            let action_target = decision.action_target.as_ref();
-            let target_point = action_target.and_then(|target| target.point);
-            if target_point.is_none() {
-                return None;
-            }
-            let urgency = decision.observation.decision_urgency.clamp(0.0, 1.0);
-            Some((
-                priority + urgency * 4.0,
-                player.id,
-                SoccerPlaybackIntentFrame {
-                    player_id: player.id,
-                    team: player.team,
-                    role: player.role,
-                    action: action.clone(),
-                    target_point,
-                    target_player: action_target.and_then(|target| target.player_id),
-                    flight: playback_pass_flight_for_action(&action),
-                    urgency,
-                },
-            ))
+            )
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
@@ -26365,35 +26422,14 @@ fn playback_intents_from_agents(
         .iter()
         .filter_map(|player| {
             let decision = player.last_decision.as_ref()?;
-            let action = normalize_soccer_action_label(&decision.action).to_string();
-            let priority = playback_intent_priority(
+            playback_intent_from_decision(
                 player.id,
                 player.team,
                 player.role,
-                &action,
+                decision,
                 possession_team,
                 ball_holder,
-            )?;
-            let action_target = decision.action_target.as_ref();
-            let target_point = action_target.and_then(|target| target.point);
-            if target_point.is_none() {
-                return None;
-            }
-            let urgency = decision.observation.decision_urgency.clamp(0.0, 1.0);
-            Some((
-                priority + urgency * 4.0,
-                player.id,
-                SoccerPlaybackIntentFrame {
-                    player_id: player.id,
-                    team: player.team,
-                    role: player.role,
-                    action: action.clone(),
-                    target_point,
-                    target_player: action_target.and_then(|target| target.player_id),
-                    flight: playback_pass_flight_for_action(&action),
-                    urgency,
-                },
-            ))
+            )
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
@@ -82090,6 +82126,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_intent["playerId"].is_u64());
         assert!(first_intent["action"].is_string());
         assert!(first_intent["targetPoint"].is_object());
+        assert!(first_intent["actionScore"].as_f64().is_some());
+        assert!(first_intent["actionProbability"].as_f64().is_some());
+        assert!(first_intent["actionTickProbability"].as_f64().is_some());
+        assert!(first_intent["consideredActions"].as_u64().unwrap_or(0) > 0);
         let player0_schedule_index = agent_schedule
             .iter()
             .position(|entry| {
@@ -85618,6 +85658,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("id=\"ballKinematics\""));
         assert!(html.contains("playbackBallHistoryForFrame"));
         assert!(html.contains("ballHistoryKinematicsLabel"));
+        assert!(html.contains("function intentLabel"));
+        assert!(html.contains("i.actionProbability"));
+        assert!(html.contains("i.actionTickProbability"));
+        assert!(html.contains("i.consideredActions"));
+        assert!(html.contains("P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}"));
         assert!(html.contains("drawGoalPosts(r)"));
         assert!(html.contains("goalWidthYards"));
         assert!(html.contains("ctx.arc(post.x, post.y, postRadius"));
@@ -86135,6 +86180,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .expect("intent entry");
         assert!(first_intent.get("targetPoint").is_some());
         assert!(first_intent.get("urgency").is_some());
+        assert!(first_intent.get("actionScore").is_some());
+        assert!(first_intent.get("actionProbability").is_some());
+        assert!(first_intent.get("actionTickProbability").is_some());
+        assert!(first_intent
+            .get("consideredActions")
+            .and_then(|value| value.as_u64())
+            .is_some_and(|count| count > 0));
         let max_line_len = jsonl.lines().map(str::len).max().unwrap_or(0);
         assert!(
             max_line_len < 18_000,

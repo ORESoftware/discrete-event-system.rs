@@ -2321,6 +2321,9 @@ function drawAssistantOffsideLines(r) {
 function pendingPassPhase(frame = state?.frame) {
   return frame?.pendingPass || frame?.pending_pass || null;
 }
+function pendingReboundPhase(frame = state?.frame) {
+  return frame?.pendingRebound || frame?.pending_rebound || null;
+}
 function yardsToCanvasRadius(yards, r) {
   const fieldWidth = Number(state.config.fieldWidthYards || 80);
   const fieldLength = Number(state.config.fieldLengthYards || 120);
@@ -2365,6 +2368,32 @@ function drawPendingPassPhase(r) {
     ctx.fillStyle = "rgba(239,68,68,.16)";
     ctx.fill();
   }
+  ctx.restore();
+}
+function drawPendingReboundPhase(r) {
+  const rebound = pendingReboundPhase();
+  const parry = rebound?.parryPosition || rebound?.parry_position;
+  if (!parry) return;
+  const target = mapPoint(parry, r);
+  const keeper = state.frame.players?.find(player => player.id === rebound.keeperId || player.id === rebound.keeper_id);
+  const pulse = 0.5 + Math.sin(Date.now() / 120) * 0.5;
+  ctx.save();
+  if (keeper?.position) {
+    const from = mapPoint(keeper.position, r);
+    drawIntentArrow(from, target, "rgba(246,201,68,.64)", 2.25, true);
+  }
+  ctx.beginPath();
+  ctx.arc(target.x, target.y, 21 + pulse * 5, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(246,201,68,.92)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(target.x, target.y, 7, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,.84)";
+  ctx.fill();
+  ctx.strokeStyle = "#7a4b00";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
   ctx.restore();
 }
 function drawFlankPolicyLanes(r) {
@@ -2698,6 +2727,7 @@ function render() {
   drawPitchGridOverlay(r);
   drawAssistantOffsideLines(r);
   drawPendingPassPhase(r);
+  drawPendingReboundPhase(r);
   drawFlankPolicyLanes(r);
   drawMovementTrails(r);
   drawSelectedVision(inspectedPlayer(), r);

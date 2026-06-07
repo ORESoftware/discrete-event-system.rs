@@ -76787,6 +76787,13 @@ mod tests {
         assert!(html.body.contains("function drawPendingPassPhase"));
         assert!(html.body.contains("pending.offside"));
         assert!(html.body.contains("drawPendingPassPhase(r)"));
+        assert!(html.body.contains("function pendingReboundPhase"));
+        assert!(html.body.contains("function drawPendingReboundPhase"));
+        assert!(html.body.contains("pendingRebound"));
+        assert!(html
+            .body
+            .contains("parryPosition || rebound?.parry_position"));
+        assert!(html.body.contains("drawPendingReboundPhase(r)"));
         assert!(html.body.contains("LowX"));
         assert!(html.body.contains("HighX"));
         assert!(html.body.contains("id=\"liveHttp\""));

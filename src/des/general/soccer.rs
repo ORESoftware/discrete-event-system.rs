@@ -251,6 +251,11 @@ const PRESSURED_SUPPORT_SPRINT_URGENCY: f64 = 0.34;
 const DEFENSIVE_GOAL_LINE_BUFFER_YARDS: f64 = 6.0;
 const DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS: f64 = 4.0;
 const DEFENSIVE_MAX_BEHIND_BALL_YARDS: f64 = 30.0;
+const DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 1.35;
+const DEFENSIVE_GOAL_SIDE_CUSHION_YARDS: f64 = 2.75;
+const MIDFIELDER_DEEP_RETREAT_LINE_YARDS: f64 = 10.0;
+const MIDFIELDER_STANDARD_RETREAT_LINE_YARDS: f64 = 15.0;
+const MIDFIELDER_DEEP_RETREAT_CHANCE: f64 = 0.25;
 const DEFENSIVE_LINE_BREAK_EXTRA_BEHIND_BALL_YARDS: f64 = 12.0;
 const DEFENSIVE_LINE_BREAK_MIN_ADVANCEMENT_FROM_GOAL_YARDS: f64 = 6.0;
 const DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 12.0;
@@ -7153,6 +7158,22 @@ impl PlayerAgent {
         options
     }
 
+    fn immediate_defensive_steal_target(&self, snapshot: &WorldSnapshot) -> Option<usize> {
+        let holder = snapshot.ball.holder?;
+        let holder_player = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == holder && player.team == self.team.other())?;
+        if self.role == PlayerRole::Goalkeeper
+            && !snapshot.goalkeeper_direct_intervention_is_safe(self.id)
+        {
+            return None;
+        }
+        let holder_position = snapshot.player_snapshot_position(holder_player);
+        (self.position.distance(holder_position) <= DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS)
+            .then_some(holder)
+    }
+
     fn loose_ball_action_options(
         &self,
         my_distance: f64,
@@ -7943,6 +7964,31 @@ impl PlayerAgent {
             }
         }
 
+        if !has_ball && snapshot.controlled_possession_team() == Some(self.team.other()) {
+            if let Some(holder) = self.immediate_defensive_steal_target(snapshot) {
+                let action = SoccerAction::Tackle {
+                    target_player: holder,
+                };
+                let action_options =
+                    self.defensive_action_options(snapshot, &directive, snapshot.dt_seconds);
+                self.last_decision = Some(self.decision_trace(
+                    snapshot,
+                    mdp_state,
+                    observation,
+                    belief,
+                    vec!["immediate-steal".to_string(), "tackle".to_string()],
+                    action_options,
+                    &action,
+                    "tackle",
+                ));
+                return PlayerIntent {
+                    player_id: self.id,
+                    action,
+                    sprint: false,
+                };
+            }
+        }
+
         if let Some(plan) = learned_plan {
             if let Some((action, action_label)) =
                 self.action_from_learned_plan(plan, snapshot, &observation)
@@ -8725,7 +8771,7 @@ impl PlayerAgent {
                         let target = if self.role == PlayerRole::Goalkeeper {
                             snapshot.defensive_assignment_for(self.id, self.home_position, roam)
                         } else if roam && dist < defend_radius {
-                            snapshot.ball.position
+                            snapshot.goal_side_defensive_target_for(self.id, snapshot.ball.position)
                         } else {
                             let target = snapshot
                                 .formation_lp_guidance_for(self.id)
@@ -8754,6 +8800,7 @@ impl PlayerAgent {
                                 target
                             }
                         };
+                        let target = snapshot.goal_side_defensive_target_for(self.id, target);
                         chosen = Some((SoccerAction::MoveTo(target), "defend".to_string()));
                         break;
                     }
@@ -8894,6 +8941,17 @@ impl PlayerAgent {
         observation: &SoccerPomdpObservation,
     ) -> Option<(SoccerAction, String)> {
         let label = normalize_soccer_action_label(&plan.action);
+        if !observation.has_ball
+            && snapshot.controlled_possession_team() == Some(self.team.other())
+            && label != "tackle"
+        {
+            let assignment = snapshot.defensive_assignment_for(self.id, self.home_position, false);
+            let target = plan
+                .target_point
+                .map(|target| snapshot.goal_side_defensive_target_for(self.id, target))
+                .unwrap_or(assignment);
+            return Some((SoccerAction::MoveTo(target), "defend".to_string()));
+        }
         match label {
             "shoot"
                 if observation.has_ball
@@ -18256,8 +18314,94 @@ impl WorldSnapshot {
     }
 
     fn ball_near_own_goal_line(&self, team: Team) -> bool {
-        (self.ball.position.y - self.own_goal_y_for(team)).abs()
-            <= DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS
+        (self.ball.position.y - self.own_goal_y_for(team)).abs() <= DEFENSIVE_GOAL_LINE_BUFFER_YARDS
+    }
+
+    fn depth_from_own_goal_y(&self, team: Team, y: f64) -> f64 {
+        ((y - self.own_goal_y_for(team)) * team.attack_dir()).clamp(0.0, self.field_length)
+    }
+
+    fn y_from_own_goal_depth(&self, team: Team, depth: f64) -> f64 {
+        self.own_goal_y_for(team) + team.attack_dir() * depth.clamp(0.0, self.field_length)
+    }
+
+    fn midfielder_deep_retreat_allowed(&self, player_id: usize) -> bool {
+        deterministic_unit_draw(self.tick, player_id, 389) < MIDFIELDER_DEEP_RETREAT_CHANCE
+    }
+
+    fn minimum_defensive_depth_from_own_goal(&self, player: &PlayerSnapshot) -> f64 {
+        let ball_depth = self.depth_from_own_goal_y(player.team, self.ball.position.y);
+        match player.role {
+            PlayerRole::Goalkeeper => 0.0,
+            PlayerRole::Defender => {
+                if ball_depth <= DEFENSIVE_GOAL_LINE_BUFFER_YARDS {
+                    0.0
+                } else {
+                    DEFENSIVE_GOAL_LINE_BUFFER_YARDS
+                }
+            }
+            PlayerRole::Midfielder => {
+                if ball_depth <= MIDFIELDER_STANDARD_RETREAT_LINE_YARDS {
+                    if self.midfielder_deep_retreat_allowed(player.id) {
+                        MIDFIELDER_DEEP_RETREAT_LINE_YARDS
+                    } else {
+                        MIDFIELDER_STANDARD_RETREAT_LINE_YARDS
+                    }
+                } else {
+                    MIDFIELDER_DEEP_RETREAT_LINE_YARDS
+                }
+            }
+            PlayerRole::Forward => self.field_length * 0.5,
+        }
+    }
+
+    fn goal_side_defensive_target_for_player(&self, player: &PlayerSnapshot, target: Vec2) -> Vec2 {
+        if player.role == PlayerRole::Goalkeeper
+            || self
+                .controlled_possession_team()
+                .or_else(|| self.possession_team())
+                != Some(player.team.other())
+        {
+            return target.clamp_to_pitch(self.field_width, self.field_length);
+        }
+
+        let ball_depth = self.depth_from_own_goal_y(player.team, self.ball.position.y);
+        let mut target_depth = self.depth_from_own_goal_y(player.team, target.y);
+        let min_depth = self.minimum_defensive_depth_from_own_goal(player);
+        let cushion = match player.role {
+            PlayerRole::Defender if ball_depth <= DEFENSIVE_GOAL_LINE_BUFFER_YARDS => ball_depth,
+            PlayerRole::Defender => DEFENSIVE_GOAL_SIDE_CUSHION_YARDS + 1.25,
+            PlayerRole::Midfielder => DEFENSIVE_GOAL_SIDE_CUSHION_YARDS,
+            PlayerRole::Forward => DEFENSIVE_GOAL_SIDE_CUSHION_YARDS * 0.70,
+            PlayerRole::Goalkeeper => 0.0,
+        };
+        let goal_side_depth = (ball_depth - cushion).max(0.0);
+        target_depth = target_depth.min(goal_side_depth).max(min_depth);
+
+        let goal = Vec2::new(self.field_width * 0.5, self.own_goal_y_for(player.team));
+        let mut guarded = target;
+        guarded.y = self.y_from_own_goal_depth(player.team, target_depth);
+        if ball_depth > 1e-6 && target_depth <= ball_depth + 1e-6 {
+            let line_x = goal.x
+                + (self.ball.position.x - goal.x) * (target_depth / ball_depth).clamp(0.0, 1.0);
+            let line_blend = match player.role {
+                PlayerRole::Defender if ball_depth <= DEFENSIVE_GOAL_LINE_BUFFER_YARDS => 0.90,
+                PlayerRole::Defender => 0.58,
+                PlayerRole::Midfielder => 0.34,
+                PlayerRole::Forward => 0.18,
+                PlayerRole::Goalkeeper => 0.0,
+            };
+            guarded.x = guarded.x * (1.0 - line_blend) + line_x * line_blend;
+        }
+        guarded.clamp_to_pitch(self.field_width, self.field_length)
+    }
+
+    fn goal_side_defensive_target_for(&self, player_id: usize, target: Vec2) -> Vec2 {
+        self.players
+            .iter()
+            .find(|player| player.id == player_id)
+            .map(|player| self.goal_side_defensive_target_for_player(player, target))
+            .unwrap_or_else(|| target.clamp_to_pitch(self.field_width, self.field_length))
     }
 
     fn goalkeeper_ball_goal_tracking_target(&self, team: Team) -> Vec2 {
@@ -22188,6 +22332,9 @@ impl WorldSnapshot {
             }
             shape = shape.clamp_to_pitch(self.field_width, self.field_length);
         }
+        if self.possession_team() == Some(me.team.other()) && me.role != PlayerRole::Goalkeeper {
+            shape = self.goal_side_defensive_target_for_player(me, shape);
+        }
         shape
     }
 
@@ -22325,15 +22472,16 @@ impl WorldSnapshot {
             if let Some((holder_position, line_gap)) =
                 self.opponent_breakthrough_ball_carrier(me.team)
             {
-                return self.clamp_defensive_line_break_retreat(
+                let target = self.clamp_defensive_line_break_retreat(
                     me.team,
                     holder_position,
                     line_gap,
                     guarded,
                 );
+                return self.goal_side_defensive_target_for_player(me, target);
             }
         }
-        guarded
+        self.goal_side_defensive_target_for_player(me, guarded)
     }
 
     fn clamp_to_role_position(
@@ -22386,7 +22534,8 @@ impl WorldSnapshot {
         }
         let bounded = self.clamp_forward_onside_support(me, bounded);
         if self.possession_team() == Some(me.team.other()) && me.role != PlayerRole::Goalkeeper {
-            self.clamp_defensive_goal_line_and_ball_gap(me.team, bounded)
+            let bounded = self.clamp_defensive_goal_line_and_ball_gap(me.team, bounded);
+            self.goal_side_defensive_target_for_player(me, bounded)
         } else {
             bounded
         }
@@ -77758,6 +77907,166 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             snapshot.ball.position.y - target.y <= DEFENSIVE_MAX_BEHIND_BALL_YARDS + 1e-9,
             "defender target should stay connected to ball: {target:?}"
+        );
+    }
+
+    #[test]
+    fn immediate_reachable_opponent_ball_forces_steal_before_goal_side_recovery() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let holder = 17;
+        park_players_except(&mut sim, &[defender, holder]);
+        sim.players[defender].position = Vec2::new(40.0, 31.4);
+        sim.players[defender].home_position = Vec2::new(40.0, 78.0);
+        sim.players[holder].position = Vec2::new(40.0, 30.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut player = sim.players[defender].clone();
+        let intent = player.run_time_step(&snapshot, None, None, &mut mulberry32(77_001));
+
+        assert!(
+            !goal_side_between_y(
+                sim.players[defender].position.y,
+                sim.ball.position.y,
+                Team::Away.goal_y(snapshot.field_length)
+            ),
+            "test setup should put defender just beyond the ball"
+        );
+        assert!(matches!(
+            intent.action,
+            SoccerAction::Tackle {
+                target_player
+            } if target_player == holder
+        ));
+        assert_eq!(
+            player
+                .last_decision
+                .as_ref()
+                .and_then(|decision| decision.operation_order.first())
+                .map(String::as_str),
+            Some("immediate-steal")
+        );
+    }
+
+    #[test]
+    fn defensive_assignment_projects_wrong_side_defender_goal_side_of_ball() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let holder = 17;
+        park_players_except(&mut sim, &[defender, holder]);
+        sim.players[defender].position = Vec2::new(48.0, 78.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+        sim.players[holder].position = Vec2::new(32.0, 60.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let target =
+            snapshot.defensive_assignment_for(defender, sim.players[defender].home_position, false);
+
+        assert!(
+            target.y <= sim.ball.position.y - DEFENSIVE_GOAL_SIDE_CUSHION_YARDS,
+            "defender should recover goal-side of the ball from any starting line: target={target:?} ball={:?}",
+            sim.ball.position
+        );
+        assert!(
+            target.x < sim.players[defender].position.x,
+            "goal-side recovery should also bend toward the ball-goal line: target={target:?}"
+        );
+    }
+
+    #[test]
+    fn defensive_forward_stops_retreat_at_halfway_line() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let forward = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Forward)
+            .map(|player| player.id)
+            .expect("home forward");
+        let holder = 17;
+        park_players_except(&mut sim, &[forward, holder]);
+        sim.players[forward].position = Vec2::new(48.0, 86.0);
+        sim.players[forward].home_position = sim.players[forward].position;
+        sim.players[holder].position = Vec2::new(32.0, 32.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let target =
+            snapshot.defensive_assignment_for(forward, sim.players[forward].home_position, false);
+
+        assert!(
+            target.y >= snapshot.field_length * 0.5 - 1e-9,
+            "forward should not retreat past halfway even when goal-side is deeper: target={target:?}"
+        );
+    }
+
+    #[test]
+    fn midfielders_only_sometimes_drop_to_ten_yards_when_ball_is_inside_fifteen() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let midfielder = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Midfielder)
+            .map(|player| player.id)
+            .expect("home midfielder");
+        let holder = 17;
+        park_players_except(&mut sim, &[midfielder, holder]);
+        sim.players[midfielder].position = Vec2::new(42.0, 70.0);
+        sim.players[midfielder].home_position = sim.players[midfielder].position;
+        sim.players[holder].position = Vec2::new(38.0, 12.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let mut ten_yard_drops = 0usize;
+        for tick in 0..400 {
+            sim.tick = tick;
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let target = snapshot.goal_side_defensive_target_for(midfielder, Vec2::new(40.0, 42.0));
+            assert!(
+                (MIDFIELDER_DEEP_RETREAT_LINE_YARDS - 1e-9
+                    ..=MIDFIELDER_STANDARD_RETREAT_LINE_YARDS + 1e-9)
+                    .contains(&target.y),
+                "midfielder retreat should stay on the 10/15-yard bands, got {target:?}"
+            );
+            if target.y <= MIDFIELDER_DEEP_RETREAT_LINE_YARDS + 0.10 {
+                ten_yard_drops += 1;
+            }
+        }
+
+        assert!(
+            (80..=120).contains(&ten_yard_drops),
+            "midfielders should drop to the 10-yard line about 20-30% of the time, got {ten_yard_drops}/400"
+        );
+    }
+
+    #[test]
+    fn defenders_can_collapse_to_goal_line_when_ball_is_inside_six_yards() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let holder = 17;
+        park_players_except(&mut sim, &[defender, holder]);
+        sim.players[defender].position = Vec2::new(48.0, 24.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+        sim.players[holder].position = Vec2::new(36.0, 5.5);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let target =
+            snapshot.defensive_assignment_for(defender, sim.players[defender].home_position, false);
+
+        assert!(
+            target.y <= 0.25,
+            "defenders should be allowed all the way onto the goal line when the ball is inside six yards: target={target:?}"
         );
     }
 

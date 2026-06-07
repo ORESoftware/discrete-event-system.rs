@@ -28916,6 +28916,7 @@ fn soccer_accounting_check_frames(
         soccer_accounting_check_frame_roster(frame, report);
         soccer_accounting_check_frame_ball_accounting(frame, report);
         soccer_accounting_check_frame_shared_positions(frame, report);
+        soccer_accounting_check_frame_histories(frame, report);
         soccer_accounting_check_agent_schedule(frame, report);
     }
 
@@ -29260,6 +29261,185 @@ fn soccer_accounting_check_frame_shared_positions(
                 ball_sample.tick, ball_sample.clock_seconds, ball_sample.position
             ),
             "shared ball position sample should match the authoritative ball state",
+        );
+    }
+}
+
+fn soccer_accounting_expected_history_len(tick: u64, limit: usize) -> usize {
+    usize::try_from(tick)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+        .min(limit)
+        .max(1)
+}
+
+fn soccer_accounting_check_frame_histories(
+    frame: &MatchFrame,
+    report: &mut SoccerAccountingSmokeReport,
+) {
+    const POSITION_EPSILON_YARDS: f64 = 1e-6;
+    let expected_player_history =
+        soccer_accounting_expected_history_len(frame.tick, PLAYER_POSITION_HISTORY_LIMIT);
+    let expected_ball_history =
+        soccer_accounting_expected_history_len(frame.tick, BALL_POSITION_HISTORY_LIMIT);
+
+    for player in &frame.players {
+        if player.position_history.len() > PLAYER_POSITION_HISTORY_LIMIT
+            || player.position_history.len() < expected_player_history
+        {
+            report.push_violation(
+                frame.tick,
+                "history",
+                "playerPositionHistory",
+                format!(
+                    "{}..={}",
+                    expected_player_history, PLAYER_POSITION_HISTORY_LIMIT
+                ),
+                format!("player {} len {}", player.id, player.position_history.len()),
+                "full playback frames should retain each player's rolling 50-position history",
+            );
+        }
+        if player
+            .position_history
+            .last()
+            .is_none_or(|position| position.distance(player.position) > POSITION_EPSILON_YARDS)
+        {
+            report.push_violation(
+                frame.tick,
+                "history",
+                "playerPositionHistoryLatest",
+                format!("player {} latest {:?}", player.id, player.position),
+                format!("last {:?}", player.position_history.last()),
+                "player history should end at the authoritative player position",
+            );
+        }
+
+        let shared_history_len = frame
+            .shared_positions
+            .history_for(player.id)
+            .map(|history| history.len())
+            .unwrap_or(0);
+        if shared_history_len > PLAYER_POSITION_HISTORY_LIMIT
+            || shared_history_len < expected_player_history
+        {
+            report.push_violation(
+                frame.tick,
+                "sharedPositions",
+                "playerHistory",
+                format!(
+                    "player {} len {}..={}",
+                    player.id, expected_player_history, PLAYER_POSITION_HISTORY_LIMIT
+                ),
+                shared_history_len.to_string(),
+                "shared position data should retain each player's rolling 50-sample history",
+            );
+        }
+    }
+
+    for official in &frame.officials {
+        if official.position_history.len() > PLAYER_POSITION_HISTORY_LIMIT
+            || official.position_history.len() < expected_player_history
+        {
+            report.push_violation(
+                frame.tick,
+                "history",
+                "officialPositionHistory",
+                format!(
+                    "{}..={}",
+                    expected_player_history, PLAYER_POSITION_HISTORY_LIMIT
+                ),
+                format!(
+                    "official {} len {}",
+                    official.id,
+                    official.position_history.len()
+                ),
+                "full playback frames should retain each official's rolling 50-position history",
+            );
+        }
+        if official
+            .position_history
+            .last()
+            .is_none_or(|position| position.distance(official.position) > POSITION_EPSILON_YARDS)
+        {
+            report.push_violation(
+                frame.tick,
+                "history",
+                "officialPositionHistoryLatest",
+                format!("official {} latest {:?}", official.id, official.position),
+                format!("last {:?}", official.position_history.last()),
+                "official history should end at the authoritative official position",
+            );
+        }
+
+        let shared_history_len = frame
+            .shared_positions
+            .official_history_for(official.id)
+            .map(|history| history.len())
+            .unwrap_or(0);
+        if shared_history_len > PLAYER_POSITION_HISTORY_LIMIT
+            || shared_history_len < expected_player_history
+        {
+            report.push_violation(
+                frame.tick,
+                "sharedPositions",
+                "officialHistory",
+                format!(
+                    "official {} len {}..={}",
+                    official.id, expected_player_history, PLAYER_POSITION_HISTORY_LIMIT
+                ),
+                shared_history_len.to_string(),
+                "shared position data should retain each official's rolling 50-sample history",
+            );
+        }
+    }
+
+    if frame.ball_history.len() > BALL_POSITION_HISTORY_LIMIT
+        || frame.ball_history.len() < expected_ball_history
+    {
+        report.push_violation(
+            frame.tick,
+            "history",
+            "ballPositionHistory",
+            format!(
+                "{}..={}",
+                expected_ball_history, BALL_POSITION_HISTORY_LIMIT
+            ),
+            frame.ball_history.len().to_string(),
+            "full playback frames should retain the ball agent's rolling 50-sample history",
+        );
+    }
+    if frame
+        .ball_history
+        .last()
+        .is_none_or(|sample| sample.position.distance(frame.ball.position) > POSITION_EPSILON_YARDS)
+    {
+        report.push_violation(
+            frame.tick,
+            "history",
+            "ballPositionHistoryLatest",
+            format!("ball latest {:?}", frame.ball.position),
+            format!(
+                "last {:?}",
+                frame.ball_history.last().map(|sample| sample.position)
+            ),
+            "ball history should end at the authoritative ball position",
+        );
+    }
+
+    let shared_ball_history_len = frame.shared_positions.ball_history().len();
+    if shared_ball_history_len > BALL_POSITION_HISTORY_LIMIT
+        || shared_ball_history_len < expected_ball_history
+    {
+        report.push_violation(
+            frame.tick,
+            "sharedPositions",
+            "ballHistory",
+            format!(
+                "{}..={}",
+                expected_ball_history, BALL_POSITION_HISTORY_LIMIT
+            ),
+            shared_ball_history_len.to_string(),
+            "shared position data should retain the ball agent's rolling 50-sample history",
         );
     }
 }
@@ -64784,6 +64964,55 @@ mod tests {
         }));
         assert!(report.violations.iter().any(|violation| {
             violation.subject == "sharedPositions" && violation.metric == "ballLatestConsistency"
+        }));
+    }
+
+    #[test]
+    fn accounting_smoke_report_flags_missing_rolling_histories() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                seed: 13_113,
+                ..MatchConfig::playback_trace(0.3)
+            },
+            1,
+        );
+        let frame = trace
+            .frames
+            .iter_mut()
+            .find(|frame| frame.tick > 0)
+            .expect("post-tick frame with rolling histories");
+        let player_id = frame.players[0].id;
+        let official_id = frame.officials[0].id;
+        frame.players[0].position_history.clear();
+        frame.officials[0].position_history.clear();
+        frame.ball_history.clear();
+        frame.shared_positions.histories.remove(&player_id);
+        frame
+            .shared_positions
+            .official_histories
+            .remove(&official_id);
+        frame.shared_positions.ball_history.clear();
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "history" && violation.metric == "playerPositionHistory"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "history" && violation.metric == "officialPositionHistory"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "history" && violation.metric == "ballPositionHistory"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "sharedPositions" && violation.metric == "playerHistory"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "sharedPositions" && violation.metric == "officialHistory"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "sharedPositions" && violation.metric == "ballHistory"
         }));
     }
 

@@ -31733,6 +31733,8 @@ pub struct SoccerTrackingImportRequest {
 pub struct SoccerTrackingImportResponse {
     pub learning: SoccerLearningSnapshot,
     pub policy_probability: SoccerPolicyProbabilitySummaryStatus,
+    #[serde(default)]
+    pub tracking_tactical_summary: SoccerTacticalLearningSummary,
     pub source: String,
     pub format: String,
     pub frames: usize,
@@ -34516,6 +34518,7 @@ impl SoccerMatch {
             return Ok(SoccerTrackingImportResponse {
                 learning: self.learning_stats_snapshot(),
                 policy_probability: self.team_policy_probability_summary(),
+                tracking_tactical_summary: SoccerTacticalLearningSummary::default(),
                 source: tracking.source.clone(),
                 format,
                 frames: tracking.frames.len(),
@@ -34534,6 +34537,8 @@ impl SoccerMatch {
             });
         }
         let dataset = tracking.to_learning_dataset()?;
+        let tracking_tactical_summary =
+            SoccerTacticalLearningSummary::from_transitions(&dataset.transitions);
         let (
             imported_home_entries,
             imported_away_entries,
@@ -34565,6 +34570,7 @@ impl SoccerMatch {
         Ok(SoccerTrackingImportResponse {
             learning,
             policy_probability: self.team_policy_probability_summary(),
+            tracking_tactical_summary,
             source: tracking.source.clone(),
             format,
             frames: tracking.frames.len(),
@@ -71461,6 +71467,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(value["frames"], 2);
         assert_eq!(value["importedTransitions"], 3);
         assert_eq!(value["importedNeuralSamples"], 0);
+        assert_eq!(value["trackingTacticalSummary"]["totalTransitions"], 3);
+        assert!(
+            value["trackingTacticalSummary"]["shapeTransitions"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(value["trackingTacticalSummary"]["meanTacticalReward"]
+            .as_f64()
+            .is_some());
+        assert!(
+            value["trackingTacticalSummary"]["lookBehindScanTransitions"]
+                .as_u64()
+                .is_some()
+        );
         assert_eq!(value["trainingSkipped"], false);
         assert_eq!(value["physicsRejected"], false);
         assert_eq!(value["physicsSmoke"]["framesAnalyzed"], 2);
@@ -71523,6 +71544,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             response.imported_neural_samples,
             response.imported_transitions
         );
+        assert_eq!(
+            response.tracking_tactical_summary.total_transitions,
+            response.imported_transitions
+        );
+        assert!(response.tracking_tactical_summary.shape_transitions > 0);
         assert!(response.learning.neural_learning_enabled);
         assert_eq!(response.learning.neural_learning_backend, "inline");
         assert!(response.learning.neural_learning_training_steps > 0);
@@ -71815,6 +71841,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&import.body).expect("tracking import json");
         assert_eq!(value["frames"], 2);
         assert_eq!(value["importedTransitions"], 0);
+        assert_eq!(value["trackingTacticalSummary"]["totalTransitions"], 0);
+        assert_eq!(value["trackingTacticalSummary"]["shapeTransitions"], 0);
         assert_eq!(value["trainingSkipped"], true);
         assert_eq!(value["physicsRejected"], true);
         assert_eq!(
@@ -87439,6 +87467,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             html.contains("[\"pass\", \"flank-low-cross\", \"first-time-pass\"].includes(action)")
         );
         assert!(html.contains("trackingPhysicsSmokeLabel"));
+        assert!(html.contains("trackingTacticalImportLabel"));
         assert!(html.contains("id=\"exportTrackingJsonl\""));
         assert!(html.contains("id=\"sampleTrackingJsonl\""));
         assert!(html.contains("application/x-ndjson"));
@@ -87449,8 +87478,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("lower.endsWith(\".jsonl\") || lower.endsWith(\".ndjson\")"));
         assert!(html.contains("format = lower.endsWith(\".jsonl\")"));
         assert!(html.contains("response.physicsSmoke"));
+        assert!(html.contains("response.trackingTacticalSummary"));
         assert!(html.contains("response.importedNeuralSamples"));
         assert!(html.contains("transitions N${neuralSamples}"));
+        assert!(html.contains("shape S${shapeTransitions}"));
         assert!(html.contains("physics ok"));
         assert!(html.contains("physics ${warnings} warnings"));
         assert!(html.contains("function effectiveMatchDurationSeconds"));

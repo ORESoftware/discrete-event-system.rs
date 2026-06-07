@@ -3772,6 +3772,13 @@ function trackingPhysicsSmokeLabel(physicsSmoke) {
   if (warnings > 0) return `physics ${warnings} warnings ${speedLabel}`;
   return `physics ok ${frames} frames ${speedLabel}`;
 }
+function trackingTacticalImportLabel(summary) {
+  if (!summary) return "shape S0 R0.00 Look0";
+  const shapeTransitions = Math.max(0, Math.round(Number(summary.shapeTransitions ?? 0)));
+  const reward = Number(summary.meanTacticalReward ?? summary.meanPositionalShapeReward ?? 0);
+  const lookBehindScans = Math.max(0, Math.round(Number(summary.lookBehindScanTransitions ?? 0)));
+  return `shape S${shapeTransitions} R${reward.toFixed(2)} Look${lookBehindScans}`;
+}
 async function importTrackingFile(file) {
   const content = await file.text();
   const name = file.name || "tracking-upload";
@@ -3795,10 +3802,11 @@ async function importTrackingFile(file) {
   const aTargets = Number(response.importedAwayTargetEntries ?? response.learning?.awayPolicyTargetEntries ?? 0);
   const neuralSamples = Number(response.importedNeuralSamples ?? 0);
   const physics = trackingPhysicsSmokeLabel(response.physicsSmoke);
+  const tactical = trackingTacticalImportLabel(response.trackingTacticalSummary);
   const reason = response.rejectionReason ? `; ${response.rejectionReason}` : "";
   statusEl.textContent = response.trainingSkipped
-    ? `tracking rejected N${neuralSamples} H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}${reason}`
-    : `tracking trained ${response.importedTransitions} transitions N${neuralSamples} H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}`;
+    ? `tracking rejected N${neuralSamples} H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}; ${tactical}${reason}`
+    : `tracking trained ${response.importedTransitions} transitions N${neuralSamples} H${hActions}/${hTargets} A${aActions}/${aTargets}; ${physics}; ${tactical}`;
   render();
 }
 async function loadState() {

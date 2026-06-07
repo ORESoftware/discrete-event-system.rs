@@ -68095,6 +68095,91 @@ mod tests {
     }
 
     #[test]
+    fn live_http_tracking_csv_import_trains_from_normalized_footage_rows() {
+        let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 2.0,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                batch_size: 2,
+                max_batches_per_tick: 2,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 118,
+            ..Default::default()
+        })));
+        let input_queue = session.lock().unwrap().input_queue();
+        let raw = r#"tick,source_frame_id,clock_seconds,player_id,name,team,role,shirt,x_norm,y_norm,home_x_norm,home_y_norm,ball_x_norm,ball_y_norm,ball_holder,last_touch_team
+0,broadcast-normalized-0001,0.0,0,Home passer,Home,Midfielder,8,0.500000,0.583333,0.500000,0.541667,0.500000,0.583333,0,Home
+0,broadcast-normalized-0001,0.0,1,Home runner,Home,Forward,9,0.550000,0.683333,0.550000,0.666667,0.500000,0.583333,0,Home
+0,broadcast-normalized-0001,0.0,2,Away defender,Away,Defender,4,0.725000,0.650000,0.725000,0.650000,0.500000,0.583333,0,Home
+1,broadcast-normalized-0002,1.0,0,Home passer,Home,Midfielder,8,0.502500,0.586667,0.500000,0.541667,0.550000,0.683333,1,Home
+1,broadcast-normalized-0002,1.0,1,Home runner,Home,Forward,9,0.550000,0.683333,0.550000,0.666667,0.550000,0.683333,1,Home
+1,broadcast-normalized-0002,1.0,2,Away defender,Away,Defender,4,0.706250,0.654167,0.725000,0.650000,0.550000,0.683333,1,Home
+"#;
+        let body = serde_json::json!({
+            "source": "broadcast-normalized.csv",
+            "format": "csv",
+            "content": raw
+        })
+        .to_string();
+
+        let import = handle_live_soccer_request(
+            &format!(
+                "POST /api/tracking-policy HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+
+        assert_eq!(import.status, 200);
+        let value: serde_json::Value =
+            serde_json::from_str(&import.body).expect("tracking csv import json");
+        assert_eq!(value["source"], "broadcast-normalized.csv");
+        assert_eq!(value["format"], "csv");
+        assert_eq!(value["frames"], 2);
+        assert_eq!(value["importedTransitions"], 3);
+        assert_eq!(value["importedNeuralSamples"], 3);
+        assert_eq!(value["trainingSkipped"], false);
+        assert_eq!(value["physicsRejected"], false);
+        assert_eq!(value["physicsSmoke"]["violationCount"], 0);
+        assert_eq!(
+            value["physicsSmoke"]["violations"]
+                .as_array()
+                .expect("physics smoke violations")
+                .len(),
+            0
+        );
+        assert!(value["importedHomeEntries"].as_u64().unwrap() > 0);
+        assert!(value["importedHomeTargetEntries"].as_u64().unwrap() > 0);
+        assert_eq!(
+            value["learning"]["homePolicyEntries"],
+            value["importedHomeEntries"]
+        );
+        assert_eq!(
+            value["learning"]["homePolicyTargetEntries"],
+            value["importedHomeTargetEntries"]
+        );
+        assert_eq!(value["learning"]["neuralLearningEnabled"], true);
+        assert_eq!(value["learning"]["neuralLearningBackend"], "inline");
+        assert!(
+            value["learning"]["neuralLearningTrainingSteps"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            value["learning"]["neuralLearningSamples"].as_u64().unwrap()
+                >= value["importedNeuralSamples"].as_u64().unwrap()
+        );
+        assert!(value["policyProbability"]["homeStates"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
     fn live_http_tracking_import_skips_policy_training_on_physics_warnings_by_default() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,

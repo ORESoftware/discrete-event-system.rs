@@ -57580,6 +57580,62 @@ mod tests {
     }
 
     #[test]
+    fn official_agents_randomize_internal_operation_order() {
+        for kind in [
+            OfficialKind::CenterReferee,
+            OfficialKind::AssistantRefereeNear,
+            OfficialKind::AssistantRefereeFar,
+        ] {
+            let mut first_ops = HashSet::new();
+            let mut full_orders = HashSet::new();
+
+            for seed in 0..48 {
+                let mut sim = SoccerMatch::default_11v11(MatchConfig {
+                    duration_seconds: 0.1,
+                    seed: 3_120 + seed,
+                    ..Default::default()
+                });
+                sim.run_time_step();
+                let frame = sim.to_frame();
+                let decision = frame
+                    .officials
+                    .iter()
+                    .find(|official| official.kind == kind)
+                    .and_then(|official| official.last_decision.as_ref())
+                    .unwrap_or_else(|| panic!("{kind:?} decision trace"));
+
+                assert_eq!(decision.operation_order.len(), 6);
+                assert!(decision
+                    .operation_order
+                    .iter()
+                    .any(|op| op == "update-kinematics"));
+                assert!(decision
+                    .operation_order
+                    .iter()
+                    .any(|op| op == "choose-referee-target"));
+                first_ops.insert(
+                    decision
+                        .operation_order
+                        .first()
+                        .cloned()
+                        .expect("first official operation"),
+                );
+                full_orders.insert(decision.operation_order.join(">"));
+            }
+
+            assert!(
+                first_ops.len() > 1,
+                "{kind:?} should not always inspect the same operation first: {first_ops:?}"
+            );
+            assert!(
+                full_orders.len() > 4,
+                "{kind:?} should expose varied weighted operation orders: {}",
+                full_orders.len()
+            );
+        }
+    }
+
+    #[test]
     fn central_brain_snapshot_exposes_center_of_play_centroids() {
         let sim = SoccerMatch::default_11v11(MatchConfig::default());
         let mut snapshot = WorldSnapshot::from_match(&sim);

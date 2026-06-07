@@ -8335,10 +8335,11 @@ impl PlayerAgent {
                         &support_context.special_targets,
                     )
                 });
-            let support_target = if matches!(
-                first_support_label.as_str(),
-                "support-shape" | "support-roam"
-            ) {
+            let support_target = if self.role != PlayerRole::Goalkeeper
+                && matches!(
+                    first_support_label.as_str(),
+                    "support-shape" | "support-roam"
+                ) {
                 snapshot
                     .formation_lp_guidance_for(self.id)
                     .map(|guidance| SupportMovementTarget {
@@ -70939,6 +70940,70 @@ mod tests {
         assert!(
             line_distance < 1e-9 && (0.0..=1.0).contains(&line_projection),
             "keeper possession support should remain on the direct line: support={support:?} line_distance={line_distance} projection={line_projection}"
+        );
+    }
+
+    #[test]
+    fn goalkeeper_runtime_support_ignores_off_line_lp_guidance() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let teammate = 6;
+        sim.players[keeper].position = Vec2::new(18.0, 10.0);
+        sim.players[teammate].position = Vec2::new(63.0, 54.0);
+        sim.ball.holder = Some(teammate);
+        sim.ball.position = sim.players[teammate].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        let mut lp_snapshot = snapshot.clone();
+        lp_snapshot
+            .formation_lp_guidance
+            .push(SoccerFormationLpPlayerGuidance {
+                team: Team::Home,
+                player_id: keeper,
+                slot: 0,
+                current: sim.players[keeper].position,
+                target: Vec2::new(15.0, line_target.y + 8.0),
+                formation_anchor: sim.players[keeper].home_position,
+                pressure_target: None,
+                recommended_move: Vec2::new(-8.0, 8.0),
+                target_velocity: Vec2::zero(),
+                target_acceleration: Vec2::zero(),
+                recommended_move_yards: 11.3,
+                recommended_speed_yps: 0.0,
+                recommended_acceleration_yps2: 0.0,
+                formation_error_yards: 0.0,
+                movement_error_yards: 11.3,
+                pair_error_yards: 0.0,
+                role_line_error_yards: 0.0,
+                pressure_error_yards: 0.0,
+                fore_aft_speed_error_yps: 0.0,
+                pressure_weight: 1.0,
+                speed_match_weight: 0.0,
+                alignment_weight: 1.0,
+                reduced_cost_target_x: 0.0,
+                reduced_cost_target_y: 0.0,
+                solver_status: "optimal".to_string(),
+                solver_objective: 0.0,
+                solver_iterations: Some(1),
+                solver_elapsed_ms: 0.0,
+                variable_count: 1,
+                constraint_count: 1,
+            });
+        let mut keeper_player = sim.players[keeper].clone();
+        let intent =
+            keeper_player.run_time_step(&lp_snapshot, None, None, &mut SeededRandom::new(28_404));
+        let SoccerAction::MoveTo(runtime_target) = intent.action else {
+            panic!(
+                "keeper should choose support movement, got {:?}",
+                intent.action
+            );
+        };
+
+        assert!(
+            runtime_target.distance(line_target) < 1e-9,
+            "runtime keeper support should ignore off-line LP guidance: runtime={runtime_target:?} line_target={line_target:?}"
         );
     }
 

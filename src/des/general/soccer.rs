@@ -244,8 +244,9 @@ const PRESSURED_SUPPORT_SPRINT_URGENCY: f64 = 0.34;
 const DEFENSIVE_GOAL_LINE_BUFFER_YARDS: f64 = 6.0;
 const DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS: f64 = 4.0;
 const DEFENSIVE_MAX_BEHIND_BALL_YARDS: f64 = 30.0;
-const DEFENSIVE_LINE_BREAK_EXTRA_BEHIND_BALL_YARDS: f64 = 6.0;
-const DEFENSIVE_LINE_BREAK_MIN_ADVANCEMENT_FROM_GOAL_YARDS: f64 = 10.0;
+const DEFENSIVE_LINE_BREAK_EXTRA_BEHIND_BALL_YARDS: f64 = 9.0;
+const DEFENSIVE_LINE_BREAK_MIN_ADVANCEMENT_FROM_GOAL_YARDS: f64 = 6.0;
+const DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 12.0;
 const DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 42.0;
 const DEFENSIVE_LINE_BREAK_BASE_RETREAT_GAP_YARDS: f64 = 32.0;
 const DEFENSIVE_LINE_BREAK_URGENT_RETREAT_GAP_YARDS: f64 = 20.0;
@@ -17654,6 +17655,11 @@ impl WorldSnapshot {
         }
         let line_gap = (holder_position.y - defensive_line_y) * team.attack_dir();
         if !(-16.0..=DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS).contains(&line_gap) {
+            return None;
+        }
+        if line_advancement_from_goal < 10.0
+            && line_gap > DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS
+        {
             return None;
         }
         Some((holder_position, line_gap))
@@ -73172,6 +73178,45 @@ mod tests {
         assert!(
             (holder_position.y - target.y) * Team::Home.attack_dir() >= 11.0,
             "defender should stay materially goal-side of the threatening carrier: target={target:?} holder={holder_position:?}"
+        );
+    }
+
+    #[test]
+    fn defenders_retreat_from_six_yard_line_break_threshold() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let threat = 17;
+        for id in 1..=4 {
+            sim.players[id].position = Vec2::new(22.0 + id as f64 * 9.0, 8.0);
+            sim.players[id].home_position = sim.players[id].position;
+        }
+        sim.players[threat].position = Vec2::new(40.0, 14.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let (holder_position, line_gap) = snapshot
+            .opponent_breakthrough_ball_carrier(Team::Home)
+            .expect("six-yard-buffer back line should still detect a break-through threat");
+        let target =
+            snapshot.defensive_assignment_for(defender, sim.players[defender].home_position, false);
+
+        assert!(
+            line_gap >= 0.0,
+            "test setup should place the threat in front of the six-yard-buffer line: {line_gap}"
+        );
+        assert!(
+            target.y >= DEFENSIVE_GOAL_LINE_BUFFER_YARDS - 1e-9,
+            "defender must not retreat inside the six-yard goal-line buffer while the ball is outside it: target={target:?}"
+        );
+        assert!(
+            target.y <= DEFENSIVE_GOAL_LINE_BUFFER_YARDS + 1.25,
+            "line-break threat should pull the low back line to the six-yard buffer: target={target:?}"
+        );
+        assert!(
+            (holder_position.y - target.y) * Team::Home.attack_dir() >= 7.0,
+            "defender should remain materially goal-side of the threatening carrier: target={target:?} holder={holder_position:?}"
         );
     }
 

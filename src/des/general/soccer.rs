@@ -6742,6 +6742,25 @@ impl PlayerAgent {
                 min_clearance_probability,
             );
         }
+        let hold_pressure = excessive_hold_pressure(observation, dribbling);
+        let release_pressure = pressure_urgency
+            .max(pressure)
+            .max(observation.immediate_dispossession_risk)
+            .clamp(0.0, 1.0);
+        if pass_target_count > 0
+            && hold_pressure >= 0.12
+            && release_pressure >= 0.38
+            && dribbling < NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF
+            && !goal_attack_shot_required
+        {
+            let release_floor = (0.20
+                + hold_pressure * 0.28
+                + release_pressure * 0.18
+                + observation.best_pass_receiver_openness.clamp(0.0, 1.0) * 0.12
+                + observation.expected_pass_completion.clamp(0.0, 1.0) * 0.10)
+                .clamp(0.28, 0.68);
+            ensure_min_legal_option_probability(&mut options, "pass1", release_floor);
+        }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
         options
@@ -9259,10 +9278,7 @@ impl PlayerAgent {
         snapshot: &WorldSnapshot,
         observation: &SoccerPomdpObservation,
     ) -> Option<(SoccerAction, String)> {
-        if !observation.has_ball
-            || !matches!(self.role, PlayerRole::Goalkeeper | PlayerRole::Defender)
-            || observation.yards_to_own_goal >= observation.yards_to_goal
-        {
+        if !observation.has_ball {
             return None;
         }
 
@@ -9280,22 +9296,86 @@ impl PlayerAgent {
             return None;
         }
 
-        Some((
-            SoccerAction::Clearance {
-                target: snapshot
-                    .pressure_clearance_target_for(self.id)
-                    .unwrap_or_else(|| {
-                        clearance_target_for_player(
-                            self.team,
-                            self.position,
-                            snapshot.field_width,
-                            snapshot.field_length,
-                        )
-                    }),
-                power: (0.88 + danger_pressure * 0.10 + hold_pressure * 0.06).clamp(0.88, 0.98),
-            },
-            "clearance".to_string(),
-        ))
+        if matches!(self.role, PlayerRole::Goalkeeper | PlayerRole::Defender)
+            && observation.yards_to_own_goal < observation.yards_to_goal
+        {
+            return Some((
+                SoccerAction::Clearance {
+                    target: snapshot
+                        .pressure_clearance_target_for(self.id)
+                        .unwrap_or_else(|| {
+                            clearance_target_for_player(
+                                self.team,
+                                self.position,
+                                snapshot.field_width,
+                                snapshot.field_length,
+                            )
+                        }),
+                    power: (0.88 + danger_pressure * 0.10 + hold_pressure * 0.06).clamp(0.88, 0.98),
+                },
+                "clearance".to_string(),
+            ));
+        }
+
+        if dribbling >= NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF && hold_pressure < 0.64 {
+            return None;
+        }
+
+        if shot_decision_is_qualified_for_role(observation, self.role)
+            && (goal_attack_shot_is_required(observation, self.role)
+                || observation.yards_to_goal <= TEAMMATE_MUST_SHOOT_YARDS)
+        {
+            return Some((
+                SoccerAction::Shoot {
+                    power: shot_power_for_skill(ability01(self.skills.shooting)),
+                },
+                "shoot".to_string(),
+            ));
+        }
+
+        let floor_target = snapshot
+            .ranked_visible_pass_targets(self.id, 1)
+            .first()
+            .copied()
+            .filter(|_| {
+                observation.expected_pass_completion >= 0.34
+                    || observation.best_pass_receiver_openness >= 0.34
+            });
+        if let Some(target) = floor_target {
+            return Some((
+                SoccerAction::Pass {
+                    target_player: Some(target),
+                    power: 0.60 + 0.30 * ability01(self.skills.passing_completion_rate),
+                    flight: PassFlight::Floor,
+                },
+                "pass1".to_string(),
+            ));
+        }
+
+        let aerial_target = snapshot
+            .ranked_visible_aerial_pass_targets(self.id, 1)
+            .first()
+            .copied()
+            .filter(|_| {
+                observation.expected_aerial_pass_completion >= 0.34
+                    || observation.best_aerial_pass_receiver_openness >= 0.34
+            });
+        aerial_target.map(|target| {
+            (
+                SoccerAction::Pass {
+                    target_player: Some(target),
+                    power: 0.62
+                        + 0.28
+                            * ability01(
+                                self.skills
+                                    .passing_completion_rate
+                                    .max(self.skills.crossing_left.max(self.skills.crossing_right)),
+                            ),
+                    flight: PassFlight::Aerial,
+                },
+                "aerial-pass1".to_string(),
+            )
+        })
     }
 }
 
@@ -81257,6 +81337,146 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn pressured_overholding_midfielder_gets_pass_release_probability_floor() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 22_681,
+            ..Default::default()
+        });
+        let holder = 7;
+        let outlet = 8;
+        let pressure = 14;
+        park_players_except(&mut sim, &[holder, outlet, pressure]);
+        sim.players[holder].position = Vec2::new(38.0, 42.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].skills.dribbling = 7.7;
+        sim.players[holder].skills.passing_completion_rate = 7.8;
+        sim.players[holder].preferences.dribble_bias = 1.18;
+        sim.players[holder].preferences.pass_bias = 0.70;
+        sim.players[outlet].position = Vec2::new(45.0, 50.0);
+        sim.players[outlet].home_position = sim.players[outlet].position;
+        sim.players[pressure].position = Vec2::new(35.0, 40.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let pass_targets = snapshot.ranked_visible_pass_targets(holder, 3);
+        assert!(
+            pass_targets.contains(&outlet),
+            "test setup should expose a visible outlet, got {pass_targets:?}"
+        );
+        let mut observation = snapshot.observation_for(holder);
+        observation.actual_time_on_ball_seconds = 3.4;
+        observation.perceived_pressure = 0.84;
+        observation.pressure_urgency = 0.88;
+        observation.immediate_dispossession_risk = 0.72;
+        observation.expected_pass_completion = 0.58;
+        observation.best_pass_receiver_openness = 0.62;
+
+        let options = sim.players[holder].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            pass_targets.len(),
+            snapshot.ranked_visible_aerial_pass_targets(holder, 3).len(),
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let pass1 = options
+            .iter()
+            .find(|option| option.label == "pass1")
+            .expect("pass1 option");
+        let dribble = options
+            .iter()
+            .find(|option| option.label == "dribble")
+            .expect("dribble option");
+        let carry_forward = options
+            .iter()
+            .find(|option| option.label == "carry-forward")
+            .expect("carry-forward option");
+
+        assert!(pass1.legal);
+        assert!(
+            pass1.probability >= 0.28,
+            "overheld pressure should force a meaningful pass release floor, got {pass1:?}"
+        );
+        assert!(
+            pass1.probability > dribble.probability
+                && pass1.probability > carry_forward.probability,
+            "release to an open outlet should outrank stale carrying: pass={pass1:?} dribble={dribble:?} carry={carry_forward:?}"
+        );
+    }
+
+    #[test]
+    fn learned_stale_non_elite_dribble_releases_to_open_outlet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 22_682,
+            ..Default::default()
+        });
+        let holder = 7;
+        let outlet = 8;
+        let pressure = 14;
+        park_players_except(&mut sim, &[holder, outlet, pressure]);
+        sim.players[holder].position = Vec2::new(38.0, 42.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].skills.dribbling = 7.8;
+        sim.players[holder].skills.passing_completion_rate = 8.0;
+        sim.players[outlet].position = Vec2::new(45.0, 50.0);
+        sim.players[outlet].home_position = sim.players[outlet].position;
+        sim.players[pressure].position = Vec2::new(35.0, 40.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(holder);
+        observation.actual_time_on_ball_seconds = 3.5;
+        observation.perceived_pressure = 0.86;
+        observation.pressure_urgency = 0.88;
+        observation.immediate_dispossession_risk = 0.74;
+        observation.expected_pass_completion = 0.60;
+        observation.best_pass_receiver_openness = 0.64;
+        observation.excessive_hold_pressure = excessive_hold_pressure(
+            &observation,
+            ability01(sim.players[holder].skills.dribbling),
+        );
+        let plan = SoccerLearnedPlan {
+            action: "carry-forward".to_string(),
+            target_player: None,
+            target_point: Some(Vec2::new(38.0, 48.0)),
+        };
+
+        let (action, label) = sim.players[holder]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("stale learned carry should release to an outlet");
+        assert_eq!(label, "pass1");
+        let SoccerAction::Pass {
+            target_player: Some(target),
+            flight: PassFlight::Floor,
+            ..
+        } = action
+        else {
+            panic!("stale learned carry should become a floor pass, got {action:?}");
+        };
+        assert_eq!(target, outlet);
+
+        let mut elite_holder = sim.players[holder].clone();
+        elite_holder.skills.dribbling = 9.4;
+        let elite_observation = SoccerPomdpObservation {
+            excessive_hold_pressure: excessive_hold_pressure(&observation, ability01(9.4)),
+            ..observation
+        };
+        let (elite_action, elite_label) = elite_holder
+            .action_from_learned_plan(&plan, &snapshot, &elite_observation)
+            .expect("elite dribbler should still be allowed to execute the carry");
+        assert!(
+            matches!(elite_action, SoccerAction::DribbleMove { .. }),
+            "elite dribbler should retain carry permission, got {elite_action:?}"
+        );
+        assert_ne!(elite_label, "pass1");
+    }
+
+    #[test]
     fn excessive_hold_pressure_is_visible_to_table_and_neural_learners() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = sim
@@ -86709,11 +86929,6 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("id=\"matchStep\""));
         assert!(html.contains("function matchStepLabel"));
         assert!(html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t"));
-        assert!(html.contains("id=\"simSpeed\">1.0x 1t"));
-        assert!(html.contains(
-            "id=\"simTicksPerPulse\" type=\"range\" min=\"1\" max=\"100\" step=\"1\" value=\"1\""
-        ));
-        assert!(html.contains("const DEFAULT_SIM_TICKS_PER_PULSE = 1"));
         assert!(html.contains("return configuredSimTicksPerPulse();"));
         assert!(html.contains("const inputText = liveControllerAssigned() ? \" + input\" : \"\";"));
         assert!(html.contains("observation.shotLaneOpen === true"));

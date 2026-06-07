@@ -12808,6 +12808,59 @@ impl MatchConfig {
         }
     }
 
+    pub fn sanitized_for_runtime(&self) -> Self {
+        let mut config = self.clone();
+        config.dt_seconds = sane_dt_seconds(config.dt_seconds, DEFAULT_DT_SECONDS);
+        if !config.duration_seconds.is_finite() || config.duration_seconds < 0.0 {
+            config.duration_seconds = DEFAULT_DURATION_SECONDS;
+        }
+        if !config.half_duration_seconds.is_finite() || config.half_duration_seconds < 0.0 {
+            config.half_duration_seconds = DEFAULT_HALF_DURATION_SECONDS;
+        }
+        if !config.halftime_fatigue_recovery.is_finite() || config.halftime_fatigue_recovery < 0.0 {
+            config.halftime_fatigue_recovery = DEFAULT_HALFTIME_FATIGUE_RECOVERY;
+        }
+        if !config.period_break_recovery_seconds.is_finite()
+            || config.period_break_recovery_seconds < 0.0
+        {
+            config.period_break_recovery_seconds = 0.0;
+        }
+
+        let (field_width, field_length) =
+            sane_pitch_dimensions(config.field_width_yards, config.field_length_yards);
+        config.field_width_yards = field_width;
+        config.field_length_yards = field_length;
+        if !config.goal_width_yards.is_finite() || config.goal_width_yards <= 0.0 {
+            config.goal_width_yards = DEFAULT_GOAL_WIDTH_YARDS.min(field_width * 0.5);
+        } else {
+            config.goal_width_yards = config.goal_width_yards.clamp(1.0, field_width * 0.8);
+        }
+
+        config.ball_drag_per_tick = if config.ball_drag_per_tick.is_finite() {
+            config.ball_drag_per_tick.clamp(0.0, 0.95)
+        } else {
+            DEFAULT_BALL_DRAG_PER_TICK
+        };
+        config.ball_air_resistance = if config.ball_air_resistance.is_finite() {
+            config.ball_air_resistance.clamp(0.0, 0.10)
+        } else {
+            DEFAULT_BALL_AIR_RESISTANCE
+        };
+        config.ball_grass_resistance_yps2 = if config.ball_grass_resistance_yps2.is_finite() {
+            config.ball_grass_resistance_yps2.clamp(0.0, 5.0)
+        } else {
+            DEFAULT_BALL_GRASS_RESISTANCE_YPS2
+        };
+        config.ball_stop_speed_yps = if config.ball_stop_speed_yps.is_finite() {
+            config.ball_stop_speed_yps.clamp(0.0, 20.0)
+        } else {
+            DEFAULT_BALL_STOP_SPEED_YPS
+        };
+        config.max_human_players = config.max_human_players.min(4);
+
+        config
+    }
+
     pub fn half_count(&self) -> u8 {
         self.halves.max(1)
     }
@@ -32961,6 +33014,7 @@ impl SoccerStepTimingStats {
 
 impl SoccerMatch {
     pub fn default_11v11(config: MatchConfig) -> Self {
+        let config = config.sanitized_for_runtime();
         let mut rng = mulberry32(config.seed);
         let mut players = default_players(&config, &mut rng);
         let officials = vec![
@@ -33992,6 +34046,9 @@ impl SoccerMatch {
     pub fn clear_controller_assignments(&mut self) {
         for player in &mut self.players {
             player.controller_slot = None;
+        }
+        for controller_slot in 0..self.config.human_slots() {
+            self.human_inputs.clear_slot(controller_slot);
         }
     }
 
@@ -42401,6 +42458,7 @@ fn run_site_simulation() -> SimulationTrace {
 }
 
 pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> SimulationTrace {
+    let config = config.sanitized_for_runtime();
     let mut sim = SoccerMatch::default_11v11(config.clone());
     sim.clear_controller_assignments();
     let mut frames = vec![sim.to_frame()];
@@ -42421,6 +42479,7 @@ pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> Simulatio
 }
 
 pub fn run_learning_episode(config: MatchConfig) -> SoccerLearningDataset {
+    let config = config.sanitized_for_runtime();
     let mut sim = SoccerMatch::default_11v11(config.clone());
     let total_ticks = config.total_ticks();
     for _ in 0..total_ticks {
@@ -51916,6 +51975,84 @@ mod tests {
     }
 
     #[test]
+    fn runtime_match_config_sanitizes_malformed_clock_pitch_and_ball_physics() {
+        let sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: f64::NAN,
+            duration_seconds: f64::INFINITY,
+            half_duration_seconds: f64::NAN,
+            halftime_fatigue_recovery: f64::NAN,
+            period_break_recovery_seconds: f64::NEG_INFINITY,
+            field_width_yards: f64::NAN,
+            field_length_yards: -1.0,
+            goal_width_yards: f64::INFINITY,
+            ball_drag_per_tick: f64::NAN,
+            ball_air_resistance: f64::INFINITY,
+            ball_grass_resistance_yps2: -1.0,
+            ball_stop_speed_yps: f64::NAN,
+            max_human_players: 9,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(sim.config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(sim.config.duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(
+            sim.config.half_duration_seconds,
+            DEFAULT_HALF_DURATION_SECONDS
+        );
+        assert_eq!(
+            sim.config.halftime_fatigue_recovery,
+            DEFAULT_HALFTIME_FATIGUE_RECOVERY
+        );
+        assert_eq!(sim.config.period_break_recovery_seconds, 0.0);
+        assert_eq!(sim.config.field_width_yards, DEFAULT_FIELD_WIDTH_YARDS);
+        assert_eq!(sim.config.field_length_yards, DEFAULT_FIELD_LENGTH_YARDS);
+        assert_eq!(sim.config.goal_width_yards, DEFAULT_GOAL_WIDTH_YARDS);
+        assert_eq!(sim.config.ball_drag_per_tick, DEFAULT_BALL_DRAG_PER_TICK);
+        assert_eq!(sim.config.ball_air_resistance, DEFAULT_BALL_AIR_RESISTANCE);
+        assert_eq!(sim.config.ball_grass_resistance_yps2, 0.0);
+        assert_eq!(sim.config.ball_stop_speed_yps, DEFAULT_BALL_STOP_SPEED_YPS);
+        assert_eq!(sim.config.total_ticks(), 6_000);
+        assert_eq!(sim.config.max_human_players, 4);
+        assert_eq!(sim.config.human_slots(), 4);
+        assert!(sim.match_clock().total_seconds.is_finite());
+        assert!(sim
+            .players
+            .iter()
+            .all(|player| vec2_is_finite(player.position)));
+        assert!(sim
+            .officials
+            .iter()
+            .all(|official| vec2_is_finite(official.position)));
+        assert!(vec2_is_finite(sim.ball.position));
+
+        let trace = run_simulation(
+            MatchConfig {
+                dt_seconds: f64::NAN,
+                duration_seconds: 0.0,
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..SoccerNeuralLearningConfig::default()
+                },
+                max_human_players: 0,
+                ..Default::default()
+            },
+            1,
+        );
+        assert_eq!(trace.config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(trace.config.total_ticks(), 0);
+        assert_eq!(trace.summary.ticks, 0);
+        assert_eq!(trace.frames.len(), 1);
+    }
+
+    #[test]
     #[ignore = "full 6000-tick debug smoke is slow; run explicitly for duration/performance checks"]
     fn simulation_runner_reaches_full_ten_minute_default_duration_with_sparse_frames() {
         let trace = run_simulation(
@@ -59737,6 +59874,65 @@ mod tests {
                 .map(String::as_str),
             Some("human-input"),
             "newly assigned player should consume fresh slot input"
+        );
+    }
+
+    #[test]
+    fn clearing_controller_assignments_flushes_pending_slot_input() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 785,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0");
+        sim.assign_controller_slot(1, Some(1))
+            .expect("assign slot 1");
+        let input_queue = sim.human_inputs.clone();
+        for slot in 0..2 {
+            assert!(input_queue.push(HumanInputFrame {
+                controller_slot: slot,
+                player_id: None,
+                seq: 7,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }));
+        }
+        assert_eq!(input_queue.queued_len(), 2);
+        assert_eq!(input_queue.last_seq_for_slot(0), Some(7));
+        assert_eq!(input_queue.last_seq_for_slot(1), Some(7));
+
+        sim.clear_controller_assignments();
+
+        assert!(sim.controller_assignments().is_empty());
+        assert_eq!(
+            input_queue.queued_len(),
+            0,
+            "bulk clearing controller assignments should discard stale queued inputs"
+        );
+        assert_eq!(input_queue.last_seq_for_slot(0), None);
+        assert_eq!(input_queue.last_seq_for_slot(1), None);
+        assert!(
+            input_queue.push(HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(1),
+                seq: 1,
+                axis: Vec2::new(0.0, 1.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }),
+            "cleared controller slot should accept a fresh low sequence"
         );
     }
 

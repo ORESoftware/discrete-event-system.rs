@@ -1865,6 +1865,8 @@ pub struct SoccerDecisionContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_tracking_source_frame_id: Option<String>,
     #[serde(default)]
+    pub tracking_confidence: f64,
+    #[serde(default)]
     pub actor_position: Vec2,
     #[serde(default)]
     pub actor_velocity: Vec2,
@@ -23528,6 +23530,7 @@ fn soccer_decision_context_for(
         defending_team_acceleration_yps2,
         tracking_source_frame_id: None,
         next_tracking_source_frame_id: None,
+        tracking_confidence: 0.0,
     }
 }
 
@@ -26799,6 +26802,10 @@ pub struct SoccerTrackingFrame {
     pub tick: u64,
     #[serde(default)]
     pub clock_seconds: f64,
+    #[serde(default, alias = "confidence", alias = "frameConfidence")]
+    pub tracking_confidence: Option<f64>,
+    #[serde(default, alias = "ballDetectionConfidence")]
+    pub ball_confidence: Option<f64>,
     #[serde(default)]
     pub ball_position: Vec2,
     #[serde(default)]
@@ -26844,6 +26851,8 @@ pub struct SoccerTrackingPlayerSample {
     pub role: PlayerRole,
     #[serde(default)]
     pub shirt: Option<u8>,
+    #[serde(default, alias = "confidence", alias = "detectionConfidence")]
+    pub tracking_confidence: Option<f64>,
     pub position: Vec2,
     #[serde(default)]
     pub velocity: Option<Vec2>,
@@ -27366,6 +27375,23 @@ impl SoccerTrackingDataset {
                     format!("tracking frame {idx} ballAction {action:?} is invalid: {e}")
                 })?;
             }
+            validate_optional_tracking_confidence(
+                frame.tracking_confidence,
+                &format!("tracking frame {idx} trackingConfidence"),
+            )?;
+            validate_optional_tracking_confidence(
+                frame.ball_confidence,
+                &format!("tracking frame {idx} ballConfidence"),
+            )?;
+            for player in &frame.players {
+                validate_optional_tracking_confidence(
+                    player.tracking_confidence,
+                    &format!(
+                        "tracking frame {idx} player {} trackingConfidence",
+                        player.id
+                    ),
+                )?;
+            }
         }
         Ok(())
     }
@@ -27373,6 +27399,18 @@ impl SoccerTrackingDataset {
     pub fn to_learning_dataset(&self) -> Result<SoccerLearningDataset, String> {
         soccer_tracking_dataset_to_learning_dataset(self)
     }
+}
+
+fn validate_optional_tracking_confidence(
+    confidence: Option<f64>,
+    label: &str,
+) -> Result<(), String> {
+    if let Some(confidence) = confidence {
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+            return Err(format!("{label} must be finite and between 0 and 1"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -40613,6 +40651,8 @@ fn tracking_frame_from_match(sim: &SoccerMatch) -> SoccerTrackingFrame {
         source_frame_id: None,
         tick: sim.tick,
         clock_seconds: sim.clock_seconds,
+        tracking_confidence: Some(1.0),
+        ball_confidence: Some(1.0),
         ball_position: sim.ball.position,
         ball_velocity: Some(sim.ball.velocity),
         ball_acceleration: Some(sim.ball.acceleration),
@@ -40635,6 +40675,7 @@ fn tracking_frame_from_match(sim: &SoccerMatch) -> SoccerTrackingFrame {
                 team: player.team,
                 role: player.role,
                 shirt: Some(player.shirt),
+                tracking_confidence: Some(1.0),
                 position: player.position,
                 velocity: Some(player.velocity),
                 motion_acceleration: Some(player.acceleration),
@@ -44022,6 +44063,8 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                 source_frame_id: None,
                 tick: 0,
                 clock_seconds: 0.0,
+                tracking_confidence: None,
+                ball_confidence: None,
                 ball_position: Vec2::new(40.0, 70.0),
                 ball_velocity: None,
                 ball_acceleration: None,
@@ -44042,6 +44085,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                         team: Team::Home,
                         role: PlayerRole::Midfielder,
                         shirt: Some(8),
+                        tracking_confidence: None,
                         position: Vec2::new(40.0, 70.0),
                         velocity: None,
                         motion_acceleration: None,
@@ -44058,6 +44102,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                         team: Team::Home,
                         role: PlayerRole::Forward,
                         shirt: Some(9),
+                        tracking_confidence: None,
                         position: Vec2::new(42.6, 77.2),
                         velocity: None,
                         motion_acceleration: None,
@@ -44074,6 +44119,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                         team: Team::Away,
                         role: PlayerRole::Defender,
                         shirt: Some(4),
+                        tracking_confidence: None,
                         position: Vec2::new(58.0, 78.0),
                         velocity: None,
                         motion_acceleration: None,
@@ -44090,6 +44136,8 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                 source_frame_id: None,
                 tick: 1,
                 clock_seconds: config.dt_seconds,
+                tracking_confidence: None,
+                ball_confidence: None,
                 ball_position: Vec2::new(42.8, 77.6),
                 ball_velocity: None,
                 ball_acceleration: None,
@@ -44110,6 +44158,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                         team: Team::Home,
                         role: PlayerRole::Midfielder,
                         shirt: Some(8),
+                        tracking_confidence: None,
                         position: Vec2::new(40.2, 70.4),
                         velocity: None,
                         motion_acceleration: None,
@@ -44126,6 +44175,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                         team: Team::Home,
                         role: PlayerRole::Forward,
                         shirt: Some(9),
+                        tracking_confidence: None,
                         position: Vec2::new(42.8, 77.6),
                         velocity: None,
                         motion_acceleration: None,
@@ -44142,6 +44192,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                         team: Team::Away,
                         role: PlayerRole::Defender,
                         shirt: Some(4),
+                        tracking_confidence: None,
                         position: Vec2::new(57.4, 78.2),
                         velocity: None,
                         motion_acceleration: None,
@@ -44207,7 +44258,9 @@ fn tracking_import_format(request: &SoccerTrackingImportRequest) -> String {
 /// optional `rotation_degrees`/`rotate_degrees` calibration columns, then
 /// mirrored with optional `flip_x`/`flip_y` columns when a source feed uses the
 /// opposite sideline or goal-line origin.
-/// Optional columns include `source_frame_id`, `frame_id`, `clock_seconds`, `name`, `shirt`, `vx`, `vy`,
+/// Optional columns include `source_frame_id`, `frame_id`, `clock_seconds`,
+/// `tracking_confidence`, `ball_confidence`, `name`, `shirt`,
+/// `player_confidence`, `vx`, `vy`,
 /// `ax`, `ay`, `jx`, `jy`, `facing`, `receive_facing`, `action_facing`,
 /// `home_x`, `home_y`, `home_x_norm`, `home_y_norm`, skill columns such as
 /// `top_speed`, `dribbling`, `passing_completion_rate`, `crossing_left`, and
@@ -44270,6 +44323,33 @@ pub fn soccer_tracking_dataset_from_csv(
             line_no,
         )? {
             builder.clock_seconds = Some(clock);
+        }
+        if let Some(confidence) = csv_optional_f64(
+            row,
+            &header_map,
+            &[
+                "tracking_confidence",
+                "trackingconfidence",
+                "frame_confidence",
+                "frameconfidence",
+                "confidence",
+            ],
+            line_no,
+        )? {
+            builder.tracking_confidence = Some(confidence);
+        }
+        if let Some(confidence) = csv_optional_f64(
+            row,
+            &header_map,
+            &[
+                "ball_confidence",
+                "ballconfidence",
+                "ball_detection_confidence",
+                "balldetectionconfidence",
+            ],
+            line_no,
+        )? {
+            builder.ball_confidence = Some(confidence);
         }
         if let Some(ball_position) =
             csv_optional_pitch_point(row, &header_map, BALL_PITCH_POINT_ALIASES, &config, line_no)?
@@ -44412,6 +44492,19 @@ pub fn soccer_tracking_dataset_from_csv(
         let role_raw = csv_required(row, &header_map, &["role", "position_role"], line_no)?;
         let role = parse_tracking_role(role_raw, line_no)?;
         let skills = tracking_csv_skill_profile(row, &header_map, role, line_no)?;
+        let tracking_confidence = csv_optional_f64(
+            row,
+            &header_map,
+            &[
+                "player_confidence",
+                "playerconfidence",
+                "player_detection_confidence",
+                "playerdetectionconfidence",
+                "detection_confidence",
+                "detectionconfidence",
+            ],
+            line_no,
+        )?;
         let position = csv_required_pitch_point(
             row,
             &header_map,
@@ -44432,6 +44525,7 @@ pub fn soccer_tracking_dataset_from_csv(
                 &["shirt", "shirt_number", "number"],
                 line_no,
             )?,
+            tracking_confidence,
             position,
             velocity: csv_optional_vec2(
                 row,
@@ -44568,6 +44662,8 @@ pub fn soccer_tracking_dataset_from_csv(
             clock_seconds: builder
                 .clock_seconds
                 .unwrap_or(builder.tick as f64 * config.dt_seconds),
+            tracking_confidence: builder.tracking_confidence,
+            ball_confidence: builder.ball_confidence,
             ball_position: builder.ball_position.unwrap_or(center),
             ball_velocity: builder.ball_velocity,
             ball_acceleration: builder.ball_acceleration,
@@ -44647,6 +44743,8 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
                 after.score_away,
                 true,
             );
+            let tracking_confidence = tracking_transition_confidence(&pair[0], &pair[1], player.id);
+            let reward = reward * tracking_reward_confidence_multiplier(tracking_confidence);
             let mut decision_context = soccer_decision_context_for(
                 player.id,
                 player.team,
@@ -44657,6 +44755,7 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
             );
             decision_context.tracking_source_frame_id = pair[0].source_frame_id.clone();
             decision_context.next_tracking_source_frame_id = pair[1].source_frame_id.clone();
+            decision_context.tracking_confidence = tracking_confidence;
             let before_pos = before.player_position(player.id).unwrap_or(player.position);
             let after_pos = after.player_position(player.id).unwrap_or(before_pos);
             transitions.push(SoccerLearningTransition {
@@ -44701,6 +44800,37 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
         transitions,
         events,
     })
+}
+
+fn tracking_confidence_value(confidence: Option<f64>) -> f64 {
+    confidence.unwrap_or(1.0).clamp(0.0, 1.0)
+}
+
+fn tracking_player_confidence(frame: &SoccerTrackingFrame, player_id: usize) -> f64 {
+    frame
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .map(|player| tracking_confidence_value(player.tracking_confidence))
+        .unwrap_or(0.35)
+}
+
+fn tracking_transition_confidence(
+    before: &SoccerTrackingFrame,
+    after: &SoccerTrackingFrame,
+    player_id: usize,
+) -> f64 {
+    let frame_confidence = tracking_confidence_value(before.tracking_confidence)
+        .min(tracking_confidence_value(after.tracking_confidence));
+    let ball_confidence = tracking_confidence_value(before.ball_confidence)
+        .min(tracking_confidence_value(after.ball_confidence));
+    let player_confidence = tracking_player_confidence(before, player_id)
+        .min(tracking_player_confidence(after, player_id));
+    (frame_confidence * 0.34 + ball_confidence * 0.26 + player_confidence * 0.40).clamp(0.0, 1.0)
+}
+
+fn tracking_reward_confidence_multiplier(confidence: f64) -> f64 {
+    (0.18 + confidence.clamp(0.0, 1.0) * 0.82).clamp(0.18, 1.0)
 }
 
 pub fn soccer_moment_records_from_jsonl(
@@ -45705,6 +45835,8 @@ struct TrackingCsvFrameBuilder {
     tick: u64,
     source_frame_id: Option<String>,
     clock_seconds: Option<f64>,
+    tracking_confidence: Option<f64>,
+    ball_confidence: Option<f64>,
     ball_position: Option<Vec2>,
     ball_velocity: Option<Vec2>,
     ball_acceleration: Option<Vec2>,
@@ -45727,6 +45859,8 @@ impl TrackingCsvFrameBuilder {
             tick,
             source_frame_id: None,
             clock_seconds: None,
+            tracking_confidence: None,
+            ball_confidence: None,
             ball_position: None,
             ball_velocity: None,
             ball_acceleration: None,
@@ -68342,6 +68476,82 @@ mod tests {
     }
 
     #[test]
+    fn tracking_dataset_confidence_downweights_imported_rewards() {
+        let high_confidence = sample_tracking_pass_dataset();
+        let high_dataset = high_confidence
+            .to_learning_dataset()
+            .expect("high confidence tracking conversion");
+        let high_passer = high_dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0 && transition.action == "pass")
+            .expect("high confidence passer");
+        assert!(
+            high_passer.reward.abs() > 1e-6,
+            "sample pass should produce a meaningful reward"
+        );
+        assert!(
+            (high_passer.decision_context.tracking_confidence - 1.0).abs() < 1e-12,
+            "missing confidence values should default to full trust"
+        );
+
+        let mut low_confidence = sample_tracking_pass_dataset();
+        low_confidence.frames[0].tracking_confidence = Some(0.50);
+        low_confidence.frames[1].tracking_confidence = Some(0.40);
+        low_confidence.frames[0].ball_confidence = Some(0.60);
+        low_confidence.frames[1].ball_confidence = Some(0.70);
+        low_confidence.frames[0].players[0].tracking_confidence = Some(0.25);
+        low_confidence.frames[1].players[0].tracking_confidence = Some(0.35);
+
+        let low_dataset = low_confidence
+            .to_learning_dataset()
+            .expect("low confidence tracking conversion");
+        let low_passer = low_dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0 && transition.action == "pass")
+            .expect("low confidence passer");
+        let expected_confidence = 0.40 * 0.34 + 0.60 * 0.26 + 0.25 * 0.40;
+        let expected_multiplier = tracking_reward_confidence_multiplier(expected_confidence);
+
+        assert!(
+            (low_passer.decision_context.tracking_confidence - expected_confidence).abs() < 1e-12,
+            "tracking confidence should combine frame, ball, and actor detector confidence"
+        );
+        assert!(
+            (low_passer.reward - high_passer.reward * expected_multiplier).abs() < 1e-9,
+            "low-confidence imported reward should be down-weighted: high={} low={} multiplier={expected_multiplier}",
+            high_passer.reward,
+            low_passer.reward
+        );
+        assert_eq!(
+            low_passer
+                .action_target
+                .as_ref()
+                .and_then(|target| target.player_id),
+            Some(1),
+            "confidence should not erase the learned pass target"
+        );
+    }
+
+    #[test]
+    fn tracking_dataset_rejects_invalid_detector_confidence() {
+        let mut tracking = sample_tracking_pass_dataset();
+        tracking.frames[0].ball_confidence = Some(1.4);
+        assert!(tracking
+            .validate()
+            .expect_err("ball confidence above one should be rejected")
+            .contains("ballConfidence"));
+
+        let mut tracking = sample_tracking_pass_dataset();
+        tracking.frames[0].players[0].tracking_confidence = Some(f64::NAN);
+        assert!(tracking
+            .validate()
+            .expect_err("non-finite player confidence should be rejected")
+            .contains("trackingConfidence"));
+    }
+
+    #[test]
     fn tracking_dataset_preserves_explicit_receive_and_action_facing() {
         let tracking = sample_tracking_pass_dataset();
         let mut value = serde_json::to_value(&tracking).expect("tracking json value");
@@ -68999,6 +69209,38 @@ mod tests {
         assert_eq!(fallback.source, "frame-only-upload.jsonl");
         assert_eq!(fallback.config.seed, tracking.config.seed);
         assert_eq!(fallback.frames.len(), 2);
+    }
+
+    #[test]
+    fn tracking_csv_parses_detector_confidence_columns() {
+        let raw = "\
+tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,player_confidence
+0,0,home,midfielder,40,50,40,50,0.70,0.80,0.90
+1,0,home,midfielder,41,51,41,51,0.60,0.75,0.85
+";
+        let tracking = soccer_tracking_dataset_from_csv(
+            raw,
+            MatchConfig {
+                duration_seconds: 0.2,
+                seed: 123,
+                ..Default::default()
+            },
+            "confidence.csv",
+        )
+        .expect("tracking csv with confidence columns");
+
+        assert_eq!(tracking.frames[0].tracking_confidence, Some(0.70));
+        assert_eq!(tracking.frames[0].ball_confidence, Some(0.80));
+        assert_eq!(
+            tracking.frames[0].players[0].tracking_confidence,
+            Some(0.90)
+        );
+        let dataset = tracking
+            .to_learning_dataset()
+            .expect("confidence csv learns");
+        let transition = dataset.transitions.first().expect("csv transition");
+        assert!(transition.decision_context.tracking_confidence < 1.0);
+        assert!(transition.reward.is_finite());
     }
 
     #[test]
@@ -84879,6 +85121,8 @@ mod tests {
                     source_frame_id: None,
                     tick: 0,
                     clock_seconds: 0.0,
+                    tracking_confidence: None,
+                    ball_confidence: None,
                     ball_position: Vec2::new(40.0, 70.0),
                     ball_velocity: Some(Vec2::zero()),
                     ball_acceleration: None,
@@ -84899,6 +85143,7 @@ mod tests {
                             team: Team::Home,
                             role: PlayerRole::Midfielder,
                             shirt: Some(8),
+                            tracking_confidence: None,
                             position: Vec2::new(40.0, 70.0),
                             velocity: None,
                             motion_acceleration: None,
@@ -84915,6 +85160,7 @@ mod tests {
                             team: Team::Home,
                             role: PlayerRole::Forward,
                             shirt: Some(9),
+                            tracking_confidence: None,
                             position: Vec2::new(44.0, 82.0),
                             velocity: None,
                             motion_acceleration: None,
@@ -84931,6 +85177,7 @@ mod tests {
                             team: Team::Away,
                             role: PlayerRole::Defender,
                             shirt: Some(4),
+                            tracking_confidence: None,
                             position: Vec2::new(58.0, 78.0),
                             velocity: None,
                             motion_acceleration: None,
@@ -84947,6 +85194,8 @@ mod tests {
                     source_frame_id: None,
                     tick: 1,
                     clock_seconds: 0.1,
+                    tracking_confidence: None,
+                    ball_confidence: None,
                     ball_position: Vec2::new(44.0, 82.0),
                     ball_velocity: Some(Vec2::new(8.0, 16.0)),
                     ball_acceleration: None,
@@ -84967,6 +85216,7 @@ mod tests {
                             team: Team::Home,
                             role: PlayerRole::Midfielder,
                             shirt: Some(8),
+                            tracking_confidence: None,
                             position: Vec2::new(40.2, 70.4),
                             velocity: None,
                             motion_acceleration: None,
@@ -84983,6 +85233,7 @@ mod tests {
                             team: Team::Home,
                             role: PlayerRole::Forward,
                             shirt: Some(9),
+                            tracking_confidence: None,
                             position: Vec2::new(44.0, 82.0),
                             velocity: None,
                             motion_acceleration: None,
@@ -84999,6 +85250,7 @@ mod tests {
                             team: Team::Away,
                             role: PlayerRole::Defender,
                             shirt: Some(4),
+                            tracking_confidence: None,
                             position: Vec2::new(56.5, 78.5),
                             velocity: None,
                             motion_acceleration: None,

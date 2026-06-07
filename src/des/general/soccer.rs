@@ -32628,15 +32628,15 @@ impl SoccerMatch {
             ));
         }
 
-        let target_idx = if let Some(player_id) = player_id {
-            Some(
-                self.players
-                    .iter()
-                    .position(|p| p.id == player_id)
-                    .ok_or_else(|| format!("player {player_id} does not exist"))?,
-            )
+        let (target_idx, previous_target_slot) = if let Some(player_id) = player_id {
+            let target_idx = self
+                .players
+                .iter()
+                .position(|p| p.id == player_id)
+                .ok_or_else(|| format!("player {player_id} does not exist"))?;
+            (Some(target_idx), self.players[target_idx].controller_slot)
         } else {
-            None
+            (None, None)
         };
 
         for player in &mut self.players {
@@ -32649,6 +32649,9 @@ impl SoccerMatch {
             self.players[target_idx].controller_slot = Some(controller_slot);
         }
         self.human_inputs.clear_slot(controller_slot);
+        if let Some(previous_slot) = previous_target_slot.filter(|slot| *slot != controller_slot) {
+            self.human_inputs.clear_slot(previous_slot);
+        }
 
         Ok(())
     }
@@ -38622,10 +38625,21 @@ impl SoccerRealtimeSession {
         &mut self,
         request: SoccerControllerAssignmentRequest,
     ) -> Result<SoccerControllerAssignmentResponse, String> {
+        let previous_slot = request.player_id.and_then(|player_id| {
+            self.sim
+                .players
+                .iter()
+                .find(|player| player.id == player_id)
+                .and_then(|player| player.controller_slot)
+        });
         self.sim
             .assign_controller_slot(request.controller_slot, request.player_id)?;
         self.controller_input_router
             .clear_pending_for_slot(request.controller_slot);
+        if let Some(previous_slot) = previous_slot.filter(|slot| *slot != request.controller_slot) {
+            self.controller_input_router
+                .clear_pending_for_slot(previous_slot);
+        }
         self.sync_controller_input_assignments();
         Ok(SoccerControllerAssignmentResponse {
             controller_assignments: self.sim.controller_assignments(),
@@ -56873,6 +56887,68 @@ mod tests {
     }
 
     #[test]
+    fn moving_player_to_new_controller_slot_flushes_old_slot_input() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 786,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0 to player 0");
+        let input_queue = sim.human_inputs.clone();
+        assert!(input_queue.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 11,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+        assert!(input_queue.push(HumanInputFrame {
+            controller_slot: 1,
+            player_id: Some(0),
+            seq: 3,
+            axis: Vec2::new(0.0, 1.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+        assert_eq!(input_queue.queued_len(), 2);
+
+        sim.assign_controller_slot(1, Some(0))
+            .expect("move player 0 to slot 1");
+
+        assert_eq!(sim.players[0].controller_slot, Some(1));
+        assert_eq!(input_queue.queued_len(), 0);
+        assert_eq!(input_queue.last_seq_for_slot(0), None);
+        assert_eq!(input_queue.last_seq_for_slot(1), None);
+        assert!(
+            input_queue.push(HumanInputFrame {
+                controller_slot: 1,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(0.0, 1.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }),
+            "new slot should accept a fresh sequence after reassignment"
+        );
+    }
+
+    #[test]
     fn realtime_assignment_flushes_native_controller_mailbox() {
         let mut session = SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
@@ -56950,6 +57026,70 @@ mod tests {
                 .map(String::as_str),
             Some("human-input"),
             "controller thread should remain alive after clearing stale pending input"
+        );
+    }
+
+    #[test]
+    fn moving_player_between_native_controller_slots_flushes_old_mailbox() {
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 789,
+            ..Default::default()
+        });
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("assign player 0 to slot 0");
+        assert_eq!(
+            session.push_human_inputs([HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 8,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }]),
+            1
+        );
+        assert_eq!(session.queued_human_input_count(), 1);
+        assert!(session.controller_thread_stats()[0].pending);
+
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 1,
+                player_id: Some(0),
+            })
+            .expect("move player 0 to slot 1");
+
+        let stats = session.controller_thread_stats();
+        assert_eq!(session.match_ref().players[0].controller_slot, Some(1));
+        assert!(!stats[0].pending);
+        assert_eq!(stats[0].latest_seq_seen, None);
+        assert!(!stats[1].pending);
+        assert_eq!(stats[1].latest_seq_seen, None);
+        assert_eq!(session.queued_human_input_count(), 0);
+        assert_eq!(
+            session.push_human_inputs([HumanInputFrame {
+                controller_slot: 1,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(0.0, 1.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }]),
+            1,
+            "new native slot should accept a fresh sequence after reassignment"
         );
     }
 
@@ -76833,15 +76973,15 @@ mod tests {
             .unwrap()
             .iter()
             .any(|a| a["controllerSlot"] == 0 && a["playerId"] == 5));
-        assert_eq!(assign_value["config"]["learningEnabled"], false);
-        assert_eq!(assign_value["config"]["neuralLearning"]["enabled"], false);
-        assert_eq!(assign_value["learning"]["learningEnabled"], false);
-        assert_eq!(assign_value["learning"]["neuralLearningEnabled"], false);
+        assert_eq!(assign_value["config"]["learningEnabled"], true);
+        assert_eq!(assign_value["config"]["neuralLearning"]["enabled"], true);
+        assert_eq!(assign_value["learning"]["learningEnabled"], true);
+        assert_eq!(assign_value["learning"]["neuralLearningEnabled"], true);
         assert_eq!(
             session.lock().unwrap().match_ref().players[5].controller_slot,
             Some(0)
         );
-        assert!(!session.lock().unwrap().match_ref().config.learning_enabled);
+        assert!(session.lock().unwrap().match_ref().config.learning_enabled);
 
         let start_x = session.lock().unwrap().match_ref().players[5].position.x;
         let step_body = r#"{"ticks":1,"inputs":[{"controllerSlot":0,"playerId":5,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}]}"#;

@@ -421,6 +421,7 @@ function emptyStats() {
 const trace = {
   config: {...FALLBACK_CONFIG},
   summary: {ticks: 0, stats: emptyStats()},
+  cadence: null,
   frames: [],
   events: [],
   runId: null,
@@ -616,17 +617,22 @@ function recentLoadedFrameRate() {
   return frames / Math.max(.25, ms / 1000);
 }
 function expectedFrameCount() {
+  const cadenceFrames = Number(trace.cadence?.expectedFrameCount || 0);
+  if (cadenceFrames > 0) return cadenceFrames;
   const ticks = Number(trace.summary?.ticks || 0);
   return Math.max(ticks + 1, trace.frames.length, 0);
 }
+function cadenceDtSeconds() {
+  return Number(trace.cadence?.dtSeconds || trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
+}
 function totalLoadedSeconds() {
-  return Math.max(0, trace.frames.length - 1) * Number(trace.config.dtSeconds || 0.1);
+  return Math.max(0, trace.frames.length - 1) * cadenceDtSeconds();
 }
 function bufferedFrameCountAhead() {
   return Math.max(0, trace.frames.length - 1 - frameIndex);
 }
 function bufferedSeconds() {
-  return bufferedFrameCountAhead() * Number(trace.config.dtSeconds || 0.1);
+  return bufferedFrameCountAhead() * cadenceDtSeconds();
 }
 function canStartPlayback() {
   if (trace.frames.length < 2) return false;
@@ -656,6 +662,7 @@ function resetTraceState() {
   uiReady = false;
   trace.config = {...FALLBACK_CONFIG};
   trace.summary = {ticks: 0, stats: emptyStats()};
+  trace.cadence = null;
   trace.frames = [];
   trace.events = [];
   trace.runId = null;
@@ -1330,10 +1337,12 @@ function updateMetrics() {
   const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
-  const dt = Number(trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
+  const dt = cadenceDtSeconds();
   const expectedFrames = expectedFrameCount();
-  const duration = Math.max(0, expectedFrames - 1) * dt;
-  cadence.textContent = `${dt.toFixed(2)}s; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f`;
+  const duration = Number(trace.cadence?.durationSeconds || Math.max(0, expectedFrames - 1) * dt);
+  const tickHz = Number(trace.cadence?.tickHz || (dt > 0 ? 1 / dt : 0));
+  const contract = trace.cadence?.defaultTenMinuteContract ? " ok" : "";
+  cadence.textContent = `${dt.toFixed(2)}s/${tickHz.toFixed(0)}Hz; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f${contract}`;
   seed.textContent = trace.config?.seed ?? "-";
   runId.textContent = runIdLabel();
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
@@ -1558,6 +1567,7 @@ async function loadTraceMeta(signal) {
   trace.config = meta.config || trace.config || {...FALLBACK_CONFIG};
   trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
   trace.summary.stats = trace.summary.stats || emptyStats();
+  trace.cadence = meta.cadence || meta.playback?.cadence || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;
   trace.generatedAtUnixMs = meta.generatedAtUnixMs || null;

@@ -30118,6 +30118,55 @@ pub struct SoccerMatchClock {
     pub done: bool,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerSimulationCadence {
+    pub dt_seconds: f64,
+    pub tick_hz: f64,
+    pub tick_millis: f64,
+    pub duration_seconds: f64,
+    pub total_ticks: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_every_ticks: Option<u64>,
+    pub expected_frame_count: usize,
+    pub default_ten_minute_contract: bool,
+}
+
+fn soccer_simulation_cadence(
+    config: &MatchConfig,
+    record_every_ticks: Option<u64>,
+    expected_frame_count: usize,
+) -> SoccerSimulationCadence {
+    let dt_seconds = config.dt_seconds.max(0.0);
+    let tick_hz = if dt_seconds > 0.0 {
+        1.0 / dt_seconds
+    } else {
+        0.0
+    };
+    let duration_seconds = config.effective_duration_seconds().max(0.0);
+    let total_ticks = config.total_ticks();
+    SoccerSimulationCadence {
+        dt_seconds,
+        tick_hz,
+        tick_millis: dt_seconds * 1_000.0,
+        duration_seconds,
+        total_ticks,
+        record_every_ticks: record_every_ticks.map(|ticks| ticks.max(1)),
+        expected_frame_count,
+        default_ten_minute_contract: (dt_seconds - DEFAULT_DT_SECONDS).abs() < 1e-9
+            && (duration_seconds - DEFAULT_DURATION_SECONDS).abs() < 1e-9
+            && total_ticks == 6_000,
+    }
+}
+
+fn soccer_full_match_cadence(config: &MatchConfig) -> SoccerSimulationCadence {
+    soccer_simulation_cadence(
+        config,
+        Some(1),
+        1 + usize::try_from(config.total_ticks()).unwrap_or(usize::MAX),
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerAssignment {
@@ -30270,6 +30319,8 @@ pub struct SoccerStepResponse {
     #[serde(default)]
     pub match_clock: SoccerMatchClock,
     #[serde(default)]
+    pub cadence: SoccerSimulationCadence,
+    #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
     #[serde(default)]
@@ -30312,6 +30363,8 @@ pub struct SoccerLiveStateResponse {
     pub summary: MatchSummary,
     #[serde(default)]
     pub match_clock: SoccerMatchClock,
+    #[serde(default)]
+    pub cadence: SoccerSimulationCadence,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
@@ -40066,6 +40119,12 @@ impl SoccerRealtimeSession {
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
             self.controller_latency_budget_for(&frame, &controller_threads, controller_yield);
+        let cadence = soccer_simulation_cadence(
+            &self.sim.config,
+            Some(record_every),
+            1 + usize::try_from(self.sim.config.total_ticks().div_ceil(record_every))
+                .unwrap_or(usize::MAX),
+        );
         SoccerStepResponse {
             frame,
             frames,
@@ -40082,6 +40141,7 @@ impl SoccerRealtimeSession {
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
+            cadence,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -40122,6 +40182,12 @@ impl SoccerRealtimeSession {
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
             self.controller_latency_budget_for(&frame, &controller_threads, controller_yield);
+        let cadence = soccer_simulation_cadence(
+            &self.sim.config,
+            Some(record_every),
+            1 + usize::try_from(self.sim.config.total_ticks().div_ceil(record_every))
+                .unwrap_or(usize::MAX),
+        );
         SoccerStepResponse {
             frame,
             frames: Vec::new(),
@@ -40138,6 +40204,7 @@ impl SoccerRealtimeSession {
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
+            cadence,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -40729,6 +40796,7 @@ impl SoccerRealtimeSession {
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
+            cadence: soccer_full_match_cadence(&self.sim.config),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -45387,17 +45455,20 @@ fn soccer_playback_metadata_json(
     record_every_ticks: Option<u64>,
 ) -> serde_json::Value {
     let generated_at_unix_ms = soccer_artifact_generated_at_unix_ms();
+    let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
     serde_json::json!({
         "runId": soccer_artifact_run_id(config.seed, generated_at_unix_ms),
         "generatedAtUnixMs": generated_at_unix_ms,
         "config": config,
         "summary": summary,
+        "cadence": cadence,
         "playback": {
             "dtSeconds": config.dt_seconds,
             "durationSeconds": config.effective_duration_seconds(),
             "totalTicks": config.total_ticks(),
             "recordEveryTicks": record_every_ticks.map(|ticks| ticks.max(1)),
             "expectedFrameCount": expected_frame_count,
+            "cadence": cadence,
         },
         "events": events,
     })
@@ -58308,6 +58379,20 @@ mod tests {
         assert_eq!(record_every_ticks, SITE_PLAYBACK_RECORD_EVERY_TICKS);
         assert_eq!(record_every_ticks, 1);
         assert_eq!(1 + config.total_ticks().div_ceil(record_every_ticks), 6_001);
+        let cadence = soccer_simulation_cadence(
+            &config,
+            Some(record_every_ticks),
+            1 + usize::try_from(config.total_ticks().div_ceil(record_every_ticks))
+                .expect("static site frame count"),
+        );
+        assert_eq!(cadence.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(cadence.tick_hz, 10.0);
+        assert_eq!(cadence.tick_millis, 100.0);
+        assert_eq!(cadence.duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(cadence.total_ticks, 6_000);
+        assert_eq!(cadence.record_every_ticks, Some(1));
+        assert_eq!(cadence.expected_frame_count, 6_001);
+        assert!(cadence.default_ten_minute_contract);
         assert_ne!(config.seed, 0);
         assert!(!config.learning_enabled);
         assert!(!config.learning_logging_enabled);
@@ -58396,6 +58481,12 @@ mod tests {
         assert!((initial.match_clock.remaining_seconds - DEFAULT_DURATION_SECONDS).abs() < 1e-9);
         assert_eq!(initial.match_clock.progress, 0.0);
         assert!(!initial.match_clock.done);
+        assert_eq!(initial.cadence.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(initial.cadence.tick_hz, 10.0);
+        assert_eq!(initial.cadence.total_ticks, 6_000);
+        assert_eq!(initial.cadence.expected_frame_count, 6_001);
+        assert_eq!(initial.cadence.record_every_ticks, Some(1));
+        assert!(initial.cadence.default_ten_minute_contract);
         assert!(!initial.done);
 
         let step = session.step(SoccerStepRequest {
@@ -58416,6 +58507,12 @@ mod tests {
         assert!((step.match_clock.remaining_seconds - 599.9).abs() < 1e-9);
         assert!(step.match_clock.progress > 0.0);
         assert!(!step.match_clock.done);
+        assert_eq!(step.cadence.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(step.cadence.tick_hz, 10.0);
+        assert_eq!(step.cadence.total_ticks, 6_000);
+        assert_eq!(step.cadence.expected_frame_count, 6_001);
+        assert_eq!(step.cadence.record_every_ticks, Some(1));
+        assert!(step.cadence.default_ten_minute_contract);
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
         assert_eq!(step.frame.central_brain.tracked_officials, 3);
@@ -85440,8 +85537,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("0.1s x 6001"));
         assert!(html.contains("const cadence = document.getElementById(\"cadence\")"));
         assert!(html.contains("function fmtDuration"));
+        assert!(html.contains("function cadenceDtSeconds"));
+        assert!(html.contains("trace.cadence = meta.cadence || meta.playback?.cadence || null"));
+        assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
-            "cadence.textContent = `${dt.toFixed(2)}s; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f`"
+            "cadence.textContent = `${dt.toFixed(2)}s/${tickHz.toFixed(0)}Hz; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f${contract}`"
         ));
         assert!(html.contains("trace.config?.seed"));
         assert!(html.contains("trace.runId"));
@@ -85626,6 +85726,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::Value::Null
         );
         assert_eq!(meta["playback"]["expectedFrameCount"], trace.frames.len());
+        assert_eq!(meta["cadence"], meta["playback"]["cadence"]);
+        assert_eq!(meta["cadence"]["dtSeconds"], trace.config.dt_seconds);
+        assert_eq!(meta["cadence"]["tickHz"], 10.0);
+        assert_eq!(meta["cadence"]["tickMillis"], 100.0);
+        assert_eq!(
+            meta["cadence"]["durationSeconds"],
+            trace.config.effective_duration_seconds()
+        );
+        assert_eq!(meta["cadence"]["totalTicks"], trace.config.total_ticks());
+        assert!(meta["cadence"].get("recordEveryTicks").is_none());
+        assert_eq!(meta["cadence"]["expectedFrameCount"], trace.frames.len());
+        assert_eq!(meta["cadence"]["defaultTenMinuteContract"], false);
         assert!(meta["generatedAtUnixMs"].as_u64().unwrap() > 0);
         assert!(meta["runId"]
             .as_str()
@@ -85684,6 +85796,24 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             meta["playback"]["expectedFrameCount"],
             config.total_ticks() + 1
+        );
+        assert_eq!(meta["cadence"], meta["playback"]["cadence"]);
+        assert_eq!(meta["cadence"]["dtSeconds"], config.dt_seconds);
+        assert_eq!(meta["cadence"]["tickHz"], 10.0);
+        assert_eq!(meta["cadence"]["tickMillis"], 100.0);
+        assert_eq!(
+            meta["cadence"]["durationSeconds"],
+            config.effective_duration_seconds()
+        );
+        assert_eq!(meta["cadence"]["totalTicks"], config.total_ticks());
+        assert_eq!(meta["cadence"]["recordEveryTicks"], 1);
+        assert_eq!(
+            meta["cadence"]["expectedFrameCount"],
+            config.total_ticks() + 1
+        );
+        assert_eq!(
+            meta["cadence"]["defaultTenMinuteContract"],
+            (config.effective_duration_seconds() - DEFAULT_DURATION_SECONDS).abs() < 1e-9
         );
         assert!(meta["generatedAtUnixMs"].as_u64().unwrap() > 0);
         assert!(meta["runId"]

@@ -18048,6 +18048,8 @@ impl WorldSnapshot {
         let retreat_y = self.defensive_line_break_retreat_target_y(team, holder, line_gap);
         let threat_fit = defensive_line_break_threat_fit(line_gap);
         let dir = team.attack_dir();
+        // Preserve a narrow close-down window; otherwise the back line either drops
+        // for an immediate break threat or retreats to stay connected behind the ball.
         let should_hard_retreat = line_gap <= DEFENSIVE_LINE_BREAK_HARD_RETREAT_GAP_YARDS
             || line_gap >= DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS;
         if should_hard_retreat {

@@ -27155,6 +27155,19 @@ fn soccer_policy_postgres_entry_row(
     let state_key = soccer_policy_postgres_state_key(state)?;
     let state_hash = soccer_policy_postgres_state_hash(&state_key)?;
     let action = normalize_soccer_action_label(action).to_string();
+    let role_scope = soccer_policy_role_storage_label(state.role).to_string();
+    let player_fine_cell_id = soccer_policy_postgres_cell_id(state.player_fine_cell_id)?;
+    let player_tactical_cell_id = soccer_policy_postgres_cell_id(state.player_tactical_cell_id)?;
+    let player_macro_cell_id = soccer_policy_postgres_cell_id(state.player_macro_cell_id)?;
+    let player_root_cell_id = soccer_policy_postgres_cell_id(state.player_root_cell_id)?;
+    let scope_key = soccer_policy_postgres_scope_key(
+        team,
+        &role_scope,
+        player_fine_cell_id,
+        player_tactical_cell_id,
+        player_macro_cell_id,
+        player_root_cell_id,
+    );
     if action.is_empty() || action.len() > 80 {
         return Err(format!(
             "soccer policy postgres action must be 1..=80 bytes, got {}",
@@ -27166,6 +27179,12 @@ fn soccer_policy_postgres_entry_row(
         entry_kind: entry_kind.to_string(),
         state_hash,
         state_key,
+        role_scope,
+        player_fine_cell_id,
+        player_tactical_cell_id,
+        player_macro_cell_id,
+        player_root_cell_id,
+        scope_key,
         action,
         target_fine_cell_id,
         target_tactical_cell_id,
@@ -27175,6 +27194,20 @@ fn soccer_policy_postgres_entry_row(
         visits,
         source_run_id,
     })
+}
+
+fn soccer_policy_postgres_scope_key(
+    team: Team,
+    role_scope: &str,
+    player_fine_cell_id: i32,
+    player_tactical_cell_id: i32,
+    player_macro_cell_id: i32,
+    player_root_cell_id: i32,
+) -> String {
+    format!(
+        "team={}:role={role_scope}:fine={player_fine_cell_id}:tactical={player_tactical_cell_id}:macro={player_macro_cell_id}:root={player_root_cell_id}",
+        soccer_policy_postgres_team(team)
+    )
 }
 
 fn soccer_policy_postgres_team(team: Team) -> &'static str {
@@ -27209,6 +27242,9 @@ fn normalize_soccer_policy_role_storage_label(raw: &str) -> String {
 }
 
 fn soccer_policy_postgres_entry_role(entry: &SoccerPolicyPostgresPolicyEntryRow) -> String {
+    if !entry.role_scope.is_empty() {
+        return normalize_soccer_policy_role_storage_label(&entry.role_scope);
+    }
     entry
         .state_key
         .get("role")
@@ -30874,6 +30910,18 @@ pub struct SoccerPolicyPostgresPolicyEntryRow {
     pub entry_kind: String,
     pub state_hash: String,
     pub state_key: serde_json::Value,
+    #[serde(default)]
+    pub role_scope: String,
+    #[serde(default)]
+    pub player_fine_cell_id: i32,
+    #[serde(default)]
+    pub player_tactical_cell_id: i32,
+    #[serde(default)]
+    pub player_macro_cell_id: i32,
+    #[serde(default)]
+    pub player_root_cell_id: i32,
+    #[serde(default)]
+    pub scope_key: String,
     pub action: String,
     pub target_fine_cell_id: i32,
     pub target_tactical_cell_id: i32,
@@ -30912,12 +30960,12 @@ impl Default for SoccerPolicyPostgresDimensionSummary {
     fn default() -> Self {
         SoccerPolicyPostgresDimensionSummary {
             scope_model: "state-key-role-and-grid".to_string(),
-            role_source: "state_key.role".to_string(),
+            role_source: "role_scope (denormalized from state_key.role)".to_string(),
             grid_sources: vec![
-                "state_key.playerFineCellId".to_string(),
-                "state_key.playerTacticalCellId".to_string(),
-                "state_key.playerMacroCellId".to_string(),
-                "state_key.playerRootCellId".to_string(),
+                "player_fine_cell_id".to_string(),
+                "player_tactical_cell_id".to_string(),
+                "player_macro_cell_id".to_string(),
+                "player_root_cell_id".to_string(),
             ],
             global_action_entry_count: 0,
             global_target_entry_count: 0,
@@ -64570,12 +64618,52 @@ mod tests {
             soccer_policy_value_micros(artifact.home_entries[0].value)
         );
         assert!(first.state_key.is_object());
+        assert_eq!(
+            first.role_scope,
+            soccer_policy_role_storage_label(artifact.home_entries[0].state.role)
+        );
+        assert_eq!(
+            first.player_fine_cell_id,
+            soccer_policy_postgres_cell_id(artifact.home_entries[0].state.player_fine_cell_id)
+                .expect("fine cell id")
+        );
+        assert_eq!(
+            first.player_tactical_cell_id,
+            soccer_policy_postgres_cell_id(artifact.home_entries[0].state.player_tactical_cell_id)
+                .expect("tactical cell id")
+        );
+        assert_eq!(
+            first.player_macro_cell_id,
+            soccer_policy_postgres_cell_id(artifact.home_entries[0].state.player_macro_cell_id)
+                .expect("macro cell id")
+        );
+        assert_eq!(
+            first.player_root_cell_id,
+            soccer_policy_postgres_cell_id(artifact.home_entries[0].state.player_root_cell_id)
+                .expect("root cell id")
+        );
+        assert_eq!(
+            first.scope_key,
+            soccer_policy_postgres_scope_key(
+                Team::Home,
+                &first.role_scope,
+                first.player_fine_cell_id,
+                first.player_tactical_cell_id,
+                first.player_macro_cell_id,
+                first.player_root_cell_id
+            )
+        );
         assert_eq!(first.state_hash.len(), 16);
         assert!(first.state_hash.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_eq!(first.state_hash, repeated.entries[0].state_hash);
         assert!(export.entries.iter().all(|entry| {
             matches!(entry.team.as_str(), "home" | "away")
                 && matches!(entry.entry_kind.as_str(), "action" | "target")
+                && matches!(
+                    entry.role_scope.as_str(),
+                    "goalkeeper" | "defender" | "midfielder" | "forward"
+                )
+                && !entry.scope_key.is_empty()
                 && entry.action.len() <= 80
                 && entry.state_key.is_object()
         }));
@@ -64596,7 +64684,10 @@ mod tests {
             export.policy_dimensions.scope_model,
             "state-key-role-and-grid"
         );
-        assert_eq!(export.policy_dimensions.role_source, "state_key.role");
+        assert_eq!(
+            export.policy_dimensions.role_source,
+            "role_scope (denormalized from state_key.role)"
+        );
         assert_eq!(
             export.policy_dimensions.global_total_entry_count,
             export.entries.len()
@@ -64615,7 +64706,7 @@ mod tests {
         );
         assert_eq!(
             export.version.metrics["policyDimensions"]["roleSource"],
-            "state_key.role"
+            "role_scope (denormalized from state_key.role)"
         );
         let role_total = export
             .policy_dimensions
@@ -64664,7 +64755,10 @@ mod tests {
         assert_eq!(meta["format"], "jsonl");
         assert_eq!(meta["artifactSchema"], "SoccerTeamPolicyArtifact/v1");
         assert_eq!(meta["contract"]["backend"], SOCCER_POLICY_POSTGRES_BACKEND);
-        assert_eq!(meta["policyDimensions"]["roleSource"], "state_key.role");
+        assert_eq!(
+            meta["policyDimensions"]["roleSource"],
+            "role_scope (denormalized from state_key.role)"
+        );
         assert_eq!(
             meta["policyDimensions"]["globalTotalEntryCount"]
                 .as_u64()
@@ -64696,6 +64790,16 @@ mod tests {
         assert_eq!(first_entry["kind"], "soccer-policy-postgres-entry");
         assert_eq!(first_entry["entry"]["team"], "home");
         assert_eq!(first_entry["entry"]["entryKind"], "action");
+        assert!(first_entry["entry"]["roleScope"]
+            .as_str()
+            .is_some_and(|role| matches!(
+                role,
+                "goalkeeper" | "defender" | "midfielder" | "forward"
+            )));
+        assert!(first_entry["entry"]["playerFineCellId"].is_i64());
+        assert!(first_entry["entry"]["scopeKey"]
+            .as_str()
+            .is_some_and(|scope| scope.starts_with("team=home:role=")));
         assert!(first_entry["entry"]["stateKey"].is_object());
     }
 
@@ -81353,7 +81457,10 @@ mod tests {
         assert_eq!(pg_value["version"]["experimentSlug"], "soccer/live");
         assert_eq!(pg_value["version"]["versionLabel"], "live/t2");
         assert_eq!(pg_value["version"]["generation"], 2);
-        assert_eq!(pg_value["policyDimensions"]["roleSource"], "state_key.role");
+        assert_eq!(
+            pg_value["policyDimensions"]["roleSource"],
+            "role_scope (denormalized from state_key.role)"
+        );
         assert_eq!(
             pg_value["version"]["metrics"]["policyDimensions"]["scopeModel"],
             "state-key-role-and-grid"
@@ -81378,6 +81485,14 @@ mod tests {
         assert_eq!(first_pg["entryKind"], "action");
         assert_eq!(first_pg["targetFineCellId"], -1);
         assert_eq!(first_pg["stateHash"].as_str().unwrap().len(), 16);
+        assert!(first_pg["roleScope"].as_str().is_some_and(|role| matches!(
+            role,
+            "goalkeeper" | "defender" | "midfielder" | "forward"
+        )));
+        assert!(first_pg["playerFineCellId"].is_i64());
+        assert!(first_pg["scopeKey"]
+            .as_str()
+            .is_some_and(|scope| scope.starts_with("team=home:role=")));
         assert!(first_pg["stateKey"].is_object());
         assert!(pg_entries.iter().any(|entry| {
             entry["entryKind"] == "target" && entry["targetFineCellId"].as_i64().unwrap() >= 0
@@ -81406,7 +81521,7 @@ mod tests {
         );
         assert_eq!(
             pg_jsonl_meta["policyDimensions"]["roleSource"],
-            "state_key.role"
+            "role_scope (denormalized from state_key.role)"
         );
         assert_eq!(
             pg_jsonl_meta["entryRows"].as_u64().unwrap(),

@@ -17138,7 +17138,18 @@ impl WorldSnapshot {
             return goal.clamp_to_pitch(self.field_width, self.field_length);
         }
         let ball_pressure = (1.0 - ball_distance / 72.0).clamp(0.0, 1.0);
-        let depth = (2.2 + ball_pressure * 10.8).clamp(2.2, 13.0);
+        let holder_pressure = self
+            .ball
+            .holder
+            .and_then(|holder| self.players.iter().find(|player| player.id == holder))
+            .filter(|holder| holder.team == team.other())
+            .map(|holder| {
+                let holder_position = self.player_snapshot_position(holder);
+                let line_gap = (holder_position.y - goal.y).abs();
+                (1.0 - line_gap / 42.0).clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0);
+        let depth = (2.2 + ball_pressure * 9.6 + holder_pressure * 2.0).clamp(2.2, 13.8);
         (goal + to_ball.normalized() * depth).clamp_to_pitch(self.field_width, self.field_length)
     }
 
@@ -17154,7 +17165,7 @@ impl WorldSnapshot {
         let holder_position = self.player_snapshot_position(holder);
         let own_goal_y = self.own_goal_y_for(team);
         let ball_goal_distance = (holder_position.y - own_goal_y).abs();
-        if ball_goal_distance > self.field_length * 0.55 {
+        if ball_goal_distance > self.field_length * 0.62 {
             return None;
         }
 
@@ -17173,7 +17184,7 @@ impl WorldSnapshot {
         }
         let defensive_line_y = defender_y_total / defender_count as f64;
         let line_gap = (holder_position.y - defensive_line_y) * team.attack_dir();
-        if !(-8.0..=18.0).contains(&line_gap) {
+        if !(-12.0..=24.0).contains(&line_gap) {
             return None;
         }
         Some((holder_position, line_gap))
@@ -17185,8 +17196,8 @@ impl WorldSnapshot {
         holder: Vec2,
         line_gap: f64,
     ) -> f64 {
-        let urgency = ((18.0 - line_gap) / 26.0).clamp(0.0, 1.0);
-        let retreat_gap = 11.5 + urgency * 5.5;
+        let urgency = ((24.0 - line_gap) / 36.0).clamp(0.0, 1.0);
+        let retreat_gap = 13.5 + urgency * 6.5;
         let target_y = holder.y - team.attack_dir() * retreat_gap;
         let own_goal_y = self.own_goal_y_for(team);
         if !self.ball_near_own_goal_line(team) {
@@ -17198,6 +17209,23 @@ impl WorldSnapshot {
         } else {
             target_y
         }
+    }
+
+    fn clamp_defensive_line_break_retreat(
+        &self,
+        team: Team,
+        holder: Vec2,
+        line_gap: f64,
+        mut target: Vec2,
+    ) -> Vec2 {
+        let retreat_y = self.defensive_line_break_retreat_target_y(team, holder, line_gap);
+        let dir = team.attack_dir();
+        if dir > 0.0 {
+            target.y = target.y.min(retreat_y + 2.0);
+        } else {
+            target.y = target.y.max(retreat_y - 2.0);
+        }
+        self.clamp_defensive_goal_line_and_ball_gap(team, target)
     }
 
     fn likely_next_opponent_pass_target_for_defense(&self, defending_team: Team) -> Option<Vec2> {
@@ -20494,6 +20522,12 @@ impl WorldSnapshot {
             };
         };
         let open = self.open_space_for(player_id, home);
+        if me.role == PlayerRole::Goalkeeper {
+            return SupportMovementTarget {
+                point: self.goalkeeper_ball_goal_tracking_target(me.team),
+                action_label: "support-shape",
+            };
+        }
         if self.possession_team() == Some(me.team) && !roam {
             if let Some(target) = special_targets.check_to_ball {
                 return SupportMovementTarget {
@@ -20871,7 +20905,21 @@ impl WorldSnapshot {
                 }
             }
         }
-        self.shape_guarded_movement_point(player_id, best, &[mark, zone, home], home, roam)
+        let guarded =
+            self.shape_guarded_movement_point(player_id, best, &[mark, zone, home], home, roam);
+        if me.role == PlayerRole::Defender {
+            if let Some((holder_position, line_gap)) =
+                self.opponent_breakthrough_ball_carrier(me.team)
+            {
+                return self.clamp_defensive_line_break_retreat(
+                    me.team,
+                    holder_position,
+                    line_gap,
+                    guarded,
+                );
+            }
+        }
+        guarded
     }
 
     fn clamp_to_role_position(
@@ -70557,6 +70605,43 @@ mod tests {
         assert!(
             runtime_target.distance(line_target) < 1e-9,
             "runtime keeper defense should ignore off-line LP guidance: runtime={runtime_target:?} line_target={line_target:?}"
+        );
+    }
+
+    #[test]
+    fn goalkeeper_support_shape_still_tracks_ball_goal_line() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let teammate = 6;
+        sim.players[keeper].position = Vec2::new(18.0, 10.0);
+        sim.players[teammate].position = Vec2::new(63.0, 54.0);
+        sim.ball.holder = Some(teammate);
+        sim.ball.position = sim.players[teammate].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        let support = snapshot.attacking_support_movement_for(
+            keeper,
+            sim.players[keeper].home_position,
+            false,
+        );
+        let goal = Vec2::new(
+            snapshot.field_width * 0.5,
+            snapshot.own_goal_y_for(Team::Home),
+        );
+        let line_distance = segment_distance_to_point(goal, snapshot.ball.position, support.point);
+        let line_projection =
+            segment_projection_factor(goal, snapshot.ball.position, support.point);
+
+        assert_eq!(support.action_label, "support-shape");
+        assert!(
+            support.point.distance(line_target) < 1e-9,
+            "keeper support target should still be direct ball-goal-line tracking: support={support:?} line_target={line_target:?}"
+        );
+        assert!(
+            line_distance < 1e-9 && (0.0..=1.0).contains(&line_projection),
+            "keeper possession support should remain on the direct line: support={support:?} line_distance={line_distance} projection={line_projection}"
         );
     }
 

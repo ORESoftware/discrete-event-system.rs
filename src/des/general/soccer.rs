@@ -8666,20 +8666,26 @@ impl PlayerAgent {
         ));
         let sprint = match &action {
             SoccerAction::MoveTo(target) if is_attacking_support_action_label(&action_label) => {
-                (snapshot.attacking_support_sprint_active(self.team)
-                    || holder_pressure_support_urgency(snapshot, self.team)
-                        >= PRESSURED_SUPPORT_SPRINT_URGENCY
-                    || matches!(
-                        normalize_soccer_action_label(&action_label),
-                        "check-to-ball"
-                            | "wide-outlet"
-                            | "run-in-behind"
-                            | "shot-creation-run"
-                            | "overlap-run"
-                            | "support-push-up"
-                    ))
-                    && matches!(self.role, PlayerRole::Midfielder | PlayerRole::Forward)
-                    && self.position.distance(*target) > 3.5
+                if self.role == PlayerRole::Goalkeeper {
+                    snapshot.goalkeeper_line_recovery_sprint_active(self.id)
+                        && self.position.distance(*target)
+                            > GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS
+                } else {
+                    (snapshot.attacking_support_sprint_active(self.team)
+                        || holder_pressure_support_urgency(snapshot, self.team)
+                            >= PRESSURED_SUPPORT_SPRINT_URGENCY
+                        || matches!(
+                            normalize_soccer_action_label(&action_label),
+                            "check-to-ball"
+                                | "wide-outlet"
+                                | "run-in-behind"
+                                | "shot-creation-run"
+                                | "overlap-run"
+                                | "support-push-up"
+                        ))
+                        && matches!(self.role, PlayerRole::Midfielder | PlayerRole::Forward)
+                        && self.position.distance(*target) > 3.5
+                }
             }
             SoccerAction::MoveTo(target) if action_label == "defend" => {
                 if self.role == PlayerRole::Goalkeeper {
@@ -17632,7 +17638,7 @@ impl WorldSnapshot {
         if keeper.role != PlayerRole::Goalkeeper {
             return false;
         }
-        if self.controlled_possession_team() == Some(keeper.team) {
+        if self.ball.holder == Some(keeper_id) {
             return false;
         }
         let current = self.player_snapshot_position(keeper);
@@ -74254,6 +74260,43 @@ mod tests {
         assert!(
             runtime_target.distance(line_target) < 1e-9,
             "runtime keeper support should ignore off-line LP guidance: runtime={runtime_target:?} line_target={line_target:?}"
+        );
+    }
+
+    #[test]
+    fn goalkeeper_support_sprints_back_to_line_during_own_possession() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let teammate = 6;
+        sim.players[keeper].position = Vec2::new(13.0, 7.5);
+        sim.players[teammate].position = Vec2::new(63.0, 54.0);
+        sim.ball.holder = Some(teammate);
+        sim.ball.position = sim.players[teammate].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        let mut keeper_player = sim.players[keeper].clone();
+        let intent =
+            keeper_player.run_time_step(&snapshot, None, None, &mut SeededRandom::new(28_405));
+        let SoccerAction::MoveTo(runtime_target) = intent.action else {
+            panic!(
+                "off-line keeper should choose support movement back to the line, got {:?}",
+                intent.action
+            );
+        };
+
+        assert!(
+            snapshot.goalkeeper_line_recovery_sprint_active(keeper),
+            "keeper should urgently recover line position even while his team has the ball"
+        );
+        assert!(
+            runtime_target.distance(line_target) < 1e-9,
+            "runtime keeper support should target the exact ball-goal line: runtime={runtime_target:?} line_target={line_target:?}"
+        );
+        assert!(
+            intent.sprint,
+            "off-line keeper support should sprint back onto the ball-goal line"
         );
     }
 

@@ -105,6 +105,10 @@ const SHOT_BAILOUT_ON_FRAME_PROBABILITY: f64 = 0.20;
 const STRIKER_SHOT_WINDOW_YARDS: f64 = 30.0;
 const TEAMMATE_MUST_SHOOT_YARDS: f64 = 25.0;
 const STRIKER_MUST_SHOOT_YARDS: f64 = TEAMMATE_MUST_SHOOT_YARDS;
+const CLEAN_SHOT_MUST_SHOOT_YARDS: f64 = 20.0;
+const CLEAN_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.34;
+const CLEAN_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.32;
+const CLEAN_SHOT_MIN_KEEPER_BEAT_PROBABILITY: f64 = 0.08;
 const ATTACKING_DRIBBLE_GOAL_DRIVE_YARDS: f64 = 34.0;
 const ATTACKING_DRIBBLE_SHOOTING_POCKET_YARDS: f64 = 12.0;
 const STRIKER_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.72;
@@ -48246,8 +48250,24 @@ fn shot_decision_is_qualified_for_role(
     role: PlayerRole,
 ) -> bool {
     shot_decision_is_qualified(observation)
+        || clean_twenty_yard_shot_is_qualified(observation, role)
         || teammate_near_goal_shot_is_qualified(observation, role)
         || striker_shot_window_is_qualified(observation, role)
+}
+
+fn clean_twenty_yard_shot_is_qualified(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> bool {
+    if role == PlayerRole::Goalkeeper || !observation.shot_lane_open {
+        return false;
+    }
+    observation.yards_to_goal <= CLEAN_SHOT_MUST_SHOOT_YARDS
+        && observation.shot_block_probability.clamp(0.0, 1.0) <= CLEAN_SHOT_MAX_BLOCK_PROBABILITY
+        && observation.shot_on_frame_probability >= CLEAN_SHOT_MIN_ON_FRAME_PROBABILITY
+        && observation.shot_beat_goalkeeper_probability >= CLEAN_SHOT_MIN_KEEPER_BEAT_PROBABILITY
+        && (observation.forward_dribble_space_yards >= 1.5
+            || observation.shot_block_probability <= CLEAN_SHOT_MAX_BLOCK_PROBABILITY * 0.52)
 }
 
 fn teammate_near_goal_shot_is_qualified(
@@ -48284,6 +48304,7 @@ fn striker_must_shoot(observation: &SoccerPomdpObservation, role: PlayerRole) ->
 
 fn must_shoot_near_goal(observation: &SoccerPomdpObservation, role: PlayerRole) -> bool {
     teammate_near_goal_shot_is_qualified(observation, role)
+        || clean_twenty_yard_shot_is_qualified(observation, role)
 }
 
 fn goal_attack_shot_is_required(observation: &SoccerPomdpObservation, role: PlayerRole) -> bool {
@@ -62755,6 +62776,87 @@ mod tests {
             PlayerRole::Forward
         ));
         assert!(!must_shoot_near_goal(&observation, PlayerRole::Midfielder));
+    }
+
+    #[test]
+    fn clean_twenty_yard_window_forces_shot_even_below_quality_gate() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1418,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 101.0);
+        sim.players[attacker].skills.shooting = 5.4;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.20;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 1.0;
+        sim.players[keeper].position = Vec2::new(40.0, 116.0);
+        sim.players[keeper].skills.goalkeeping = 8.8;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(attacker);
+        observation.shot_lane_open = true;
+        observation.yards_to_goal = CLEAN_SHOT_MUST_SHOOT_YARDS - 1.0;
+        observation.shot_block_probability = 0.16;
+        observation.shot_on_frame_probability = CLEAN_SHOT_MIN_ON_FRAME_PROBABILITY + 0.02;
+        observation.shot_beat_goalkeeper_probability =
+            CLEAN_SHOT_MIN_KEEPER_BEAT_PROBABILITY + 0.02;
+        observation.forward_dribble_space_yards = 5.0;
+
+        assert!(
+            !shot_decision_is_qualified(&observation),
+            "the base quality gate should stay conservative for this mediocre shot"
+        );
+        assert!(clean_twenty_yard_shot_is_qualified(
+            &observation,
+            sim.players[attacker].role
+        ));
+        assert!(must_shoot_near_goal(
+            &observation,
+            sim.players[attacker].role
+        ));
+        assert!(goal_attack_shot_is_required(
+            &observation,
+            sim.players[attacker].role
+        ));
+
+        let mut blocked = observation.clone();
+        blocked.shot_lane_open = false;
+        blocked.shot_block_probability = CLEAN_SHOT_MAX_BLOCK_PROBABILITY + 0.04;
+        assert!(!clean_twenty_yard_shot_is_qualified(
+            &blocked,
+            sim.players[attacker].role
+        ));
+        assert!(!must_shoot_near_goal(&blocked, sim.players[attacker].role));
+
+        let mut shoot_count = 0;
+        for seed in 0..40 {
+            let mut player = sim.players[attacker].clone();
+            let intent = player.run_time_step_with_context(
+                &snapshot,
+                snapshot.mdp_state_for_player(attacker),
+                observation.clone(),
+                None,
+                None,
+                &mut mulberry32(26_000 + seed),
+            );
+            if matches!(intent.action, SoccerAction::Shoot { .. }) {
+                shoot_count += 1;
+            }
+        }
+        assert_eq!(
+            shoot_count, 40,
+            "clean 20-yard windows should be deterministic must-shoot events"
+        );
     }
 
     #[test]

@@ -11272,58 +11272,43 @@ impl SharedPlayerPositions {
     }
 
     pub fn snapshot(&self) -> SharedPlayerPositionSnapshot {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
-            .snapshot()
+        soccer_rwlock_read(&self.inner, "shared_player_positions").snapshot()
     }
 
     pub fn latest_for(&self, player_id: usize) -> Option<PlayerPositionSample> {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
+        soccer_rwlock_read(&self.inner, "shared_player_positions")
             .latest_for(player_id)
             .cloned()
     }
 
     pub fn history_for(&self, player_id: usize) -> Option<Vec<PlayerPositionSample>> {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
+        soccer_rwlock_read(&self.inner, "shared_player_positions")
             .histories
             .get(&player_id)
             .map(|history| history.iter().cloned().collect())
     }
 
     pub fn official_latest_for(&self, official_id: usize) -> Option<OfficialPositionSample> {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
+        soccer_rwlock_read(&self.inner, "shared_player_positions")
             .official_latest_for(official_id)
             .cloned()
     }
 
     pub fn official_history_for(&self, official_id: usize) -> Option<Vec<OfficialPositionSample>> {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
+        soccer_rwlock_read(&self.inner, "shared_player_positions")
             .official_histories
             .get(&official_id)
             .map(|history| history.iter().cloned().collect())
     }
 
     pub fn ball_latest(&self) -> Option<BallPositionSample> {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
+        soccer_rwlock_read(&self.inner, "shared_player_positions")
             .ball_latest
             .clone()
     }
 
     pub fn ball_history(&self) -> Vec<BallPositionSample> {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
+        soccer_rwlock_read(&self.inner, "shared_player_positions")
             .ball_history
             .iter()
             .cloned()
@@ -11338,10 +11323,13 @@ impl SharedPlayerPositions {
         tick: u64,
         clock_seconds: f64,
     ) {
-        self.inner
-            .write()
-            .expect("shared player position lock poisoned")
-            .sync_from_players_and_ball(players, officials, ball, tick, clock_seconds);
+        soccer_rwlock_write(&self.inner, "shared_player_positions").sync_from_players_and_ball(
+            players,
+            officials,
+            ball,
+            tick,
+            clock_seconds,
+        );
     }
 
     fn snapshot_with_current_players(
@@ -11353,17 +11341,14 @@ impl SharedPlayerPositions {
         clock_seconds: f64,
         dt_seconds: f64,
     ) -> SharedPlayerPositionSnapshot {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
-            .snapshot_with_current_players(
-                players,
-                officials,
-                ball,
-                tick,
-                clock_seconds,
-                dt_seconds,
-            )
+        soccer_rwlock_read(&self.inner, "shared_player_positions").snapshot_with_current_players(
+            players,
+            officials,
+            ball,
+            tick,
+            clock_seconds,
+            dt_seconds,
+        )
     }
 
     fn latest_snapshot_with_current_players(
@@ -11375,9 +11360,7 @@ impl SharedPlayerPositions {
         clock_seconds: f64,
         dt_seconds: f64,
     ) -> SharedPlayerPositionSnapshot {
-        self.inner
-            .read()
-            .expect("shared player position lock poisoned")
+        soccer_rwlock_read(&self.inner, "shared_player_positions")
             .latest_snapshot_with_current_players(
                 players,
                 officials,
@@ -58323,6 +58306,56 @@ mod tests {
                 .expect("shared ball latest after syncs")
                 .tick,
             sim.tick
+        );
+    }
+
+    #[test]
+    fn shared_position_board_recovers_from_poisoned_lock() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 213,
+            ..MatchConfig::playback_trace(0.4)
+        });
+        sim.run_time_step();
+        let shared = sim.shared_positions.clone();
+        let poisoner = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let _guard = shared
+                    .inner
+                    .write()
+                    .expect("test poison shared position lock");
+                panic!("poison shared player position lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+
+        let snapshot = shared.snapshot();
+        assert_eq!(snapshot.latest.len(), 22);
+        assert_eq!(snapshot.official_latest.len(), 3);
+        assert_eq!(
+            shared.latest_for(0).expect("recovered player latest").tick,
+            sim.tick
+        );
+        assert_eq!(
+            shared
+                .official_latest_for(22)
+                .expect("recovered center ref latest")
+                .tick,
+            sim.tick
+        );
+        assert_eq!(
+            shared.ball_latest().expect("recovered ball latest").tick,
+            sim.tick
+        );
+
+        sim.run_time_step();
+        assert_eq!(
+            sim.shared_positions
+                .ball_latest()
+                .expect("shared ball latest after recovered write")
+                .tick,
+            sim.tick,
+            "main loop should still sync shared positions after a reader/writer panic poisons the board"
         );
     }
 

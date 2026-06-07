@@ -245,10 +245,15 @@ const DEFENSIVE_GOAL_LINE_BUFFER_YARDS: f64 = 6.0;
 const DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS: f64 = 4.0;
 const DEFENSIVE_MAX_BEHIND_BALL_YARDS: f64 = 30.0;
 const DEFENSIVE_LINE_BREAK_MIN_ADVANCEMENT_FROM_GOAL_YARDS: f64 = 10.0;
+const DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 36.0;
+const DEFENSIVE_LINE_BREAK_BASE_RETREAT_GAP_YARDS: f64 = 28.0;
+const DEFENSIVE_LINE_BREAK_URGENT_RETREAT_GAP_YARDS: f64 = 15.0;
 const GOALKEEPER_LOOSE_BALL_COLLECTION_WINDOW_YARDS: f64 = 5.5;
 const GOALKEEPER_LINE_SAFE_INTERVENTION_RADIUS_YARDS: f64 = 2.25;
 const GOALKEEPER_LINE_SAFE_INTERVENTION_DEVIATION_YARDS: f64 = 1.15;
 const GOALKEEPER_LINE_COLLECTION_DEVIATION_YARDS: f64 = 5.5;
+const GOALKEEPER_LINE_RECOVERY_SPRINT_ALIGNMENT_SCORE: f64 = 0.86;
+const GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS: f64 = 1.35;
 const DEFENDER_PRESS_MIDFIELDER_IDEAL_YARDS: f64 = 5.0;
 const MIDFIELDER_PRESS_FOCUS_IDEAL_YARDS: f64 = 5.0;
 const FORWARD_TOP_SPEED_MULTIPLIER: f64 = 1.10;
@@ -260,6 +265,13 @@ const CENTER_REF_BALL_POSITION_WEIGHT: f64 = 0.20;
 const ASSISTANT_REF_BALL_CLEARANCE_YARDS: f64 = 4.0;
 const ASSISTANT_REF_TOUCHLINE_OFFSET_YARDS: f64 = 0.5;
 const LIVE_HTTP_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
+fn defensive_line_break_threat_fit(line_gap: f64) -> f64 {
+    ((DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS - line_gap)
+        / (DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS + 16.0))
+        .clamp(0.0, 1.0)
+}
+
 const DEFAULT_LIVE_TEAM_POLICY_PATH: &str = "out/soccer-live/team-policy.json";
 const DEFAULT_TRACKED_TEAM_POLICY_PATH: &str = "data/soccer/policies/team-policy.snapshot.json";
 const DEFAULT_LIVE_TEAM_POLICY_HISTORY_PATH: &str = "out/soccer-live/team-policy.history.jsonl";
@@ -6962,9 +6974,15 @@ impl PlayerAgent {
         let (shape_score, roam_score) = if self.role == PlayerRole::Goalkeeper {
             let ball_distance = self.position.distance(snapshot.ball.position);
             let close_ball = (1.0 - ball_distance / 12.0).clamp(0.0, 1.0);
+            let line_recovery = snapshot.goalkeeper_line_recovery_sprint_active(self.id);
             (
-                (4.70 + defensive_mindedness * 0.44).clamp(4.70, 5.20),
-                (0.04 + close_ball * 0.10 + press * 0.015).clamp(0.04, 0.16),
+                (4.70 + defensive_mindedness * 0.44 + if line_recovery { 0.85 } else { 0.0 })
+                    .clamp(4.70, 6.05),
+                if line_recovery {
+                    0.02
+                } else {
+                    (0.04 + close_ball * 0.10 + press * 0.015).clamp(0.04, 0.16)
+                },
             )
         } else {
             (
@@ -8644,12 +8662,19 @@ impl PlayerAgent {
                     && self.position.distance(*target) > 3.5
             }
             SoccerAction::MoveTo(target) if action_label == "defend" => {
-                snapshot.defensive_tracking_sprint_active(self.team)
-                    && matches!(self.role, PlayerRole::Defender | PlayerRole::Midfielder)
-                    && self.position.distance(*target) > 2.5
+                if self.role == PlayerRole::Goalkeeper {
+                    snapshot.goalkeeper_line_recovery_sprint_active(self.id)
+                        && self.position.distance(*target) > 0.75
+                } else {
+                    snapshot.defensive_tracking_sprint_active(self.team)
+                        && matches!(self.role, PlayerRole::Defender | PlayerRole::Midfielder)
+                        && self.position.distance(*target) > 2.5
+                }
             }
             SoccerAction::MoveTo(target) if action_label == "recover" => {
-                snapshot.rebound_recovery_sprint_active(self.id)
+                (snapshot.rebound_recovery_sprint_active(self.id)
+                    || (self.role == PlayerRole::Goalkeeper
+                        && snapshot.goalkeeper_line_recovery_sprint_active(self.id)))
                     && self.position.distance(*target) > 0.75
             }
             _ => false,
@@ -17508,6 +17533,25 @@ impl WorldSnapshot {
                 <= GOALKEEPER_LINE_SAFE_INTERVENTION_DEVIATION_YARDS
     }
 
+    fn goalkeeper_line_recovery_sprint_active(&self, keeper_id: usize) -> bool {
+        let Some(keeper) = self.players.iter().find(|player| player.id == keeper_id) else {
+            return false;
+        };
+        if keeper.role != PlayerRole::Goalkeeper {
+            return false;
+        }
+        if self.controlled_possession_team() == Some(keeper.team) {
+            return false;
+        }
+        let current = self.player_snapshot_position(keeper);
+        let line_target = self.goalkeeper_ball_goal_tracking_target(keeper.team);
+        if current.distance(line_target) < GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS {
+            return false;
+        }
+        goalkeeper_ball_goal_line_alignment_score(keeper.team, current, self)
+            < GOALKEEPER_LINE_RECOVERY_SPRINT_ALIGNMENT_SCORE
+    }
+
     fn opponent_breakthrough_ball_carrier(&self, team: Team) -> Option<(Vec2, f64)> {
         let holder_id = self.ball.holder?;
         let holder = self
@@ -17544,7 +17588,7 @@ impl WorldSnapshot {
             return None;
         }
         let line_gap = (holder_position.y - defensive_line_y) * team.attack_dir();
-        if !(-16.0..=30.0).contains(&line_gap) {
+        if !(-16.0..=DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS).contains(&line_gap) {
             return None;
         }
         Some((holder_position, line_gap))
@@ -17556,8 +17600,9 @@ impl WorldSnapshot {
         holder: Vec2,
         line_gap: f64,
     ) -> f64 {
-        let urgency = ((30.0 - line_gap) / 44.0).clamp(0.0, 1.0);
-        let retreat_gap = 24.0 + urgency * 13.0;
+        let urgency = defensive_line_break_threat_fit(line_gap);
+        let retreat_gap = DEFENSIVE_LINE_BREAK_BASE_RETREAT_GAP_YARDS
+            + urgency * DEFENSIVE_LINE_BREAK_URGENT_RETREAT_GAP_YARDS;
         let target_y = holder.y - team.attack_dir() * retreat_gap;
         let own_goal_y = self.own_goal_y_for(team);
         if !self.ball_near_own_goal_line(team) {
@@ -18119,7 +18164,7 @@ impl WorldSnapshot {
         };
         let defensive_line_break_threat = if me.role == PlayerRole::Defender {
             self.opponent_breakthrough_ball_carrier(me.team)
-                .map(|(_, line_gap)| ((30.0 - line_gap) / 44.0).clamp(0.0, 1.0))
+                .map(|(_, line_gap)| defensive_line_break_threat_fit(line_gap))
                 .unwrap_or(0.0)
         } else {
             0.0
@@ -21214,7 +21259,7 @@ impl WorldSnapshot {
             if let Some((holder_position, line_gap)) =
                 self.opponent_breakthrough_ball_carrier(me.team)
             {
-                let threat_fit = ((30.0 - line_gap) / 44.0).clamp(0.0, 1.0);
+                let threat_fit = defensive_line_break_threat_fit(line_gap);
                 let retreat_y =
                     self.defensive_line_break_retreat_target_y(me.team, holder_position, line_gap);
                 let retreat_blend =
@@ -72394,6 +72439,8 @@ mod tests {
             .expect("line-break threat");
         let retreat_y =
             snapshot.defensive_line_break_retreat_target_y(Team::Home, holder_position, line_gap);
+        let connected_retreat_y =
+            retreat_y.max(snapshot.ball.position.y - DEFENSIVE_MAX_BEHIND_BALL_YARDS);
         let target =
             snapshot.defensive_assignment_for(defender, sim.players[defender].home_position, false);
 
@@ -72407,8 +72454,8 @@ mod tests {
             sim.players[defender].home_position
         );
         assert!(
-            target.y <= retreat_y + 5.0,
-            "defender target should honor the computed retreat band: target={target:?} retreat_y={retreat_y}"
+            target.y <= connected_retreat_y + 1.25,
+            "defender target should honor the retreat band after the 30-yard ball-gap cap: target={target:?} retreat_y={retreat_y} connected_retreat_y={connected_retreat_y}"
         );
         assert!(
             (holder_position.y - target.y) * Team::Home.attack_dir() >= 7.0,
@@ -72516,6 +72563,8 @@ mod tests {
             .expect("line-break threat");
         let retreat_y =
             snapshot.defensive_line_break_retreat_target_y(Team::Home, holder_position, line_gap);
+        let connected_retreat_y =
+            retreat_y.max(snapshot.ball.position.y - DEFENSIVE_MAX_BEHIND_BALL_YARDS);
         let mut lp_snapshot = snapshot.clone();
         lp_snapshot
             .formation_lp_guidance
@@ -72562,8 +72611,8 @@ mod tests {
         };
 
         assert!(
-            runtime_target.y <= retreat_y + 1.25,
-            "runtime defender should clamp high LP guidance into the retreat band: target={runtime_target:?} retreat_y={retreat_y}"
+            runtime_target.y <= connected_retreat_y + 1.25,
+            "runtime defender should clamp high LP guidance into the effective retreat band: target={runtime_target:?} retreat_y={retreat_y} connected_retreat_y={connected_retreat_y}"
         );
         assert!(
             (holder_position.y - runtime_target.y) * Team::Home.attack_dir() >= 17.0,
@@ -72572,6 +72621,40 @@ mod tests {
         assert!(
             runtime_target.y >= DEFENSIVE_GOAL_LINE_BUFFER_YARDS - 1e-9,
             "runtime retreat clamp should preserve the six-yard endline buffer: {runtime_target:?}"
+        );
+    }
+
+    #[test]
+    fn defenders_detect_channel_break_threat_before_attacker_reaches_line() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let threat = 17;
+        for id in 1..=4 {
+            sim.players[id].position = Vec2::new(22.0 + id as f64 * 9.0, 34.0);
+            sim.players[id].home_position = sim.players[id].position;
+        }
+        sim.players[threat].position = Vec2::new(40.0, 69.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let (holder_position, line_gap) = snapshot
+            .opponent_breakthrough_ball_carrier(Team::Home)
+            .expect(
+                "defense should recognize the channel threat before the carrier reaches the line",
+            );
+        let target =
+            snapshot.defensive_assignment_for(defender, sim.players[defender].home_position, false);
+
+        assert!(
+            (30.0..=DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS).contains(&line_gap),
+            "test setup should exercise the earlier 30-36 yard trigger band: {line_gap}"
+        );
+        assert!(
+            (holder_position.y - target.y) * Team::Home.attack_dir()
+                >= DEFENSIVE_LINE_BREAK_BASE_RETREAT_GAP_YARDS - 1.5,
+            "defender should hold a deeper goal-side cushion once the runner can threaten the line: target={target:?} holder={holder_position:?}"
         );
     }
 
@@ -72600,6 +72683,44 @@ mod tests {
         assert!(
             segment_distance_to_point(goal, snapshot.ball.position, recovery_target) < 1e-9,
             "keeper recovery target should remain directly between ball and goal: {recovery_target:?}"
+        );
+    }
+
+    #[test]
+    fn goalkeeper_off_line_recovery_sprints_to_ball_goal_line() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let threat = 17;
+        park_players_except(&mut sim, &[keeper, threat]);
+        sim.players[keeper].position = Vec2::new(18.0, 8.0);
+        sim.players[threat].position = Vec2::new(58.0, 35.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        let mut keeper_player = sim.players[keeper].clone();
+        let intent =
+            keeper_player.run_time_step(&snapshot, None, None, &mut SeededRandom::new(84_019));
+        let SoccerAction::MoveTo(runtime_target) = intent.action else {
+            panic!(
+                "off-line keeper should recover line shape, got {:?}",
+                intent.action
+            );
+        };
+
+        assert!(
+            snapshot.goalkeeper_line_recovery_sprint_active(keeper),
+            "test setup should put the keeper far enough off the direct ball-goal line"
+        );
+        assert!(
+            runtime_target.distance(line_target) < 1e-9,
+            "keeper should choose the exact ball-goal-line tracking target: runtime={runtime_target:?} line={line_target:?}"
+        );
+        assert!(
+            intent.sprint,
+            "off-line keeper recovery should carry sprint urgency so the visual line tracking catches up"
         );
     }
 

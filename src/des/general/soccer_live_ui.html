@@ -332,7 +332,7 @@
     <div class="stage"><canvas id="pitch" width="1280" height="720"></canvas></div>
     <aside>
       <div class="row">
-        <button id="run">Run</button>
+        <button id="run" aria-label="Run live simulation">Run</button>
         <button id="step">Step</button>
         <button id="resetMatch">New Match</button>
         <a id="freshMatchLink" class="control-link" href="/fresh">Fresh</a>
@@ -1560,19 +1560,26 @@ function fullTimeLabel() {
   if (!state?.frame) return "full time";
   return `full time ${state.frame.scoreHome}-${state.frame.scoreAway}`;
 }
+function setRunButtonLabel(text, ariaLabel) {
+  runButton.textContent = text;
+  runButton.setAttribute("aria-label", ariaLabel || text);
+}
 function updateRunButton() {
   if (state?.done) {
     const autoEpisodes = autoEpisodeEnabled.checked;
     if (!autoEpisodes) running = false;
     runButton.classList.toggle("active", running && autoEpisodes);
-    runButton.textContent = running && autoEpisodes ? "Auto Next" : "Full Time";
+    setRunButtonLabel(
+      running && autoEpisodes ? "Auto Next" : "Full Time",
+      running && autoEpisodes ? "Queue next soccer match" : "Match full time"
+    );
     statusEl.textContent = running && autoEpisodes
       ? `${fullTimeLabel()} next match`
       : fullTimeLabel();
     return;
   }
   runButton.classList.toggle("active", running);
-  runButton.textContent = running ? "Pause" : "Run";
+  setRunButtonLabel(running ? "Pause" : "Run", running ? "Pause live simulation" : "Run live simulation");
 }
 function shortTeam(v) {
   return v === "Home" ? "H" : v === "Away" ? "A" : "-";

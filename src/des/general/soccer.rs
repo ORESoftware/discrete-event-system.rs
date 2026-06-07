@@ -86884,6 +86884,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let html = soccer_live_page_html();
 
         assert!(html.contains("id=\"actionIntent\""));
+        assert!(html.contains("id=\"run\" aria-label=\"Run live simulation\""));
+        assert!(html.contains("function setRunButtonLabel"));
+        assert!(html.contains("setRunButtonLabel(running ? \"Pause\" : \"Run\""));
+        assert!(html.contains("Pause live simulation"));
+        assert!(html.contains("Queue next soccer match"));
         assert!(html.contains("liveIntentCandidates"));
         assert!(html.contains("drawDecisionIntentTraces"));
         assert!(html.contains("decision?.actionTarget"));

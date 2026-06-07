@@ -27506,6 +27506,7 @@ pub struct SoccerAccountingSmokeReport {
     pub moving_player_count: usize,
     pub player_movement_yards: f64,
     pub ball_movement_yards: f64,
+    pub ball_goalward_progress_yards: f64,
     pub ball_active_frames: usize,
     pub score_home_from_goal_events: u32,
     pub score_away_from_goal_events: u32,
@@ -27684,6 +27685,12 @@ fn soccer_accounting_check_frame_liveness(
             if movement.is_finite() {
                 report.ball_movement_yards += movement;
             }
+            if let Some(team) = soccer_accounting_frame_ball_team(frame) {
+                let goalward = (frame.ball.position.y - prev_ball.y) * team.attack_dir();
+                if goalward.is_finite() && goalward > 0.0 {
+                    report.ball_goalward_progress_yards += goalward;
+                }
+            }
         }
         if frame.ball.holder.is_some() || frame.ball.velocity.len() > 0.05 {
             report.ball_active_frames = report.ball_active_frames.saturating_add(1);
@@ -27729,6 +27736,32 @@ fn soccer_accounting_check_frame_liveness(
             "multi-frame soccer simulation should keep the ball active or controlled",
         );
     }
+
+    if trace.summary.ticks >= 5 && report.ball_goalward_progress_yards <= 0.10 {
+        report.push_violation(
+            trace.summary.ticks,
+            "liveness",
+            "ballGoalwardProgress",
+            "> 0.10".to_string(),
+            format!("{:.6}", report.ball_goalward_progress_yards),
+            "multi-frame soccer simulation should move the ball toward a team's goal at least once",
+        );
+    }
+}
+
+fn soccer_accounting_frame_ball_team(frame: &MatchFrame) -> Option<Team> {
+    frame
+        .ball
+        .holder
+        .and_then(|holder| {
+            frame
+                .players
+                .iter()
+                .find(|player| player.id == holder)
+                .map(|player| player.team)
+        })
+        .or(frame.central_brain.possession_team)
+        .or(frame.ball.last_touch_team)
 }
 
 fn soccer_accounting_check_frame_roster(
@@ -61360,6 +61393,11 @@ mod tests {
             "accounting smoke should observe an active or moving ball"
         );
         assert!(
+            report.ball_goalward_progress_yards > 0.10,
+            "accounting smoke should observe some goalward ball progress, got {:.6}",
+            report.ball_goalward_progress_yards
+        );
+        assert!(
             report.ok(),
             "accounting smoke violations: {:?}",
             report.violations
@@ -61424,6 +61462,9 @@ mod tests {
         }));
         assert!(report.violations.iter().any(|violation| {
             violation.subject == "liveness" && violation.metric == "ballActivity"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "liveness" && violation.metric == "ballGoalwardProgress"
         }));
     }
 

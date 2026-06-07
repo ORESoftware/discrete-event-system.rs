@@ -149,6 +149,16 @@
     font-size: 12px;
   }
   .slot label { color: var(--muted); }
+  .slot.active select {
+    outline: 2px solid rgba(246,201,68,.75);
+    outline-offset: 1px;
+  }
+  .slot .keymap {
+    grid-column: 2;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.25;
+  }
   .legend {
     display: flex;
     gap: 10px;
@@ -492,6 +502,12 @@ const keys = new Set();
 const MOVE_KEY_CODES = new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD"]);
 const SPRINT_KEY_CODES = new Set(["ShiftLeft","ShiftRight"]);
 const HUMAN_ACTION_KEY_CODES = new Set(["Enter","Space"]);
+const CONTROLLER_KEYMAPS = [
+  {left: "ArrowLeft", right: "ArrowRight", up: "ArrowUp", down: "ArrowDown", sprint: "ShiftLeft", pass: "Enter", shoot: "Space"},
+  {left: "KeyA", right: "KeyD", up: "KeyW", down: "KeyS", sprint: "ShiftRight", pass: "KeyF", shoot: "KeyG"},
+  {left: "KeyJ", right: "KeyL", up: "KeyI", down: "KeyK", sprint: "KeyU", pass: "KeyO", shoot: "KeyP"},
+  {left: "Numpad4", right: "Numpad6", up: "Numpad8", down: "Numpad5", sprint: "Numpad0", pass: "Numpad7", shoot: "Numpad9"}
+];
 let frameIndex = 0;
 let playing = false;
 let lastTs = 0;
@@ -1613,6 +1629,10 @@ function selectedPlayer(slot) {
   const sel = document.getElementById(`slot-${slot}`);
   return sel && sel.value !== "" ? Number(sel.value) : null;
 }
+function isFormEditingTarget(target) {
+  const tag = String(target?.tagName || "").toLowerCase();
+  return tag === "input" || tag === "select" || tag === "textarea" || !!target?.isContentEditable;
+}
 function selectedPassTarget() {
   return passTarget.value === "" ? null : Number(passTarget.value);
 }
@@ -1622,9 +1642,50 @@ function visibleHumanSlotCount() {
   const slotCount = configured > 0 ? configured : fallback;
   return Math.min(Math.max(slotCount, 0), 4);
 }
-function selectedPlayerSnapshot() {
+function keyName(code) {
+  return String(code || "")
+    .replace(/^Arrow/, "")
+    .replace(/^Key/, "")
+    .replace(/^Numpad/, "Num")
+    .replace(/^ShiftLeft$/, "LShift")
+    .replace(/^ShiftRight$/, "RShift");
+}
+function controllerKeymapLabel(slot) {
+  const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
+  return `Move ${keyName(map.up)}/${keyName(map.left)}/${keyName(map.down)}/${keyName(map.right)}; Sprint ${keyName(map.sprint)}; Pass ${keyName(map.pass)}; Shoot ${keyName(map.shoot)}`;
+}
+function controllerSlotForKey(code) {
+  const visible = visibleHumanSlotCount();
+  const slot = CONTROLLER_KEYMAPS.findIndex(map =>
+    [map.left, map.right, map.up, map.down, map.sprint, map.pass, map.shoot].includes(code)
+  );
+  return slot >= 0 && slot < visible ? slot : null;
+}
+function controllerKeyKind(slot, code) {
+  const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
+  if (code === map.left || code === map.right || code === map.up || code === map.down) return "move";
+  if (code === map.sprint) return "sprint";
+  if (code === map.pass) return "pass";
+  if (code === map.shoot) return "shoot";
+  return null;
+}
+function refreshActiveSlotRows() {
+  for (let slot = 0; slot < visibleHumanSlotCount(); slot++) {
+    const row = document.getElementById(`slot-row-${slot}`);
+    if (row) row.classList.toggle("active", slot === activeSlot);
+  }
+}
+function setActiveSlot(slot) {
+  const visible = visibleHumanSlotCount();
+  if (visible <= 0) return;
+  activeSlot = Math.min(Math.max(Number(slot) || 0, 0), visible - 1);
+  refreshActiveSlotRows();
+  rebuildPassTargets();
+  updateAgentStatePanel();
+}
+function selectedPlayerSnapshot(slot = activeSlot) {
   const frame = currentFrame();
-  const playerId = selectedPlayer(activeSlot);
+  const playerId = selectedPlayer(slot);
   return frame && playerId != null ? frame.players.find(p => p.id === playerId) || null : null;
 }
 function playerLabel(p) {
@@ -1767,9 +1828,9 @@ function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
   const tactical = `K${keeperLine.toFixed(2)} B${breakThreat.toFixed(2)} P${pressure.toFixed(2)} U${urgency.toFixed(2)}`;
   return agentTrace ? `${tactical} ${agentTrace}` : tactical;
 }
-function selectedPlayerShotContext() {
+function selectedPlayerShotContext(slot = activeSlot) {
   const frame = currentFrame();
-  const p = selectedPlayerSnapshot();
+  const p = selectedPlayerSnapshot(slot);
   if (!frame || !p) return null;
   if (frame.ball?.holder !== p.id) return {kind: "no-ball"};
   const config = trace.config || FALLBACK_CONFIG;
@@ -1786,32 +1847,41 @@ function selectedPlayerShotLaneLabel() {
   if (!context.nearGoal) return `${context.yardsToGoal.toFixed(0)}y`;
   return context.laneOpen ? "Open" : "Blocked";
 }
-function selectedPlayerCanShoot() {
-  const context = selectedPlayerShotContext();
+function selectedPlayerCanShoot(slot = activeSlot) {
+  const context = selectedPlayerShotContext(slot);
   return !!context && context.kind === "holder" && context.nearGoal && context.laneOpen;
 }
-function pushActionInput(forceShoot = false) {
-  if (selectedPlayer(activeSlot) == null) return false;
+function pushActionInput(forceShoot = false, slot = activeSlot) {
+  if (selectedPlayer(slot) == null) return false;
   const shoot = forceShoot
-    || keys.has("ShiftLeft")
-    || keys.has("ShiftRight")
-    || selectedPlayerCanShoot();
-  return pushInput(!shoot, shoot);
+    || controllerSprintForSlot(slot)
+    || selectedPlayerCanShoot(slot);
+  return queueSlotInput(slot, !shoot, shoot);
 }
-function pushInput(pass = false, shoot = false, action = null) {
-  const playerId = selectedPlayer(activeSlot);
-  if (playerId == null) return false;
+function controllerAxisForSlot(slot) {
+  const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   const axis = {x: 0, y: 0};
-  if (keys.has("ArrowLeft") || keys.has("KeyA")) axis.x -= 1;
-  if (keys.has("ArrowRight") || keys.has("KeyD")) axis.x += 1;
-  if (keys.has("ArrowUp") || keys.has("KeyW")) axis.y += 1;
-  if (keys.has("ArrowDown") || keys.has("KeyS")) axis.y -= 1;
+  if (keys.has(map.left)) axis.x -= 1;
+  if (keys.has(map.right)) axis.x += 1;
+  if (keys.has(map.up)) axis.y += 1;
+  if (keys.has(map.down)) axis.y -= 1;
+  return axis;
+}
+function controllerSprintForSlot(slot) {
+  const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
+  return keys.has(map.sprint);
+}
+function queueSlotInput(slot, pass = false, shoot = false, action = null) {
+  const playerId = selectedPlayer(slot);
+  if (playerId == null) return false;
+  setActiveSlot(slot);
+  const axis = controllerAxisForSlot(slot);
   window.dispatchHumanInput({
-    controllerSlot: activeSlot,
+    controllerSlot: slot,
     playerId,
     seq: ++inputSeq,
     axis,
-    sprint: keys.has("ShiftLeft") || keys.has("ShiftRight"),
+    sprint: controllerSprintForSlot(slot),
     pass,
     passFlight: pass ? passFlight.value : "floor",
     shoot,
@@ -1819,6 +1889,9 @@ function pushInput(pass = false, shoot = false, action = null) {
     targetPlayer: pass ? selectedPassTarget() : null
   });
   return true;
+}
+function pushInput(pass = false, shoot = false, action = null) {
+  return queueSlotInput(activeSlot, pass, shoot, action);
 }
 function rebuildPassTargets() {
   const frame = currentFrame();
@@ -1852,6 +1925,7 @@ function buildSlots() {
   for (let i = 0; i < visibleHumanSlotCount(); i++) {
     const row = document.createElement("div");
     row.className = "slot";
+    row.id = `slot-row-${i}`;
     const label = document.createElement("label");
     label.textContent = `Slot ${i + 1}`;
     const select = document.createElement("select");
@@ -1868,9 +1942,12 @@ function buildSlots() {
       if (p.controllerSlot === i) opt.selected = true;
       select.appendChild(opt);
     }
-    select.addEventListener("focus", () => { activeSlot = i; syncStaticSlotAvailability(); rebuildPassTargets(); });
+    const keymap = document.createElement("div");
+    keymap.className = "keymap";
+    keymap.textContent = controllerKeymapLabel(i);
+    select.addEventListener("focus", () => { setActiveSlot(i); syncStaticSlotAvailability(); });
     select.addEventListener("change", () => {
-      activeSlot = i;
+      setActiveSlot(i);
       syncStaticSlotAvailability();
       const selected = selectedPlayer(i);
       applyControllerAssignments(
@@ -1883,9 +1960,10 @@ function buildSlots() {
       render();
       syncControllerAssignment(i, selected);
     });
-    row.append(label, select);
+    row.append(label, select, keymap);
     slots.appendChild(row);
   }
+  refreshActiveSlotRows();
   syncStaticSlotAvailability();
   rebuildPassTargets();
 }
@@ -2066,19 +2144,38 @@ carryActionButton.addEventListener("click", () => pushInput(false, false, "carry
 protectActionButton.addEventListener("click", () => pushInput(false, false, "protect-ball"));
 window.addEventListener("keydown", e => {
   keys.add(e.code);
-  if (MOVE_KEY_CODES.has(e.code) || SPRINT_KEY_CODES.has(e.code)) {
+  if (!isFormEditingTarget(e.target) && /^Digit[1-4]$/.test(e.code)) {
+    const slot = Number(e.code.slice(-1)) - 1;
+    if (slot < visibleHumanSlotCount()) {
+      e.preventDefault();
+      setActiveSlot(slot);
+      render();
+    }
+    return;
+  }
+  const slot = controllerSlotForKey(e.code);
+  const kind = slot == null ? null : controllerKeyKind(slot, e.code);
+  if (kind === "move" || kind === "sprint") {
     e.preventDefault();
-    pushInput(false, false);
-  } else if (HUMAN_ACTION_KEY_CODES.has(e.code)) {
+    queueSlotInput(slot, false, false);
+  } else if (kind === "pass" || kind === "shoot") {
     e.preventDefault();
-    if (!e.repeat) pushActionInput(e.code === "Space");
+    if (!e.repeat) {
+      if (kind === "shoot") {
+        queueSlotInput(slot, false, true);
+      } else {
+        pushActionInput(false, slot);
+      }
+    }
   }
 });
 window.addEventListener("keyup", e => {
   keys.delete(e.code);
-  if (MOVE_KEY_CODES.has(e.code) || SPRINT_KEY_CODES.has(e.code)) {
+  const slot = controllerSlotForKey(e.code);
+  const kind = slot == null ? null : controllerKeyKind(slot, e.code);
+  if (kind === "move" || kind === "sprint") {
     e.preventDefault();
-    pushInput(false, false);
+    queueSlotInput(slot, false, false);
   }
 });
 setControlsEnabled(false);

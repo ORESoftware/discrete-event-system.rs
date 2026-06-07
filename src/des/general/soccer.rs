@@ -88609,6 +88609,23 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("drawGaitCue"));
         assert!(html.contains("movementGait"));
         assert!(html.contains("HUMAN_ACTION_KEY_CODES"));
+        assert!(html.contains("const CONTROLLER_KEYMAPS = ["));
+        assert!(html.contains("left: \"ArrowLeft\""));
+        assert!(html.contains("pass: \"Enter\""));
+        assert!(html.contains("shoot: \"Space\""));
+        assert!(html.contains("left: \"KeyA\""));
+        assert!(html.contains("pass: \"KeyF\""));
+        assert!(html.contains("left: \"KeyJ\""));
+        assert!(html.contains("pass: \"KeyO\""));
+        assert!(html.contains("left: \"Numpad4\""));
+        assert!(html.contains("shoot: \"Numpad9\""));
+        assert!(html.contains("function controllerKeymapLabel"));
+        assert!(html.contains("function controllerSlotForKey"));
+        assert!(html.contains("function queueSlotInput"));
+        assert!(html.contains("function setActiveSlot"));
+        assert!(html.contains("keymap.textContent = controllerKeymapLabel(i)"));
+        assert!(html.contains("const slot = controllerSlotForKey(e.code)"));
+        assert!(html.contains("if (!isFormEditingTarget(e.target) && /^Digit[1-4]$/.test(e.code))"));
         assert!(html.contains("selectedPlayerCanShoot"));
         assert!(html.contains("pushActionInput"));
         assert!(html.contains("\"Enter\""));
@@ -88636,7 +88653,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "static controller slots should allow selecting Home or Away players"
         );
         assert!(html.contains("if (playerId == null) return false"));
-        assert!(html.contains("return pushInput(!shoot, shoot)"));
+        assert!(html.contains("return queueSlotInput(slot, !shoot, shoot)"));
         assert!(
             !html.contains("\"frames\":[") && !html.contains("\"frames\": ["),
             "static HTML shell should not inline a large JSON frames array"

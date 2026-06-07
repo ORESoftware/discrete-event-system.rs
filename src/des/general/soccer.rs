@@ -34651,6 +34651,7 @@ impl SoccerMatch {
             p.velocity,
             gait,
             self.ball.holder == Some(player_id),
+            p.action_facing,
         );
         if movement_facing != FacingBucket::Unknown {
             p.action_facing = movement_facing;
@@ -48233,13 +48234,19 @@ fn movement_action_facing_bucket(
     velocity: Vec2,
     gait: MovementGait,
     has_ball: bool,
+    current_facing: FacingBucket,
 ) -> FacingBucket {
     if has_ball && to_target.len() > 1e-6 {
         return facing_bucket_from_vector(to_target);
     }
 
-    let ball_facing = ball_facing_bucket_from_position(team, position, ball_position);
     let to_ball = ball_position - position;
+    if to_ball.len() <= PLAYER_CONTROL_RADIUS_YARDS * 0.6 && current_facing != FacingBucket::Unknown
+    {
+        return current_facing;
+    }
+
+    let ball_facing = ball_facing_bucket_from_position(team, position, ball_position);
     if matches!(gait, MovementGait::Run | MovementGait::Sprint)
         && velocity.len() > 0.35
         && to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS
@@ -53474,6 +53481,31 @@ mod tests {
             sim.players[player].action_facing,
             FacingBucket::South,
             "a full sprint away from the ball is one of the few cases where body facing follows the run"
+        );
+    }
+
+    #[test]
+    fn close_ball_support_movement_keeps_existing_facing_to_avoid_spin() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.1,
+            duration_seconds: 0.1,
+            seed: 2113,
+            ..Default::default()
+        });
+        let player = 2;
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(40.0, 60.25);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+        sim.players[player].action_facing = FacingBucket::East;
+
+        sim.move_player_towards(player, Vec2::new(44.0, 60.0), false);
+
+        assert_eq!(sim.players[player].movement_gait, MovementGait::SideStep);
+        assert_eq!(
+            sim.players[player].action_facing,
+            FacingBucket::East,
+            "when the ball is too close for a stable facing vector, keep the player's previous look direction instead of snapping to a team default"
         );
     }
 

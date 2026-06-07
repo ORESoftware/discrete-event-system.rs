@@ -86001,11 +86001,24 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("id=\"seed\""));
         assert!(html.contains("id=\"runId\""));
         assert!(html.contains("id=\"cadence\""));
+        assert!(html.contains("id=\"stepBudget\""));
         assert!(html.contains("0.1s x 6001"));
         assert!(html.contains("const cadence = document.getElementById(\"cadence\")"));
+        assert!(html.contains("const stepBudget = document.getElementById(\"stepBudget\")"));
         assert!(html.contains("function fmtDuration"));
         assert!(html.contains("function cadenceDtSeconds"));
+        assert!(html.contains("function stepTimingTelemetry"));
+        assert!(html.contains("function stepBudgetStatus"));
+        assert!(html.contains("function stepBudgetLabel"));
+        assert!(html.contains("function stepBudgetTitle"));
+        assert!(html.contains("tickBudgetMs"));
+        assert!(html.contains("learningBudgetMs"));
+        assert!(html.contains("overBudgetTicks"));
+        assert!(html.contains("learningOverBudgetTicks"));
+        assert!(html.contains("stepBudget.textContent = stepBudgetLabel()"));
+        assert!(html.contains("stepBudget.title = stepBudgetTitle()"));
         assert!(html.contains("trace.cadence = meta.cadence || meta.playback?.cadence || null"));
+        assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
             "cadence.textContent = `${dt.toFixed(2)}s/${tickHz.toFixed(0)}Hz; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f${contract}`"

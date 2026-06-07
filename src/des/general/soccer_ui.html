@@ -331,6 +331,7 @@
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Cadence</span><b id="cadence">0.1s x 6001</b></div>
+      <div class="metric"><span>Step Budget</span><b id="stepBudget">100ms ok</b></div>
       <div class="metric"><span>Seed</span><b id="seed">-</b></div>
       <div class="metric"><span>Run ID</span><b id="runId">-</b></div>
       <div class="section">Controller Slots</div>
@@ -423,6 +424,7 @@ const trace = {
   config: {...FALLBACK_CONFIG},
   summary: {ticks: 0, stats: emptyStats()},
   cadence: null,
+  stepTiming: null,
   frames: [],
   events: [],
   runId: null,
@@ -459,6 +461,7 @@ const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
 const cadence = document.getElementById("cadence");
+const stepBudget = document.getElementById("stepBudget");
 const seed = document.getElementById("seed");
 const runId = document.getElementById("runId");
 const scrub = document.getElementById("scrub");
@@ -664,6 +667,70 @@ function expectedFrameCount() {
 function cadenceDtSeconds() {
   return Number(trace.cadence?.dtSeconds || trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
 }
+function stepTimingTelemetry() {
+  return trace.stepTiming || trace.summary?.stepTiming || trace.cadence?.stepTiming || null;
+}
+function timingNumber(timing, ...keys) {
+  for (const key of keys) {
+    const value = Number(timing?.[key]);
+    if (Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+function stepBudgetStatus() {
+  const timing = stepTimingTelemetry();
+  const cadenceBudget = cadenceDtSeconds() * 1000;
+  if (!timing) {
+    return {
+      total: 0,
+      learning: 0,
+      budget: cadenceBudget,
+      learningBudget: cadenceBudget * 0.35,
+      over: false,
+      learningOver: false,
+      overTicks: 0,
+      learningOverTicks: 0,
+      ticks: 0,
+      maxOver: 0,
+      maxLearningOver: 0
+    };
+  }
+  const budget = timingNumber(timing, "tickBudgetMs", "tick_budget_ms") || cadenceBudget;
+  const learningBudget = timingNumber(timing, "learningBudgetMs", "learning_budget_ms") || budget * 0.35;
+  const learning = timingNumber(timing, "learningMs", "learning_ms")
+    || timingNumber(timing, "learningDefenseMs") + timingNumber(timing, "learningTransitionsMs")
+    + timingNumber(timing, "recentLearningMs") + timingNumber(timing, "neuralSamplesMs")
+    + timingNumber(timing, "policyTrainMs") + timingNumber(timing, "learningLogMs")
+    + timingNumber(timing, "fullGameLearningMs");
+  const total = timingNumber(timing, "totalMs", "total_ms");
+  const overTicks = timingNumber(timing, "overBudgetTicks", "over_budget_ticks");
+  const learningOverTicks = timingNumber(timing, "learningOverBudgetTicks", "learning_over_budget_ticks");
+  return {
+    total,
+    learning,
+    budget,
+    learningBudget,
+    over: Boolean(timing.overBudget ?? timing.over_budget ?? (budget > 0 && total > budget)),
+    learningOver: Boolean(timing.learningOverBudget ?? timing.learning_over_budget ?? (learningBudget > 0 && learning > learningBudget)),
+    overTicks,
+    learningOverTicks,
+    ticks: timingNumber(timing, "ticks"),
+    maxOver: timingNumber(timing, "maxBudgetOverrunMs", "max_budget_overrun_ms"),
+    maxLearningOver: timingNumber(timing, "maxLearningBudgetOverrunMs", "max_learning_budget_overrun_ms")
+  };
+}
+function stepBudgetLabel() {
+  const status = stepBudgetStatus();
+  const label = status.over ? "over" : status.learningOver ? "learn" : "ok";
+  const total = status.ticks > 0 ? status.total.toFixed(1) : status.budget.toFixed(0);
+  const learning = status.ticks > 0 ? status.learning.toFixed(1) : "0.0";
+  return `${total}/${status.budget.toFixed(0)}ms ${learning}/${status.learningBudget.toFixed(0)}L ${label}`;
+}
+function stepBudgetTitle() {
+  const status = stepBudgetStatus();
+  if (status.ticks <= 0) return `tick budget ${status.budget.toFixed(0)}ms; learning ${status.learningBudget.toFixed(0)}ms`;
+  return `${status.ticks} ticks; over ${status.overTicks}; learning over ${status.learningOverTicks}; max ${status.maxOver.toFixed(1)}ms; learning max ${status.maxLearningOver.toFixed(1)}ms`;
+}
 function totalLoadedSeconds() {
   return Math.max(0, trace.frames.length - 1) * cadenceDtSeconds();
 }
@@ -702,6 +769,7 @@ function resetTraceState() {
   trace.config = {...FALLBACK_CONFIG};
   trace.summary = {ticks: 0, stats: emptyStats()};
   trace.cadence = null;
+  trace.stepTiming = null;
   trace.frames = [];
   trace.events = [];
   trace.runId = null;
@@ -1392,6 +1460,8 @@ function updateMetrics() {
   const tickHz = Number(trace.cadence?.tickHz || (dt > 0 ? 1 / dt : 0));
   const contract = trace.cadence?.defaultTenMinuteContract ? " ok" : "";
   cadence.textContent = `${dt.toFixed(2)}s/${tickHz.toFixed(0)}Hz; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f${contract}`;
+  stepBudget.textContent = stepBudgetLabel();
+  stepBudget.title = stepBudgetTitle();
   seed.textContent = trace.config?.seed ?? "-";
   runId.textContent = runIdLabel();
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
@@ -1690,6 +1760,7 @@ async function loadTraceMeta(signal) {
   trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
   trace.summary.stats = trace.summary.stats || emptyStats();
   trace.cadence = meta.cadence || meta.playback?.cadence || null;
+  trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;
   trace.generatedAtUnixMs = meta.generatedAtUnixMs || null;

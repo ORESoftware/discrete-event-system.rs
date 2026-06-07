@@ -54002,6 +54002,91 @@ mod tests {
     }
 
     #[test]
+    fn ball_agent_trace_randomizes_internal_operation_order() {
+        let required = [
+            "sync-holder",
+            "apply-curl",
+            "apply-resistance",
+            "advance-position",
+            "resolve-shot",
+            "resolve-boundary",
+            "resolve-control",
+        ];
+        let mut first_ops = HashSet::new();
+        let mut full_orders = HashSet::new();
+
+        for tick in 0..96 {
+            let order = ball_agent_operation_order(tick, "roll", Some((tick % 27) as usize));
+
+            assert_eq!(order.len(), required.len());
+            for operation in required {
+                assert!(
+                    order.iter().any(|actual| actual == operation),
+                    "ball operation order should contain {operation}: {order:?}"
+                );
+            }
+            first_ops.insert(order.first().cloned().expect("first ball operation"));
+            full_orders.insert(order.join(">"));
+        }
+
+        assert!(
+            first_ops.len() > 1,
+            "ball agent should not always run the same internal operation first: {first_ops:?}"
+        );
+        assert!(
+            full_orders.len() > 8,
+            "ball agent should expose varied weighted operation orders: {}",
+            full_orders.len()
+        );
+    }
+
+    #[test]
+    fn official_agent_trace_randomizes_internal_operation_order() {
+        let required = [
+            "sense-ball",
+            "sample-offside-line",
+            "choose-referee-target",
+            "avoid-player-lanes",
+            "clamp-duty-zone",
+            "update-kinematics",
+        ];
+        let officials = [
+            (22, OfficialKind::CenterReferee),
+            (23, OfficialKind::AssistantRefereeNear),
+            (24, OfficialKind::AssistantRefereeFar),
+        ];
+        let mut first_ops = HashSet::new();
+        let mut full_orders = HashSet::new();
+
+        for tick in 0..48 {
+            for (id, kind) in officials {
+                let order =
+                    official_agent_operation_order(tick, id, kind, Some((tick as usize + id) % 27));
+
+                assert_eq!(order.len(), required.len());
+                for operation in required {
+                    assert!(
+                        order.iter().any(|actual| actual == operation),
+                        "official operation order should contain {operation}: {order:?}"
+                    );
+                }
+                first_ops.insert(order.first().cloned().expect("first official operation"));
+                full_orders.insert(order.join(">"));
+            }
+        }
+
+        assert!(
+            first_ops.len() > 1,
+            "official agents should not always run the same internal operation first: {first_ops:?}"
+        );
+        assert!(
+            full_orders.len() > 8,
+            "official agents should expose varied weighted operation orders: {}",
+            full_orders.len()
+        );
+    }
+
+    #[test]
     fn central_brain_directives_shape_team_behavior() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         sim.players[9].position = Vec2::new(40.0, 94.0);

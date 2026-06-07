@@ -36917,6 +36917,26 @@ impl SoccerMatch {
         let Some(player) = self.players.get(player_id) else {
             return FacingBucket::Unknown;
         };
+        if matches!(action, SoccerAction::HoldShape | SoccerAction::MoveTo(_)) {
+            let target = match action {
+                SoccerAction::HoldShape => player.home_position,
+                SoccerAction::MoveTo(target) => *target,
+                _ => unreachable!(),
+            };
+            let facing = movement_action_facing_bucket(
+                player.team,
+                player.position,
+                self.ball.position,
+                target - player.position,
+                player.velocity,
+                player.movement_gait,
+                self.ball.holder == Some(player_id),
+                player.action_facing,
+            );
+            if facing != FacingBucket::Unknown {
+                return facing;
+            }
+        }
         let target = match action {
             SoccerAction::HoldShape => Some(player.home_position),
             SoccerAction::MoveTo(target)
@@ -58504,6 +58524,58 @@ mod tests {
             sim.players[player].action_facing,
             FacingBucket::South,
             "a full sprint away from the ball is one of the few cases where body facing follows the run"
+        );
+    }
+
+    #[test]
+    fn off_ball_move_intent_trace_faces_ball_not_lateral_target() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.1,
+            duration_seconds: 0.1,
+            seed: 2112,
+            ..Default::default()
+        });
+        let player = 2;
+        sim.ball.holder = Some(17);
+        sim.ball.position = Vec2::new(40.0, 80.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+        sim.players[player].movement_gait = MovementGait::SideStep;
+        sim.players[player].action_facing = FacingBucket::Unknown;
+
+        let lateral_target = Vec2::new(48.0, 60.0);
+        let facing = sim.facing_for_player_action(player, &SoccerAction::MoveTo(lateral_target));
+
+        assert_eq!(
+            facing,
+            FacingBucket::South,
+            "off-ball support/defensive intent traces should face the ball instead of briefly snapping to a lateral target"
+        );
+    }
+
+    #[test]
+    fn off_ball_fast_away_move_intent_can_face_run_when_committed() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.1,
+            duration_seconds: 0.1,
+            seed: 2112,
+            ..Default::default()
+        });
+        let player = 2;
+        sim.ball.holder = Some(17);
+        sim.ball.position = Vec2::new(40.0, 40.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::new(0.0, 7.0);
+        sim.players[player].movement_gait = MovementGait::Sprint;
+        sim.players[player].action_facing = FacingBucket::North;
+
+        let retreat_target = Vec2::new(40.0, 82.0);
+        let facing = sim.facing_for_player_action(player, &SoccerAction::MoveTo(retreat_target));
+
+        assert_eq!(
+            facing,
+            FacingBucket::South,
+            "a committed fast run away from the ball may face the run, matching the movement-facing gate"
         );
     }
 

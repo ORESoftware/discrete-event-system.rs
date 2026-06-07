@@ -45950,9 +45950,9 @@ fn excessive_hold_pressure(observation: &SoccerPomdpObservation, dribbling: f64)
         .max(observation.perceived_pressure)
         .clamp(0.0, 1.0);
     let allowed_seconds = (dribble_hold_base_seconds(dribbling)
-        - urgency * 0.85
-        - observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.45)
-        .clamp(1.15, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
+        - urgency * 1.10
+        - observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.62)
+        .clamp(0.90, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
     ((actual_hold - allowed_seconds) / 3.2).clamp(0.0, 1.0)
 }
 
@@ -45967,11 +45967,11 @@ fn dribble_hold_score_multiplier(observation: &SoccerPomdpObservation, dribbling
         .pressure_urgency
         .max(observation.perceived_pressure)
         .clamp(0.0, 1.0);
-    (1.0 - hold_pressure * (0.24 + non_elite_fit * 0.54 + pressure_fit * 0.18)).clamp(
+    (1.0 - hold_pressure * (0.30 + non_elite_fit * 0.66 + pressure_fit * 0.24)).clamp(
         if dribbling >= NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF {
-            0.74
+            0.66
         } else {
-            0.26
+            0.14
         },
         1.0,
     )
@@ -45989,7 +45989,7 @@ fn release_after_hold_multiplier(observation: &SoccerPomdpObservation, dribbling
         .max(observation.defensive_urgency)
         .max(observation.immediate_dispossession_risk)
         .clamp(0.0, 1.0);
-    (1.0 + hold_pressure * (0.34 + non_elite_fit * 0.46 + urgency_fit * 0.36)).clamp(1.0, 2.05)
+    (1.0 + hold_pressure * (0.42 + non_elite_fit * 0.58 + urgency_fit * 0.46)).clamp(1.0, 2.40)
 }
 
 fn excessive_hold_penalty_points(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
@@ -71647,6 +71647,81 @@ mod tests {
         assert!(
             overheld_pass / overheld_carry > fresh_pass / fresh_carry * 1.35,
             "non-elite overheld possession should shift release-vs-carry ratio: fresh={fresh_pass}/{fresh_carry} overheld={overheld_pass}/{overheld_carry}"
+        );
+    }
+
+    #[test]
+    fn non_elite_close_pressure_makes_release_beat_dribble_family_after_long_hold() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_106,
+            ..Default::default()
+        });
+        let holder = 6;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].skills.dribbling = 7.0;
+        sim.players[holder].skills.strength = 6.8;
+        sim.players[holder].skills.passing_completion_rate = 7.8;
+        sim.players[holder].preferences.dribble_bias = 1.0;
+        sim.players[holder].preferences.pass_bias = 1.0;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(holder);
+        observation.has_ball = true;
+        observation.visible_pass_options = 1;
+        observation.visible_forward_pass_options = 1;
+        observation.forward_dribble_space_yards = 6.0;
+        observation.expected_pass_completion = 0.86;
+        observation.best_pass_receiver_openness = 0.82;
+        observation.floor_pass_lane_score = 0.84;
+        observation.perceived_pressure = 0.86;
+        observation.pressure_urgency = 0.88;
+        observation.immediate_dispossession_risk = 0.76;
+        observation.actual_time_on_ball_seconds = 6.4;
+        observation.yards_to_goal = 54.0;
+        observation.yards_to_own_goal = 66.0;
+
+        let options = sim.players[holder].possession_action_options(
+            &observation,
+            &TeamTacticalDirective::neutral(
+                Team::Home,
+                DEFAULT_FIELD_WIDTH_YARDS,
+                DEFAULT_FIELD_LENGTH_YARDS,
+            ),
+            1,
+            1,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        let release_score = ["pass1", "aerial-pass1"]
+            .into_iter()
+            .map(|label| action_option_score(&options, label))
+            .fold(0.0, f64::max);
+        let dribble_family_score = [
+            "dribble",
+            "carry-forward",
+            "carry-out-left",
+            "carry-out-right",
+            "protect-ball",
+            "side-step",
+            "fake-left-cut-right",
+            "fake-right-cut-left",
+            "hold-up-flank",
+        ]
+        .into_iter()
+        .map(|label| action_option_score(&options, label))
+        .fold(0.0, f64::max);
+
+        assert!(
+            excessive_hold_pressure(&observation, ability01(sim.players[holder].skills.dribbling))
+                >= 0.70
+        );
+        assert!(
+            release_score > dribble_family_score * 1.20,
+            "overheld close pressure should force release: release={release_score} dribble_family={dribble_family_score}"
         );
     }
 

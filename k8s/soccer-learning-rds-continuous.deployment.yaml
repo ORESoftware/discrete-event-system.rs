@@ -1,0 +1,226 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-soccer-learning-rds-continuous
+  namespace: default
+  labels:
+    app: dd-soccer-learning-rds-continuous
+    app.kubernetes.io/name: dd-soccer-learning-rds-continuous
+    app.kubernetes.io/part-of: des-soccer-learning
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dd-soccer-learning-rds-continuous
+  template:
+    metadata:
+      labels:
+        app: dd-soccer-learning-rds-continuous
+        app.kubernetes.io/name: dd-soccer-learning-rds-continuous
+        app.kubernetes.io/part-of: des-soccer-learning
+    spec:
+      serviceAccountName: dd-remote-rest-api
+      automountServiceAccountToken: true
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: soccer-learning
+          image: docker.io/library/rust:1.90-bookworm
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              export PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+              run_prefix="${SOCCER_RUN_ID_PREFIX:-codex-soccer-learning-continuous}"
+              work="/tmp/${run_prefix}-src"
+              target="/tmp/${run_prefix}-target"
+              export CARGO_TARGET_DIR="${target}"
+
+              echo "continuous_started_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "postgres_required=${SOCCER_REQUIRE_POSTGRES}"
+              echo "games_per_cycle=${SOCCER_GAMES}"
+              echo "parallel_games=${SOCCER_PARALLEL_GAMES}"
+              echo "dt_seconds=${SOCCER_DT_SECONDS}"
+              echo "neural_learning=${SOCCER_NEURAL_LEARNING_ENABLED}"
+              echo "neural_backend=${SOCCER_NEURAL_LEARNING_BACKEND}"
+              echo "policy_version_interval=${SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES}"
+              echo "completed_batch_games=${SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES}"
+              echo "flush_before_new_sim=${SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM}"
+              echo "refresh_with_resume=${SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT}"
+
+              git clone --depth 1 --branch main https://github.com/ORESoftware/discrete-event-system.rs.git "${work}"
+              cd "${work}"
+              actual_commit="$(git rev-parse HEAD)"
+              echo "source_commit_actual=${actual_commit}"
+              export SOCCER_SOURCE_COMMIT="${actual_commit}"
+
+              /usr/local/cargo/bin/cargo build --release --bin main_soccer_learning_run
+
+              cycle=0
+              while true; do
+                cycle="$((cycle + 1))"
+                stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                export SOCCER_RUN_ID="${run_prefix}-${stamp}-c${cycle}"
+                export SOCCER_RUN_DIR="/tmp/${SOCCER_RUN_ID}"
+                echo "continuous_cycle_start cycle=${cycle} run_id=${SOCCER_RUN_ID} started_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                if "${target}/release/main_soccer_learning_run"; then
+                  echo "continuous_cycle_complete cycle=${cycle} run_id=${SOCCER_RUN_ID} finished_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  sleep "${SOCCER_CYCLE_SLEEP_SECONDS:-30}"
+                else
+                  status="$?"
+                  echo "continuous_cycle_failed cycle=${cycle} run_id=${SOCCER_RUN_ID} status=${status} failed_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+                  sleep "${SOCCER_FAILURE_SLEEP_SECONDS:-300}"
+                fi
+              done
+          env:
+            - name: HOME
+              value: /tmp
+            - name: CARGO_HOME
+              value: /tmp/cargo
+            - name: CARGO_BUILD_JOBS
+              value: "2"
+            - name: SOCCER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dd-remote-rest-api-secrets
+                  key: RDS_DATABASE_URL
+            - name: SOCCER_REQUIRE_POSTGRES
+              value: "true"
+            - name: SOCCER_RUN_ID_PREFIX
+              value: codex-soccer-learning-continuous
+            - name: SOCCER_EXPERIMENT_SLUG
+              value: soccer-self-play-k8s-smoke
+            - name: SOCCER_EXPERIMENT_NAME
+              value: Soccer self-play k8s continuous learning
+            - name: SOCCER_GAMES
+              value: "10"
+            - name: SOCCER_PARALLEL_GAMES
+              value: "1"
+            - name: SOCCER_HALVES
+              value: "2"
+            - name: SOCCER_HALF_MINUTES
+              value: "45"
+            - name: SOCCER_MINUTES
+              value: "90"
+            - name: SOCCER_PERIOD_BREAK_RECOVERY_SECONDS
+              value: "900"
+            - name: SOCCER_DT_SECONDS
+              value: "2"
+            - name: SOCCER_LEARNING_INTERVAL_TICKS
+              value: "4"
+            - name: SOCCER_NEURAL_LEARNING_ENABLED
+              value: "true"
+            - name: SOCCER_NEURAL_LEARNING_BACKEND
+              value: threaded
+            - name: SOCCER_NEURAL_BATCH_SIZE
+              value: "16"
+            - name: SOCCER_NEURAL_TRAIN_EVERY_TICKS
+              value: "1"
+            - name: SOCCER_NEURAL_MAX_BATCHES_PER_TICK
+              value: "1"
+            - name: SOCCER_NEURAL_REPLAY_CAPACITY
+              value: "128"
+            - name: SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK
+              value: "8"
+            - name: SOCCER_NEURAL_MAX_PENDING_BATCHES
+              value: "16"
+            - name: SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES
+              value: "16"
+            - name: SOCCER_NEURAL_DRAIN_TIMEOUT_MS
+              value: "20000"
+            - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
+              value: "1"
+            - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
+              value: "1"
+            - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
+              value: "200"
+            - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
+              value: "2"
+            - name: SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES
+              value: "2"
+            - name: SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS
+              value: "5"
+            - name: SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE
+              value: "true"
+            - name: SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT
+              value: "true"
+            - name: SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM
+              value: "true"
+            - name: SOCCER_EVOLUTION_ENABLED
+              value: "true"
+            - name: SOCCER_EVOLUTION_INTERVAL_GAMES
+              value: "1"
+            - name: SOCCER_EVOLUTION_ELITE_GAMES
+              value: "1"
+            - name: SOCCER_EVOLUTION_WINDOW_GAMES
+              value: "3"
+            - name: SOCCER_EVOLUTION_MUTATION_RATE
+              value: "0.08"
+            - name: SOCCER_EVOLUTION_MUTATION_SCALE
+              value: "0.34"
+            - name: SOCCER_EVOLUTION_CROSSOVER_RATE
+              value: "0.62"
+            - name: SOCCER_EVOLUTION_EXPLORATION_RATE
+              value: "0.14"
+            - name: SOCCER_EVOLUTION_EXPLORATION_SCALE
+              value: "0.90"
+            - name: SOCCER_EVOLUTION_ELITE_WEIGHT_FLOOR
+              value: "0.08"
+            - name: SOCCER_EVOLUTION_POPULATION_SIZE
+              value: "4"
+            - name: SOCCER_EVOLUTION_SEED
+              value: "20260607"
+            - name: SOCCER_GAME_ARTIFACT_MODE
+              value: summary
+            - name: SOCCER_WRITE_GAME_ARTIFACTS
+              value: "false"
+            - name: SOCCER_WRITE_FINAL_ARTIFACTS
+              value: "false"
+            - name: SOCCER_WRITE_FINAL_POLICY_ARTIFACT
+              value: "false"
+            - name: SOCCER_WRITE_CHECKPOINT_ARTIFACTS
+              value: "false"
+            - name: SOCCER_WRITE_EPISODE_LOG
+              value: "false"
+            - name: SOCCER_PRINT_COMPLETED_GAMES
+              value: "false"
+            - name: SOCCER_ARTIFACT_PATH
+              value: /dev/null
+            - name: SOCCER_CHECKPOINT_ARTIFACT_PATH
+              value: /dev/null
+            - name: SOCCER_EPISODE_LOG_PATH
+              value: /dev/null
+            - name: SOCCER_LEARNED_PARAMS_PATH
+              value: /dev/null
+          resources:
+            requests:
+              cpu: 1500m
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 64Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 96Gi

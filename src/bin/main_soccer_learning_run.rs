@@ -54,7 +54,7 @@ const DEFAULT_SOCCER_EVOLUTION_ENABLED: bool = true;
 const DEFAULT_SOCCER_EVOLUTION_INTERVAL_GAMES: usize = 10;
 const DEFAULT_SOCCER_EVOLUTION_ELITE_GAMES: usize = 4;
 const SOCCER_POLICY_SOURCE_MERGE: &str = "merge";
-const SOCCER_POLICY_SOURCE_EVOLUTION: &str = "evolution";
+const SOCCER_POLICY_SOURCE_EVOLUTION: &str = "mutation";
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
@@ -448,8 +448,8 @@ fn validate_run_settings(
         )
         .into());
     }
-    if !dt_seconds.is_finite() || !(0.01..=5.0).contains(&dt_seconds) {
-        return Err(invalid_data("SOCCER_DT_SECONDS must be finite and in [0.01, 5.0]").into());
+    if !dt_seconds.is_finite() || !(0.01..=4.0).contains(&dt_seconds) {
+        return Err(invalid_data("SOCCER_DT_SECONDS must be finite and in [0.01, 4.0]").into());
     }
     if learning_interval_ticks == 0 {
         return Err(invalid_data("SOCCER_LEARNING_INTERVAL_TICKS must be at least 1").into());
@@ -3439,6 +3439,42 @@ mod tests {
         .collect()
     }
 
+    #[test]
+    fn run_settings_reject_dt_above_soccer_runtime_limit() {
+        let options = SoccerQPolicyOptions::default();
+        let tactical_learning = SoccerTacticalLearningWeights::default();
+
+        assert!(validate_run_settings(
+            1,
+            2,
+            45.0,
+            90.0,
+            900.0,
+            4.0,
+            4,
+            1,
+            1,
+            &options,
+            &tactical_learning,
+        )
+        .is_ok());
+        let err = validate_run_settings(
+            1,
+            2,
+            45.0,
+            90.0,
+            900.0,
+            4.01,
+            4,
+            1,
+            1,
+            &options,
+            &tactical_learning,
+        )
+        .expect_err("dt above runtime-safe bound should fail");
+        assert!(err.to_string().contains("[0.01, 4.0]"));
+    }
+
     fn empty_pg_batch(
         experiment_id: &str,
         runner_id: &str,
@@ -4208,7 +4244,7 @@ mod tests {
         );
 
         assert_eq!(SOCCER_POLICY_SOURCE_MERGE, "merge");
-        assert_eq!(SOCCER_POLICY_SOURCE_EVOLUTION, "evolution");
+        assert_eq!(SOCCER_POLICY_SOURCE_EVOLUTION, "mutation");
         assert!(label.ends_with("-evolution"));
         assert!(!label.ends_with("-mutation"));
     }

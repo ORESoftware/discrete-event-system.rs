@@ -56,7 +56,7 @@ spec:
             - name: SOCCER_GAMES
               value: "25"
             - name: SOCCER_PARALLEL_GAMES
-              value: "5"
+              value: "3"
             - name: SOCCER_HALVES
               value: "2"
             - name: SOCCER_HALF_MINUTES
@@ -66,13 +66,21 @@ spec:
             - name: SOCCER_PERIOD_BREAK_RECOVERY_SECONDS
               value: "900"
             - name: SOCCER_DT_SECONDS
-              value: "5"
+              value: "2"
             - name: SOCCER_LEARNING_INTERVAL_TICKS
               value: "4"
+            - name: SOCCER_NEURAL_LEARNING_ENABLED
+              value: "true"
+            - name: SOCCER_NEURAL_LEARNING_BACKEND
+              value: threaded
+            - name: SOCCER_NEURAL_REPLAY_CAPACITY
+              value: "256"
+            - name: SOCCER_NEURAL_MAX_PENDING_BATCHES
+              value: "64"
             - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
-              value: "5"
+              value: "3"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
-              value: "5"
+              value: "3"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
               value: "200"
             - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
@@ -86,11 +94,11 @@ spec:
             - name: SOCCER_EVOLUTION_ENABLED
               value: "true"
             - name: SOCCER_EVOLUTION_INTERVAL_GAMES
-              value: "5"
+              value: "3"
             - name: SOCCER_EVOLUTION_ELITE_GAMES
-              value: "4"
+              value: "3"
             - name: SOCCER_EVOLUTION_POPULATION_SIZE
-              value: "8"
+              value: "12"
             - name: SOCCER_CHECKPOINT_INTERVAL_GAMES
               value: "0"
             - name: SOCCER_GAME_ARTIFACT_MODE
@@ -120,10 +128,10 @@ spec:
           resources:
             requests:
               cpu: 1500m
-              memory: 2Gi
+              memory: 3Gi
             limits:
-              cpu: "5"
-              memory: 8Gi
+              cpu: "6"
+              memory: 16Gi
           volumeMounts:
             - name: tmp
               mountPath: /tmp

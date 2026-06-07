@@ -1112,8 +1112,8 @@ fn validate_queue_settings(
         )
         .into());
     }
-    if !dt_seconds.is_finite() || !(0.01..=5.0).contains(&dt_seconds) {
-        return Err(invalid_data("SOCCER_DT_SECONDS must be finite and in [0.01, 5.0]").into());
+    if !dt_seconds.is_finite() || !(0.01..=4.0).contains(&dt_seconds) {
+        return Err(invalid_data("SOCCER_DT_SECONDS must be finite and in [0.01, 4.0]").into());
     }
     if learning_interval_ticks == 0 {
         return Err(invalid_data("SOCCER_LEARNING_INTERVAL_TICKS must be at least 1").into());
@@ -2199,6 +2199,16 @@ mod tests {
         .into_iter()
         .map(EnvVarGuard::clear)
         .collect()
+    }
+
+    #[test]
+    fn queue_settings_reject_dt_above_soccer_runtime_limit() {
+        let options = SoccerQPolicyOptions::default();
+
+        assert!(validate_queue_settings(1, 2, 45.0, 90.0, 900.0, 4.0, 4, 1, &options).is_ok());
+        let err = validate_queue_settings(1, 2, 45.0, 90.0, 900.0, 4.01, 4, 1, &options)
+            .expect_err("dt above runtime-safe bound should fail");
+        assert!(err.to_string().contains("[0.01, 4.0]"));
     }
 
     fn empty_pg_batch(experiment_id: &str, runner_id: &str) -> PostgresCompletedRunBatch {

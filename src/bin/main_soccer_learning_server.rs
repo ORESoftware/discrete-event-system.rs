@@ -292,8 +292,8 @@ fn validate_payload_settings(
         )
         .into());
     }
-    if !dt_seconds.is_finite() || !(0.01..=5.0).contains(&dt_seconds) {
-        return Err(invalid_input("SOCCER_DT_SECONDS must be finite and in [0.01, 5.0]").into());
+    if !dt_seconds.is_finite() || !(0.01..=4.0).contains(&dt_seconds) {
+        return Err(invalid_input("SOCCER_DT_SECONDS must be finite and in [0.01, 4.0]").into());
     }
     if learning_interval_ticks == 0 {
         return Err(invalid_input("SOCCER_LEARNING_INTERVAL_TICKS must be at least 1").into());
@@ -1257,6 +1257,14 @@ mod tests {
             away_policy_entries: 0,
             away_policy_target_entries: 0,
         }
+    }
+
+    #[test]
+    fn payload_settings_reject_dt_above_soccer_runtime_limit() {
+        assert!(validate_payload_settings(1, 90.0, 2, 900.0, 4.0, 4, 0.12, 0.96, &[]).is_ok());
+        let err = validate_payload_settings(1, 90.0, 2, 900.0, 4.01, 4, 0.12, 0.96, &[])
+            .expect_err("dt above runtime-safe bound should fail");
+        assert!(err.to_string().contains("[0.01, 4.0]"));
     }
 
     #[test]

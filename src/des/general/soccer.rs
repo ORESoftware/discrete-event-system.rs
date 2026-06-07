@@ -7159,16 +7159,14 @@ impl PlayerAgent {
     }
 
     fn immediate_defensive_steal_target(&self, snapshot: &WorldSnapshot) -> Option<usize> {
+        if self.role == PlayerRole::Goalkeeper {
+            return None;
+        }
         let holder = snapshot.ball.holder?;
         let holder_player = snapshot
             .players
             .iter()
             .find(|player| player.id == holder && player.team == self.team.other())?;
-        if self.role == PlayerRole::Goalkeeper
-            && !snapshot.goalkeeper_direct_intervention_is_safe(self.id)
-        {
-            return None;
-        }
         let holder_position = snapshot.player_snapshot_position(holder_player);
         (self.position.distance(holder_position) <= DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS)
             .then_some(holder)
@@ -18378,21 +18376,8 @@ impl WorldSnapshot {
         let goal_side_depth = (ball_depth - cushion).max(0.0);
         target_depth = target_depth.min(goal_side_depth).max(min_depth);
 
-        let goal = Vec2::new(self.field_width * 0.5, self.own_goal_y_for(player.team));
         let mut guarded = target;
         guarded.y = self.y_from_own_goal_depth(player.team, target_depth);
-        if ball_depth > 1e-6 && target_depth <= ball_depth + 1e-6 {
-            let line_x = goal.x
-                + (self.ball.position.x - goal.x) * (target_depth / ball_depth).clamp(0.0, 1.0);
-            let line_blend = match player.role {
-                PlayerRole::Defender if ball_depth <= DEFENSIVE_GOAL_LINE_BUFFER_YARDS => 0.90,
-                PlayerRole::Defender => 0.58,
-                PlayerRole::Midfielder => 0.34,
-                PlayerRole::Forward => 0.18,
-                PlayerRole::Goalkeeper => 0.0,
-            };
-            guarded.x = guarded.x * (1.0 - line_blend) + line_x * line_blend;
-        }
         guarded.clamp_to_pitch(self.field_width, self.field_length)
     }
 
@@ -22331,9 +22316,6 @@ impl WorldSnapshot {
                 shape.y = shape.y.min(own_goal_y - buffer);
             }
             shape = shape.clamp_to_pitch(self.field_width, self.field_length);
-        }
-        if self.possession_team() == Some(me.team.other()) && me.role != PlayerRole::Goalkeeper {
-            shape = self.goal_side_defensive_target_for_player(me, shape);
         }
         shape
     }
@@ -77952,6 +77934,32 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn goalkeeper_never_uses_immediate_steal_override() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Goalkeeper)
+            .map(|player| player.id)
+            .expect("home goalkeeper");
+        let holder = 17;
+        park_players_except(&mut sim, &[keeper, holder]);
+        sim.players[keeper].position = Vec2::new(40.0, 9.8);
+        sim.players[holder].position = Vec2::new(40.0, 10.6);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+
+        assert_eq!(
+            sim.players[keeper].immediate_defensive_steal_target(&snapshot),
+            None,
+            "keeper should prioritize ball-goal positioning over the immediate-steal override"
+        );
+    }
+
+    #[test]
     fn defensive_assignment_projects_wrong_side_defender_goal_side_of_ball() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let defender = 2;
@@ -77973,9 +77981,31 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "defender should recover goal-side of the ball from any starting line: target={target:?} ball={:?}",
             sim.ball.position
         );
+    }
+
+    #[test]
+    fn goal_side_projection_preserves_defender_lateral_lane() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let holder = 17;
+        park_players_except(&mut sim, &[defender, holder]);
+        sim.players[defender].position = Vec2::new(50.0, 76.0);
+        sim.players[holder].position = Vec2::new(24.0, 58.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let requested = Vec2::new(50.0, 72.0);
+        let target = snapshot.goal_side_defensive_target_for(defender, requested);
+
         assert!(
-            target.x < sim.players[defender].position.x,
-            "goal-side recovery should also bend toward the ball-goal line: target={target:?}"
+            (target.x - requested.x).abs() <= 1e-9,
+            "goal-side projection should fix defensive depth without causing lateral lane swaps: target={target:?}"
+        );
+        assert!(
+            target.y <= sim.ball.position.y - DEFENSIVE_GOAL_SIDE_CUSHION_YARDS,
+            "goal-side projection should still place defender behind the ball: target={target:?}"
         );
     }
 

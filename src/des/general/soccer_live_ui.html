@@ -3586,6 +3586,7 @@ async function resetMatch(options = {}) {
     rememberSemanticBallActionsFromFrames([state.frame]);
     applyAssignmentsToFrame(state.controllerAssignments);
     syncSurfaceControls();
+    syncLearningControls();
     rebuildControls(state.controllerAssignments);
     running = Boolean(options.keepRunning);
     const previousTicks = Number(response.previousSummary?.ticks ?? 0);

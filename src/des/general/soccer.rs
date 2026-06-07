@@ -72562,6 +72562,9 @@ mod tests {
         assert!(html
             .body
             .contains("resetMatch({freshLoad: true, clearFreshUrl: true})"));
+        assert!(html
+            .body
+            .contains("syncSurfaceControls();\n    syncLearningControls();\n    rebuildControls"));
         assert!(html.body.contains("if (stepping || resetting) return;"));
         assert!(html.body.contains("if (running && !resetting)"));
 
@@ -73992,6 +73995,7 @@ mod tests {
     fn live_http_reset_starts_new_match_while_preserving_policy_and_controller() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
+            learning_interval_ticks: 1,
             max_human_players: 2,
             seed: 160,
             ..Default::default()

@@ -244,18 +244,20 @@ const PRESSURED_SUPPORT_SPRINT_URGENCY: f64 = 0.34;
 const DEFENSIVE_GOAL_LINE_BUFFER_YARDS: f64 = 6.0;
 const DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS: f64 = 4.0;
 const DEFENSIVE_MAX_BEHIND_BALL_YARDS: f64 = 30.0;
-const DEFENSIVE_LINE_BREAK_EXTRA_BEHIND_BALL_YARDS: f64 = 9.0;
+const DEFENSIVE_LINE_BREAK_EXTRA_BEHIND_BALL_YARDS: f64 = 12.0;
 const DEFENSIVE_LINE_BREAK_MIN_ADVANCEMENT_FROM_GOAL_YARDS: f64 = 6.0;
 const DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 12.0;
 const DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 42.0;
-const DEFENSIVE_LINE_BREAK_BASE_RETREAT_GAP_YARDS: f64 = 32.0;
-const DEFENSIVE_LINE_BREAK_URGENT_RETREAT_GAP_YARDS: f64 = 20.0;
+const DEFENSIVE_LINE_BREAK_BASE_RETREAT_GAP_YARDS: f64 = 34.0;
+const DEFENSIVE_LINE_BREAK_URGENT_RETREAT_GAP_YARDS: f64 = 22.0;
+const DEFENSIVE_LINE_BREAK_CARRIER_LOOKAHEAD_SECONDS: f64 = 1.20;
+const DEFENSIVE_LINE_BREAK_CARRIER_SPEED_TRIGGER_YPS: f64 = 4.5;
 const GOALKEEPER_LOOSE_BALL_COLLECTION_WINDOW_YARDS: f64 = 5.5;
 const GOALKEEPER_LINE_SAFE_INTERVENTION_RADIUS_YARDS: f64 = 2.25;
-const GOALKEEPER_LINE_SAFE_INTERVENTION_DEVIATION_YARDS: f64 = 1.15;
-const GOALKEEPER_LINE_COLLECTION_DEVIATION_YARDS: f64 = 5.5;
-const GOALKEEPER_LINE_RECOVERY_SPRINT_ALIGNMENT_SCORE: f64 = 0.96;
-const GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS: f64 = 0.35;
+const GOALKEEPER_LINE_SAFE_INTERVENTION_DEVIATION_YARDS: f64 = 0.65;
+const GOALKEEPER_LINE_COLLECTION_DEVIATION_YARDS: f64 = 4.0;
+const GOALKEEPER_LINE_RECOVERY_SPRINT_ALIGNMENT_SCORE: f64 = 0.985;
+const GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS: f64 = 0.20;
 const DEFENDER_PRESS_MIDFIELDER_IDEAL_YARDS: f64 = 5.0;
 const MIDFIELDER_PRESS_FOCUS_IDEAL_YARDS: f64 = 5.0;
 const FORWARD_TOP_SPEED_MULTIPLIER: f64 = 1.10;
@@ -328,7 +330,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 112;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 113;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -382,9 +384,10 @@ const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_DRIFT_RISK: usize = 108;
 const SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT: usize = 109;
 const SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT: usize = 110;
 const SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE: usize = 111;
+const SOCCER_NEURAL_FEATURE_SHOOTING_SKILL: usize = 112;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111,
+    110, 111, 112,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1702,6 +1705,8 @@ pub struct SoccerPomdpObservation {
     pub skill_aggression: f64,
     #[serde(default)]
     pub skill_defending: f64,
+    #[serde(default)]
+    pub skill_shooting: f64,
     #[serde(default)]
     pub skill_right_foot_shot_power: f64,
     #[serde(default)]
@@ -3092,6 +3097,8 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub skill_defending_bin: u8,
     #[serde(default)]
+    pub skill_shooting_bin: u8,
+    #[serde(default)]
     pub skill_defensive_tracking_bin: u8,
     pub open_space_bin: u8,
 }
@@ -3502,6 +3509,7 @@ impl SoccerQStateKey {
             skill_dribbling_bin: skill_bucket(observation.skill_dribbling),
             skill_aggression_bin: skill_bucket(observation.skill_aggression),
             skill_defending_bin: skill_bucket(observation.skill_defending),
+            skill_shooting_bin: skill_bucket(observation.skill_shooting),
             skill_right_foot_shot_bin: skill_bucket(observation.skill_right_foot_shot_power),
             skill_left_foot_shot_bin: skill_bucket(observation.skill_left_foot_shot_power),
             skill_passing_completion_bin: skill_bucket(observation.skill_passing_completion_rate),
@@ -3673,6 +3681,7 @@ impl SoccerQStateKey {
             && self.skill_dribbling_bin == other.skill_dribbling_bin
             && self.skill_aggression_bin == other.skill_aggression_bin
             && self.skill_defending_bin == other.skill_defending_bin
+            && self.skill_shooting_bin == other.skill_shooting_bin
             && self.skill_right_foot_shot_bin == other.skill_right_foot_shot_bin
             && self.skill_left_foot_shot_bin == other.skill_left_foot_shot_bin
             && self.skill_passing_completion_bin == other.skill_passing_completion_bin
@@ -17585,8 +17594,8 @@ impl WorldSnapshot {
                 (1.0 - line_gap / 42.0).clamp(0.0, 1.0)
             })
             .unwrap_or(0.0);
-        let raw_depth = (3.0 + ball_pressure * 11.2 + holder_pressure * 3.0).clamp(3.0, 16.0);
-        let depth = raw_depth.min((ball_distance - 0.75).max(0.0));
+        let raw_depth = (3.5 + ball_pressure * 12.5 + holder_pressure * 4.2).clamp(3.5, 18.0);
+        let depth = raw_depth.min((ball_distance - 0.85).max(0.0));
         (goal + to_ball.normalized() * depth).clamp_to_pitch(self.field_width, self.field_length)
     }
 
@@ -17663,15 +17672,23 @@ impl WorldSnapshot {
             return None;
         }
         let line_gap = (holder_position.y - defensive_line_y) * team.attack_dir();
-        if !(-16.0..=DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS).contains(&line_gap) {
+        let carrier_velocity = self.player_velocity(holder.id).unwrap_or(holder.velocity);
+        let carrier_goalward_speed = (-(carrier_velocity.y * team.attack_dir())).max(0.0);
+        let projected_line_gap =
+            if carrier_goalward_speed >= DEFENSIVE_LINE_BREAK_CARRIER_SPEED_TRIGGER_YPS {
+                line_gap - carrier_goalward_speed * DEFENSIVE_LINE_BREAK_CARRIER_LOOKAHEAD_SECONDS
+            } else {
+                line_gap
+            };
+        if !(-16.0..=DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS).contains(&projected_line_gap) {
             return None;
         }
         if line_advancement_from_goal < 10.0
-            && line_gap > DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS
+            && projected_line_gap > DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS
         {
             return None;
         }
-        Some((holder_position, line_gap))
+        Some((holder_position, projected_line_gap))
     }
 
     fn defensive_line_break_retreat_target_y(
@@ -18006,6 +18023,7 @@ impl WorldSnapshot {
                 skill_dribbling: 0.0,
                 skill_aggression: 0.0,
                 skill_defending: 0.0,
+                skill_shooting: 0.0,
                 skill_right_foot_shot_power: 0.0,
                 skill_left_foot_shot_power: 0.0,
                 skill_passing_completion_rate: 0.0,
@@ -18737,6 +18755,7 @@ impl WorldSnapshot {
             skill_dribbling: me.skills.dribbling,
             skill_aggression: me.skills.aggression,
             skill_defending: me.skills.defending,
+            skill_shooting: me.skills.shooting,
             skill_right_foot_shot_power: me.skills.right_foot_shot_power,
             skill_left_foot_shot_power: me.skills.left_foot_shot_power,
             skill_passing_completion_rate: me.skills.passing_completion_rate,
@@ -25117,15 +25136,15 @@ fn goalkeeper_ball_goal_line_alignment_score(
     }
     let line_distance = segment_distance_to_point(goal, ball, player_position);
     let projection = segment_projection_factor(goal, ball, player_position);
-    let line_score = (1.0 - line_distance / 2.2).clamp(-1.0, 1.0);
+    let line_score = (1.0 - line_distance / 1.0).clamp(-1.0, 1.0);
     let projection_score = if (0.0..=1.0).contains(&projection) {
         1.0
     } else {
         (1.0 - projection.min(0.0).abs().max((projection - 1.0).max(0.0)) / 0.35).clamp(-1.0, 1.0)
     };
     let ideal = snapshot.goalkeeper_ball_goal_tracking_target(team);
-    let depth_score = (1.0 - player_position.distance(ideal) / 6.0).clamp(-1.0, 1.0);
-    (line_score * 0.70 + projection_score * 0.12 + depth_score * 0.18).clamp(-1.0, 1.0)
+    let depth_score = (1.0 - player_position.distance(ideal) / 4.5).clamp(-1.0, 1.0);
+    (line_score * 0.82 + projection_score * 0.08 + depth_score * 0.10).clamp(-1.0, 1.0)
 }
 
 fn defensive_endline_depth_yards(
@@ -32281,6 +32300,7 @@ fn soccer_neural_transition_features(
         ),
         soccer_neural_unit(transition.observation.defensive_line_break_threat),
         soccer_neural_unit(transition.observation.excessive_hold_pressure),
+        soccer_neural_bin(state.skill_shooting_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -64746,6 +64766,64 @@ mod tests {
     }
 
     #[test]
+    fn neural_learning_pads_previous_snapshot_shooting_skill_input() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15088,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_SHOOTING_SKILL;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+        previous_snapshot.layers[0].weights[0][previous_dim - 1] = 0.135_791;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous shooting-skill neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][previous_dim - 1],
+            0.135_791
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_SHOOTING_SKILL], 0.0,
+            "new shooting-skill input weight should start neutral for 112-input snapshots"
+        );
+    }
+
+    #[test]
     fn neural_learning_trains_on_threaded_backend() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.4,
@@ -67077,6 +67155,7 @@ mod tests {
         let mut skills = SkillProfile::default();
         skills.top_speed = 9.4;
         skills.acceleration = 8.9;
+        skills.shooting = 8.6;
         skills.passing_completion_rate = 9.2;
         skills.crossing_left = 4.1;
         skills.crossing_right = 8.7;
@@ -67102,6 +67181,7 @@ mod tests {
             .expect("passer transition");
         assert_eq!(passer.observation.skill_top_speed, 9.4);
         assert_eq!(passer.observation.skill_acceleration, 8.9);
+        assert_eq!(passer.observation.skill_shooting, 8.6);
         assert_eq!(passer.observation.skill_passing_completion_rate, 9.2);
         assert_eq!(passer.observation.skill_crossing_left, 4.1);
         assert_eq!(passer.observation.skill_crossing_right, 8.7);
@@ -67110,6 +67190,7 @@ mod tests {
         assert_eq!(passer.observation.skill_vision, 9.1);
         let state = SoccerQStateKey::from_transition(passer);
         assert_eq!(state.skill_top_speed_bin, skill_bucket(skills.top_speed));
+        assert_eq!(state.skill_shooting_bin, skill_bucket(skills.shooting));
         assert_eq!(
             state.skill_passing_completion_bin,
             skill_bucket(skills.passing_completion_rate)
@@ -67130,6 +67211,10 @@ mod tests {
             features[SOCCER_NEURAL_FEATURE_VISION_SKILL],
             soccer_neural_bin(state.skill_vision_bin, 5.0)
         );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_SHOOTING_SKILL],
+            soccer_neural_bin(state.skill_shooting_bin, 5.0)
+        );
 
         let mut lower_vision = passer.clone();
         lower_vision.observation.skill_vision = 2.1;
@@ -67143,6 +67228,20 @@ mod tests {
             features[SOCCER_NEURAL_FEATURE_VISION_SKILL]
                 > lower_features[SOCCER_NEURAL_FEATURE_VISION_SKILL],
             "neural learner should receive the same vision distinction as the Q state"
+        );
+
+        let mut lower_shooting = passer.clone();
+        lower_shooting.observation.skill_shooting = 2.4;
+        let lower_shooting_state = SoccerQStateKey::from_transition(&lower_shooting);
+        let lower_shooting_features = soccer_neural_transition_features(&lower_shooting);
+        assert!(
+            state.skill_shooting_bin > lower_shooting_state.skill_shooting_bin,
+            "high-shooting and low-shooting imported players should learn from different Q buckets"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_SHOOTING_SKILL]
+                > lower_shooting_features[SOCCER_NEURAL_FEATURE_SHOOTING_SKILL],
+            "neural learner should receive the same shooting distinction as the Q state"
         );
     }
 
@@ -67971,13 +68070,13 @@ mod tests {
             seed: 103,
             ..Default::default()
         };
-        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_holder,last_touch_team,top_speed,acceleration,strength,weight_pounds,dribbling,passing_completion_rate,crossing_left,crossing_right,defensive_ability,ability_in_goal,vision
-0,0.0,0,Home passer,Home,Midfielder,8,40.0,70.0,40.0,70.0,0,Home,9.6,8.8,7.4,166.0,8.2,9.1,4.2,8.9,3.1,2.0,9.4
-0,0.0,1,Home runner,Home,Forward,9,44.0,82.0,40.0,70.0,0,Home,8.0,8.0,7.8,174.0,8.0,7.0,7.0,7.0,4.0,2.0,7.0
-0,0.0,2,Away defender,Away,Defender,4,58.0,78.0,40.0,70.0,0,Home,7.0,7.0,8.5,188.0,5.0,6.0,5.0,5.0,8.5,2.0,6.0
-1,0.1,0,Home passer,Home,Midfielder,8,40.2,70.4,44.0,82.0,1,Home,9.6,8.8,7.4,166.0,8.2,9.1,4.2,8.9,3.1,2.0,9.4
-1,0.1,1,Home runner,Home,Forward,9,44.0,82.0,44.0,82.0,1,Home,8.0,8.0,7.8,174.0,8.0,7.0,7.0,7.0,4.0,2.0,7.0
-1,0.1,2,Away defender,Away,Defender,4,56.5,78.5,44.0,82.0,1,Home,7.0,7.0,8.5,188.0,5.0,6.0,5.0,5.0,8.5,2.0,6.0
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_holder,last_touch_team,top_speed,acceleration,strength,weight_pounds,shooting,dribbling,passing_completion_rate,crossing_left,crossing_right,defensive_ability,ability_in_goal,vision
+0,0.0,0,Home passer,Home,Midfielder,8,40.0,70.0,40.0,70.0,0,Home,9.6,8.8,7.4,166.0,8.6,8.2,9.1,4.2,8.9,3.1,2.0,9.4
+0,0.0,1,Home runner,Home,Forward,9,44.0,82.0,40.0,70.0,0,Home,8.0,8.0,7.8,174.0,9.2,8.0,7.0,7.0,7.0,4.0,2.0,7.0
+0,0.0,2,Away defender,Away,Defender,4,58.0,78.0,40.0,70.0,0,Home,7.0,7.0,8.5,188.0,4.4,5.0,6.0,5.0,5.0,8.5,2.0,6.0
+1,0.1,0,Home passer,Home,Midfielder,8,40.2,70.4,44.0,82.0,1,Home,9.6,8.8,7.4,166.0,8.6,8.2,9.1,4.2,8.9,3.1,2.0,9.4
+1,0.1,1,Home runner,Home,Forward,9,44.0,82.0,44.0,82.0,1,Home,8.0,8.0,7.8,174.0,9.2,8.0,7.0,7.0,7.0,4.0,2.0,7.0
+1,0.1,2,Away defender,Away,Defender,4,56.5,78.5,44.0,82.0,1,Home,7.0,7.0,8.5,188.0,4.4,5.0,6.0,5.0,5.0,8.5,2.0,6.0
 "#;
 
         let tracking =
@@ -67990,6 +68089,7 @@ mod tests {
         assert_eq!(imported.acceleration, 8.8);
         assert_eq!(imported.strength, 7.4);
         assert_eq!(imported.weight_pounds, 166.0);
+        assert_eq!(imported.shooting, 8.6);
         assert_eq!(imported.passing_completion_rate, 9.1);
         assert_eq!(imported.crossing_right, 8.9);
         assert_eq!(imported.defending, 3.1);
@@ -68004,12 +68104,14 @@ mod tests {
             .expect("passer transition");
         assert_eq!(passer.observation.skill_top_speed, 9.6);
         assert_eq!(passer.observation.skill_weight_pounds, 166.0);
+        assert_eq!(passer.observation.skill_shooting, 8.6);
         assert_eq!(passer.observation.skill_crossing_left, 4.2);
         assert_eq!(passer.observation.skill_crossing_right, 8.9);
         assert_eq!(passer.observation.skill_defending, 3.1);
         let state = SoccerQStateKey::from_transition(passer);
         assert_eq!(state.skill_top_speed_bin, skill_bucket(9.6));
         assert_eq!(state.skill_weight_bin, player_weight_bucket(166.0));
+        assert_eq!(state.skill_shooting_bin, skill_bucket(8.6));
         assert_eq!(state.skill_crossing_left_bin, skill_bucket(4.2));
         assert_eq!(state.skill_crossing_right_bin, skill_bucket(8.9));
         assert_eq!(state.skill_defending_bin, skill_bucket(3.1));
@@ -73449,6 +73551,56 @@ mod tests {
     }
 
     #[test]
+    fn fast_ball_carrier_projection_triggers_back_line_retreat_early() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let threat = 17;
+        for id in 1..=4 {
+            sim.players[id].position = Vec2::new(22.0 + id as f64 * 9.0, 28.0);
+            sim.players[id].home_position = sim.players[id].position;
+        }
+        sim.players[threat].position = Vec2::new(40.0, 73.5);
+        sim.players[threat].velocity = Vec2::zero();
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let static_snapshot = WorldSnapshot::from_match(&sim);
+        assert!(
+            static_snapshot
+                .opponent_breakthrough_ball_carrier(Team::Home)
+                .is_none(),
+            "static carrier just beyond the trigger band should not yet force a retreat"
+        );
+
+        sim.players[threat].velocity = Vec2::new(0.0, -6.0);
+        let moving_snapshot = WorldSnapshot::from_match(&sim);
+        let (holder_position, projected_line_gap) = moving_snapshot
+            .opponent_breakthrough_ball_carrier(Team::Home)
+            .expect("fast carrier should project into the line-break trigger band");
+        let target = moving_snapshot.defensive_assignment_for(
+            defender,
+            sim.players[defender].home_position,
+            false,
+        );
+
+        assert!(
+            projected_line_gap <= DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS,
+            "projected line gap should enter the trigger band: {projected_line_gap}"
+        );
+        assert!(
+            target.y <= moving_snapshot.ball.position.y - DEFENSIVE_MAX_BEHIND_BALL_YARDS + 1.25,
+            "fast runner should make the back line hold the deepest connected cushion: target={target:?} ball={:?}",
+            moving_snapshot.ball.position
+        );
+        assert!(
+            (holder_position.y - target.y) * Team::Home.attack_dir()
+                >= DEFENSIVE_MAX_BEHIND_BALL_YARDS - 1.25,
+            "defender should stay goal-side of the projected break threat: target={target:?} holder={holder_position:?}"
+        );
+    }
+
+    #[test]
     fn goalkeeper_loose_ball_recovery_holds_ball_goal_line_until_collection_window() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
@@ -73661,6 +73813,54 @@ mod tests {
     }
 
     #[test]
+    fn goalkeeper_small_lateral_drift_off_ball_goal_line_triggers_recovery() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let threat = 17;
+        park_players_except(&mut sim, &[keeper, threat]);
+        sim.players[threat].position = Vec2::new(58.0, 35.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let setup_snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = setup_snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        let goal = Vec2::new(
+            setup_snapshot.field_width * 0.5,
+            setup_snapshot.own_goal_y_for(Team::Home),
+        );
+        let tangent = (setup_snapshot.ball.position - goal).normalized();
+        let lateral = Vec2::new(-tangent.y, tangent.x);
+        sim.players[keeper].position = (line_target + lateral * 0.30)
+            .clamp_to_pitch(sim.config.field_width_yards, sim.config.field_length_yards);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut keeper_player = sim.players[keeper].clone();
+        let intent =
+            keeper_player.run_time_step(&snapshot, None, None, &mut SeededRandom::new(19_217));
+        let SoccerAction::MoveTo(runtime_target) = intent.action else {
+            panic!(
+                "keeper slightly off the direct line should recover shape, got {:?}",
+                intent.action
+            );
+        };
+
+        assert!(
+            snapshot.goalkeeper_line_recovery_sprint_active(keeper),
+            "keeper should recover from even small visible lateral drift off the ball-goal line"
+        );
+        assert!(
+            runtime_target.distance(snapshot.goalkeeper_ball_goal_tracking_target(Team::Home))
+                < 1e-9,
+            "runtime target should stay exactly on the ball-goal line: runtime={runtime_target:?}"
+        );
+        assert!(
+            intent.sprint,
+            "keeper should sprint back onto the direct line"
+        );
+    }
+
+    #[test]
     fn goalkeeper_defensive_shape_tracks_direct_ball_goal_line() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
@@ -73717,8 +73917,11 @@ mod tests {
         sim.players[threat].position = Vec2::new(41.0, 9.0);
         sim.ball.holder = Some(threat);
         sim.ball.position = sim.players[threat].position;
+        let close_setup_snapshot = WorldSnapshot::from_match(&sim);
+        let close_line_target =
+            close_setup_snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        sim.players[keeper].position = close_line_target;
         let close_snapshot = WorldSnapshot::from_match(&sim);
-        let close_line_target = close_snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
         let close_goal = Vec2::new(
             close_snapshot.field_width * 0.5,
             close_snapshot.own_goal_y_for(Team::Home),

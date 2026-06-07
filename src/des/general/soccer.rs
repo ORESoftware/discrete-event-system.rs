@@ -28139,6 +28139,20 @@ fn soccer_accounting_check_agent_schedule(
                 "central brain decision trace should expose the internal operation order",
             );
         }
+        soccer_accounting_check_operation_order_contains(
+            report,
+            frame.tick,
+            "centralBrainDecisionOperationOrderItems",
+            &decision.operation_order,
+            &[
+                "sense-possession",
+                "classify-phase",
+                "sample-defensive-cover",
+                "measure-overloads",
+                "issue-team-directives",
+            ],
+            "central brain operation order should expose its internal tactical loop",
+        );
     } else if frame.tick > 0 {
         report.push_violation(
             frame.tick,
@@ -28238,6 +28252,21 @@ fn soccer_accounting_check_agent_schedule(
                     "official decision trace should expose the internal operation order",
                 );
             }
+            soccer_accounting_check_operation_order_contains(
+                report,
+                frame.tick,
+                "officialDecisionOperationOrderItems",
+                &decision.operation_order,
+                &[
+                    "sense-ball",
+                    "sample-offside-line",
+                    "choose-referee-target",
+                    "avoid-player-lanes",
+                    "clamp-duty-zone",
+                    "update-kinematics",
+                ],
+                "official operation order should expose the referee's internal loop",
+            );
         }
     }
 
@@ -28286,6 +28315,22 @@ fn soccer_accounting_check_agent_schedule(
                 "ball decision trace should expose the ball agent internal operation order",
             );
         }
+        soccer_accounting_check_operation_order_contains(
+            report,
+            frame.tick,
+            "ballDecisionOperationOrderItems",
+            &decision.operation_order,
+            &[
+                "sync-holder",
+                "apply-curl",
+                "apply-resistance",
+                "advance-position",
+                "resolve-shot",
+                "resolve-boundary",
+                "resolve-control",
+            ],
+            "ball operation order should expose its full run_time_step loop",
+        );
     } else if scheduled_index.is_some() {
         report.push_violation(
             frame.tick,
@@ -28295,6 +28340,29 @@ fn soccer_accounting_check_agent_schedule(
             "missing".to_string(),
             "scheduled ball agent should expose its run_time_step decision trace",
         );
+    }
+}
+
+fn soccer_accounting_check_operation_order_contains(
+    report: &mut SoccerAccountingSmokeReport,
+    tick: u64,
+    metric: &str,
+    operation_order: &[String],
+    expected: &[&str],
+    message: &str,
+) {
+    for op in expected {
+        if !operation_order.iter().any(|actual| actual == op) {
+            report.push_violation(
+                tick,
+                "agentSchedule",
+                metric,
+                expected.join(","),
+                operation_order.join(","),
+                message,
+            );
+            return;
+        }
     }
 }
 
@@ -61326,6 +61394,44 @@ mod tests {
     }
 
     #[test]
+    fn accounting_smoke_report_flags_incomplete_ball_agent_operation_order() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                seed: 13_082,
+                ..MatchConfig::playback_trace(0.2)
+            },
+            1,
+        );
+        let scheduled_frame = trace
+            .frames
+            .iter_mut()
+            .find(|frame| {
+                frame.tick > 0
+                    && frame
+                        .agent_schedule
+                        .iter()
+                        .any(|entry| entry.kind == AgentScheduleKind::Ball)
+            })
+            .expect("post-tick scheduled ball frame");
+        let decision = scheduled_frame
+            .ball
+            .last_decision
+            .as_mut()
+            .expect("scheduled ball decision trace");
+        decision
+            .operation_order
+            .retain(|operation| operation != "resolve-control");
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "agentSchedule"
+                && violation.metric == "ballDecisionOperationOrderItems"
+        }));
+    }
+
+    #[test]
     fn accounting_smoke_report_flags_exclusive_events_same_tick() {
         let mut trace = run_simulation(
             MatchConfig {
@@ -73856,7 +73962,13 @@ mod tests {
 
         let setup_snapshot = WorldSnapshot::from_match(&sim);
         let line_target = setup_snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
-        sim.players[keeper].position = (line_target + Vec2::new(-2.0, 0.0))
+        let goal = Vec2::new(
+            setup_snapshot.field_width * 0.5,
+            setup_snapshot.own_goal_y_for(Team::Home),
+        );
+        let tangent = (setup_snapshot.ball.position - goal).normalized();
+        let lateral = Vec2::new(-tangent.y, tangent.x);
+        sim.players[keeper].position = (line_target + lateral * 2.0)
             .clamp_to_pitch(sim.config.field_width_yards, sim.config.field_length_yards);
 
         let snapshot = WorldSnapshot::from_match(&sim);

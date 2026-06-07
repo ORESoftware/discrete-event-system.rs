@@ -88853,6 +88853,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("soccer-sim.frames.jsonl"));
         assert!(html.contains("Loading match data"));
         assert!(html.contains("id=\"loadingTitleText\""));
+        assert!(html.contains("id=\"loadingProgress\""));
+        assert!(html.contains("role=\"progressbar\""));
+        assert!(html.contains("loadingProgress.setAttribute(\"aria-valuenow\""));
+        assert!(html.contains("loadingProgress.setAttribute(\"aria-valuetext\""));
         assert!(html.contains("id=\"authForm\""));
         assert!(html.contains("id=\"authToken\""));
         assert!(html.contains("const AUTH_HEADER_NAME = \"Auth\""));

@@ -290,7 +290,7 @@
       <div id="loadingOverlay" class="loading-overlay">
         <div class="loading-card">
           <div id="loadingTitle" class="loading-title"><span class="spinner"></span><span id="loadingTitleText">Loading match data</span></div>
-          <div class="progress"><div id="loadingBar" class="progress-fill"></div></div>
+          <div id="loadingProgress" class="progress" role="progressbar" aria-label="Match data loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Starting download"><div id="loadingBar" class="progress-fill"></div></div>
           <div id="loadingStatus" class="loading-status">Starting download</div>
           <div id="loadingBytes" class="loading-bytes">0 B</div>
           <form id="authForm" class="auth-panel">
@@ -493,6 +493,7 @@ const protectActionButton = document.getElementById("protectAction");
 const loadingOverlay = document.getElementById("loadingOverlay");
 const loadingTitle = document.getElementById("loadingTitle");
 const loadingTitleText = document.getElementById("loadingTitleText");
+const loadingProgress = document.getElementById("loadingProgress");
 const loadingBar = document.getElementById("loadingBar");
 const loadingStatus = document.getElementById("loadingStatus");
 const loadingBytes = document.getElementById("loadingBytes");
@@ -852,6 +853,13 @@ function updateLoadingProgress(loadedBytes = 0, totalBytes = 0, message = "Loadi
   loadingBytes.textContent = totalBytes > 0
     ? `${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)}; ${frameProgress}`
     : `${formatBytes(loadedBytes)} streamed; ${frameProgress}`;
+  loadingProgress.setAttribute("aria-valuenow", percent.toFixed(1));
+  loadingProgress.setAttribute(
+    "aria-valuetext",
+    totalBytes > 0
+      ? `${percent.toFixed(1)} percent; ${loadingBytes.textContent}; ${loadingStatus.textContent}`
+      : `Streaming; ${loadingBytes.textContent}; ${loadingStatus.textContent}`
+  );
   updatePlaybackAvailability();
 }
 function hideLoadingOverlay() {
@@ -2054,16 +2062,19 @@ async function bootstrapTrace(options = {}) {
     if (err.name === "AbortError") return;
     playing = false;
     loadingBar.style.width = "100%";
+    loadingProgress.setAttribute("aria-valuenow", "100");
     if (err.name === "AuthRequiredError") {
       setLoadingTitle("Authentication required", "auth");
       loadingStatus.textContent = `Auth required: ${err.message}`;
       loadingBytes.textContent = "Enter the legacy Auth header to load the split trace";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Auth required";
       authToken.focus();
     } else {
       setLoadingTitle("Load failed", "failed");
       loadingStatus.textContent = `Load failed: ${err.message}`;
       loadingBytes.textContent = "Retry after redeploying the split trace artifacts";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Load failed";
     }
     setControlsEnabled(false);
@@ -2093,16 +2104,19 @@ async function runNewSimulation() {
     assertFreshRunLoaded(previousRunKey);
   } catch (err) {
     loadingBar.style.width = "100%";
+    loadingProgress.setAttribute("aria-valuenow", "100");
     if (err.name === "AuthRequiredError") {
       setLoadingTitle("Authentication required", "auth");
       loadingStatus.textContent = `Auth required: ${err.message}`;
       loadingBytes.textContent = "Enter the legacy Auth header to run a fresh simulation";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Auth required";
       authToken.focus();
     } else {
       setLoadingTitle("Run failed", "failed");
       loadingStatus.textContent = `Run failed: ${err.message}`;
       loadingBytes.textContent = "main_soccer did not produce a fresh split trace";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Run failed";
     }
   } finally {

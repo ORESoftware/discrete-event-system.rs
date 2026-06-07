@@ -26342,6 +26342,14 @@ pub struct SoccerPlaybackPlayerFrame {
     pub last_action: Option<String>,
     #[serde(default)]
     pub operation_order: Vec<String>,
+    #[serde(default)]
+    pub action_score: f64,
+    #[serde(default)]
+    pub action_probability: f64,
+    #[serde(default)]
+    pub action_tick_probability: f64,
+    #[serde(default)]
+    pub considered_actions: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26792,6 +26800,14 @@ fn playback_selected_action_option_stats(
         .unwrap_or((0.0, 0.0, 0.0, considered_actions))
 }
 
+fn playback_player_decision_stats(decision: Option<&AgentDecisionTrace>) -> (f64, f64, f64, usize) {
+    let Some(decision) = decision else {
+        return (0.0, 0.0, 0.0, 0);
+    };
+    let action = normalize_soccer_action_label(&decision.action);
+    playback_selected_action_option_stats(decision, action)
+}
+
 fn playback_intent_from_decision(
     player_id: usize,
     team: Team,
@@ -26965,30 +26981,42 @@ impl SoccerPlaybackFrame {
             players: sim
                 .players
                 .iter()
-                .map(|player| SoccerPlaybackPlayerFrame {
-                    id: player.id,
-                    name: player.name.clone(),
-                    team: player.team,
-                    role: player.role,
-                    shirt: player.shirt,
-                    position: player.position,
-                    velocity: player.velocity,
-                    movement_gait: player.movement_gait,
-                    receive_facing: player.receive_facing,
-                    action_facing: player.action_facing,
-                    controller_slot: player.controller_slot,
-                    scheduled_index: sim.last_agent_schedule.iter().position(|entry| {
-                        entry.kind == AgentScheduleKind::Player && entry.id == player.id
-                    }),
-                    last_action: player
-                        .last_decision
-                        .as_ref()
-                        .map(|decision| decision.action.clone()),
-                    operation_order: player
-                        .last_decision
-                        .as_ref()
-                        .map(|decision| decision.operation_order.clone())
-                        .unwrap_or_default(),
+                .map(|player| {
+                    let (
+                        action_score,
+                        action_probability,
+                        action_tick_probability,
+                        considered_actions,
+                    ) = playback_player_decision_stats(player.last_decision.as_ref());
+                    SoccerPlaybackPlayerFrame {
+                        id: player.id,
+                        name: player.name.clone(),
+                        team: player.team,
+                        role: player.role,
+                        shirt: player.shirt,
+                        position: player.position,
+                        velocity: player.velocity,
+                        movement_gait: player.movement_gait,
+                        receive_facing: player.receive_facing,
+                        action_facing: player.action_facing,
+                        controller_slot: player.controller_slot,
+                        scheduled_index: sim.last_agent_schedule.iter().position(|entry| {
+                            entry.kind == AgentScheduleKind::Player && entry.id == player.id
+                        }),
+                        last_action: player
+                            .last_decision
+                            .as_ref()
+                            .map(|decision| decision.action.clone()),
+                        operation_order: player
+                            .last_decision
+                            .as_ref()
+                            .map(|decision| decision.operation_order.clone())
+                            .unwrap_or_default(),
+                        action_score,
+                        action_probability,
+                        action_tick_probability,
+                        considered_actions,
+                    }
                 })
                 .collect(),
             officials: sim
@@ -27110,28 +27138,40 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
             players: frame
                 .players
                 .iter()
-                .map(|player| SoccerPlaybackPlayerFrame {
-                    id: player.id,
-                    name: player.name.clone(),
-                    team: player.team,
-                    role: player.role,
-                    shirt: player.shirt,
-                    position: player.position,
-                    velocity: player.velocity,
-                    movement_gait: player.movement_gait,
-                    receive_facing: player.receive_facing,
-                    action_facing: player.action_facing,
-                    controller_slot: player.controller_slot,
-                    scheduled_index: player.scheduled_index,
-                    last_action: player
-                        .last_decision
-                        .as_ref()
-                        .map(|decision| decision.action.clone()),
-                    operation_order: player
-                        .last_decision
-                        .as_ref()
-                        .map(|decision| decision.operation_order.clone())
-                        .unwrap_or_default(),
+                .map(|player| {
+                    let (
+                        action_score,
+                        action_probability,
+                        action_tick_probability,
+                        considered_actions,
+                    ) = playback_player_decision_stats(player.last_decision.as_ref());
+                    SoccerPlaybackPlayerFrame {
+                        id: player.id,
+                        name: player.name.clone(),
+                        team: player.team,
+                        role: player.role,
+                        shirt: player.shirt,
+                        position: player.position,
+                        velocity: player.velocity,
+                        movement_gait: player.movement_gait,
+                        receive_facing: player.receive_facing,
+                        action_facing: player.action_facing,
+                        controller_slot: player.controller_slot,
+                        scheduled_index: player.scheduled_index,
+                        last_action: player
+                            .last_decision
+                            .as_ref()
+                            .map(|decision| decision.action.clone()),
+                        operation_order: player
+                            .last_decision
+                            .as_ref()
+                            .map(|decision| decision.operation_order.clone())
+                            .unwrap_or_default(),
+                        action_score,
+                        action_probability,
+                        action_tick_probability,
+                        considered_actions,
+                    }
                 })
                 .collect(),
             officials: frame
@@ -88009,6 +88049,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function selectedPlayerShotContext"));
         assert!(html.contains("function selectedPlayerShotLaneLabel"));
         assert!(html.contains("function selectedPlayerTacticalLabel"));
+        assert!(html.contains("function selectedPlayerDecisionProbabilityLabel"));
+        assert!(html.contains("p?.actionProbability"));
+        assert!(html.contains("p?.actionTickProbability"));
+        assert!(html.contains("p?.consideredActions"));
+        assert!(html.contains(
+            "P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)} C${compactConsidered}"
+        ));
         assert!(html.contains("p?.lastDecision?.action || p?.lastAction"));
         assert!(html.contains("p?.lastDecision?.operationOrder || p?.operationOrder"));
         assert!(html.contains("agentTrace ? `${tactical} ${agentTrace}` : tactical"));
@@ -88514,6 +88561,28 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .all(|player| player["operationOrder"]
                 .as_array()
                 .is_some_and(|order| !order.is_empty())));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["actionScore"].as_f64().is_some()));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["actionProbability"].as_f64().is_some()));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["actionTickProbability"].as_f64().is_some()));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["consideredActions"]
+                .as_u64()
+                .is_some_and(|count| count > 0)));
         assert!(scheduled_frame["officials"][0]
             .get("scheduledIndex")
             .is_some());

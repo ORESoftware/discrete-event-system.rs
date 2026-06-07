@@ -1067,6 +1067,23 @@ function intentLabel(i) {
     : "";
   return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}${probabilityLabel}`;
 }
+function selectedPlayerDecisionProbabilityLabel(p) {
+  const compactConsidered = Number(p?.consideredActions ?? 0);
+  if (compactConsidered > 0) {
+    const actionProbability = Number(p?.actionProbability ?? 0);
+    const tickProbability = Number(p?.actionTickProbability ?? actionProbability);
+    return ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)} C${compactConsidered}`;
+  }
+  const decision = p?.lastDecision;
+  const options = Array.isArray(decision?.actionOptions) ? decision.actionOptions : [];
+  const legal = options.filter(option => option?.legal !== false);
+  if (!legal.length) return "";
+  const action = String(decision?.action || "").toLowerCase();
+  const selected = legal.find(option => String(option?.label || "").toLowerCase() === action) || legal[0];
+  const actionProbability = Number(selected?.probability ?? 0);
+  const tickProbability = Number(selected?.tickProbability ?? actionProbability);
+  return ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)} C${legal.length}`;
+}
 function vecLen(v) {
   if (!v) return 0;
   return Math.hypot(Number(v.x || 0), Number(v.y || 0));
@@ -1675,7 +1692,8 @@ function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
   const action = String(p?.lastDecision?.action || p?.lastAction || "").replace(/-/g, " ");
   const schedule = playbackScheduleSlotLabel(p?.scheduledIndex);
   const ops = operationOrderLabel(p?.lastDecision?.operationOrder || p?.operationOrder, 2);
-  const agentTrace = action ? `${action}${schedule}${ops ? ` ${ops}` : ""}` : "";
+  const probability = selectedPlayerDecisionProbabilityLabel(p);
+  const agentTrace = action ? `${action}${schedule}${probability}${ops ? ` ${ops}` : ""}` : "";
   if (!observation) return agentTrace || "-";
   const keeperLine = Number(observation.goalkeeperBallGoalLineAlignmentScore ?? 0);
   const breakThreat = Number(observation.defensiveLineBreakThreat ?? 0);

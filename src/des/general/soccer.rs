@@ -6809,6 +6809,16 @@ impl PlayerAgent {
                 .flank_cross_arrival_target_for(self.id, self.home_position),
         };
         let current = snapshot.player_position(self.id).unwrap_or(self.position);
+        let open = snapshot.open_space_for(self.id, self.home_position);
+        let guarded_special_target = |target: Vec2| {
+            snapshot.shape_guarded_support_point(
+                self.id,
+                target,
+                &[open, self.home_position],
+                self.home_position,
+                false,
+            )
+        };
         let special_score = |target: Vec2, base: f64| {
             let forward = ((target.y - current.y) * self.team.attack_dir()).clamp(-8.0, 24.0);
             let openness = pass_receiver_openness_for_snapshots_with_teammates(
@@ -6846,6 +6856,7 @@ impl PlayerAgent {
             ),
         ];
         if let Some(target) = special_targets.check_to_ball {
+            let target = guarded_special_target(target);
             let ball_gain = (current.distance(snapshot.ball.position)
                 - target.distance(snapshot.ball.position))
             .max(0.0);
@@ -6861,6 +6872,7 @@ impl PlayerAgent {
             ));
         }
         if let Some(target) = special_targets.in_behind {
+            let target = guarded_special_target(target);
             options.push(AgentActionOptionTrace::new(
                 "run-in-behind",
                 special_score(target, 0.50 + holder_pressure_urgency * 0.10),
@@ -6868,6 +6880,7 @@ impl PlayerAgent {
             ));
         }
         if let Some(target) = special_targets.wide_outlet {
+            let target = guarded_special_target(target);
             let touchline_fit = ((target.x - snapshot.field_width * 0.5).abs()
                 / (snapshot.field_width * 0.5).max(1.0))
             .clamp(0.0, 1.0);
@@ -6888,6 +6901,7 @@ impl PlayerAgent {
             ));
         }
         if let Some(target) = special_targets.flank_cross_arrival {
+            let target = guarded_special_target(target);
             let goalward = ((target.y - current.y) * self.team.attack_dir()).clamp(-4.0, 24.0);
             let centrality = (1.0
                 - ((target.x - snapshot.field_width * 0.5).abs()
@@ -8453,28 +8467,33 @@ impl PlayerAgent {
                 .unwrap_or("support-shape")
                 .to_string();
             order_names.extend(support_order);
+            let support_open = snapshot.open_space_for(self.id, self.home_position);
+            let guarded_support_special = |point: Vec2| {
+                snapshot.shape_guarded_support_point(
+                    self.id,
+                    point,
+                    &[support_open, self.home_position],
+                    self.home_position,
+                    false,
+                )
+            };
             let support_target =
                 match first_support_label.as_str() {
                     "check-to-ball" => support_context.special_targets.check_to_ball.map(|point| {
                         SupportMovementTarget {
-                            point,
+                            point: guarded_support_special(point),
                             action_label: "check-to-ball",
                         }
                     }),
                     "run-in-behind" => support_context.special_targets.in_behind.map(|point| {
                         SupportMovementTarget {
-                            point: snapshot.clamp_to_role_position(
-                                self.id,
-                                point,
-                                self.home_position,
-                                false,
-                            ),
+                            point: guarded_support_special(point),
                             action_label: "run-in-behind",
                         }
                     }),
                     "wide-outlet" => support_context.special_targets.wide_outlet.map(|point| {
                         SupportMovementTarget {
-                            point,
+                            point: guarded_support_special(point),
                             action_label: "wide-outlet",
                         }
                     }),
@@ -9112,13 +9131,27 @@ impl PlayerAgent {
             }),
             "check-to-ball" if !observation.has_ball => snapshot
                 .check_to_ball_target_for(self.id, self.home_position)
-                .map(|target| (SoccerAction::MoveTo(target), "check-to-ball".to_string())),
-            "run-in-behind" if !observation.has_ball => {
-                snapshot.in_behind_run_target_for(self.id).map(|target| {
+                .map(|target| {
+                    let open = snapshot.open_space_for(self.id, self.home_position);
                     (
-                        SoccerAction::MoveTo(snapshot.clamp_to_role_position(
+                        SoccerAction::MoveTo(snapshot.shape_guarded_support_point(
                             self.id,
                             target,
+                            &[open, self.home_position],
+                            self.home_position,
+                            false,
+                        )),
+                        "check-to-ball".to_string(),
+                    )
+                }),
+            "run-in-behind" if !observation.has_ball => {
+                snapshot.in_behind_run_target_for(self.id).map(|target| {
+                    let open = snapshot.open_space_for(self.id, self.home_position);
+                    (
+                        SoccerAction::MoveTo(snapshot.shape_guarded_support_point(
+                            self.id,
+                            target,
+                            &[open, self.home_position],
                             self.home_position,
                             false,
                         )),
@@ -9128,7 +9161,19 @@ impl PlayerAgent {
             }
             "wide-outlet" if !observation.has_ball => snapshot
                 .wide_possession_outlet_target_for(self.id, self.home_position)
-                .map(|target| (SoccerAction::MoveTo(target), "wide-outlet".to_string())),
+                .map(|target| {
+                    let open = snapshot.open_space_for(self.id, self.home_position);
+                    (
+                        SoccerAction::MoveTo(snapshot.shape_guarded_support_point(
+                            self.id,
+                            target,
+                            &[open, self.home_position],
+                            self.home_position,
+                            false,
+                        )),
+                        "wide-outlet".to_string(),
+                    )
+                }),
             "shot-creation-run" | "overlap-run" | "support-push-up" | "support-screen"
             | "support-shape" | "support-roam"
                 if !observation.has_ball =>
@@ -73446,6 +73491,70 @@ mod tests {
             }
             other => panic!("expected check-to-ball movement, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn learned_check_to_ball_target_is_shape_guarded_from_teammate_space() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = 6;
+        let receiver = 9;
+        let occupying_teammate = 8;
+        let marker = 12;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[receiver].position = Vec2::new(31.0, 70.0);
+        sim.players[marker].position = Vec2::new(32.1, 70.0);
+        for id in 11..22 {
+            if id != marker {
+                sim.players[id].position = Vec2::new(70.0, 98.0);
+            }
+        }
+
+        let raw_snapshot = WorldSnapshot::from_match(&sim);
+        let raw_target = raw_snapshot
+            .check_to_ball_target_for(receiver, sim.players[receiver].home_position)
+            .expect("raw check-to-ball target");
+        sim.players[occupying_teammate].position = raw_target;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let occupied_target = snapshot
+            .check_to_ball_target_for(receiver, sim.players[receiver].home_position)
+            .expect("occupied check-to-ball target still geometrically available");
+        let occupied_pressure = snapshot.teammate_occupied_space_pressure_at(
+            Team::Home,
+            occupied_target,
+            Some(receiver),
+        );
+        assert!(
+            occupied_pressure > 0.90,
+            "test setup should make raw check-to-ball target teammate-occupied: {occupied_pressure}"
+        );
+
+        let observation = snapshot.observation_for(receiver);
+        let plan = SoccerLearnedPlan {
+            action: "check_to_ball".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let (action, label) = sim.players[receiver]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("guarded check-to-ball learned action");
+        assert_eq!(label, "check-to-ball");
+        let SoccerAction::MoveTo(target) = action else {
+            panic!("expected guarded check-to-ball movement, got {action:?}");
+        };
+
+        assert!(
+            target.distance(occupied_target) > TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS,
+            "guarded check-to-ball should not run into teammate-occupied target: target={target:?} occupied={occupied_target:?}"
+        );
+        assert!(
+            snapshot.teammate_occupied_space_pressure_at(Team::Home, target, Some(receiver))
+                < occupied_pressure * 0.50,
+            "guarded check-to-ball should materially reduce teammate-space pressure: target={target:?}"
+        );
     }
 
     #[test]

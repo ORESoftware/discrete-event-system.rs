@@ -311,7 +311,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 110;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 111;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -363,6 +363,7 @@ const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_SCAN: usize = 106;
 const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_DRIFT_RISK: usize = 107;
 const SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT: usize = 108;
 const SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT: usize = 109;
+const SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE: usize = 110;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87, 89, 93, 96, 102];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1630,6 +1631,8 @@ pub struct SoccerPomdpObservation {
     pub perceived_time_on_ball_seconds: f64,
     #[serde(default)]
     pub actual_time_on_ball_seconds: f64,
+    #[serde(default)]
+    pub excessive_hold_pressure: f64,
     #[serde(default)]
     pub fatigue: f64,
     #[serde(default)]
@@ -2993,6 +2996,8 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub perceived_time_on_ball_bin: u8,
     #[serde(default)]
+    pub excessive_hold_pressure_bin: u8,
+    #[serde(default)]
     pub fatigue_bin: u8,
     #[serde(default)]
     pub nearest_defender_fatigue_bin: u8,
@@ -3397,6 +3402,10 @@ impl SoccerQStateKey {
                 observation.perceived_time_on_ball_seconds,
                 &[0.35, 0.75, 1.3, 2.2],
             ),
+            excessive_hold_pressure_bin: distance_bucket(
+                observation.excessive_hold_pressure,
+                &[0.15, 0.35, 0.60, 0.82],
+            ),
             fatigue_bin: distance_bucket(observation.fatigue, &[0.15, 0.35, 0.60, 0.82]),
             nearest_defender_fatigue_bin: distance_bucket(
                 observation.perceived_nearest_defender_fatigue,
@@ -3609,6 +3618,7 @@ impl SoccerQStateKey {
             && self.positional_shape_exception_relief_bin
                 == other.positional_shape_exception_relief_bin
             && self.perceived_time_on_ball_bin == other.perceived_time_on_ball_bin
+            && self.excessive_hold_pressure_bin == other.excessive_hold_pressure_bin
             && self.fatigue_bin == other.fatigue_bin
             && self.nearest_defender_fatigue_bin == other.nearest_defender_fatigue_bin
             && self.nearest_defender_fatigue_confidence_bin
@@ -17763,6 +17773,7 @@ impl WorldSnapshot {
                 real_time_on_ball_seconds: 0.0,
                 perceived_time_on_ball_seconds: 0.0,
                 actual_time_on_ball_seconds: 0.0,
+                excessive_hold_pressure: 0.0,
                 fatigue: 0.0,
                 nearest_defender_fatigue: 0.0,
                 perceived_nearest_defender_fatigue: 0.5,
@@ -18334,6 +18345,18 @@ impl WorldSnapshot {
             .max(offensive_urgency)
             .max(defensive_urgency)
             .clamp(0.0, 1.0);
+        let excessive_hold_pressure = if has_ball {
+            excessive_hold_pressure_from_parts(
+                actual_time_on_ball_seconds,
+                pressure_urgency,
+                defensive_urgency,
+                perceived_pressure,
+                immediate_dispossession_risk,
+                ability01(me.skills.dribbling),
+            )
+        } else {
+            0.0
+        };
         let formation_lp_guidance = self.formation_lp_guidance_for(player_id);
         let formation_lp_recommended_move_yards = formation_lp_guidance
             .map(|guidance| finite_metric(guidance.recommended_move_yards))
@@ -18480,6 +18503,7 @@ impl WorldSnapshot {
             real_time_on_ball_seconds,
             perceived_time_on_ball_seconds,
             actual_time_on_ball_seconds,
+            excessive_hold_pressure,
             fatigue: me.fatigue.clamp(0.0, 1.0),
             nearest_defender_fatigue,
             perceived_nearest_defender_fatigue,
@@ -32039,6 +32063,7 @@ fn soccer_neural_transition_features(
                 .goalkeeper_ball_goal_line_alignment_score,
         ),
         soccer_neural_unit(transition.observation.defensive_line_break_threat),
+        soccer_neural_unit(transition.observation.excessive_hold_pressure),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -47169,21 +47194,38 @@ fn dribble_hold_base_seconds(dribbling: f64) -> f64 {
         + (ELITE_DRIBBLE_HOLD_BASE_SECONDS - NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS) * elite_fit
 }
 
-fn excessive_hold_pressure(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
-    let actual_hold = observation.actual_time_on_ball_seconds.max(0.0);
+fn excessive_hold_pressure_from_parts(
+    actual_time_on_ball_seconds: f64,
+    pressure_urgency: f64,
+    defensive_urgency: f64,
+    perceived_pressure: f64,
+    immediate_dispossession_risk: f64,
+    dribbling: f64,
+) -> f64 {
+    let actual_hold = actual_time_on_ball_seconds.max(0.0);
     if actual_hold <= 0.0 {
         return 0.0;
     }
-    let urgency = observation
-        .pressure_urgency
-        .max(observation.defensive_urgency)
-        .max(observation.perceived_pressure)
+    let urgency = pressure_urgency
+        .max(defensive_urgency)
+        .max(perceived_pressure)
         .clamp(0.0, 1.0);
     let allowed_seconds = (dribble_hold_base_seconds(dribbling)
         - urgency * 1.35
-        - observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.85)
+        - immediate_dispossession_risk.clamp(0.0, 1.0) * 0.85)
         .clamp(0.75, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
     ((actual_hold - allowed_seconds) / 3.2).clamp(0.0, 1.0)
+}
+
+fn excessive_hold_pressure(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
+    excessive_hold_pressure_from_parts(
+        observation.actual_time_on_ball_seconds,
+        observation.pressure_urgency,
+        observation.defensive_urgency,
+        observation.perceived_pressure,
+        observation.immediate_dispossession_risk,
+        dribbling,
+    )
 }
 
 fn dribble_hold_score_multiplier(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
@@ -76198,6 +76240,74 @@ mod tests {
         assert!(
             non_elite_release > elite_release + 0.80,
             "overheld non-elite carries should boost pass/clear release more than elite carries: non_elite={non_elite_release} elite={elite_release}"
+        );
+    }
+
+    #[test]
+    fn excessive_hold_pressure_is_visible_to_table_and_neural_learners() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Midfielder)
+            .map(|player| player.id)
+            .expect("home midfielder");
+        park_players_except(&mut sim, &[holder]);
+        sim.players[holder].skills.dribbling = 7.8;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(holder);
+        observation.actual_time_on_ball_seconds = 3.2;
+        observation.perceived_pressure = 0.82;
+        observation.pressure_urgency = 0.86;
+        observation.defensive_urgency = 0.58;
+        observation.immediate_dispossession_risk = 0.70;
+        observation.excessive_hold_pressure = excessive_hold_pressure(
+            &observation,
+            ability01(sim.players[holder].skills.dribbling),
+        );
+
+        let q_key = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(holder),
+            &observation,
+            Team::Home,
+            sim.players[holder].role,
+        );
+        let decision = test_decision_trace(&snapshot, holder, "carry-forward");
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: holder,
+            team: Team::Home,
+            role: sim.players[holder].role,
+            state: decision.mdp_state,
+            observation: observation.clone(),
+            belief: decision.belief,
+            action: "carry-forward".to_string(),
+            action_target: decision.action_target,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(holder),
+            next_observation: observation.clone(),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
+
+        assert!(
+            observation.excessive_hold_pressure > 0.60,
+            "test setup should create a stale pressured carry: {:?}",
+            observation.excessive_hold_pressure
+        );
+        assert!(
+            q_key.excessive_hold_pressure_bin >= 3,
+            "Q-state should expose overheld-pressure bins, got {}",
+            q_key.excessive_hold_pressure_bin
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE] > 0.60,
+            "neural learner should directly see excessive hold pressure"
         );
     }
 

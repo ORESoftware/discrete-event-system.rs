@@ -63961,6 +63961,52 @@ mod tests {
     }
 
     #[test]
+    fn runtime_agent_schedule_shuffles_field_entities_each_tick() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.8,
+            seed: 13_084,
+            ..Default::default()
+        });
+        let mut field_orders = HashSet::new();
+        let mut ball_indexes = HashSet::new();
+
+        for _ in 0..8 {
+            sim.run_time_step();
+            let summary = agent_schedule_summary_for(
+                &sim.last_agent_schedule,
+                sim.players.len(),
+                sim.officials.len(),
+            );
+            assert!(
+                summary.complete,
+                "runtime schedule should stay complete: {summary:?}"
+            );
+            assert_eq!(summary.expected_total_agents, 27);
+            assert_eq!(summary.player_count, 22);
+            assert_eq!(summary.official_count, 3);
+            assert_eq!(summary.ball_count, 1);
+            assert!(summary.central_brain_first);
+            ball_indexes.insert(summary.ball_scheduled_index.expect("ball scheduled"));
+            field_orders.insert(
+                sim.last_agent_schedule
+                    .iter()
+                    .skip(1)
+                    .map(|entry| (entry.kind.clone(), entry.id))
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        assert!(
+            field_orders.len() > 1,
+            "Fisher-Yates field entity order should vary across ticks"
+        );
+        assert!(
+            ball_indexes.len() > 1,
+            "ball agent should move through the shuffled field schedule, got {ball_indexes:?}"
+        );
+    }
+
+    #[test]
     fn accounting_smoke_report_flags_frozen_multi_frame_match() {
         let mut trace = run_simulation(
             MatchConfig {

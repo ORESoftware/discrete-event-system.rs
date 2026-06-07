@@ -377,6 +377,7 @@ const FALLBACK_CONFIG = {
   maxHumanPlayers: 4,
   dtSeconds: 0.1
 };
+const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
 function emptyStats() {
   return {
     shotsHome: 0,
@@ -500,10 +501,13 @@ let lastFrameLoadSampleCount = 0;
 let traceLoadController = null;
 let runningNewSimulation = false;
 let controllerAssignmentSyncSeq = 0;
+let inputFlushTimer = null;
+let inputFlushInFlight = false;
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
   if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
+  scheduleInputFlush();
 };
 
 function formatBytes(bytes) {
@@ -575,6 +579,24 @@ function soccerApiUrl(path) {
     prefix = current.pathname.slice(0, desIdx + "/des-rs".length);
   }
   return new URL(`${prefix}${normalizedPath}`, current.href).toString();
+}
+async function postSoccerJson(path, payload, resource = "api") {
+  const options = fetchOptions("application/json");
+  options.method = "POST";
+  options.headers = {...options.headers, "Content-Type": "application/json"};
+  options.body = JSON.stringify(payload);
+  const response = await fetch(cacheBustUrl(soccerApiUrl(path)), options);
+  if (response.status === 401 || response.status === 403) {
+    let detail = "";
+    try {
+      detail = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 180);
+    } catch (_) {
+      detail = "";
+    }
+    throw new AuthRequiredError(resource, response.status, detail);
+  }
+  if (!response.ok) throw new Error(`${resource} ${response.status}`);
+  return response.json();
 }
 class AuthRequiredError extends Error {
   constructor(resource, status, detail) {
@@ -1466,13 +1488,7 @@ async function syncControllerAssignment(slot, playerId) {
   const requestId = ++controllerAssignmentSyncSeq;
   const payload = {controllerSlot: slot, playerId: playerId == null ? null : playerId};
   try {
-    const options = fetchOptions("application/json");
-    options.method = "POST";
-    options.headers = {...options.headers, "Content-Type": "application/json"};
-    options.body = JSON.stringify(payload);
-    const response = await fetch(cacheBustUrl(soccerApiUrl("/api/assign")), options);
-    if (!response.ok) throw new Error(`assign ${response.status}`);
-    const data = await response.json();
+    const data = await postSoccerJson("/api/assign", payload, "assign");
     if (requestId !== controllerAssignmentSyncSeq) return;
     if (Array.isArray(data.controllerAssignments)) {
       applyControllerAssignments(data.controllerAssignments);
@@ -1482,6 +1498,28 @@ async function syncControllerAssignment(slot, playerId) {
     }
   } catch (err) {
     console.warn("controller assignment sync unavailable; keeping local selection", err);
+  }
+}
+function scheduleInputFlush() {
+  if (inputFlushTimer != null || inputFlushInFlight) return;
+  inputFlushTimer = window.setTimeout(flushQueuedInputsToInputApi, LIVE_INPUT_FLUSH_INTERVAL_MS);
+}
+async function flushQueuedInputsToInputApi() {
+  inputFlushTimer = null;
+  if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
+  inputFlushInFlight = true;
+  const inputs = window.__humanInputQueue.slice();
+  try {
+    const ack = await postSoccerJson("/api/input", inputs, "input");
+    if (Number(ack?.acceptedInputs ?? 0) > 0 || ack?.queued) {
+      const newestSeq = inputs.reduce((max, input) => Math.max(max, Number(input.seq || 0)), 0);
+      window.__humanInputQueue = window.__humanInputQueue.filter(input => Number(input.seq || 0) > newestSeq);
+    }
+  } catch (err) {
+    console.warn("live input sync unavailable; keeping local input queue", err);
+  } finally {
+    inputFlushInFlight = false;
+    if (window.__humanInputQueue.length > inputs.length) scheduleInputFlush();
   }
 }
 function updateAgentStatePanel() {

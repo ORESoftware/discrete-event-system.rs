@@ -85741,10 +85741,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("S${Number(a.controllerSlot ?? 0) + 1}#${Number(a.playerId ?? 0)}"));
         assert!(html.contains("centralBrainControllerAssignmentLabel(b)"));
         assert!(html.contains("function soccerApiUrl"));
+        assert!(html.contains("async function postSoccerJson"));
         assert!(html.contains("function syncControllerAssignment"));
-        assert!(html.contains("fetch(cacheBustUrl(soccerApiUrl(\"/api/assign\")), options)"));
+        assert!(html.contains("postSoccerJson(\"/api/assign\", payload, \"assign\")"));
         assert!(html.contains("function applyControllerAssignments"));
         assert!(html.contains("frame.centralBrain.controllerAssignments = normalized"));
+        assert!(html.contains("const LIVE_INPUT_FLUSH_INTERVAL_MS = 33"));
+        assert!(html.contains("function scheduleInputFlush"));
+        assert!(html.contains("function flushQueuedInputsToInputApi"));
+        assert!(html.contains("postSoccerJson(\"/api/input\", inputs, \"input\")"));
         assert!(html.contains("ballAgent.textContent = playbackBallAgentLabel(f.ball)"));
         assert!(html.contains("ballAgent.title = Array.isArray(f.ball?.operationOrder)"));
         assert!(html.contains("function officialAgentsLabel"));

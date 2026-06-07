@@ -12164,6 +12164,8 @@ pub struct PendingPassSnapshot {
     pub off_target_yards: f64,
     pub receiver_urgency: f64,
     pub nearest_receiver: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offside: Option<PendingOffsideSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -12199,6 +12201,32 @@ struct PendingOffside {
     position: Vec2,
     ball_y: f64,
     second_last_defender_y: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingOffsideSnapshot {
+    pub team: Team,
+    pub passer: usize,
+    pub target: usize,
+    pub position: Vec2,
+    pub ball_y: f64,
+    pub second_last_defender_y: f64,
+    pub interference_radius_yards: f64,
+}
+
+impl From<&PendingOffside> for PendingOffsideSnapshot {
+    fn from(offside: &PendingOffside) -> Self {
+        PendingOffsideSnapshot {
+            team: offside.team,
+            passer: offside.passer,
+            target: offside.target,
+            position: offside.position,
+            ball_y: offside.ball_y,
+            second_last_defender_y: offside.second_last_defender_y,
+            interference_radius_yards: OFFSIDE_INTERFERENCE_RADIUS_YARDS,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -15765,6 +15793,7 @@ fn pending_pass_snapshot_from(
         off_target_yards,
         receiver_urgency,
         nearest_receiver,
+        offside: pass.offside.as_ref().map(PendingOffsideSnapshot::from),
     }
 }
 
@@ -24476,6 +24505,8 @@ pub struct SoccerPlaybackFrame {
     pub tick: u64,
     pub clock_seconds: f64,
     pub ball: SoccerPlaybackBallFrame,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_pass: Option<PendingPassSnapshot>,
     pub players: Vec<SoccerPlaybackPlayerFrame>,
     pub officials: Vec<SoccerPlaybackOfficialFrame>,
     pub score_home: u32,
@@ -24659,6 +24690,11 @@ impl SoccerPlaybackFrame {
             .possession_team
             .or(ball_holder_team)
             .or(sim.ball.last_touch_team);
+        let pending_pass = WorldSnapshot::from_match_with_options(
+            sim,
+            WorldSnapshotOptions::DEFENSIVE_OR_LOOSE_AGENT_DECISION,
+        )
+        .pending_pass;
 
         SoccerPlaybackFrame {
             tick: sim.tick,
@@ -24681,6 +24717,7 @@ impl SoccerPlaybackFrame {
                 holder: sim.ball.holder,
                 last_touch_team: sim.ball.last_touch_team,
             },
+            pending_pass,
             players: sim
                 .players
                 .iter()
@@ -24768,6 +24805,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                 holder: frame.ball.holder,
                 last_touch_team: frame.ball.last_touch_team,
             },
+            pending_pass: frame.pending_pass.clone(),
             players: frame
                 .players
                 .iter()
@@ -24930,6 +24968,8 @@ pub struct MatchFrame {
     pub ball: BallState,
     #[serde(default)]
     pub ball_history: Vec<BallPositionSample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_pass: Option<PendingPassSnapshot>,
     pub players: Vec<PlayerSnapshot>,
     #[serde(default)]
     pub shared_positions: SharedPlayerPositionSnapshot,
@@ -32731,6 +32771,7 @@ impl SoccerMatch {
             clock_seconds: self.clock_seconds,
             ball,
             ball_history: snapshot.ball_history,
+            pending_pass: snapshot.pending_pass,
             players,
             shared_positions: snapshot.shared_positions,
             officials,
@@ -64910,6 +64951,66 @@ mod tests {
     }
 
     #[test]
+    fn pending_pass_frames_expose_offside_interference_phase() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 5;
+        let runner = 9;
+        sim.players[passer].position = Vec2::new(40.0, 70.0);
+        sim.players[runner].position = Vec2::new(40.0, 108.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(8.0 + away as f64, 82.0);
+        }
+        sim.players[11].position = Vec2::new(40.0, 118.0);
+        sim.players[12].position = Vec2::new(42.0, 96.0);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.holder = Some(passer);
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: passer,
+            action: SoccerAction::Pass {
+                target_player: Some(runner),
+                power: 1.0,
+                flight: PassFlight::Floor,
+            },
+            sprint: false,
+        });
+
+        let frame = sim.to_frame();
+        let pending = frame.pending_pass.as_ref().expect("frame pending pass");
+        let offside = pending.offside.as_ref().expect("pending offside phase");
+        assert_eq!(pending.from, passer);
+        assert_eq!(pending.target, Some(runner));
+        assert_eq!(pending.nearest_receiver, Some(runner));
+        assert_eq!(offside.target, runner);
+        assert_eq!(offside.passer, passer);
+        assert_eq!(offside.second_last_defender_y, 96.0);
+        assert_eq!(
+            offside.interference_radius_yards,
+            OFFSIDE_INTERFERENCE_RADIUS_YARDS
+        );
+
+        let playback = SoccerPlaybackFrame::from(&frame);
+        let playback_value =
+            serde_json::to_value(&playback).expect("serialize playback offside phase");
+        assert_eq!(
+            playback_value["pendingPass"]["from"].as_u64(),
+            Some(passer as u64)
+        );
+        assert_eq!(
+            playback_value["pendingPass"]["target"].as_u64(),
+            Some(runner as u64)
+        );
+        assert_eq!(
+            playback_value["pendingPass"]["offside"]["target"].as_u64(),
+            Some(runner as u64)
+        );
+        assert_eq!(
+            playback_value["pendingPass"]["offside"]["interferenceRadiusYards"].as_f64(),
+            Some(OFFSIDE_INTERFERENCE_RADIUS_YARDS)
+        );
+    }
+
+    #[test]
     fn offside_runner_within_three_yards_of_loose_ball_is_flagged() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         sim.players[5].position = Vec2::new(40.0, 70.0);
@@ -72111,6 +72212,10 @@ mod tests {
         assert!(html.body.contains("function flankLaneTargetsForDirective"));
         assert!(html.body.contains("function drawFlankPolicyLanes"));
         assert!(html.body.contains("drawFlankPolicyLanes(r)"));
+        assert!(html.body.contains("function pendingPassPhase"));
+        assert!(html.body.contains("function drawPendingPassPhase"));
+        assert!(html.body.contains("pending.offside"));
+        assert!(html.body.contains("drawPendingPassPhase(r)"));
         assert!(html.body.contains("LowX"));
         assert!(html.body.contains("HighX"));
         assert!(html.body.contains("id=\"liveHttp\""));

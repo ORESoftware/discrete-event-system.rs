@@ -51615,6 +51615,55 @@ fn facing_bucket_to_vector(facing: FacingBucket) -> Option<Vec2> {
     }
 }
 
+fn facing_bucket_clock_index(facing: FacingBucket) -> Option<i8> {
+    match facing {
+        FacingBucket::East => Some(0),
+        FacingBucket::SouthEast => Some(1),
+        FacingBucket::South => Some(2),
+        FacingBucket::SouthWest => Some(3),
+        FacingBucket::West => Some(4),
+        FacingBucket::NorthWest => Some(5),
+        FacingBucket::North => Some(6),
+        FacingBucket::NorthEast => Some(7),
+        FacingBucket::Unknown => None,
+    }
+}
+
+fn facing_bucket_from_clock_index(index: i8) -> FacingBucket {
+    match index.rem_euclid(8) {
+        0 => FacingBucket::East,
+        1 => FacingBucket::SouthEast,
+        2 => FacingBucket::South,
+        3 => FacingBucket::SouthWest,
+        4 => FacingBucket::West,
+        5 => FacingBucket::NorthWest,
+        6 => FacingBucket::North,
+        _ => FacingBucket::NorthEast,
+    }
+}
+
+fn facing_bucket_rotate_one_step_toward(
+    current: FacingBucket,
+    target: FacingBucket,
+) -> FacingBucket {
+    let (Some(current_idx), Some(target_idx)) = (
+        facing_bucket_clock_index(current),
+        facing_bucket_clock_index(target),
+    ) else {
+        return target;
+    };
+    let clockwise = (target_idx - current_idx).rem_euclid(8);
+    if clockwise == 0 {
+        current
+    } else if clockwise <= 1 || clockwise >= 7 {
+        target
+    } else if clockwise <= 4 {
+        facing_bucket_from_clock_index(current_idx + 1)
+    } else {
+        facing_bucket_from_clock_index(current_idx - 1)
+    }
+}
+
 fn ball_facing_bucket_from_position(
     team: Team,
     position: Vec2,
@@ -51660,10 +51709,16 @@ fn movement_action_facing_bucket(
     }
 
     if let Some(current) = facing_bucket_to_vector(current_facing) {
+        let to_ball_dir = to_ball.normalized();
         if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS
-            && current.normalized().dot(to_ball.normalized()) >= STABLE_CURRENT_FACING_BALL_DOT
+            && current.normalized().dot(to_ball_dir) >= STABLE_CURRENT_FACING_BALL_DOT
         {
             return current_facing;
+        }
+        if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS
+            && current.normalized().dot(to_ball_dir) >= -0.10
+        {
+            return facing_bucket_rotate_one_step_toward(current_facing, ball_facing);
         }
     }
 
@@ -57983,8 +58038,8 @@ mod tests {
 
         assert_eq!(
             sim.players[player].action_facing,
-            FacingBucket::East,
-            "stale facing still turns when the ball is no longer in the player's broad forward view"
+            FacingBucket::SouthEast,
+            "stale facing should rotate one bucket toward a square ball instead of snapping across the body"
         );
     }
 
@@ -58021,8 +58076,8 @@ mod tests {
 
         assert_eq!(
             sim.players[player].action_facing,
-            FacingBucket::East,
-            "players still turn once the ball is squarely outside the broad forward view"
+            FacingBucket::SouthEast,
+            "players should turn toward a square ball smoothly instead of snapping across facing buckets"
         );
     }
 

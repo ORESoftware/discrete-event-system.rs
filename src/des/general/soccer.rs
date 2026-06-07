@@ -74082,6 +74082,72 @@ mod tests {
     }
 
     #[test]
+    fn goalkeeper_runtime_tracks_ball_goal_line_at_least_ninety_five_percent() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let threat = 17;
+        park_players_except(&mut sim, &[keeper, threat]);
+        sim.players[threat].position = Vec2::new(41.0, 9.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+        let setup_snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = setup_snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        sim.players[keeper].position = line_target;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert!(
+            snapshot.goalkeeper_direct_intervention_is_safe(keeper),
+            "test setup should permit a rare legal keeper intervention"
+        );
+        let options = sim.players[keeper].defensive_action_options(
+            &snapshot,
+            snapshot.tactical_directive(Team::Home),
+            snapshot.dt_seconds,
+        );
+        let tackle = options
+            .iter()
+            .find(|option| option.label == "tackle")
+            .expect("keeper tackle option");
+        assert!(
+            tackle.legal && tackle.score > 0.0,
+            "legal keeper intervention should remain in the option table for close-ball emergencies: {tackle:?}"
+        );
+
+        let mut line_tracking = 0usize;
+        let mut legal_interventions = 0usize;
+        let samples = 512usize;
+        for seed in 0..samples {
+            let mut keeper_player = sim.players[keeper].clone();
+            let intent = keeper_player.run_time_step(
+                &snapshot,
+                None,
+                None,
+                &mut SeededRandom::new(seed as u32),
+            );
+            match intent.action {
+                SoccerAction::MoveTo(target) if target.distance(line_target) < 1e-9 => {
+                    line_tracking += 1;
+                }
+                SoccerAction::Tackle { .. } => {
+                    legal_interventions += 1;
+                }
+                other => {
+                    panic!(
+                        "keeper should either track the direct line or make a legal intervention, got {other:?}"
+                    );
+                }
+            }
+        }
+
+        let line_share = line_tracking as f64 / samples as f64;
+        assert!(
+            line_share >= 0.95,
+            "keeper should track the ball-goal line at least 95% of runtime decisions; line={line_tracking} interventions={legal_interventions} samples={samples}"
+        );
+    }
+
+    #[test]
     fn goalkeeper_loose_ball_collection_requires_line_aligned_collection() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");

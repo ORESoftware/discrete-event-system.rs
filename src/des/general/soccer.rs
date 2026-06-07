@@ -51022,6 +51022,7 @@ fn pitch_grid_cell(
 }
 
 fn pitch_grid_address(position: Vec2, field_width: f64, field_length: f64) -> PitchGridAddress {
+    let (field_width, field_length) = sane_pitch_dimensions(field_width, field_length);
     let whole_pitch = PitchGridCell::default();
     let macro_zone = pitch_grid_cell(
         position,
@@ -62876,6 +62877,47 @@ mod tests {
         assert_eq!(state.action_facing, FacingBucket::West);
         assert_eq!(observation.player_grid.fine.id, state.player_grid.fine.id);
         assert_eq!(observation.action_facing, FacingBucket::West);
+    }
+
+    #[test]
+    fn pitch_grid_address_clamps_noisy_tracking_boundaries_and_keeps_parent_links() {
+        let samples = [
+            Vec2::new(-3.0, -2.0),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(DEFAULT_FIELD_WIDTH_YARDS, DEFAULT_FIELD_LENGTH_YARDS),
+            Vec2::new(
+                DEFAULT_FIELD_WIDTH_YARDS + 4.0,
+                DEFAULT_FIELD_LENGTH_YARDS + 6.0,
+            ),
+        ];
+
+        for position in samples {
+            let grid = pitch_grid_address(
+                position,
+                DEFAULT_FIELD_WIDTH_YARDS,
+                DEFAULT_FIELD_LENGTH_YARDS,
+            );
+
+            assert_eq!(grid.whole_pitch.id, 0);
+            assert_eq!(grid.whole_pitch.parent_id, None);
+            assert_eq!(grid.macro_zone.parent_id, Some(grid.whole_pitch.id));
+            assert_eq!(grid.tactical.parent_id, Some(grid.macro_zone.id));
+            assert_eq!(grid.fine.parent_id, Some(grid.tactical.id));
+            assert!(grid.macro_zone.x < PITCH_MACRO_GRID_COLUMNS);
+            assert!(grid.macro_zone.y < PITCH_MACRO_GRID_ROWS);
+            assert!(grid.tactical.x < PITCH_TACTICAL_GRID_COLUMNS);
+            assert!(grid.tactical.y < PITCH_TACTICAL_GRID_ROWS);
+            assert!(grid.fine.x < PITCH_FINE_GRID_COLUMNS);
+            assert!(grid.fine.y < PITCH_FINE_GRID_ROWS);
+        }
+
+        let fallback_grid = pitch_grid_address(Vec2::new(18.0, 62.0), f64::NAN, 0.0);
+        let default_grid = pitch_grid_address(
+            Vec2::new(18.0, 62.0),
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        );
+        assert_eq!(fallback_grid, default_grid);
     }
 
     #[test]

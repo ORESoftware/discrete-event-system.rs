@@ -51578,6 +51578,37 @@ mod tests {
             .collect()
     }
 
+    fn test_human_input(
+        controller_slot: usize,
+        player_id: Option<usize>,
+        seq: u64,
+    ) -> HumanInputFrame {
+        HumanInputFrame {
+            controller_slot,
+            player_id,
+            seq,
+            axis: Vec2::zero(),
+            sprint: false,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }
+    }
+
+    fn test_controller_assignment(
+        controller_slot: usize,
+        player_id: usize,
+    ) -> ControllerAssignment {
+        ControllerAssignment {
+            controller_slot,
+            player_id,
+            player_name: format!("P{player_id}"),
+            team: Team::Home,
+        }
+    }
+
     fn test_decision_trace(
         snapshot: &WorldSnapshot,
         player_id: usize,
@@ -58856,6 +58887,51 @@ mod tests {
 
         assert_eq!(session.owned_controller_thread_count(), 4);
         assert_eq!(session.match_ref().config.human_slots(), 4);
+    }
+
+    #[test]
+    fn shared_controller_assignments_cap_slots_and_keep_players_unique() {
+        let assignments = SharedControllerAssignments::new(6);
+
+        assignments.assign_slot(0, Some(10));
+        assignments.assign_slot(4, Some(14));
+        assignments.assign_slot(1, Some(10));
+
+        assert_eq!(assignments.assigned_player_for_slot(0), None);
+        assert_eq!(assignments.assigned_player_for_slot(1), Some(10));
+        assert_eq!(assignments.assigned_player_for_slot(4), None);
+        assert!(!assignments.accepts_input(&test_human_input(0, Some(10), 1)));
+        assert!(assignments.accepts_input(&test_human_input(1, Some(10), 1)));
+        assert!(assignments.accepts_input(&test_human_input(1, None, 2)));
+        assert!(!assignments.accepts_input(&test_human_input(1, Some(11), 3)));
+
+        assignments.set_human_slots(1);
+
+        assert_eq!(assignments.assigned_player_for_slot(1), None);
+        assert!(!assignments.accepts_input(&test_human_input(1, Some(10), 4)));
+    }
+
+    #[test]
+    fn shared_controller_assignment_replacement_dedupes_players_and_caps_slots() {
+        let assignments = SharedControllerAssignments::new(4);
+        assignments.replace_from_assignments(
+            6,
+            &[
+                test_controller_assignment(0, 7),
+                test_controller_assignment(1, 7),
+                test_controller_assignment(5, 9),
+                test_controller_assignment(2, 8),
+            ],
+        );
+
+        assert_eq!(assignments.assigned_player_for_slot(0), None);
+        assert_eq!(assignments.assigned_player_for_slot(1), Some(7));
+        assert_eq!(assignments.assigned_player_for_slot(2), Some(8));
+        assert_eq!(assignments.assigned_player_for_slot(5), None);
+        assert!(!assignments.accepts_input(&test_human_input(0, Some(7), 1)));
+        assert!(assignments.accepts_input(&test_human_input(1, Some(7), 1)));
+        assert!(assignments.accepts_input(&test_human_input(2, Some(8), 1)));
+        assert!(!assignments.accepts_input(&test_human_input(5, Some(9), 1)));
     }
 
     #[test]

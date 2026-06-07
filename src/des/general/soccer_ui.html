@@ -883,8 +883,12 @@ function playbackBallAgentLabel(ball) {
   const action = String(ball?.lastAction || "waiting");
   const schedule = playbackScheduleSlotLabel(ball?.scheduledIndex);
   const holder = ball?.holder == null ? "" : ` #${ball.holder}`;
+  const decisionSpeed = Number(ball?.decisionSpeedYps ?? vecLen(ball?.velocity || {x: 0, y: 0}));
+  const decisionAltitude = Number(ball?.decisionAltitudeYards ?? ball?.altitudeYards ?? 0);
+  const decisionCurl = Number(ball?.decisionCurlYps2 ?? 0);
+  const physics = ` v${decisionSpeed.toFixed(1)} z${decisionAltitude.toFixed(1)} c${decisionCurl.toFixed(1)}`;
   const ops = operationOrderLabel(ball?.operationOrder, 2);
-  return `${action}${schedule}${holder}${ops ? ` ${ops}` : ""}`;
+  return `${action}${schedule}${holder}${physics}${ops ? ` ${ops}` : ""}`;
 }
 function officialKindShortLabel(kind) {
   if (kind === "centerReferee") return "CR";

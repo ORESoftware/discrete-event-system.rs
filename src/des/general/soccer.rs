@@ -11240,6 +11240,16 @@ pub struct BallDecisionTrace {
     pub tick: u64,
     pub action: String,
     pub position: Vec2,
+    #[serde(default)]
+    pub velocity: Vec2,
+    #[serde(default)]
+    pub acceleration: Vec2,
+    #[serde(default)]
+    pub jerk: Vec2,
+    #[serde(default)]
+    pub curl_acceleration: Vec2,
+    #[serde(default)]
+    pub altitude_yards: f64,
     pub holder: Option<usize>,
     #[serde(default)]
     pub scheduled_index: Option<usize>,
@@ -11882,6 +11892,11 @@ impl BallAgent {
             tick,
             action: action.to_string(),
             position: self.position,
+            velocity: self.velocity,
+            acceleration: self.acceleration,
+            jerk: self.jerk,
+            curl_acceleration: self.curl_acceleration,
+            altitude_yards: self.altitude_yards,
             holder: self.holder,
             scheduled_index,
             operation_order: ball_agent_operation_order(tick, action, scheduled_index),
@@ -25869,6 +25884,12 @@ pub struct SoccerPlaybackBallFrame {
     #[serde(default)]
     pub jerk: Vec2,
     #[serde(default)]
+    pub decision_speed_yps: f64,
+    #[serde(default)]
+    pub decision_altitude_yards: f64,
+    #[serde(default)]
+    pub decision_curl_yps2: f64,
+    #[serde(default)]
     pub scheduled_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_action: Option<String>,
@@ -26471,6 +26492,24 @@ impl SoccerPlaybackFrame {
                 velocity: sim.ball.velocity,
                 acceleration: sim.ball.acceleration,
                 jerk: sim.ball.jerk,
+                decision_speed_yps: sim
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.velocity.len())
+                    .unwrap_or_else(|| sim.ball.velocity.len()),
+                decision_altitude_yards: sim
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.altitude_yards)
+                    .unwrap_or(sim.ball.altitude_yards),
+                decision_curl_yps2: sim
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.curl_acceleration.len())
+                    .unwrap_or_else(|| sim.ball.curl_acceleration.len()),
                 scheduled_index: sim
                     .last_agent_schedule
                     .iter()
@@ -26582,6 +26621,24 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                 velocity: frame.ball.velocity,
                 acceleration: frame.ball.acceleration,
                 jerk: frame.ball.jerk,
+                decision_speed_yps: frame
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.velocity.len())
+                    .unwrap_or_else(|| frame.ball.velocity.len()),
+                decision_altitude_yards: frame
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.altitude_yards)
+                    .unwrap_or(frame.ball.altitude_yards),
+                decision_curl_yps2: frame
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.curl_acceleration.len())
+                    .unwrap_or_else(|| frame.ball.curl_acceleration.len()),
                 scheduled_index: frame.ball.scheduled_index,
                 last_action: frame
                     .ball
@@ -47274,6 +47331,11 @@ fn tracking_frame_to_world_snapshot(
                         ),
                         action,
                         position: frame.ball_position,
+                        velocity: frame.ball_velocity.unwrap_or_default(),
+                        acceleration: frame.ball_acceleration.unwrap_or_default(),
+                        jerk: frame.ball_jerk.unwrap_or_default(),
+                        curl_acceleration: frame.ball_curl_acceleration.unwrap_or_default(),
+                        altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
                         holder: frame.ball_holder,
                         scheduled_index,
                     }
@@ -53537,6 +53599,15 @@ mod tests {
         let decision = sim.ball.last_decision.as_ref().expect("ball decision");
         assert_eq!(decision.tick, 0);
         assert!(!decision.action.is_empty());
+        assert!(decision.velocity.x.is_finite());
+        assert!(decision.velocity.y.is_finite());
+        assert!(decision.acceleration.x.is_finite());
+        assert!(decision.acceleration.y.is_finite());
+        assert!(decision.jerk.x.is_finite());
+        assert!(decision.jerk.y.is_finite());
+        assert!(decision.curl_acceleration.x.is_finite());
+        assert!(decision.curl_acceleration.y.is_finite());
+        assert!(decision.altitude_yards.is_finite());
         let frame_decision = sim
             .to_frame()
             .ball
@@ -53544,6 +53615,11 @@ mod tests {
             .expect("frame ball decision");
         assert_eq!(frame_decision.tick, decision.tick);
         assert_eq!(frame_decision.action, decision.action);
+        assert_eq!(frame_decision.velocity, decision.velocity);
+        assert_eq!(frame_decision.acceleration, decision.acceleration);
+        assert_eq!(frame_decision.jerk, decision.jerk);
+        assert_eq!(frame_decision.curl_acceleration, decision.curl_acceleration);
+        assert_eq!(frame_decision.altitude_yards, decision.altitude_yards);
     }
 
     #[test]
@@ -54953,6 +55029,11 @@ mod tests {
             tick: sim.tick,
             action: "route-one".to_string(),
             position: sim.ball.position,
+            velocity: sim.ball.velocity,
+            acceleration: sim.ball.acceleration,
+            jerk: sim.ball.jerk,
+            curl_acceleration: sim.ball.curl_acceleration,
+            altitude_yards: sim.ball.altitude_yards,
             holder: None,
             scheduled_index: None,
             operation_order: ball_agent_operation_order(sim.tick, "route-one", None),
@@ -74059,6 +74140,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             tick: sim.tick,
             action: "route-one".to_string(),
             position: sim.ball.position,
+            velocity: sim.ball.velocity,
+            acceleration: sim.ball.acceleration,
+            jerk: sim.ball.jerk,
+            curl_acceleration: sim.ball.curl_acceleration,
+            altitude_yards: sim.ball.altitude_yards,
             holder: None,
             scheduled_index: None,
             operation_order: ball_agent_operation_order(sim.tick, "route-one", None),
@@ -82070,6 +82156,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .iter()
             .position(|entry| entry["kind"] == "ball" && entry["id"] == BALL_AGENT_ID)
             .expect("ball schedule index");
+        assert!(value["frame"]["ball"]["decisionSpeedYps"]
+            .as_f64()
+            .is_some());
+        assert!(value["frame"]["ball"]["decisionAltitudeYards"]
+            .as_f64()
+            .is_some());
+        assert!(value["frame"]["ball"]["decisionCurlYps2"]
+            .as_f64()
+            .is_some());
         let holder_ball_schedule_order =
             schedule_order_relative_to_ball(Some(holder_schedule_index), Some(ball_schedule_index));
         assert_eq!(
@@ -85634,6 +85729,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("id=\"officialAgents\""));
         assert!(html.contains("function playbackBallAgentLabel"));
         assert!(html.contains("ball?.lastAction"));
+        assert!(html.contains("ball?.decisionSpeedYps"));
+        assert!(html.contains("ball?.decisionAltitudeYards"));
+        assert!(html.contains("ball?.decisionCurlYps2"));
+        assert!(html.contains("v${decisionSpeed.toFixed(1)}"));
         assert!(html.contains("function operationOrderLabel"));
         assert!(html.contains("ball?.operationOrder"));
         assert!(html.contains("function centralBrainControllerAssignmentLabel"));
@@ -86142,6 +86241,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .iter()
             .all(|official| official["scheduledIndex"].as_u64().is_some()));
         assert!(scheduled_frame["ball"]["scheduledIndex"].as_u64().is_some());
+        assert!(scheduled_frame["ball"]["decisionSpeedYps"]
+            .as_f64()
+            .is_some());
+        assert!(scheduled_frame["ball"]["decisionAltitudeYards"]
+            .as_f64()
+            .is_some());
+        assert!(scheduled_frame["ball"]["decisionCurlYps2"]
+            .as_f64()
+            .is_some());
         assert_eq!(
             scheduled_frame["agentScheduleSummary"]["totalAgents"].as_u64(),
             Some(27)

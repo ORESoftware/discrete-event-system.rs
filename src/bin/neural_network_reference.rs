@@ -324,6 +324,54 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static NEURAL_NETWORK_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn neural_network_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-neural-network"),
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-neural-network"),
+            EnvVarGuard::set(
+                "PYTORCH_PYTHON",
+                "/definitely/not-python-for-neural-network",
+            ),
+            EnvVarGuard::set(
+                "TENSORFLOW_PYTHON",
+                "/definitely/not-python-for-neural-network",
+            ),
+            EnvVarGuard::clear("NEURAL_NETWORK_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+        ]
+    }
 
     #[test]
     fn accepts_external_module_args() {
@@ -381,5 +429,99 @@ mod tests {
             .as_f64()
             .expect("ode final")
             .is_finite());
+    }
+
+    #[test]
+    fn reference_generation_ignores_python_env_and_runs_in_rust() {
+        let _env_lock = NEURAL_NETWORK_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("neural-network env lock");
+        let _guards = neural_network_python_off_guards();
+
+        let output = run(&Args {
+            seed: 11,
+            xor_epochs: 6,
+            corridor_length: 5,
+            ode_y0: 2.0,
+            ode_t1: 0.3,
+            ode_dt: 0.1,
+            ..Args::default()
+        });
+
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["backend"], "rust");
+        assert_eq!(
+            output["result"]["xor"]["predictions"]
+                .as_array()
+                .expect("xor predictions")
+                .len(),
+            4
+        );
+        assert_eq!(
+            output["result"]["corridor"]["policy"]
+                .as_array()
+                .expect("corridor policy")
+                .len(),
+            5
+        );
+        let final_value = output["result"]["neuralOdeDecay"]["finalValue"]
+            .as_f64()
+            .expect("ode final");
+        assert!(final_value.is_finite());
+        assert!((0.0..2.0).contains(&final_value));
+    }
+
+    #[test]
+    fn force_python_env_still_uses_rust_native_reference() {
+        let _env_lock = NEURAL_NETWORK_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("neural-network env lock");
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-neural-network");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-neural-network");
+        let _torch_guard = EnvVarGuard::set(
+            "PYTORCH_PYTHON",
+            "/definitely/not-python-for-neural-network",
+        );
+        let _tensorflow_guard = EnvVarGuard::set(
+            "TENSORFLOW_PYTHON",
+            "/definitely/not-python-for-neural-network",
+        );
+        let _force_guard = EnvVarGuard::set("NEURAL_NETWORK_REFERENCE_FORCE_PYTHON", "1");
+        let _global_force_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON", "1");
+
+        let output = run(&Args {
+            seed: 17,
+            xor_epochs: 4,
+            corridor_length: 4,
+            ode_y0: 1.5,
+            ode_t1: 0.2,
+            ode_dt: 0.1,
+            ..Args::default()
+        });
+
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["backend"], "rust");
+        assert_eq!(
+            output["result"]["xor"]["predictions"]
+                .as_array()
+                .expect("xor predictions")
+                .len(),
+            4
+        );
+        assert_eq!(
+            output["result"]["corridor"]["policy"]
+                .as_array()
+                .expect("corridor policy")
+                .len(),
+            4
+        );
+        assert!(output["result"]["neuralOdeDecay"]["finalValue"]
+            .as_f64()
+            .expect("ode final")
+            .is_finite());
+        assert!(!serde_json::to_string(&output)
+            .expect("reference output json")
+            .contains("/definitely/not-python-for-neural-network"));
     }
 }

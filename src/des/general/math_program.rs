@@ -5315,6 +5315,10 @@ pub struct ExternalMathProgramOptions {
     pub solution_limit: Option<u64>,
     /// Optional solution-pool target size for external CLI solves that expose it.
     pub solution_pool_size: Option<u64>,
+    /// Optional solution-pool objective gap relative to the best solution.
+    pub solution_pool_relative_gap: Option<f64>,
+    /// Optional solution-pool absolute objective gap from the best solution.
+    pub solution_pool_absolute_gap: Option<f64>,
     /// Optional incumbent objective target for external MIP-style solves.
     pub objective_limit: Option<f64>,
     /// Optional primal/row feasibility tolerance for external LP/MIP solves.
@@ -5366,6 +5370,8 @@ pub struct MathProgramSolverControlFeedback {
     pub node_limit: Option<usize>,
     pub solution_limit: Option<u64>,
     pub solution_pool_size: Option<u64>,
+    pub solution_pool_relative_gap: Option<f64>,
+    pub solution_pool_absolute_gap: Option<f64>,
     pub objective_limit: Option<f64>,
     pub relative_gap: Option<f64>,
     pub absolute_gap: Option<f64>,
@@ -8978,12 +8984,12 @@ fn solve_math_program_external_single_objective(
             "highs-cli".to_string()
         }
     });
-    if let Some(solution) = solve_math_program_external_linear_cli(program, opts, &method)? {
-        return Ok(solution);
-    }
     if let Some(solution) =
         solve_math_program_external_quadratic_rust_reference(program, opts, &method)?
     {
+        return Ok(solution);
+    }
+    if let Some(solution) = solve_math_program_external_linear_cli(program, opts, &method)? {
         return Ok(solution);
     }
     if let Some(solution) =
@@ -9511,6 +9517,10 @@ fn parse_external_math_program_linear_cli_method(method: &str) -> Option<Externa
         "lindo-cli" | "runlindo-cli" | "lindo:cli" | "runlindo:cli" => {
             Some(ExternalLinearCliSolver::Lindo)
         }
+        "mosek-cli" | "mosek:cli" => Some(ExternalLinearCliSolver::Mosek),
+        "copt-cli" | "copt-cmd-cli" | "copt:cli" | "copt-cmd:cli" => {
+            Some(ExternalLinearCliSolver::Copt)
+        }
         _ => None,
     }
 }
@@ -9712,6 +9722,8 @@ fn math_program_control_feedback_from_external_linear_cli(
         node_limit: None,
         solution_limit: cli.solution_limit,
         solution_pool_size: cli.solution_pool_size,
+        solution_pool_relative_gap: None,
+        solution_pool_absolute_gap: None,
         objective_limit: cli.objective_limit,
         relative_gap: cli.mip_gap,
         absolute_gap: cli.absolute_gap,
@@ -9799,7 +9811,7 @@ fn solve_math_program_external_native_mip_reference(
     }
 
     let _validated = encode_external_math_program_options(opts)?;
-    if opts.solution_pool_size.is_some() {
+    if external_math_program_solution_pool_requested(opts) {
         return solve_math_program_external_native_mip_solution_pool(program, opts, method)
             .map(Some);
     }
@@ -9852,7 +9864,10 @@ fn solve_math_program_external_native_mip_solution_pool(
     opts: &ExternalMathProgramOptions,
     method: &str,
 ) -> Result<MathProgramSolution, MathProgramError> {
-    let solution_pool_size = opts.solution_pool_size.unwrap_or(1);
+    let default_pool_opts = MathProgramSolutionPoolOptions::default();
+    let solution_pool_size = opts
+        .solution_pool_size
+        .unwrap_or(default_pool_opts.max_solutions as u64);
     let max_solutions = usize::try_from(solution_pool_size).map_err(|_| {
         MathProgramError::InvalidBound(
             "external solution_pool_size is too large for the native MIP backend".to_string(),
@@ -9864,6 +9879,8 @@ fn solve_math_program_external_native_mip_solution_pool(
         &solve_opts,
         &MathProgramSolutionPoolOptions {
             max_solutions,
+            absolute_gap: opts.solution_pool_absolute_gap,
+            relative_gap: opts.solution_pool_relative_gap,
             ..Default::default()
         },
     )?;
@@ -9889,6 +9906,12 @@ fn solve_math_program_external_native_mip_solution_pool(
         "direct Rust MIP solution-pool route for {method}; pool_solutions={solution_count}, exhausted={exhausted}, {pool_message}"
     ));
     Ok(solution)
+}
+
+fn external_math_program_solution_pool_requested(opts: &ExternalMathProgramOptions) -> bool {
+    opts.solution_pool_size.is_some()
+        || opts.solution_pool_relative_gap.is_some()
+        || opts.solution_pool_absolute_gap.is_some()
 }
 
 fn external_math_program_native_mip_solve_options(
@@ -9994,6 +10017,8 @@ fn external_math_program_native_mip_control_feedback(
         node_limit: opts.node_limit,
         solution_limit: opts.solution_limit,
         solution_pool_size: opts.solution_pool_size,
+        solution_pool_relative_gap: None,
+        solution_pool_absolute_gap: None,
         objective_limit: opts.objective_limit,
         relative_gap: opts.relative_gap,
         absolute_gap: opts.absolute_gap,
@@ -10036,6 +10061,8 @@ fn external_math_program_native_mip_solution_pool_control_feedback(
         time_limit_ms: opts.time_limit_ms,
         node_limit: opts.node_limit,
         solution_pool_size: opts.solution_pool_size,
+        solution_pool_relative_gap: opts.solution_pool_relative_gap,
+        solution_pool_absolute_gap: opts.solution_pool_absolute_gap,
         relative_gap: opts.relative_gap,
         absolute_gap: opts.absolute_gap,
         integer_feasibility_tolerance: opts.integer_feasibility_tolerance,
@@ -10049,6 +10076,40 @@ fn external_math_program_native_mip_solution_pool_control_feedback(
             .map(|selection| selection.as_str().to_string()),
         branch_priorities_accepted: opts.branch_priorities.as_ref().map(|_| true),
         branch_priority_count: opts.branch_priorities.as_ref().map(Vec::len),
+        ..Default::default()
+    };
+    (feedback != MathProgramSolverControlFeedback::default()).then_some(feedback)
+}
+
+fn external_math_program_cp_sat_reference_options(
+    opts: &ExternalMathProgramOptions,
+    solver: ExternalCpSatReferenceSolver,
+) -> Result<ExternalCpSatReferenceOptions, MathProgramError> {
+    let enumerate_solutions = opts
+        .solution_pool_size
+        .map(|size| {
+            usize::try_from(size).map_err(|_| {
+                MathProgramError::Unsupported(
+                    "external solution_pool_size is too large for the CP-SAT Rust reference"
+                        .to_string(),
+                )
+            })
+        })
+        .transpose()?;
+    Ok(ExternalCpSatReferenceOptions {
+        solver,
+        enumerate_solutions,
+        max_nodes: opts.node_limit,
+        ..Default::default()
+    })
+}
+
+fn external_math_program_cp_sat_control_feedback(
+    opts: &ExternalMathProgramOptions,
+) -> Option<MathProgramSolverControlFeedback> {
+    let feedback = MathProgramSolverControlFeedback {
+        node_limit: opts.node_limit,
+        solution_pool_size: opts.solution_pool_size,
         ..Default::default()
     };
     (feedback != MathProgramSolverControlFeedback::default()).then_some(feedback)
@@ -10073,19 +10134,18 @@ fn solve_math_program_external_cp_sat_rust_reference(
     }
     let _validated = encode_external_math_program_options(opts)?;
     let compiled = compile_mip(program)?;
-    let Some(model) = compiled_mip_to_cp_sat_reference_model(&compiled, opts.node_limit) else {
+    let Some(model) = compiled_mip_to_cp_sat_reference_model(&compiled, None) else {
         return Ok(None);
     };
+    let reference_options = external_math_program_cp_sat_reference_options(opts, solver)?;
     let run = solve_cp_sat_json_with_external_reference(
         &cp_sat_model_to_reference_json(&model),
-        &ExternalCpSatReferenceOptions {
-            solver,
-            ..Default::default()
-        },
+        &reference_options,
     );
-    Ok(Some(math_program_solution_from_external_cp_sat_reference(
-        program, &compiled, run,
-    )))
+    let mut solution =
+        math_program_solution_from_external_cp_sat_reference(program, &compiled, run);
+    solution.control_feedback = external_math_program_cp_sat_control_feedback(opts);
+    Ok(Some(solution))
 }
 
 fn external_math_program_cp_sat_reference_solver_for_method(
@@ -10197,6 +10257,12 @@ fn math_program_solution_from_external_cp_sat_reference(
     run: ExternalCpSatReferenceRun,
 ) -> MathProgramSolution {
     let status = from_external_cp_sat_reference_status(run.status);
+    let pool_suffix = run
+        .raw
+        .get("solutions")
+        .and_then(Value::as_array)
+        .map(|solutions| format!("; pool_solutions={}", solutions.len()))
+        .unwrap_or_default();
     let canonical_x = if run.assignment.len() == compiled.problem.c.len() {
         run.assignment.iter().map(|&value| value as f64).collect()
     } else {
@@ -10232,7 +10298,7 @@ fn math_program_solution_from_external_cp_sat_reference(
         unbounded_ray: None,
         infeasibility_certificate: None,
         solver: run.backend,
-        message: Some(run.message),
+        message: Some(format!("{}{}", run.message, pool_suffix)),
     }
 }
 
@@ -10383,8 +10449,11 @@ fn external_math_program_quadratic_reference_solver_for_method(
             Some(ExternalQuadraticReferenceSolver::Clarabel)
         }
         "ecos" | "cvxpy-ecos" | "cvxpy:ecos" => Some(ExternalQuadraticReferenceSolver::Ecos),
-        "mosek" | "cvxpy-mosek" | "cvxpy:mosek" => Some(ExternalQuadraticReferenceSolver::Mosek),
-        "copt" | "cvxpy-copt" | "cvxpy:copt" => Some(ExternalQuadraticReferenceSolver::Copt),
+        "mosek" | "mosek-cli" | "mosek:cli" | "cvxpy-mosek" | "cvxpy:mosek" => {
+            Some(ExternalQuadraticReferenceSolver::Mosek)
+        }
+        "copt" | "copt-cli" | "copt-cmd-cli" | "copt:cli" | "copt-cmd:cli" | "cvxpy-copt"
+        | "cvxpy:copt" => Some(ExternalQuadraticReferenceSolver::Copt),
         "qpoases" | "cvxpy-qpoases" | "cvxpy:qpoases" => {
             Some(ExternalQuadraticReferenceSolver::Qpoases)
         }
@@ -11370,6 +11439,28 @@ fn encode_external_math_program_options(
             Value::from(solution_pool_size),
         );
     }
+    if let Some(relative_gap) = opts.solution_pool_relative_gap {
+        if !relative_gap.is_finite() || relative_gap < 0.0 {
+            return Err(MathProgramError::InvalidBound(
+                "external solution_pool_relative_gap must be finite and non-negative".to_string(),
+            ));
+        }
+        object.insert(
+            "solutionPoolRelativeGap".to_string(),
+            Value::from(relative_gap),
+        );
+    }
+    if let Some(absolute_gap) = opts.solution_pool_absolute_gap {
+        if !absolute_gap.is_finite() || absolute_gap < 0.0 {
+            return Err(MathProgramError::InvalidBound(
+                "external solution_pool_absolute_gap must be finite and non-negative".to_string(),
+            ));
+        }
+        object.insert(
+            "solutionPoolAbsoluteGap".to_string(),
+            Value::from(absolute_gap),
+        );
+    }
     if let Some(objective_limit) = opts.objective_limit {
         if !objective_limit.is_finite() {
             return Err(MathProgramError::InvalidBound(
@@ -11491,6 +11582,8 @@ fn parse_external_solver_control_feedback(raw: &Value) -> Option<MathProgramSolv
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok()),
         solution_pool_size: raw.get("solutionPoolSize").and_then(Value::as_u64),
+        solution_pool_relative_gap: raw.get("solutionPoolRelativeGap").and_then(Value::as_f64),
+        solution_pool_absolute_gap: raw.get("solutionPoolAbsoluteGap").and_then(Value::as_f64),
         objective_limit: raw.get("objectiveLimit").and_then(Value::as_f64),
         relative_gap: raw
             .get("relativeGap")
@@ -11538,6 +11631,8 @@ fn parse_external_solver_control_feedback(raw: &Value) -> Option<MathProgramSolv
         || feedback.node_limit.is_some()
         || feedback.solution_limit.is_some()
         || feedback.solution_pool_size.is_some()
+        || feedback.solution_pool_relative_gap.is_some()
+        || feedback.solution_pool_absolute_gap.is_some()
         || feedback.objective_limit.is_some()
         || feedback.relative_gap.is_some()
         || feedback.absolute_gap.is_some()
@@ -22423,7 +22518,17 @@ mod tests {
             parse_external_math_program_linear_cli_method("lindo-cli"),
             Some(ExternalLinearCliSolver::Lindo)
         );
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("mosek:cli"),
+            Some(ExternalLinearCliSolver::Mosek)
+        );
+        assert_eq!(
+            parse_external_math_program_linear_cli_method("copt_cmd_cli"),
+            Some(ExternalLinearCliSolver::Copt)
+        );
         assert_eq!(parse_external_math_program_linear_cli_method("highs"), None);
+        assert_eq!(parse_external_math_program_linear_cli_method("mosek"), None);
+        assert_eq!(parse_external_math_program_linear_cli_method("copt"), None);
         assert_eq!(
             parse_external_math_program_linear_cli_method("glpk:default"),
             None
@@ -22470,6 +22575,86 @@ mod tests {
         );
         assert_close(solution.objective, 4.0);
         assert_eq!(solution.x, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn external_math_program_cp_sat_node_limit_reaches_rust_reference() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK.lock().expect("lock env");
+        let _python_bin_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-cp-sat");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-cp-sat");
+        let _force_cp_sat_python_guard = EnvVarGuard::set("CP_SAT_REFERENCE_FORCE_PYTHON", "0");
+        let _force_ortools_python_guard =
+            EnvVarGuard::set("CP_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON", "0");
+        let _force_all_python_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON", "0");
+        let mut mip = MathProgram::new(ObjectiveSense::Max);
+        let x = mip.add_binary_var("x", 4.0).unwrap();
+        let y = mip.add_binary_var("y", 3.0).unwrap();
+        mip.add_constraint("capacity", vec![(x, 1.0), (y, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+
+        let solution = solve_math_program_external(
+            &mip,
+            &ExternalMathProgramOptions {
+                method: Some("ortools-cp-sat".to_string()),
+                node_limit: Some(1),
+                solution_pool_size: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::NodeLimit);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-cp-sat-fallback-for-ortools-cp-sat"
+        );
+        assert!(solution
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("node limit")));
+        let feedback = solution.control_feedback.expect("CP-SAT feedback");
+        assert_eq!(feedback.node_limit, Some(1));
+        assert_eq!(feedback.solution_pool_size, Some(2));
+    }
+
+    #[test]
+    fn external_math_program_cp_sat_solution_pool_size_uses_rust_enumeration() {
+        let _lock = MATH_PROGRAM_EXTERNAL_ENV_LOCK.lock().expect("lock env");
+        let _python_bin_guard = EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-cp-sat");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-cp-sat");
+        let _force_cp_sat_python_guard = EnvVarGuard::set("CP_SAT_REFERENCE_FORCE_PYTHON", "0");
+        let _force_ortools_python_guard =
+            EnvVarGuard::set("CP_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON", "0");
+        let _force_all_python_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON", "0");
+        let mut mip = MathProgram::new(ObjectiveSense::Max);
+        let x = mip.add_binary_var("x", 4.0).unwrap();
+        let y = mip.add_binary_var("y", 3.0).unwrap();
+        mip.add_constraint("capacity", vec![(x, 1.0), (y, 1.0)], RowSense::Le, 1.0)
+            .unwrap();
+
+        let solution = solve_math_program_external(
+            &mip,
+            &ExternalMathProgramOptions {
+                method: Some("ortools-cp-sat".to_string()),
+                solution_pool_size: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::Optimal);
+        assert_eq!(
+            solution.solver,
+            "rust:registered-cp-sat-fallback-for-ortools-cp-sat"
+        );
+        assert_close(solution.objective, 4.0);
+        assert_eq!(solution.x, vec![1.0, 0.0]);
+        assert!(solution
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("pool_solutions=2")));
+        let feedback = solution.control_feedback.expect("CP-SAT feedback");
+        assert_eq!(feedback.solution_pool_size, Some(2));
     }
 
     #[test]
@@ -22558,12 +22743,56 @@ mod tests {
     }
 
     #[test]
+    fn external_math_program_native_mip_solution_pool_respects_pool_relative_gap() {
+        let mut mip = MathProgram::new(ObjectiveSense::Max);
+        let batches = mip
+            .add_integer_var("batches", 10.0, Some(0.0), Some(2.0))
+            .unwrap();
+        let lot = mip.add_semi_integer_var("lot", 1.0, 2.0, 3.0).unwrap();
+        mip.add_constraint(
+            "capacity",
+            vec![(batches, 1.0), (lot, 1.0)],
+            RowSense::Le,
+            4.0,
+        )
+        .unwrap();
+
+        let solution = solve_math_program_external(
+            &mip,
+            &ExternalMathProgramOptions {
+                method: Some("des-ipmip".to_string()),
+                solution_pool_size: Some(10),
+                solution_pool_relative_gap: Some(0.41),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(solution.status, MathProgramStatus::Optimal);
+        assert_eq!(solution.solver, "des-ipmip");
+        assert_close(solution.objective, 22.0);
+        assert_eq!(solution.x, vec![2.0, 2.0]);
+        assert!(solution
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("pool_solutions=3")));
+        let feedback = solution
+            .control_feedback
+            .expect("native MIP solution-pool feedback");
+        assert_eq!(feedback.solution_pool_size, Some(10));
+        assert_eq!(feedback.solution_pool_relative_gap, Some(0.41));
+        assert_eq!(feedback.relative_gap, None);
+    }
+
+    #[test]
     fn external_solver_control_feedback_parses_relative_gap() {
         let feedback = parse_external_solver_control_feedback(&serde_json::json!({
             "solutionLimit": 5,
             "timeLimitMs": 2500.0,
             "nodeLimit": 32,
             "solutionPoolSize": 3,
+            "solutionPoolRelativeGap": 0.2,
+            "solutionPoolAbsoluteGap": 1.5,
             "relativeGap": 0.125,
             "absoluteGap": 0.5
         }))
@@ -22573,6 +22802,8 @@ mod tests {
         assert_eq!(feedback.time_limit_ms, Some(2500.0));
         assert_eq!(feedback.node_limit, Some(32));
         assert_eq!(feedback.solution_pool_size, Some(3));
+        assert_eq!(feedback.solution_pool_relative_gap, Some(0.2));
+        assert_eq!(feedback.solution_pool_absolute_gap, Some(1.5));
         assert_eq!(feedback.relative_gap, Some(0.125));
         assert_eq!(feedback.absolute_gap, Some(0.5));
 
@@ -23012,7 +23243,11 @@ mod tests {
             ("cvxpy:ecos", "builtin:qp-active-set-for-ecos"),
             ("cvxpy-ecos", "builtin:qp-active-set-for-ecos"),
             ("mosek", "builtin:qp-active-set-for-mosek"),
+            ("mosek-cli", "builtin:qp-active-set-for-mosek"),
+            ("mosek:cli", "builtin:qp-active-set-for-mosek"),
             ("cvxpy-mosek", "builtin:qp-active-set-for-mosek"),
+            ("copt-cli", "builtin:qp-active-set-for-copt"),
+            ("copt_cmd_cli", "builtin:qp-active-set-for-copt"),
             ("cvxpy:copt", "builtin:qp-active-set-for-copt"),
             ("cvxpy-copt", "builtin:qp-active-set-for-copt"),
             ("qpoases", "builtin:qp-active-set-for-qpoases"),
@@ -23038,7 +23273,11 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(solution.status, MathProgramStatus::Optimal);
+            assert_eq!(
+                solution.status,
+                MathProgramStatus::Optimal,
+                "method={method}"
+            );
             assert_eq!(solution.solver, solver, "method={method}");
             assert_close(solution.x[x], 0.5);
             assert_close(solution.x[y], 1.0);

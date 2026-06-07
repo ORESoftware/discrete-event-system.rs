@@ -36,7 +36,7 @@ struct Args {
 
 fn usage(program: &str) -> String {
     format!(
-        "usage: {program} [--solver auto|rust|rust:qp-active-set|fallback|highs|highs:qp|scipy|scipy:slsqp|osqp|cvxpy|scs|clarabel|ecos|mosek|copt|qpoases|proxqp|cosmo|sdpa|csdp] [--max-enumerations N]"
+        "usage: {program} [--solver auto|rust|rust:qp-active-set|fallback|highs|highs:qp|scipy|scipy:slsqp|osqp|cvxpy|scs|clarabel|ecos|mosek|mosek-cli|copt|copt-cli|qpoases|proxqp|cosmo|sdpa|csdp] [--max-enumerations N]"
     )
 }
 
@@ -77,8 +77,11 @@ fn parse_solver(value: &str) -> Result<ExternalQuadraticReferenceSolver, CliErro
             Ok(ExternalQuadraticReferenceSolver::Clarabel)
         }
         "ecos" | "cvxpy-ecos" | "cvxpy:ecos" => Ok(ExternalQuadraticReferenceSolver::Ecos),
-        "mosek" | "cvxpy-mosek" | "cvxpy:mosek" => Ok(ExternalQuadraticReferenceSolver::Mosek),
-        "copt" | "cvxpy-copt" | "cvxpy:copt" => Ok(ExternalQuadraticReferenceSolver::Copt),
+        "mosek" | "mosek-cli" | "mosek:cli" | "cvxpy-mosek" | "cvxpy:mosek" => {
+            Ok(ExternalQuadraticReferenceSolver::Mosek)
+        }
+        "copt" | "copt-cli" | "copt-cmd-cli" | "copt:cli" | "copt-cmd:cli" | "cvxpy-copt"
+        | "cvxpy:copt" => Ok(ExternalQuadraticReferenceSolver::Copt),
         "qpoases" | "cvxpy-qpoases" | "cvxpy:qpoases" => {
             Ok(ExternalQuadraticReferenceSolver::Qpoases)
         }
@@ -858,6 +861,53 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static QP_REFERENCE_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn qp_reference_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-qp-cli"),
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-qp-cli"),
+            EnvVarGuard::set("SCIPY_OPTIMIZE_PYTHON", "/definitely/not-python-for-qp-cli"),
+            EnvVarGuard::set("CVXPY_PYTHON", "/definitely/not-python-for-qp-cli"),
+            EnvVarGuard::set("OSQP_PYTHON", "/definitely/not-python-for-qp-cli"),
+            EnvVarGuard::clear("QP_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("QP_REFERENCE_SCIPY_FORCE_PYTHON"),
+            EnvVarGuard::clear("QP_REFERENCE_OSQP_FORCE_PYTHON"),
+            EnvVarGuard::clear("QP_REFERENCE_CVXPY_FORCE_PYTHON"),
+            EnvVarGuard::clear("QUADRATIC_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+        ]
+    }
 
     const QP_SAMPLE: &str = r#"{
         "Q": [[2.0, 0.0], [0.0, 2.0]],
@@ -905,7 +955,9 @@ mod tests {
             ("cvxpy:clarabel", ExternalQuadraticReferenceSolver::Clarabel),
             ("cvxpy-ecos", ExternalQuadraticReferenceSolver::Ecos),
             ("cvxpy:mosek", ExternalQuadraticReferenceSolver::Mosek),
+            ("mosek-cli", ExternalQuadraticReferenceSolver::Mosek),
             ("cvxpy-copt", ExternalQuadraticReferenceSolver::Copt),
+            ("copt_cmd_cli", ExternalQuadraticReferenceSolver::Copt),
             ("cvxpy:qpoases", ExternalQuadraticReferenceSolver::Qpoases),
             ("cvxpy-proxqp", ExternalQuadraticReferenceSolver::Proxqp),
             ("cvxpy:cosmo", ExternalQuadraticReferenceSolver::Cosmo),
@@ -975,6 +1027,40 @@ mod tests {
         assert_eq!(output["solver"], "rust:qp-active-set");
         assert!(output["objective"].as_f64().is_some());
         assert_eq!(output["x"].as_array().expect("x").len(), 2);
+    }
+
+    #[test]
+    fn python_backed_qp_cli_aliases_use_registered_rust_fallback_without_python() {
+        let _lock = QP_REFERENCE_CLI_ENV_LOCK
+            .lock()
+            .expect("QP reference CLI env lock poisoned");
+        let _guards = qp_reference_python_off_guards();
+
+        for (solver, expected_label) in [
+            ("scipy:slsqp", "builtin:qp-active-set-for-scipy"),
+            ("cvxpy:osqp", "builtin:qp-active-set-for-osqp"),
+            ("cvxpy:default", "builtin:qp-active-set-for-cvxpy"),
+        ] {
+            let output = run(
+                vec![
+                    "qp_reference".to_string(),
+                    "--solver".to_string(),
+                    solver.to_string(),
+                ],
+                QP_SAMPLE,
+            )
+            .expect("run");
+
+            assert_eq!(output["status"], "optimal", "{solver}: {output:?}");
+            assert_eq!(output["solver"], expected_label, "{solver}: {output:?}");
+            assert_eq!(output["x"].as_array().expect("x").len(), 2);
+            assert!(
+                output["message"].as_str().is_some_and(|message| {
+                    message.contains("registered external solver fallback")
+                }),
+                "{solver}: {output:?}"
+            );
+        }
     }
 
     #[test]

@@ -207,4 +207,57 @@ mod tests {
         assert_eq!(output["verdict"], "valid");
         assert_eq!(output["validator"], "builtin:security-protocol-structural");
     }
+
+    #[test]
+    fn external_formal_tool_aliases_use_rust_structural_validators() {
+        let alloy = run(
+            vec![
+                "formal_benchmark_validation_reference".to_string(),
+                "--tool".to_string(),
+                "alloy".to_string(),
+            ],
+            r#"{
+                "kind": "alloy-validation",
+                "model": "module soccer\nsig Team {}\npred show {}\n",
+                "commands": ["run show"]
+            }"#,
+        )
+        .expect("run alloy validation");
+        assert_eq!(alloy["status"], "ok");
+        assert_eq!(alloy["verdict"], "valid");
+        assert_eq!(alloy["validator"], "builtin:alloy-structural");
+
+        let promela = run(
+            vec![
+                "formal_benchmark_validation_reference".to_string(),
+                "--tool=spin".to_string(),
+            ],
+            r#"{
+                "kind": "spin-validation",
+                "model": "init { skip; }\n",
+                "properties": ["ltl eventually_done { <> true }"]
+            }"#,
+        )
+        .expect("run spin validation");
+        assert_eq!(promela["status"], "ok");
+        assert_eq!(promela["verdict"], "valid");
+        assert_eq!(promela["validator"], "builtin:promela-structural");
+
+        let uppaal = run(
+            vec![
+                "formal_benchmark_validation_reference".to_string(),
+                "--tool".to_string(),
+                "uppaal".to_string(),
+            ],
+            r#"{
+                "kind": "uppaal-validation",
+                "model": "<nta><template><name>T</name><location id=\"l0\"/><init ref=\"l0\"/><transition><source ref=\"l0\"/><target ref=\"l0\"/></transition></template></nta>",
+                "queries": ["A[] not deadlock"]
+            }"#,
+        )
+        .expect("run uppaal validation");
+        assert_eq!(uppaal["status"], "ok");
+        assert_eq!(uppaal["verdict"], "valid");
+        assert_eq!(uppaal["validator"], "builtin:uppaal-structural");
+    }
 }

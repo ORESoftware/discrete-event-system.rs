@@ -464,6 +464,42 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static SCHEDULING_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn scheduling_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "SCHEDULING_REFERENCE_FORCE_PYTHON",
+            "SCHEDULING_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
 
     const JOB_SHOP_SAMPLE: &str = r#"{
         "kind": "job-shop",
@@ -527,6 +563,40 @@ mod tests {
         assert_eq!(output["solver"], "rust:exact-flow-shop");
         assert_eq!(output["sequence"].as_array().expect("sequence").len(), 4);
         assert_eq!(output["schedule"].as_array().expect("schedule").len(), 12);
+    }
+
+    #[test]
+    fn ortools_cli_alias_defaults_to_rust_reference_without_python() {
+        let _lock = SCHEDULING_CLI_ENV_LOCK
+            .lock()
+            .expect("lock scheduling CLI env guard");
+        let _force_python_guards = scheduling_force_python_off_guards();
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-scheduling-cli");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-scheduling-cli");
+
+        let output = run(
+            vec![
+                "scheduling_reference".to_string(),
+                "--solver=ortools:cp-sat".to_string(),
+                "--kind=job-shop".to_string(),
+            ],
+            JOB_SHOP_SAMPLE,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(
+            output["solver"],
+            "rust:registered-scheduling-fallback-for-ortools"
+        );
+        assert_eq!(output["referenceStatus"], "optimal");
+        assert_eq!(output["referenceMakespan"], 9.0);
+        assert_eq!(output["makespan"], 9.0);
+        assert!(output["message"]
+            .as_str()
+            .expect("message")
+            .contains("validated with Rust fallback"));
     }
 
     #[test]

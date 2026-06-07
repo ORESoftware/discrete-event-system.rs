@@ -359,6 +359,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static STOCHASTIC_LP_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn stochastic_lp_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "STOCHASTIC_LP_REFERENCE_FORCE_PYTHON",
+            "STOCHASTIC_LP_REFERENCE_SCIPY_FORCE_PYTHON",
+            "STOCHASTIC_LP_EXTERNAL_BRIDGE",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
 
     const SAMPLE: &str = r#"{
         "cFirst": [1.0],
@@ -419,6 +456,37 @@ mod tests {
 
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["solver"], "rust:monolithic-slp");
+    }
+
+    #[test]
+    fn scipy_cli_alias_defaults_to_rust_reference_without_python() {
+        let _lock = STOCHASTIC_LP_CLI_ENV_LOCK
+            .lock()
+            .expect("lock stochastic LP CLI env guard");
+        let _force_python_guards = stochastic_lp_force_python_off_guards();
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-stochastic-lp-cli");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-stochastic-lp-cli");
+
+        let output = run(
+            vec![
+                "stochastic_lp_reference".to_string(),
+                "--solver=scipy-highs".to_string(),
+            ],
+            SAMPLE,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(
+            output["solver"],
+            "rust:registered-stochastic-lp-fallback-for-scipy"
+        );
+        assert!(output["message"]
+            .as_str()
+            .expect("message")
+            .contains("validated with Rust fallback"));
     }
 
     #[test]

@@ -1111,6 +1111,30 @@ pub const EXTERNAL_VALIDATION_TOOLS: &[ExternalValidationToolSpec] = &[
         notes: "Commercial LINDO Systems command-line adapter using local installations",
     },
     ExternalValidationToolSpec {
+        id: "mosek-cli",
+        display_name: "MOSEK CLI",
+        env_key: "MOSEK_CLI",
+        family: ExternalValidationFamily::ConvexConicSolver,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["mosek"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: CONIC_FORMATS,
+        notes: "Commercial MOSEK command-line adapter for conic, quadratic, and MIP validation using local installations",
+    },
+    ExternalValidationToolSpec {
+        id: "copt-cli",
+        display_name: "COPT CLI",
+        env_key: "COPT_CLI",
+        family: ExternalValidationFamily::ConstraintModeling,
+        runtime: ExternalValidationRuntime::NativeCli,
+        artifact_kind: ExternalValidationArtifactKind::NativeInstallDir,
+        command_aliases: &["copt_cmd", "copt"],
+        capabilities: SOLVE_AND_VALIDATE_CAPS,
+        input_formats: MILP_FORMATS,
+        notes: "Commercial COPT command-line adapter for LP/QP/QCP/MIP validation using local installations",
+    },
+    ExternalValidationToolSpec {
         id: "ampl",
         display_name: "AMPL",
         env_key: "AMPL",
@@ -8696,7 +8720,9 @@ fn model_validation_linear_source(payload: &Value) -> &Value {
 
 fn model_validation_payload_has_linear_model(payload: &Value) -> bool {
     let source = model_validation_linear_source(payload);
-    source.get("objective").is_some()
+    source
+        .get("objective")
+        .is_some_and(|objective| objective.as_array().is_some() || objective.as_object().is_some())
         || source.get("objective_coefs").is_some()
         || source.get("objectiveCoefficients").is_some()
         || source.get("c").is_some()
@@ -9282,8 +9308,10 @@ fn model_validation_nonlinear_solver_for_tool(
         | "ipopt-rust-adapter"
         | "ores-ipopt-rust-adapter" => ExternalNonlinearValidationReferenceSolver::Ipopt,
         "casadi" | "casadi-adapter" => ExternalNonlinearValidationReferenceSolver::Casadi,
-        "mosek" | "mosek-adapter" => ExternalNonlinearValidationReferenceSolver::Mosek,
-        "copt" | "copt-adapter" => ExternalNonlinearValidationReferenceSolver::Copt,
+        "mosek" | "mosek-adapter" | "mosek-cli" => {
+            ExternalNonlinearValidationReferenceSolver::Mosek
+        }
+        "copt" | "copt-adapter" | "copt-cli" => ExternalNonlinearValidationReferenceSolver::Copt,
         "cvxpy" | "cvxpy-adapter" | "cvxopt" | "cvxopt-adapter" | "osqp" | "osqp-adapter"
         | "scs" | "scs-adapter" | "clarabel" | "clarabel-adapter" | "ecos" | "ecos-adapter" => {
             ExternalNonlinearValidationReferenceSolver::Fallback
@@ -14458,6 +14486,8 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "cplex-cli",
         "xpress-cli",
         "lindo-cli",
+        "mosek-cli",
+        "copt-cli",
         "ortools-glop",
         "ortools-pdlp",
         "good-lp",
@@ -14526,8 +14556,10 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "ecos-adapter",
         "mosek",
         "mosek-adapter",
+        "mosek-cli",
         "copt",
         "copt-adapter",
+        "copt-cli",
         "qpoases",
         "qpoases-adapter",
         "proxqp",
@@ -14574,8 +14606,10 @@ pub fn run_model_validation_json_with_rust_reference(payload: &Value, tool: &str
         "casadi-adapter",
         "mosek",
         "mosek-adapter",
+        "mosek-cli",
         "copt",
         "copt-adapter",
+        "copt-cli",
         "cvxpy",
         "cvxpy-adapter",
         "cvxopt",
@@ -19389,6 +19423,8 @@ fn external_validation_model_tool_has_rust_reference(id: &str) -> bool {
             | "cplex-cli"
             | "xpress-cli"
             | "lindo-cli"
+            | "mosek-cli"
+            | "copt-cli"
             | "qpoases"
             | "cosmo"
             | "nlopt-cli"
@@ -19571,6 +19607,14 @@ pub fn external_validation_artifact_env_names(tool: &ExternalValidationToolSpec)
         "cplex-cli" => names.push("CPLEX_CMD".to_string()),
         "xpress-cli" => names.push("XPRESS_CMD".to_string()),
         "lindo-cli" => names.push("LINDOAPI_CMD".to_string()),
+        "mosek-cli" => {
+            names.push("MOSEK_CMD".to_string());
+            names.push("MOSEKLM_LICENSE_FILE".to_string());
+        }
+        "copt-cli" => {
+            names.push("COPT_CMD".to_string());
+            names.push("COPT_HOME".to_string());
+        }
         "ampl" => names.push("AMPL_HOME".to_string()),
         "gams" => names.push("GAMS_HOME".to_string()),
         "hexaly" => {
@@ -19700,6 +19744,8 @@ pub fn external_validation_command_dir_env_names(tool: &ExternalValidationToolSp
         "cplex-cli" => &["CPLEX_STUDIO_DIR", "CPLEX_HOME"],
         "xpress-cli" => &["XPRESSDIR", "XPRESS_DIR", "XPRESS_HOME"],
         "lindo-cli" => &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"],
+        "mosek-cli" => &["MOSEK_HOME", "MOSEK_DIR"],
+        "copt-cli" => &["COPT_HOME", "COPT_DIR"],
         "ampl" => &["AMPL_HOME", "AMPL_DIR"],
         "gams" => &["GAMS_HOME", "GAMS_DIR"],
         "hexaly" => &[
@@ -23246,7 +23292,14 @@ mod tests {
 
     #[test]
     fn commercial_lp_mip_cli_ids_advertise_rust_linear_reference_fallbacks() {
-        for tool_id in ["gurobi-cli", "cplex-cli", "xpress-cli", "lindo-cli"] {
+        for tool_id in [
+            "gurobi-cli",
+            "cplex-cli",
+            "xpress-cli",
+            "lindo-cli",
+            "mosek-cli",
+            "copt-cli",
+        ] {
             let tool = find_external_validation_tool(tool_id).expect(tool_id);
             assert!(
                 external_validation_tool_has_rust_reference(tool),
@@ -24232,6 +24285,8 @@ mod tests {
         for (tool_id, solver) in [
             ("nlopt-cli", "solver=builtin:nlp-pattern-search-for-nlopt"),
             ("ipopt", "solver=builtin:nlp-pattern-search-for-ipopt"),
+            ("mosek-cli", "solver=builtin:nlp-pattern-search-for-mosek"),
+            ("copt-cli", "solver=builtin:nlp-pattern-search-for-copt"),
         ] {
             let tool = find_external_validation_tool(tool_id).expect(tool_id);
             assert!(
@@ -24370,7 +24425,7 @@ mod tests {
     #[test]
     fn registry_covers_recommended_validation_layers() {
         let tools = external_validation_tool_specs();
-        assert_eq!(tools.len(), 269);
+        assert_eq!(tools.len(), 271);
         assert!(tools
             .iter()
             .any(|tool| tool.id == "minizinc" && tool.input_formats.contains(&"mzn")));
@@ -24489,6 +24544,18 @@ mod tests {
                 && tool.runtime == ExternalValidationRuntime::Python
                 && tool.artifact_kind == ExternalValidationArtifactKind::PythonPackage
         }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "mosek-cli"
+                && tool.runtime == ExternalValidationRuntime::NativeCli
+                && tool.family == ExternalValidationFamily::ConvexConicSolver
+                && tool.command_aliases.contains(&"mosek")
+        }));
+        assert!(tools.iter().any(|tool| {
+            tool.id == "copt-cli"
+                && tool.runtime == ExternalValidationRuntime::NativeCli
+                && tool.input_formats.contains(&"mps")
+                && tool.command_aliases.contains(&"copt_cmd")
+        }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "highs-rust" && tool.input_formats.contains(&"mps") }));
@@ -24604,6 +24671,12 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "lindo-cli" && tool.command_aliases.contains(&"runlindo") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "mosek-cli" && tool.command_aliases.contains(&"mosek") }));
+        assert!(tools
+            .iter()
+            .any(|tool| { tool.id == "copt-cli" && tool.command_aliases.contains(&"copt_cmd") }));
         assert!(tools
             .iter()
             .any(|tool| { tool.id == "ampl" && tool.input_formats.contains(&"mod") }));
@@ -25121,6 +25194,27 @@ mod tests {
         assert!(
             external_validation_artifact_env_names(lindo_cli).contains(&"LINDOAPI_CMD".to_string())
         );
+        let mosek_cli = find_external_validation_tool("mosek_cli").unwrap();
+        assert_eq!(mosek_cli.id, "mosek-cli");
+        assert_eq!(mosek_cli.runtime, ExternalValidationRuntime::NativeCli);
+        assert_eq!(
+            mosek_cli.family,
+            ExternalValidationFamily::ConvexConicSolver
+        );
+        assert!(
+            external_validation_artifact_env_names(mosek_cli).contains(&"MOSEK_CMD".to_string())
+        );
+        assert!(external_validation_artifact_env_names(mosek_cli)
+            .contains(&"MOSEKLM_LICENSE_FILE".to_string()));
+        assert!(external_validation_command_dir_env_names(mosek_cli)
+            .contains(&"MOSEK_HOME".to_string()));
+        let copt_cli = find_external_validation_tool("copt_cli").unwrap();
+        assert_eq!(copt_cli.id, "copt-cli");
+        assert_eq!(copt_cli.runtime, ExternalValidationRuntime::NativeCli);
+        assert!(external_validation_artifact_env_names(copt_cli).contains(&"COPT_CMD".to_string()));
+        assert!(
+            external_validation_command_dir_env_names(copt_cli).contains(&"COPT_HOME".to_string())
+        );
         let ampl = find_external_validation_tool("ampl").unwrap();
         assert!(external_validation_command_dir_env_names(ampl).contains(&"AMPL_HOME".to_string()));
         let hexaly = find_external_validation_tool("hexaly").unwrap();
@@ -25296,6 +25390,99 @@ mod tests {
             "apache-arrow"
         );
         assert!(find_external_validation_tool("not-a-tool").is_none());
+    }
+
+    #[test]
+    fn solver_adapter_registry_preserves_runtime_and_artifact_contracts() {
+        for id in [
+            "choco-solver",
+            "jacop",
+            "ibm-cp-optimizer",
+            "ortools-java",
+            "ojalgo",
+            "optaplanner",
+            "timefold",
+            "jmetal",
+            "moea-framework",
+            "ecj",
+        ] {
+            let spec = find_external_validation_tool(id).expect("registered Java solver adapter");
+            assert_eq!(spec.runtime, ExternalValidationRuntime::Java, "{id}");
+            assert_eq!(
+                spec.artifact_kind,
+                ExternalValidationArtifactKind::JavaClasspath,
+                "{id}"
+            );
+            assert_eq!(
+                spec.family,
+                ExternalValidationFamily::ConstraintModeling,
+                "{id}"
+            );
+            assert!(
+                spec.capabilities
+                    .contains(&ExternalValidationCapability::SolveModel),
+                "{id}"
+            );
+            assert!(!spec.command_aliases.is_empty(), "{id}");
+            assert!(!spec.env_key.is_empty(), "{id}");
+        }
+
+        for (id, family) in [
+            ("good-lp", ExternalValidationFamily::ConstraintModeling),
+            ("lp-modeler", ExternalValidationFamily::ConstraintModeling),
+            ("rust-linprog", ExternalValidationFamily::ConstraintModeling),
+            ("minilp", ExternalValidationFamily::ConstraintModeling),
+            ("highs-rust", ExternalValidationFamily::ConstraintModeling),
+            ("scip-rust", ExternalValidationFamily::ConstraintModeling),
+            ("cbc-rust", ExternalValidationFamily::ConstraintModeling),
+            ("gurobi-rust", ExternalValidationFamily::ConstraintModeling),
+            ("cplex-rust", ExternalValidationFamily::ConstraintModeling),
+            ("argmin", ExternalValidationFamily::NonlinearGlobalSolver),
+            ("nlopt-rs", ExternalValidationFamily::NonlinearGlobalSolver),
+            (
+                "ipopt-rust",
+                ExternalValidationFamily::NonlinearGlobalSolver,
+            ),
+            ("osqp-rust", ExternalValidationFamily::ConvexConicSolver),
+            ("clarabel-rust", ExternalValidationFamily::ConvexConicSolver),
+        ] {
+            let spec = find_external_validation_tool(id).expect("registered Rust solver adapter");
+            assert_eq!(spec.runtime, ExternalValidationRuntime::Rust, "{id}");
+            assert_eq!(
+                spec.artifact_kind,
+                ExternalValidationArtifactKind::RustCrate,
+                "{id}"
+            );
+            assert_eq!(spec.family, family, "{id}");
+            assert!(
+                spec.capabilities
+                    .contains(&ExternalValidationCapability::SolveModel),
+                "{id}"
+            );
+            assert!(!spec.command_aliases.is_empty(), "{id}");
+            assert!(!spec.env_key.is_empty(), "{id}");
+        }
+
+        for id in ["minizinc", "gecode", "chuffed", "ortools-cp-sat"] {
+            let spec = find_external_validation_tool(id).expect("registered native CLI adapter");
+            assert_eq!(spec.runtime, ExternalValidationRuntime::NativeCli, "{id}");
+            assert_eq!(
+                spec.artifact_kind,
+                ExternalValidationArtifactKind::None,
+                "{id}"
+            );
+            assert_eq!(
+                spec.family,
+                ExternalValidationFamily::ConstraintModeling,
+                "{id}"
+            );
+            assert!(
+                spec.capabilities
+                    .contains(&ExternalValidationCapability::SolveModel),
+                "{id}"
+            );
+            assert!(!spec.command_aliases.is_empty(), "{id}");
+        }
     }
 
     #[test]

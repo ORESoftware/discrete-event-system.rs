@@ -99,6 +99,8 @@ pub enum ExternalLinearCliSolver {
     Cplex,
     Xpress,
     Lindo,
+    Mosek,
+    Copt,
 }
 
 /// Broad licensing/install class for a local CLI solver.
@@ -215,6 +217,8 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cplex,
             ExternalLinearCliSolver::Xpress,
             ExternalLinearCliSolver::Lindo,
+            ExternalLinearCliSolver::Mosek,
+            ExternalLinearCliSolver::Copt,
         ]
     }
 
@@ -232,6 +236,8 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cplex => "cplex",
             ExternalLinearCliSolver::Xpress => "xpress",
             ExternalLinearCliSolver::Lindo => "lindo",
+            ExternalLinearCliSolver::Mosek => "mosek",
+            ExternalLinearCliSolver::Copt => "copt",
         }
     }
 
@@ -249,6 +255,8 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cplex => "IBM ILOG CPLEX",
             ExternalLinearCliSolver::Xpress => "FICO Xpress",
             ExternalLinearCliSolver::Lindo => "LINDO Systems",
+            ExternalLinearCliSolver::Mosek => "MOSEK",
+            ExternalLinearCliSolver::Copt => "COPT",
         }
     }
 
@@ -265,7 +273,9 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Gurobi
             | ExternalLinearCliSolver::Cplex
             | ExternalLinearCliSolver::Xpress
-            | ExternalLinearCliSolver::Lindo => ExternalLinearCliLicenseClass::Commercial,
+            | ExternalLinearCliSolver::Lindo
+            | ExternalLinearCliSolver::Mosek
+            | ExternalLinearCliSolver::Copt => ExternalLinearCliLicenseClass::Commercial,
         }
     }
 
@@ -307,6 +317,12 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Lindo => {
                 "Commercial LINDO Systems LP/MIP solver exposed only when installed locally and licensed."
             }
+            ExternalLinearCliSolver::Mosek => {
+                "Commercial MOSEK CLI discovered for local conic/QP/MIP validation; LP/MIP direct parsing is intentionally disabled until a stable solution-file contract is verified."
+            }
+            ExternalLinearCliSolver::Copt => {
+                "Commercial COPT CLI discovered for local LP/QP/QCP/MIP validation; LP/MIP direct parsing is intentionally disabled until a stable solution-file contract is verified."
+            }
         }
     }
 
@@ -325,6 +341,8 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Cplex => &["cplex"],
             ExternalLinearCliSolver::Xpress => &["optimizer", "xpress"],
             ExternalLinearCliSolver::Lindo => &["runlindo", "lindo", "lindoapi"],
+            ExternalLinearCliSolver::Mosek => &["mosek"],
+            ExternalLinearCliSolver::Copt => &["copt_cmd", "copt"],
         }
     }
 
@@ -426,6 +444,21 @@ impl ExternalLinearCliSolver {
                 "DES_LINDO_BIN",
                 "LINDO_BIN",
             ],
+            ExternalLinearCliSolver::Mosek => &[
+                "MOSEK_CMD",
+                "ORES_MOSEK_CMD",
+                "ORES_MOSEK_BIN",
+                "DES_MOSEK_BIN",
+                "MOSEK_BIN",
+            ],
+            ExternalLinearCliSolver::Copt => &[
+                "COPT_CMD",
+                "COPT_CMD_BIN",
+                "ORES_COPT_CMD",
+                "ORES_COPT_BIN",
+                "DES_COPT_BIN",
+                "COPT_BIN",
+            ],
         }
     }
 
@@ -457,6 +490,8 @@ impl ExternalLinearCliSolver {
             ExternalLinearCliSolver::Lindo => {
                 &["LINDO_HOME", "LINDO_DIR", "LINDOAPI_HOME", "LINDOAPI_DIR"]
             }
+            ExternalLinearCliSolver::Mosek => &["MOSEK_HOME", "MOSEK_DIR", "MSKHOME"],
+            ExternalLinearCliSolver::Copt => &["COPT_HOME", "COPT_DIR"],
         }
     }
 
@@ -12914,12 +12949,12 @@ mod tests {
         lower_bounded_ipmip_problem_to_cli_json, lp_problem_to_cli_json,
         lp_problem_to_cplex_lp_string, lp_problem_to_mps_string,
         multi_objective_ipmip_problem_to_cli_json, normalized_node_limit, normalized_random_seed,
-        normalized_relative_gap, normalized_threads, pwl_ipmip_problem_to_cli_json,
-        quadratic_objective_ipmip_problem_to_cli_json, semi_ipmip_problem_to_cli_json,
-        solve_ipmip_with_external_cli, solve_lower_bounded_ipmip_with_external_cli,
-        solve_lp_with_external_cli, solve_multi_objective_ipmip_with_external_cli,
-        solve_source_ipmip_with_external_cli, solver_command_env_var,
-        sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json,
+        normalized_relative_gap, normalized_threads, probe_external_linear_cli_solver,
+        pwl_ipmip_problem_to_cli_json, quadratic_objective_ipmip_problem_to_cli_json,
+        semi_ipmip_problem_to_cli_json, solve_ipmip_with_external_cli,
+        solve_lower_bounded_ipmip_with_external_cli, solve_lp_with_external_cli,
+        solve_multi_objective_ipmip_with_external_cli, solve_source_ipmip_with_external_cli,
+        solver_command_env_var, sos_ipmip_problem_to_cli_json, source_ipmip_problem_to_cli_json,
         ExternalLinearCliBranchRule, ExternalLinearCliKind, ExternalLinearCliLicenseClass,
         ExternalLinearCliLpAlgorithm, ExternalLinearCliMipSwitch, ExternalLinearCliModelFormat,
         ExternalLinearCliNodeSelection, ExternalLinearCliOptions, ExternalLinearCliPresolve,
@@ -16388,7 +16423,7 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
 
     #[test]
     fn solver_aliases_and_kind_support_match_bridge_contract() {
-        assert_eq!(ExternalLinearCliSolver::all().len(), 12);
+        assert_eq!(ExternalLinearCliSolver::all().len(), 14);
         assert_eq!(ExternalLinearCliSolver::Glpk.command_aliases(), &["glpsol"]);
         assert_eq!(
             ExternalLinearCliSolver::Highs.command_env_vars(),
@@ -16550,6 +16585,11 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
             ExternalLinearCliSolver::QsoptEx.command_aliases(),
             &["qsopt_ex", "qsopt-ex", "qsopt", "esolver"]
         );
+        assert_eq!(ExternalLinearCliSolver::Mosek.command_aliases(), &["mosek"]);
+        assert_eq!(
+            ExternalLinearCliSolver::Copt.command_aliases(),
+            &["copt_cmd", "copt"]
+        );
         assert!(ExternalLinearCliSolver::Highs.supports_kind(ExternalLinearCliKind::Lp));
         assert!(ExternalLinearCliSolver::Highs.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Clp.supports_kind(ExternalLinearCliKind::Lp));
@@ -16564,12 +16604,16 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(ExternalLinearCliSolver::Lindo.supports_kind(ExternalLinearCliKind::Mip));
         assert!(ExternalLinearCliSolver::Xpress.supports_kind(ExternalLinearCliKind::Lp));
         assert!(ExternalLinearCliSolver::Xpress.supports_kind(ExternalLinearCliKind::Mip));
+        assert!(!ExternalLinearCliSolver::Mosek.supports_kind(ExternalLinearCliKind::Lp));
+        assert!(!ExternalLinearCliSolver::Mosek.supports_kind(ExternalLinearCliKind::Mip));
+        assert!(!ExternalLinearCliSolver::Copt.supports_kind(ExternalLinearCliKind::Lp));
+        assert!(!ExternalLinearCliSolver::Copt.supports_kind(ExternalLinearCliKind::Mip));
     }
 
     #[test]
     fn solver_manifest_matches_bridge_contract() {
         let specs = external_linear_cli_solver_specs();
-        assert_eq!(specs.len(), 12);
+        assert_eq!(specs.len(), 14);
         assert_eq!(
             specs
                 .iter()
@@ -16582,7 +16626,7 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
                 .iter()
                 .filter(|spec| spec.license_class == ExternalLinearCliLicenseClass::Commercial)
                 .count(),
-            4
+            6
         );
 
         let highs = ExternalLinearCliSolver::Highs.spec();
@@ -16626,9 +16670,26 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
         assert!(lindo.supports_lp);
         assert!(lindo.supports_mip);
 
+        let mosek = ExternalLinearCliSolver::Mosek.spec();
+        assert_eq!(mosek.id, "mosek");
+        assert_eq!(mosek.display_name, "MOSEK");
+        assert!(mosek.command_env_vars.contains(&"MOSEK_CMD"));
+        assert!(mosek.command_dir_env_vars.contains(&"MOSEK_HOME"));
+        assert!(!mosek.supports_lp);
+        assert!(!mosek.supports_mip);
+
+        let copt = ExternalLinearCliSolver::Copt.spec();
+        assert_eq!(copt.id, "copt");
+        assert_eq!(copt.display_name, "COPT");
+        assert!(copt.command_aliases.contains(&"copt_cmd"));
+        assert!(copt.command_env_vars.contains(&"COPT_CMD"));
+        assert!(copt.command_dir_env_vars.contains(&"COPT_HOME"));
+        assert!(!copt.supports_lp);
+        assert!(!copt.supports_mip);
+
         let manifest = external_linear_cli_solver_manifest();
         let items = manifest.as_array().expect("manifest array");
-        assert_eq!(items.len(), 12);
+        assert_eq!(items.len(), 14);
         assert!(items.iter().any(|item| {
             item.get("id").and_then(|value| value.as_str()) == Some("cbc")
                 && item
@@ -16636,6 +16697,16 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
                     .and_then(|value| value.as_array())
                     .is_some_and(|aliases| aliases.iter().any(|alias| alias == "cbc"))
                 && item.get("supportsMip").and_then(|value| value.as_bool()) == Some(true)
+        }));
+        assert!(items.iter().any(|item| {
+            item.get("id").and_then(|value| value.as_str()) == Some("mosek")
+                && item.get("supportsLp").and_then(|value| value.as_bool()) == Some(false)
+                && item.get("supportsMip").and_then(|value| value.as_bool()) == Some(false)
+        }));
+        assert!(items.iter().any(|item| {
+            item.get("id").and_then(|value| value.as_str()) == Some("copt")
+                && item.get("supportsLp").and_then(|value| value.as_bool()) == Some(false)
+                && item.get("supportsMip").and_then(|value| value.as_bool()) == Some(false)
         }));
     }
 
@@ -16651,6 +16722,30 @@ Optimal solution                 220 after          5 iter,         4 nodes (gap
             external_linear_cli_command_with_options(ExternalLinearCliSolver::Highs, &opts),
             Some(configured)
         );
+    }
+
+    #[test]
+    fn unsupported_commercial_cli_probes_do_not_attempt_smoke_solve() {
+        for solver in [
+            ExternalLinearCliSolver::Mosek,
+            ExternalLinearCliSolver::Copt,
+        ] {
+            let configured = PathBuf::from(format!("/opt/local/bin/{}", solver.as_str()));
+            let opts = ExternalLinearCliOptions {
+                solver,
+                command_path: Some(configured.clone()),
+                ..Default::default()
+            };
+
+            let probe = probe_external_linear_cli_solver(ExternalLinearCliKind::Lp, &opts);
+            assert_eq!(probe.command, Some(configured));
+            assert_eq!(
+                probe.status,
+                ExternalLinearCliProbeStatus::BridgeUnsupported
+            );
+            assert_eq!(probe.smoke_status, None);
+            assert!(probe.message.contains("does not yet support lp solves"));
+        }
     }
 
     #[test]

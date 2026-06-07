@@ -782,6 +782,7 @@ fn cp_constraint_to_reference_json(constraint: &CpConstraint) -> Value {
 pub struct ExternalCpSatReferenceOptions {
     pub solver: ExternalCpSatReferenceSolver,
     pub enumerate_solutions: Option<usize>,
+    pub max_nodes: Option<usize>,
     pub assumption_core: bool,
 }
 
@@ -790,6 +791,7 @@ impl Default for ExternalCpSatReferenceOptions {
         ExternalCpSatReferenceOptions {
             solver: ExternalCpSatReferenceSolver::Auto,
             enumerate_solutions: None,
+            max_nodes: None,
             assumption_core: false,
         }
     }
@@ -1579,11 +1581,12 @@ fn native_cp_assumptions(value: &Value) -> Result<Vec<BoolLiteral>, String> {
 fn cp_solve_options(
     solution_hint: Vec<CpSolutionHint>,
     decision_strategies: Vec<CpDecisionStrategy>,
+    max_nodes: Option<usize>,
 ) -> CpSolveOptions {
     CpSolveOptions {
+        max_nodes: max_nodes.unwrap_or_else(|| CpSolveOptions::default().max_nodes),
         solution_hint,
         decision_strategies,
-        ..Default::default()
     }
 }
 
@@ -1600,7 +1603,11 @@ fn solve_cp_sat_json_with_native_rust(
                 &cp_model,
                 &assumptions,
                 CpAssumptionCoreOptions {
-                    solve_options: cp_solve_options(solution_hint, decision_strategies),
+                    solve_options: cp_solve_options(
+                        solution_hint,
+                        decision_strategies,
+                        options.max_nodes,
+                    ),
                 },
             )
         }))
@@ -1640,13 +1647,25 @@ fn solve_cp_sat_json_with_native_rust(
             enumerate_cp_solutions(
                 &cp_model,
                 CpEnumerateOptions {
+                    max_nodes: options
+                        .max_nodes
+                        .unwrap_or_else(|| CpEnumerateOptions::default().max_nodes),
                     max_solutions: limit.max(1),
                     ..Default::default()
                 },
             )
         }))
         .map_err(|_| "native Rust CP solution enumeration panicked".to_string())?;
-        let status = native_cp_status(run.status);
+        let hit_node_limit = !run.exhausted
+            && run
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("node limit"));
+        let status = if hit_node_limit {
+            ExternalCpSatReferenceStatus::Exhausted
+        } else {
+            native_cp_status(run.status)
+        };
         let first = run.solutions.first();
         let assignment = first
             .map(|solution| solution.assignment.clone())
@@ -1693,7 +1712,7 @@ fn solve_cp_sat_json_with_native_rust(
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         solve_cp_model(
             &cp_model,
-            cp_solve_options(solution_hint, decision_strategies),
+            cp_solve_options(solution_hint, decision_strategies, options.max_nodes),
         )
     }))
     .map_err(|_| "native Rust CP solve panicked".to_string())?;
@@ -2738,6 +2757,26 @@ mod tests {
         assert_eq!(run.assignment, vec![1, 0]);
         assert_eq!(run.objective, Some(1.0));
         assert_eq!(run.backend, "rust:cp-native-enumeration");
+    }
+
+    #[test]
+    fn cp_sat_rust_enumeration_honors_reference_node_limit() {
+        let run = solve_cp_sat_json_with_external_reference(
+            &tiny_cp_sat_model(),
+            &ExternalCpSatReferenceOptions {
+                solver: ExternalCpSatReferenceSolver::RustEnumeration,
+                enumerate_solutions: Some(2),
+                max_nodes: Some(1),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(run.status, ExternalCpSatReferenceStatus::Exhausted);
+        assert_eq!(run.backend, "rust:cp-native-solution-enumeration");
+        assert!(run
+            .message
+            .contains("node limit reached during solution enumeration"));
+        assert!(run.nodes.is_some_and(|nodes| nodes > 1));
     }
 
     #[test]

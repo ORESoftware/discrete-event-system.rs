@@ -22,7 +22,7 @@ impl Error for CliError {}
 
 fn usage(program: &str) -> String {
     format!(
-        "usage: {program} [--solver auto|fallback|rust:nonlinear-validation-reference|scipy|scipy:slsqp|ipopt|bonmin|minotaur|couenne|symphony|knitro|mosek|baron|copt|casadi|nlopt|nlopt:bobyqa|nlopt-cli]"
+        "usage: {program} [--solver auto|fallback|rust:nonlinear-validation-reference|scipy|scipy:slsqp|ipopt|bonmin|minotaur|couenne|symphony|knitro|mosek|mosek-cli|baron|copt|copt-cli|casadi|nlopt|nlopt:bobyqa|nlopt-cli]"
     )
 }
 
@@ -81,6 +81,8 @@ fn parse_solver(value: &str) -> Result<ExternalNonlinearValidationReferenceSolve
             Ok(ExternalNonlinearValidationReferenceSolver::Knitro)
         }
         "mosek"
+        | "mosek-cli"
+        | "mosek:cli"
         | "builtin-nlp-pattern-search-for-mosek"
         | "builtin:nlp-pattern-search-for-mosek" => {
             Ok(ExternalNonlinearValidationReferenceSolver::Mosek)
@@ -90,7 +92,13 @@ fn parse_solver(value: &str) -> Result<ExternalNonlinearValidationReferenceSolve
         | "builtin:nlp-pattern-search-for-baron" => {
             Ok(ExternalNonlinearValidationReferenceSolver::Baron)
         }
-        "copt" | "builtin-nlp-pattern-search-for-copt" | "builtin:nlp-pattern-search-for-copt" => {
+        "copt"
+        | "copt-cli"
+        | "copt-cmd-cli"
+        | "copt:cli"
+        | "copt-cmd:cli"
+        | "builtin-nlp-pattern-search-for-copt"
+        | "builtin:nlp-pattern-search-for-copt" => {
             Ok(ExternalNonlinearValidationReferenceSolver::Copt)
         }
         "casadi"
@@ -247,6 +255,56 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static NONLINEAR_VALIDATION_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn nonlinear_validation_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-nonlinear-cli"),
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-nonlinear-cli"),
+            EnvVarGuard::set(
+                "SCIPY_OPTIMIZE_PYTHON",
+                "/definitely/not-python-for-nonlinear-cli",
+            ),
+            EnvVarGuard::set(
+                "ORES_SCIPY_OPTIMIZE_PYTHON",
+                "/definitely/not-python-for-nonlinear-cli",
+            ),
+            EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("ORES_EXTERNAL_VALIDATION_PYTHON_IMPORT_PROBES"),
+            EnvVarGuard::clear("EXTERNAL_VALIDATION_PYTHON_IMPORT_PROBES"),
+            EnvVarGuard::clear("EXTERNAL_VALIDATION_PROBE_PYTHON_IMPORTS"),
+        ]
+    }
 
     const SAMPLE: &str = r#"{
         "kind": "nonlinear-validation",
@@ -277,6 +335,8 @@ mod tests {
         for raw in [
             "scipy:slsqp",
             "ipopt:default",
+            "mosek-cli",
+            "copt-cmd-cli",
             "casadi:ipopt",
             "nlopt:bobyqa",
             "nlopt:cli",
@@ -297,6 +357,11 @@ mod tests {
                 "builtin:nlp-pattern-search-for-casadi",
                 ExternalNonlinearValidationReferenceSolver::Casadi,
             ),
+            (
+                "mosek:cli",
+                ExternalNonlinearValidationReferenceSolver::Mosek,
+            ),
+            ("copt:cli", ExternalNonlinearValidationReferenceSolver::Copt),
             (
                 "builtin:nlp-pattern-search-for-nlopt-cli",
                 ExternalNonlinearValidationReferenceSolver::NloptCli,
@@ -340,5 +405,53 @@ mod tests {
 
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["solver"], "builtin:nlp-pattern-search-for-nlopt");
+    }
+
+    #[test]
+    fn scipy_cli_alias_uses_rust_pattern_search_without_python() {
+        let _lock = NONLINEAR_VALIDATION_CLI_ENV_LOCK
+            .lock()
+            .expect("nonlinear validation CLI env lock poisoned");
+        let _guards = nonlinear_validation_python_off_guards();
+        let output = run(
+            vec![
+                "nonlinear_validation_reference".to_string(),
+                "--solver=scipy:slsqp".to_string(),
+            ],
+            SAMPLE,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(output["solver"], "builtin:nlp-pattern-search-for-scipy");
+        assert_eq!(output["x"].as_array().expect("x").len(), 2);
+        assert!(output["objective"]
+            .as_f64()
+            .is_some_and(|value| value <= 1e-6));
+    }
+
+    #[test]
+    fn commercial_cli_labels_use_rust_pattern_search_fallback() {
+        for (solver, expected_label) in [
+            ("mosek-cli", "builtin:nlp-pattern-search-for-mosek"),
+            ("copt-cli", "builtin:nlp-pattern-search-for-copt"),
+        ] {
+            let output = run(
+                vec![
+                    "nonlinear_validation_reference".to_string(),
+                    "--solver".to_string(),
+                    solver.to_string(),
+                ],
+                SAMPLE,
+            )
+            .expect("run");
+
+            assert_eq!(output["status"], "optimal", "{solver}: {output:?}");
+            assert_eq!(output["solver"], expected_label, "{solver}: {output:?}");
+            assert_eq!(output["x"].as_array().expect("x").len(), 2);
+            assert!(output["objective"]
+                .as_f64()
+                .is_some_and(|value| value <= 1e-6));
+        }
     }
 }

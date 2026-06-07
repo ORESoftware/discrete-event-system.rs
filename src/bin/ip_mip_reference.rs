@@ -175,6 +175,48 @@ fn rust_reference_solver_alias_supported(solver: &str) -> bool {
             | "rust-internal"
             | "rust:internal"
             | "milp"
+            | "highs"
+            | "highs-cli"
+            | "highs:mip"
+            | "highs:cli"
+            | "cbc"
+            | "cbc-cli"
+            | "cbc:mip"
+            | "cbc:cli"
+            | "glpk"
+            | "glpk-cli"
+            | "glpk:mip"
+            | "glpk:cli"
+            | "scip"
+            | "scip-cli"
+            | "scip:mip"
+            | "scip:cli"
+            | "gurobi"
+            | "gurobi-cli"
+            | "gurobi:mip"
+            | "gurobi:cli"
+            | "cplex"
+            | "cplex-cli"
+            | "cplex:mip"
+            | "cplex:cli"
+            | "xpress"
+            | "xpress-cli"
+            | "xpress:mip"
+            | "xpress:cli"
+            | "fico-xpress"
+            | "fico:xpress"
+            | "lindo"
+            | "lindo-cli"
+            | "lindo:mip"
+            | "lindo:cli"
+            | "mosek"
+            | "mosek-cli"
+            | "mosek:mip"
+            | "mosek:cli"
+            | "copt"
+            | "copt-cli"
+            | "copt:mip"
+            | "copt:cli"
             | "scipy"
             | "scipy-milp"
             | "scipy:milp"
@@ -3020,6 +3062,49 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static IP_MIP_REFERENCE_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn ip_mip_reference_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not/python"),
+            EnvVarGuard::set("PYTHON", "/definitely/not/python"),
+            EnvVarGuard::set("SCIPY_MILP_PYTHON", "/definitely/not/python"),
+            EnvVarGuard::set("ORES_SCIPY_MILP_PYTHON", "/definitely/not/python"),
+            EnvVarGuard::unset("IP_MIP_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::unset("IP_MIP_REFERENCE_SCIPY_FORCE_PYTHON"),
+            EnvVarGuard::unset("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+        ]
+    }
 
     const BINARY_SAMPLE: &str = r#"{
         "sense": "max",
@@ -3076,6 +3161,45 @@ mod tests {
             assert_eq!(output["result"]["status"], "optimal", "{solver}: {output}");
             assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
             assert_eq!(output["result"]["x"], json!([1.0, 0.0]));
+        }
+    }
+
+    #[test]
+    fn major_external_mip_cli_aliases_use_rust_enumeration_without_python() {
+        let _env_lock = IP_MIP_REFERENCE_CLI_ENV_LOCK.lock().expect("env lock");
+        let _guards = ip_mip_reference_python_off_guards();
+
+        for solver in [
+            "highs",
+            "highs:cli",
+            "cbc",
+            "glpk",
+            "scip",
+            "gurobi",
+            "cplex",
+            "xpress",
+            "fico-xpress",
+            "lindo",
+            "mosek",
+            "copt",
+            "scipy:milp",
+        ] {
+            let output = run(
+                &Args {
+                    problem: None,
+                    out: None,
+                    solver: solver.to_string(),
+                    max_enumerations: 100,
+                    pool_size: None,
+                },
+                BINARY_SAMPLE,
+            )
+            .expect("run");
+
+            assert_eq!(output["result"]["status"], "optimal", "{solver}: {output}");
+            assert_eq!(output["result"]["solver"], "rust:bounded-enumeration");
+            assert_eq!(output["result"]["x"], json!([1.0, 0.0]));
+            assert_eq!(output["result"]["objective"], 3.0);
         }
     }
 

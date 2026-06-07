@@ -630,6 +630,7 @@ fn queue_tactical_evolution_search_metadata(
     completed_games: usize,
     elite_games: usize,
     window_games: usize,
+    sample_count: usize,
     best_fitness: f64,
     options: SoccerEvolutionOptions,
     previous_tactical_learning: &SoccerTacticalLearningWeights,
@@ -640,6 +641,7 @@ fn queue_tactical_evolution_search_metadata(
         "completedGames": completed_games,
         "eliteGames": elite_games,
         "windowGames": window_games,
+        "sampleCount": sample_count,
         "bestFitness": best_fitness,
         "options": options,
         "previousTacticalLearning": previous_tactical_learning,
@@ -1939,6 +1941,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                                     queue_completed_games_seen,
                                     elite_count,
                                     tactical_evolution_window_games,
+                                    tactical_evolution_samples.len(),
                                     best_fitness,
                                     queue_evolution_options,
                                     &previous_tactical_learning,
@@ -2474,8 +2477,9 @@ mod tests {
             seed: 4242,
         };
 
-        let metadata =
-            queue_tactical_evolution_search_metadata(21, 4, 12, 1.75, options, &previous, &evolved);
+        let metadata = queue_tactical_evolution_search_metadata(
+            21, 4, 12, 9, 1.75, options, &previous, &evolved,
+        );
 
         assert_eq!(
             metadata["algorithm"],
@@ -2484,6 +2488,7 @@ mod tests {
         assert_eq!(metadata["completedGames"], serde_json::json!(21));
         assert_eq!(metadata["eliteGames"], serde_json::json!(4));
         assert_eq!(metadata["windowGames"], serde_json::json!(12));
+        assert_eq!(metadata["sampleCount"], serde_json::json!(9));
         assert_eq!(metadata["bestFitness"], serde_json::json!(1.75));
         assert_eq!(metadata["options"]["populationSize"], serde_json::json!(18));
         assert_eq!(metadata["options"]["seed"], serde_json::json!(4242));

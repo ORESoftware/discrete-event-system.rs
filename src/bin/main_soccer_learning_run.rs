@@ -916,6 +916,45 @@ fn clear_evolution_search_samples_after_postgres_refresh(
     samples_cleared
 }
 
+fn run_evolution_search_metadata(
+    completed_games: usize,
+    elite_games: usize,
+    window_games: usize,
+    sample_count: usize,
+    best_fitness: f64,
+    options: SoccerEvolutionOptions,
+    previous_tactical_learning: &SoccerTacticalLearningWeights,
+    evolved_tactical_learning: &SoccerTacticalLearningWeights,
+) -> serde_json::Value {
+    let tactical = serde_json::json!({
+        "algorithm": "evolutionary-genetic-programming-tactical-search",
+        "completedGames": completed_games,
+        "eliteGames": elite_games,
+        "windowGames": window_games,
+        "sampleCount": sample_count,
+        "bestFitness": best_fitness,
+        "options": options,
+        "previousTacticalLearning": previous_tactical_learning,
+        "evolvedTacticalLearning": evolved_tactical_learning,
+        "previousTacticalLearningFingerprint": soccer_tactical_learning_weights_fingerprint(
+            previous_tactical_learning,
+        ),
+        "evolvedTacticalLearningFingerprint": soccer_tactical_learning_weights_fingerprint(
+            evolved_tactical_learning,
+        )
+    });
+    serde_json::json!({
+        "algorithm": "evolutionary-genetic-programming",
+        "completedGames": completed_games,
+        "eliteGames": elite_games,
+        "windowGames": window_games,
+        "sampleCount": sample_count,
+        "bestFitness": best_fitness,
+        "options": options,
+        "tactical": tactical
+    })
+}
+
 struct SoccerLearningWorkerTask {
     episode: usize,
     config: MatchConfig,
@@ -1649,6 +1688,7 @@ fn run_game(
     })
 }
 
+#[cfg(test)]
 fn tactical_genome_parents_from_completed_games<'a>(
     completed_games: &'a [CompletedGame],
     ranked_parents: &[(usize, f64)],
@@ -3020,15 +3060,16 @@ fn run() -> Result<(), Box<dyn Error>> {
                     policies: policies.clone(),
                     fitness: best_fitness,
                     neural_network: latest_neural_network.clone(),
-                    search_metadata: Some(serde_json::json!({
-                        "algorithm": "evolutionary-genetic-programming",
-                        "completedGames": completed_after_batch,
-                        "eliteGames": elite_count,
-                        "windowGames": evolution_window_games,
-                        "sampleCount": evolution_search_samples.len(),
-                        "bestFitness": best_fitness,
-                        "options": batch_evolution_options
-                    })),
+                    search_metadata: Some(run_evolution_search_metadata(
+                        completed_after_batch,
+                        elite_count,
+                        evolution_window_games,
+                        evolution_search_samples.len(),
+                        best_fitness,
+                        batch_evolution_options,
+                        &previous_tactical_learning,
+                        &tactical_learning,
+                    )),
                 });
                 pg_base_policy_version_id = Some(output_policy_version_id.clone());
                 pg_last_policy_version_id = Some(output_policy_version_id);
@@ -3592,6 +3633,57 @@ mod tests {
     }
 
     #[test]
+    fn run_evolution_metadata_persists_tactical_genome_weights() {
+        let options = SoccerEvolutionOptions {
+            mutation_rate: 0.12,
+            crossover_rate: 0.62,
+            exploration_scale: 1.05,
+            population_size: 24,
+            seed: 90210,
+            ..Default::default()
+        };
+        let mut previous = SoccerTacticalLearningWeights::default();
+        previous.attack_flank_lane_weight = 1.25;
+        previous.defense_contract_delta_weight = 0.35;
+        let mut evolved = previous.clone();
+        evolved.attack_flank_lane_weight = 1.85;
+        evolved.defense_contract_delta_weight = 0.70;
+
+        let metadata =
+            run_evolution_search_metadata(40, 4, 16, 12, 2.75, options, &previous, &evolved);
+
+        assert_eq!(metadata["algorithm"], "evolutionary-genetic-programming");
+        assert_eq!(
+            metadata["tactical"]["algorithm"],
+            "evolutionary-genetic-programming-tactical-search"
+        );
+        assert_eq!(metadata["completedGames"].as_u64(), Some(40));
+        assert_eq!(metadata["tactical"]["sampleCount"].as_u64(), Some(12));
+        assert_eq!(
+            metadata["tactical"]["previousTacticalLearning"]["attackFlankLaneWeight"].as_f64(),
+            Some(previous.attack_flank_lane_weight)
+        );
+        assert_eq!(
+            metadata["tactical"]["evolvedTacticalLearning"]["defenseContractDeltaWeight"].as_f64(),
+            Some(evolved.defense_contract_delta_weight)
+        );
+        assert_eq!(
+            metadata["tactical"]["previousTacticalLearningFingerprint"].as_u64(),
+            Some(soccer_tactical_learning_weights_fingerprint(&previous))
+        );
+        assert_eq!(
+            metadata["tactical"]["evolvedTacticalLearningFingerprint"].as_u64(),
+            Some(soccer_tactical_learning_weights_fingerprint(&evolved))
+        );
+        let refreshed_options =
+            soccer_evolution_options_from_search_metadata(Some(&metadata), Default::default())
+                .expect("evolution options from run metadata");
+        assert_eq!(refreshed_options.population_size, 24);
+        assert_eq!(refreshed_options.seed, 90210);
+        assert!((refreshed_options.crossover_rate - 0.62).abs() < 1e-12);
+    }
+
+    #[test]
     fn batch_evolution_window_keeps_prior_batch_genomes_for_search() {
         let mut flank_weights = SoccerTacticalLearningWeights::default();
         flank_weights.attack_flank_lane_weight = 1.75;
@@ -4099,6 +4191,13 @@ mod tests {
         assert!(options.mutation_rate > 0.0);
         assert!(options.mutation_scale > 0.0);
         assert!(options.crossover_rate > 0.0);
+    }
+
+    #[test]
+    fn default_evolution_interval_respects_parallelism() {
+        assert_eq!(default_evolution_interval_games(0), 10);
+        assert_eq!(default_evolution_interval_games(4), 10);
+        assert_eq!(default_evolution_interval_games(16), 16);
     }
 
     #[test]

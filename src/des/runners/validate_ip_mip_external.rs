@@ -1022,6 +1022,54 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static IP_MIP_EXTERNAL_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn ip_mip_external_no_solver_no_python_guards() -> Vec<EnvVarGuard> {
+        let mut guards = vec![
+            EnvVarGuard::clear("IP_MIP_EXTERNAL_BRIDGE"),
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-ip-mip-runner"),
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-ip-mip-runner"),
+        ];
+        for solver in ExternalLinearCliSolver::open_source_mip() {
+            for key in solver.command_env_vars() {
+                guards.push(EnvVarGuard::clear(key));
+            }
+            for key in solver.command_dir_env_vars() {
+                guards.push(EnvVarGuard::clear(key));
+            }
+        }
+        guards
+    }
 
     #[test]
     fn ip_mip_external_bridge_switch_requires_explicit_compatibility_values() {
@@ -1078,6 +1126,42 @@ mod tests {
                 "{value:?} should stay an explicit solver or bridge request"
             );
         }
+    }
+
+    #[test]
+    fn ip_mip_external_unknown_solver_does_not_fall_back_to_python_by_default() {
+        let _env_lock = IP_MIP_EXTERNAL_TEST_ENV_LOCK
+            .lock()
+            .expect("ip mip external env lock");
+        let _guards = ip_mip_external_no_solver_no_python_guards();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let out_dir =
+            std::env::temp_dir().join(format!("ip-mip-external-rust-first-{}", std::process::id()));
+        let mut driver = Driver {
+            checks: Vec::new(),
+            root,
+            out_dir,
+        };
+        let problem = build_binary_knapsack_ip(vec![3.0, 2.0], vec![2.0, 1.0], 2.0);
+
+        let payload =
+            driver.run_external("unknown-solver-no-python", &problem, "not-a-real-solver");
+
+        assert_eq!(payload.result.status, "unavailable");
+        assert_eq!(payload.result.solver, "not-a-real-solver");
+        let message = payload.result.message.expect("unavailable message");
+        assert!(
+            message.contains("no installed command found for requested solver `not-a-real-solver`"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("/definitely/not-python-for-ip-mip-runner"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("failed to start Python fallback"),
+            "{message}"
+        );
     }
 
     #[test]

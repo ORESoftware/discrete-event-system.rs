@@ -4653,6 +4653,39 @@ mod tests {
     }
 
     #[test]
+    fn tactical_weight_score_prefers_flank_and_contract_when_shape_gaps_are_high() {
+        let base = SoccerTacticalLearningWeights::default();
+        let summary = SoccerTacticalLearningSummary {
+            mean_attack_width_score: 0.75,
+            mean_attack_flank_lane_score: 0.10,
+            mean_attack_spacing_score: 0.80,
+            mean_defense_contract_score: 0.12,
+            mean_defense_spacing_score: 0.78,
+            mean_defense_ball_gap_score: 0.70,
+            mean_defense_role_press_score: 0.76,
+            ..Default::default()
+        };
+
+        let mut generic_shape = base.clone();
+        generic_shape.attack_width_delta_weight += 0.80;
+        generic_shape.defense_spacing_delta_weight += 0.80;
+        generic_shape.defender_midfielder_press_weight += 0.50;
+
+        let mut flank_and_contract = base.clone();
+        flank_and_contract.attack_flank_lane_weight += 0.80;
+        flank_and_contract.defense_contract_delta_weight += 0.80;
+        flank_and_contract.defense_compactness_score_weight += 0.50;
+
+        let base_score = soccer_tactical_weight_search_score(&base, &summary);
+        let generic_score = soccer_tactical_weight_search_score(&generic_shape, &summary);
+        let flank_contract_score =
+            soccer_tactical_weight_search_score(&flank_and_contract, &summary);
+
+        assert!(generic_score > base_score);
+        assert!(flank_contract_score > generic_score);
+    }
+
+    #[test]
     fn tactical_strategy_candidates_coordinate_flanks_and_contraction() {
         let base = SoccerTacticalLearningWeights::default();
         let summary = SoccerTacticalLearningSummary {

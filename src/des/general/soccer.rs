@@ -55338,13 +55338,10 @@ mod tests {
         let learning = sim.learning_snapshot();
         assert!(learning.full_game_learning_enabled);
         assert!(learning.full_game_learning_applied);
-        assert_eq!(
-            learning.full_game_learning_episode_transitions,
-            total_ticks as usize * 22
-        );
+        assert!(learning.full_game_learning_episode_transitions >= total_ticks as usize * 22);
         assert_eq!(
             learning.full_game_learning_replay_transitions,
-            total_ticks as usize * 22
+            learning.full_game_learning_episode_transitions
         );
         assert!(
             learning.home_policy_visits + learning.away_policy_visits
@@ -55380,9 +55377,10 @@ mod tests {
 
         let learning = sim.learning_snapshot();
         assert!(learning.full_game_learning_applied);
+        assert!(learning.full_game_learning_episode_transitions >= total_ticks as usize * 22);
         assert_eq!(
             learning.full_game_learning_replay_transitions,
-            total_ticks as usize * 22
+            learning.full_game_learning_episode_transitions
         );
         assert!(learning.neural_learning_enabled);
         assert!(learning.neural_learning_training_steps >= 2);

@@ -1025,6 +1025,51 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static MODEL_VALIDATION_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn model_validation_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/missing/python"),
+            EnvVarGuard::set("PYTHON", "/definitely/missing/python"),
+            EnvVarGuard::set("PYOMO_PYTHON", "/definitely/missing/python"),
+            EnvVarGuard::set("PYTHON_MIP_PYTHON", "/definitely/missing/python"),
+            EnvVarGuard::set("PYSAT_PYTHON", "/definitely/missing/python"),
+            EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("ORES_EXTERNAL_VALIDATION_PYTHON_IMPORT_PROBES"),
+            EnvVarGuard::clear("EXTERNAL_VALIDATION_PYTHON_IMPORT_PROBES"),
+            EnvVarGuard::clear("EXTERNAL_VALIDATION_PROBE_PYTHON_IMPORTS"),
+        ]
+    }
 
     #[test]
     fn dimacs_builtin_finds_sat_assignment() {
@@ -1053,6 +1098,74 @@ mod tests {
         assert_eq!(output["status"], "ok");
         assert_eq!(output["verdict"], "sat");
         assert_eq!(output["validator"], "rust:dimacs-small-cnf");
+    }
+
+    #[test]
+    fn python_mip_cli_alias_uses_rust_reference_without_python() {
+        let _lock = MODEL_VALIDATION_CLI_ENV_LOCK
+            .lock()
+            .expect("model validation CLI env lock poisoned");
+        let _guards = model_validation_python_off_guards();
+
+        let output = run(
+            vec![
+                "model_validation_reference".to_string(),
+                "--tool=python-mip-adapter".to_string(),
+            ],
+            r#"{
+                "kind": "linear-mip-validation",
+                "sense": "max",
+                "objective": {"x": 4, "y": 1},
+                "variables": {
+                    "x": {"binary": true},
+                    "y": {"binary": true}
+                },
+                "constraints": [
+                    {"coefficients": [1, 1], "operator": "<=", "rhs": 1}
+                ]
+            }"#,
+        )
+        .expect("model validation output");
+
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["verdict"], "optimal");
+        assert_eq!(
+            output["validator"],
+            "builtin:linear-mip-small-for-python-mip-adapter"
+        );
+        assert!(
+            output["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("x=1") && stdout.contains("objective=4")),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn python_sat_cli_alias_uses_rust_reference_without_python() {
+        let _lock = MODEL_VALIDATION_CLI_ENV_LOCK
+            .lock()
+            .expect("model validation CLI env lock poisoned");
+        let _guards = model_validation_python_off_guards();
+
+        let output = run(
+            vec![
+                "model_validation_reference".to_string(),
+                "--tool=python-sat-adapter".to_string(),
+            ],
+            r#"{"dimacs":"p cnf 2 2\n1 2 0\n-1 2 0\n"}"#,
+        )
+        .expect("model validation output");
+
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["verdict"], "sat");
+        assert_eq!(output["validator"], "builtin:dimacs-small-cnf");
+        assert!(
+            output["stdout"]
+                .as_str()
+                .is_some_and(|stdout| stdout.contains("s SATISFIABLE")),
+            "{output:?}"
+        );
     }
 
     #[test]

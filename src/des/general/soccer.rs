@@ -3136,6 +3136,14 @@ impl SoccerQStateKey {
                 observation.defensive_cross_arrival_threat_fit,
                 &[0.15, 0.35, 0.60, 0.82],
             ),
+            goalkeeper_ball_goal_line_alignment_bin: distance_bucket(
+                observation.goalkeeper_ball_goal_line_alignment_score,
+                &[-0.50, 0.0, 0.45, 0.82],
+            ),
+            defensive_line_break_threat_bin: distance_bucket(
+                observation.defensive_line_break_threat,
+                &[0.15, 0.35, 0.60, 0.82],
+            ),
             team_brain_cover_target_bin: observation.team_brain_defensive_cover_target.min(4) as u8,
             team_brain_cover_actual_bin: observation.team_brain_defensive_cover_actual.min(4) as u8,
             team_centroid_ball_distance_bin: distance_bucket(
@@ -3475,6 +3483,9 @@ impl SoccerQStateKey {
                 == other.defensive_cross_arrival_threat_distance_bin
             && self.defensive_cross_arrival_threat_fit_bin
                 == other.defensive_cross_arrival_threat_fit_bin
+            && self.goalkeeper_ball_goal_line_alignment_bin
+                == other.goalkeeper_ball_goal_line_alignment_bin
+            && self.defensive_line_break_threat_bin == other.defensive_line_break_threat_bin
             && self.team_brain_cover_target_bin == other.team_brain_cover_target_bin
             && self.team_brain_cover_actual_bin == other.team_brain_cover_actual_bin
             && self.team_centroid_ball_distance_bin == other.team_centroid_ball_distance_bin
@@ -17309,6 +17320,8 @@ impl WorldSnapshot {
                 defensive_cross_arrival_threat_available: false,
                 defensive_cross_arrival_threat_distance_yards: 0.0,
                 defensive_cross_arrival_threat_fit: 0.0,
+                goalkeeper_ball_goal_line_alignment_score: 0.0,
+                defensive_line_break_threat: 0.0,
                 team_brain_defensive_cover_target: 0,
                 team_brain_defensive_cover_actual: 0,
                 team_centroid_to_ball_yards: 0.0,
@@ -17619,6 +17632,18 @@ impl WorldSnapshot {
                     .clamp(0.0, 1.0)
             })
             .unwrap_or(0.0);
+        let goalkeeper_ball_goal_line_alignment_score = if me.role == PlayerRole::Goalkeeper {
+            goalkeeper_ball_goal_line_alignment_score(me.team, me_position, self)
+        } else {
+            0.0
+        };
+        let defensive_line_break_threat = if me.role == PlayerRole::Defender {
+            self.opponent_breakthrough_ball_carrier(me.team)
+                .map(|(_, line_gap)| ((18.0 - line_gap) / 26.0).clamp(0.0, 1.0))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let pass_eval_elapsed = phase_started.elapsed();
         let phase_started = Instant::now();
         let player_grid = pitch_grid_address(me_position, self.field_width, self.field_length);
@@ -18006,6 +18031,8 @@ impl WorldSnapshot {
             defensive_cross_arrival_threat_available: defensive_cross_arrival_target.is_some(),
             defensive_cross_arrival_threat_distance_yards,
             defensive_cross_arrival_threat_fit,
+            goalkeeper_ball_goal_line_alignment_score,
+            defensive_line_break_threat,
             team_brain_defensive_cover_target: team_directive.defensive_cover_target,
             team_brain_defensive_cover_actual: team_directive.defensive_cover_actual,
             team_centroid_to_ball_yards: team_shape.centroid_to_ball_yards,
@@ -31313,6 +31340,12 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.positional_shape_exception_relief_bin, 5.0),
         soccer_neural_bool(state.look_behind_scan),
         soccer_neural_bin(state.look_behind_drift_risk_bin, 5.0),
+        soccer_neural_signed_unit(
+            transition
+                .observation
+                .goalkeeper_ball_goal_line_alignment_score,
+        ),
+        soccer_neural_unit(transition.observation.defensive_line_break_threat),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -70256,6 +70289,100 @@ mod tests {
         assert!(
             line_reward > off_line_reward + 0.45,
             "dense learner should prefer keeper recovery onto the ball-goal line: line={line_reward} off={off_line_reward}"
+        );
+    }
+
+    #[test]
+    fn pomdp_q_state_and_neural_features_track_keeper_line_and_break_threat() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let defender = 2;
+        let threat = 17;
+        for id in 1..=4 {
+            sim.players[id].position = Vec2::new(22.0 + id as f64 * 9.0, 34.0);
+            sim.players[id].home_position = sim.players[id].position;
+        }
+        sim.players[threat].position = Vec2::new(58.0, 43.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+        let initial_snapshot = WorldSnapshot::from_match(&sim);
+        sim.players[keeper].position =
+            initial_snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let keeper_observation = snapshot.observation_for(keeper);
+        let keeper_state = snapshot.mdp_state_for_player(keeper);
+        let keeper_key = SoccerQStateKey::from_parts(
+            &keeper_state,
+            &keeper_observation,
+            Team::Home,
+            PlayerRole::Goalkeeper,
+        );
+        let keeper_transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: keeper,
+            team: Team::Home,
+            role: PlayerRole::Goalkeeper,
+            state: keeper_state,
+            observation: keeper_observation.clone(),
+            belief: belief_from_observation(&keeper_observation),
+            action: "defend-shape".to_string(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(keeper),
+            next_observation: keeper_observation.clone(),
+            done: false,
+        };
+        let keeper_features = soccer_neural_transition_features(&keeper_transition);
+
+        assert!(
+            keeper_observation.goalkeeper_ball_goal_line_alignment_score > 0.92,
+            "keeper on the direct ball-goal line should expose high alignment: {keeper_observation:?}"
+        );
+        assert!(keeper_key.goalkeeper_ball_goal_line_alignment_bin >= 4);
+        assert!(
+            keeper_features[SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT] > 0.92,
+            "neural keeper-line feature should expose high alignment"
+        );
+
+        let defender_observation = snapshot.observation_for(defender);
+        let defender_state = snapshot.mdp_state_for_player(defender);
+        let defender_key = SoccerQStateKey::from_parts(
+            &defender_state,
+            &defender_observation,
+            Team::Home,
+            PlayerRole::Defender,
+        );
+        let defender_transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: defender,
+            team: Team::Home,
+            role: PlayerRole::Defender,
+            state: defender_state,
+            observation: defender_observation.clone(),
+            belief: belief_from_observation(&defender_observation),
+            action: "defend-shape".to_string(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(defender),
+            next_observation: defender_observation.clone(),
+            done: false,
+        };
+        let defender_features = soccer_neural_transition_features(&defender_transition);
+
+        assert!(
+            defender_observation.defensive_line_break_threat > 0.30,
+            "ball carrier near the back line should expose break threat: {defender_observation:?}"
+        );
+        assert!(defender_key.defensive_line_break_threat_bin >= 1);
+        assert!(
+            defender_features[SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT] > 0.30,
+            "neural line-break feature should expose defensive retreat urgency"
         );
     }
 

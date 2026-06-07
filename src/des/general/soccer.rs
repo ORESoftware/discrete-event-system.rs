@@ -15660,7 +15660,11 @@ impl CentralBrain {
             .agent_schedule
             .iter()
             .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        let scheduled_index = snapshot.agent_schedule.iter().position(|entry| {
+            entry.kind == AgentScheduleKind::CentralBrain && entry.id == CENTRAL_BRAIN_AGENT_ID
+        });
         CentralBrainSnapshot {
+            scheduled_index,
             phase: self.phase,
             possession_team: self.possession_team.or_else(|| snapshot.possession_team()),
             ball_position: snapshot.ball.position,
@@ -25200,6 +25204,8 @@ pub struct CentralBrainOfficialAwareness {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CentralBrainSnapshot {
+    #[serde(default)]
+    pub scheduled_index: Option<usize>,
     pub phase: TacticalPhase,
     pub possession_team: Option<Team>,
     pub ball_position: Vec2,
@@ -50515,6 +50521,7 @@ mod tests {
                 .map(|entry| (&entry.kind, entry.id)),
             Some((&AgentScheduleKind::CentralBrain, CENTRAL_BRAIN_AGENT_ID))
         );
+        assert_eq!(frame.central_brain.scheduled_index, Some(0));
         assert_eq!(
             frame
                 .agent_schedule
@@ -74079,6 +74086,7 @@ mod tests {
             value["frame"]["awayBrain"]["ballLastAction"],
             value["frame"]["ball"]["lastDecision"]["action"]
         );
+        assert_eq!(value["frame"]["centralBrain"]["scheduledIndex"], 0);
         assert_eq!(
             value["frame"]["centralBrain"]["trackedOfficialAwareness"]
                 .as_array()
@@ -77342,6 +77350,7 @@ mod tests {
             .contains("B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)}"));
         assert!(html.contains("brain.teamCentroid"));
         assert!(html.contains("playersNearBall"));
+        assert!(html.contains("playbackScheduleSlotLabel(b.scheduledIndex)"));
         assert!(html.contains("function flankPolicyLabel"));
         assert!(html.contains("playDownFlankLowCross"));
         assert!(html.contains("playDownFlankHighCross"));

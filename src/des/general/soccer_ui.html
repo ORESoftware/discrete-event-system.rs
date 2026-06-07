@@ -731,6 +731,7 @@ function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
   const officials = Number(b.trackedOfficials ?? 0);
+  const schedule = playbackScheduleSlotLabel(b.scheduledIndex);
   const possession = b.possessionTeam || "Loose";
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   const center = b.centerOfPlay;
@@ -740,7 +741,7 @@ function centralBrainLabel(b) {
   const ballJerk = vecLen(b.ballJerk || {x: 0, y: 0});
   const ballZ = Number(b.ballAltitudeYards ?? 0);
   const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}`;
-  return `${players}p ${officials}o ${possession}${holder}${centerText}${ballText}`;
+  return `${players}p ${officials}o${schedule} ${possession}${holder}${centerText}${ballText}`;
 }
 function agentScheduleGlyph(entry) {
   if (!entry) return "?";

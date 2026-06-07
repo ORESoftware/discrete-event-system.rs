@@ -226,6 +226,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ASSIGNMENT_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn assignment_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "ASSIGNMENT_REFERENCE_FORCE_PYTHON",
+            "ASSIGNMENT_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ASSIGNMENT_REFERENCE_SCIPY_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
 
     const SAMPLE: &str = r#"{
         "cost": [
@@ -268,6 +305,45 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["assignment"], json!([0, 1]));
         assert_eq!(output["objective"], 2.0);
+    }
+
+    #[test]
+    fn external_cli_aliases_default_to_rust_reference_without_python() {
+        let _lock = ASSIGNMENT_CLI_ENV_LOCK
+            .lock()
+            .expect("lock assignment CLI env guard");
+        let _force_python_guards = assignment_force_python_off_guards();
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-assignment-cli");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-assignment-cli");
+
+        for (alias, expected_solver) in [
+            (
+                "ortools:simple-linear-sum-assignment",
+                "rust:registered-assignment-fallback-for-ortools",
+            ),
+            (
+                "scipy:linear-sum-assignment",
+                "rust:registered-assignment-fallback-for-scipy",
+            ),
+        ] {
+            let output = run(
+                vec![
+                    "assignment_reference".to_string(),
+                    format!("--solver={alias}"),
+                ],
+                SAMPLE,
+            )
+            .expect(alias);
+
+            assert_eq!(output["status"], "optimal", "{alias}");
+            assert_eq!(output["solver"], expected_solver, "{alias}");
+            assert_eq!(output["assignment"], json!([1, 0, 2, 3]), "{alias}");
+            assert!(output["message"]
+                .as_str()
+                .expect("message")
+                .contains("validated with Rust fallback"));
+        }
     }
 
     #[test]

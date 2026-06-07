@@ -856,6 +856,7 @@ impl Driver {
             &ExternalCpSatReferenceOptions {
                 solver: ExternalCpSatReferenceSolver::RustEnumeration,
                 enumerate_solutions,
+                max_nodes: None,
                 assumption_core,
             },
         )

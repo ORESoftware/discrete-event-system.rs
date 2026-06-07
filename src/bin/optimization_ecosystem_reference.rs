@@ -318,4 +318,150 @@ mod tests {
         assert_eq!(cuopt["tool"], "nvidia-cuopt");
         assert_eq!(cuopt["family"], "linear-mip");
     }
+
+    #[test]
+    fn java_and_rust_ecosystem_aliases_use_rust_builtins() {
+        let cp_payload = r#"{
+            "kind": "ecosystem-cp-assignment",
+            "costs": [[3, 1], [2, 4]]
+        }"#;
+        for tool in ["jacop", "ortools-java"] {
+            let output = run(
+                vec![
+                    "optimization_ecosystem_reference".to_string(),
+                    "--tool".to_string(),
+                    tool.to_string(),
+                ],
+                cp_payload,
+            )
+            .expect("run CP ecosystem alias");
+
+            assert_eq!(output["status"], "optimal", "{tool}: {output}");
+            assert_eq!(output["tool"], tool, "{tool}: {output}");
+            assert_eq!(
+                output["family"], "constraint-programming",
+                "{tool}: {output}"
+            );
+            assert_eq!(
+                output["backend"], "builtin-rust:constraint-programming",
+                "{tool}: {output}"
+            );
+            assert_eq!(output["objective"], 3.0, "{tool}: {output}");
+        }
+
+        let planning_payload = r#"{
+            "kind": "ecosystem-planning-assignment",
+            "task_durations": [2, 3, 4],
+            "machines": 2
+        }"#;
+        let optaplanner = run(
+            vec![
+                "optimization_ecosystem_reference".to_string(),
+                "--tool".to_string(),
+                "optaplanner".to_string(),
+            ],
+            planning_payload,
+        )
+        .expect("run planning ecosystem alias");
+        assert_eq!(optaplanner["status"], "optimal");
+        assert_eq!(optaplanner["family"], "planning-metaheuristic");
+        assert_eq!(
+            optaplanner["backend"],
+            "builtin-rust:planning-metaheuristic"
+        );
+
+        let multiobjective_payload = r#"{
+            "kind": "ecosystem-multiobjective",
+            "senses": ["min", "min"],
+            "candidates": [
+                {"x": [0], "objectives": [3, 2]},
+                {"x": [1], "objectives": [2, 2]},
+                {"x": [2], "objectives": [4, 1]}
+            ]
+        }"#;
+        for tool in ["moea-framework", "ecj"] {
+            let output = run(
+                vec![
+                    "optimization_ecosystem_reference".to_string(),
+                    "--tool".to_string(),
+                    tool.to_string(),
+                ],
+                multiobjective_payload,
+            )
+            .expect("run multiobjective ecosystem alias");
+
+            assert_eq!(output["status"], "optimal", "{tool}: {output}");
+            assert_eq!(output["tool"], tool, "{tool}: {output}");
+            assert_eq!(
+                output["family"], "evolutionary-multiobjective",
+                "{tool}: {output}"
+            );
+            assert_eq!(
+                output["backend"], "builtin-rust:evolutionary-multiobjective",
+                "{tool}: {output}"
+            );
+        }
+
+        let linear_payload = r#"{
+            "kind": "ecosystem-linear-binary",
+            "sense": "max",
+            "objective": [3, 2],
+            "constraints": [{"coefs": [1, 1], "sense": "<=", "rhs": 1}],
+            "domains": [[0, 1], [0, 1]]
+        }"#;
+        for tool in ["ojalgo", "good-lp", "lp-modeler"] {
+            let output = run(
+                vec![
+                    "optimization_ecosystem_reference".to_string(),
+                    "--tool".to_string(),
+                    tool.to_string(),
+                ],
+                linear_payload,
+            )
+            .expect("run linear ecosystem alias");
+
+            assert_eq!(output["status"], "optimal", "{tool}: {output}");
+            assert_eq!(output["tool"], tool, "{tool}: {output}");
+            assert_eq!(output["family"], "linear-mip", "{tool}: {output}");
+            assert_eq!(
+                output["backend"], "builtin-rust:linear-mip",
+                "{tool}: {output}"
+            );
+            assert_eq!(output["objective"], 3.0, "{tool}: {output}");
+        }
+
+        let nonlinear_payload = r#"{
+            "kind": "ecosystem-nonlinear",
+            "sense": "min",
+            "variables": [
+                {"name": "x", "lb": 0, "ub": 2, "start": 1},
+                {"name": "y", "lb": 0, "ub": 4, "start": 2}
+            ],
+            "objective": "(x - 1) * (x - 1) + (y - 2) * (y - 2)"
+        }"#;
+        for tool in ["argmin", "nlopt"] {
+            let output = run(
+                vec![
+                    "optimization_ecosystem_reference".to_string(),
+                    "--tool".to_string(),
+                    tool.to_string(),
+                ],
+                nonlinear_payload,
+            )
+            .expect("run nonlinear ecosystem alias");
+
+            assert_eq!(output["status"], "optimal", "{tool}: {output}");
+            assert_eq!(output["tool"], tool, "{tool}: {output}");
+            assert_eq!(
+                output["family"], "nonlinear-optimization",
+                "{tool}: {output}"
+            );
+            assert_eq!(
+                output["backend"], "builtin-rust:nonlinear-optimization",
+                "{tool}: {output}"
+            );
+            assert_eq!(output["objective"], 0.0, "{tool}: {output}");
+            assert_eq!(output["x"], json!([1.0, 2.0]), "{tool}: {output}");
+        }
+    }
 }

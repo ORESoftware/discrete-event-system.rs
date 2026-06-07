@@ -551,6 +551,48 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TRAFFIC_FEL_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn traffic_reference_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-traffic-fel"),
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-traffic-fel"),
+            EnvVarGuard::set("SUMO_HOME", "/definitely/not-sumo-for-traffic-fel"),
+            EnvVarGuard::clear("TRAFFIC_FEL_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("SUMO_REFERENCE_FORCE_EXTERNAL"),
+            EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+        ]
+    }
 
     fn minimal_input() -> SharedTrafficInput {
         serde_json::from_value(json!({
@@ -652,5 +694,68 @@ mod tests {
             .get("meanSpeedMps")
             .and_then(Value::as_f64)
             .is_some_and(f64::is_finite));
+    }
+
+    #[test]
+    fn shared_traffic_reference_ignores_external_env_and_runs_in_rust() {
+        let _env_lock = TRAFFIC_FEL_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("traffic FEL env lock");
+        let _guards = traffic_reference_python_off_guards();
+
+        let output = reference_output(minimal_input()).expect("reference output");
+        let result = output.get("result").expect("result");
+
+        assert_eq!(output.get("status").and_then(Value::as_str), Some("ok"));
+        assert_eq!(output.get("backend").and_then(Value::as_str), Some("rust"));
+        assert_eq!(
+            output.get("simulator").and_then(Value::as_str),
+            Some("rust:traffic-fel-reference")
+        );
+        assert_eq!(
+            result.get("generatedDemand").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(result
+            .get("notes")
+            .and_then(Value::as_array)
+            .is_some_and(|notes| notes.iter().any(|note| note
+                .as_str()
+                .is_some_and(|text| text.contains("crate-native smart traffic simulator")))));
+    }
+
+    #[test]
+    fn force_external_python_env_still_runs_rust_traffic_reference() {
+        let _env_lock = TRAFFIC_FEL_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("traffic FEL env lock");
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-traffic-fel");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-traffic-fel");
+        let _sumo_guard = EnvVarGuard::set("SUMO_HOME", "/definitely/not-sumo-for-traffic-fel");
+        let _force_python_guard = EnvVarGuard::set("TRAFFIC_FEL_REFERENCE_FORCE_PYTHON", "1");
+        let _force_sumo_guard = EnvVarGuard::set("SUMO_REFERENCE_FORCE_EXTERNAL", "1");
+        let _global_force_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON", "1");
+
+        let output = reference_output(minimal_input()).expect("reference output");
+        let result = output.get("result").expect("result");
+
+        assert_eq!(output.get("status").and_then(Value::as_str), Some("ok"));
+        assert_eq!(output.get("backend").and_then(Value::as_str), Some("rust"));
+        assert_eq!(
+            output.get("simulator").and_then(Value::as_str),
+            Some("rust:traffic-fel-reference")
+        );
+        assert_eq!(
+            result.get("generatedDemand").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(result
+            .get("meanTravelTimeSec")
+            .and_then(Value::as_f64)
+            .is_some_and(f64::is_finite));
+        assert!(!serde_json::to_string(&output)
+            .expect("traffic reference output json")
+            .contains("/definitely/not-python-for-traffic-fel"));
     }
 }

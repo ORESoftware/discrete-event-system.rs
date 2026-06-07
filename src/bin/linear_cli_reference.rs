@@ -26,7 +26,7 @@ impl Error for CliError {}
 
 fn usage(program: &str) -> String {
     format!(
-        "usage: {program} --kind lp|mip --solver highs|glpk|scip|cbc|clp|soplex|qsopt-ex|lp-solve|gurobi|cplex|xpress|lindo [--problem PATH] [--model-format lp|mps]"
+        "usage: {program} --kind lp|mip --solver highs|glpk|scip|cbc|clp|soplex|qsopt-ex|lp-solve|gurobi|cplex|xpress|lindo|mosek|copt [--problem PATH] [--model-format lp|mps]"
     )
 }
 
@@ -60,6 +60,10 @@ fn parse_solver(value: &str) -> Result<ExternalLinearCliSolver, String> {
         "xpress" | "optimizer" | "xpress-cli" | "xpress:cli" => Ok(ExternalLinearCliSolver::Xpress),
         "lindo" | "runlindo" | "lindoapi" | "lindo-cli" | "lindo:cli" => {
             Ok(ExternalLinearCliSolver::Lindo)
+        }
+        "mosek" | "mosek-cli" | "mosek:cli" => Ok(ExternalLinearCliSolver::Mosek),
+        "copt" | "copt-cmd" | "copt-cli" | "copt:cli" | "copt-cmd:cli" => {
+            Ok(ExternalLinearCliSolver::Copt)
         }
         _ => Err(format!("unknown solver {value:?}")),
     }
@@ -528,6 +532,16 @@ mod tests {
         "ub": [null]
     }"#;
 
+    const MIP: &str = r#"{
+        "sense": "max",
+        "c": [3.0, 2.0],
+        "A_ub": [[2.0, 1.0]],
+        "b_ub": [2.0],
+        "integer_vars": [true, true],
+        "lb": [0.0, 0.0],
+        "ub": [1.0, 1.0]
+    }"#;
+
     #[test]
     fn parses_core_python_bridge_options() {
         let (_, opts, problem_path) = parse_args([
@@ -575,6 +589,8 @@ mod tests {
             ("cplex:cli", ExternalLinearCliSolver::Cplex),
             ("optimizer", ExternalLinearCliSolver::Xpress),
             ("runlindo", ExternalLinearCliSolver::Lindo),
+            ("mosek-cli", ExternalLinearCliSolver::Mosek),
+            ("copt_cmd", ExternalLinearCliSolver::Copt),
         ] {
             assert_eq!(parse_solver(alias).expect(alias), expected, "{alias}");
         }
@@ -593,6 +609,30 @@ mod tests {
                 "/definitely/not/python".to_string(),
             ],
             LP,
+        )
+        .expect("linear CLI output");
+
+        assert_eq!(output["solver"], json!("highs:cli"));
+        assert_ne!(output["status"], json!("error"));
+        assert!(!output["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/definitely/not/python"));
+    }
+
+    #[test]
+    fn plain_mip_payload_enters_rust_linear_cli_path() {
+        let output = run(
+            vec![
+                "linear_cli_reference".to_string(),
+                "--kind".to_string(),
+                "mip".to_string(),
+                "--solver".to_string(),
+                "highs".to_string(),
+                "--python".to_string(),
+                "/definitely/not/python".to_string(),
+            ],
+            MIP,
         )
         .expect("linear CLI output");
 

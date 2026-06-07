@@ -214,4 +214,109 @@ mod tests {
             "builtin:data-profile-structural-for-whylogs"
         );
     }
+
+    #[test]
+    fn structural_validator_aliases_run_through_rust_cli() {
+        let yaml = run(
+            vec![
+                "output_validation_reference".to_string(),
+                "--tool=yamllint".to_string(),
+            ],
+            r#"{
+                "kind": "yaml-validation",
+                "yaml": "---\nname: soccer-learning\nsteps:\n  - simulate\n  - validate\n"
+            }"#,
+        )
+        .expect("run yaml validation");
+        assert_eq!(yaml["status"], "ok");
+        assert_eq!(yaml["verdict"], "valid");
+        assert_eq!(yaml["validator"], "builtin:yaml-structural");
+
+        let graphql = run(
+            vec![
+                "output_validation_reference".to_string(),
+                "--tool".to_string(),
+                "graphql-inspector".to_string(),
+            ],
+            r#"{
+                "kind": "graphql-schema-validation",
+                "schema": "type Query { score: Int }\n"
+            }"#,
+        )
+        .expect("run graphql validation");
+        assert_eq!(graphql["status"], "ok");
+        assert_eq!(graphql["verdict"], "valid");
+        assert_eq!(graphql["validator"], "builtin:graphql-schema-structural");
+
+        let sql = run(
+            vec![
+                "output_validation_reference".to_string(),
+                "--tool".to_string(),
+                "sqlfluff".to_string(),
+            ],
+            r#"{
+                "sql": "select id, score from where score > 0"
+            }"#,
+        )
+        .expect("run sql validation");
+        assert_eq!(sql["status"], "ok");
+        assert_eq!(sql["verdict"], "invalid");
+        assert_eq!(sql["validator"], "builtin:sql-structural-for-sqlfluff");
+
+        let csv = run(
+            vec![
+                "output_validation_reference".to_string(),
+                "--tool=csvlint".to_string(),
+            ],
+            r#"{
+                "schema": {
+                    "columns": {"episode": {"type": "integer", "required": true}},
+                    "minRows": 1
+                },
+                "csv": "episode\n1\n"
+            }"#,
+        )
+        .expect("run csv validation");
+        assert_eq!(csv["status"], "ok");
+        assert_eq!(csv["verdict"], "valid");
+        assert_eq!(csv["validator"], "builtin:table-schema-subset");
+
+        let frictionless = run(
+            vec![
+                "output_validation_reference".to_string(),
+                "--tool".to_string(),
+                "frictionless".to_string(),
+            ],
+            r#"{
+                "kind": "data-package-validation",
+                "package": {
+                    "profile": "tabular-data-package",
+                    "resources": [
+                        {
+                            "name": "episodes",
+                            "path": "episodes.csv",
+                            "schema": {
+                                "fields": [
+                                    {"name": "episode", "type": "integer", "constraints": {"required": true, "minimum": 1}},
+                                    {"name": "score", "type": "number", "constraints": {"minimum": 0}}
+                                ],
+                                "primaryKey": "episode"
+                            },
+                            "rows": [
+                                {"episode": 1, "score": 3.5},
+                                {"episode": 2, "score": 2.0}
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("run frictionless validation");
+        assert_eq!(frictionless["status"], "ok");
+        assert_eq!(frictionless["verdict"], "valid");
+        assert_eq!(
+            frictionless["validator"],
+            "builtin:frictionless-data-package-structural"
+        );
+    }
 }

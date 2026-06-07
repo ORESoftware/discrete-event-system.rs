@@ -255,10 +255,15 @@ fn external_methods_for_case_with_python_bridges(
             || program.has_conic_constraints());
     let mixed_integer_nonlinear = program.has_discrete_features()
         && (program.has_quadratic_constraints() || program.has_conic_constraints());
+    let direct_continuous_qp = name == "continuous-qp";
     let direct_mixed_integer_qp = name == "mixed-integer-qp";
-    let mut external_methods = if continuous_nonlinear {
+    let mut external_methods = if direct_continuous_qp {
+        continuous_quadratic_methods(include_python_bridges)
+    } else if direct_mixed_integer_qp {
+        mixed_integer_quadratic_methods(include_python_bridges)
+    } else if continuous_nonlinear {
         nonlinear_methods(include_python_bridges)
-    } else if mixed_integer_nonlinear || direct_mixed_integer_qp {
+    } else if mixed_integer_nonlinear {
         nonlinear_methods(include_python_bridges)
     } else if program.has_discrete_features() {
         mixed_integer_linear_methods(include_python_bridges)
@@ -293,6 +298,52 @@ fn rust_quadratic_reference_method() -> (&'static str, Option<String>) {
     ("rust-quadratic-reference", Some("rust".to_string()))
 }
 
+fn continuous_quadratic_methods(
+    include_python_bridges: bool,
+) -> Vec<(&'static str, Option<String>)> {
+    let mut methods = vec![
+        rust_quadratic_reference_method(),
+        ("highs-qp", Some("highs:qp".to_string())),
+        ("osqp", Some("osqp".to_string())),
+        ("scs", Some("scs".to_string())),
+        ("clarabel", Some("clarabel".to_string())),
+        ("ecos", Some("ecos".to_string())),
+        ("mosek-cli", Some("mosek-cli".to_string())),
+        ("copt-cli", Some("copt-cli".to_string())),
+        ("qpoases", Some("qpoases".to_string())),
+        ("proxqp", Some("proxqp".to_string())),
+        ("cosmo", Some("cosmo".to_string())),
+        ("sdpa", Some("sdpa".to_string())),
+        ("csdp", Some("csdp".to_string())),
+    ];
+    if include_python_bridges {
+        methods.extend([
+            ("gurobi", Some("gurobi:default".to_string())),
+            ("cplex", Some("cplex:default".to_string())),
+            ("xpress", Some("xpress:default".to_string())),
+        ]);
+    }
+    methods
+}
+
+fn mixed_integer_quadratic_methods(
+    include_python_bridges: bool,
+) -> Vec<(&'static str, Option<String>)> {
+    let mut methods = vec![
+        rust_quadratic_reference_method(),
+        ("highs-qp", Some("highs:qp".to_string())),
+        ("rust-miqp-fallback", Some("fallback".to_string())),
+    ];
+    if include_python_bridges {
+        methods.extend([
+            ("gurobi", Some("gurobi:default".to_string())),
+            ("cplex", Some("cplex:default".to_string())),
+            ("xpress", Some("xpress:default".to_string())),
+        ]);
+    }
+    methods
+}
+
 fn nonlinear_methods(include_python_bridges: bool) -> Vec<(&'static str, Option<String>)> {
     let mut methods = vec![rust_quadratic_reference_method()];
     if include_python_bridges {
@@ -320,6 +371,8 @@ fn mixed_integer_linear_methods(
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
+        ("mosek-cli", Some("mosek-cli".to_string())),
+        ("copt-cli", Some("copt-cli".to_string())),
     ];
     methods
 }
@@ -341,6 +394,8 @@ fn continuous_linear_methods(_include_python_bridges: bool) -> Vec<(&'static str
         ("cplex", Some("cplex:default".to_string())),
         ("xpress", Some("xpress:default".to_string())),
         ("lindo-cli", Some("lindo-cli".to_string())),
+        ("mosek-cli", Some("mosek-cli".to_string())),
+        ("copt-cli", Some("copt-cli".to_string())),
         default_rust_linear_method(),
     ]
 }
@@ -2491,6 +2546,15 @@ mod tests {
                 .any(|(label, method)| *label == "lindo-cli"
                     && method.as_deref() == Some("lindo-cli"))
         );
+        assert!(
+            methods
+                .iter()
+                .any(|(label, method)| *label == "mosek-cli"
+                    && method.as_deref() == Some("mosek-cli"))
+        );
+        assert!(methods
+            .iter()
+            .any(|(label, method)| *label == "copt-cli" && method.as_deref() == Some("copt-cli")));
         assert_eq!(
             methods
                 .last()
@@ -2519,6 +2583,15 @@ mod tests {
                 .any(|(label, method)| *label == "lindo-cli"
                     && method.as_deref() == Some("lindo-cli"))
         );
+        assert!(
+            methods
+                .iter()
+                .any(|(label, method)| *label == "mosek-cli"
+                    && method.as_deref() == Some("mosek-cli"))
+        );
+        assert!(methods
+            .iter()
+            .any(|(label, method)| *label == "copt-cli" && method.as_deref() == Some("copt-cli")));
         assert_eq!(
             methods
                 .last()
@@ -2549,6 +2622,15 @@ mod tests {
                 .any(|(label, method)| *label == "lindo-cli"
                     && method.as_deref() == Some("lindo-cli"))
         );
+        assert!(
+            mip_methods
+                .iter()
+                .any(|(label, method)| *label == "mosek-cli"
+                    && method.as_deref() == Some("mosek-cli"))
+        );
+        assert!(mip_methods
+            .iter()
+            .any(|(label, method)| *label == "copt-cli" && method.as_deref() == Some("copt-cli")));
         assert_eq!(
             mip_methods
                 .last()
@@ -2609,6 +2691,15 @@ mod tests {
                 .any(|(label, method)| *label == "lindo-cli"
                     && method.as_deref() == Some("lindo-cli"))
         );
+        assert!(
+            lp_methods
+                .iter()
+                .any(|(label, method)| *label == "mosek-cli"
+                    && method.as_deref() == Some("mosek-cli"))
+        );
+        assert!(lp_methods
+            .iter()
+            .any(|(label, method)| *label == "copt-cli" && method.as_deref() == Some("copt-cli")));
         assert!(!lp_methods.iter().any(|(label, _)| *label == "scipy-highs"));
     }
 
@@ -2623,10 +2714,34 @@ mod tests {
                 .map(|(label, method)| (*label, method.as_deref())),
             Some(("rust-quadratic-reference", Some("rust")))
         );
-        assert_eq!(default_qp.len(), 1);
+        assert!(default_qp
+            .iter()
+            .any(|(label, method)| *label == "highs-qp" && method.as_deref() == Some("highs:qp")));
+        assert!(default_qp
+            .iter()
+            .any(|(label, method)| *label == "osqp" && method.as_deref() == Some("osqp")));
+        assert!(
+            default_qp
+                .iter()
+                .any(|(label, method)| *label == "mosek-cli"
+                    && method.as_deref() == Some("mosek-cli"))
+        );
+        assert!(default_qp
+            .iter()
+            .any(|(label, method)| *label == "copt-cli" && method.as_deref() == Some("copt-cli")));
+        assert!(default_qp
+            .iter()
+            .any(|(label, method)| *label == "qpoases" && method.as_deref() == Some("qpoases")));
+        assert!(default_qp
+            .iter()
+            .any(|(label, method)| *label == "cosmo" && method.as_deref() == Some("cosmo")));
+        assert!(!default_qp.iter().any(|(label, _)| *label == "gurobi"));
 
         let api_qp =
             super::external_methods_for_case_with_python_bridges("continuous-qp", &qp, true);
+        assert!(api_qp
+            .iter()
+            .any(|(label, method)| *label == "highs-qp" && method.as_deref() == Some("highs:qp")));
         assert!(api_qp.iter().any(
             |(label, method)| *label == "gurobi" && method.as_deref() == Some("gurobi:default")
         ));
@@ -2649,7 +2764,55 @@ mod tests {
                 .map(|(label, method)| (*label, method.as_deref())),
             Some(("rust-quadratic-reference", Some("rust")))
         );
-        assert_eq!(default_miqp.len(), 1);
+        assert!(default_miqp
+            .iter()
+            .any(|(label, method)| *label == "highs-qp" && method.as_deref() == Some("highs:qp")));
+        assert!(default_miqp
+            .iter()
+            .any(|(label, method)| *label == "rust-miqp-fallback"
+                && method.as_deref() == Some("fallback")));
+        assert!(!default_miqp.iter().any(|(label, _)| *label == "mosek-cli"));
+        assert!(!default_miqp.iter().any(|(label, _)| *label == "qpoases"));
+    }
+
+    #[test]
+    fn continuous_qp_rust_first_alias_matrix_cross_checks_without_python() {
+        let qp = super::build_continuous_qp_case();
+        let methods = super::continuous_quadratic_methods(false);
+
+        for (label, method) in methods {
+            let report = super::cross_check_math_program_with_external(
+                &qp,
+                &super::MathProgramSolveOptions::default(),
+                &super::ExternalMathProgramOptions {
+                    method,
+                    ..Default::default()
+                },
+                1e-6,
+            )
+            .expect("continuous QP cross-check should run");
+
+            assert!(
+                report.within_tolerance,
+                "{label}: status={:?} solver={} objective_diff={:?} max_x_diff={:?}",
+                report.external.status,
+                report.external.solver,
+                report.objective_abs_diff,
+                report.max_x_abs_diff
+            );
+            assert_ne!(
+                report.external.status,
+                super::MathProgramStatus::NumericalError,
+                "{label}: {:?}",
+                report.external.message
+            );
+            assert!(
+                report.external.solver.starts_with("rust:")
+                    || report.external.solver.starts_with("builtin:"),
+                "{label}: {}",
+                report.external.solver
+            );
+        }
     }
 
     #[test]

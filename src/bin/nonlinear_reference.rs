@@ -440,6 +440,63 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static NONLINEAR_REFERENCE_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn nonlinear_reference_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set(
+                "PYTHON_BIN",
+                "/definitely/not-python-for-nonlinear-reference-cli",
+            ),
+            EnvVarGuard::set(
+                "PYTHON",
+                "/definitely/not-python-for-nonlinear-reference-cli",
+            ),
+            EnvVarGuard::set(
+                "SCIPY_OPTIMIZE_PYTHON",
+                "/definitely/not-python-for-nonlinear-reference-cli",
+            ),
+            EnvVarGuard::set(
+                "ORES_SCIPY_OPTIMIZE_PYTHON",
+                "/definitely/not-python-for-nonlinear-reference-cli",
+            ),
+            EnvVarGuard::clear("NONLINEAR_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("NL_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("NONLINEAR_REFERENCE_SCIPY_FORCE_PYTHON"),
+            EnvVarGuard::clear("NONLINEAR_REFERENCE_NLOPT_FORCE_PYTHON"),
+            EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+        ]
+    }
 
     #[test]
     fn parser_accepts_rust_and_external_solver_labels_used_by_validation_tools() {
@@ -503,6 +560,45 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["solver"], "rust:known-rosenbrock-minimum");
         assert_eq!(output["x"].as_array().expect("x").len(), 3);
+    }
+
+    #[test]
+    fn scipy_and_nlopt_cli_aliases_use_registered_rust_fallback_without_python() {
+        let _lock = NONLINEAR_REFERENCE_CLI_ENV_LOCK
+            .lock()
+            .expect("nonlinear reference CLI env lock poisoned");
+        let _guards = nonlinear_reference_python_off_guards();
+
+        for (solver, expected_label) in [
+            (
+                "scipy:slsqp",
+                "rust:registered-nonlinear-fallback-for-scipy",
+            ),
+            (
+                "nlopt:bobyqa",
+                "rust:registered-nonlinear-fallback-for-nlopt",
+            ),
+        ] {
+            let output = run(
+                vec![
+                    "nonlinear_reference".to_string(),
+                    "--solver".to_string(),
+                    solver.to_string(),
+                ],
+                r#"{"kind":"rosenbrock","x0":[-1.2,1.0,0.8]}"#,
+            )
+            .expect("run");
+
+            assert_eq!(output["status"], "optimal", "{solver}: {output:?}");
+            assert_eq!(output["solver"], expected_label, "{solver}: {output:?}");
+            assert_eq!(output["x"].as_array().expect("x").len(), 3);
+            assert!(
+                output["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("validated with Rust fallback")),
+                "{solver}: {output:?}"
+            );
+        }
     }
 
     #[test]

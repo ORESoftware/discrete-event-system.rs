@@ -232,4 +232,64 @@ mod tests {
             "builtin:small-opb-proof-for-veripb-checker"
         );
     }
+
+    #[test]
+    fn proof_checker_command_aliases_use_rust_cli_path() {
+        let unsat_cnf = r#"{
+            "cnf": "p cnf 1 2\n1 0\n-1 0\n",
+            "proof": "0\n"
+        }"#;
+        let drat_trim = run(
+            vec![
+                "proof_validation_reference".to_string(),
+                "--tool".to_string(),
+                "drat-trim".to_string(),
+            ],
+            unsat_cnf,
+        )
+        .expect("run drat-trim");
+        assert_eq!(drat_trim["status"], "ok");
+        assert_eq!(drat_trim["verdict"], "valid");
+        assert_eq!(
+            drat_trim["validator"],
+            "builtin:small-cnf-proof-for-drat-trim"
+        );
+
+        let lrat_check = run(
+            vec![
+                "proof_validation_reference".to_string(),
+                "--tool=lrat-check".to_string(),
+            ],
+            r#"{
+                "cnf": "p cnf 1 2\n1 0\n-1 0\n",
+                "proof": "1 0 0\n"
+            }"#,
+        )
+        .expect("run lrat-check");
+        assert_eq!(lrat_check["status"], "ok");
+        assert_eq!(lrat_check["verdict"], "valid");
+        assert_eq!(
+            lrat_check["validator"],
+            "builtin:small-cnf-proof-for-lrat-check"
+        );
+
+        let frat_trim = run(
+            vec![
+                "proof_validation_reference".to_string(),
+                "--tool".to_string(),
+                "frat-trim".to_string(),
+            ],
+            r#"{
+                "cnf": "p cnf 1 2\n1 0\n-1 0\n",
+                "proof": "a 0\n"
+            }"#,
+        )
+        .expect("run frat-trim");
+        assert_eq!(frat_trim["status"], "ok");
+        assert_eq!(frat_trim["verdict"], "valid");
+        assert_eq!(
+            frat_trim["validator"],
+            "builtin:small-cnf-proof-for-frat-trim"
+        );
+    }
 }

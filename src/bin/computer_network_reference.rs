@@ -414,6 +414,46 @@ fn main() {
 mod tests {
     use super::*;
     use des_engine::des::runners::validate_computer_network::problem_to_json;
+    use std::sync::Mutex;
+
+    static COMPUTER_NETWORK_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn computer_network_python_off_guards() -> Vec<EnvVarGuard> {
+        vec![
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-computer-network"),
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-computer-network"),
+            EnvVarGuard::clear("COMPUTER_NETWORK_REFERENCE_FORCE_PYTHON"),
+            EnvVarGuard::clear("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"),
+        ]
+    }
 
     #[test]
     fn accepts_external_module_args() {
@@ -480,5 +520,85 @@ mod tests {
             .get("bottlenecks")
             .and_then(JsonValue::as_array)
             .is_some());
+    }
+
+    #[test]
+    fn builtin_reference_ignores_python_env_and_runs_in_rust() {
+        let _env_lock = COMPUTER_NETWORK_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("computer-network env lock");
+        let _guards = computer_network_python_off_guards();
+
+        let output = run(&Args {
+            builtin: Some("small-enterprise".to_string()),
+            ..Default::default()
+        })
+        .expect("run");
+        let result = output.get("result").expect("result");
+
+        assert_eq!(output.get("status").and_then(JsonValue::as_str), Some("ok"));
+        assert_eq!(
+            output.get("backend").and_then(JsonValue::as_str),
+            Some("rust")
+        );
+        assert_eq!(
+            output.get("solver").and_then(JsonValue::as_str),
+            Some("rust:computer-network")
+        );
+        assert!(
+            result
+                .get("generatedPackets")
+                .and_then(JsonValue::as_f64)
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(result
+            .get("flowStats")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|flows| !flows.is_empty()));
+    }
+
+    #[test]
+    fn force_python_env_still_runs_rust_computer_network_reference() {
+        let _env_lock = COMPUTER_NETWORK_REFERENCE_ENV_LOCK
+            .lock()
+            .expect("computer-network env lock");
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-computer-network");
+        let _python_guard =
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-computer-network");
+        let _force_guard = EnvVarGuard::set("COMPUTER_NETWORK_REFERENCE_FORCE_PYTHON", "1");
+        let _global_force_guard = EnvVarGuard::set("ORES_EXTERNAL_REFERENCE_FORCE_PYTHON", "1");
+
+        let output = run(&Args {
+            builtin: Some("bottleneck-lab".to_string()),
+            ..Default::default()
+        })
+        .expect("run");
+        let result = output.get("result").expect("result");
+
+        assert_eq!(output.get("status").and_then(JsonValue::as_str), Some("ok"));
+        assert_eq!(
+            output.get("backend").and_then(JsonValue::as_str),
+            Some("rust")
+        );
+        assert_eq!(
+            output.get("solver").and_then(JsonValue::as_str),
+            Some("rust:computer-network")
+        );
+        assert!(
+            result
+                .get("generatedPackets")
+                .and_then(JsonValue::as_f64)
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(result
+            .get("bottlenecks")
+            .and_then(JsonValue::as_array)
+            .is_some());
+        assert!(!output
+            .to_string_pretty(2)
+            .contains("/definitely/not-python-for-computer-network"));
     }
 }

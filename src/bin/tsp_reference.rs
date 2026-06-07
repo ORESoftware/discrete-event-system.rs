@@ -291,6 +291,42 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TSP_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn tsp_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "TSP_REFERENCE_FORCE_PYTHON",
+            "TSP_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
 
     const UNIT_SQUARE_POINTS: &str = r#"{
         "points": [
@@ -336,6 +372,33 @@ mod tests {
         assert_eq!(output["solver"], "rust:held-karp-tsp");
         assert_eq!(output["tour"], json!([0, 1, 2, 3]));
         assert_eq!(output["objective"], 4.0);
+    }
+
+    #[test]
+    fn ortools_cli_alias_defaults_to_rust_reference_without_python() {
+        let _lock = TSP_CLI_ENV_LOCK.lock().expect("lock TSP CLI env guard");
+        let _force_python_guards = tsp_force_python_off_guards();
+        let _python_bin_guard =
+            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-tsp-cli");
+        let _python_guard = EnvVarGuard::set("PYTHON", "/definitely/not-python-for-tsp-cli");
+
+        let output = run(
+            vec![
+                "tsp_reference".to_string(),
+                "--solver=ortools:routing-tsp".to_string(),
+            ],
+            UNIT_SQUARE_POINTS,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(output["solver"], "rust:registered-tsp-fallback-for-ortools");
+        assert_eq!(output["tour"], json!([0, 1, 2, 3]));
+        assert_eq!(output["objective"], 4.0);
+        assert!(output["message"]
+            .as_str()
+            .expect("message")
+            .contains("validated with Rust fallback"));
     }
 
     #[test]

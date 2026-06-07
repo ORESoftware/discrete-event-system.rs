@@ -290,6 +290,42 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static WEIGHTED_MAX_SAT_CLI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn weighted_max_sat_force_python_off_guards() -> Vec<EnvVarGuard> {
+        [
+            "WEIGHTED_MAX_SAT_REFERENCE_FORCE_PYTHON",
+            "WEIGHTED_MAX_SAT_REFERENCE_ORTOOLS_FORCE_PYTHON",
+            "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
+        ]
+        .into_iter()
+        .map(|key| EnvVarGuard::set(key, "0"))
+        .collect()
+    }
 
     const SAMPLE: &str = r#"{
         "numVars": 3,
@@ -334,6 +370,41 @@ mod tests {
         assert_eq!(output["status"], "optimal");
         assert_eq!(output["assignment"], json!([true]));
         assert_eq!(output["objective"], 2.0);
+    }
+
+    #[test]
+    fn ortools_cli_alias_defaults_to_rust_reference_without_python() {
+        let _lock = WEIGHTED_MAX_SAT_CLI_ENV_LOCK
+            .lock()
+            .expect("lock weighted-max-sat CLI env guard");
+        let _force_python_guards = weighted_max_sat_force_python_off_guards();
+        let _python_bin_guard = EnvVarGuard::set(
+            "PYTHON_BIN",
+            "/definitely/not-python-for-weighted-max-sat-cli",
+        );
+        let _python_guard =
+            EnvVarGuard::set("PYTHON", "/definitely/not-python-for-weighted-max-sat-cli");
+
+        let output = run(
+            vec![
+                "weighted_max_sat_reference".to_string(),
+                "--solver=ortools:cp-sat-weighted-max-sat".to_string(),
+            ],
+            SAMPLE,
+        )
+        .expect("run");
+
+        assert_eq!(output["status"], "optimal");
+        assert_eq!(
+            output["solver"],
+            "rust:registered-weighted-max-sat-fallback-for-ortools"
+        );
+        assert_eq!(output["assignment"], json!([true, true, true]));
+        assert_eq!(output["objective"], 16.0);
+        assert!(output["message"]
+            .as_str()
+            .expect("message")
+            .contains("validated with Rust fallback"));
     }
 
     #[test]

@@ -1322,6 +1322,7 @@ function controllerLatencyBudgetLabel(b = state?.controllerLatencyBudget) {
   const budget = Number(b.tickBudgetMs ?? 100);
   const estimated = Number(b.estimatedControlLatencyMs ?? 0);
   const consumed = Number(b.consumedInputs ?? 0);
+  const expired = Number(b.expiredInputs ?? 0);
   const status = b.overBudget ? "over" : "ok";
   const queue = Number(b.maxQueueAgeMs ?? 0);
   const debounce = Number(b.lastDebounceMs ?? 0);
@@ -1334,10 +1335,13 @@ function controllerLatencyBudgetLabel(b = state?.controllerLatencyBudget) {
       const slotEstimate = Number(slot.estimatedControlLatencyMs ?? 0);
       const over = slot.overBudget ? "!" : "";
       const input = Number(slot.consumedInputs ?? 0) > 0 ? "i" : "";
-      return `S${slotId}:${slotEstimate.toFixed(1)}${input}${over}`;
+      const expiredSlot = Number(slot.expiredInputs ?? 0);
+      const expiredLabel = expiredSlot > 0 ? `x${expiredSlot}` : "";
+      return `S${slotId}:${slotEstimate.toFixed(1)}${input}${expiredLabel}${over}`;
     });
   const slotSuffix = slotBits.length ? ` ${slotBits.join(" ")}` : "";
-  return `${estimated.toFixed(1)}/${budget.toFixed(0)}ms ${status} C${consumed} Q${queue.toFixed(0)} Db${debounce.toFixed(1)} Y${yieldWait.toFixed(1)}${slotSuffix}`;
+  const expiredText = expired > 0 ? ` X${expired}` : "";
+  return `${estimated.toFixed(1)}/${budget.toFixed(0)}ms ${status} C${consumed}${expiredText} Q${queue.toFixed(0)} Db${debounce.toFixed(1)} Y${yieldWait.toFixed(1)}${slotSuffix}`;
 }
 function slotLatencyBudget(slot, budget = state?.controllerLatencyBudget) {
   const slots = Array.isArray(budget?.slots) ? budget.slots : [];
@@ -1350,10 +1354,12 @@ function slotLatencyBudgetLabel(slot) {
   const queue = Number(b.maxQueueAgeMs ?? 0);
   const debounce = Number(b.lastDebounceMs ?? 0);
   const consumed = Number(b.consumedInputs ?? 0);
+  const expired = Number(b.expiredInputs ?? 0);
   const pending = b.pending ? " pending" : "";
   const input = consumed > 0 ? ` input${consumed}` : " idle";
+  const expiredText = expired > 0 ? ` expired${expired}` : "";
   const status = b.overBudget ? " over budget" : " ok";
-  return `${estimate.toFixed(1)}ms${status}${input}${pending} Q${queue.toFixed(0)} Db${debounce.toFixed(1)}`;
+  return `${estimate.toFixed(1)}ms${status}${input}${expiredText}${pending} Q${queue.toFixed(0)} Db${debounce.toFixed(1)}`;
 }
 function policyAutosaveLabel(a) {
   if (!a) return "Off";

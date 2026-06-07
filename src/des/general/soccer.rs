@@ -9255,6 +9255,7 @@ fn soccer_unix_millis() -> u64 {
 struct SharedHumanInputStore {
     pending: VecDeque<QueuedHumanInputFrame>,
     latest_seq_by_slot: HashMap<usize, u64>,
+    expired_frames_by_slot: HashMap<usize, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -9340,11 +9341,19 @@ impl SharedHumanInputStore {
         self.pending = retained;
         latest.and_then(|queued| {
             let queue_age_ms = consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms);
-            (queue_age_ms <= HUMAN_INPUT_MAX_QUEUE_AGE_MS).then_some(HumanInputDrainResult {
-                queue_age_ms,
-                enqueued_unix_ms: queued.enqueued_unix_ms,
-                input: queued.input,
-            })
+            if queue_age_ms > HUMAN_INPUT_MAX_QUEUE_AGE_MS {
+                *self
+                    .expired_frames_by_slot
+                    .entry(queued.input.controller_slot)
+                    .or_default() += 1;
+                None
+            } else {
+                Some(HumanInputDrainResult {
+                    queue_age_ms,
+                    enqueued_unix_ms: queued.enqueued_unix_ms,
+                    input: queued.input,
+                })
+            }
         })
     }
 
@@ -9362,6 +9371,17 @@ impl SharedHumanInputStore {
             .iter()
             .filter(|queued| controller_slots.contains(&queued.input.controller_slot))
             .count()
+    }
+
+    fn expired_len_for_slot(&self, controller_slot: usize) -> u64 {
+        self.expired_frames_by_slot
+            .get(&controller_slot)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn expired_len(&self) -> u64 {
+        self.expired_frames_by_slot.values().copied().sum()
     }
 }
 
@@ -9663,6 +9683,20 @@ impl SharedHumanInputs {
             .get(&controller_slot)
             .copied()
     }
+
+    pub fn expired_len_for_slot(&self, controller_slot: usize) -> u64 {
+        self.inner
+            .read()
+            .expect("human input queue lock poisoned")
+            .expired_len_for_slot(controller_slot)
+    }
+
+    pub fn expired_len(&self) -> u64 {
+        self.inner
+            .read()
+            .expect("human input queue lock poisoned")
+            .expired_len()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -9719,6 +9753,7 @@ pub struct SoccerControllerSlotLatencyBudget {
     pub debounced_frames: u64,
     pub latest_seq_seen: Option<u64>,
     pub consumed_inputs: usize,
+    pub expired_inputs: u64,
     pub min_queue_age_ms: f64,
     pub avg_queue_age_ms: f64,
     pub max_queue_age_ms: f64,
@@ -9735,6 +9770,7 @@ pub struct SoccerControllerSlotLatencyBudget {
 pub struct SoccerControllerLatencyBudget {
     pub tick_budget_ms: f64,
     pub consumed_inputs: usize,
+    pub expired_inputs: u64,
     pub min_queue_age_ms: f64,
     pub avg_queue_age_ms: f64,
     pub max_queue_age_ms: f64,
@@ -38536,6 +38572,7 @@ impl SoccerRealtimeSession {
         }
         slot_count = slot_count.min(4);
         let mut queue_ages_by_slot = vec![Vec::<f64>::new(); slot_count];
+        let expired_inputs = self.input_queue.expired_len();
         let mut consumed_inputs = 0usize;
         let mut min_queue_age_ms = f64::INFINITY;
         let mut max_queue_age_ms: f64 = 0.0;
@@ -38617,6 +38654,7 @@ impl SoccerRealtimeSession {
                 };
             let slot_last_debounce_ms = finite_metric(thread.last_debounce_ms).max(0.0);
             let slot_max_debounce_ms = finite_metric(thread.max_debounce_ms).max(0.0);
+            let slot_expired_inputs = self.input_queue.expired_len_for_slot(slot);
             let assigned = player_id_by_slot[slot].is_some();
             let slot_last_yield_wait_ms = if assigned { last_yield_wait_ms } else { 0.0 };
             let slot_max_yield_wait_ms = if assigned { max_yield_wait_ms } else { 0.0 };
@@ -38637,6 +38675,7 @@ impl SoccerRealtimeSession {
                 debounced_frames: thread.debounced_frames,
                 latest_seq_seen: thread.latest_seq_seen,
                 consumed_inputs: slot_consumed_inputs,
+                expired_inputs: slot_expired_inputs,
                 min_queue_age_ms: slot_min_queue_age_ms,
                 avg_queue_age_ms: slot_avg_queue_age_ms,
                 max_queue_age_ms: slot_max_queue_age_ms,
@@ -38652,6 +38691,7 @@ impl SoccerRealtimeSession {
         SoccerControllerLatencyBudget {
             tick_budget_ms,
             consumed_inputs,
+            expired_inputs,
             min_queue_age_ms,
             avg_queue_age_ms,
             max_queue_age_ms,
@@ -57029,6 +57069,8 @@ mod tests {
             stale.is_none(),
             "stale controller input should not be applied after the soft-real-time age cap"
         );
+        assert_eq!(q.expired_len_for_slot(0), 1);
+        assert_eq!(q.expired_len(), 1);
         assert_eq!(
             q.queued_len_for_slots(&[0]),
             0,
@@ -57043,6 +57085,8 @@ mod tests {
             .expect("fresh input at the age boundary should still be accepted");
         assert_eq!(fresh.input.seq, 1);
         assert_eq!(fresh.queue_age_ms, HUMAN_INPUT_MAX_QUEUE_AGE_MS);
+        assert_eq!(q.expired_len_for_slot(1), 0);
+        assert_eq!(q.expired_len(), 1);
         assert_eq!(q.queued_len(), 0);
     }
 
@@ -57841,6 +57885,73 @@ mod tests {
         assert!(!decision.observation.human_input_present);
         assert_eq!(decision.observation.human_input_seq, None);
         assert_eq!(decision.observation.human_input_queue_age_ms, None);
+    }
+
+    #[test]
+    fn realtime_response_reports_expired_controller_input_budget() {
+        let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 788,
+            ..Default::default()
+        });
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("assign slot 0");
+        let input_queue = session.input_queue();
+        let enqueued_unix_ms =
+            soccer_unix_millis().saturating_sub(HUMAN_INPUT_MAX_QUEUE_AGE_MS + 20);
+        assert!(input_queue.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            enqueued_unix_ms,
+        ));
+
+        let response = session.step_once();
+
+        assert_eq!(response.accepted_inputs, 0);
+        assert_eq!(response.queued_human_inputs, 0);
+        assert_eq!(response.controller_latency_budget.consumed_inputs, 0);
+        assert_eq!(response.controller_latency_budget.expired_inputs, 1);
+        assert_eq!(response.controller_latency_budget.slots.len(), 1);
+        assert_eq!(
+            response.controller_latency_budget.slots[0].controller_slot,
+            0
+        );
+        assert_eq!(
+            response.controller_latency_budget.slots[0].consumed_inputs,
+            0
+        );
+        assert_eq!(
+            response.controller_latency_budget.slots[0].expired_inputs,
+            1
+        );
+        let player = response
+            .frame
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .expect("controlled player frame");
+        let observation = &player
+            .last_decision
+            .as_ref()
+            .expect("controlled player decision")
+            .observation;
+        assert!(observation.human_controlled);
+        assert!(!observation.human_input_present);
     }
 
     #[test]
@@ -77231,6 +77342,8 @@ mod tests {
         assert!(html.body.contains("id=\"controllerBudget\""));
         assert!(html.body.contains("function controllerLatencyBudgetLabel"));
         assert!(html.body.contains("estimatedControlLatencyMs"));
+        assert!(html.body.contains("expiredInputs"));
+        assert!(html.body.contains("expired${expired}"));
         assert!(html.body.contains("b.slots"));
         assert!(html.body.contains("function slotLatencyBudgetLabel"));
         assert!(html.body.contains("slot-health"));
@@ -77469,6 +77582,7 @@ mod tests {
             100.0
         );
         assert_eq!(state_value["controllerLatencyBudget"]["consumedInputs"], 0);
+        assert_eq!(state_value["controllerLatencyBudget"]["expiredInputs"], 0);
         assert_eq!(state_value["controllerLatencyBudget"]["overBudget"], false);
         let state_budget_slots = state_value["controllerLatencyBudget"]["slots"]
             .as_array()
@@ -77478,6 +77592,7 @@ mod tests {
         assert_eq!(state_budget_slots[0]["assigned"], false);
         assert_eq!(state_budget_slots[0]["playerId"], serde_json::Value::Null);
         assert_eq!(state_budget_slots[0]["consumedInputs"], 0);
+        assert_eq!(state_budget_slots[0]["expiredInputs"], 0);
         assert_eq!(state_budget_slots[0]["overBudget"], false);
         assert_eq!(state_value["queuedHumanInputs"], 0);
         assert_eq!(state_value["episodeIndex"], 0);
@@ -77542,6 +77657,7 @@ mod tests {
         assert_eq!(value["controllerYield"]["totalWaitMs"], 0.0);
         assert_eq!(value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
         assert_eq!(value["controllerLatencyBudget"]["consumedInputs"], 0);
+        assert_eq!(value["controllerLatencyBudget"]["expiredInputs"], 0);
         assert_eq!(value["controllerLatencyBudget"]["overBudget"], false);
         let step_budget_slots = value["controllerLatencyBudget"]["slots"]
             .as_array()
@@ -77550,6 +77666,7 @@ mod tests {
         assert_eq!(step_budget_slots[0]["controllerSlot"], 0);
         assert_eq!(step_budget_slots[0]["assigned"], false);
         assert_eq!(step_budget_slots[0]["consumedInputs"], 0);
+        assert_eq!(step_budget_slots[0]["expiredInputs"], 0);
         assert_eq!(step_budget_slots[0]["overBudget"], false);
         assert!(
             value["frames"].as_array().unwrap().is_empty(),

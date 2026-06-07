@@ -15572,6 +15572,14 @@ impl Default for CentralBrain {
     }
 }
 
+fn central_brain_formation_lp_operation_label(formation_lp_enabled: bool) -> &'static str {
+    if formation_lp_enabled {
+        "solve-formation-lp"
+    } else {
+        "skip-formation-lp"
+    }
+}
+
 impl CentralBrain {
     pub fn run_time_step(&mut self, snapshot: &WorldSnapshot, rng: &mut SeededRandom) {
         self.run_time_step_with_adversarial_embeddings(snapshot, rng, None);
@@ -15636,7 +15644,7 @@ impl CentralBrain {
                 snapshot.field_length,
             );
         }
-        if snapshot.formation_lp_enabled {
+        let formation_lp_operation = if snapshot.formation_lp_enabled {
             let home_directive = self.home_directive.clone();
             self.home_formation_lp.solve_tick(snapshot, &home_directive);
             apply_formation_lp_directive_signal(
@@ -15651,10 +15659,12 @@ impl CentralBrain {
                 &self.away_formation_lp.last_snapshot,
                 &self.away_formation_lp.last_guidance,
             );
+            central_brain_formation_lp_operation_label(true)
         } else {
             self.home_formation_lp.disable_tick();
             self.away_formation_lp.disable_tick();
-        }
+            central_brain_formation_lp_operation_label(false)
+        };
         self.pressure_line_home = self.home_directive.defensive_line_y;
         self.pressure_line_away = self.away_directive.defensive_line_y;
         self.last_decision = Some(CentralBrainDecisionTrace {
@@ -15672,7 +15682,7 @@ impl CentralBrain {
                 "sample-defensive-cover".to_string(),
                 "measure-overloads".to_string(),
                 "issue-team-directives".to_string(),
-                "solve-formation-lp".to_string(),
+                formation_lp_operation.to_string(),
             ],
         });
     }
@@ -51322,6 +51332,33 @@ mod tests {
         assert_eq!(decision.mdp_state.phase, TacticalPhase::HomeAttack);
         assert_eq!(decision.mdp_state.possession_team, Some(Team::Home));
         assert!(sim.central_brain.home_directive.shot_threshold_yards > 20.0);
+    }
+
+    #[test]
+    fn central_brain_trace_marks_formation_lp_solved_or_skipped() {
+        assert_eq!(
+            central_brain_formation_lp_operation_label(true),
+            "solve-formation-lp"
+        );
+        assert_eq!(
+            central_brain_formation_lp_operation_label(false),
+            "skip-formation-lp"
+        );
+
+        let mut live = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 205,
+            ..MatchConfig::live_gameplay()
+        });
+        live.run_time_step();
+        let live_order = &live
+            .central_brain
+            .last_decision
+            .as_ref()
+            .expect("live central brain decision")
+            .operation_order;
+        assert!(live_order.iter().any(|op| op == "skip-formation-lp"));
+        assert!(!live_order.iter().any(|op| op == "solve-formation-lp"));
     }
 
     #[test]

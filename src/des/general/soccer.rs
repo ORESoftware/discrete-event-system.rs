@@ -27867,6 +27867,8 @@ pub struct SoccerControllerAssignmentRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SoccerControllerAssignmentResponse {
     pub controller_assignments: Vec<ControllerAssignment>,
+    pub config: MatchConfig,
+    pub learning: SoccerLearningSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37785,6 +37787,8 @@ impl SoccerRealtimeSession {
         self.sync_controller_input_assignments();
         Ok(SoccerControllerAssignmentResponse {
             controller_assignments: self.sim.controller_assignments(),
+            config: self.sim.config.clone(),
+            learning: self.sim.learning_stats_snapshot(),
         })
     }
 
@@ -74258,6 +74262,10 @@ mod tests {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
             max_human_players: 2,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                ..Default::default()
+            },
             seed: 58,
             ..Default::default()
         })));
@@ -74281,10 +74289,15 @@ mod tests {
             .unwrap()
             .iter()
             .any(|a| a["controllerSlot"] == 0 && a["playerId"] == 5));
+        assert_eq!(assign_value["config"]["learningEnabled"], false);
+        assert_eq!(assign_value["config"]["neuralLearning"]["enabled"], false);
+        assert_eq!(assign_value["learning"]["learningEnabled"], false);
+        assert_eq!(assign_value["learning"]["neuralLearningEnabled"], false);
         assert_eq!(
             session.lock().unwrap().match_ref().players[5].controller_slot,
             Some(0)
         );
+        assert!(!session.lock().unwrap().match_ref().config.learning_enabled);
 
         let start_x = session.lock().unwrap().match_ref().players[5].position.x;
         let step_body = r#"{"ticks":1,"inputs":[{"controllerSlot":0,"playerId":5,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}]}"#;
@@ -76698,6 +76711,11 @@ mod tests {
         assert!(html.contains("policyTrainMaxTransitionsPerTick: Math.max(1"));
         assert!(html.contains("neuralLearningEnabled: neuralLearningEnabled.checked"));
         assert!(html.contains("neuralLearningBackend: neuralLearningBackend.value"));
+        assert!(html.contains("if (response.config) state.config = response.config;"));
+        assert!(html.contains("if (response.learning) state.learning = response.learning;"));
+        assert!(
+            html.contains("playerId == null ? \"controller cleared\" : \"controller assigned\"")
+        );
         assert!(html.contains("[learningEnabled, learningLoggingEnabled, neuralLearningEnabled, neuralLearningBackend].forEach"));
         assert!(html.contains("[learningIntervalTicks, policyTrainMaxTransitions].forEach"));
         assert!(html.contains("N${String(l.neuralLearningBackend || \"inline\")"));

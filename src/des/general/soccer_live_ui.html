@@ -3342,11 +3342,14 @@ async function refreshPolicyHistory(path, options = {}) {
 }
 async function assignSlot(slot, playerId) {
   const response = await postJson("/api/assign", {controllerSlot: slot, playerId});
+  if (response.config) state.config = response.config;
+  if (response.learning) state.learning = response.learning;
   state.controllerAssignments = response.controllerAssignments;
   applyAssignmentsToFrame(response.controllerAssignments);
   rebuildControls(response.controllerAssignments);
+  syncLearningControls();
   if (playerId != null) inspectedPlayerId = playerId;
-  statusEl.textContent = "controller assigned";
+  statusEl.textContent = playerId == null ? "controller cleared" : "controller assigned";
   render();
 }
 async function handlePitchClick(e) {

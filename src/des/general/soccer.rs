@@ -74613,6 +74613,37 @@ mod tests {
         assert_eq!(value["learning"]["learningIntervalTicks"], 8);
         assert_eq!(value["learning"]["policyTrainMaxTransitionsPerTick"], 16);
         assert!(!session.lock().unwrap().match_ref().config.learning_enabled);
+
+        let body = r#"{"learningEnabled":true,"learningLoggingEnabled":true,"learningIntervalTicks":4,"policyTrainMaxTransitionsPerTick":24,"neuralLearningEnabled":true,"neuralLearningBackend":"threaded"}"#;
+        let response = handle_live_soccer_request(
+            &format!(
+                "POST /api/learning HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(response.status, 200);
+        let value: serde_json::Value =
+            serde_json::from_str(&response.body).expect("neural learning runtime json");
+        assert_eq!(value["config"]["learningEnabled"], true);
+        assert_eq!(value["config"]["learningLoggingEnabled"], true);
+        assert_eq!(value["config"]["learningIntervalTicks"], 4);
+        assert_eq!(value["config"]["policyTrainMaxTransitionsPerTick"], 24);
+        assert_eq!(value["config"]["neuralLearning"]["enabled"], true);
+        assert_eq!(value["config"]["neuralLearning"]["backend"], "threaded");
+        assert_eq!(value["learning"]["neuralLearningEnabled"], true);
+        assert_eq!(value["learning"]["neuralLearningBackend"], "threaded");
+        assert!(
+            session
+                .lock()
+                .unwrap()
+                .match_ref()
+                .config
+                .neural_learning
+                .enabled
+        );
     }
 
     #[test]
@@ -76611,11 +76642,23 @@ mod tests {
         assert!(html.contains("postJson(\"/api/input\", inputs)"));
         assert!(html.contains("id=\"learningIntervalTicks\""));
         assert!(html.contains("id=\"policyTrainMaxTransitions\""));
+        assert!(html.contains("id=\"neuralLearningEnabled\""));
+        assert!(html.contains("id=\"neuralLearningBackend\""));
         assert!(html.contains("learningIntervalTicks.value = String"));
         assert!(html.contains("policyTrainMaxTransitions.value = String"));
+        assert!(
+            html.contains("neuralLearningEnabled.checked = !!state.config.neuralLearning?.enabled")
+        );
+        assert!(html.contains(
+            "neuralLearningBackend.value = state.config.neuralLearning?.backend || \"inline\""
+        ));
         assert!(html.contains("learningIntervalTicks: Math.max(1"));
         assert!(html.contains("policyTrainMaxTransitionsPerTick: Math.max(1"));
+        assert!(html.contains("neuralLearningEnabled: neuralLearningEnabled.checked"));
+        assert!(html.contains("neuralLearningBackend: neuralLearningBackend.value"));
+        assert!(html.contains("[learningEnabled, learningLoggingEnabled, neuralLearningEnabled, neuralLearningBackend].forEach"));
         assert!(html.contains("[learningIntervalTicks, policyTrainMaxTransitions].forEach"));
+        assert!(html.contains("N${String(l.neuralLearningBackend || \"inline\")"));
         assert!(html.contains("I${interval} C${cap}"));
         assert!(html.contains("function pulseLowLatencyControllerInput"));
         assert!(html.contains("pulseLowLatencyControllerInput();"));

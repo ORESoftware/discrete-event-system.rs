@@ -413,6 +413,11 @@
       <div class="toggle-control">
         <label for="learningEnabled"><input id="learningEnabled" type="checkbox" checked>Learn</label>
         <label for="learningLoggingEnabled"><input id="learningLoggingEnabled" type="checkbox" checked>Log</label>
+        <label for="neuralLearningEnabled"><input id="neuralLearningEnabled" type="checkbox">Neural</label>
+        <select id="neuralLearningBackend">
+          <option value="inline">NN Inline</option>
+          <option value="threaded">NN Threaded</option>
+        </select>
         <label for="autoEpisodeEnabled"><input id="autoEpisodeEnabled" type="checkbox" checked>Auto Episodes</label>
       </div>
       <div class="surface-control">
@@ -613,6 +618,8 @@ const controllerBudget = document.getElementById("controllerBudget");
 const inspectModeButton = document.getElementById("inspectMode");
 const learningEnabled = document.getElementById("learningEnabled");
 const learningLoggingEnabled = document.getElementById("learningLoggingEnabled");
+const neuralLearningEnabled = document.getElementById("neuralLearningEnabled");
+const neuralLearningBackend = document.getElementById("neuralLearningBackend");
 const autoEpisodeEnabled = document.getElementById("autoEpisodeEnabled");
 const learningIntervalTicks = document.getElementById("learningIntervalTicks");
 const policyTrainMaxTransitions = document.getElementById("policyTrainMaxTransitions");
@@ -1026,7 +1033,10 @@ function learningLabel(l) {
   const cap = Math.max(1, Math.round(Number(l.policyTrainMaxTransitionsPerTick ?? state?.config?.policyTrainMaxTransitionsPerTick ?? 1)));
   const deferred = Math.max(0, Math.round(Number(l.deferredRewardTransitions ?? 0)));
   const deferredText = deferred ? ` Q${deferred}` : "";
-  return `${mode}${log} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
+  const neural = l.neuralLearningEnabled
+    ? ` N${String(l.neuralLearningBackend || "inline").slice(0, 1).toUpperCase()}${Number(l.neuralLearningTrainingSteps ?? 0)}/${Number(l.neuralLearningSamples ?? 0)}`
+    : "";
+  return `${mode}${log}${neural} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
 }
 function shapeLearningLabel(summary = state?.tacticalSummary) {
   if (!summary) return "L0.00 C0.00 D0.0 R0.00";
@@ -2907,6 +2917,10 @@ function syncLearningControls() {
   syncingLearning = true;
   learningEnabled.checked = state.config.learningEnabled !== false;
   learningLoggingEnabled.checked = state.config.learningLoggingEnabled !== false;
+  neuralLearningEnabled.checked = !!state.config.neuralLearning?.enabled;
+  neuralLearningBackend.value = state.config.neuralLearning?.backend || "inline";
+  neuralLearningEnabled.disabled = learningEnabled.checked === false;
+  neuralLearningBackend.disabled = learningEnabled.checked === false || !neuralLearningEnabled.checked;
   learningIntervalTicks.value = String(Math.max(1, Math.round(Number(state.config.learningIntervalTicks ?? 4))));
   policyTrainMaxTransitions.value = String(Math.max(1, Math.round(Number(state.config.policyTrainMaxTransitionsPerTick ?? 24))));
   syncingLearning = false;
@@ -3383,11 +3397,14 @@ async function updateLearningRuntime() {
   const response = await postJson("/api/learning", {
     learningEnabled: learningEnabled.checked,
     learningLoggingEnabled: learningLoggingEnabled.checked,
+    neuralLearningEnabled: neuralLearningEnabled.checked,
+    neuralLearningBackend: neuralLearningBackend.value,
     learningIntervalTicks: Math.max(1, Math.round(Number(learningIntervalTicks.value || 1))),
     policyTrainMaxTransitionsPerTick: Math.max(1, Math.round(Number(policyTrainMaxTransitions.value || 1)))
   });
   state.config = response.config;
   state.learning = response.learning;
+  syncLearningControls();
   statusEl.textContent = learningEnabled.checked ? "learning updated" : "learning paused";
   render();
 }
@@ -3972,7 +3989,7 @@ surfacePreset.addEventListener("change", () => {
     updateSurface(surfaceValues()).catch(e => statusEl.textContent = e.message);
   });
 });
-[learningEnabled, learningLoggingEnabled].forEach(el => {
+[learningEnabled, learningLoggingEnabled, neuralLearningEnabled, neuralLearningBackend].forEach(el => {
   el.addEventListener("change", () => {
     updateLearningRuntime().catch(e => statusEl.textContent = e.message);
   });

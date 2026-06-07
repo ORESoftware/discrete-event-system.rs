@@ -1065,7 +1065,7 @@ function intentLabel(i) {
   const probabilityLabel = considered > 0
     ? ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}`
     : "";
-  return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}${probabilityLabel}`;
+  return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}${probabilityLabel}${intentTargetGridLabel(i)}`;
 }
 function selectedPlayerDecisionProbabilityLabel(p) {
   const compactConsidered = Number(p?.consideredActions ?? 0);
@@ -1102,6 +1102,15 @@ function pitchGridAddressFromPosition(position) {
 function gridCellFromCompact(parts) {
   if (!Array.isArray(parts)) return null;
   return {id: Number(parts[0] ?? 0), parentId: Number(parts[1] ?? 0), x: Number(parts[2] ?? 0), y: Number(parts[3] ?? 0)};
+}
+function intentTargetGridLabel(i) {
+  const compact = i?.targetGrid;
+  if (!compact?.f || !compact?.t || !compact?.m) return "";
+  const fine = gridCellFromCompact(compact.f);
+  const tactical = gridCellFromCompact(compact.t);
+  const macro = gridCellFromCompact(compact.m);
+  const facing = i?.targetFacing ? ` F${i.targetFacing}` : "";
+  return ` G${fine?.id ?? 0}/${tactical?.id ?? 0}/${macro?.id ?? 0}${facing}`;
 }
 function gridAddressForPlayer(p) {
   const compact = p?.playerGrid;

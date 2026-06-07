@@ -26717,6 +26717,10 @@ pub struct SoccerPlaybackIntentFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_player: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_grid: Option<SoccerPlaybackPlayerGridFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_facing: Option<FacingBucket>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flight: Option<PassFlight>,
     #[serde(default)]
     pub urgency: f64,
@@ -26848,6 +26852,8 @@ fn playback_intent_from_decision(
     decision: &AgentDecisionTrace,
     possession_team: Option<Team>,
     ball_holder: Option<usize>,
+    field_width_yards: f64,
+    field_length_yards: f64,
 ) -> Option<(f64, usize, SoccerPlaybackIntentFrame)> {
     let action = normalize_soccer_action_label(&decision.action).to_string();
     let priority =
@@ -26857,6 +26863,16 @@ fn playback_intent_from_decision(
     if target_point.is_none() {
         return None;
     }
+    let target_grid = action_target
+        .and_then(|target| target.grid)
+        .or_else(|| {
+            target_point
+                .map(|point| pitch_grid_address(point, field_width_yards, field_length_yards))
+        })
+        .map(playback_player_grid_frame);
+    let target_facing = action_target
+        .map(|target| target.facing)
+        .filter(|facing| *facing != FacingBucket::Unknown);
     let urgency = decision.observation.decision_urgency.clamp(0.0, 1.0);
     let (action_score, action_probability, action_tick_probability, considered_actions) =
         playback_selected_action_option_stats(decision, &action);
@@ -26870,6 +26886,8 @@ fn playback_intent_from_decision(
             action: action.clone(),
             target_point,
             target_player: action_target.and_then(|target| target.player_id),
+            target_grid,
+            target_facing,
             flight: playback_pass_flight_for_action(&action),
             urgency,
             action_score,
@@ -26881,6 +26899,18 @@ fn playback_intent_from_decision(
 }
 
 fn playback_intents_from_frame(frame: &MatchFrame) -> Vec<SoccerPlaybackIntentFrame> {
+    playback_intents_from_frame_with_pitch(
+        frame,
+        DEFAULT_FIELD_WIDTH_YARDS,
+        DEFAULT_FIELD_LENGTH_YARDS,
+    )
+}
+
+fn playback_intents_from_frame_with_pitch(
+    frame: &MatchFrame,
+    field_width_yards: f64,
+    field_length_yards: f64,
+) -> Vec<SoccerPlaybackIntentFrame> {
     let possession_team = frame.central_brain.possession_team.or_else(|| {
         frame
             .ball
@@ -26900,6 +26930,8 @@ fn playback_intents_from_frame(frame: &MatchFrame) -> Vec<SoccerPlaybackIntentFr
                 decision,
                 possession_team,
                 frame.ball.holder,
+                field_width_yards,
+                field_length_yards,
             )
         })
         .collect::<Vec<_>>();
@@ -26919,6 +26951,8 @@ fn playback_intents_from_agents(
     players: &[PlayerAgent],
     possession_team: Option<Team>,
     ball_holder: Option<usize>,
+    field_width_yards: f64,
+    field_length_yards: f64,
 ) -> Vec<SoccerPlaybackIntentFrame> {
     let mut candidates = players
         .iter()
@@ -26931,6 +26965,8 @@ fn playback_intents_from_agents(
                 decision,
                 possession_team,
                 ball_holder,
+                field_width_yards,
+                field_length_yards,
             )
         })
         .collect::<Vec<_>>();
@@ -27123,7 +27159,13 @@ impl SoccerPlaybackFrame {
                     .away_directive
                     .flank_overlap_run_probability,
             },
-            intents: playback_intents_from_agents(&sim.players, possession_team, sim.ball.holder),
+            intents: playback_intents_from_agents(
+                &sim.players,
+                possession_team,
+                sim.ball.holder,
+                sim.config.field_width_yards,
+                sim.config.field_length_yards,
+            ),
         }
     }
 }
@@ -35924,8 +35966,13 @@ impl SoccerMatch {
                     .map(|player| player.team)
             }))
             .or(self.ball.last_touch_team);
-        let intents =
-            playback_intents_from_agents(&self.players, possession_team, self.ball.holder);
+        let intents = playback_intents_from_agents(
+            &self.players,
+            possession_team,
+            self.ball.holder,
+            self.config.field_width_yards,
+            self.config.field_length_yards,
+        );
         let mut players = snapshot.players.clone();
         for player in &mut players {
             if include_learned_policy_traces {
@@ -88068,6 +88115,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("i.actionTickProbability"));
         assert!(html.contains("i.consideredActions"));
         assert!(html.contains("P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}"));
+        assert!(html.contains("function intentTargetGridLabel"));
+        assert!(html.contains("i?.targetGrid"));
+        assert!(html.contains("i?.targetFacing"));
+        assert!(html.contains("G${fine?.id ?? 0}/${tactical?.id ?? 0}/${macro?.id ?? 0}"));
         assert!(html.contains("drawGoalPosts(r)"));
         assert!(html.contains("goalWidthYards"));
         assert!(html.contains("ctx.arc(post.x, post.y, postRadius"));
@@ -88708,6 +88759,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .and_then(|intents| intents.first())
             .expect("intent entry");
         assert!(first_intent.get("targetPoint").is_some());
+        assert!(first_intent["targetGrid"]["f"]
+            .as_array()
+            .is_some_and(|cell| cell.len() == 4));
+        assert!(first_intent["targetGrid"]["t"]
+            .as_array()
+            .is_some_and(|cell| cell.len() == 4));
+        assert!(first_intent["targetGrid"]["m"]
+            .as_array()
+            .is_some_and(|cell| cell.len() == 4));
         assert!(first_intent.get("urgency").is_some());
         assert!(first_intent.get("actionScore").is_some());
         assert!(first_intent.get("actionProbability").is_some());

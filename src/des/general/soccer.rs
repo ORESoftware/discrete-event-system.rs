@@ -61741,7 +61741,7 @@ mod tests {
     }
 
     #[test]
-    fn live_gameplay_defaults_keep_learning_threaded_and_bounded() {
+    fn live_gameplay_defaults_enable_learning_work() {
         let live_config = SoccerLiveServerConfig::default();
         let config = live_config.match_config;
 
@@ -61750,15 +61750,15 @@ mod tests {
         assert_eq!(config.total_ticks(), 6_000);
         assert_eq!(config.human_slots(), 4);
         assert!(config.learning_enabled);
-        assert!(!config.learning_logging_enabled);
-        assert!(!config.full_game_learning_enabled);
-        assert!(!config.formation_lp_enabled);
+        assert!(config.learning_logging_enabled);
+        assert!(config.full_game_learning_enabled);
+        assert!(config.formation_lp_enabled);
         assert!(config.neural_learning.enabled);
         assert_eq!(
             config.neural_learning.backend,
             SoccerNeuralLearningBackend::Threaded
         );
-        assert!(!config.adversarial_embedding_exploitation_enabled);
+        assert!(config.adversarial_embedding_exploitation_enabled);
         assert!(live_config.autosave_team_policy);
     }
 

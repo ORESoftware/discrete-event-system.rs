@@ -9029,6 +9029,11 @@ impl PlayerAgent {
                 "recover".to_string(),
             )),
             "tackle" => snapshot.ball.holder.and_then(|holder| {
+                if self.role == PlayerRole::Goalkeeper
+                    && !snapshot.goalkeeper_direct_intervention_is_safe(self.id)
+                {
+                    return None;
+                }
                 let holder_player = snapshot.players.iter().find(|p| p.id == holder)?;
                 if holder_player.team == self.team.other()
                     && self.position.distance(holder_player.position) < 3.2
@@ -9069,22 +9074,29 @@ impl PlayerAgent {
                 let roam = matches!(label, "support-roam" | "overlap-run");
                 let support_target =
                     snapshot.attacking_support_movement_for(self.id, self.home_position, roam);
-                let target = plan
-                    .target_point
-                    .map(|target| {
-                        snapshot.shape_guarded_learned_support_target(
-                            self.id,
-                            target,
-                            support_target.point,
-                            self.home_position,
-                        )
-                    })
-                    .unwrap_or(support_target.point);
+                let target = if self.role == PlayerRole::Goalkeeper {
+                    support_target.point
+                } else {
+                    plan.target_point
+                        .map(|target| {
+                            snapshot.shape_guarded_learned_support_target(
+                                self.id,
+                                target,
+                                support_target.point,
+                                self.home_position,
+                            )
+                        })
+                        .unwrap_or(support_target.point)
+                };
                 Some((SoccerAction::MoveTo(target), label.to_string()))
             }
             "space" if !observation.has_ball => {
                 let target = if snapshot.controlled_possession_team() == Some(self.team) {
-                    snapshot.positional_open_space_for(self.id, self.home_position, false)
+                    if self.role == PlayerRole::Goalkeeper {
+                        snapshot.goalkeeper_ball_goal_tracking_target(self.team)
+                    } else {
+                        snapshot.positional_open_space_for(self.id, self.home_position, false)
+                    }
                 } else if snapshot.controlled_possession_team() == Some(self.team.other()) {
                     snapshot.defensive_assignment_for(self.id, self.home_position, false)
                 } else {
@@ -9092,6 +9104,10 @@ impl PlayerAgent {
                 };
                 Some((SoccerAction::MoveTo(target), "space".to_string()))
             }
+            "hold" if self.role == PlayerRole::Goalkeeper && !observation.has_ball => Some((
+                SoccerAction::MoveTo(snapshot.goalkeeper_ball_goal_tracking_target(self.team)),
+                "hold".to_string(),
+            )),
             "hold" => Some((SoccerAction::MoveTo(self.home_position), "hold".to_string())),
             _ => None,
         }
@@ -73571,6 +73587,66 @@ mod tests {
         assert!(
             runtime_target.distance(line_target) < 1e-9,
             "runtime keeper support should ignore off-line LP guidance: runtime={runtime_target:?} line_target={line_target:?}"
+        );
+    }
+
+    #[test]
+    fn goalkeeper_learned_off_ball_plans_preserve_ball_goal_line() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let teammate = 6;
+        sim.players[keeper].position = Vec2::new(18.0, 10.0);
+        sim.players[teammate].position = Vec2::new(63.0, 54.0);
+        sim.ball.holder = Some(teammate);
+        sim.ball.position = sim.players[teammate].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
+        let off_line_target = Vec2::new(7.0, line_target.y + 18.0);
+        let observation = snapshot.observation_for(keeper);
+
+        for action in ["support-shape", "support-roam", "space", "hold"] {
+            let plan = SoccerLearnedPlan {
+                action: action.to_string(),
+                target_player: None,
+                target_point: Some(off_line_target),
+            };
+            let (learned_action, _) = sim.players[keeper]
+                .action_from_learned_plan(&plan, &snapshot, &observation)
+                .unwrap_or_else(|| panic!("keeper learned {action} plan should resolve"));
+            let SoccerAction::MoveTo(target) = learned_action else {
+                panic!("keeper learned {action} plan should move, got {learned_action:?}");
+            };
+            assert!(
+                target.distance(line_target) < 1e-9,
+                "learned {action} should ignore off-line targets and preserve the direct ball-goal line: target={target:?} line={line_target:?}"
+            );
+        }
+
+        let threat = 17;
+        sim.players[keeper].position = Vec2::new(55.0, 34.0);
+        sim.players[threat].position = Vec2::new(56.5, 34.3);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let tackle_snapshot = WorldSnapshot::from_match(&sim);
+        let tackle_observation = tackle_snapshot.observation_for(keeper);
+        let tackle_plan = SoccerLearnedPlan {
+            action: "tackle".to_string(),
+            target_player: Some(threat),
+            target_point: None,
+        };
+        assert!(
+            !tackle_snapshot.goalkeeper_direct_intervention_is_safe(keeper),
+            "test setup should put the keeper close but off the direct ball-goal line"
+        );
+        assert!(
+            sim.players[keeper]
+                .action_from_learned_plan(&tackle_plan, &tackle_snapshot, &tackle_observation)
+                .is_none(),
+            "learned tackle should not override the keeper line-safety gate"
         );
     }
 

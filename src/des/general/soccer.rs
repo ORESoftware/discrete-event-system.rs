@@ -60912,6 +60912,56 @@ mod tests {
     }
 
     #[test]
+    fn accounting_smoke_report_flags_duplicate_agent_schedule_entries() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                seed: 13_080,
+                ..MatchConfig::playback_trace(0.2)
+            },
+            1,
+        );
+        let scheduled_frame = trace
+            .frames
+            .iter_mut()
+            .find(|frame| frame.tick > 0)
+            .expect("post-tick scheduled frame");
+        let first_player_slot = scheduled_frame
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Player)
+            .expect("first scheduled player");
+        let second_player_slot = scheduled_frame
+            .agent_schedule
+            .iter()
+            .enumerate()
+            .skip(first_player_slot + 1)
+            .find(|(_, entry)| entry.kind == AgentScheduleKind::Player)
+            .map(|(idx, _)| idx)
+            .expect("second scheduled player");
+        let missing_player_id = scheduled_frame.agent_schedule[second_player_slot].id;
+        scheduled_frame.agent_schedule[second_player_slot] =
+            scheduled_frame.agent_schedule[first_player_slot].clone();
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "agentSchedule" && violation.metric == "uniqueAgents"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "agentSchedule"
+                && violation.metric == "playerScheduled"
+                && violation.expected == format!("player {missing_player_id}")
+        }));
+        assert!(
+            !report.violations.iter().any(|violation| {
+                violation.subject == "agentSchedule" && violation.metric == "length"
+            }),
+            "duplicate-agent regression should catch exact-once violations even when schedule length stays valid"
+        );
+    }
+
+    #[test]
     fn accounting_smoke_report_flags_missing_ball_agent_decision_trace() {
         let mut trace = run_simulation(
             MatchConfig {

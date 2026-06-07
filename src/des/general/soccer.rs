@@ -1376,6 +1376,19 @@ pub enum TacticalPhase {
     Transition,
 }
 
+impl TacticalPhase {
+    fn action_label(self) -> &'static str {
+        match self {
+            TacticalPhase::Kickoff => "kickoff",
+            TacticalPhase::HomeBuildUp => "home-build-up",
+            TacticalPhase::AwayBuildUp => "away-build-up",
+            TacticalPhase::HomeAttack => "home-attack",
+            TacticalPhase::AwayAttack => "away-attack",
+            TacticalPhase::Transition => "transition",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerPomdpObservation {
@@ -15503,6 +15516,21 @@ impl SoccerAdversarialEmbeddingSignals {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CentralBrainDecisionTrace {
+    pub tick: u64,
+    #[serde(default)]
+    pub scheduled_index: Option<usize>,
+    pub action: String,
+    pub phase: TacticalPhase,
+    pub possession_team: Option<Team>,
+    pub ball_holder: Option<usize>,
+    pub tracked_players: usize,
+    pub tracked_officials: usize,
+    pub operation_order: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CentralBrain {
     pub phase: TacticalPhase,
     pub possession_team: Option<Team>,
@@ -15510,6 +15538,8 @@ pub struct CentralBrain {
     pub pressure_line_away: f64,
     pub home_directive: TeamTacticalDirective,
     pub away_directive: TeamTacticalDirective,
+    #[serde(default)]
+    pub last_decision: Option<CentralBrainDecisionTrace>,
     #[serde(skip, default = "default_home_formation_lp_brain")]
     home_formation_lp: SoccerFormationLpBrain,
     #[serde(skip, default = "default_away_formation_lp_brain")]
@@ -15533,6 +15563,7 @@ impl Default for CentralBrain {
                 DEFAULT_FIELD_WIDTH_YARDS,
                 DEFAULT_FIELD_LENGTH_YARDS,
             ),
+            last_decision: None,
             home_formation_lp: default_home_formation_lp_brain(),
             away_formation_lp: default_away_formation_lp_brain(),
         }
@@ -15624,6 +15655,24 @@ impl CentralBrain {
         }
         self.pressure_line_home = self.home_directive.defensive_line_y;
         self.pressure_line_away = self.away_directive.defensive_line_y;
+        self.last_decision = Some(CentralBrainDecisionTrace {
+            tick: snapshot.tick,
+            scheduled_index: Some(0),
+            action: format!("directives-{}", self.phase.action_label()),
+            phase: self.phase,
+            possession_team: self.possession_team,
+            ball_holder: snapshot.ball.holder,
+            tracked_players: snapshot.players.len(),
+            tracked_officials: snapshot.shared_positions.official_latest.len(),
+            operation_order: vec![
+                "sense-possession".to_string(),
+                "classify-phase".to_string(),
+                "sample-defensive-cover".to_string(),
+                "measure-overloads".to_string(),
+                "issue-team-directives".to_string(),
+                "solve-formation-lp".to_string(),
+            ],
+        });
     }
 
     pub fn directive_for(&self, team: Team) -> &TeamTacticalDirective {
@@ -15693,6 +15742,7 @@ impl CentralBrain {
                 .last_decision
                 .as_ref()
                 .map(|decision| decision.action.clone()),
+            last_decision: self.last_decision.clone(),
             player_centroid: center_of_play.player_centroid,
             live_play_centroid: center_of_play.live_play_centroid,
             center_of_play: center_of_play.center_of_play,
@@ -25235,6 +25285,8 @@ pub struct CentralBrainSnapshot {
     pub ball_scheduled_index: Option<usize>,
     #[serde(default)]
     pub ball_last_action: Option<String>,
+    #[serde(default)]
+    pub last_decision: Option<CentralBrainDecisionTrace>,
     #[serde(default)]
     pub player_centroid: Vec2,
     #[serde(default)]
@@ -50536,6 +50588,26 @@ mod tests {
             Some((&AgentScheduleKind::CentralBrain, CENTRAL_BRAIN_AGENT_ID))
         );
         assert_eq!(frame.central_brain.scheduled_index, Some(0));
+        let central_decision = frame
+            .central_brain
+            .last_decision
+            .as_ref()
+            .expect("central brain decision");
+        assert_eq!(central_decision.tick, 0);
+        assert_eq!(central_decision.scheduled_index, Some(0));
+        assert_eq!(central_decision.phase, frame.central_brain.phase);
+        assert_eq!(
+            central_decision.possession_team,
+            frame.central_brain.possession_team
+        );
+        assert_eq!(central_decision.ball_holder, frame.central_brain.ball_holder);
+        assert_eq!(central_decision.tracked_players, 22);
+        assert_eq!(central_decision.tracked_officials, 3);
+        assert!(central_decision.action.starts_with("directives-"));
+        assert!(central_decision
+            .operation_order
+            .iter()
+            .any(|operation| operation == "issue-team-directives"));
         assert_eq!(
             frame
                 .agent_schedule

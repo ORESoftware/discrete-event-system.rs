@@ -86709,6 +86709,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("id=\"matchStep\""));
         assert!(html.contains("function matchStepLabel"));
         assert!(html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t"));
+        assert!(html.contains("id=\"simSpeed\">1.0x 1t"));
+        assert!(html.contains(
+            "id=\"simTicksPerPulse\" type=\"range\" min=\"1\" max=\"100\" step=\"1\" value=\"1\""
+        ));
+        assert!(html.contains("const DEFAULT_SIM_TICKS_PER_PULSE = 1"));
         assert!(html.contains("return configuredSimTicksPerPulse();"));
         assert!(html.contains("const inputText = liveControllerAssigned() ? \" + input\" : \"\";"));
         assert!(html.contains("observation.shotLaneOpen === true"));

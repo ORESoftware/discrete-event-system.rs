@@ -568,6 +568,7 @@ cargo run --bin main_stochastic_sde_report
 cargo run --bin main_empirical_control_report
 cargo run --bin main_build_site
 cargo run --bin main_studio_workbench
+cargo run --bin main_soccer_live_5056
 ```
 
 Report binaries write HTML artifacts under `out/`.
@@ -575,6 +576,11 @@ Report binaries write HTML artifacts under `out/`.
 tool for inspecting, running, sweeping, and exporting `des/studio-graph/v1`
 model specs. The full site build also writes `out/studio/spec-workbench.html`
 for editing and dragging `des/studio/v1` JSON block diagrams.
+
+`main_soccer_live_5056` runs the live 2D soccer sim at
+`http://127.0.0.1:5056/` with the orientation-preserving field canvas. The
+existing `main_soccer_live` binary keeps its original default port; both launch
+paths still honor `SOCCER_LIVE_PORT`/`SOCCER_PORT` when set.
 
 ## Development
 

@@ -33934,7 +33934,7 @@ impl SoccerMatch {
         &mut self,
         controller_slot: usize,
         player_id: Option<usize>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let slot_count = self.config.human_slots();
         if controller_slot >= slot_count {
             let range = if slot_count == 0 {
@@ -33958,6 +33958,13 @@ impl SoccerMatch {
             (None, None)
         };
 
+        let current_slot_player = self.assigned_player_for_controller_slot(controller_slot);
+        let changed = current_slot_player != player_id
+            || previous_target_slot.is_some_and(|slot| slot != controller_slot);
+        if !changed {
+            return Ok(false);
+        }
+
         for player in &mut self.players {
             if player.controller_slot == Some(controller_slot) {
                 player.controller_slot = None;
@@ -33972,7 +33979,7 @@ impl SoccerMatch {
             self.human_inputs.clear_slot(previous_slot);
         }
 
-        Ok(())
+        Ok(true)
     }
 
     pub fn clear_controller_assignments(&mut self) {
@@ -39974,13 +39981,18 @@ impl SoccerRealtimeSession {
                 .find(|player| player.id == player_id)
                 .and_then(|player| player.controller_slot)
         });
-        self.sim
+        let changed = self
+            .sim
             .assign_controller_slot(request.controller_slot, request.player_id)?;
-        self.controller_input_router
-            .clear_pending_for_slot(request.controller_slot);
-        if let Some(previous_slot) = previous_slot.filter(|slot| *slot != request.controller_slot) {
+        if changed {
             self.controller_input_router
-                .clear_pending_for_slot(previous_slot);
+                .clear_pending_for_slot(request.controller_slot);
+            if let Some(previous_slot) =
+                previous_slot.filter(|slot| *slot != request.controller_slot)
+            {
+                self.controller_input_router
+                    .clear_pending_for_slot(previous_slot);
+            }
         }
         self.sync_controller_input_assignments();
         Ok(SoccerControllerAssignmentResponse {
@@ -59560,6 +59572,58 @@ mod tests {
     }
 
     #[test]
+    fn controller_noop_assignment_preserves_pending_slot_input() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 790,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        assert!(
+            sim.assign_controller_slot(0, Some(0))
+                .expect("assign slot 0 to player 0"),
+            "initial assignment should change controller state"
+        );
+        let input_queue = sim.human_inputs.clone();
+        assert!(input_queue.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 1,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+        assert_eq!(input_queue.queued_len(), 1);
+
+        assert!(
+            !sim.assign_controller_slot(0, Some(0))
+                .expect("repeat assignment should be a no-op"),
+            "repeat assignment should report no controller state change"
+        );
+
+        assert_eq!(
+            input_queue.queued_len(),
+            1,
+            "no-op assignment must not clear already accepted input"
+        );
+        sim.run_time_step();
+        assert_eq!(
+            sim.players[0]
+                .last_decision
+                .as_ref()
+                .and_then(|decision| decision.operation_order.first())
+                .map(String::as_str),
+            Some("human-input"),
+            "controlled player should still consume pending input after a no-op assignment"
+        );
+    }
+
+    #[test]
     fn moving_player_to_new_controller_slot_flushes_old_slot_input() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 1.0,
@@ -59699,6 +59763,62 @@ mod tests {
                 .map(String::as_str),
             Some("human-input"),
             "controller thread should remain alive after clearing stale pending input"
+        );
+    }
+
+    #[test]
+    fn realtime_noop_assignment_preserves_native_controller_mailbox() {
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 791,
+            ..Default::default()
+        });
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("assign first player");
+        assert_eq!(
+            session.push_human_inputs([HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }]),
+            1
+        );
+        assert!(session.controller_thread_stats()[0].pending);
+        assert_eq!(session.queued_human_input_count(), 1);
+
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("repeat assignment should succeed");
+
+        assert!(
+            session.controller_thread_stats()[0].pending,
+            "no-op assignment must not clear the native controller mailbox"
+        );
+        let step = session.step_once();
+        assert_eq!(step.queued_human_inputs, 0);
+        assert_eq!(
+            session.match_ref().players[0]
+                .last_decision
+                .as_ref()
+                .and_then(|decision| decision.operation_order.first())
+                .map(String::as_str),
+            Some("human-input"),
+            "controlled player should still consume mailbox input after a no-op assignment"
         );
     }
 
@@ -75979,7 +76099,9 @@ mod tests {
 
         assert!(
             target.distance(threat) < zone.distance(threat),
-            "assignment should close down the dangerous attacker"
+            "assignment should close down the dangerous attacker: target={target:?} zone={zone:?} threat={threat:?} target_dist={} zone_dist={}",
+            target.distance(threat),
+            zone.distance(threat)
         );
         assert!(
             target.y < threat.y,

@@ -12,6 +12,12 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
+use crate::des::general::des_base::visual_block::{
+    visual_block_graph_ir, Metadata, VisualBlock, VisualBlockConnectionOptions, VisualBlockLayout,
+    VisualBlockOptions, VisualBlockPortSpec, VisualBlockRole, VisualBlockStyle, VisualPortInput,
+    VisualPortOptions,
+};
+use crate::des::general::des_spec::JsonValue;
 use crate::des::general::prng::mulberry32;
 use crate::des::general::signal_transforms::{run_fft_transform, FastFourierTransformParams};
 use crate::des::shared::capabilities::RandomSource;
@@ -19,6 +25,374 @@ use crate::des::shared::capabilities::RandomSource;
 pub const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 pub const DEFAULT_SONG_SECONDS: f64 = 180.0;
 pub const MAX_MUSIC_SAMPLE_SEED_BYTES: u64 = 96 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MusicFeatureCategory {
+    RhythmMeter,
+    MelodyPitchTuning,
+    HarmonyTonality,
+    FormArrangement,
+    PerformanceArticulation,
+    ProductionMixing,
+    SequencingSampling,
+    TextureSpectrum,
+}
+
+impl MusicFeatureCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MusicFeatureCategory::RhythmMeter => "rhythm-meter",
+            MusicFeatureCategory::MelodyPitchTuning => "melody-pitch-tuning",
+            MusicFeatureCategory::HarmonyTonality => "harmony-tonality",
+            MusicFeatureCategory::FormArrangement => "form-arrangement",
+            MusicFeatureCategory::PerformanceArticulation => "performance-articulation",
+            MusicFeatureCategory::ProductionMixing => "production-mixing",
+            MusicFeatureCategory::SequencingSampling => "sequencing-sampling",
+            MusicFeatureCategory::TextureSpectrum => "texture-spectrum",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MusicFeature {
+    pub italian: &'static str,
+    pub english: &'static str,
+    pub category: MusicFeatureCategory,
+}
+
+pub const ITALIAN_MUSIC_FEATURES: [MusicFeature; 50] = [
+    MusicFeature {
+        italian: "ritmo",
+        english: "rhythm",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "melodia",
+        english: "melody",
+        category: MusicFeatureCategory::MelodyPitchTuning,
+    },
+    MusicFeature {
+        italian: "armonia",
+        english: "harmony",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "timbro",
+        english: "timbre",
+        category: MusicFeatureCategory::TextureSpectrum,
+    },
+    MusicFeature {
+        italian: "tempo",
+        english: "tempo",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "dinamica",
+        english: "dynamics",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "intensità",
+        english: "intensity",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "altezza",
+        english: "pitch height",
+        category: MusicFeatureCategory::MelodyPitchTuning,
+    },
+    MusicFeature {
+        italian: "durata",
+        english: "duration",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "pausa",
+        english: "rest",
+        category: MusicFeatureCategory::FormArrangement,
+    },
+    MusicFeature {
+        italian: "battito",
+        english: "beat",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "misura",
+        english: "bar",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "accordo",
+        english: "chord",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "tonalità",
+        english: "key",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "scala",
+        english: "scale",
+        category: MusicFeatureCategory::MelodyPitchTuning,
+    },
+    MusicFeature {
+        italian: "fraseggio",
+        english: "phrasing",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "articolazione",
+        english: "articulation",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "legato",
+        english: "legato",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "staccato",
+        english: "staccato",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "vibrato",
+        english: "vibrato",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "cadenza",
+        english: "cadence",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "modulazione",
+        english: "modulation",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "improvvisazione",
+        english: "improvisation",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "arrangiamento",
+        english: "arrangement",
+        category: MusicFeatureCategory::FormArrangement,
+    },
+    MusicFeature {
+        italian: "orchestrazione",
+        english: "orchestration",
+        category: MusicFeatureCategory::FormArrangement,
+    },
+    MusicFeature {
+        italian: "tessitura",
+        english: "tessitura",
+        category: MusicFeatureCategory::TextureSpectrum,
+    },
+    MusicFeature {
+        italian: "metro",
+        english: "meter",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "sincope",
+        english: "syncopation",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "accento",
+        english: "accent",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "groove",
+        english: "groove",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "andamento",
+        english: "movement",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "espressione",
+        english: "expression",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "interpretazione",
+        english: "interpretation",
+        category: MusicFeatureCategory::PerformanceArticulation,
+    },
+    MusicFeature {
+        italian: "registrazione",
+        english: "recording",
+        category: MusicFeatureCategory::ProductionMixing,
+    },
+    MusicFeature {
+        italian: "equalizzazione",
+        english: "equalization",
+        category: MusicFeatureCategory::ProductionMixing,
+    },
+    MusicFeature {
+        italian: "riverbero",
+        english: "reverb",
+        category: MusicFeatureCategory::ProductionMixing,
+    },
+    MusicFeature {
+        italian: "eco",
+        english: "echo",
+        category: MusicFeatureCategory::ProductionMixing,
+    },
+    MusicFeature {
+        italian: "distorsione",
+        english: "distortion",
+        category: MusicFeatureCategory::ProductionMixing,
+    },
+    MusicFeature {
+        italian: "compressione",
+        english: "compression",
+        category: MusicFeatureCategory::ProductionMixing,
+    },
+    MusicFeature {
+        italian: "campionamento",
+        english: "sampling",
+        category: MusicFeatureCategory::SequencingSampling,
+    },
+    MusicFeature {
+        italian: "loop",
+        english: "loop",
+        category: MusicFeatureCategory::SequencingSampling,
+    },
+    MusicFeature {
+        italian: "sequenza",
+        english: "sequence",
+        category: MusicFeatureCategory::SequencingSampling,
+    },
+    MusicFeature {
+        italian: "armonizzazione",
+        english: "harmonization",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "contrappunto",
+        english: "counterpoint",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "polifonia",
+        english: "polyphony",
+        category: MusicFeatureCategory::TextureSpectrum,
+    },
+    MusicFeature {
+        italian: "monodia",
+        english: "monody",
+        category: MusicFeatureCategory::TextureSpectrum,
+    },
+    MusicFeature {
+        italian: "modalità",
+        english: "modality",
+        category: MusicFeatureCategory::HarmonyTonality,
+    },
+    MusicFeature {
+        italian: "intonazione",
+        english: "intonation",
+        category: MusicFeatureCategory::MelodyPitchTuning,
+    },
+    MusicFeature {
+        italian: "pulsazione",
+        english: "pulse",
+        category: MusicFeatureCategory::RhythmMeter,
+    },
+    MusicFeature {
+        italian: "spettro",
+        english: "spectrum",
+        category: MusicFeatureCategory::TextureSpectrum,
+    },
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicFeatureCoverage {
+    pub covered: Vec<String>,
+    pub missing: Vec<String>,
+    pub extras: Vec<String>,
+}
+
+impl MusicFeatureCoverage {
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
+pub fn italian_music_feature_catalog() -> &'static [MusicFeature] {
+    &ITALIAN_MUSIC_FEATURES
+}
+
+pub fn all_italian_music_feature_terms() -> Vec<String> {
+    italian_music_feature_catalog()
+        .iter()
+        .map(|feature| feature.italian.to_string())
+        .collect()
+}
+
+pub fn find_italian_music_feature(term: &str) -> Option<&'static MusicFeature> {
+    let term = canonical_music_feature_term(term);
+    italian_music_feature_catalog()
+        .iter()
+        .find(|feature| canonical_music_feature_term(feature.italian) == term)
+}
+
+pub fn music_feature_coverage<'a, I>(terms: I) -> MusicFeatureCoverage
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let supplied = terms
+        .into_iter()
+        .map(canonical_music_feature_term)
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let mut covered = Vec::new();
+    let mut missing = Vec::new();
+    for feature in italian_music_feature_catalog() {
+        let term = canonical_music_feature_term(feature.italian);
+        if supplied.iter().any(|supplied| supplied == &term) {
+            covered.push(feature.italian.to_string());
+        } else {
+            missing.push(feature.italian.to_string());
+        }
+    }
+    let mut extras = Vec::new();
+    for term in supplied {
+        if find_italian_music_feature(&term).is_none() && !extras.iter().any(|e| e == &term) {
+            extras.push(term);
+        }
+    }
+    MusicFeatureCoverage {
+        covered,
+        missing,
+        extras,
+    }
+}
+
+pub fn validate_italian_music_feature_coverage(
+    terms: &[String],
+) -> Result<MusicFeatureCoverage, String> {
+    let coverage = music_feature_coverage(terms.iter().map(String::as_str));
+    if coverage.is_complete() {
+        Ok(coverage)
+    } else {
+        Err(format!(
+            "missing Italian music features: {}",
+            coverage.missing.join(", ")
+        ))
+    }
+}
+
+fn canonical_music_feature_term(term: &str) -> String {
+    term.trim().to_lowercase()
+}
 
 fn require_finite(name: &str, value: f64) {
     assert!(value.is_finite(), "{name} must be finite");
@@ -1476,6 +1850,1106 @@ impl SampleManifest {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MusicStudioBusKind {
+    Midi,
+    Audio,
+    Control,
+    Analysis,
+}
+
+impl MusicStudioBusKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MusicStudioBusKind::Midi => "midi",
+            MusicStudioBusKind::Audio => "audio",
+            MusicStudioBusKind::Control => "control",
+            MusicStudioBusKind::Analysis => "analysis",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MusicStudioLineage {
+    MidiSequencing,
+    RecordingStudios,
+    ElectronicMusic,
+    WindowsLoops,
+    BudgetDaw,
+    MacComposers,
+    ModularElectronic,
+    TrackerScene,
+}
+
+impl MusicStudioLineage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MusicStudioLineage::MidiSequencing => "midi-sequencing",
+            MusicStudioLineage::RecordingStudios => "recording-studios",
+            MusicStudioLineage::ElectronicMusic => "electronic-music",
+            MusicStudioLineage::WindowsLoops => "windows-loops",
+            MusicStudioLineage::BudgetDaw => "budget-daw",
+            MusicStudioLineage::MacComposers => "mac-composers",
+            MusicStudioLineage::ModularElectronic => "modular-electronic",
+            MusicStudioLineage::TrackerScene => "tracker-scene",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MusicStudioReferenceApp {
+    pub lineage: MusicStudioLineage,
+    pub software: &'static str,
+}
+
+pub const MUSIC_STUDIO_REFERENCE_APPS: [MusicStudioReferenceApp; 11] = [
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::MidiSequencing,
+        software: "Cubase",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::MidiSequencing,
+        software: "Logic",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::RecordingStudios,
+        software: "Pro Tools",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::ElectronicMusic,
+        software: "FL Studio",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::ElectronicMusic,
+        software: "Ableton Live",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::WindowsLoops,
+        software: "ACID Pro",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::BudgetDaw,
+        software: "Cakewalk",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::MacComposers,
+        software: "Digital Performer",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::ModularElectronic,
+        software: "Reason",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::ModularElectronic,
+        software: "Orion",
+    },
+    MusicStudioReferenceApp {
+        lineage: MusicStudioLineage::TrackerScene,
+        software: "Buzz",
+    },
+];
+
+pub fn music_studio_reference_apps() -> &'static [MusicStudioReferenceApp] {
+    &MUSIC_STUDIO_REFERENCE_APPS
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MusicStudioBlockKind {
+    ClockTransport,
+    ArrangementLane,
+    MidiSequencer,
+    GrooveQuantizer,
+    ChordHarmony,
+    AutomationLane,
+    PerformanceController,
+    SynthVoice,
+    DrumMachine,
+    Sampler,
+    LoopPlayer,
+    AudioTrack,
+    MixerChannel,
+    Equalizer,
+    Compressor,
+    Distortion,
+    DelayEcho,
+    Reverb,
+    SpectrumAnalyzer,
+    MasterOutput,
+}
+
+impl MusicStudioBlockKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MusicStudioBlockKind::ClockTransport => "clock-transport",
+            MusicStudioBlockKind::ArrangementLane => "arrangement-lane",
+            MusicStudioBlockKind::MidiSequencer => "midi-sequencer",
+            MusicStudioBlockKind::GrooveQuantizer => "groove-quantizer",
+            MusicStudioBlockKind::ChordHarmony => "chord-harmony",
+            MusicStudioBlockKind::AutomationLane => "automation-lane",
+            MusicStudioBlockKind::PerformanceController => "performance-controller",
+            MusicStudioBlockKind::SynthVoice => "synth-voice",
+            MusicStudioBlockKind::DrumMachine => "drum-machine",
+            MusicStudioBlockKind::Sampler => "sampler",
+            MusicStudioBlockKind::LoopPlayer => "loop-player",
+            MusicStudioBlockKind::AudioTrack => "audio-track",
+            MusicStudioBlockKind::MixerChannel => "mixer-channel",
+            MusicStudioBlockKind::Equalizer => "equalizer",
+            MusicStudioBlockKind::Compressor => "compressor",
+            MusicStudioBlockKind::Distortion => "distortion",
+            MusicStudioBlockKind::DelayEcho => "delay-echo",
+            MusicStudioBlockKind::Reverb => "reverb",
+            MusicStudioBlockKind::SpectrumAnalyzer => "spectrum-analyzer",
+            MusicStudioBlockKind::MasterOutput => "master-output",
+        }
+    }
+
+    pub fn default_label(self) -> &'static str {
+        match self {
+            MusicStudioBlockKind::ClockTransport => "Transport / Clock",
+            MusicStudioBlockKind::ArrangementLane => "Arrangement Lane",
+            MusicStudioBlockKind::MidiSequencer => "MIDI Sequencer",
+            MusicStudioBlockKind::GrooveQuantizer => "Groove Quantizer",
+            MusicStudioBlockKind::ChordHarmony => "Chord + Counterpoint",
+            MusicStudioBlockKind::AutomationLane => "Automation Lane",
+            MusicStudioBlockKind::PerformanceController => "Performance Controls",
+            MusicStudioBlockKind::SynthVoice => "Synth Voice",
+            MusicStudioBlockKind::DrumMachine => "Drum Machine",
+            MusicStudioBlockKind::Sampler => "Sampler",
+            MusicStudioBlockKind::LoopPlayer => "Loop Player",
+            MusicStudioBlockKind::AudioTrack => "Audio Recording Track",
+            MusicStudioBlockKind::MixerChannel => "Mixer Channel",
+            MusicStudioBlockKind::Equalizer => "Equalizer",
+            MusicStudioBlockKind::Compressor => "Compressor",
+            MusicStudioBlockKind::Distortion => "Distortion",
+            MusicStudioBlockKind::DelayEcho => "Delay / Echo",
+            MusicStudioBlockKind::Reverb => "Reverb",
+            MusicStudioBlockKind::SpectrumAnalyzer => "Spectrum Analyzer",
+            MusicStudioBlockKind::MasterOutput => "Master Output",
+        }
+    }
+
+    pub fn visual_role(self) -> VisualBlockRole {
+        match self {
+            MusicStudioBlockKind::ClockTransport
+            | MusicStudioBlockKind::ArrangementLane
+            | MusicStudioBlockKind::AutomationLane
+            | MusicStudioBlockKind::PerformanceController
+            | MusicStudioBlockKind::LoopPlayer
+            | MusicStudioBlockKind::AudioTrack => VisualBlockRole::Source,
+            MusicStudioBlockKind::MasterOutput => VisualBlockRole::Sink,
+            MusicStudioBlockKind::MixerChannel => VisualBlockRole::Station,
+            MusicStudioBlockKind::SpectrumAnalyzer => VisualBlockRole::Observer,
+            _ => VisualBlockRole::Transform,
+        }
+    }
+
+    pub fn input_ports(self) -> Vec<MusicStudioPortTemplate> {
+        match self {
+            MusicStudioBlockKind::ClockTransport
+            | MusicStudioBlockKind::ArrangementLane
+            | MusicStudioBlockKind::AutomationLane
+            | MusicStudioBlockKind::PerformanceController
+            | MusicStudioBlockKind::LoopPlayer
+            | MusicStudioBlockKind::AudioTrack => Vec::new(),
+            MusicStudioBlockKind::MidiSequencer => vec![
+                music_port("clock", "clock", MusicStudioBusKind::Control, true),
+                music_port(
+                    "arrangement",
+                    "arrangement",
+                    MusicStudioBusKind::Control,
+                    false,
+                ),
+            ],
+            MusicStudioBlockKind::GrooveQuantizer | MusicStudioBlockKind::ChordHarmony => {
+                vec![music_port(
+                    "midi_in",
+                    "MIDI in",
+                    MusicStudioBusKind::Midi,
+                    true,
+                )]
+            }
+            MusicStudioBlockKind::SynthVoice => vec![
+                music_port("midi_in", "MIDI in", MusicStudioBusKind::Midi, true),
+                music_port(
+                    "modulation",
+                    "modulation",
+                    MusicStudioBusKind::Control,
+                    false,
+                ),
+            ],
+            MusicStudioBlockKind::DrumMachine | MusicStudioBlockKind::Sampler => {
+                vec![music_port(
+                    "midi_in",
+                    "MIDI in",
+                    MusicStudioBusKind::Midi,
+                    true,
+                )]
+            }
+            MusicStudioBlockKind::MixerChannel => vec![
+                music_port("audio_in", "audio in", MusicStudioBusKind::Audio, true),
+                music_port("control", "control", MusicStudioBusKind::Control, false),
+            ],
+            MusicStudioBlockKind::Equalizer
+            | MusicStudioBlockKind::Compressor
+            | MusicStudioBlockKind::Distortion
+            | MusicStudioBlockKind::DelayEcho
+            | MusicStudioBlockKind::Reverb
+            | MusicStudioBlockKind::SpectrumAnalyzer
+            | MusicStudioBlockKind::MasterOutput => {
+                vec![music_port(
+                    "audio_in",
+                    "audio in",
+                    MusicStudioBusKind::Audio,
+                    true,
+                )]
+            }
+        }
+    }
+
+    pub fn output_ports(self) -> Vec<MusicStudioPortTemplate> {
+        match self {
+            MusicStudioBlockKind::ClockTransport => {
+                vec![music_port(
+                    "clock",
+                    "clock",
+                    MusicStudioBusKind::Control,
+                    true,
+                )]
+            }
+            MusicStudioBlockKind::ArrangementLane => vec![music_port(
+                "arrangement",
+                "arrangement",
+                MusicStudioBusKind::Control,
+                true,
+            )],
+            MusicStudioBlockKind::AutomationLane => vec![music_port(
+                "automation",
+                "automation",
+                MusicStudioBusKind::Control,
+                true,
+            )],
+            MusicStudioBlockKind::PerformanceController => vec![music_port(
+                "performance",
+                "performance",
+                MusicStudioBusKind::Control,
+                true,
+            )],
+            MusicStudioBlockKind::MidiSequencer
+            | MusicStudioBlockKind::GrooveQuantizer
+            | MusicStudioBlockKind::ChordHarmony => {
+                vec![music_port(
+                    "midi_out",
+                    "MIDI out",
+                    MusicStudioBusKind::Midi,
+                    true,
+                )]
+            }
+            MusicStudioBlockKind::SynthVoice
+            | MusicStudioBlockKind::DrumMachine
+            | MusicStudioBlockKind::Sampler
+            | MusicStudioBlockKind::LoopPlayer
+            | MusicStudioBlockKind::AudioTrack
+            | MusicStudioBlockKind::MixerChannel
+            | MusicStudioBlockKind::Equalizer
+            | MusicStudioBlockKind::Compressor
+            | MusicStudioBlockKind::Distortion
+            | MusicStudioBlockKind::DelayEcho
+            | MusicStudioBlockKind::Reverb => {
+                vec![music_port(
+                    "audio_out",
+                    "audio out",
+                    MusicStudioBusKind::Audio,
+                    true,
+                )]
+            }
+            MusicStudioBlockKind::SpectrumAnalyzer => vec![music_port(
+                "analysis",
+                "analysis",
+                MusicStudioBusKind::Analysis,
+                false,
+            )],
+            MusicStudioBlockKind::MasterOutput => Vec::new(),
+        }
+    }
+
+    pub fn default_feature_terms(self) -> Vec<&'static str> {
+        match self {
+            MusicStudioBlockKind::ClockTransport => vec![
+                "ritmo",
+                "tempo",
+                "durata",
+                "pausa",
+                "battito",
+                "misura",
+                "metro",
+                "andamento",
+                "pulsazione",
+            ],
+            MusicStudioBlockKind::ArrangementLane => vec![
+                "fraseggio",
+                "arrangiamento",
+                "orchestrazione",
+                "dinamica",
+                "intensità",
+                "improvvisazione",
+            ],
+            MusicStudioBlockKind::MidiSequencer => vec![
+                "melodia",
+                "altezza",
+                "scala",
+                "tonalità",
+                "modalità",
+                "intonazione",
+                "sequenza",
+            ],
+            MusicStudioBlockKind::GrooveQuantizer => {
+                vec![
+                    "sincope",
+                    "accento",
+                    "groove",
+                    "articolazione",
+                    "staccato",
+                    "legato",
+                ]
+            }
+            MusicStudioBlockKind::ChordHarmony => vec![
+                "armonia",
+                "accordo",
+                "cadenza",
+                "modulazione",
+                "armonizzazione",
+                "contrappunto",
+                "polifonia",
+                "monodia",
+            ],
+            MusicStudioBlockKind::AutomationLane => vec!["vibrato", "espressione"],
+            MusicStudioBlockKind::PerformanceController => {
+                vec!["interpretazione", "espressione", "improvvisazione"]
+            }
+            MusicStudioBlockKind::SynthVoice => vec!["timbro", "tessitura", "intonazione"],
+            MusicStudioBlockKind::DrumMachine => vec!["ritmo", "battito", "accento", "groove"],
+            MusicStudioBlockKind::Sampler => vec!["campionamento", "registrazione", "timbro"],
+            MusicStudioBlockKind::LoopPlayer => vec!["loop", "sequenza", "campionamento"],
+            MusicStudioBlockKind::AudioTrack => vec!["registrazione", "durata"],
+            MusicStudioBlockKind::MixerChannel => vec!["dinamica", "intensità", "timbro"],
+            MusicStudioBlockKind::Equalizer => vec!["equalizzazione", "spettro", "timbro"],
+            MusicStudioBlockKind::Compressor => vec!["compressione", "dinamica", "intensità"],
+            MusicStudioBlockKind::Distortion => vec!["distorsione", "timbro"],
+            MusicStudioBlockKind::DelayEcho => vec!["eco", "durata"],
+            MusicStudioBlockKind::Reverb => vec!["riverbero", "spettro"],
+            MusicStudioBlockKind::SpectrumAnalyzer => vec!["spettro", "timbro"],
+            MusicStudioBlockKind::MasterOutput => {
+                vec!["equalizzazione", "compressione", "spettro"]
+            }
+        }
+    }
+
+    fn visual_style(self) -> VisualBlockStyle {
+        match self {
+            MusicStudioBlockKind::ClockTransport
+            | MusicStudioBlockKind::ArrangementLane
+            | MusicStudioBlockKind::MidiSequencer
+            | MusicStudioBlockKind::GrooveQuantizer
+            | MusicStudioBlockKind::ChordHarmony => music_visual_style("#edf7ed", "#187047"),
+            MusicStudioBlockKind::SynthVoice
+            | MusicStudioBlockKind::DrumMachine
+            | MusicStudioBlockKind::Sampler
+            | MusicStudioBlockKind::LoopPlayer
+            | MusicStudioBlockKind::AudioTrack => music_visual_style("#f7f1e8", "#a15c10"),
+            MusicStudioBlockKind::AutomationLane | MusicStudioBlockKind::PerformanceController => {
+                music_visual_style("#eef4ff", "#265da8")
+            }
+            MusicStudioBlockKind::MixerChannel
+            | MusicStudioBlockKind::Equalizer
+            | MusicStudioBlockKind::Compressor
+            | MusicStudioBlockKind::Distortion
+            | MusicStudioBlockKind::DelayEcho
+            | MusicStudioBlockKind::Reverb => music_visual_style("#f5f3ff", "#6846b7"),
+            MusicStudioBlockKind::SpectrumAnalyzer | MusicStudioBlockKind::MasterOutput => {
+                music_visual_style("#eef6f7", "#08747f")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MusicStudioPortTemplate {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub bus: MusicStudioBusKind,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicStudioBoardBlock {
+    pub id: String,
+    pub kind: MusicStudioBlockKind,
+    pub label: String,
+    pub feature_terms: Vec<String>,
+}
+
+impl MusicStudioBoardBlock {
+    pub fn new(id: impl Into<String>, kind: MusicStudioBlockKind) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+            label: kind.default_label().to_string(),
+            feature_terms: kind
+                .default_feature_terms()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    pub fn with_features(mut self, feature_terms: Vec<String>) -> Self {
+        self.feature_terms = feature_terms;
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicStudioBoardConnection {
+    pub id: String,
+    pub from_block: String,
+    pub from_port: String,
+    pub to_block: String,
+    pub to_port: String,
+    pub bus: MusicStudioBusKind,
+}
+
+impl MusicStudioBoardConnection {
+    pub fn new(
+        id: impl Into<String>,
+        from_block: impl Into<String>,
+        from_port: impl Into<String>,
+        to_block: impl Into<String>,
+        to_port: impl Into<String>,
+        bus: MusicStudioBusKind,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            from_block: from_block.into(),
+            from_port: from_port.into(),
+            to_block: to_block.into(),
+            to_port: to_port.into(),
+            bus,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicStudioBoardValidation {
+    pub feature_coverage: MusicFeatureCoverage,
+    pub source_blocks: Vec<String>,
+    pub output_blocks: Vec<String>,
+    pub connection_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicStudioBoard {
+    pub id: String,
+    pub label: String,
+    pub reference_apps: Vec<MusicStudioReferenceApp>,
+    pub blocks: Vec<MusicStudioBoardBlock>,
+    pub connections: Vec<MusicStudioBoardConnection>,
+}
+
+impl MusicStudioBoard {
+    pub fn reason_style_default() -> Self {
+        let blocks = vec![
+            MusicStudioBoardBlock::new("transport", MusicStudioBlockKind::ClockTransport),
+            MusicStudioBoardBlock::new("arrangement", MusicStudioBlockKind::ArrangementLane),
+            MusicStudioBoardBlock::new("sequencer", MusicStudioBlockKind::MidiSequencer),
+            MusicStudioBoardBlock::new("groove", MusicStudioBlockKind::GrooveQuantizer),
+            MusicStudioBoardBlock::new("harmony", MusicStudioBlockKind::ChordHarmony),
+            MusicStudioBoardBlock::new("automation", MusicStudioBlockKind::AutomationLane),
+            MusicStudioBoardBlock::new("performance", MusicStudioBlockKind::PerformanceController),
+            MusicStudioBoardBlock::new("synth", MusicStudioBlockKind::SynthVoice),
+            MusicStudioBoardBlock::new("drums", MusicStudioBlockKind::DrumMachine),
+            MusicStudioBoardBlock::new("sampler", MusicStudioBlockKind::Sampler),
+            MusicStudioBoardBlock::new("loops", MusicStudioBlockKind::LoopPlayer),
+            MusicStudioBoardBlock::new("audio_track", MusicStudioBlockKind::AudioTrack),
+            MusicStudioBoardBlock::new("mixer", MusicStudioBlockKind::MixerChannel),
+            MusicStudioBoardBlock::new("eq", MusicStudioBlockKind::Equalizer),
+            MusicStudioBoardBlock::new("compressor", MusicStudioBlockKind::Compressor),
+            MusicStudioBoardBlock::new("distortion", MusicStudioBlockKind::Distortion),
+            MusicStudioBoardBlock::new("delay", MusicStudioBlockKind::DelayEcho),
+            MusicStudioBoardBlock::new("reverb", MusicStudioBlockKind::Reverb),
+            MusicStudioBoardBlock::new("spectrum", MusicStudioBlockKind::SpectrumAnalyzer),
+            MusicStudioBoardBlock::new("master", MusicStudioBlockKind::MasterOutput),
+        ];
+        let connections = vec![
+            board_conn(
+                "transport-clock",
+                "transport",
+                "clock",
+                "sequencer",
+                "clock",
+                MusicStudioBusKind::Control,
+            ),
+            board_conn(
+                "arrangement-to-sequencer",
+                "arrangement",
+                "arrangement",
+                "sequencer",
+                "arrangement",
+                MusicStudioBusKind::Control,
+            ),
+            board_conn(
+                "sequencer-to-groove",
+                "sequencer",
+                "midi_out",
+                "groove",
+                "midi_in",
+                MusicStudioBusKind::Midi,
+            ),
+            board_conn(
+                "groove-to-harmony",
+                "groove",
+                "midi_out",
+                "harmony",
+                "midi_in",
+                MusicStudioBusKind::Midi,
+            ),
+            board_conn(
+                "harmony-to-synth",
+                "harmony",
+                "midi_out",
+                "synth",
+                "midi_in",
+                MusicStudioBusKind::Midi,
+            ),
+            board_conn(
+                "groove-to-drums",
+                "groove",
+                "midi_out",
+                "drums",
+                "midi_in",
+                MusicStudioBusKind::Midi,
+            ),
+            board_conn(
+                "harmony-to-sampler",
+                "harmony",
+                "midi_out",
+                "sampler",
+                "midi_in",
+                MusicStudioBusKind::Midi,
+            ),
+            board_conn(
+                "automation-to-synth",
+                "automation",
+                "automation",
+                "synth",
+                "modulation",
+                MusicStudioBusKind::Control,
+            ),
+            board_conn(
+                "performance-to-mixer",
+                "performance",
+                "performance",
+                "mixer",
+                "control",
+                MusicStudioBusKind::Control,
+            ),
+            board_conn(
+                "synth-to-mixer",
+                "synth",
+                "audio_out",
+                "mixer",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "drums-to-mixer",
+                "drums",
+                "audio_out",
+                "mixer",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "sampler-to-mixer",
+                "sampler",
+                "audio_out",
+                "mixer",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "loops-to-mixer",
+                "loops",
+                "audio_out",
+                "mixer",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "audio-track-to-mixer",
+                "audio_track",
+                "audio_out",
+                "mixer",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "mixer-to-eq",
+                "mixer",
+                "audio_out",
+                "eq",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "eq-to-compressor",
+                "eq",
+                "audio_out",
+                "compressor",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "compressor-to-distortion",
+                "compressor",
+                "audio_out",
+                "distortion",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "distortion-to-delay",
+                "distortion",
+                "audio_out",
+                "delay",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "delay-to-reverb",
+                "delay",
+                "audio_out",
+                "reverb",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "reverb-to-master",
+                "reverb",
+                "audio_out",
+                "master",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+            board_conn(
+                "reverb-to-spectrum",
+                "reverb",
+                "audio_out",
+                "spectrum",
+                "audio_in",
+                MusicStudioBusKind::Audio,
+            ),
+        ];
+        Self {
+            id: "reason-style-studio-board".to_string(),
+            label: "Reason-style Visual Blocks Sound Board".to_string(),
+            reference_apps: music_studio_reference_apps().to_vec(),
+            blocks,
+            connections,
+        }
+    }
+
+    pub fn validate(&self) -> Result<MusicStudioBoardValidation, String> {
+        if self.blocks.is_empty() {
+            return Err("music studio board must include at least one block".to_string());
+        }
+
+        let mut block_ids = std::collections::HashSet::new();
+        let mut block_index = std::collections::HashMap::new();
+        for (index, block) in self.blocks.iter().enumerate() {
+            if block.id.trim().is_empty() {
+                return Err("music studio block ids must not be empty".to_string());
+            }
+            if !block_ids.insert(block.id.clone()) {
+                return Err(format!("duplicate music studio block id {}", block.id));
+            }
+            block_index.insert(block.id.clone(), index);
+        }
+
+        let source_blocks: Vec<String> = self
+            .blocks
+            .iter()
+            .filter(|block| block.kind.visual_role() == VisualBlockRole::Source)
+            .map(|block| block.id.clone())
+            .collect();
+        let output_blocks: Vec<String> = self
+            .blocks
+            .iter()
+            .filter(|block| block.kind == MusicStudioBlockKind::MasterOutput)
+            .map(|block| block.id.clone())
+            .collect();
+        if source_blocks.is_empty() {
+            return Err("music studio board needs at least one source block".to_string());
+        }
+        if output_blocks.is_empty() {
+            return Err("music studio board needs a master output block".to_string());
+        }
+        if self.connections.is_empty() {
+            return Err("music studio board needs at least one connection".to_string());
+        }
+
+        let mut connection_ids = std::collections::HashSet::new();
+        let mut incoming = std::collections::HashSet::new();
+        let mut outgoing = std::collections::HashSet::new();
+        let mut adjacency: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for connection in &self.connections {
+            if connection.id.trim().is_empty() {
+                return Err("music studio connection ids must not be empty".to_string());
+            }
+            if !connection_ids.insert(connection.id.clone()) {
+                return Err(format!(
+                    "duplicate music studio connection id {}",
+                    connection.id
+                ));
+            }
+            if connection.from_block == connection.to_block {
+                return Err(format!(
+                    "music studio connection {} loops back into block {}",
+                    connection.id, connection.from_block
+                ));
+            }
+            let from = self
+                .blocks
+                .get(*block_index.get(&connection.from_block).ok_or_else(|| {
+                    format!(
+                        "music studio connection {} references unknown source block {}",
+                        connection.id, connection.from_block
+                    )
+                })?)
+                .expect("block index");
+            let to = self
+                .blocks
+                .get(*block_index.get(&connection.to_block).ok_or_else(|| {
+                    format!(
+                        "music studio connection {} references unknown target block {}",
+                        connection.id, connection.to_block
+                    )
+                })?)
+                .expect("block index");
+            let from_bus = find_music_port_bus(&from.kind.output_ports(), &connection.from_port)
+                .ok_or_else(|| {
+                    format!(
+                        "music studio connection {} references unknown output port {}.{}",
+                        connection.id, connection.from_block, connection.from_port
+                    )
+                })?;
+            let to_bus = find_music_port_bus(&to.kind.input_ports(), &connection.to_port)
+                .ok_or_else(|| {
+                    format!(
+                        "music studio connection {} references unknown input port {}.{}",
+                        connection.id, connection.to_block, connection.to_port
+                    )
+                })?;
+            if from_bus != connection.bus || to_bus != connection.bus {
+                return Err(format!(
+                    "music studio connection {} bus mismatch: declared {}, source {}, target {}",
+                    connection.id,
+                    connection.bus.as_str(),
+                    from_bus.as_str(),
+                    to_bus.as_str()
+                ));
+            }
+            outgoing.insert(format!(
+                "{}:{}",
+                connection.from_block, connection.from_port
+            ));
+            incoming.insert(format!("{}:{}", connection.to_block, connection.to_port));
+            adjacency
+                .entry(connection.from_block.clone())
+                .or_default()
+                .push(connection.to_block.clone());
+        }
+
+        for block in &self.blocks {
+            for port in block.kind.input_ports().iter().filter(|port| port.required) {
+                let key = format!("{}:{}", block.id, port.id);
+                if !incoming.contains(&key) {
+                    return Err(format!(
+                        "music studio block {} missing required input port {}",
+                        block.id, port.id
+                    ));
+                }
+            }
+            for port in block
+                .kind
+                .output_ports()
+                .iter()
+                .filter(|port| port.required)
+            {
+                let key = format!("{}:{}", block.id, port.id);
+                if !outgoing.contains(&key) {
+                    return Err(format!(
+                        "music studio block {} missing required output port {}",
+                        block.id, port.id
+                    ));
+                }
+            }
+        }
+
+        if !music_board_reaches_output(&source_blocks, &output_blocks, &adjacency) {
+            return Err(
+                "music studio board has no routed path from a source to master output".to_string(),
+            );
+        }
+
+        let features = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.feature_terms.iter().map(String::as_str));
+        let feature_coverage = music_feature_coverage(features);
+        if !feature_coverage.is_complete() {
+            return Err(format!(
+                "music studio board missing Italian music features: {}",
+                feature_coverage.missing.join(", ")
+            ));
+        }
+
+        Ok(MusicStudioBoardValidation {
+            feature_coverage,
+            source_blocks,
+            output_blocks,
+            connection_count: self.connections.len(),
+        })
+    }
+
+    pub fn to_visual_blocks(&self) -> Result<Vec<VisualBlock>, String> {
+        self.validate()?;
+        let mut blocks: Vec<VisualBlock> = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| music_studio_visual_block(block, index))
+            .collect();
+
+        for connection in &self.connections {
+            let from_index = blocks
+                .iter()
+                .position(|block| block.id() == connection.from_block)
+                .expect("validated source block exists");
+            let to_index = blocks
+                .iter()
+                .position(|block| block.id() == connection.to_block)
+                .expect("validated target block exists");
+            if from_index < to_index {
+                let (left, right) = blocks.split_at_mut(to_index);
+                let from = &mut left[from_index];
+                let to = &mut right[0];
+                from.connect_to(to, visual_connection_options(connection));
+            } else {
+                let (left, right) = blocks.split_at_mut(from_index);
+                let to = &mut left[to_index];
+                let from = &mut right[0];
+                from.connect_to(to, visual_connection_options(connection));
+            }
+        }
+        Ok(blocks)
+    }
+
+    pub fn to_visual_block_ir(&self) -> Result<JsonValue, String> {
+        let blocks = self.to_visual_blocks()?;
+        let refs: Vec<&VisualBlock> = blocks.iter().collect();
+        Ok(visual_block_graph_ir(&refs))
+    }
+}
+
+pub fn default_music_studio_sound_board() -> MusicStudioBoard {
+    MusicStudioBoard::reason_style_default()
+}
+
+pub fn default_music_studio_sound_board_ir() -> Result<JsonValue, String> {
+    default_music_studio_sound_board().to_visual_block_ir()
+}
+
+fn music_port(
+    id: &'static str,
+    label: &'static str,
+    bus: MusicStudioBusKind,
+    required: bool,
+) -> MusicStudioPortTemplate {
+    MusicStudioPortTemplate {
+        id,
+        label,
+        bus,
+        required,
+    }
+}
+
+fn board_conn(
+    id: &'static str,
+    from_block: &'static str,
+    from_port: &'static str,
+    to_block: &'static str,
+    to_port: &'static str,
+    bus: MusicStudioBusKind,
+) -> MusicStudioBoardConnection {
+    MusicStudioBoardConnection::new(id, from_block, from_port, to_block, to_port, bus)
+}
+
+fn find_music_port_bus(
+    ports: &[MusicStudioPortTemplate],
+    port_id: &str,
+) -> Option<MusicStudioBusKind> {
+    ports
+        .iter()
+        .find(|port| port.id == port_id)
+        .map(|port| port.bus)
+}
+
+fn music_board_reaches_output(
+    source_blocks: &[String],
+    output_blocks: &[String],
+    adjacency: &std::collections::HashMap<String, Vec<String>>,
+) -> bool {
+    let outputs: std::collections::HashSet<&str> =
+        output_blocks.iter().map(String::as_str).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = source_blocks.to_vec();
+    while let Some(block) = stack.pop() {
+        if !seen.insert(block.clone()) {
+            continue;
+        }
+        if outputs.contains(block.as_str()) {
+            return true;
+        }
+        if let Some(next) = adjacency.get(&block) {
+            stack.extend(next.iter().cloned());
+        }
+    }
+    false
+}
+
+fn music_studio_visual_block(block: &MusicStudioBoardBlock, index: usize) -> VisualBlock {
+    let layout = music_board_layout(index);
+    VisualBlock::new(
+        &block.id,
+        VisualBlockOptions {
+            kind: Some(format!("music-{}", block.kind.as_str())),
+            role: Some(block.kind.visual_role()),
+            label: Some(block.label.clone()),
+            layout: Some(layout),
+            ports: Some(VisualBlockPortSpec {
+                inputs: block
+                    .kind
+                    .input_ports()
+                    .iter()
+                    .map(music_port_to_visual_port)
+                    .collect(),
+                outputs: block
+                    .kind
+                    .output_ports()
+                    .iter()
+                    .map(music_port_to_visual_port)
+                    .collect(),
+            }),
+            style: Some(block.kind.visual_style()),
+            metadata: Some(music_block_metadata(block)),
+        },
+    )
+}
+
+fn music_board_layout(index: usize) -> VisualBlockLayout {
+    let columns = 5usize;
+    let col = index % columns;
+    let row = index / columns;
+    VisualBlockLayout {
+        x: Some(24.0 + col as f64 * 214.0),
+        y: Some(24.0 + row as f64 * 92.0),
+        w: Some(188.0),
+        h: Some(72.0),
+    }
+}
+
+fn music_port_to_visual_port(port: &MusicStudioPortTemplate) -> VisualPortInput {
+    VisualPortInput::Opts(VisualPortOptions {
+        id: port.id.to_string(),
+        kind: Some(port.bus.as_str().to_string()),
+        label: Some(port.label.to_string()),
+        data_type: Some(
+            match port.bus {
+                MusicStudioBusKind::Midi => "MidiEvent",
+                MusicStudioBusKind::Audio => "AudioBuffer",
+                MusicStudioBusKind::Control => "ControlSignal",
+                MusicStudioBusKind::Analysis => "SpectrumAnalysis",
+            }
+            .to_string(),
+        ),
+        required: Some(port.required),
+        ..Default::default()
+    })
+}
+
+fn visual_connection_options(
+    connection: &MusicStudioBoardConnection,
+) -> VisualBlockConnectionOptions {
+    VisualBlockConnectionOptions {
+        id: Some(connection.id.clone()),
+        from_port: Some(connection.from_port.clone()),
+        to_port: Some(connection.to_port.clone()),
+        kind: Some(connection.bus.as_str().to_string()),
+        metadata: Some(music_connection_metadata(connection)),
+        wire_des: Some(false),
+    }
+}
+
+fn music_visual_style(fill: &str, stroke: &str) -> VisualBlockStyle {
+    VisualBlockStyle {
+        fill: Some(fill.to_string()),
+        stroke: Some(stroke.to_string()),
+        text: Some("#171717".to_string()),
+    }
+}
+
+fn music_block_metadata(block: &MusicStudioBoardBlock) -> Metadata {
+    let mut metadata = Metadata::new();
+    metadata.insert(
+        "domain".to_string(),
+        JsonValue::String("music-studio".to_string()),
+    );
+    metadata.insert(
+        "blockKind".to_string(),
+        JsonValue::String(block.kind.as_str().to_string()),
+    );
+    metadata.insert(
+        "italianFeatures".to_string(),
+        JsonValue::Array(
+            block
+                .feature_terms
+                .iter()
+                .map(|feature| JsonValue::String(feature.clone()))
+                .collect(),
+        ),
+    );
+    metadata
+}
+
+fn music_connection_metadata(connection: &MusicStudioBoardConnection) -> Metadata {
+    let mut metadata = Metadata::new();
+    metadata.insert(
+        "domain".to_string(),
+        JsonValue::String("music-studio".to_string()),
+    );
+    metadata.insert(
+        "bus".to_string(),
+        JsonValue::String(connection.bus.as_str().to_string()),
+    );
+    metadata
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MusicUrlSourceKind {
     YouTube,
@@ -2831,25 +4305,10 @@ pub fn generate_track_structure_plan(
                 start_seconds: duration_seconds * 0.705,
                 duration_seconds: 0.28 + (seed % 7) as f64 * 0.035,
                 depth: 0.12,
-                italian_feature: "respiro".to_string(),
+                italian_feature: "pausa".to_string(),
             },
         ],
-        italian_features: vec![
-            "ritmo".to_string(),
-            "melodia".to_string(),
-            "armonia".to_string(),
-            "timbro".to_string(),
-            "pausa".to_string(),
-            "misura".to_string(),
-            "fraseggio".to_string(),
-            "modulazione".to_string(),
-            "metro".to_string(),
-            "sincope".to_string(),
-            "accento".to_string(),
-            "contrappunto".to_string(),
-            "polifonia".to_string(),
-            "spettro".to_string(),
-        ],
+        italian_features: all_italian_music_feature_terms(),
     }
 }
 
@@ -3121,17 +4580,14 @@ pub fn song_spec_from_music_sample_seed_with_prompt(
         first.numerator = meter_bias.0;
         first.denominator = meter_bias.1;
     }
-    structure_plan
-        .italian_features
-        .push("campionamento".to_string());
+    push_unique(&mut structure_plan.italian_features, "campionamento");
     if let Some(influence) = &prompt_influence {
-        structure_plan
-            .italian_features
-            .push("direzione".to_string());
+        push_unique(&mut structure_plan.italian_features, "direzione");
         for tag in &influence.feature_tags {
-            structure_plan
-                .italian_features
-                .push(format!("prompt-{tag}"));
+            push_unique(
+                &mut structure_plan.italian_features,
+                format!("prompt-{tag}"),
+            );
         }
     }
     let bpm = if let Some(influence) = &prompt_influence {
@@ -3496,6 +4952,8 @@ pub fn validate_song_structure(summary: &ArrangementSummary) -> Result<(), Strin
             ));
         }
     }
+    validate_italian_music_feature_coverage(&summary.italian_features)
+        .map_err(|err| format!("{} {err}", summary.title))?;
     Ok(())
 }
 
@@ -4430,6 +5888,159 @@ mod tests {
         assert!(palette.validate_anti_mimicry().is_ok());
         assert!(palette.for_role(InstrumentRole::Lead).is_some());
         assert!(palette.for_role(InstrumentRole::Texture).is_some());
+    }
+
+    #[test]
+    fn italian_music_feature_catalog_covers_requested_terms() {
+        let requested = [
+            "ritmo",
+            "melodia",
+            "armonia",
+            "timbro",
+            "tempo",
+            "dinamica",
+            "intensità",
+            "altezza",
+            "durata",
+            "pausa",
+            "battito",
+            "misura",
+            "accordo",
+            "tonalità",
+            "scala",
+            "fraseggio",
+            "articolazione",
+            "legato",
+            "staccato",
+            "vibrato",
+            "cadenza",
+            "modulazione",
+            "improvvisazione",
+            "arrangiamento",
+            "orchestrazione",
+            "tessitura",
+            "metro",
+            "sincope",
+            "accento",
+            "groove",
+            "andamento",
+            "espressione",
+            "interpretazione",
+            "registrazione",
+            "equalizzazione",
+            "riverbero",
+            "eco",
+            "distorsione",
+            "compressione",
+            "campionamento",
+            "loop",
+            "sequenza",
+            "armonizzazione",
+            "contrappunto",
+            "polifonia",
+            "monodia",
+            "modalità",
+            "intonazione",
+            "pulsazione",
+            "spettro",
+        ];
+
+        assert_eq!(italian_music_feature_catalog().len(), 50);
+        for term in requested {
+            assert!(
+                find_italian_music_feature(term).is_some(),
+                "missing Italian music feature {term}"
+            );
+        }
+        let coverage = music_feature_coverage(requested.iter().copied());
+        assert!(coverage.is_complete(), "{coverage:?}");
+        assert!(coverage.extras.is_empty(), "{coverage:?}");
+    }
+
+    #[test]
+    fn generated_track_plan_covers_all_italian_music_features() {
+        let plan =
+            generate_track_structure_plan("feature coverage", MusicGenre::Electronica, 30.0, 9);
+        let coverage = validate_italian_music_feature_coverage(&plan.italian_features)
+            .expect("generated plan should cover the canonical feature catalog");
+        assert_eq!(coverage.covered.len(), 50);
+        assert!(plan.italian_features.contains(&"registrazione".to_string()));
+        assert!(plan
+            .italian_features
+            .contains(&"equalizzazione".to_string()));
+        assert!(plan.italian_features.contains(&"contrappunto".to_string()));
+        assert!(plan.italian_features.contains(&"spettro".to_string()));
+    }
+
+    #[test]
+    fn default_music_studio_board_validates_and_emits_visual_block_ir() {
+        let board = default_music_studio_sound_board();
+        let validation = board
+            .validate()
+            .expect("default music studio sound board should validate");
+        assert_eq!(validation.feature_coverage.covered.len(), 50);
+        assert!(validation.source_blocks.contains(&"transport".to_string()));
+        assert!(validation.output_blocks.contains(&"master".to_string()));
+        assert_eq!(validation.connection_count, board.connections.len());
+        assert!(board
+            .reference_apps
+            .iter()
+            .any(|app| app.software == "Reason"));
+
+        let ir = board
+            .to_visual_block_ir()
+            .expect("valid board should convert to visual block IR");
+        let JsonValue::Object(root) = &ir else {
+            panic!("visual block IR should be a JSON object");
+        };
+        let blocks = root
+            .get("blocks")
+            .and_then(|value| match value {
+                JsonValue::Array(blocks) => Some(blocks),
+                _ => None,
+            })
+            .expect("IR has blocks");
+        let connections = root
+            .get("connections")
+            .and_then(|value| match value {
+                JsonValue::Array(connections) => Some(connections),
+                _ => None,
+            })
+            .expect("IR has connections");
+        assert_eq!(blocks.len(), board.blocks.len());
+        assert_eq!(connections.len(), board.connections.len());
+        let json = ir.to_json_string();
+        assert!(json.contains("\"kind\":\"visual-block-graph\""), "{json}");
+        assert!(json.contains("music-midi-sequencer"), "{json}");
+        assert!(json.contains("italianFeatures"), "{json}");
+        assert!(json.contains("midi_out"), "{json}");
+        assert!(json.contains("audio_in"), "{json}");
+    }
+
+    #[test]
+    fn music_studio_board_rejects_missing_features_and_bad_bus_connections() {
+        let mut missing_feature = default_music_studio_sound_board();
+        for block in &mut missing_feature.blocks {
+            block.feature_terms.retain(|feature| feature != "spettro");
+        }
+        let err = missing_feature
+            .validate()
+            .expect_err("board missing spettro should reject");
+        assert!(err.contains("spettro"), "{err}");
+
+        let mut bad_bus = default_music_studio_sound_board();
+        bad_bus.connections.push(MusicStudioBoardConnection::new(
+            "bad-midi-audio",
+            "synth",
+            "audio_out",
+            "mixer",
+            "audio_in",
+            MusicStudioBusKind::Midi,
+        ));
+        let err = bad_bus
+            .validate()
+            .expect_err("declared MIDI connection over audio ports should reject");
+        assert!(err.contains("bus mismatch"), "{err}");
     }
 
     #[test]

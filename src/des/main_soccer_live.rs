@@ -4,6 +4,8 @@ use crate::des::general::soccer::{
     run_live_soccer_server, SoccerLiveServerConfig, SoccerNeuralLearningBackend,
 };
 
+pub const SOCCER_LIVE_REVIVAL_PORT: u16 = 5056;
+
 fn env_value<F>(lookup: &F, primary: &str, fallback: &str) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
@@ -88,14 +90,29 @@ fn live_server_config_from_lookup<F>(lookup: F) -> SoccerLiveServerConfig
 where
     F: Fn(&str) -> Option<String>,
 {
+    live_server_config_from_lookup_with_default_port(lookup, None)
+}
+
+fn live_server_config_from_lookup_with_default_port<F>(
+    lookup: F,
+    default_port: Option<u16>,
+) -> SoccerLiveServerConfig
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut cfg = SoccerLiveServerConfig::default();
     if let Some(host) = env_text(&lookup, "SOCCER_LIVE_HOST", "SOCCER_HOST") {
         cfg.host = host;
     }
-    if let Some(port) = env_value(&lookup, "SOCCER_LIVE_PORT", "SOCCER_PORT")
+    match env_value(&lookup, "SOCCER_LIVE_PORT", "SOCCER_PORT")
         .and_then(|raw| raw.parse::<u16>().ok())
     {
-        cfg.port = port;
+        Some(port) => cfg.port = port,
+        None => {
+            if let Some(port) = default_port {
+                cfg.port = port;
+            }
+        }
     }
     if let Some(workers) =
         env_positive_usize(&lookup, "SOCCER_LIVE_HTTP_WORKERS", "SOCCER_HTTP_WORKERS")
@@ -206,8 +223,24 @@ fn live_server_config_from_env() -> SoccerLiveServerConfig {
     live_server_config_from_lookup(|name| std::env::var(name).ok())
 }
 
+fn live_server_config_from_env_with_default_port(default_port: u16) -> SoccerLiveServerConfig {
+    live_server_config_from_lookup_with_default_port(
+        |name| std::env::var(name).ok(),
+        Some(default_port),
+    )
+}
+
 pub fn run() {
     run_live_soccer_server(live_server_config_from_env()).expect("run live soccer server");
+}
+
+pub fn run_with_default_port(default_port: u16) {
+    run_live_soccer_server(live_server_config_from_env_with_default_port(default_port))
+        .expect("run live soccer server");
+}
+
+pub fn run_5056() {
+    run_with_default_port(SOCCER_LIVE_REVIVAL_PORT);
 }
 
 #[cfg(test)]
@@ -263,5 +296,29 @@ mod tests {
             SoccerNeuralLearningBackend::Threaded
         );
         assert!(cfg.match_config.adversarial_embedding_exploitation_enabled);
+    }
+
+    #[test]
+    fn live_server_5056_feature_preserves_default_and_env_override() {
+        let default_cfg = live_server_config_from_lookup(|_| None);
+        assert_eq!(default_cfg.port, 5055);
+
+        let revival_cfg = live_server_config_from_lookup_with_default_port(
+            |_| None,
+            Some(SOCCER_LIVE_REVIVAL_PORT),
+        );
+        assert_eq!(revival_cfg.port, SOCCER_LIVE_REVIVAL_PORT);
+
+        let env_cfg = live_server_config_from_lookup_with_default_port(
+            |name| {
+                if name == "SOCCER_LIVE_PORT" {
+                    Some("6060".to_string())
+                } else {
+                    None
+                }
+            },
+            Some(SOCCER_LIVE_REVIVAL_PORT),
+        );
+        assert_eq!(env_cfg.port, 6060);
     }
 }

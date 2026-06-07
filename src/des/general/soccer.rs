@@ -77311,7 +77311,7 @@ mod tests {
         assert!(html.contains("function selectedPlayerShotContext"));
         assert!(html.contains("function selectedPlayerShotLaneLabel"));
         assert!(html.contains("agentShotLane.textContent = selectedPlayerShotLaneLabel()"));
-        assert!(html.contains("return nearGoal && staticShotLaneOpen(frame, p, goal)"));
+        assert!(html.contains("context.kind === \"holder\" && context.nearGoal && context.laneOpen"));
         assert!(html.contains("drawGaitCue"));
         assert!(html.contains("movementGait"));
         assert!(html.contains("HUMAN_ACTION_KEY_CODES"));

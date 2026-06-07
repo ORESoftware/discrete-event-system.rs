@@ -17774,9 +17774,9 @@ impl WorldSnapshot {
         let (width, length) = sane_pitch_dimensions(self.field_width, self.field_length);
         let center = Vec2::new(width * 0.5, length * 0.5);
         let position = finite_pitch_point(position, width, length, center);
-        let mut opponent_distance: f64 = 35.0;
-        let mut teammate_crowding: f64 = 25.0;
-        let mut nearest_teammate_distance = f64::INFINITY;
+        let mut opponent_distance_sq: f64 = 35.0_f64.powi(2);
+        let mut teammate_crowding_sq: f64 = 25.0_f64.powi(2);
+        let mut nearest_teammate_distance_sq = f64::INFINITY;
         for player in &self.players {
             let player_position = finite_pitch_point(
                 self.player_snapshot_position(player),
@@ -17784,18 +17784,22 @@ impl WorldSnapshot {
                 length,
                 player.home_position,
             );
-            let distance = player_position.distance(position);
+            let delta = player_position - position;
+            let distance_sq = delta.x * delta.x + delta.y * delta.y;
             if player.team != team {
-                opponent_distance = opponent_distance.min(distance);
+                opponent_distance_sq = opponent_distance_sq.min(distance_sq);
             } else {
-                if distance > 0.1 {
-                    teammate_crowding = teammate_crowding.min(distance);
+                if distance_sq > 0.01 {
+                    teammate_crowding_sq = teammate_crowding_sq.min(distance_sq);
                 }
                 if exclude_player_id != Some(player.id) {
-                    nearest_teammate_distance = nearest_teammate_distance.min(distance);
+                    nearest_teammate_distance_sq = nearest_teammate_distance_sq.min(distance_sq);
                 }
             }
         }
+        let opponent_distance = opponent_distance_sq.sqrt();
+        let teammate_crowding = teammate_crowding_sq.sqrt();
+        let nearest_teammate_distance = nearest_teammate_distance_sq.sqrt();
         CandidateOccupancy {
             open_space_score: open_space_score_from_distances(opponent_distance, teammate_crowding),
             nearest_teammate_distance,

@@ -364,7 +364,8 @@ const SOCCER_NEURAL_FEATURE_LOOK_BEHIND_DRIFT_RISK: usize = 107;
 const SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT: usize = 108;
 const SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT: usize = 109;
 const SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE: usize = 110;
-const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87, 89, 93, 96, 102];
+const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] =
+    &[61, 81, 83, 85, 87, 89, 93, 96, 102, 106, 108, 109, 110];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
 const DEFAULT_SOCCER_NEURAL_BATCH_SIZE: usize = 16;
@@ -63869,6 +63870,70 @@ mod tests {
                 "new positional-shape input weights should start neutral"
             );
         }
+    }
+
+    #[test]
+    fn neural_learning_pads_previous_snapshot_excessive_hold_pressure_input() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15087,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&SOCCER_NEURAL_FEATURE_LOOK_BEHIND_SCAN));
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS
+            .contains(&SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT));
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS
+            .contains(&SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+        previous_snapshot.layers[0].weights[0][previous_dim - 1] = 0.246_810;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous excessive-hold neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][previous_dim - 1],
+            0.246_810
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE],
+            0.0,
+            "new excessive-hold input weight should start neutral for 110-input snapshots"
+        );
     }
 
     #[test]

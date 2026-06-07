@@ -27730,6 +27730,16 @@ fn soccer_accounting_check_agent_schedule(
             "central brain should run before the shuffled field agents",
         );
     }
+    if frame.central_brain.scheduled_index != Some(0) {
+        report.push_violation(
+            frame.tick,
+            "agentSchedule",
+            "centralBrainScheduledIndex",
+            "Some(0)".to_string(),
+            format!("{:?}", frame.central_brain.scheduled_index),
+            "central brain snapshot should expose its fixed schedule index",
+        );
+    }
 
     let central_count = frame
         .agent_schedule
@@ -27767,6 +27777,38 @@ fn soccer_accounting_check_agent_schedule(
                 "agent schedule has the wrong count for this agent kind",
             );
         }
+    }
+
+    if let Some(decision) = frame.central_brain.last_decision.as_ref() {
+        if decision.scheduled_index != Some(0) {
+            report.push_violation(
+                frame.tick,
+                "agentSchedule",
+                "centralBrainDecisionScheduledIndex",
+                "Some(0)".to_string(),
+                format!("{:?}", decision.scheduled_index),
+                "central brain decision trace should expose the fixed schedule index",
+            );
+        }
+        if decision.operation_order.is_empty() {
+            report.push_violation(
+                frame.tick,
+                "agentSchedule",
+                "centralBrainDecisionOperationOrder",
+                "non-empty".to_string(),
+                "empty".to_string(),
+                "central brain decision trace should expose the internal operation order",
+            );
+        }
+    } else if frame.tick > 0 {
+        report.push_violation(
+            frame.tick,
+            "agentSchedule",
+            "centralBrainDecisionTrace",
+            "present".to_string(),
+            "missing".to_string(),
+            "scheduled central brain should expose its run_time_step decision trace",
+        );
     }
 
     if !frame
@@ -27864,6 +27906,16 @@ fn soccer_accounting_check_agent_schedule(
         .agent_schedule
         .iter()
         .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+    if frame.central_brain.ball_scheduled_index != scheduled_index {
+        report.push_violation(
+            frame.tick,
+            "agentSchedule",
+            "centralBrainBallScheduledIndex",
+            format!("{scheduled_index:?}"),
+            format!("{:?}", frame.central_brain.ball_scheduled_index),
+            "central brain snapshot should expose the ball agent schedule index",
+        );
+    }
     if frame.ball.scheduled_index != scheduled_index {
         report.push_violation(
             frame.tick,
@@ -60390,6 +60442,47 @@ mod tests {
         }));
         assert!(report.violations.iter().any(|violation| {
             violation.subject == "sharedPositions" && violation.metric == "ballLatestConsistency"
+        }));
+    }
+
+    #[test]
+    fn accounting_smoke_report_flags_stale_central_brain_schedule_trace() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                seed: 13_112,
+                ..MatchConfig::playback_trace(0.2)
+            },
+            1,
+        );
+        let frame = trace
+            .frames
+            .iter_mut()
+            .find(|frame| frame.tick > 0)
+            .expect("post-tick frame with schedule");
+        frame.central_brain.scheduled_index = None;
+        frame.central_brain.ball_scheduled_index = None;
+        if let Some(decision) = frame.central_brain.last_decision.as_mut() {
+            decision.scheduled_index = Some(3);
+            decision.operation_order.clear();
+        }
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "agentSchedule" && violation.metric == "centralBrainScheduledIndex"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "agentSchedule"
+                && violation.metric == "centralBrainDecisionScheduledIndex"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "agentSchedule"
+                && violation.metric == "centralBrainDecisionOperationOrder"
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "agentSchedule"
+                && violation.metric == "centralBrainBallScheduledIndex"
         }));
     }
 

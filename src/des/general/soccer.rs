@@ -145,7 +145,7 @@ const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS: f64 = 30.0;
 const COMPLETED_DANGEROUS_CROSS_BONUS_POINTS: f64 = 3.8;
 const COMPLETED_CROSS_MAX_BONUS_POINTS: f64 = 5.0;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
-const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 1.50;
+const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 2.10;
 const NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF: f64 = 0.90;
 const NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS: f64 = 2.35;
 const ELITE_DRIBBLE_HOLD_BASE_SECONDS: f64 = 4.8;
@@ -6714,13 +6714,13 @@ impl PlayerAgent {
         }
         if clearance_legal {
             let hold_pressure = excessive_hold_pressure(observation, dribbling);
-            let min_clearance_probability = (0.16
-                + clearance_pressure_signal * 0.24
-                + defensive_urgency * 0.14
-                + defensive_third_pressure * 0.10
-                + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.10
-                + hold_pressure * 0.26)
-                .clamp(0.26, 0.68);
+            let min_clearance_probability = (0.18
+                + clearance_pressure_signal * 0.28
+                + defensive_urgency * 0.16
+                + defensive_third_pressure * 0.12
+                + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.12
+                + hold_pressure * 0.34)
+                .clamp(0.32, 0.78);
             ensure_min_legal_option_probability(
                 &mut options,
                 "clearance",
@@ -48707,9 +48707,9 @@ fn excessive_hold_pressure_from_parts(
         .max(perceived_pressure)
         .clamp(0.0, 1.0);
     let allowed_seconds = (dribble_hold_base_seconds(dribbling)
-        - urgency * 1.35
-        - immediate_dispossession_risk.clamp(0.0, 1.0) * 0.85)
-        .clamp(0.75, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
+        - urgency * 1.55
+        - immediate_dispossession_risk.clamp(0.0, 1.0) * 1.00)
+        .clamp(0.55, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
     ((actual_hold - allowed_seconds) / 3.2).clamp(0.0, 1.0)
 }
 
@@ -48734,12 +48734,13 @@ fn dribble_hold_score_multiplier(observation: &SoccerPomdpObservation, dribbling
     let pressure_fit = observation
         .pressure_urgency
         .max(observation.perceived_pressure)
+        .max(observation.immediate_dispossession_risk)
         .clamp(0.0, 1.0);
-    (1.0 - hold_pressure * (0.34 + non_elite_fit * 0.74 + pressure_fit * 0.30)).clamp(
+    (1.0 - hold_pressure * (0.38 + non_elite_fit * 0.86 + pressure_fit * 0.36)).clamp(
         if dribbling >= NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF {
             0.66
         } else {
-            0.10
+            0.06
         },
         1.0,
     )
@@ -48757,7 +48758,7 @@ fn release_after_hold_multiplier(observation: &SoccerPomdpObservation, dribbling
         .max(observation.defensive_urgency)
         .max(observation.immediate_dispossession_risk)
         .clamp(0.0, 1.0);
-    (1.0 + hold_pressure * (0.50 + non_elite_fit * 0.70 + urgency_fit * 0.56)).clamp(1.0, 2.75)
+    (1.0 + hold_pressure * (0.58 + non_elite_fit * 0.86 + urgency_fit * 0.68)).clamp(1.0, 3.20)
 }
 
 fn excessive_hold_penalty_points(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
@@ -51870,8 +51871,8 @@ fn pressured_release_multiplier(observation: &SoccerPomdpObservation) -> f64 {
     let open_receiver = observation.best_pass_receiver_openness.clamp(0.0, 1.0);
     let forward_option = (observation.visible_forward_pass_options as f64 / 2.0).clamp(0.0, 1.0);
     (1.0 + pressure_release_signal(observation)
-        * (0.28 + quality * 0.48 + open_receiver * 0.18 + forward_option * 0.12))
-        .clamp(1.0, 1.82)
+        * (0.36 + quality * 0.62 + open_receiver * 0.24 + forward_option * 0.16))
+        .clamp(1.0, 2.20)
 }
 
 fn ability_score(value: f64) -> f64 {
@@ -79362,6 +79363,84 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn non_elite_pressure_window_forces_release_before_long_dribble() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_109,
+            ..Default::default()
+        });
+        let holder = 6;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].skills.dribbling = 7.2;
+        sim.players[holder].skills.strength = 6.6;
+        sim.players[holder].skills.passing_completion_rate = 8.0;
+        sim.players[holder].preferences.dribble_bias = 1.04;
+        sim.players[holder].preferences.pass_bias = 0.98;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(holder);
+        observation.has_ball = true;
+        observation.visible_pass_options = 2;
+        observation.visible_forward_pass_options = 1;
+        observation.forward_dribble_space_yards = 7.5;
+        observation.expected_pass_completion = 0.88;
+        observation.best_pass_receiver_openness = 0.84;
+        observation.floor_pass_lane_score = 0.86;
+        observation.perceived_pressure = 0.88;
+        observation.pressure_urgency = 0.90;
+        observation.immediate_dispossession_risk = 0.82;
+        observation.actual_time_on_ball_seconds = 2.0;
+        observation.yards_to_goal = 52.0;
+        observation.yards_to_own_goal = 68.0;
+
+        let options = sim.players[holder].possession_action_options(
+            &observation,
+            &TeamTacticalDirective::neutral(
+                Team::Home,
+                DEFAULT_FIELD_WIDTH_YARDS,
+                DEFAULT_FIELD_LENGTH_YARDS,
+            ),
+            2,
+            1,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        let release_score = ["pass1", "pass2", "aerial-pass1"]
+            .into_iter()
+            .map(|label| action_option_score(&options, label))
+            .fold(0.0, f64::max);
+        let dribble_family_score = [
+            "dribble",
+            "carry-forward",
+            "carry-out-left",
+            "carry-out-right",
+            "protect-ball",
+            "side-step",
+            "fake-left-cut-right",
+            "fake-right-cut-left",
+            "hold-up-flank",
+        ]
+        .into_iter()
+        .map(|label| action_option_score(&options, label))
+        .fold(0.0, f64::max);
+
+        assert!(
+            excessive_hold_pressure(
+                &observation,
+                ability01(sim.players[holder].skills.dribbling)
+            ) >= 0.40,
+            "two seconds under close pressure should already be stale for a non-elite holder"
+        );
+        assert!(
+            release_score > dribble_family_score * 1.35,
+            "non-elite pressure window should make the holder release before a long dribble: release={release_score} dribble_family={dribble_family_score}"
+        );
+    }
+
+    #[test]
     fn pressured_defender_long_hold_boosts_clearance() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -79491,6 +79570,82 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             clearance.score > dribble_family_score,
             "clearance should outrank another dribble under own-half pressure: clearance={} dribble_family={dribble_family_score}",
+            clearance.score
+        );
+    }
+
+    #[test]
+    fn own_half_defender_under_pressure_gets_early_clearance_floor() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_110,
+            ..Default::default()
+        });
+        let defender = 2;
+        sim.players[defender].role = PlayerRole::Defender;
+        sim.players[defender].skills.dribbling = 6.1;
+        sim.players[defender].skills.defending = 8.2;
+        sim.players[defender].skills.passing_completion_rate = 6.4;
+        sim.players[defender].preferences.dribble_bias = 1.05;
+        sim.players[defender].preferences.pass_bias = 0.92;
+        let player = sim.players[defender].clone();
+        let directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        );
+        let mut observation = WorldSnapshot::from_match(&sim).observation_for(defender);
+        observation.has_ball = true;
+        observation.yards_to_own_goal = 16.0;
+        observation.yards_to_goal = 104.0;
+        observation.perceived_pressure = 0.82;
+        observation.pressure_urgency = 0.86;
+        observation.defensive_urgency = 0.94;
+        observation.immediate_dispossession_risk = 0.86;
+        observation.forward_dribble_space_yards = 5.5;
+        observation.expected_pass_completion = 0.22;
+        observation.best_pass_receiver_openness = 0.16;
+        observation.visible_pass_options = 0;
+        observation.visible_forward_pass_options = 0;
+        observation.actual_time_on_ball_seconds = 2.0;
+
+        let options = player.possession_action_options(
+            &observation,
+            &directive,
+            0,
+            1,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        let clearance = options
+            .iter()
+            .find(|option| option.label == "clearance")
+            .expect("clearance option");
+        let dribble_family_score = [
+            "dribble",
+            "carry-forward",
+            "carry-out-left",
+            "carry-out-right",
+            "protect-ball",
+            "side-step",
+            "fake-left-cut-right",
+            "fake-right-cut-left",
+            "hold-up-flank",
+        ]
+        .into_iter()
+        .map(|label| action_option_score(&options, label))
+        .fold(0.0, f64::max);
+
+        assert!(clearance.legal);
+        assert!(
+            clearance.probability >= 0.50,
+            "own-half pressure should give defenders an early clearance branch, got {}",
+            clearance.probability
+        );
+        assert!(
+            clearance.score > dribble_family_score,
+            "own-half pressure should make clearing beat another stale dribble: clearance={} dribble_family={dribble_family_score}",
             clearance.score
         );
     }

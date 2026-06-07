@@ -3439,6 +3439,145 @@ mod tests {
         .collect()
     }
 
+    const CONTINUOUS_DEPLOYMENT_YAML: &str =
+        include_str!("../../k8s/soccer-learning-rds-continuous.deployment.yaml");
+
+    fn continuous_manifest_env_value(name: &str) -> Option<&'static str> {
+        let marker = format!("- name: {name}");
+        let mut lines = CONTINUOUS_DEPLOYMENT_YAML.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() == marker {
+                let value_line = lines.next()?.trim();
+                let raw_value = value_line.strip_prefix("value: ")?;
+                return Some(raw_value.trim_matches('"'));
+            }
+        }
+        None
+    }
+
+    fn assert_continuous_manifest_contains(snippet: &str) {
+        assert!(
+            CONTINUOUS_DEPLOYMENT_YAML.contains(snippet),
+            "continuous deployment manifest missing snippet: {snippet}"
+        );
+    }
+
+    #[test]
+    fn continuous_manifest_keeps_postgres_neural_and_refresh_required() {
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_REQUIRE_POSTGRES"),
+            Some("true")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_NEURAL_LEARNING_ENABLED"),
+            Some("true")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_NEURAL_LEARNING_BACKEND"),
+            Some("threaded")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES"),
+            Some("1")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES"),
+            Some("1")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE"),
+            Some("true")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT"),
+            Some("true")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM"),
+            Some("true")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_EVOLUTION_ENABLED"),
+            Some("true")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_GAME_ARTIFACT_MODE"),
+            Some("summary")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_WRITE_GAME_ARTIFACTS"),
+            Some("false")
+        );
+        assert_continuous_manifest_contains("key: RDS_DATABASE_URL");
+        assert_continuous_manifest_contains("memory: 64Gi");
+        assert_continuous_manifest_contains("cpu: \"4\"");
+    }
+
+    #[test]
+    fn continuous_manifest_uses_restart_safe_source_checkout() {
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_SOURCE_REPO"),
+            Some("https://github.com/ORESoftware/discrete-event-system.rs.git")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_SOURCE_REF"),
+            Some("main")
+        );
+        assert_continuous_manifest_contains("source_ref=\"${SOCCER_SOURCE_REF:-main}\"");
+        assert_continuous_manifest_contains("if [ -d \"${work}/.git\" ]; then");
+        assert_continuous_manifest_contains(
+            "git -C \"${work}\" fetch --depth 1 origin \"${source_ref}\"",
+        );
+        assert_continuous_manifest_contains("git -C \"${work}\" checkout --force FETCH_HEAD");
+        assert_continuous_manifest_contains("source_checkout_mode=clone-after-existing-path");
+        assert_continuous_manifest_contains(
+            "git clone --depth 1 --branch \"${source_ref}\" \"${source_repo}\" \"${work}\"",
+        );
+    }
+
+    #[test]
+    fn continuous_manifest_varies_cycle_run_ids_and_seeds() {
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_RUN_ID_PREFIX"),
+            Some("codex-soccer-learning-continuous")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_SEED_BASE"),
+            Some("2026")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_SEED_STRIDE"),
+            Some("1000")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_EVOLUTION_SEED_BASE"),
+            Some("20260607")
+        );
+        assert_continuous_manifest_contains("stamp=\"$(date -u +%Y%m%dT%H%M%SZ)\"");
+        assert_continuous_manifest_contains(
+            "export SOCCER_SEED=\"$((seed_base + cycle * seed_stride))\"",
+        );
+        assert_continuous_manifest_contains(
+            "export SOCCER_EVOLUTION_SEED=\"$((evolution_seed_base + cycle))\"",
+        );
+        assert_continuous_manifest_contains(
+            "export SOCCER_RUN_ID=\"${run_prefix}-${stamp}-c${cycle}\"",
+        );
+        assert_continuous_manifest_contains("continuous_cycle_start cycle=${cycle} run_id=${SOCCER_RUN_ID} seed=${SOCCER_SEED} evolution_seed=${SOCCER_EVOLUTION_SEED}");
+    }
+
+    #[test]
+    fn continuous_manifest_marks_ready_only_after_release_build() {
+        assert_continuous_manifest_contains(
+            "/usr/local/cargo/bin/cargo build --release --bin main_soccer_learning_run",
+        );
+        assert_continuous_manifest_contains("touch \"${ready_file}\"");
+        assert_continuous_manifest_contains("readinessProbe:");
+        assert_continuous_manifest_contains("test -f /tmp/codex-soccer-learning-continuous-ready");
+        assert_continuous_manifest_contains("progressDeadlineSeconds: 1200");
+        assert_continuous_manifest_contains("revisionHistoryLimit: 2");
+    }
+
     #[test]
     fn run_settings_reject_dt_above_soccer_runtime_limit() {
         let options = SoccerQPolicyOptions::default();

@@ -2197,6 +2197,12 @@ pub struct SoccerTacticalLearningTrace {
     #[serde(default)]
     pub positional_shape_reward: f64,
     #[serde(default)]
+    pub look_behind_scan_active: bool,
+    #[serde(default)]
+    pub look_behind_drift_risk: f64,
+    #[serde(default)]
+    pub look_behind_shape_penalty: f64,
+    #[serde(default)]
     pub formation_lp_guidance: bool,
     #[serde(default)]
     pub formation_lp_recommended_move_yards: f64,
@@ -25354,6 +25360,57 @@ fn positional_shape_learning_signal(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct LookBehindShapeSignal {
+    active: bool,
+    drift_risk: f64,
+    penalty: f64,
+}
+
+fn look_behind_shape_learning_signal(
+    player_id: usize,
+    team: Team,
+    role: PlayerRole,
+    before: &WorldSnapshot,
+    before_pos: Vec2,
+) -> LookBehindShapeSignal {
+    if role == PlayerRole::Goalkeeper {
+        return LookBehindShapeSignal::default();
+    }
+    let Some(player) = before.players.iter().find(|player| player.id == player_id) else {
+        return LookBehindShapeSignal::default();
+    };
+    let scan = look_behind_scan_context_for_observer(
+        before.tick,
+        before.dt_seconds,
+        player,
+        before_pos,
+        before.ball.position,
+        before.ball.velocity.len(),
+    );
+    if !scan.active {
+        return LookBehindShapeSignal::default();
+    }
+
+    let phase_weight = match before.controlled_possession_team() {
+        Some(possession_team) if possession_team == team.other() => 1.0,
+        Some(possession_team) if possession_team == team => 0.42,
+        _ => 0.68,
+    };
+    let role_weight = match role {
+        PlayerRole::Defender => 1.0,
+        PlayerRole::Midfielder => 0.78,
+        PlayerRole::Forward => 0.48,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+
+    LookBehindShapeSignal {
+        active: true,
+        drift_risk: scan.drift_risk,
+        penalty: (-scan.drift_risk * phase_weight * role_weight * 0.46).clamp(-0.46, 0.0),
+    }
+}
+
 fn tactical_shape_reward(
     player: &PlayerAgent,
     before: &WorldSnapshot,
@@ -25436,6 +25493,8 @@ fn tactical_shape_trace(
     let positional_signal = positional_shape_learning_signal(
         player_id, team, role, before, after, before_pos, after_pos,
     );
+    let look_behind_signal =
+        look_behind_shape_learning_signal(player_id, team, role, before, before_pos);
     if before_possession == Some(team) {
         let spacing_weight = before.possession_spacing_weight(team).max(0.35);
         let before_width =
@@ -25462,6 +25521,7 @@ fn tactical_shape_trace(
                 * spacing_weight;
         }
         reward += positional_signal.reward;
+        reward += look_behind_signal.penalty;
         reward += lp_trace.tactical_reward;
         return SoccerTacticalLearningTrace {
             attack_shape: true,
@@ -25514,6 +25574,9 @@ fn tactical_shape_trace(
                 - positional_signal.before_role_line_cohesion_score,
             positional_shape_exception_relief: positional_signal.positional_shape_exception_relief,
             positional_shape_reward: positional_signal.reward,
+            look_behind_scan_active: look_behind_signal.active,
+            look_behind_drift_risk: look_behind_signal.drift_risk,
+            look_behind_shape_penalty: look_behind_signal.penalty,
             tactical_reward: reward,
             ..lp_trace
         };
@@ -25556,6 +25619,7 @@ fn tactical_shape_trace(
             reward += spacing_delta.1.clamp(-1.0, 1.0) * weights.defense_spacing_score_weight;
         }
         reward += positional_signal.reward;
+        reward += look_behind_signal.penalty;
         reward += lp_trace.tactical_reward;
         return SoccerTacticalLearningTrace {
             attack_shape: false,
@@ -25608,6 +25672,9 @@ fn tactical_shape_trace(
                 - positional_signal.before_role_line_cohesion_score,
             positional_shape_exception_relief: positional_signal.positional_shape_exception_relief,
             positional_shape_reward: positional_signal.reward,
+            look_behind_scan_active: look_behind_signal.active,
+            look_behind_drift_risk: look_behind_signal.drift_risk,
+            look_behind_shape_penalty: look_behind_signal.penalty,
             tactical_reward: reward,
             ..lp_trace
         };
@@ -64861,6 +64928,73 @@ mod tests {
         assert!(
             features[SOCCER_NEURAL_FEATURE_LOOK_BEHIND_DRIFT_RISK] > 0.1,
             "neural learner should see the look-behind drift-risk bin"
+        );
+    }
+
+    #[test]
+    fn tactical_learning_penalizes_lingering_look_behind_on_defense() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14123,
+            ..Default::default()
+        });
+        let defender = 2;
+        let away_holder = 17;
+        sim.tick = 14;
+        sim.clock_seconds = sim.tick as f64 * sim.config.dt_seconds;
+        sim.players[defender].position = Vec2::new(40.0, 60.0);
+        sim.players[defender].home_position = Vec2::new(40.0, 42.0);
+        sim.players[away_holder].position = Vec2::new(40.0, 84.0);
+        sim.ball.holder = Some(away_holder);
+        sim.ball.position = sim.players[away_holder].position;
+        sim.ball.velocity = Vec2::new(0.0, 17.0);
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let previous = WorldSnapshot::from_match(&sim);
+        sim.tick = 42;
+        sim.clock_seconds = sim.tick as f64 * sim.config.dt_seconds;
+        sim.players[defender].last_decision =
+            Some(test_decision_trace(&previous, defender, "look-behind"));
+
+        sim.players[defender].action_facing = FacingBucket::South;
+        let facing_ball_snapshot = WorldSnapshot::from_match(&sim);
+        let facing_ball_trace = tactical_shape_trace_for_snapshots(
+            defender,
+            Team::Home,
+            PlayerRole::Defender,
+            &facing_ball_snapshot,
+            &facing_ball_snapshot,
+            sim.players[defender].position,
+            sim.players[defender].position,
+            &SoccerTacticalLearningWeights::default(),
+        );
+
+        sim.players[defender].action_facing = FacingBucket::North;
+        let scanning_snapshot = WorldSnapshot::from_match(&sim);
+        let scanning_observation = scanning_snapshot.observation_for(defender);
+        let scanning_trace = tactical_shape_trace_for_snapshots(
+            defender,
+            Team::Home,
+            PlayerRole::Defender,
+            &scanning_snapshot,
+            &scanning_snapshot,
+            sim.players[defender].position,
+            sim.players[defender].position,
+            &SoccerTacticalLearningWeights::default(),
+        );
+
+        assert!(scanning_observation.look_behind_scan_active);
+        assert!(scanning_trace.look_behind_scan_active);
+        assert!(scanning_trace.look_behind_drift_risk > 0.45);
+        assert!(
+            scanning_trace.look_behind_shape_penalty < -0.18,
+            "lingering defensive scans should carry positioning cost: {scanning_trace:?}"
+        );
+        assert!(
+            scanning_trace.tactical_reward < facing_ball_trace.tactical_reward - 0.18,
+            "facing the ball should beat lingering look-behind when defending: scan={} facing={}",
+            scanning_trace.tactical_reward,
+            facing_ball_trace.tactical_reward
         );
     }
 

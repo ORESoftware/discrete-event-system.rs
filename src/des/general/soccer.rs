@@ -46127,23 +46127,23 @@ fn known_tracking_facing(facing: Option<FacingBucket>) -> Option<FacingBucket> {
     facing.filter(|bucket| *bucket != FacingBucket::Unknown)
 }
 
+fn tracking_velocity_facing(sample: &SoccerTrackingPlayerSample) -> Option<FacingBucket> {
+    let facing = facing_bucket_from_vector(sample.velocity.unwrap_or_default());
+    (facing != FacingBucket::Unknown).then_some(facing)
+}
+
 fn tracking_player_receive_facing(sample: &SoccerTrackingPlayerSample) -> FacingBucket {
     known_tracking_facing(sample.receive_facing)
         .or_else(|| known_tracking_facing(sample.facing))
+        .or_else(|| tracking_velocity_facing(sample))
         .unwrap_or(FacingBucket::Unknown)
 }
 
 fn tracking_player_action_facing(sample: &SoccerTrackingPlayerSample) -> FacingBucket {
     known_tracking_facing(sample.action_facing)
         .or_else(|| known_tracking_facing(sample.facing))
-        .unwrap_or_else(|| {
-            let facing = facing_bucket_from_vector(sample.velocity.unwrap_or_default());
-            if facing == FacingBucket::Unknown {
-                default_team_facing(sample.team)
-            } else {
-                facing
-            }
-        })
+        .or_else(|| tracking_velocity_facing(sample))
+        .unwrap_or_else(|| default_team_facing(sample.team))
 }
 
 fn tracking_frame_to_world_snapshot(
@@ -67634,6 +67634,16 @@ mod tests {
         assert!((snapshot.players[0].velocity.y - 3.0).abs() < 1e-9);
         assert!((snapshot.players[0].acceleration.y - 20.0).abs() < 1e-9);
         assert!((snapshot.players[0].jerk.y - 200.0).abs() < 1e-9);
+        assert_eq!(
+            snapshot.players[0].receive_facing,
+            FacingBucket::South,
+            "position-only tracking should infer receive-facing from player motion"
+        );
+        assert_eq!(
+            snapshot.players[0].action_facing,
+            FacingBucket::South,
+            "position-only tracking should infer action-facing from player motion"
+        );
         assert!((snapshot.ball.velocity.y - 8.0).abs() < 1e-9);
         assert!((snapshot.ball.acceleration.y - 40.0).abs() < 1e-9);
         assert!((snapshot.ball.jerk.y - 400.0).abs() < 1e-9);
@@ -67677,6 +67687,26 @@ mod tests {
             .iter()
             .find(|transition| transition.tick == 2 && transition.player_id == 0)
             .expect("late tracking transition");
+        assert_eq!(
+            transition.state.receive_facing,
+            FacingBucket::South,
+            "inferred receive-facing should reach the MDP state"
+        );
+        assert_eq!(
+            transition.state.action_facing,
+            FacingBucket::South,
+            "inferred action-facing should reach the MDP state"
+        );
+        assert_eq!(
+            transition.observation.receive_facing,
+            FacingBucket::South,
+            "inferred receive-facing should reach the POMDP observation"
+        );
+        assert_eq!(
+            transition.observation.action_facing,
+            FacingBucket::South,
+            "inferred action-facing should reach the POMDP observation"
+        );
         assert!((transition.decision_context.actor_velocity.y - 3.0).abs() < 1e-9);
         assert!((transition.decision_context.actor_acceleration.y - 20.0).abs() < 1e-9);
         assert!((transition.decision_context.ball_velocity.y - 8.0).abs() < 1e-9);

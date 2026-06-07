@@ -16591,6 +16591,26 @@ impl SoccerAdversarialEmbeddingSignals {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CentralBrainTeamShapeTrace {
+    pub centroid_to_ball_yards: f64,
+    pub spread_yards: f64,
+    pub players_near_ball: usize,
+    pub forward_velocity_yps: f64,
+}
+
+impl Default for CentralBrainTeamShapeTrace {
+    fn default() -> Self {
+        Self {
+            centroid_to_ball_yards: 0.0,
+            spread_yards: 0.0,
+            players_near_ball: 0,
+            forward_velocity_yps: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CentralBrainDecisionTrace {
     pub tick: u64,
     #[serde(default)]
@@ -16611,6 +16631,10 @@ pub struct CentralBrainDecisionTrace {
     pub ball_altitude_yards: f64,
     #[serde(default)]
     pub ball_scheduled_index: Option<usize>,
+    #[serde(default)]
+    pub home_shape: CentralBrainTeamShapeTrace,
+    #[serde(default)]
+    pub away_shape: CentralBrainTeamShapeTrace,
     pub tracked_players: usize,
     pub tracked_officials: usize,
     #[serde(default)]
@@ -16796,6 +16820,10 @@ impl CentralBrain {
             .agent_schedule
             .iter()
             .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        let home_shape =
+            team_shape_observation_from_snapshot(snapshot, Team::Home, snapshot.ball.position);
+        let away_shape =
+            team_shape_observation_from_snapshot(snapshot, Team::Away, snapshot.ball.position);
         self.last_decision = Some(CentralBrainDecisionTrace {
             tick: snapshot.tick,
             scheduled_index: Some(0),
@@ -16809,6 +16837,8 @@ impl CentralBrain {
             ball_jerk: snapshot.ball.jerk,
             ball_altitude_yards: snapshot.ball.altitude_yards,
             ball_scheduled_index,
+            home_shape: central_brain_team_shape_trace(home_shape),
+            away_shape: central_brain_team_shape_trace(away_shape),
             tracked_players: snapshot.players.len(),
             tracked_officials: snapshot.shared_positions.official_latest.len(),
             controlled_human_players: controller_assignments.len(),
@@ -26491,6 +26521,15 @@ struct TeamShapeObservation {
     spread_yards: f64,
     players_near_ball: usize,
     forward_velocity_yps: f64,
+}
+
+fn central_brain_team_shape_trace(shape: TeamShapeObservation) -> CentralBrainTeamShapeTrace {
+    CentralBrainTeamShapeTrace {
+        centroid_to_ball_yards: shape.centroid_to_ball_yards,
+        spread_yards: shape.spread_yards,
+        players_near_ball: shape.players_near_ball,
+        forward_velocity_yps: shape.forward_velocity_yps,
+    }
 }
 
 fn team_shape_observation_from_snapshot(
@@ -55583,6 +55622,70 @@ mod tests {
         assert_eq!(decision.ball_jerk, snapshot.ball.jerk);
         assert_eq!(decision.ball_altitude_yards, snapshot.ball.altitude_yards);
         assert_eq!(decision.ball_scheduled_index, Some(1));
+    }
+
+    #[test]
+    fn central_brain_decision_trace_exposes_home_and_away_shape() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1703,
+            ..Default::default()
+        });
+        sim.ball.position = Vec2::new(40.0, 62.0);
+        for player in sim.players.iter_mut() {
+            player.velocity = match player.team {
+                Team::Home => Vec2::new(0.4, 3.0),
+                Team::Away => Vec2::new(-0.3, -2.2),
+            };
+        }
+        sim.shared_positions.sync_from_players_and_ball(
+            &sim.players,
+            &sim.officials,
+            &sim.ball,
+            sim.tick,
+            sim.clock_seconds,
+        );
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let expected_home =
+            team_shape_observation_from_snapshot(&snapshot, Team::Home, snapshot.ball.position);
+        let expected_away =
+            team_shape_observation_from_snapshot(&snapshot, Team::Away, snapshot.ball.position);
+        let mut brain = CentralBrain::default();
+        brain.run_time_step(&snapshot, &mut mulberry32(1703));
+        let decision = brain.last_decision.expect("central brain decision");
+
+        assert_eq!(decision.tracked_players, 22);
+        assert!(
+            (decision.home_shape.centroid_to_ball_yards - expected_home.centroid_to_ball_yards)
+                .abs()
+                < 1e-9
+        );
+        assert!((decision.home_shape.spread_yards - expected_home.spread_yards).abs() < 1e-9);
+        assert_eq!(
+            decision.home_shape.players_near_ball,
+            expected_home.players_near_ball
+        );
+        assert!(
+            (decision.home_shape.forward_velocity_yps - expected_home.forward_velocity_yps).abs()
+                < 1e-9
+        );
+        assert!(
+            (decision.away_shape.centroid_to_ball_yards - expected_away.centroid_to_ball_yards)
+                .abs()
+                < 1e-9
+        );
+        assert!((decision.away_shape.spread_yards - expected_away.spread_yards).abs() < 1e-9);
+        assert_eq!(
+            decision.away_shape.players_near_ball,
+            expected_away.players_near_ball
+        );
+        assert!(
+            (decision.away_shape.forward_velocity_yps - expected_away.forward_velocity_yps).abs()
+                < 1e-9
+        );
+        assert!(decision.home_shape.forward_velocity_yps > 0.0);
+        assert!(decision.away_shape.forward_velocity_yps > 0.0);
     }
 
     fn home_numbers_up_overload_match() -> SoccerMatch {

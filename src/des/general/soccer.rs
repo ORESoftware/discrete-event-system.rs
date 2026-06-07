@@ -19470,8 +19470,18 @@ impl WorldSnapshot {
                     PlayerRole::Defender => 1.0,
                     PlayerRole::Goalkeeper => -8.0,
                 };
+                let runner_bonus = if target.role == PlayerRole::Forward
+                    && self.player_is_recent_forward_runner(target)
+                {
+                    13.0
+                } else {
+                    0.0
+                };
                 let base_fit = (1.0 - target_position.distance(base) / 54.0).clamp(0.0, 1.0) * 12.0;
-                Some((target_position, forward + role_bonus + base_fit))
+                Some((
+                    target_position,
+                    forward + role_bonus + runner_bonus + base_fit,
+                ))
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(target_position, _)| target_position);
@@ -74634,6 +74644,56 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             target.distance(sim.players[runner].position)
                 < base.distance(sim.players[runner].position),
             "teammate-shaped clearance should land closer to the aerial outlet"
+        );
+    }
+
+    #[test]
+    fn pressure_clearance_prefers_forward_runner_over_static_outlet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let static_outlet = 8;
+        let runner = 9;
+        park_players_except(&mut sim, &[defender, static_outlet, runner]);
+        sim.players[defender].position = Vec2::new(30.0, 24.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+        sim.players[defender].action_facing = FacingBucket::South;
+        sim.players[defender].receive_facing = FacingBucket::South;
+        sim.players[defender].skills.passing_completion_rate = 7.2;
+        sim.players[static_outlet].role = PlayerRole::Forward;
+        sim.players[static_outlet].position = Vec2::new(19.0, 66.0);
+        sim.players[static_outlet].home_position = sim.players[static_outlet].position;
+        sim.players[static_outlet].velocity = Vec2::zero();
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(58.0, 60.0);
+        sim.players[runner].home_position = sim.players[runner].position;
+        sim.players[runner].velocity = Vec2::new(0.0, 4.0);
+        sim.ball.holder = Some(defender);
+        sim.ball.position = sim.players[defender].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert!(
+            snapshot.player_is_recent_forward_runner(&snapshot.players[runner]),
+            "test setup should make the striker a recent forward runner"
+        );
+        let base = clearance_target_for_player(
+            Team::Home,
+            sim.players[defender].position,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let target = snapshot
+            .pressure_clearance_target_for(defender)
+            .expect("visible runner should shape pressured clearance");
+
+        assert!(
+            target.x > base.x + 20.0,
+            "runner bonus should pull the clearance away from the static base lane: base={base:?} target={target:?}"
+        );
+        assert!(
+            target.distance(sim.players[runner].position)
+                < target.distance(sim.players[static_outlet].position),
+            "pressured clearance should land nearer the forward runner than the static outlet: target={target:?}"
         );
     }
 

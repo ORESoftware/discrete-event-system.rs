@@ -18063,15 +18063,13 @@ impl WorldSnapshot {
     }
 
     fn player_facing_direction(&self, player: &PlayerSnapshot) -> Option<Vec2> {
-        if player.velocity.len() > 0.35 {
-            return Some(player.velocity.normalized());
-        }
         if self.ball.holder == Some(player.id) {
-            return Some(Vec2::new(0.0, player.team.attack_dir()));
+            return facing_bucket_to_vector(player.action_facing)
+                .or_else(|| Some(Vec2::new(0.0, player.team.attack_dir())));
         }
         let player_position = self.player_snapshot_position(player);
         let to_ball = self.ball.position - player_position;
-        if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS {
+        if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS * 0.6 {
             Some(to_ball.normalized())
         } else {
             Some(Vec2::new(0.0, player.team.attack_dir()))
@@ -34590,11 +34588,15 @@ impl SoccerMatch {
                 * strength_to_weight_factor,
             dt,
         );
-        let movement_facing = if gait.is_backward() {
-            default_team_facing(p.team)
-        } else {
-            facing_bucket_from_vector(p.velocity)
-        };
+        let movement_facing = movement_action_facing_bucket(
+            p.team,
+            p.position,
+            self.ball.position,
+            to_target,
+            p.velocity,
+            gait,
+            self.ball.holder == Some(player_id),
+        );
         if movement_facing != FacingBucket::Unknown {
             p.action_facing = movement_facing;
         }
@@ -48037,11 +48039,54 @@ fn facing_bucket_to_vector(facing: FacingBucket) -> Option<Vec2> {
     }
 }
 
-fn player_facing_vector_for_ball_control(player: &PlayerAgent) -> Vec2 {
-    if player.velocity.len() > 0.35 {
-        return player.velocity.normalized();
+fn ball_facing_bucket_from_position(
+    team: Team,
+    position: Vec2,
+    ball_position: Vec2,
+) -> FacingBucket {
+    let to_ball = ball_position - position;
+    if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS * 0.6 {
+        facing_bucket_from_vector(to_ball)
+    } else {
+        default_team_facing(team)
     }
+}
+
+fn movement_action_facing_bucket(
+    team: Team,
+    position: Vec2,
+    ball_position: Vec2,
+    to_target: Vec2,
+    velocity: Vec2,
+    gait: MovementGait,
+    has_ball: bool,
+) -> FacingBucket {
+    if has_ball && to_target.len() > 1e-6 {
+        return facing_bucket_from_vector(to_target);
+    }
+
+    let ball_facing = ball_facing_bucket_from_position(team, position, ball_position);
+    let to_ball = ball_position - position;
+    if matches!(gait, MovementGait::Run | MovementGait::Sprint)
+        && velocity.len() > 0.35
+        && to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS
+        && velocity.normalized().dot(to_ball.normalized()) < -0.20
+    {
+        return facing_bucket_from_vector(velocity);
+    }
+
+    ball_facing
+}
+
+fn player_facing_vector_for_ball_control(player: &PlayerAgent, ball_pos: Vec2) -> Vec2 {
     facing_bucket_to_vector(player.action_facing)
+        .or_else(|| {
+            facing_bucket_to_vector(ball_facing_bucket_from_position(
+                player.team,
+                player.position,
+                ball_pos,
+            ))
+        })
         .or_else(|| facing_bucket_to_vector(default_team_facing(player.team)))
         .unwrap_or_else(|| Vec2::new(0.0, player.team.attack_dir()))
 }
@@ -48051,7 +48096,7 @@ fn player_facing_ball_control_multiplier(player: &PlayerAgent, ball_pos: Vec2) -
     if to_ball.len() <= PLAYER_CONTROL_RADIUS_YARDS * 0.6 {
         return 1.0;
     }
-    let facing = player_facing_vector_for_ball_control(player);
+    let facing = player_facing_vector_for_ball_control(player, ball_pos);
     if facing.dot(to_ball.normalized()) >= FACING_BALL_MIN_DOT {
         1.0
     } else {
@@ -53199,6 +53244,7 @@ mod tests {
         );
 
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        sim.ball.position = Vec2::new(40.0, 72.0);
         sim.players[0].position = Vec2::new(40.0, 60.0);
         sim.players[0].velocity = Vec2::zero();
         sim.move_player_towards(0, Vec2::new(40.0, 55.0), false);
@@ -53210,6 +53256,7 @@ mod tests {
         );
 
         let away_player = 11;
+        sim.ball.position = Vec2::new(40.0, 48.0);
         sim.players[away_player].position = Vec2::new(40.0, 60.0);
         sim.players[away_player].velocity = Vec2::zero();
         sim.move_player_towards(away_player, Vec2::new(40.0, 65.0), false);
@@ -53221,6 +53268,86 @@ mod tests {
             sim.players[away_player].action_facing,
             FacingBucket::North,
             "away player should backpedal toward own goal while still facing play"
+        );
+    }
+
+    #[test]
+    fn support_and_defensive_movement_face_ball_unless_fast_run_requires_turning() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.1,
+            duration_seconds: 0.1,
+            seed: 2111,
+            ..Default::default()
+        });
+        let player = 2;
+        sim.ball.position = Vec2::new(40.0, 80.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+
+        sim.move_player_towards(player, Vec2::new(48.0, 60.0), false);
+        assert_eq!(sim.players[player].movement_gait, MovementGait::SideStep);
+        assert_eq!(
+            sim.players[player].action_facing,
+            FacingBucket::South,
+            "side-stepping defenders should keep their chest/eyes toward the ball, not the lateral shuffle"
+        );
+
+        sim.ball.position = Vec2::new(40.0, 40.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+        sim.move_player_towards(player, Vec2::new(40.0, 82.0), true);
+        assert_eq!(sim.players[player].movement_gait, MovementGait::Sprint);
+        assert_eq!(
+            sim.players[player].action_facing,
+            FacingBucket::South,
+            "a full sprint away from the ball is one of the few cases where body facing follows the run"
+        );
+    }
+
+    #[test]
+    fn pomdp_visibility_faces_ball_instead_of_velocity_spin() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let player = 3;
+        sim.ball.position = Vec2::new(40.0, 80.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::new(5.0, 0.0);
+        sim.players[player].action_facing = FacingBucket::Unknown;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let defender = snapshot
+            .players
+            .iter()
+            .find(|candidate| candidate.id == player)
+            .expect("defender snapshot");
+        let facing = snapshot
+            .player_facing_direction(defender)
+            .expect("ball-facing direction");
+
+        assert_eq!(facing_bucket_from_vector(facing), FacingBucket::South);
+        assert!(snapshot
+            .player_position_confidence_entry(player, &snapshot.players[9])
+            .expect("confidence")
+            .confidence
+            .is_finite());
+    }
+
+    #[test]
+    fn ball_control_facing_penalty_uses_explicit_look_direction_not_velocity() {
+        let mut player = SoccerMatch::default_11v11(MatchConfig::default()).players[2].clone();
+        player.position = Vec2::new(40.0, 60.0);
+        player.velocity = Vec2::new(0.0, 5.0);
+        let ball_pos = Vec2::new(40.0, 50.0);
+
+        player.action_facing = FacingBucket::Unknown;
+        assert_eq!(
+            player_facing_ball_control_multiplier(&player, ball_pos),
+            1.0
+        );
+
+        player.action_facing = FacingBucket::East;
+        assert_eq!(
+            player_facing_ball_control_multiplier(&player, ball_pos),
+            NOT_FACING_BALL_INTERCEPTION_MULTIPLIER
         );
     }
 

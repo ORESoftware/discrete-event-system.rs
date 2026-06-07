@@ -77493,6 +77493,11 @@ mod tests {
         assert!(html.contains("Autonomous"));
         assert!(html.contains("sel && sel.value !== \"\""));
         assert!(html.contains("autonomous.value = \"\""));
+        assert!(html.contains("function visibleHumanSlotCount()"));
+        assert!(html.contains("const configured = Number(trace.config?.maxHumanPlayers)"));
+        assert!(html.contains("const slotCount = configured > 0 ? configured : fallback"));
+        assert!(html.contains("return Math.min(Math.max(slotCount, 0), 4)"));
+        assert!(html.contains("for (let i = 0; i < visibleHumanSlotCount(); i++)"));
         assert!(html.contains("function playerLabel(p)"));
         assert!(html.contains("const players = firstFrame.players;"));
         assert!(html.contains("opt.textContent = playerLabel(p)"));

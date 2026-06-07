@@ -1256,6 +1256,12 @@ function selectedPlayer(slot) {
 function selectedPassTarget() {
   return passTarget.value === "" ? null : Number(passTarget.value);
 }
+function visibleHumanSlotCount() {
+  const configured = Number(trace.config?.maxHumanPlayers);
+  const fallback = Number(FALLBACK_CONFIG.maxHumanPlayers || 4);
+  const slotCount = configured > 0 ? configured : fallback;
+  return Math.min(Math.max(slotCount, 0), 4);
+}
 function selectedPlayerSnapshot() {
   const frame = currentFrame();
   const playerId = selectedPlayer(activeSlot);
@@ -1363,7 +1369,7 @@ function buildSlots() {
   if (!firstFrame) return;
   const players = firstFrame.players;
   slots.innerHTML = "";
-  for (let i = 0; i < trace.config.maxHumanPlayers; i++) {
+  for (let i = 0; i < visibleHumanSlotCount(); i++) {
     const row = document.createElement("div");
     row.className = "slot";
     const label = document.createElement("label");

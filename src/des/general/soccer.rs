@@ -58429,12 +58429,8 @@ mod tests {
     fn full_time_match_frames_pass_physics_smoke_report() {
         let trace = run_simulation(
             MatchConfig {
-                duration_seconds: 1.0,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1305,
-                ..Default::default()
+                ..MatchConfig::playback_trace(1.0)
             },
             1,
         );
@@ -58454,12 +58450,8 @@ mod tests {
     fn physics_smoke_report_flags_impossible_frame_jump() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1306,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );
@@ -58477,12 +58469,8 @@ mod tests {
     fn full_time_match_frames_pass_accounting_smoke_report() {
         let trace = run_simulation(
             MatchConfig {
-                duration_seconds: 1.0,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1307,
-                ..Default::default()
+                ..MatchConfig::playback_trace(1.0)
             },
             1,
         );
@@ -58511,12 +58499,8 @@ mod tests {
     fn accounting_smoke_report_flags_incomplete_agent_schedule() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1308,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );
@@ -58544,12 +58528,8 @@ mod tests {
     fn accounting_smoke_report_flags_exclusive_events_same_tick() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1308,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );
@@ -58584,12 +58564,8 @@ mod tests {
     fn accounting_smoke_report_flags_holder_mismatch() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1309,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );
@@ -58613,12 +58589,8 @@ mod tests {
     fn accounting_smoke_report_flags_stale_shared_positions() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 13_109,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );
@@ -58647,12 +58619,8 @@ mod tests {
     fn accounting_smoke_report_counts_fifty_fifty_as_non_possession() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1310,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );
@@ -58704,12 +58672,8 @@ mod tests {
     fn accounting_smoke_report_flags_bad_stat_totals() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1311,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );
@@ -58729,12 +58693,8 @@ mod tests {
     fn accounting_smoke_report_flags_dribble_beat_stat_mismatch() {
         let mut trace = run_simulation(
             MatchConfig {
-                duration_seconds: 0.2,
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                max_human_players: 0,
                 seed: 1312,
-                ..Default::default()
+                ..MatchConfig::playback_trace(0.2)
             },
             1,
         );

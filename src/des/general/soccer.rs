@@ -309,7 +309,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 108;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 110;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -357,6 +357,8 @@ const SOCCER_NEURAL_FEATURE_ROLE_LINE_COHESION: usize = 102;
 const SOCCER_NEURAL_FEATURE_ROLE_LINE_PROXIMITY: usize = 103;
 const SOCCER_NEURAL_FEATURE_EFFECTIVE_TEAMMATE_SPACE: usize = 104;
 const SOCCER_NEURAL_FEATURE_POSITIONAL_EXCEPTION_RELIEF: usize = 105;
+const SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT: usize = 108;
+const SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT: usize = 109;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[61, 81, 83, 85, 87, 89, 93, 96, 102];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1543,6 +1545,10 @@ pub struct SoccerPomdpObservation {
     pub defensive_cross_arrival_threat_distance_yards: f64,
     #[serde(default)]
     pub defensive_cross_arrival_threat_fit: f64,
+    #[serde(default)]
+    pub goalkeeper_ball_goal_line_alignment_score: f64,
+    #[serde(default)]
+    pub defensive_line_break_threat: f64,
     #[serde(default)]
     pub team_brain_defensive_cover_target: usize,
     #[serde(default)]
@@ -2811,6 +2817,10 @@ pub struct SoccerQStateKey {
     pub defensive_cross_arrival_threat_distance_bin: u8,
     #[serde(default)]
     pub defensive_cross_arrival_threat_fit_bin: u8,
+    #[serde(default)]
+    pub goalkeeper_ball_goal_line_alignment_bin: u8,
+    #[serde(default)]
+    pub defensive_line_break_threat_bin: u8,
     #[serde(default)]
     pub team_brain_cover_target_bin: u8,
     #[serde(default)]

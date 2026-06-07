@@ -12856,6 +12856,7 @@ impl MatchConfig {
         } else {
             DEFAULT_BALL_STOP_SPEED_YPS
         };
+        config.max_human_players = config.max_human_players.min(4);
 
         config
     }
@@ -52014,6 +52015,7 @@ mod tests {
         assert_eq!(sim.config.ball_grass_resistance_yps2, 0.0);
         assert_eq!(sim.config.ball_stop_speed_yps, DEFAULT_BALL_STOP_SPEED_YPS);
         assert_eq!(sim.config.total_ticks(), 6_000);
+        assert_eq!(sim.config.max_human_players, 4);
         assert_eq!(sim.config.human_slots(), 4);
         assert!(sim.match_clock().total_seconds.is_finite());
         assert!(sim

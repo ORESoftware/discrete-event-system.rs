@@ -55471,6 +55471,86 @@ mod tests {
                 && player.skills.shooting.is_finite()
                 && player.skills.passing_completion_rate.is_finite()
         }));
+        let unique_skill_profiles = sim
+            .players
+            .iter()
+            .map(|player| {
+                (
+                    (player.skills.top_speed * 10.0).round() as i64,
+                    (player.skills.acceleration * 10.0).round() as i64,
+                    (player.skills.shooting * 10.0).round() as i64,
+                    (player.skills.dribbling * 10.0).round() as i64,
+                    (player.skills.defending * 10.0).round() as i64,
+                    (player.skills.goalkeeping * 10.0).round() as i64,
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            unique_skill_profiles.len() >= 18,
+            "default 22-player roster should have varied skill profiles, got {} unique",
+            unique_skill_profiles.len()
+        );
+        let role_average = |role: PlayerRole, metric: fn(&PlayerAgent) -> f64| -> f64 {
+            let values = sim
+                .players
+                .iter()
+                .filter(|player| player.role == role)
+                .map(metric)
+                .collect::<Vec<_>>();
+            assert!(!values.is_empty(), "missing role {role:?}");
+            values.iter().sum::<f64>() / values.len() as f64
+        };
+        let gk_goalkeeping =
+            role_average(PlayerRole::Goalkeeper, |player| player.skills.goalkeeping);
+        let outfield_goalkeeping = sim
+            .players
+            .iter()
+            .filter(|player| player.role != PlayerRole::Goalkeeper)
+            .map(|player| player.skills.goalkeeping)
+            .sum::<f64>()
+            / sim
+                .players
+                .iter()
+                .filter(|player| player.role != PlayerRole::Goalkeeper)
+                .count() as f64;
+        assert!(
+            gk_goalkeeping > outfield_goalkeeping + 5.0,
+            "goalkeepers should be materially better in goal: gk={gk_goalkeeping:.2} outfield={outfield_goalkeeping:.2}"
+        );
+        let defender_defending =
+            role_average(PlayerRole::Defender, |player| player.skills.defending);
+        let forward_defending = role_average(PlayerRole::Forward, |player| player.skills.defending);
+        assert!(
+            defender_defending > forward_defending + 2.0,
+            "defenders should defend better than forwards: defenders={defender_defending:.2} forwards={forward_defending:.2}"
+        );
+        let midfielder_passing = role_average(PlayerRole::Midfielder, |player| {
+            player.skills.passing_completion_rate
+        });
+        let defender_passing = role_average(PlayerRole::Defender, |player| {
+            player.skills.passing_completion_rate
+        });
+        assert!(
+            midfielder_passing > defender_passing + 0.6,
+            "midfielders should have stronger pass completion: mids={midfielder_passing:.2} defenders={defender_passing:.2}"
+        );
+        let forward_shooting = role_average(PlayerRole::Forward, |player| player.skills.shooting);
+        let midfielder_shooting =
+            role_average(PlayerRole::Midfielder, |player| player.skills.shooting);
+        assert!(
+            forward_shooting > midfielder_shooting + 1.0,
+            "forwards should have stronger shooting: forwards={forward_shooting:.2} mids={midfielder_shooting:.2}"
+        );
+        let forward_effective_speed = role_average(PlayerRole::Forward, |player| {
+            player_top_speed_yps(player.role, &player.skills)
+        });
+        let midfielder_effective_speed = role_average(PlayerRole::Midfielder, |player| {
+            player_top_speed_yps(player.role, &player.skills)
+        });
+        assert!(
+            forward_effective_speed > midfielder_effective_speed + 0.8,
+            "forwards should have higher effective top speed: forwards={forward_effective_speed:.2} mids={midfielder_effective_speed:.2}"
+        );
 
         sim.run_time_step();
 

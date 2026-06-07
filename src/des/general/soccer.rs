@@ -87560,6 +87560,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("../simulations/main_soccer/run?exact=1&fresh=1"));
         assert!(html.contains("cacheBustUrl"));
         assert!(html.contains("runNewSimulation"));
+        assert!(html.contains("function traceRunKey"));
+        assert!(html.contains("function assertFreshRunLoaded"));
+        assert!(html.contains("const previousRunKey = traceRunKey();"));
+        assert!(html.contains("assertFreshRunLoaded(previousRunKey);"));
+        assert!(html.contains("fresh run returned the previous split trace"));
         assert!(html.contains("id=\"seed\""));
         assert!(html.contains("id=\"runId\""));
         assert!(html.contains("id=\"cadence\""));

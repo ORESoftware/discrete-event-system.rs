@@ -793,6 +793,20 @@ function runIdLabel() {
   const shortId = id.length > 18 ? id.slice(-18) : id;
   return at ? `${shortId} ${at}` : shortId;
 }
+function traceRunKey() {
+  const id = trace.runId == null ? "" : String(trace.runId);
+  const generated = trace.generatedAtUnixMs == null ? "" : String(trace.generatedAtUnixMs);
+  const seed = trace.config?.seed == null ? "" : String(trace.config.seed);
+  if (!id && !generated && !seed) return "";
+  return `${id}|${generated}|${seed}`;
+}
+function assertFreshRunLoaded(previousRunKey) {
+  if (!previousRunKey) return;
+  const nextRunKey = traceRunKey();
+  if (nextRunKey && nextRunKey === previousRunKey) {
+    throw new Error("fresh run returned the previous split trace");
+  }
+}
 function updatePlaybackAvailability() {
   const enabled = canStartPlayback();
   setControlsEnabled(enabled);
@@ -1870,6 +1884,7 @@ async function bootstrapTrace(options = {}) {
 
 async function runNewSimulation() {
   if (runningNewSimulation) return;
+  const previousRunKey = traceRunKey();
   runningNewSimulation = true;
   runNewSimButton.disabled = true;
   runNewSimButton.textContent = "Running";
@@ -1885,6 +1900,7 @@ async function runNewSimulation() {
     if (!payload.ok) throw new Error(payload.error || "simulation failed");
     runNewSimButton.textContent = "Loading";
     await bootstrapTrace({reset: true, message: "Loading new match"});
+    assertFreshRunLoaded(previousRunKey);
   } catch (err) {
     loadingBar.style.width = "100%";
     if (err.name === "AuthRequiredError") {

@@ -26329,6 +26329,8 @@ pub struct SoccerPlaybackPlayerFrame {
     pub position: Vec2,
     pub velocity: Vec2,
     #[serde(default)]
+    pub player_grid: SoccerPlaybackPlayerGridFrame,
+    #[serde(default)]
     pub movement_gait: MovementGait,
     #[serde(default)]
     pub receive_facing: FacingBucket,
@@ -26350,6 +26352,37 @@ pub struct SoccerPlaybackPlayerFrame {
     pub action_tick_probability: f64,
     #[serde(default)]
     pub considered_actions: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPlaybackPlayerGridFrame {
+    pub f: [usize; 4],
+    pub t: [usize; 4],
+    pub m: [usize; 4],
+}
+
+fn playback_player_grid_frame(grid: PitchGridAddress) -> SoccerPlaybackPlayerGridFrame {
+    SoccerPlaybackPlayerGridFrame {
+        f: [
+            grid.fine.id,
+            grid.fine.parent_id.unwrap_or(0),
+            grid.fine.x,
+            grid.fine.y,
+        ],
+        t: [
+            grid.tactical.id,
+            grid.tactical.parent_id.unwrap_or(0),
+            grid.tactical.x,
+            grid.tactical.y,
+        ],
+        m: [
+            grid.macro_zone.id,
+            grid.macro_zone.parent_id.unwrap_or(0),
+            grid.macro_zone.x,
+            grid.macro_zone.y,
+        ],
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26996,6 +27029,11 @@ impl SoccerPlaybackFrame {
                         shirt: player.shirt,
                         position: player.position,
                         velocity: player.velocity,
+                        player_grid: playback_player_grid_frame(pitch_grid_address(
+                            player.position,
+                            sim.config.field_width_yards,
+                            sim.config.field_length_yards,
+                        )),
                         movement_gait: player.movement_gait,
                         receive_facing: player.receive_facing,
                         action_facing: player.action_facing,
@@ -27153,6 +27191,11 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                         shirt: player.shirt,
                         position: player.position,
                         velocity: player.velocity,
+                        player_grid: playback_player_grid_frame(pitch_grid_address(
+                            player.position,
+                            DEFAULT_FIELD_WIDTH_YARDS,
+                            DEFAULT_FIELD_LENGTH_YARDS,
+                        )),
                         movement_gait: player.movement_gait,
                         receive_facing: player.receive_facing,
                         action_facing: player.action_facing,
@@ -88056,6 +88099,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains(
             "P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)} C${compactConsidered}"
         ));
+        assert!(html.contains("function pitchGridAddressFromPosition"));
+        assert!(html.contains("function gridAddressForPlayer"));
+        assert!(html.contains("function selectedPlayerGridFacingLabel"));
+        assert!(html.contains("p?.playerGrid"));
+        assert!(html.contains("G${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0}"));
+        assert!(html.contains("F${receive}->${action}"));
         assert!(html.contains("p?.lastDecision?.action || p?.lastAction"));
         assert!(html.contains("p?.lastDecision?.operationOrder || p?.operationOrder"));
         assert!(html.contains("agentTrace ? `${tactical} ${agentTrace}` : tactical"));
@@ -88547,6 +88596,27 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .unwrap()
             .iter()
             .all(|player| player["scheduledIndex"].as_u64().is_some()));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["playerGrid"]["f"]
+                .as_array()
+                .is_some_and(|cell| cell.len() == 4)));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["playerGrid"]["t"]
+                .as_array()
+                .is_some_and(|cell| cell.len() == 4)));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["playerGrid"]["m"]
+                .as_array()
+                .is_some_and(|cell| cell.len() == 4)));
         assert!(scheduled_frame["players"]
             .as_array()
             .unwrap()

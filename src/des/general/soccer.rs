@@ -11188,43 +11188,45 @@ impl BallAgent {
     }
 
     pub fn history_velocity_estimate(&self, dt_seconds: f64) -> Vec2 {
-        if dt_seconds <= 0.0 || self.position_history.len() < 2 {
+        if self.position_history.len() < 2 {
             return self.velocity;
         }
         let last = self.position_history.len() - 1;
-        (self.position_history[last].position - self.position_history[last - 1].position)
-            / dt_seconds
+        ball_sample_velocity_between(
+            &self.position_history[last - 1],
+            &self.position_history[last],
+            dt_seconds,
+        )
+        .unwrap_or(self.velocity)
     }
 
     pub fn history_acceleration_estimate(&self, dt_seconds: f64) -> Vec2 {
-        if dt_seconds <= 0.0 || self.position_history.len() < 3 {
+        if self.position_history.len() < 3 {
             return self.acceleration;
         }
         let last = self.position_history.len() - 1;
-        let v0 = (self.position_history[last - 1].position
-            - self.position_history[last - 2].position)
-            / dt_seconds;
-        let v1 = (self.position_history[last].position - self.position_history[last - 1].position)
-            / dt_seconds;
-        (v1 - v0) / dt_seconds
+        ball_sample_acceleration_between(
+            &self.position_history[last - 2],
+            &self.position_history[last - 1],
+            &self.position_history[last],
+            dt_seconds,
+        )
+        .unwrap_or(self.acceleration)
     }
 
     pub fn history_jerk_estimate(&self, dt_seconds: f64) -> Vec2 {
-        if dt_seconds <= 0.0 || self.position_history.len() < 4 {
-            return Vec2::zero();
+        if self.position_history.len() < 4 {
+            return self.jerk;
         }
         let last = self.position_history.len() - 1;
-        let v0 = (self.position_history[last - 2].position
-            - self.position_history[last - 3].position)
-            / dt_seconds;
-        let v1 = (self.position_history[last - 1].position
-            - self.position_history[last - 2].position)
-            / dt_seconds;
-        let v2 = (self.position_history[last].position - self.position_history[last - 1].position)
-            / dt_seconds;
-        let a0 = (v1 - v0) / dt_seconds;
-        let a1 = (v2 - v1) / dt_seconds;
-        (a1 - a0) / dt_seconds
+        ball_sample_jerk_between(
+            &self.position_history[last - 3],
+            &self.position_history[last - 2],
+            &self.position_history[last - 1],
+            &self.position_history[last],
+            dt_seconds,
+        )
+        .unwrap_or(self.jerk)
     }
 
     fn untargeted_long_ball_team(&self, pending_pass: Option<&PendingPass>) -> Option<Team> {
@@ -11765,6 +11767,63 @@ fn ball_agent_operation_order(
         ],
         &mut trace_rng,
     )
+}
+
+fn ball_sample_delta_seconds(
+    a: &BallPositionSample,
+    b: &BallPositionSample,
+    fallback_dt_seconds: f64,
+) -> Option<f64> {
+    let sample_dt = b.clock_seconds - a.clock_seconds;
+    if sample_dt.is_finite() && sample_dt > 0.0 {
+        Some(sample_dt)
+    } else if fallback_dt_seconds.is_finite() && fallback_dt_seconds > 0.0 {
+        Some(fallback_dt_seconds)
+    } else {
+        None
+    }
+}
+
+fn ball_sample_velocity_between(
+    a: &BallPositionSample,
+    b: &BallPositionSample,
+    fallback_dt_seconds: f64,
+) -> Option<Vec2> {
+    let dt_seconds = ball_sample_delta_seconds(a, b, fallback_dt_seconds)?;
+    Some((b.position - a.position) / dt_seconds)
+}
+
+fn ball_sample_acceleration_between(
+    a: &BallPositionSample,
+    b: &BallPositionSample,
+    c: &BallPositionSample,
+    fallback_dt_seconds: f64,
+) -> Option<Vec2> {
+    let dt_ab = ball_sample_delta_seconds(a, b, fallback_dt_seconds)?;
+    let dt_bc = ball_sample_delta_seconds(b, c, fallback_dt_seconds)?;
+    let velocity_ab = (b.position - a.position) / dt_ab;
+    let velocity_bc = (c.position - b.position) / dt_bc;
+    let midpoint_dt_seconds = ((dt_ab + dt_bc) * 0.5).max(1e-9);
+    Some((velocity_bc - velocity_ab) / midpoint_dt_seconds)
+}
+
+fn ball_sample_jerk_between(
+    a: &BallPositionSample,
+    b: &BallPositionSample,
+    c: &BallPositionSample,
+    d: &BallPositionSample,
+    fallback_dt_seconds: f64,
+) -> Option<Vec2> {
+    let dt_ab = ball_sample_delta_seconds(a, b, fallback_dt_seconds)?;
+    let dt_bc = ball_sample_delta_seconds(b, c, fallback_dt_seconds)?;
+    let dt_cd = ball_sample_delta_seconds(c, d, fallback_dt_seconds)?;
+    let velocity_ab = (b.position - a.position) / dt_ab;
+    let velocity_bc = (c.position - b.position) / dt_bc;
+    let velocity_cd = (d.position - c.position) / dt_cd;
+    let acceleration_ab_bc = (velocity_bc - velocity_ab) / ((dt_ab + dt_bc) * 0.5).max(1e-9);
+    let acceleration_bc_cd = (velocity_cd - velocity_bc) / ((dt_bc + dt_cd) * 0.5).max(1e-9);
+    let acceleration_midpoint_dt_seconds = ((dt_ab + 2.0 * dt_bc + dt_cd) * 0.25).max(1e-9);
+    Some((acceleration_bc_cd - acceleration_ab_bc) / acceleration_midpoint_dt_seconds)
 }
 
 fn ball_position_sample_from_agent(
@@ -53417,6 +53476,55 @@ mod tests {
         assert_eq!(snapshot.ball.jerk, sim.ball.jerk);
         assert_eq!(sim.to_frame().ball.acceleration, sim.ball.acceleration);
         assert_eq!(sim.to_frame().ball.jerk, sim.ball.jerk);
+    }
+
+    #[test]
+    fn ball_history_kinematics_use_sample_clock_deltas() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 205,
+            ..Default::default()
+        });
+        sim.ball.velocity = Vec2::new(-1.0, 0.0);
+        sim.ball.acceleration = Vec2::new(-2.0, 0.0);
+        sim.ball.jerk = Vec2::new(-3.0, 0.0);
+        sim.ball.position_history.clear();
+
+        for (tick, clock_seconds, x) in
+            [(0, 0.0, 0.0), (1, 0.2, 2.0), (2, 0.5, 8.0), (3, 0.9, 20.0)]
+        {
+            sim.ball.position_history.push_back(BallPositionSample {
+                tick,
+                clock_seconds,
+                position: Vec2::new(x, 12.0),
+                velocity: Vec2::zero(),
+                acceleration: Vec2::zero(),
+                jerk: Vec2::zero(),
+                curl_acceleration: Vec2::zero(),
+                altitude_yards: 0.0,
+                holder: None,
+                last_touch_team: None,
+            });
+        }
+
+        let velocity = sim.ball.history_velocity_estimate(0.1);
+        let acceleration = sim.ball.history_acceleration_estimate(0.1);
+        let jerk = sim.ball.history_jerk_estimate(0.1);
+
+        assert!(
+            (velocity.x - 30.0).abs() < 1e-9,
+            "velocity should use latest sample delta, got {}",
+            velocity.x
+        );
+        assert!(
+            (acceleration.x - 28.571_428_571_428_573).abs() < 1e-9,
+            "acceleration should use uneven sample deltas, got {}",
+            acceleration.x
+        );
+        assert!(
+            (jerk.x + 38.095_238_095_238_11).abs() < 1e-9,
+            "jerk should use uneven acceleration midpoint deltas, got {}",
+            jerk.x
+        );
     }
 
     #[test]

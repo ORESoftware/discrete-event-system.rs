@@ -61415,6 +61415,44 @@ mod tests {
     }
 
     #[test]
+    fn assigned_human_player_without_fresh_input_remains_autonomous() {
+        let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 774,
+            ..Default::default()
+        });
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("assign controller slot");
+        assert_eq!(session.match_ref().players[0].controller_slot, Some(0));
+
+        let response = session.step(SoccerStepRequest {
+            inputs: Vec::new(),
+            ticks: 1,
+            record_every_ticks: Some(1),
+        });
+
+        assert_eq!(response.accepted_inputs, 0);
+        assert_eq!(response.queued_human_inputs, 0);
+        let decision = session.match_ref().players[0]
+            .last_decision
+            .as_ref()
+            .expect("autonomous fallback decision");
+        assert_ne!(
+            decision.operation_order.first().map(String::as_str),
+            Some("human-input"),
+            "selected players should keep playing autonomously when their controller is quiet"
+        );
+        assert_eq!(decision.observation.controller_slot, Some(0));
+        assert_eq!(decision.observation.human_controlled, true);
+        assert_eq!(decision.observation.human_input_present, false);
+    }
+
+    #[test]
     fn realtime_session_rejects_wrong_player_for_assigned_controller_slot() {
         let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
             duration_seconds: 1.0,

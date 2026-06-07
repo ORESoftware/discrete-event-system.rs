@@ -18048,7 +18048,9 @@ impl WorldSnapshot {
         let retreat_y = self.defensive_line_break_retreat_target_y(team, holder, line_gap);
         let threat_fit = defensive_line_break_threat_fit(line_gap);
         let dir = team.attack_dir();
-        if line_gap <= DEFENSIVE_LINE_BREAK_HARD_RETREAT_GAP_YARDS {
+        let should_hard_retreat = line_gap <= DEFENSIVE_LINE_BREAK_HARD_RETREAT_GAP_YARDS
+            || line_gap >= DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS;
+        if should_hard_retreat {
             if dir > 0.0 {
                 target.y = target.y.min(retreat_y + 1.0);
             } else {

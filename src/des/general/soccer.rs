@@ -26363,6 +26363,10 @@ pub struct SoccerPlaybackCentralBrainFrame {
     pub ball_holder: Option<usize>,
     pub tracked_players: Vec<usize>,
     pub tracked_officials: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_shape: Option<CentralBrainTeamShapeTrace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub away_shape: Option<CentralBrainTeamShapeTrace>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -27005,6 +27009,16 @@ impl SoccerPlaybackFrame {
                 ball_holder: sim.ball.holder,
                 tracked_players: sim.players.iter().map(|player| player.id).collect(),
                 tracked_officials: sim.officials.len(),
+                home_shape: sim
+                    .central_brain
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.home_shape.clone()),
+                away_shape: sim
+                    .central_brain
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.away_shape.clone()),
             },
             agent_schedule_summary: agent_schedule_summary_for(
                 &sim.last_agent_schedule,
@@ -27132,6 +27146,16 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     .map(|player| player.id)
                     .collect(),
                 tracked_officials: frame.central_brain.tracked_officials,
+                home_shape: frame
+                    .central_brain
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.home_shape.clone()),
+                away_shape: frame
+                    .central_brain
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.away_shape.clone()),
             },
             agent_schedule_summary: frame.agent_schedule_summary.clone(),
             home_directive: SoccerPlaybackDirectiveFrame {
@@ -88193,6 +88217,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("controllerAssignments"));
         assert!(html.contains("S${Number(a.controllerSlot ?? 0) + 1}#${Number(a.playerId ?? 0)}"));
         assert!(html.contains("centralBrainControllerAssignmentLabel(b)"));
+        assert!(html.contains("function centralBrainShapeLabel"));
+        assert!(html.contains("b?.homeShape"));
+        assert!(html.contains("b?.awayShape"));
+        assert!(html.contains("shape.centroidToBallYards"));
+        assert!(html.contains("shape.forwardVelocityYps"));
     }
 
     #[test]
@@ -88333,6 +88362,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .iter()
             .find(|frame| frame["tick"].as_u64().unwrap_or(0) > 0)
             .expect("scheduled playback frame");
+        assert!(scheduled_frame["centralBrain"]["homeShape"]
+            .get("centroidToBallYards")
+            .is_some());
+        assert!(scheduled_frame["centralBrain"]["homeShape"]
+            .get("spreadYards")
+            .is_some());
+        assert!(scheduled_frame["centralBrain"]["homeShape"]
+            .get("playersNearBall")
+            .is_some());
+        assert!(scheduled_frame["centralBrain"]["homeShape"]
+            .get("forwardVelocityYps")
+            .is_some());
+        assert!(scheduled_frame["centralBrain"]["awayShape"]
+            .get("centroidToBallYards")
+            .is_some());
         assert!(scheduled_frame["players"][0]
             .get("scheduledIndex")
             .is_some());

@@ -899,6 +899,17 @@ function centralBrainControllerAssignmentLabel(b) {
     .join(",");
   return slots ? ` H${humans} ${slots}` : ` H${humans}`;
 }
+function centralBrainShapeLabel(b) {
+  const shapeText = (prefix, shape) => {
+    if (!shape) return "";
+    const dist = Number(shape.centroidToBallYards ?? 0).toFixed(0);
+    const spread = Number(shape.spreadYards ?? 0).toFixed(0);
+    const near = Number(shape.playersNearBall ?? 0);
+    const forward = Number(shape.forwardVelocityYps ?? 0).toFixed(1);
+    return ` ${prefix}${dist} W${spread} NB${near} V${forward}`;
+  };
+  return `${shapeText("H", b?.homeShape)}${shapeText("A", b?.awayShape)}`;
+}
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
@@ -914,7 +925,8 @@ function centralBrainLabel(b) {
   const ballZ = Number(b.ballAltitudeYards ?? 0);
   const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}`;
   const controllerText = centralBrainControllerAssignmentLabel(b);
-  return `${players}p ${officials}o${schedule} ${possession}${holder}${controllerText}${centerText}${ballText}`;
+  const shapeText = centralBrainShapeLabel(b);
+  return `${players}p ${officials}o${schedule} ${possession}${holder}${controllerText}${centerText}${shapeText}${ballText}`;
 }
 function agentScheduleGlyph(entry) {
   if (!entry) return "?";

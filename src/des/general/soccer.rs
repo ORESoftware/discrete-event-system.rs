@@ -9461,10 +9461,13 @@ impl SharedHumanInputStore {
         })
     }
 
-    fn clear_slot(&mut self, controller_slot: usize) {
+    fn clear_slot(&mut self, controller_slot: usize) -> bool {
+        let pending_before = self.pending.len();
         self.pending
             .retain(|queued| queued.input.controller_slot != controller_slot);
-        self.latest_seq_by_slot.remove(&controller_slot);
+        let removed_pending = self.pending.len() != pending_before;
+        let removed_watermark = self.latest_seq_by_slot.remove(&controller_slot).is_some();
+        removed_pending || removed_watermark
     }
 
     fn pending_len_for_slots(&self, controller_slots: &[usize]) -> usize {
@@ -9594,10 +9597,17 @@ impl SharedHumanInputs {
     }
 
     pub fn clear_slot(&self, controller_slot: usize) {
-        self.inner
+        let cleared = self
+            .inner
             .write()
             .expect("human input queue lock poisoned")
             .clear_slot(controller_slot);
+        if cleared {
+            let (lock, condvar) = &*self.notifier;
+            let mut notifier = lock.lock().expect("human input notifier lock poisoned");
+            notifier.record_slot_change(controller_slot);
+            condvar.notify_all();
+        }
     }
 
     pub fn notification_version(&self) -> u64 {
@@ -58376,6 +58386,66 @@ mod tests {
         );
         assert!(after_assigned > version);
         assert_eq!(q.queued_len_for_slots(&[0]), 1);
+    }
+
+    #[test]
+    fn clearing_controller_slot_notifies_waiters_and_resets_sequence_watermark() {
+        let q = SharedHumanInputs::new();
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 5,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+        assert_eq!(q.drain_latest_for_slot(0).expect("queued input").seq, 5);
+        assert_eq!(q.queued_len_for_slots(&[0]), 0);
+        assert_eq!(q.last_seq_for_slot(0), Some(5));
+
+        let version = q.notification_version();
+        let waiter_queue = q.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            ready_tx.send(()).expect("waiter ready");
+            let started = Instant::now();
+            let next_version =
+                waiter_queue.wait_for_slot_change_since(&[0], version, Duration::from_millis(200));
+            (next_version, started.elapsed())
+        });
+
+        ready_rx.recv().expect("waiter started");
+        q.clear_slot(0);
+        let (next_version, elapsed) = waiter.join().expect("waiter joins");
+
+        assert!(
+            next_version > version,
+            "slot clearing should advance the slot notifier version"
+        );
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "slot clearing should wake waiters promptly instead of waiting for timeout: {elapsed:?}"
+        );
+        assert_eq!(q.last_seq_for_slot(0), None);
+        assert!(
+            q.push(HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(-1.0, 0.0),
+                sprint: false,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }),
+            "cleared slot should accept a fresh controller sequence"
+        );
     }
 
     #[test]

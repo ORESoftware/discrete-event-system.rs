@@ -43120,16 +43120,7 @@ fn handle_live_soccer_request_inner(
                 }
             };
             let mut reset_response = {
-                let mut guard = match session.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        return LiveHttpResponse::error(
-                            500,
-                            "Internal Server Error",
-                            "soccer session lock poisoned",
-                        )
-                    }
-                };
+                let mut guard = soccer_mutex_lock(session, "soccer_live_session");
                 guard.reset_match(reset_req)
             };
             reset_response.state = reset_response.state.compact_for_live_http();
@@ -43147,16 +43138,7 @@ fn handle_live_soccer_request_inner(
                         )
                     }
                 };
-            let mut guard = match session.lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return LiveHttpResponse::error(
-                        500,
-                        "Internal Server Error",
-                        "soccer session lock poisoned",
-                    )
-                }
-            };
+            let mut guard = soccer_mutex_lock(session, "soccer_live_session");
             match guard.assign_controller_slot(assignment_req) {
                 Ok(response) => LiveHttpResponse::json(&response),
                 Err(e) => LiveHttpResponse::error(400, "Bad Request", &e),
@@ -83106,6 +83088,61 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let step_value: serde_json::Value =
             serde_json::from_str(&step.body).expect("recovered step json");
         assert_eq!(step_value["summary"]["ticks"], 1);
+    }
+
+    #[test]
+    fn live_http_reset_and_assign_recover_from_poisoned_session_lock() {
+        let realtime = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 2,
+            seed: 69,
+            ..Default::default()
+        });
+        let input_queue = realtime.input_queue();
+        let session = Arc::new(Mutex::new(realtime));
+        let poisoner = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let _guard = session.lock().expect("test poison live session lock");
+                panic!("poison soccer live reset assign session lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+
+        let assign_body = r#"{"controllerSlot":0,"playerId":5}"#;
+        let assign = handle_live_soccer_request(
+            &format!(
+                "POST /api/assign HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\n\r\n{}",
+                assign_body.len(),
+                assign_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(assign.status, 200);
+        let assign_value: serde_json::Value =
+            serde_json::from_str(&assign.body).expect("recovered assign json");
+        assert!(assign_value["controllerAssignments"]
+            .as_array()
+            .expect("controller assignments")
+            .iter()
+            .any(|assignment| assignment["controllerSlot"] == 0 && assignment["playerId"] == 5));
+
+        let reset = handle_live_soccer_request(
+            "POST /api/reset HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(reset.status, 200);
+        let reset_value: serde_json::Value =
+            serde_json::from_str(&reset.body).expect("recovered reset json");
+        assert_eq!(reset_value["state"]["summary"]["ticks"], 0);
+        assert_eq!(reset_value["keptControllerAssignments"], true);
+        assert!(reset_value["state"]["controllerAssignments"]
+            .as_array()
+            .expect("reset controller assignments")
+            .iter()
+            .any(|assignment| assignment["controllerSlot"] == 0 && assignment["playerId"] == 5));
     }
 
     #[test]

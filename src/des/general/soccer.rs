@@ -26338,6 +26338,10 @@ pub struct SoccerPlaybackPlayerFrame {
     pub controller_slot: Option<usize>,
     #[serde(default)]
     pub scheduled_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<String>,
+    #[serde(default)]
+    pub operation_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26976,6 +26980,15 @@ impl SoccerPlaybackFrame {
                     scheduled_index: sim.last_agent_schedule.iter().position(|entry| {
                         entry.kind == AgentScheduleKind::Player && entry.id == player.id
                     }),
+                    last_action: player
+                        .last_decision
+                        .as_ref()
+                        .map(|decision| decision.action.clone()),
+                    operation_order: player
+                        .last_decision
+                        .as_ref()
+                        .map(|decision| decision.operation_order.clone())
+                        .unwrap_or_default(),
                 })
                 .collect(),
             officials: sim
@@ -27110,6 +27123,15 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     action_facing: player.action_facing,
                     controller_slot: player.controller_slot,
                     scheduled_index: player.scheduled_index,
+                    last_action: player
+                        .last_decision
+                        .as_ref()
+                        .map(|decision| decision.action.clone()),
+                    operation_order: player
+                        .last_decision
+                        .as_ref()
+                        .map(|decision| decision.operation_order.clone())
+                        .unwrap_or_default(),
                 })
                 .collect(),
             officials: frame
@@ -87987,6 +88009,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function selectedPlayerShotContext"));
         assert!(html.contains("function selectedPlayerShotLaneLabel"));
         assert!(html.contains("function selectedPlayerTacticalLabel"));
+        assert!(html.contains("p?.lastDecision?.action || p?.lastAction"));
+        assert!(html.contains("p?.lastDecision?.operationOrder || p?.operationOrder"));
+        assert!(html.contains("agentTrace ? `${tactical} ${agentTrace}` : tactical"));
         assert!(html.contains("goalkeeperBallGoalLineAlignmentScore"));
         assert!(html.contains("defensiveLineBreakThreat"));
         assert!(html.contains("agentShotLane.textContent = selectedPlayerShotLaneLabel()"));
@@ -88475,6 +88500,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .unwrap()
             .iter()
             .all(|player| player["scheduledIndex"].as_u64().is_some()));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["lastAction"]
+                .as_str()
+                .is_some_and(|action| !action.is_empty())));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["operationOrder"]
+                .as_array()
+                .is_some_and(|order| !order.is_empty())));
         assert!(scheduled_frame["officials"][0]
             .get("scheduledIndex")
             .is_some());

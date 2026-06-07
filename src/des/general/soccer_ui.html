@@ -1672,12 +1672,17 @@ function updateAgentStatePanel() {
 }
 function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
   const observation = p?.lastDecision?.observation;
-  if (!observation) return "-";
+  const action = String(p?.lastDecision?.action || p?.lastAction || "").replace(/-/g, " ");
+  const schedule = playbackScheduleSlotLabel(p?.scheduledIndex);
+  const ops = operationOrderLabel(p?.lastDecision?.operationOrder || p?.operationOrder, 2);
+  const agentTrace = action ? `${action}${schedule}${ops ? ` ${ops}` : ""}` : "";
+  if (!observation) return agentTrace || "-";
   const keeperLine = Number(observation.goalkeeperBallGoalLineAlignmentScore ?? 0);
   const breakThreat = Number(observation.defensiveLineBreakThreat ?? 0);
   const pressure = Number(observation.perceivedPressure ?? 0);
   const urgency = Number(observation.decisionUrgency ?? 0);
-  return `K${keeperLine.toFixed(2)} B${breakThreat.toFixed(2)} P${pressure.toFixed(2)} U${urgency.toFixed(2)}`;
+  const tactical = `K${keeperLine.toFixed(2)} B${breakThreat.toFixed(2)} P${pressure.toFixed(2)} U${urgency.toFixed(2)}`;
+  return agentTrace ? `${tactical} ${agentTrace}` : tactical;
 }
 function selectedPlayerShotContext() {
   const frame = currentFrame();

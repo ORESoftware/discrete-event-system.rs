@@ -254,6 +254,7 @@ const DEFENSIVE_LOW_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 12.0;
 const DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS: f64 = 42.0;
 const DEFENSIVE_LINE_BREAK_BASE_RETREAT_GAP_YARDS: f64 = 36.0;
 const DEFENSIVE_LINE_BREAK_URGENT_RETREAT_GAP_YARDS: f64 = 24.0;
+const DEFENSIVE_LINE_BREAK_HARD_RETREAT_GAP_YARDS: f64 = 9.0;
 const DEFENSIVE_LINE_BREAK_CARRIER_LOOKAHEAD_SECONDS: f64 = 1.55;
 const DEFENSIVE_LINE_BREAK_CARRIER_SPEED_TRIGGER_YPS: f64 = 4.5;
 const GOALKEEPER_LOOSE_BALL_COLLECTION_WINDOW_YARDS: f64 = 5.5;
@@ -18047,10 +18048,12 @@ impl WorldSnapshot {
         let retreat_y = self.defensive_line_break_retreat_target_y(team, holder, line_gap);
         let threat_fit = defensive_line_break_threat_fit(line_gap);
         let dir = team.attack_dir();
-        if dir > 0.0 {
-            target.y = target.y.min(retreat_y + 1.0);
-        } else {
-            target.y = target.y.max(retreat_y - 1.0);
+        if line_gap <= DEFENSIVE_LINE_BREAK_HARD_RETREAT_GAP_YARDS {
+            if dir > 0.0 {
+                target.y = target.y.min(retreat_y + 1.0);
+            } else {
+                target.y = target.y.max(retreat_y - 1.0);
+            }
         }
         let max_behind_ball = DEFENSIVE_MAX_BEHIND_BALL_YARDS
             + DEFENSIVE_LINE_BREAK_EXTRA_BEHIND_BALL_YARDS * threat_fit;
@@ -76096,10 +76099,13 @@ mod tests {
             false,
         );
         let threat = sim.players[threat_id].position;
+        let line_gap = snapshot
+            .opponent_breakthrough_ball_carrier(Team::Home)
+            .map(|(_, line_gap)| line_gap);
 
         assert!(
             target.distance(threat) < zone.distance(threat),
-            "assignment should close down the dangerous attacker: target={target:?} zone={zone:?} threat={threat:?} target_dist={} zone_dist={}",
+            "assignment should close down the dangerous attacker: target={target:?} zone={zone:?} threat={threat:?} line_gap={line_gap:?} target_dist={} zone_dist={}",
             target.distance(threat),
             zone.distance(threat)
         );

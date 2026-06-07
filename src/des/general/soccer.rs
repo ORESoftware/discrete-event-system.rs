@@ -9978,6 +9978,9 @@ impl SharedControllerAssignments {
             if assignment.controller_slot < store.human_slots {
                 store
                     .player_by_slot
+                    .retain(|_, assigned_player_id| *assigned_player_id != assignment.player_id);
+                store
+                    .player_by_slot
                     .insert(assignment.controller_slot, assignment.player_id);
             }
         }
@@ -9992,6 +9995,9 @@ impl SharedControllerAssignments {
             return;
         }
         if let Some(player_id) = player_id {
+            store.player_by_slot.retain(|slot, assigned_player_id| {
+                *slot == controller_slot || *assigned_player_id != player_id
+            });
             store.player_by_slot.insert(controller_slot, player_id);
         } else {
             store.player_by_slot.remove(&controller_slot);
@@ -78994,6 +79000,107 @@ mod tests {
         assert_eq!(ack_value["queued"], true);
         assert_eq!(ack_value["queuedHumanInputs"], 1);
         assert_eq!(input_queue.queued_len(), 1);
+    }
+
+    #[test]
+    fn live_http_reassignment_rejects_old_controller_slot_for_same_player() {
+        let session = Arc::new(Mutex::new(
+            SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+                duration_seconds: 1.0,
+                max_human_players: 2,
+                seed: 569,
+                ..Default::default()
+            }),
+        ));
+        let input_queue = session.lock().unwrap().input_queue();
+
+        let assign_slot_0 = r#"{"controllerSlot":0,"playerId":5}"#;
+        let assign = handle_live_soccer_request(
+            &format!(
+                "POST /api/assign HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                assign_slot_0.len(),
+                assign_slot_0
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(assign.status, 200);
+
+        let old_slot_input = r#"{"controllerSlot":0,"playerId":5,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}"#;
+        let ack = handle_live_soccer_request(
+            &format!(
+                "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                old_slot_input.len(),
+                old_slot_input
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(ack.status, 200);
+        let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
+        assert_eq!(ack_value["acceptedInputs"], 1);
+        assert_eq!(input_queue.queued_len(), 1);
+
+        let assign_slot_1 = r#"{"controllerSlot":1,"playerId":5}"#;
+        let assign = handle_live_soccer_request(
+            &format!(
+                "POST /api/assign HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                assign_slot_1.len(),
+                assign_slot_1
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(assign.status, 200);
+        let assign_value: serde_json::Value =
+            serde_json::from_str(&assign.body).expect("assignment json");
+        let assignments = assign_value["controllerAssignments"]
+            .as_array()
+            .expect("controller assignments");
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0]["controllerSlot"], 1);
+        assert_eq!(assignments[0]["playerId"], 5);
+        assert_eq!(
+            input_queue.queued_len(),
+            0,
+            "reassigning a player should clear stale queued input from the old slot"
+        );
+
+        let stale_old_slot_input = r#"{"controllerSlot":0,"playerId":5,"seq":2,"axis":{"x":-1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}"#;
+        let stale_ack = handle_live_soccer_request(
+            &format!(
+                "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                stale_old_slot_input.len(),
+                stale_old_slot_input
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(stale_ack.status, 200);
+        let stale_value: serde_json::Value =
+            serde_json::from_str(&stale_ack.body).expect("stale ack json");
+        assert_eq!(stale_value["acceptedInputs"], 0);
+        assert_eq!(stale_value["queued"], false);
+        assert_eq!(input_queue.queued_len(), 0);
+
+        let new_slot_input = r#"{"controllerSlot":1,"playerId":5,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}"#;
+        let new_ack = handle_live_soccer_request(
+            &format!(
+                "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                new_slot_input.len(),
+                new_slot_input
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(new_ack.status, 200);
+        let new_value: serde_json::Value =
+            serde_json::from_str(&new_ack.body).expect("new ack json");
+        assert_eq!(new_value["acceptedInputs"], 1);
+        assert_eq!(new_value["queued"], true);
+        let latest = input_queue.drain_latest_by_slot();
+        assert!(!latest.contains_key(&0));
+        assert_eq!(latest.get(&1).expect("new slot input").player_id, Some(5));
     }
 
     #[test]

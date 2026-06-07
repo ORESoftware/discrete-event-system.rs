@@ -2143,8 +2143,9 @@ document.getElementById("shoot").addEventListener("click", () => pushInput(false
 carryActionButton.addEventListener("click", () => pushInput(false, false, "carry-forward"));
 protectActionButton.addEventListener("click", () => pushInput(false, false, "protect-ball"));
 window.addEventListener("keydown", e => {
+  if (isFormEditingTarget(e.target)) return;
   keys.add(e.code);
-  if (!isFormEditingTarget(e.target) && /^Digit[1-4]$/.test(e.code)) {
+  if (/^Digit[1-4]$/.test(e.code)) {
     const slot = Number(e.code.slice(-1)) - 1;
     if (slot < visibleHumanSlotCount()) {
       e.preventDefault();
@@ -2170,6 +2171,7 @@ window.addEventListener("keydown", e => {
   }
 });
 window.addEventListener("keyup", e => {
+  if (isFormEditingTarget(e.target)) return;
   keys.delete(e.code);
   const slot = controllerSlotForKey(e.code);
   const kind = slot == null ? null : controllerKeyKind(slot, e.code);

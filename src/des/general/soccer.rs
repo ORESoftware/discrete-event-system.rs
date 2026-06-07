@@ -16001,6 +16001,10 @@ pub struct CentralBrainDecisionTrace {
     pub ball_holder: Option<usize>,
     pub tracked_players: usize,
     pub tracked_officials: usize,
+    #[serde(default)]
+    pub controlled_human_players: usize,
+    #[serde(default)]
+    pub controller_assignments: Vec<ControllerAssignment>,
     pub operation_order: Vec<String>,
 }
 
@@ -16161,6 +16165,21 @@ impl CentralBrain {
             ],
             rng,
         );
+        let mut controller_assignments = snapshot
+            .players
+            .iter()
+            .filter_map(|player| {
+                player
+                    .controller_slot
+                    .map(|controller_slot| ControllerAssignment {
+                        controller_slot,
+                        player_id: player.id,
+                        player_name: player.name.clone(),
+                        team: player.team,
+                    })
+            })
+            .collect::<Vec<_>>();
+        controller_assignments.sort_by_key(|assignment| assignment.controller_slot);
         self.last_decision = Some(CentralBrainDecisionTrace {
             tick: snapshot.tick,
             scheduled_index: Some(0),
@@ -16170,6 +16189,8 @@ impl CentralBrain {
             ball_holder: snapshot.ball.holder,
             tracked_players: snapshot.players.len(),
             tracked_officials: snapshot.shared_positions.official_latest.len(),
+            controlled_human_players: controller_assignments.len(),
+            controller_assignments,
             operation_order,
         });
     }
@@ -16225,6 +16246,35 @@ impl CentralBrain {
         let scheduled_index = snapshot.agent_schedule.iter().position(|entry| {
             entry.kind == AgentScheduleKind::CentralBrain && entry.id == CENTRAL_BRAIN_AGENT_ID
         });
+        let tracked_players = snapshot
+            .players
+            .iter()
+            .map(|player| CentralBrainPlayerAwareness {
+                id: player.id,
+                team: player.team,
+                position: player.position,
+                velocity: player.velocity,
+                acceleration: player.acceleration,
+                scheduled_index: player.scheduled_index,
+                controller_slot: player.controller_slot,
+            })
+            .collect::<Vec<_>>();
+        let mut controller_assignments = snapshot
+            .players
+            .iter()
+            .filter_map(|player| {
+                player
+                    .controller_slot
+                    .map(|controller_slot| ControllerAssignment {
+                        controller_slot,
+                        player_id: player.id,
+                        player_name: player.name.clone(),
+                        team: player.team,
+                    })
+            })
+            .collect::<Vec<_>>();
+        controller_assignments.sort_by_key(|assignment| assignment.controller_slot);
+        let controlled_human_players = controller_assignments.len();
         CentralBrainSnapshot {
             scheduled_index,
             phase: self.phase,
@@ -16247,19 +16297,9 @@ impl CentralBrain {
             center_of_play: center_of_play.center_of_play,
             pressure_line_home: self.pressure_line_home,
             pressure_line_away: self.pressure_line_away,
-            tracked_players: snapshot
-                .players
-                .iter()
-                .map(|player| CentralBrainPlayerAwareness {
-                    id: player.id,
-                    team: player.team,
-                    position: player.position,
-                    velocity: player.velocity,
-                    acceleration: player.acceleration,
-                    scheduled_index: player.scheduled_index,
-                    controller_slot: player.controller_slot,
-                })
-                .collect(),
+            controlled_human_players,
+            controller_assignments,
+            tracked_players,
             tracked_officials,
             tracked_official_awareness,
         }
@@ -26201,6 +26241,10 @@ pub struct CentralBrainSnapshot {
     pub center_of_play: Vec2,
     pub pressure_line_home: f64,
     pub pressure_line_away: f64,
+    #[serde(default)]
+    pub controlled_human_players: usize,
+    #[serde(default)]
+    pub controller_assignments: Vec<ControllerAssignment>,
     pub tracked_players: Vec<CentralBrainPlayerAwareness>,
     pub tracked_officials: usize,
     #[serde(default)]
@@ -54555,7 +54599,14 @@ mod tests {
         assert_eq!(kickoff.central_brain.possession_team, Some(Team::Home));
         assert_eq!(kickoff.central_brain.ball_holder, Some(5));
 
-        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            max_human_players: 4,
+            ..Default::default()
+        });
+        sim.assign_controller_slot(0, Some(9))
+            .expect("assign home striker controller");
+        sim.assign_controller_slot(1, Some(14))
+            .expect("assign away defender controller");
         sim.players[9].position = Vec2::new(41.0, 94.0);
         sim.players[9].velocity = Vec2::new(0.5, 1.0);
         sim.players[9].acceleration = Vec2::new(0.2, 0.4);
@@ -54576,6 +54627,25 @@ mod tests {
         assert_eq!(frame.central_brain.tracked_players.len(), 22);
         assert_eq!(frame.central_brain.tracked_officials, 3);
         assert_eq!(frame.central_brain.tracked_official_awareness.len(), 3);
+        assert_eq!(frame.central_brain.controlled_human_players, 2);
+        assert_eq!(frame.central_brain.controller_assignments.len(), 2);
+        assert_eq!(
+            frame.central_brain.controller_assignments[0].controller_slot,
+            0
+        );
+        assert_eq!(frame.central_brain.controller_assignments[0].player_id, 9);
+        assert_eq!(
+            frame.central_brain.controller_assignments[1].controller_slot,
+            1
+        );
+        assert_eq!(frame.central_brain.controller_assignments[1].player_id, 14);
+        let central_decision = frame
+            .central_brain
+            .last_decision
+            .as_ref()
+            .expect("central brain decision trace");
+        assert_eq!(central_decision.controlled_human_players, 2);
+        assert_eq!(central_decision.controller_assignments.len(), 2);
         assert_eq!(frame.central_brain.possession_team, Some(Team::Home));
         assert_eq!(frame.central_brain.ball_holder, Some(9));
         assert_eq!(frame.central_brain.ball_position, sim.ball.position);
@@ -54590,6 +54660,7 @@ mod tests {
         assert_eq!(frame.home_brain.mode, TeamBrainMode::Attack);
         assert!(frame.home_brain.in_possession);
         assert_eq!(frame.home_brain.tracked_team_players, 11);
+        assert_eq!(frame.home_brain.controlled_human_players, 1);
         assert_eq!(frame.home_brain.ball_holder, Some(9));
         assert_eq!(frame.home_brain.ball_jerk, sim.ball.jerk);
         assert_eq!(frame.away_brain.ball_jerk, sim.ball.jerk);
@@ -54650,6 +54721,7 @@ mod tests {
         assert_eq!(frame.away_brain.mode, TeamBrainMode::Defend);
         assert!(!frame.away_brain.in_possession);
         assert_eq!(frame.away_brain.tracked_team_players, 11);
+        assert_eq!(frame.away_brain.controlled_human_players, 1);
         assert!(frame.away_brain.team_spread_yards.is_finite());
         assert!(frame.away_brain.players_near_ball <= 11);
         let striker = frame
@@ -54666,6 +54738,7 @@ mod tests {
         assert_eq!(striker.position, striker_frame.position);
         assert_eq!(striker.velocity, striker_frame.velocity);
         assert_eq!(striker.acceleration, striker_frame.acceleration);
+        assert_eq!(striker.controller_slot, Some(0));
         assert_eq!(striker.scheduled_index, None);
         let center_ref = frame
             .central_brain
@@ -79655,6 +79728,26 @@ mod tests {
         assert!(
             observation["humanInputQueueAgeMs"].as_u64().is_some(),
             "live step JSON should expose consumed controller queue age"
+        );
+        assert_eq!(
+            step_value["frame"]["centralBrain"]["controlledHumanPlayers"].as_u64(),
+            Some(1)
+        );
+        let central_assignments = step_value["frame"]["centralBrain"]["controllerAssignments"]
+            .as_array()
+            .expect("central brain controller assignments");
+        assert_eq!(central_assignments.len(), 1);
+        assert_eq!(central_assignments[0]["controllerSlot"].as_u64(), Some(0));
+        assert_eq!(central_assignments[0]["playerId"].as_u64(), Some(5));
+        assert_eq!(
+            step_value["frame"]["centralBrain"]["lastDecision"]["controlledHumanPlayers"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            step_value["frame"]["centralBrain"]["lastDecision"]["controllerAssignments"][0]
+                ["playerId"]
+                .as_u64(),
+            Some(5)
         );
         assert!(session.lock().unwrap().match_ref().players[5].position.x > start_x);
     }

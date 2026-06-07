@@ -46327,7 +46327,169 @@ fn tracking_frame_to_world_snapshot_with_history(
     if !ball_history.is_empty() {
         snapshot.ball_history = ball_history;
     }
+    annotate_tracking_incoming_ball_contexts(&mut snapshot, frames, frame_idx);
     snapshot
+}
+
+fn tracking_pass_flight_from_frames(
+    before_frame: &SoccerTrackingFrame,
+    after_frame: &SoccerTrackingFrame,
+) -> PassFlight {
+    after_frame
+        .pass_flight
+        .or(before_frame.pass_flight)
+        .unwrap_or_else(|| {
+            let before_altitude = before_frame.ball_altitude_yards.unwrap_or(0.0);
+            let after_altitude = after_frame.ball_altitude_yards.unwrap_or(0.0);
+            if before_altitude.max(after_altitude) > 0.35 {
+                PassFlight::Aerial
+            } else {
+                PassFlight::Floor
+            }
+        })
+}
+
+fn tracking_first_touch_action_label(action: &str) -> Option<&'static str> {
+    match normalize_tracking_ball_action(action)
+        .ok()
+        .flatten()?
+        .as_str()
+    {
+        "first-time-pass" => Some("first-time-pass"),
+        "first-time-shot" => Some("first-time-shot"),
+        "first-time-header" => Some("first-time-header"),
+        "control-touch" => Some("control-touch"),
+        _ => None,
+    }
+}
+
+fn tracking_incoming_context_from_frames(
+    before_frame: &SoccerTrackingFrame,
+    after_frame: &SoccerTrackingFrame,
+    target: &PlayerSnapshot,
+    from_player: Option<usize>,
+    received_tick: u64,
+    force_aerial: bool,
+    field_width: f64,
+    field_length: f64,
+) -> IncomingBallContext {
+    let mut flight = tracking_pass_flight_from_frames(before_frame, after_frame);
+    if force_aerial {
+        flight = PassFlight::Aerial;
+    }
+    let origin = before_frame.ball_position;
+    let intended_target = target.position;
+    let distance_yards = origin.distance(intended_target);
+    let frame_dt = (after_frame.clock_seconds - before_frame.clock_seconds).max(0.0);
+    let inferred_velocity = if frame_dt > 1e-6 {
+        (after_frame.ball_position - before_frame.ball_position) / frame_dt
+    } else {
+        Vec2::zero()
+    };
+    let speed_yps = after_frame
+        .ball_velocity
+        .or(before_frame.ball_velocity)
+        .unwrap_or(inferred_velocity)
+        .len();
+    let is_cross = pass_would_be_cross(
+        origin,
+        intended_target,
+        target.team,
+        field_width,
+        field_length,
+    );
+    IncomingBallContext {
+        from_player,
+        target_player: Some(target.id),
+        team: Some(target.team),
+        kind: match (flight, is_cross) {
+            (PassFlight::Floor, false) => IncomingBallKind::GroundPass,
+            (PassFlight::Aerial, false) => IncomingBallKind::AerialPass,
+            (PassFlight::Floor, true) => IncomingBallKind::Cross,
+            (PassFlight::Aerial, true) => IncomingBallKind::AerialCross,
+        },
+        origin: Some(origin),
+        intended_target: Some(intended_target),
+        speed_yps,
+        distance_yards,
+        received_tick,
+        is_cross,
+        is_aerial: flight.is_aerial(),
+    }
+}
+
+fn annotate_tracking_incoming_ball_contexts(
+    snapshot: &mut WorldSnapshot,
+    frames: &[SoccerTrackingFrame],
+    frame_idx: usize,
+) {
+    if frames.is_empty() {
+        return;
+    }
+    let idx = frame_idx.min(frames.len() - 1);
+    let frame = &frames[idx];
+
+    if idx > 0 {
+        let previous = &frames[idx - 1];
+        if let Some(holder_id) = frame.ball_holder {
+            if previous.ball_holder != Some(holder_id) {
+                if let Some(player) = snapshot.players.iter_mut().find(|p| p.id == holder_id) {
+                    let from_player = previous.ball_holder.filter(|from| *from != holder_id);
+                    player.incoming_ball = Some(tracking_incoming_context_from_frames(
+                        previous,
+                        frame,
+                        player,
+                        from_player,
+                        frame.tick,
+                        false,
+                        snapshot.field_width,
+                        snapshot.field_length,
+                    ));
+                }
+            }
+        }
+    }
+
+    let Some(next_frame) = frames.get(idx + 1) else {
+        return;
+    };
+    let Some(raw_action) = next_frame
+        .ball_action
+        .as_deref()
+        .or(frame.ball_action.as_deref())
+    else {
+        return;
+    };
+    let Some(first_touch_action) = tracking_first_touch_action_label(raw_action) else {
+        return;
+    };
+    let Some(action_player) = next_frame.action_player.or(frame.action_player) else {
+        return;
+    };
+    if let Some(player) = snapshot
+        .players
+        .iter_mut()
+        .find(|player| player.id == action_player)
+    {
+        let from_player = frame
+            .ball_holder
+            .filter(|holder| *holder != action_player)
+            .or_else(|| {
+                idx.checked_sub(1)
+                    .and_then(|previous_idx| frames[previous_idx].ball_holder)
+                    .filter(|holder| *holder != action_player)
+            });
+        player.incoming_ball = Some(tracking_incoming_context_from_frames(
+            frame,
+            next_frame,
+            player,
+            from_player,
+            frame.tick,
+            first_touch_action == "first-time-header",
+            snapshot.field_width,
+            snapshot.field_length,
+        ));
+    }
 }
 
 fn tracking_player_position_history_at(
@@ -66479,6 +66641,15 @@ mod tests {
             .find(|transition| transition.player_id == 0)
             .expect("first-time passer transition");
         assert_eq!(passer.action, "first-time-pass");
+        assert!(passer.observation.first_touch_available);
+        assert_eq!(
+            passer.observation.incoming_ball_kind,
+            IncomingBallKind::GroundPass
+        );
+        assert_eq!(
+            SoccerQStateKey::from_transition(passer).first_touch_kind,
+            IncomingBallKind::GroundPass
+        );
         let receiver_position = first_time_pass.frames[1]
             .players
             .iter()
@@ -66542,6 +66713,11 @@ mod tests {
             .find(|transition| transition.player_id == 0)
             .expect("first-time shooter transition");
         assert_eq!(shooter.action, "first-time-shot");
+        assert!(shooter.observation.first_touch_available);
+        assert_eq!(
+            shooter.observation.incoming_ball_kind,
+            IncomingBallKind::GroundPass
+        );
         let shot_target = shooter
             .action_target
             .as_ref()
@@ -66566,6 +66742,11 @@ mod tests {
             .find(|transition| transition.player_id == 0)
             .expect("first-time header transition");
         assert_eq!(header.action, "first-time-header");
+        assert!(header.observation.first_touch_available);
+        assert_eq!(
+            header.observation.incoming_ball_kind,
+            IncomingBallKind::AerialPass
+        );
         let header_target = header
             .action_target
             .as_ref()
@@ -66592,6 +66773,11 @@ mod tests {
             .find(|transition| transition.player_id == 0)
             .expect("control touch transition");
         assert_eq!(controller.action, "control-touch");
+        assert!(controller.observation.first_touch_available);
+        assert_eq!(
+            controller.observation.incoming_ball_kind,
+            IncomingBallKind::GroundPass
+        );
         let control_target = controller
             .action_target
             .as_ref()

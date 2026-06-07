@@ -293,7 +293,7 @@ const SOCCER_FORMATION_LP_PLAYER_CAPACITY: usize = 11;
 const SOCCER_FORMATION_LP_WORLD_PLAYER_CAPACITY: usize = 22;
 const SOCCER_FORMATION_LP_CONTEXT_FEATURES: usize = 64;
 const SOCCER_FORMATION_LP_PRESS_DISTANCE_YARDS: f64 = 2.8;
-const SOCCER_FORMATION_LP_MAX_ITER: usize = 12_000;
+const SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER: usize = 12_000;
 const SOCCER_SET_PLAY_WINDOW_SECONDS: f64 = 15.0;
 const SOCCER_SET_PLAY_TRAINING_WINDOW_SECONDS: f64 = 10.0;
 const SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS: f64 = 3.0;
@@ -2215,6 +2215,14 @@ pub struct SoccerTacticalLearningSummary {
     #[serde(default)]
     pub mean_defense_tactical_reward: f64,
     #[serde(default)]
+    pub goalkeeper_line_alignment_transitions: usize,
+    #[serde(default)]
+    pub mean_goalkeeper_ball_goal_line_alignment_score: f64,
+    #[serde(default)]
+    pub defensive_line_break_threat_transitions: usize,
+    #[serde(default)]
+    pub mean_defensive_line_break_threat: f64,
+    #[serde(default)]
     pub lp_guided_transitions: usize,
     #[serde(default)]
     pub mean_lp_recommended_move_yards: f64,
@@ -2370,6 +2378,20 @@ impl SoccerTacticalLearningSummary {
             other.mean_defense_tactical_reward,
             other.defense_transitions,
         );
+        let keeper_line_count = self.goalkeeper_line_alignment_transitions;
+        self.mean_goalkeeper_ball_goal_line_alignment_score = weighted_mean(
+            self.mean_goalkeeper_ball_goal_line_alignment_score,
+            keeper_line_count,
+            other.mean_goalkeeper_ball_goal_line_alignment_score,
+            other.goalkeeper_line_alignment_transitions,
+        );
+        let break_threat_count = self.defensive_line_break_threat_transitions;
+        self.mean_defensive_line_break_threat = weighted_mean(
+            self.mean_defensive_line_break_threat,
+            break_threat_count,
+            other.mean_defensive_line_break_threat,
+            other.defensive_line_break_threat_transitions,
+        );
         let lp_count = self.lp_guided_transitions;
         self.mean_lp_recommended_move_yards = weighted_mean(
             self.mean_lp_recommended_move_yards,
@@ -2485,6 +2507,12 @@ impl SoccerTacticalLearningSummary {
         self.defense_transitions = self
             .defense_transitions
             .saturating_add(other.defense_transitions);
+        self.goalkeeper_line_alignment_transitions = self
+            .goalkeeper_line_alignment_transitions
+            .saturating_add(other.goalkeeper_line_alignment_transitions);
+        self.defensive_line_break_threat_transitions = self
+            .defensive_line_break_threat_transitions
+            .saturating_add(other.defensive_line_break_threat_transitions);
         self.lp_guided_transitions = self
             .lp_guided_transitions
             .saturating_add(other.lp_guided_transitions);
@@ -2499,6 +2527,30 @@ impl SoccerTacticalLearningSummary {
 
     fn record_transition(&mut self, transition: &SoccerLearningTransition) {
         self.total_transitions = self.total_transitions.saturating_add(1);
+        match transition.role {
+            PlayerRole::Goalkeeper => {
+                self.goalkeeper_line_alignment_transitions =
+                    self.goalkeeper_line_alignment_transitions.saturating_add(1);
+                record_running_mean(
+                    &mut self.mean_goalkeeper_ball_goal_line_alignment_score,
+                    self.goalkeeper_line_alignment_transitions,
+                    transition
+                        .observation
+                        .goalkeeper_ball_goal_line_alignment_score,
+                );
+            }
+            PlayerRole::Defender => {
+                self.defensive_line_break_threat_transitions = self
+                    .defensive_line_break_threat_transitions
+                    .saturating_add(1);
+                record_running_mean(
+                    &mut self.mean_defensive_line_break_threat,
+                    self.defensive_line_break_threat_transitions,
+                    transition.observation.defensive_line_break_threat,
+                );
+            }
+            PlayerRole::Midfielder | PlayerRole::Forward => {}
+        }
         let trace = &transition.tactical_trace;
         if trace.attack_shape {
             self.shape_transitions = self.shape_transitions.saturating_add(1);
@@ -8361,6 +8413,8 @@ impl PlayerAgent {
                         let defend_radius = 3.0 + directive.press_intensity * 3.0;
                         let target = if roam && dist < defend_radius {
                             snapshot.ball.position
+                        } else if self.role == PlayerRole::Goalkeeper {
+                            snapshot.defensive_assignment_for(self.id, self.home_position, roam)
                         } else {
                             snapshot
                                 .formation_lp_guidance_for(self.id)
@@ -12105,15 +12159,15 @@ impl MatchConfig {
     pub fn live_gameplay() -> Self {
         MatchConfig {
             learning_enabled: true,
-            learning_logging_enabled: false,
-            full_game_learning_enabled: false,
-            formation_lp_enabled: false,
+            learning_logging_enabled: true,
+            full_game_learning_enabled: true,
+            formation_lp_enabled: true,
             neural_learning: SoccerNeuralLearningConfig {
                 enabled: true,
                 backend: SoccerNeuralLearningBackend::Threaded,
                 ..SoccerNeuralLearningConfig::default()
             },
-            adversarial_embedding_exploitation_enabled: false,
+            adversarial_embedding_exploitation_enabled: true,
             max_human_players: 4,
             ..MatchConfig::default()
         }
@@ -13230,6 +13284,39 @@ fn soccer_formation_lp_pair_shape_relief(
         .clamp(0.0, 0.85)
 }
 
+fn soccer_formation_lp_internal_simplex_enabled() -> bool {
+    std::env::var("SOCCER_FORMATION_LP_INTERNAL_SIMPLEX")
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn soccer_formation_lp_budgeted_fallback_solution() -> crate::des::general::lp::LPSolution {
+    crate::des::general::lp::LPSolution {
+        status: LPStatus::IterLimit,
+        x: Vec::new(),
+        objective: f64::NAN,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        iters: Some(0),
+        solver: "formation-lp-budgeted-fallback".to_string(),
+        elapsed_ms: 0.0,
+        message: Some(
+            "internal simplex disabled for realtime soccer tick; set SOCCER_FORMATION_LP_INTERNAL_SIMPLEX=1 for exact solve"
+                .to_string(),
+        ),
+    }
+}
+
 impl SoccerFormationLpBrain {
     fn new(team: Team) -> Self {
         let mut c = Vec::new();
@@ -13930,12 +14017,16 @@ impl SoccerFormationLpBrain {
         let slots =
             soccer_formation_lp_slot_inputs(snapshot, self.team, directive, &objective_weights);
         self.update_problem_for_tick(snapshot, directive, &objective_weights, &slots);
-        let opts = InternalSimplexOptions {
-            max_iter: Some(SOCCER_FORMATION_LP_MAX_ITER),
-            tol: Some(1e-8),
-            basis_start: self.basis_start.clone(),
+        let solution = if soccer_formation_lp_internal_simplex_enabled() {
+            let opts = InternalSimplexOptions {
+                max_iter: Some(SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER),
+                tol: Some(1e-8),
+                basis_start: self.basis_start.clone(),
+            };
+            solve_lp_internal(&self.problem, &opts)
+        } else {
+            soccer_formation_lp_budgeted_fallback_solution()
         };
-        let solution = solve_lp_internal(&self.problem, &opts);
         if solution.status == LPStatus::Optimal {
             self.basis_start = LPBasisWarmStart::from_solution(&solution);
         } else {
@@ -17095,7 +17186,7 @@ impl WorldSnapshot {
         line_gap: f64,
     ) -> f64 {
         let urgency = ((18.0 - line_gap) / 26.0).clamp(0.0, 1.0);
-        let retreat_gap = 9.5 + urgency * 4.0;
+        let retreat_gap = 11.5 + urgency * 5.5;
         let target_y = holder.y - team.attack_dir() * retreat_gap;
         let own_goal_y = self.own_goal_y_for(team);
         if !self.ball_near_own_goal_line(team) {
@@ -20679,7 +20770,7 @@ impl WorldSnapshot {
                 let retreat_y =
                     self.defensive_line_break_retreat_target_y(me.team, holder_position, line_gap);
                 let retreat_blend =
-                    (0.34 + threat_fit * 0.24) * directive.press_intensity.clamp(0.55, 1.0);
+                    (0.68 + threat_fit * 0.24) * directive.press_intensity.clamp(0.85, 1.0);
                 compact_y = compact_y * (1.0 - retreat_blend) + retreat_y * retreat_blend;
                 compact_x = compact_x * 0.92 + holder_position.x * 0.08;
             }
@@ -20724,11 +20815,15 @@ impl WorldSnapshot {
     }
 
     pub fn defensive_assignment_for(&self, player_id: usize, home: Vec2, roam: bool) -> Vec2 {
-        let zone = self.defensive_shape_for(player_id, home);
-        let mark = self.mark_or_zone_for(player_id, home);
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            let zone = self.defensive_shape_for(player_id, home);
             return self.clamp_to_role_position(player_id, zone, home, roam);
         };
+        let zone = self.defensive_shape_for(player_id, home);
+        if me.role == PlayerRole::Goalkeeper {
+            return zone;
+        }
+        let mark = self.mark_or_zone_for(player_id, home);
         let opponent_width_factor = (self.team_lateral_width_yards(me.team.other())
             / self.field_width.max(1.0))
         .clamp(0.0, 1.0);
@@ -31399,6 +31494,10 @@ pub struct SoccerStepTimingStats {
     pub ticks: u64,
     pub total_ms: f64,
     pub pre_field_ms: f64,
+    pub pre_field_snapshot_ms: f64,
+    pub pre_field_adversarial_ms: f64,
+    pub central_brain_ms: f64,
+    pub controller_yield_ms: f64,
     pub field_loop_ms: f64,
     pub field_schedule_ms: f64,
     pub field_snapshot_ms: f64,
@@ -31434,6 +31533,10 @@ impl SoccerStepTimingStats {
         self.ticks = self.ticks.saturating_add(sample.ticks);
         self.total_ms += sample.total_ms;
         self.pre_field_ms += sample.pre_field_ms;
+        self.pre_field_snapshot_ms += sample.pre_field_snapshot_ms;
+        self.pre_field_adversarial_ms += sample.pre_field_adversarial_ms;
+        self.central_brain_ms += sample.central_brain_ms;
+        self.controller_yield_ms += sample.controller_yield_ms;
         self.field_loop_ms += sample.field_loop_ms;
         self.field_schedule_ms += sample.field_schedule_ms;
         self.field_snapshot_ms += sample.field_snapshot_ms;
@@ -33004,6 +33107,10 @@ impl SoccerMatch {
         }
         let step_started = Instant::now();
         let mut pre_field_elapsed = Duration::from_secs(0);
+        let mut pre_field_snapshot_elapsed = Duration::from_secs(0);
+        let mut pre_field_adversarial_elapsed = Duration::from_secs(0);
+        let mut central_brain_elapsed = Duration::from_secs(0);
+        let mut controller_yield_elapsed = Duration::from_secs(0);
         let mut field_loop_elapsed = Duration::from_secs(0);
         let mut field_schedule_elapsed = Duration::from_secs(0);
         let mut field_snapshot_elapsed = Duration::from_secs(0);
@@ -33024,19 +33131,27 @@ impl SoccerMatch {
         let mut learning_log_elapsed = Duration::from_secs(0);
         let mut full_game_learning_elapsed = Duration::from_secs(0);
 
+        let pre_field_started = Instant::now();
         let phase_started = Instant::now();
         let brain_input_snapshot = WorldSnapshot::from_match_for_agent_decision(self);
+        pre_field_snapshot_elapsed += phase_started.elapsed();
         let score_home_before = self.score_home;
         let score_away_before = self.score_away;
         let reward_event_start = self.reward_events.len();
+        let phase_started = Instant::now();
         let adversarial_embedding_signals = self.adversarial_embedding_signals();
+        pre_field_adversarial_elapsed += phase_started.elapsed();
+        let phase_started = Instant::now();
         self.central_brain
             .run_time_step_with_adversarial_embeddings(
                 &brain_input_snapshot,
                 &mut self.rng,
                 adversarial_embedding_signals.as_ref(),
             );
+        central_brain_elapsed += phase_started.elapsed();
+        let phase_started = Instant::now();
         self.yield_for_controller_threads();
+        controller_yield_elapsed += phase_started.elapsed();
         let controller_late_yield_enabled = self.controller_yield_stats.assigned_players > 0
             && !self.controller_yield_stats.last_immediate_pending
             && !self.controller_yield_stats.last_notified
@@ -33047,10 +33162,12 @@ impl SoccerMatch {
         } else {
             Duration::from_secs(0)
         };
+        let phase_started = Instant::now();
         let tick_start_snapshot = WorldSnapshot::from_match_for_learning(self);
+        pre_field_snapshot_elapsed += phase_started.elapsed();
         let ball_velocity_before = self.ball.velocity;
         let ball_acceleration_before = self.ball.acceleration;
-        pre_field_elapsed += phase_started.elapsed();
+        pre_field_elapsed += pre_field_started.elapsed();
 
         let field_loop_started = Instant::now();
         let phase_started = Instant::now();
@@ -33311,6 +33428,10 @@ impl SoccerMatch {
             ticks: 1,
             total_ms: soccer_live_duration_ms(total_elapsed),
             pre_field_ms: soccer_live_duration_ms(pre_field_elapsed),
+            pre_field_snapshot_ms: soccer_live_duration_ms(pre_field_snapshot_elapsed),
+            pre_field_adversarial_ms: soccer_live_duration_ms(pre_field_adversarial_elapsed),
+            central_brain_ms: soccer_live_duration_ms(central_brain_elapsed),
+            controller_yield_ms: soccer_live_duration_ms(controller_yield_elapsed),
             field_loop_ms: soccer_live_duration_ms(field_loop_elapsed),
             field_schedule_ms: soccer_live_duration_ms(field_schedule_elapsed),
             field_snapshot_ms: soccer_live_duration_ms(field_snapshot_elapsed),
@@ -33345,7 +33466,9 @@ impl SoccerMatch {
             eprintln!(
                 concat!(
                     "# soccer-sim step telemetry tick={} totalMs={:.2} ",
-                    "preFieldMs={:.2} fieldLoopMs={:.2} fieldScheduleMs={:.2} ",
+                    "preFieldMs={:.2} preFieldSnapshotMs={:.2} preFieldAdversarialMs={:.2} ",
+                    "centralBrainMs={:.2} controllerYieldMs={:.2} ",
+                    "fieldLoopMs={:.2} fieldScheduleMs={:.2} ",
                     "fieldSnapshotMs={:.2} fieldPlayerDecisionMs={:.2} ",
                     "fieldPlayerPossessionMs={:.2} fieldPlayerSupportMs={:.2} ",
                     "fieldPlayerDefenseMs={:.2} fieldPlayerLooseMs={:.2} ",
@@ -33358,6 +33481,10 @@ impl SoccerMatch {
                 self.tick,
                 soccer_live_duration_ms(total_elapsed),
                 soccer_live_duration_ms(pre_field_elapsed),
+                soccer_live_duration_ms(pre_field_snapshot_elapsed),
+                soccer_live_duration_ms(pre_field_adversarial_elapsed),
+                soccer_live_duration_ms(central_brain_elapsed),
+                soccer_live_duration_ms(controller_yield_elapsed),
                 soccer_live_duration_ms(field_loop_elapsed),
                 soccer_live_duration_ms(field_schedule_elapsed),
                 soccer_live_duration_ms(field_snapshot_elapsed),
@@ -51528,6 +51655,17 @@ mod tests {
             "skip-formation-lp"
         );
 
+        let mut playback = SoccerMatch::default_11v11(MatchConfig::playback_trace(0.1));
+        playback.run_time_step();
+        let playback_order = &playback
+            .central_brain
+            .last_decision
+            .as_ref()
+            .expect("playback central brain decision")
+            .operation_order;
+        assert!(playback_order.iter().any(|op| op == "skip-formation-lp"));
+        assert!(!playback_order.iter().any(|op| op == "solve-formation-lp"));
+
         let mut live = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
             seed: 205,
@@ -51540,8 +51678,8 @@ mod tests {
             .as_ref()
             .expect("live central brain decision")
             .operation_order;
-        assert!(live_order.iter().any(|op| op == "skip-formation-lp"));
-        assert!(!live_order.iter().any(|op| op == "solve-formation-lp"));
+        assert!(live_order.iter().any(|op| op == "solve-formation-lp"));
+        assert!(!live_order.iter().any(|op| op == "skip-formation-lp"));
     }
 
     #[test]
@@ -53119,18 +53257,18 @@ mod tests {
     }
 
     #[test]
-    fn formation_lp_is_disabled_for_live_gameplay_config() {
+    fn formation_lp_is_enabled_for_live_gameplay_config() {
         assert!(MatchConfig::default().formation_lp_enabled);
         let config = MatchConfig::live_gameplay();
-        assert!(!config.formation_lp_enabled);
+        assert!(config.formation_lp_enabled);
         let mut sim = SoccerMatch::default_11v11(config);
 
         sim.run_time_step();
         let snapshot = WorldSnapshot::from_match(&sim);
 
-        assert!(!snapshot.formation_lp_enabled);
-        assert!(snapshot.formation_lp_guidance.is_empty());
-        assert!(snapshot.formation_lp_teams.is_empty());
+        assert!(snapshot.formation_lp_enabled);
+        assert_eq!(snapshot.formation_lp_guidance.len(), 22);
+        assert_eq!(snapshot.formation_lp_teams.len(), 2);
     }
 
     #[test]
@@ -55085,9 +55223,9 @@ mod tests {
         assert_eq!(config.effective_duration_seconds(), 12.0);
         assert_eq!(config.total_ticks(), 120);
         assert!(!config.learning_enabled);
-        assert!(!config.learning_logging_enabled);
-        assert!(!config.full_game_learning_enabled);
-        assert!(!config.formation_lp_enabled);
+        assert!(config.learning_logging_enabled);
+        assert!(config.full_game_learning_enabled);
+        assert!(config.formation_lp_enabled);
         assert!(!config.neural_learning.enabled);
         assert!(!config.adversarial_embedding_exploitation_enabled);
         assert_eq!(config.max_human_players, 0);
@@ -60647,7 +60785,38 @@ mod tests {
                 .abs()
                 < 1e-12
         );
+        assert_eq!(
+            sim.tactical_summary.goalkeeper_line_alignment_transitions,
+            recomputed.goalkeeper_line_alignment_transitions
+        );
+        assert_eq!(
+            sim.tactical_summary.defensive_line_break_threat_transitions,
+            recomputed.defensive_line_break_threat_transitions
+        );
+        assert!(
+            (sim.tactical_summary
+                .mean_goalkeeper_ball_goal_line_alignment_score
+                - recomputed.mean_goalkeeper_ball_goal_line_alignment_score)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (sim.tactical_summary.mean_defensive_line_break_threat
+                - recomputed.mean_defensive_line_break_threat)
+                .abs()
+                < 1e-12
+        );
         assert!(sim.tactical_summary.mean_vertical_lane_affinity_score > 0.0);
+        assert!(sim.tactical_summary.goalkeeper_line_alignment_transitions > 0);
+        assert!(sim.tactical_summary.defensive_line_break_threat_transitions > 0);
+        assert!(sim
+            .tactical_summary
+            .mean_goalkeeper_ball_goal_line_alignment_score
+            .is_finite());
+        assert!(sim
+            .tactical_summary
+            .mean_defensive_line_break_threat
+            .is_finite());
         assert!(sim
             .tactical_summary
             .mean_teammate_congestion_pressure
@@ -60670,6 +60839,18 @@ mod tests {
         assert_eq!(
             artifact_json["tacticalSummary"]["meanPositionalShapeReward"],
             serde_json::json!(artifact.tactical_summary.mean_positional_shape_reward)
+        );
+        assert_eq!(
+            artifact_json["tacticalSummary"]["meanGoalkeeperBallGoalLineAlignmentScore"],
+            serde_json::json!(
+                artifact
+                    .tactical_summary
+                    .mean_goalkeeper_ball_goal_line_alignment_score
+            )
+        );
+        assert_eq!(
+            artifact_json["tacticalSummary"]["meanDefensiveLineBreakThreat"],
+            serde_json::json!(artifact.tactical_summary.mean_defensive_line_break_threat)
         );
     }
 
@@ -60694,6 +60875,16 @@ mod tests {
             sim.tactical_summary.attack_transitions + sim.tactical_summary.defense_transitions
         );
         assert!(sim.tactical_summary.mean_vertical_lane_affinity_score > 0.0);
+        assert!(sim.tactical_summary.goalkeeper_line_alignment_transitions > 0);
+        assert!(sim.tactical_summary.defensive_line_break_threat_transitions > 0);
+        assert!(sim
+            .tactical_summary
+            .mean_goalkeeper_ball_goal_line_alignment_score
+            .is_finite());
+        assert!(sim
+            .tactical_summary
+            .mean_defensive_line_break_threat
+            .is_finite());
         assert!(sim
             .tactical_summary
             .mean_teammate_congestion_pressure
@@ -62063,15 +62254,15 @@ mod tests {
         assert_eq!(config.total_ticks(), 6_000);
         assert_eq!(config.human_slots(), 4);
         assert!(config.learning_enabled);
-        assert!(!config.learning_logging_enabled);
-        assert!(!config.full_game_learning_enabled);
-        assert!(!config.formation_lp_enabled);
+        assert!(config.learning_logging_enabled);
+        assert!(config.full_game_learning_enabled);
+        assert!(config.formation_lp_enabled);
         assert!(config.neural_learning.enabled);
         assert_eq!(
             config.neural_learning.backend,
             SoccerNeuralLearningBackend::Threaded
         );
-        assert!(!config.adversarial_embedding_exploitation_enabled);
+        assert!(config.adversarial_embedding_exploitation_enabled);
         assert!(live_config.autosave_team_policy);
     }
 
@@ -70177,6 +70368,10 @@ mod tests {
             "defender target should honor the computed retreat band: target={target:?} retreat_y={retreat_y}"
         );
         assert!(
+            (holder_position.y - target.y) * Team::Home.attack_dir() >= 7.0,
+            "line-break threat should leave the defender materially goal-side of the ball carrier: target={target:?} holder={holder_position:?}"
+        );
+        assert!(
             target.y >= DEFENSIVE_GOAL_LINE_BUFFER_YARDS - 1e-9,
             "defender should not retreat inside the six-yard endline buffer while the ball is outside it: {target:?}"
         );
@@ -70194,7 +70389,10 @@ mod tests {
         sim.ball.last_touch_team = Some(Team::Away);
 
         let snapshot = WorldSnapshot::from_match(&sim);
+        let line_target = snapshot.goalkeeper_ball_goal_tracking_target(Team::Home);
         let target = snapshot.defensive_shape_for(keeper, sim.players[keeper].home_position);
+        let assignment =
+            snapshot.defensive_assignment_for(keeper, sim.players[keeper].home_position, false);
         let goal = Vec2::new(
             snapshot.field_width * 0.5,
             snapshot.own_goal_y_for(Team::Home),
@@ -70220,12 +70418,65 @@ mod tests {
             "keeper target should sit directly on the ball-goal line: target={target:?} line_distance={line_distance} projection={line_projection}"
         );
         assert!(
+            assignment.distance(line_target) < 1e-9,
+            "keeper defensive assignment should bypass generic mark/spacing sampling: assignment={assignment:?} line_target={line_target:?}"
+        );
+        assert!(
             shape.probability >= 0.95,
             "keeper should almost always prefer ball-goal-line shape tracking: shape={shape:?} roam={roam:?}"
         );
         assert!(
             roam.probability <= 0.05,
             "keeper roam should be rare unless making a close intervention: shape={shape:?} roam={roam:?}"
+        );
+
+        let mut lp_snapshot = snapshot.clone();
+        lp_snapshot
+            .formation_lp_guidance
+            .push(SoccerFormationLpPlayerGuidance {
+                team: Team::Home,
+                player_id: keeper,
+                slot: 0,
+                current: sim.players[keeper].position,
+                target: Vec2::new(16.0, line_target.y + 6.0),
+                formation_anchor: sim.players[keeper].home_position,
+                pressure_target: None,
+                recommended_move: Vec2::new(-10.0, 6.0),
+                target_velocity: Vec2::zero(),
+                target_acceleration: Vec2::zero(),
+                recommended_move_yards: 11.7,
+                recommended_speed_yps: 0.0,
+                recommended_acceleration_yps2: 0.0,
+                formation_error_yards: 0.0,
+                movement_error_yards: 11.7,
+                pair_error_yards: 0.0,
+                role_line_error_yards: 0.0,
+                pressure_error_yards: 0.0,
+                fore_aft_speed_error_yps: 0.0,
+                pressure_weight: 1.0,
+                speed_match_weight: 0.0,
+                alignment_weight: 1.0,
+                reduced_cost_target_x: 0.0,
+                reduced_cost_target_y: 0.0,
+                solver_status: "optimal".to_string(),
+                solver_objective: 0.0,
+                solver_iterations: Some(1),
+                solver_elapsed_ms: 0.0,
+                variable_count: 1,
+                constraint_count: 1,
+            });
+        let mut keeper_player = sim.players[keeper].clone();
+        let intent =
+            keeper_player.run_time_step(&lp_snapshot, None, None, &mut SeededRandom::new(26_118));
+        let SoccerAction::MoveTo(runtime_target) = intent.action else {
+            panic!(
+                "keeper should choose defensive movement, got {:?}",
+                intent.action
+            );
+        };
+        assert!(
+            runtime_target.distance(line_target) < 1e-9,
+            "runtime keeper defense should ignore off-line LP guidance: runtime={runtime_target:?} line_target={line_target:?}"
         );
     }
 
@@ -73682,6 +73933,20 @@ mod tests {
         assert_eq!(stats.ticks, 2);
         assert!(stats.total_ms > 0.0);
         assert!(stats.max_step_ms > 0.0);
+        assert!(stats.pre_field_ms >= 0.0);
+        assert!(stats.pre_field_snapshot_ms >= 0.0);
+        assert!(stats.pre_field_adversarial_ms >= 0.0);
+        assert!(stats.central_brain_ms >= 0.0);
+        assert!(stats.controller_yield_ms >= 0.0);
+        let pre_field_parts = stats.pre_field_snapshot_ms
+            + stats.pre_field_adversarial_ms
+            + stats.central_brain_ms
+            + stats.controller_yield_ms;
+        assert!(
+            pre_field_parts <= stats.pre_field_ms + 0.75,
+            "split pre-field timing should fit inside total pre-field timing: parts={pre_field_parts} total={}",
+            stats.pre_field_ms
+        );
         assert!(stats.field_loop_ms >= 0.0);
         assert!(stats.field_schedule_ms >= 0.0);
         assert!(stats.field_snapshot_ms > 0.0);
@@ -74507,12 +74772,20 @@ mod tests {
         assert!(html.body.contains("function liveHttpLabel"));
         assert!(html.body.contains("id=\"runtimeTiming\""));
         assert!(html.body.contains("function runtimeTimingLabel"));
+        assert!(html.body.contains("centralBrainMs"));
+        assert!(html.body.contains("preFieldMs"));
         assert!(html.body.contains("state.matchClock"));
         assert!(html.body.contains("remainingSeconds"));
         assert!(html.body.contains("remainingTicks"));
         assert!(html.body.contains("id=\"shapeLearning\""));
         assert!(html.body.contains("function shapeLearningLabel"));
         assert!(html.body.contains("meanVerticalLaneAffinityScore"));
+        assert!(html
+            .body
+            .contains("meanGoalkeeperBallGoalLineAlignmentScore"));
+        assert!(html.body.contains("goalkeeperLineAlignmentTransitions"));
+        assert!(html.body.contains("meanDefensiveLineBreakThreat"));
+        assert!(html.body.contains("defensiveLineBreakThreatTransitions"));
         assert!(html
             .body
             .contains("tacticalSummary: response.tacticalSummary"));
@@ -74726,6 +74999,16 @@ mod tests {
         assert_eq!(value["liveHttp"]["batchesStepTicks"], true);
         assert_eq!(value["stepTiming"]["ticks"], 2);
         assert!(value["stepTiming"]["totalMs"].as_f64().unwrap() > 0.0);
+        assert!(value["stepTiming"]["preFieldMs"].as_f64().unwrap() >= 0.0);
+        assert!(value["stepTiming"]["preFieldSnapshotMs"].as_f64().unwrap() >= 0.0);
+        assert!(
+            value["stepTiming"]["preFieldAdversarialMs"]
+                .as_f64()
+                .unwrap()
+                >= 0.0
+        );
+        assert!(value["stepTiming"]["centralBrainMs"].as_f64().unwrap() >= 0.0);
+        assert!(value["stepTiming"]["controllerYieldMs"].as_f64().unwrap() >= 0.0);
         assert!(value["stepTiming"]["fieldSnapshotMs"].as_f64().unwrap() > 0.0);
         assert!(
             value["stepTiming"]["fieldPlayerDecisionMs"]
@@ -78415,6 +78698,7 @@ mod tests {
         assert!(html.contains("ctx.arc(post.x, post.y, postRadius"));
         assert!(html.contains("id=\"agentKinematics\""));
         assert!(html.contains("id=\"agentShotLane\""));
+        assert!(html.contains("id=\"agentTactical\""));
         assert!(html.contains("historyKinematicsFromPositions"));
         assert!(html.contains("playbackPlayerHistoryForFrame"));
         assert!(html.contains("playerHistoryKinematicsLabel"));
@@ -78425,7 +78709,11 @@ mod tests {
         assert!(html.contains("function staticShotLaneOpen"));
         assert!(html.contains("function selectedPlayerShotContext"));
         assert!(html.contains("function selectedPlayerShotLaneLabel"));
+        assert!(html.contains("function selectedPlayerTacticalLabel"));
+        assert!(html.contains("goalkeeperBallGoalLineAlignmentScore"));
+        assert!(html.contains("defensiveLineBreakThreat"));
         assert!(html.contains("agentShotLane.textContent = selectedPlayerShotLaneLabel()"));
+        assert!(html.contains("agentTactical.textContent = selectedPlayerTacticalLabel(p)"));
         assert!(
             html.contains("context.kind === \"holder\" && context.nearGoal && context.laneOpen")
         );

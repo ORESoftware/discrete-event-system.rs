@@ -403,7 +403,7 @@
         </select>
       </div>
       <div class="metric"><span>Learning</span><b id="learning">T0 H0 A0</b></div>
-      <div class="metric"><span>Shape Learn</span><b id="shapeLearning">L0.00 C0.00 D0.0 R0.00</b></div>
+      <div class="metric"><span>Shape Learn</span><b id="shapeLearning">L0.00 C0.00 D0.0 K0.00 B0.00 R0.00</b></div>
       <div class="metric"><span>Policy Save</span><b id="policyAutosave">Off</b></div>
       <div class="metric"><span>Policy Store</span><b id="policyStorage">JSON</b></div>
       <div class="metric"><span>Policy Prob</span><b id="policyProbability">H0/0 A0/0</b></div>
@@ -1039,17 +1039,21 @@ function learningLabel(l) {
   return `${mode}${log}${neural} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
 }
 function shapeLearningLabel(summary = state?.tacticalSummary) {
-  if (!summary) return "L0.00 C0.00 D0.0 R0.00";
+  if (!summary) return "L0.00 C0.00 D0.0 K0.00 B0.00 R0.00";
   const lane = Number(summary.meanVerticalLaneAffinityScore ?? 0);
   const laneDelta = Number(summary.meanVerticalLaneAffinityDelta ?? 0);
   const congestion = Number(summary.meanTeammateCongestionPressure ?? 0);
   const congestionDelta = Number(summary.meanTeammateCongestionDelta ?? 0);
   const line = Number(summary.meanRoleLineDeviationYards ?? 0);
+  const keeperLine = Number(summary.meanGoalkeeperBallGoalLineAlignmentScore ?? 0);
+  const breakThreat = Number(summary.meanDefensiveLineBreakThreat ?? 0);
   const reward = Number(summary.meanPositionalShapeReward ?? 0);
   const shapeTransitions = Math.max(0, Math.round(Number(summary.shapeTransitions ?? 0)));
+  const keeperSamples = Math.max(0, Math.round(Number(summary.goalkeeperLineAlignmentTransitions ?? 0)));
+  const breakSamples = Math.max(0, Math.round(Number(summary.defensiveLineBreakThreatTransitions ?? 0)));
   const laneDeltaText = laneDelta ? `${laneDelta >= 0 ? "+" : ""}${laneDelta.toFixed(2)}` : "+0.00";
   const congestionDeltaText = congestionDelta ? `${congestionDelta >= 0 ? "+" : ""}${congestionDelta.toFixed(2)}` : "+0.00";
-  return `L${lane.toFixed(2)}(${laneDeltaText}) C${congestion.toFixed(2)}(${congestionDeltaText}) D${line.toFixed(1)} R${reward.toFixed(2)} S${shapeTransitions}`;
+  return `L${lane.toFixed(2)}(${laneDeltaText}) C${congestion.toFixed(2)}(${congestionDeltaText}) D${line.toFixed(1)} K${keeperLine.toFixed(2)}/${keeperSamples} B${breakThreat.toFixed(2)}/${breakSamples} R${reward.toFixed(2)} S${shapeTransitions}`;
 }
 function ballAgentLabel(ball = state?.frame?.ball) {
   const decision = ball?.lastDecision;
@@ -1248,6 +1252,8 @@ function runtimeTimingLabel(timing = state?.stepTiming) {
   if (!timing || Number(timing.ticks ?? 0) <= 0) return "0ms";
   const ticks = Math.max(1, Number(timing.ticks || 1));
   const avg = Number(timing.totalMs ?? 0) / ticks;
+  const preField = Number(timing.preFieldMs ?? 0) / ticks;
+  const centralBrain = Number(timing.centralBrainMs ?? 0) / ticks;
   const snapshot = Number(timing.fieldSnapshotMs ?? 0) / ticks;
   const decision = Number(timing.fieldPlayerDecisionMs ?? 0) / ticks;
   const learning = Number(timing.learningDefenseMs ?? 0)
@@ -1261,7 +1267,7 @@ function runtimeTimingLabel(timing = state?.stepTiming) {
   const fieldPct = Number(timing.totalMs ?? 0) > 0
     ? Number(timing.fieldLoopMs ?? 0) / Number(timing.totalMs) * 100
     : 0;
-  return `avg ${avg.toFixed(1)} max ${Number(timing.maxStepMs ?? 0).toFixed(1)} snap ${snapshot.toFixed(1)} dec ${decision.toFixed(1)} F${fieldPct.toFixed(0)} L${learningPct.toFixed(0)}`;
+  return `avg ${avg.toFixed(1)} max ${Number(timing.maxStepMs ?? 0).toFixed(1)} PF${preField.toFixed(1)} CB${centralBrain.toFixed(1)} snap ${snapshot.toFixed(1)} dec ${decision.toFixed(1)} F${fieldPct.toFixed(0)} L${learningPct.toFixed(0)}`;
 }
 function controllerYieldLabel(stats = state?.controllerYield) {
   if (!stats) return "idle";

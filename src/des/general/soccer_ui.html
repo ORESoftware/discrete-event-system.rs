@@ -337,6 +337,7 @@
       <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
       <div class="metric"><span>Kinematics</span><b id="agentKinematics">-</b></div>
       <div class="metric"><span>Shot Lane</span><b id="agentShotLane">-</b></div>
+      <div class="metric"><span>Tactical</span><b id="agentTactical">-</b></div>
       <div class="row">
         <select id="passTarget"></select>
         <select id="passFlight" aria-label="Pass flight">
@@ -465,6 +466,7 @@ const slots = document.getElementById("slots");
 const agentSelected = document.getElementById("agentSelected");
 const agentKinematics = document.getElementById("agentKinematics");
 const agentShotLane = document.getElementById("agentShotLane");
+const agentTactical = document.getElementById("agentTactical");
 const passTarget = document.getElementById("passTarget");
 const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
@@ -1276,6 +1278,7 @@ function updateAgentStatePanel() {
     agentSelected.textContent = "Autonomous";
     agentKinematics.textContent = "-";
     agentShotLane.textContent = "-";
+    agentTactical.textContent = "-";
     return;
   }
   agentSelected.textContent = `${p.team} ${p.shirt} ${p.name}`;
@@ -1285,6 +1288,16 @@ function updateAgentStatePanel() {
     playbackPlayerHistoryForFrame(p.id)
   );
   agentShotLane.textContent = selectedPlayerShotLaneLabel();
+  agentTactical.textContent = selectedPlayerTacticalLabel(p);
+}
+function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
+  const observation = p?.lastDecision?.observation;
+  if (!observation) return "-";
+  const keeperLine = Number(observation.goalkeeperBallGoalLineAlignmentScore ?? 0);
+  const breakThreat = Number(observation.defensiveLineBreakThreat ?? 0);
+  const pressure = Number(observation.perceivedPressure ?? 0);
+  const urgency = Number(observation.decisionUrgency ?? 0);
+  return `K${keeperLine.toFixed(2)} B${breakThreat.toFixed(2)} P${pressure.toFixed(2)} U${urgency.toFixed(2)}`;
 }
 function selectedPlayerShotContext() {
   const frame = currentFrame();

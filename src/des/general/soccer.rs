@@ -50806,6 +50806,125 @@ mod tests {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         assert_eq!(sim.players.len(), 22);
         assert_eq!(sim.officials.len(), 3);
+        assert_eq!(
+            sim.players
+                .iter()
+                .filter(|player| player.role == PlayerRole::Goalkeeper)
+                .count(),
+            2
+        );
+        assert_eq!(
+            sim.players
+                .iter()
+                .filter(|player| player.role == PlayerRole::Defender)
+                .count(),
+            8
+        );
+        assert_eq!(
+            sim.players
+                .iter()
+                .filter(|player| player.role == PlayerRole::Midfielder)
+                .count(),
+            8
+        );
+        assert_eq!(
+            sim.players
+                .iter()
+                .filter(|player| player.role == PlayerRole::Forward)
+                .count(),
+            4
+        );
+        let skill_signature = |skills: &SkillProfile| {
+            format!(
+                "{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}",
+                skills.top_speed,
+                skills.acceleration,
+                skills.shooting,
+                skills.passing_completion_rate,
+                skills.dribbling,
+                skills.defending,
+                skills.goalkeeping,
+                skills.defensive_tracking
+            )
+        };
+        let skill_signatures = sim
+            .players
+            .iter()
+            .map(|player| skill_signature(&player.skills))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            skill_signatures.len() >= 18,
+            "default agents should carry differentiated skill profiles, got {skill_signatures:?}"
+        );
+        for player in &sim.players {
+            let skills = &player.skills;
+            for (name, value) in [
+                ("top_speed", skills.top_speed),
+                ("acceleration", skills.acceleration),
+                ("strength", skills.strength),
+                ("height", skills.height),
+                ("shooting", skills.shooting),
+                ("right_foot_shot_power", skills.right_foot_shot_power),
+                ("left_foot_shot_power", skills.left_foot_shot_power),
+                ("passing_completion_rate", skills.passing_completion_rate),
+                ("flair_passing", skills.flair_passing),
+                ("crossing_left", skills.crossing_left),
+                ("crossing_right", skills.crossing_right),
+                ("dribbling", skills.dribbling),
+                ("defending", skills.defending),
+                ("goalkeeping", skills.goalkeeping),
+                ("defensive_tracking", skills.defensive_tracking),
+            ] {
+                assert!(
+                    (1.0..=10.0).contains(&value),
+                    "player {} {} skill {} should be in 1-10 range, got {}",
+                    player.id,
+                    format!("{:?}", player.role),
+                    name,
+                    value
+                );
+            }
+            assert!(
+                player.skills.weight_pounds.is_finite() && player.skills.weight_pounds > 120.0,
+                "player {} should have plausible weight for physics: {}",
+                player.id,
+                player.skills.weight_pounds
+            );
+        }
+        let role_average = |role: PlayerRole, metric: fn(&SkillProfile) -> f64| {
+            let values = sim
+                .players
+                .iter()
+                .filter(|player| player.role == role)
+                .map(|player| metric(&player.skills))
+                .collect::<Vec<_>>();
+            values.iter().sum::<f64>() / values.len().max(1) as f64
+        };
+        let forward_speed = role_average(PlayerRole::Forward, |skills| skills.top_speed);
+        let defender_speed = role_average(PlayerRole::Defender, |skills| skills.top_speed);
+        let forward_shooting = role_average(PlayerRole::Forward, |skills| skills.shooting);
+        let midfielder_passing = role_average(PlayerRole::Midfielder, |skills| {
+            skills.passing_completion_rate
+        });
+        let defender_defending = role_average(PlayerRole::Defender, |skills| skills.defending);
+        let goalkeeper_goalkeeping =
+            role_average(PlayerRole::Goalkeeper, |skills| skills.goalkeeping);
+        assert!(
+            forward_speed > defender_speed,
+            "forwards should be faster on average: fwd={forward_speed} def={defender_speed}"
+        );
+        assert!(
+            forward_shooting > defender_defending * 0.80,
+            "forwards should have real shooting ability: fwd_shoot={forward_shooting} def_def={defender_defending}"
+        );
+        assert!(
+            midfielder_passing > forward_shooting * 0.75,
+            "midfielders should have meaningful passing completion: mid_pass={midfielder_passing} fwd_shoot={forward_shooting}"
+        );
+        assert!(
+            goalkeeper_goalkeeping > defender_defending,
+            "goalkeepers should have the strongest ability in goal: gk={goalkeeper_goalkeeping} def={defender_defending}"
+        );
         assert_eq!(sim.config.dt_seconds, DEFAULT_DT_SECONDS);
         assert_eq!(
             sim.config.effective_duration_seconds(),

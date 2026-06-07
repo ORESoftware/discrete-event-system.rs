@@ -50323,6 +50323,95 @@ mod tests {
     }
 
     #[test]
+    fn first_touch_run_time_step_randomizes_pass_or_control_order() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_513,
+            ..Default::default()
+        });
+        let receiver = 6;
+        let outlet = 8;
+        park_players_except(&mut sim, &[receiver, outlet]);
+        sim.active_set_play = None;
+        sim.pending_pass = None;
+        sim.pending_shot = None;
+        sim.ball.holder = Some(receiver);
+        sim.ball.position = Vec2::new(40.0, 58.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[receiver].position = sim.ball.position;
+        sim.players[receiver].home_position = sim.ball.position;
+        sim.players[receiver].role = PlayerRole::Midfielder;
+        sim.players[receiver].skills.first_touch = 7.2;
+        sim.players[receiver].skills.passing_completion_rate = 7.4;
+        sim.players[receiver].skills.shooting = 4.0;
+        sim.players[receiver].incoming_ball = Some(IncomingBallContext {
+            from_player: Some(5),
+            target_player: Some(receiver),
+            team: Some(Team::Home),
+            kind: IncomingBallKind::GroundPass,
+            origin: Some(Vec2::new(33.0, 44.0)),
+            intended_target: Some(sim.players[receiver].position),
+            speed_yps: 15.0,
+            distance_yards: 16.0,
+            received_tick: sim.tick,
+            is_cross: false,
+            is_aerial: false,
+        });
+        sim.players[outlet].position = Vec2::new(48.0, 70.0);
+        sim.players[outlet].home_position = sim.players[outlet].position;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(receiver);
+        assert!(observation.has_ball);
+        assert!(observation.first_touch_available);
+        assert_eq!(observation.incoming_ball_kind, IncomingBallKind::GroundPass);
+        assert!(
+            !goal_attack_shot_is_required(&observation, sim.players[receiver].role),
+            "test setup should exercise weighted first-touch choices instead of must-shoot"
+        );
+        assert!(!snapshot.ranked_visible_pass_targets(receiver, 3).is_empty());
+
+        let mut first_ops = std::collections::BTreeSet::new();
+        let mut full_orders = std::collections::BTreeSet::new();
+        for seed in 0..80 {
+            let mut player = sim.players[receiver].clone();
+            let _intent =
+                player.run_time_step(&snapshot, None, None, &mut mulberry32(22_700 + seed));
+            let decision = player.last_decision.expect("first-touch decision trace");
+            assert!(
+                decision
+                    .action_options
+                    .iter()
+                    .any(|option| option.label == "first-time-pass" && option.legal),
+                "first-touch branch should expose a legal first-time pass option: {decision:?}"
+            );
+            assert!(
+                decision
+                    .action_options
+                    .iter()
+                    .any(|option| option.label == "control-touch" && option.legal),
+                "first-touch branch should expose a legal control/trap option: {decision:?}"
+            );
+            assert!(
+                !decision.operation_order.is_empty(),
+                "first-touch decision should record weighted operation order"
+            );
+            first_ops.insert(decision.operation_order[0].clone());
+            full_orders.insert(decision.operation_order.join(">"));
+        }
+
+        assert!(
+            first_ops.contains("first-time-pass") && first_ops.contains("control-touch"),
+            "first-touch order should vary between quick pass and control touch: {first_ops:?}"
+        );
+        assert!(
+            full_orders.len() >= 2,
+            "first-touch run_time_step should not use one rigid operation order"
+        );
+    }
+
+    #[test]
     fn completed_pass_reward_prioritizes_forward_progression() {
         let field_length = 120.0;
         let short_forward = completed_pass_reward(

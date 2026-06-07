@@ -9242,6 +9242,7 @@ pub struct HumanInputFrame {
 }
 
 const HUMAN_INPUT_QUEUE_LIMIT: usize = 256;
+const HUMAN_INPUT_MAX_QUEUE_AGE_MS: u64 = 250;
 
 fn soccer_unix_millis() -> u64 {
     SystemTime::now()
@@ -9337,10 +9338,13 @@ impl SharedHumanInputStore {
             }
         }
         self.pending = retained;
-        latest.map(|queued| HumanInputDrainResult {
-            queue_age_ms: consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms),
-            enqueued_unix_ms: queued.enqueued_unix_ms,
-            input: queued.input,
+        latest.and_then(|queued| {
+            let queue_age_ms = consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms);
+            (queue_age_ms <= HUMAN_INPUT_MAX_QUEUE_AGE_MS).then_some(HumanInputDrainResult {
+                queue_age_ms,
+                enqueued_unix_ms: queued.enqueued_unix_ms,
+                input: queued.input,
+            })
         })
     }
 
@@ -56982,6 +56986,67 @@ mod tests {
     }
 
     #[test]
+    fn human_input_queue_drops_stale_soft_realtime_frames_on_drain() {
+        let q = SharedHumanInputs::new();
+        let consumed_at = 10_000;
+        assert!(q.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            consumed_at - HUMAN_INPUT_MAX_QUEUE_AGE_MS - 1,
+        ));
+        assert!(q.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 1,
+                player_id: Some(1),
+                seq: 1,
+                axis: Vec2::new(0.0, 1.0),
+                sprint: false,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            consumed_at - HUMAN_INPUT_MAX_QUEUE_AGE_MS,
+        ));
+
+        let stale = q
+            .inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .drain_latest_for_slot_with_age(0, consumed_at);
+        assert!(
+            stale.is_none(),
+            "stale controller input should not be applied after the soft-real-time age cap"
+        );
+        assert_eq!(
+            q.queued_len_for_slots(&[0]),
+            0,
+            "stale frame should be removed from the queue once considered"
+        );
+
+        let fresh = q
+            .inner
+            .write()
+            .expect("human input queue lock poisoned")
+            .drain_latest_for_slot_with_age(1, consumed_at)
+            .expect("fresh input at the age boundary should still be accepted");
+        assert_eq!(fresh.input.seq, 1);
+        assert_eq!(fresh.queue_age_ms, HUMAN_INPUT_MAX_QUEUE_AGE_MS);
+        assert_eq!(q.queued_len(), 0);
+    }
+
+    #[test]
     fn shared_human_inputs_notify_waiting_main_loop() {
         let q = SharedHumanInputs::new();
         let version = q.notification_version();
@@ -57727,6 +57792,55 @@ mod tests {
             age <= 60_000,
             "queue age should be clamped for UI safety, got {age}ms"
         );
+    }
+
+    #[test]
+    fn main_loop_discards_stale_controller_input_before_player_decision() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 787,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0");
+        let input_queue = sim.human_inputs.clone();
+        let enqueued_unix_ms =
+            soccer_unix_millis().saturating_sub(HUMAN_INPUT_MAX_QUEUE_AGE_MS + 20);
+        assert!(input_queue.push_with_enqueue_unix_ms(
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 1,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+            enqueued_unix_ms,
+        ));
+
+        sim.run_time_step();
+
+        assert_eq!(
+            sim.human_inputs.queued_len(),
+            0,
+            "expired input should be removed when the controlled player's turn checks the queue"
+        );
+        let decision = sim.players[0]
+            .last_decision
+            .as_ref()
+            .expect("controlled player should still make an autonomous decision");
+        assert_ne!(decision.operation_order, vec!["human-input".to_string()]);
+        assert_eq!(decision.observation.controller_slot, Some(0));
+        assert!(decision.observation.human_controlled);
+        assert!(!decision.observation.human_input_present);
+        assert_eq!(decision.observation.human_input_seq, None);
+        assert_eq!(decision.observation.human_input_queue_age_ms, None);
     }
 
     #[test]

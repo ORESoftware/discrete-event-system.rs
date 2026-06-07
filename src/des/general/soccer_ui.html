@@ -1094,14 +1094,27 @@ function pointSegmentDistance(point, a, b) {
   const closest = {x: Number(a?.x ?? 0) + ab.x * t, y: Number(a?.y ?? 0) + ab.y * t};
   return vecLen(vecSub(point, closest));
 }
-function staticShotLaneOpen(frame, player, goal) {
+function staticShotLaneOpenToTarget(frame, player, target) {
   if (!frame || !player || !Array.isArray(frame.players)) return true;
   const blockRadiusYards = 2.2;
   return !frame.players.some(other =>
     other.team !== player.team
-      && pointSegmentDistance(other.position, player.position, goal) <= blockRadiusYards
-      && vecDot(vecSub(other.position, player.position), vecSub(goal, player.position)) > 0
+      && pointSegmentDistance(other.position, player.position, target) <= blockRadiusYards
+      && vecDot(vecSub(other.position, player.position), vecSub(target, player.position)) > 0
   );
+}
+function staticShotLaneTargets(goalY) {
+  const fieldWidth = Number(config.fieldWidthYards || 80);
+  const goalWidth = Number(config.goalWidthYards || 8);
+  const centerX = fieldWidth * 0.5;
+  const halfGoal = Math.max(1, goalWidth) * 0.5;
+  return [-0.92, -0.46, 0, 0.46, 0.92].map(fraction => ({
+    x: Math.max(0, Math.min(fieldWidth, centerX + halfGoal * fraction)),
+    y: goalY,
+  }));
+}
+function staticShotLaneOpen(frame, player, goalY) {
+  return staticShotLaneTargets(goalY).some(target => staticShotLaneOpenToTarget(frame, player, target));
 }
 function historyKinematicsFromPositions(history, dtSeconds) {
   const samples = Array.isArray(history) ? history.map(finiteVec2) : [];
@@ -1673,10 +1686,9 @@ function selectedPlayerShotContext() {
   if (frame.ball?.holder !== p.id) return {kind: "no-ball"};
   const config = trace.config || FALLBACK_CONFIG;
   const goalY = p.team === "Home" ? Number(config.fieldLengthYards || 120) : 0;
-  const goal = {x: Number(config.fieldWidthYards || 80) * 0.5, y: goalY};
   const yardsToGoal = Math.abs(goalY - Number(p.position?.y || 0));
   const nearGoal = yardsToGoal <= 20;
-  const laneOpen = staticShotLaneOpen(frame, p, goal);
+  const laneOpen = staticShotLaneOpen(frame, p, goalY);
   return {kind: "holder", nearGoal, laneOpen, yardsToGoal};
 }
 function selectedPlayerShotLaneLabel() {

@@ -118,6 +118,7 @@ const SHOT_BLOCK_DIRECT_PROBABILITY: f64 = 0.80;
 const SHOT_BLOCK_LANE_RADIUS_YARDS: f64 = 3.25;
 const SHOT_BLOCK_DECISION_MAX_PROBABILITY: f64 = 0.58;
 const SHOT_BLOCK_BAILOUT_MAX_PROBABILITY: f64 = 0.86;
+const SHOT_GOALMOUTH_TARGET_FRACTIONS: [f64; 5] = [-0.92, -0.46, 0.0, 0.46, 0.92];
 const GOAL_APPROACH_CARRY_YARDS: f64 = 45.0;
 const SHOT_BLOCK_QUICK_RELEASE_MULTIPLIER: f64 = 0.68;
 const SHOT_SCREEN_IDEAL_MIN_YARDS: f64 = 1.0;
@@ -51234,17 +51235,31 @@ fn shot_sightline_screen_probability_for_agents(
     (1.0 - clear_probability).clamp(0.0, 1.0)
 }
 
-fn shot_block_assessment_for_snapshot(
+fn shot_goalmouth_target_points(
+    field_width: f64,
+    field_length: f64,
+    goal_width: f64,
+    attacking_team: Team,
+) -> [Vec2; 5] {
+    let goal_y = attacking_team.goal_y(field_length);
+    let center_x = field_width * 0.5;
+    let half_width = goal_width.max(1.0) * 0.5;
+    SHOT_GOALMOUTH_TARGET_FRACTIONS.map(|fraction| {
+        Vec2::new(
+            (center_x + half_width * fraction).clamp(0.0, field_width),
+            goal_y,
+        )
+    })
+}
+
+fn shot_block_assessment_for_snapshot_target(
     snapshot: &WorldSnapshot,
     from: Vec2,
+    target: Vec2,
     attacking_team: Team,
     shot_speed_yps: f64,
     quick_release: bool,
 ) -> Option<ShotBlockAssessment> {
-    let goal = Vec2::new(
-        snapshot.field_width * 0.5,
-        attacking_team.goal_y(snapshot.field_length),
-    );
     let assessments = snapshot
         .players
         .iter()
@@ -51259,7 +51274,7 @@ fn shot_block_assessment_for_snapshot(
                     player.role,
                     player.fatigue,
                     from,
-                    goal,
+                    target,
                     position,
                     shot_speed_yps,
                     quick_release,
@@ -51276,6 +51291,44 @@ fn shot_block_assessment_for_snapshot(
         })
         .collect::<Vec<_>>();
     combine_shot_block_assessments(assessments)
+}
+
+fn shot_block_assessment_for_snapshot(
+    snapshot: &WorldSnapshot,
+    from: Vec2,
+    attacking_team: Team,
+    shot_speed_yps: f64,
+    quick_release: bool,
+) -> Option<ShotBlockAssessment> {
+    let targets = shot_goalmouth_target_points(
+        snapshot.field_width,
+        snapshot.field_length,
+        snapshot.goal_width,
+        attacking_team,
+    );
+    let mut best: Option<ShotBlockAssessment> = None;
+    for target in targets {
+        match shot_block_assessment_for_snapshot_target(
+            snapshot,
+            from,
+            target,
+            attacking_team,
+            shot_speed_yps,
+            quick_release,
+        ) {
+            None => return None,
+            Some(assessment)
+                if best
+                    .as_ref()
+                    .map(|best| assessment.probability < best.probability)
+                    .unwrap_or(true) =>
+            {
+                best = Some(assessment);
+            }
+            Some(_) => {}
+        }
+    }
+    best
 }
 
 fn shot_miss_window_yards(
@@ -86423,6 +86476,36 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn shot_lane_accepts_open_goalmouth_target_when_center_is_screened() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let attacker = 9;
+        let blocker = 13;
+        park_players_except(&mut sim, &[attacker, blocker]);
+        sim.players[attacker].position = Vec2::new(40.0, 90.0);
+        sim.players[blocker].position = Vec2::new(40.0, 115.0);
+        sim.players[blocker].skills.defending = 10.0;
+        sim.players[blocker].skills.defensive_tracking = 10.0;
+        sim.players[blocker].skills.aggression = 10.0;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let center_goal = Vec2::new(
+            snapshot.field_width * 0.5,
+            Team::Home.goal_y(snapshot.field_length),
+        );
+        assert!(
+            !snapshot.clear_line(sim.players[attacker].position, center_goal, Team::Away, 3.0),
+            "test setup should screen the center of goal"
+        );
+        assert!(
+            shot_lane_is_clear(&snapshot, attacker),
+            "a shooter should be allowed to use an open side of the goalmouth"
+        );
+    }
+
+    #[test]
     fn blocked_shot_lane_makes_shoot_option_and_learned_shoot_illegal() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -87893,7 +87976,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("frame.players?.find(player => player.id === playerId)?.position"));
         assert!(html.contains("H${k.samples} V${vecLen(velocity).toFixed(1)}"));
         assert!(html.contains("function pointSegmentDistance"));
+        assert!(html.contains("function staticShotLaneOpenToTarget"));
+        assert!(html.contains("function staticShotLaneTargets"));
         assert!(html.contains("function staticShotLaneOpen"));
+        assert!(html.contains("[-0.92, -0.46, 0, 0.46, 0.92]"));
+        assert!(html.contains("goalWidthYards"));
+        assert!(
+            html.contains("staticShotLaneTargets(goalY).some(target => staticShotLaneOpenToTarget")
+        );
         assert!(html.contains("function selectedPlayerShotContext"));
         assert!(html.contains("function selectedPlayerShotLaneLabel"));
         assert!(html.contains("function selectedPlayerTacticalLabel"));

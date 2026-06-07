@@ -6483,6 +6483,20 @@ impl PlayerAgent {
                 (0.18 + directive.flank_overlap_run_probability * 0.10).clamp(0.18, 0.30),
             );
         }
+        if clearance_legal {
+            let hold_pressure = excessive_hold_pressure(observation, dribbling);
+            let min_clearance_probability = (0.16
+                + clearance_pressure_signal * 0.10
+                + defensive_urgency * 0.06
+                + defensive_third_pressure * 0.06
+                + hold_pressure * 0.14)
+                .clamp(0.18, 0.36);
+            ensure_min_legal_option_probability(
+                &mut options,
+                "clearance",
+                min_clearance_probability,
+            );
+        }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
         options
@@ -71790,6 +71804,79 @@ mod tests {
         assert!(
             held_clearance > quick_clearance * 1.20,
             "pressured overheld defender should prefer clearing: quick={quick_clearance} held={held_clearance}"
+        );
+    }
+
+    #[test]
+    fn pressured_overheld_defender_gets_clearance_probability_floor() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_107,
+            ..Default::default()
+        });
+        let defender = 2;
+        sim.players[defender].role = PlayerRole::Defender;
+        sim.players[defender].skills.dribbling = 6.1;
+        sim.players[defender].skills.defending = 8.4;
+        sim.players[defender].skills.passing_completion_rate = 6.4;
+        sim.players[defender].preferences.dribble_bias = 1.12;
+        sim.players[defender].preferences.pass_bias = 0.94;
+        let player = sim.players[defender].clone();
+        let directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        );
+        let mut observation = WorldSnapshot::from_match(&sim).observation_for(defender);
+        observation.has_ball = true;
+        observation.yards_to_own_goal = 18.0;
+        observation.yards_to_goal = 102.0;
+        observation.perceived_pressure = 0.86;
+        observation.pressure_urgency = 0.84;
+        observation.defensive_urgency = 0.92;
+        observation.immediate_dispossession_risk = 0.78;
+        observation.forward_dribble_space_yards = 5.0;
+        observation.expected_pass_completion = 0.44;
+        observation.actual_time_on_ball_seconds = 6.8;
+
+        let options = player.possession_action_options(
+            &observation,
+            &directive,
+            2,
+            1,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        let clearance = options
+            .iter()
+            .find(|option| option.label == "clearance")
+            .expect("clearance option");
+        let dribble_family_score = [
+            "dribble",
+            "carry-forward",
+            "carry-out-left",
+            "carry-out-right",
+            "protect-ball",
+            "side-step",
+            "fake-left-cut-right",
+            "fake-right-cut-left",
+            "hold-up-flank",
+        ]
+        .into_iter()
+        .map(|label| action_option_score(&options, label))
+        .fold(0.0, f64::max);
+
+        assert!(clearance.legal);
+        assert!(
+            clearance.probability >= 0.30,
+            "overheld defender under pressure should keep a meaningful clearance branch, got {}",
+            clearance.probability
+        );
+        assert!(
+            clearance.score > dribble_family_score,
+            "clearance should outrank another dribble under own-half pressure: clearance={} dribble_family={dribble_family_score}",
+            clearance.score
         );
     }
 

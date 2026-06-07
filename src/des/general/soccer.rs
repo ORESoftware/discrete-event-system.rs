@@ -60,6 +60,9 @@ const PLAYER_AVOIDANCE_LANE_RADIUS_YARDS: f64 = PLAYER_BODY_RADIUS_YARDS * 3.0;
 const PLAYER_AVOIDANCE_HEAD_ON_DOT: f64 = -0.35;
 const KICKOFF_CENTER_CIRCLE_RADIUS_YARDS: f64 = 10.0;
 const SHOT_SAVE_DEPTH_YARDS: f64 = 1.6;
+const GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP: f64 = 0.78;
+const GOALKEEPER_PARRY_MIN_YARDS: f64 = 2.0;
+const GOALKEEPER_PARRY_MAX_YARDS: f64 = 5.0;
 const BALL_AGENT_ID: usize = 25;
 const CENTRAL_BRAIN_AGENT_ID: usize = 26;
 const PLAYER_POSITION_HISTORY_LIMIT: usize = 50;
@@ -138,6 +141,10 @@ const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS: f64 = 30.0;
 const COMPLETED_DANGEROUS_CROSS_BONUS_POINTS: f64 = 3.8;
 const COMPLETED_CROSS_MAX_BONUS_POINTS: f64 = 5.0;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
+const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 1.15;
+const NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF: f64 = 0.90;
+const NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS: f64 = 2.7;
+const ELITE_DRIBBLE_HOLD_BASE_SECONDS: f64 = 4.8;
 const GOALMOUTH_CARRY_REWARD_POINTS: f64 = 1.35;
 const ENDLINE_DRIBBLE_TRAP_PENALTY_POINTS: f64 = 1.85;
 const LOW_PRESSURE_FORCED_PASS_PENALTY_POINTS: f64 = 1.75;
@@ -1597,6 +1604,8 @@ pub struct SoccerPomdpObservation {
     pub real_time_on_ball_seconds: f64,
     #[serde(default)]
     pub perceived_time_on_ball_seconds: f64,
+    #[serde(default)]
+    pub actual_time_on_ball_seconds: f64,
     #[serde(default)]
     pub fatigue: f64,
     #[serde(default)]
@@ -6084,6 +6093,8 @@ impl PlayerAgent {
         let pressured_good_outlet = (pressured_release_signal
             * floor_pass_quality.max(aerial_pass_quality * 0.86))
         .clamp(0.0, 1.0);
+        let hold_penalty_multiplier = dribble_hold_score_multiplier(observation, dribbling);
+        let hold_release_multiplier = release_after_hold_multiplier(observation, dribbling);
         let poor_floor_pass = (1.0 - floor_pass_quality).clamp(0.0, 1.0);
         let forward_space_fit = (observation.forward_dribble_space_yards / 18.0).clamp(0.0, 1.0);
         let patient_dribble_lift = (1.0
@@ -6118,8 +6129,11 @@ impl PlayerAgent {
             * (1.0 + offensive_urgency * 0.30 + pressure_urgency * 0.20)
             * (1.0 - pressured_good_outlet * 0.30).clamp(0.62, 1.0))
         .clamp(0.02, 1.36);
-        let dribble_score =
-            (pre_fatigue_dribble_score * fatigue_dribble * patient_dribble_lift).clamp(0.02, 1.75);
+        let dribble_score = (pre_fatigue_dribble_score
+            * fatigue_dribble
+            * patient_dribble_lift
+            * hold_penalty_multiplier)
+            .clamp(0.02, 1.75);
         let patient_carry_score_base = (dribble_score * patient_carry_multiplier).clamp(0.02, 1.58);
         let carry_forward_legal = (observation.forward_dribble_space_yards >= 1.2
             || goalmouth_carry_forced)
@@ -6225,6 +6239,7 @@ impl PlayerAgent {
             * (0.46 + dribbling * 0.42 + ability01(self.skills.strength) * 0.18)
             * (0.74 + pressure * 0.18)
             * (1.0 + (1.0 - (pass_target_count as f64 / 2.0).clamp(0.0, 1.0)) * 0.28))
+            * hold_penalty_multiplier
             * (1.0 - pressured_good_outlet * 0.26).clamp(0.62, 1.0))
         .clamp(0.03, 0.78);
         let mut options = vec![
@@ -6260,16 +6275,31 @@ impl PlayerAgent {
             PlayerRole::Midfielder => 0.24,
             PlayerRole::Forward => 0.08,
         };
+        let emergency_clearance_pressure = pressure_urgency
+            .max(pressure)
+            .max(defensive_urgency)
+            .max(observation.immediate_dispossession_risk)
+            .clamp(0.0, 1.0);
+        let clearance_pressure_signal = pressure_urgency
+            .max(pressure)
+            .max(observation.immediate_dispossession_risk)
+            .clamp(0.0, 1.0);
         let clearance_legal = own_half
-            && pressure_urgency.max(pressure) >= 0.35
+            && (clearance_pressure_signal >= 0.34
+                || (defensive_urgency >= 0.42 && clearance_pressure_signal >= 0.24)
+                || excessive_hold_pressure(observation, dribbling) >= 0.18)
             && matches!(self.role, PlayerRole::Goalkeeper | PlayerRole::Defender);
         let clearance_score = ((pressure * 0.48
             + defensive_urgency * 0.46
             + defensive_third_pressure * 0.42
+            + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.24
+            + excessive_hold_pressure(observation, dribbling) * 0.32
             + (1.0 - observation.expected_pass_completion.clamp(0.0, 1.0)) * 0.20)
             * clearance_role_bias
-            * (0.78 + ability01(self.skills.defending) * 0.22))
-            .clamp(0.01, 0.88);
+            * (0.78 + ability01(self.skills.defending) * 0.22)
+            * hold_release_multiplier
+            * (1.0 + emergency_clearance_pressure * 0.18))
+            .clamp(0.01, 1.78);
         let route_one_role_bias = match self.role {
             PlayerRole::Goalkeeper => 0.76,
             PlayerRole::Defender => 0.92,
@@ -6281,11 +6311,13 @@ impl PlayerAgent {
             + directive.risk_tolerance * 0.12
             + passing * 0.12
             + defensive_urgency * 0.22
+            + excessive_hold_pressure(observation, dribbling) * 0.18
             + observation.attacking_overload_score.clamp(0.0, 1.0) * 0.22
             + (1.0 - observation.expected_pass_completion.clamp(0.0, 1.0)) * 0.10
             + (1.0 - (pass_target_count as f64 / 3.0).clamp(0.0, 1.0)) * 0.08)
-            * route_one_role_bias)
-            .clamp(0.02, 0.58);
+            * route_one_role_bias
+            * hold_release_multiplier)
+            .clamp(0.02, 1.12);
         options.push(AgentActionOptionTrace::new(
             "clearance",
             clearance_score,
@@ -6301,6 +6333,7 @@ impl PlayerAgent {
             low_pressure_pass_release_multiplier(observation, PassFlight::Floor);
         let aerial_pass_patience_multiplier =
             low_pressure_pass_release_multiplier(observation, PassFlight::Aerial);
+        let hold_release_score_cap = 1.22 * hold_release_multiplier.clamp(1.0, 1.38);
         let aerial_forward_runner_multiplier = observation
             .aerial_forward_runner_pass_multiplier
             .clamp(1.0, 1.50);
@@ -6320,6 +6353,7 @@ impl PlayerAgent {
                 + goal_attack * 0.22)
             * near_goal_pass_multiplier
             * floor_pass_patience_multiplier
+            * hold_release_multiplier
             * pressured_release_multiplier(observation)
             * low_cross_multiplier)
             .clamp(0.01, 0.86);
@@ -6352,6 +6386,7 @@ impl PlayerAgent {
             * near_goal_pass_multiplier
             * aerial_pass_patience_multiplier
             * aerial_forward_runner_multiplier
+            * hold_release_multiplier
             * pressured_release_multiplier(observation)
             * high_cross_multiplier)
             .clamp(0.01, 0.78);
@@ -6381,10 +6416,11 @@ impl PlayerAgent {
                 * (1.0 + observation.pass_curl_probability * 0.055)
                 * near_goal_pass_multiplier
                 * floor_pass_patience_multiplier
+                * hold_release_multiplier
                 * low_cross_multiplier
                 * pressured_release_multiplier(observation)
                 * rank_weight)
-                .clamp(0.004, 0.97);
+                .clamp(0.004, hold_release_score_cap);
             options.push(AgentActionOptionTrace::new(
                 format!("pass{}", rank + 1),
                 pass_score,
@@ -6423,10 +6459,11 @@ impl PlayerAgent {
                 * near_goal_pass_multiplier
                 * aerial_pass_patience_multiplier
                 * aerial_forward_runner_multiplier
+                * hold_release_multiplier
                 * high_cross_multiplier
                 * pressured_release_multiplier(observation)
                 * rank_weight)
-                .clamp(0.004, 0.74);
+                .clamp(0.004, 0.98 * hold_release_multiplier.clamp(1.0, 1.24));
             options.push(AgentActionOptionTrace::new(
                 format!("aerial-pass{}", rank + 1),
                 aerial_score,
@@ -7860,12 +7897,16 @@ impl PlayerAgent {
                         {
                             chosen = Some((
                                 SoccerAction::Clearance {
-                                    target: clearance_target_for_player(
-                                        self.team,
-                                        self.position,
-                                        snapshot.field_width,
-                                        snapshot.field_length,
-                                    ),
+                                    target: snapshot
+                                        .pressure_clearance_target_for(self.id)
+                                        .unwrap_or_else(|| {
+                                            clearance_target_for_player(
+                                                self.team,
+                                                self.position,
+                                                snapshot.field_width,
+                                                snapshot.field_length,
+                                            )
+                                        }),
                                     power: 0.86
                                         + observation.perceived_pressure.clamp(0.0, 1.0) * 0.12,
                                 },
@@ -8559,12 +8600,16 @@ impl PlayerAgent {
             }
             "clearance" if observation.has_ball => Some((
                 SoccerAction::Clearance {
-                    target: clearance_target_for_player(
-                        self.team,
-                        self.position,
-                        snapshot.field_width,
-                        snapshot.field_length,
-                    ),
+                    target: snapshot
+                        .pressure_clearance_target_for(self.id)
+                        .unwrap_or_else(|| {
+                            clearance_target_for_player(
+                                self.team,
+                                self.position,
+                                snapshot.field_width,
+                                snapshot.field_length,
+                            )
+                        }),
                     power: 0.92,
                 },
                 "clearance".to_string(),
@@ -11048,12 +11093,22 @@ impl BallAgent {
                                 shot: Some(shot),
                             };
                         };
+                        let sightline_screen_probability =
+                            shot_sightline_screen_probability_for_agents(
+                                context.players,
+                                shot.origin,
+                                crossing_position,
+                                shot.team,
+                                self.velocity.len(),
+                                false,
+                            );
                         let save_probability = goalkeeper_save_probability(
                             keeper,
                             shot.origin,
                             crossing_position,
                             self.velocity.len(),
                             context.goal_width,
+                            sightline_screen_probability,
                         );
                         if rng.next_float() < save_probability {
                             let save_y = match defending_team {
@@ -11067,20 +11122,66 @@ impl BallAgent {
                                 ),
                                 save_y,
                             );
-                            self.holder = Some(keeper_id);
-                            self.position = save_position;
-                            self.velocity = Vec2::zero();
+                            let catch_probability = goalkeeper_catch_probability_after_save(
+                                keeper,
+                                shot.origin,
+                                crossing_position,
+                                self.velocity.len(),
+                                context.goal_width,
+                                sightline_screen_probability,
+                            );
+                            if rng.next_float() < catch_probability {
+                                self.holder = Some(keeper_id);
+                                self.position = save_position;
+                                self.velocity = Vec2::zero();
+                                self.curl_acceleration = Vec2::zero();
+                                self.altitude_yards = 0.0;
+                                self.untargeted_long_ball_flight = None;
+                                self.untargeted_long_ball_launcher = None;
+                                self.last_touch_team = Some(defending_team);
+                                self.record_decision(context.tick, "save", context.scheduled_index);
+                                return BallStepOutcome::Save {
+                                    shot,
+                                    defending_team,
+                                    keeper_id,
+                                    save_position,
+                                };
+                            }
+                            let away_from_goal = Vec2::new(0.0, defending_team.attack_dir());
+                            let lateral = Vec2::new(1.0, 0.0)
+                                * if rng.next_float() < 0.5 { -1.0 } else { 1.0 };
+                            let parry_direction =
+                                (away_from_goal * 0.78 + lateral * 0.22).normalized();
+                            let parry_distance = GOALKEEPER_PARRY_MIN_YARDS
+                                + rng.next_float()
+                                    * (GOALKEEPER_PARRY_MAX_YARDS - GOALKEEPER_PARRY_MIN_YARDS);
+                            let parry_position = (save_position + parry_direction * parry_distance)
+                                .clamp_to_pitch(context.field_width, context.field_length);
+                            let parry_speed = (4.8 + rng.next_float() * 3.8).max(
+                                parry_position.distance(save_position)
+                                    / context.dt_seconds.max(0.35),
+                            );
+                            let parry_velocity = parry_direction * parry_speed;
+                            self.holder = None;
+                            self.position = parry_position;
+                            self.velocity = parry_velocity;
                             self.curl_acceleration = Vec2::zero();
                             self.altitude_yards = 0.0;
                             self.untargeted_long_ball_flight = None;
                             self.untargeted_long_ball_launcher = None;
                             self.last_touch_team = Some(defending_team);
-                            self.record_decision(context.tick, "save", context.scheduled_index);
-                            return BallStepOutcome::Save {
+                            self.record_decision(
+                                context.tick,
+                                "keeper-parry",
+                                context.scheduled_index,
+                            );
+                            return BallStepOutcome::KeeperParry {
                                 shot,
                                 defending_team,
                                 keeper_id,
                                 save_position,
+                                parry_position,
+                                velocity: parry_velocity,
                             };
                         }
                     }
@@ -12334,6 +12435,14 @@ enum BallStepOutcome {
         defending_team: Team,
         keeper_id: usize,
         save_position: Vec2,
+    },
+    KeeperParry {
+        shot: PendingShot,
+        defending_team: Team,
+        keeper_id: usize,
+        save_position: Vec2,
+        parry_position: Vec2,
+        velocity: Vec2,
     },
     Goal {
         scoring_team: Team,
@@ -17066,6 +17175,7 @@ impl WorldSnapshot {
                 goal_attack_window_score: 0.0,
                 real_time_on_ball_seconds: 0.0,
                 perceived_time_on_ball_seconds: 0.0,
+                actual_time_on_ball_seconds: 0.0,
                 fatigue: 0.0,
                 nearest_defender_fatigue: 0.0,
                 perceived_nearest_defender_fatigue: 0.5,
@@ -17345,6 +17455,11 @@ impl WorldSnapshot {
             perceived_pressure_for_player(me, real_pressure, visible_opponents);
         let real_time_on_ball_seconds = time_on_ball_seconds(real_pressure);
         let perceived_time_on_ball_seconds = time_on_ball_seconds(perceived_pressure);
+        let actual_time_on_ball_seconds = if has_ball {
+            self.ball_holder_possession_seconds.max(0.0)
+        } else {
+            0.0
+        };
         let expected_shot_power = shot_power_for_skill(ability01(me.skills.shooting));
         let expected_shot_speed_yps = shot_speed_yps_from_power(expected_shot_power, &me.skills);
         let shot_block_assessment = if has_ball {
@@ -17763,6 +17878,7 @@ impl WorldSnapshot {
             goal_attack_window_score,
             real_time_on_ball_seconds,
             perceived_time_on_ball_seconds,
+            actual_time_on_ball_seconds,
             fatigue: me.fatigue.clamp(0.0, 1.0),
             nearest_defender_fatigue,
             perceived_nearest_defender_fatigue,
@@ -17832,6 +17948,56 @@ impl WorldSnapshot {
             .into_iter()
             .next()
             .or_else(|| self.best_pass_target(player_id))
+    }
+
+    pub fn pressure_clearance_target_for(&self, player_id: usize) -> Option<Vec2> {
+        let me = self.players.iter().find(|player| player.id == player_id)?;
+        let from = self.player_snapshot_position(me);
+        let base =
+            clearance_target_for_actor(me.team, from, self.field_width, self.field_length, me.role);
+        let attack_dir = me.team.attack_dir();
+        let nominal_speed = pass_speed_yps_from_power(0.92, PassFlight::Aerial, false, &me.skills);
+        let outlet = self
+            .ranked_visible_aerial_pass_targets(player_id, 5)
+            .into_iter()
+            .filter_map(|target_id| {
+                let target = self.players.iter().find(|player| player.id == target_id)?;
+                let target_position = self
+                    .anticipated_pass_reception_point(
+                        player_id,
+                        target_id,
+                        PassFlight::Aerial,
+                        nominal_speed,
+                    )
+                    .or_else(|| self.player_position(target_id))
+                    .unwrap_or_else(|| self.player_snapshot_position(target));
+                let forward = (target_position.y - from.y) * attack_dir;
+                if forward < 10.0
+                    || self
+                        .pending_offside_for_pass(player_id, target_id)
+                        .is_some()
+                {
+                    return None;
+                }
+                let role_bonus = match target.role {
+                    PlayerRole::Forward => 10.0,
+                    PlayerRole::Midfielder => 4.0,
+                    PlayerRole::Defender => 1.0,
+                    PlayerRole::Goalkeeper => -8.0,
+                };
+                let base_fit = (1.0 - target_position.distance(base) / 54.0).clamp(0.0, 1.0) * 12.0;
+                Some((target_position, forward + role_bonus + base_fit))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(target_position, _)| target_position);
+        outlet
+            .map(|target_position| {
+                let runner_lead = Vec2::new(0.0, attack_dir * 8.0);
+                (target_position + runner_lead).clamp_to_pitch(self.field_width, self.field_length)
+                    * 0.72
+                    + base * 0.28
+            })
+            .map(|target| target.clamp_to_pitch(self.field_width, self.field_length))
     }
 
     pub fn ranked_pass_targets(&self, player_id: usize, limit: usize) -> Vec<usize> {
@@ -34348,6 +34514,28 @@ impl SoccerMatch {
         }
     }
 
+    fn record_excessive_hold_penalty(&mut self, player_id: usize, action: &SoccerAction) {
+        if player_id >= self.players.len()
+            || self.ball.holder != Some(player_id)
+            || !matches!(
+                action,
+                SoccerAction::Dribble(_)
+                    | SoccerAction::DribbleMove { .. }
+                    | SoccerAction::HoldShape
+            )
+        {
+            return;
+        }
+        let snapshot = WorldSnapshot::from_match(self);
+        let observation = snapshot.observation_for(player_id);
+        let dribbling = ability01(self.players[player_id].skills.dribbling);
+        let amount = excessive_hold_penalty_points(&observation, dribbling)
+            * self.config.dt_seconds.clamp(0.05, 1.0);
+        if amount > 0.0 {
+            self.record_reward_event(player_id, -amount);
+        }
+    }
+
     fn apply_player_intent(&mut self, intent: PlayerIntent) {
         if intent.player_id >= self.players.len() {
             return;
@@ -34356,6 +34544,7 @@ impl SoccerMatch {
         let action_facing = self.facing_for_player_action(player_id, &intent.action);
         self.players[player_id].action_facing = action_facing;
         self.record_near_goal_no_shot_penalty(player_id, &intent.action);
+        self.record_excessive_hold_penalty(player_id, &intent.action);
         let player_pos = self.players[player_id].position;
         let player_team = self.players[player_id].team;
         match intent.action {
@@ -35276,6 +35465,57 @@ impl SoccerMatch {
                     team: Some(defending_team),
                     player_id: Some(keeper_id),
                     description: format!("{keeper_name} saved a shot by {shooter_name}"),
+                });
+            }
+            BallStepOutcome::KeeperParry {
+                shot,
+                defending_team,
+                keeper_id,
+                save_position,
+                parry_position,
+                velocity,
+            } => {
+                self.pending_shot = None;
+                self.ball.holder = None;
+                self.ball.position = parry_position;
+                self.ball.velocity = velocity;
+                self.ball.altitude_yards = 0.0;
+                self.ball.untargeted_long_ball_flight = None;
+                self.ball.untargeted_long_ball_launcher = None;
+                self.ball.last_touch_team = Some(defending_team);
+                self.stat_shot_on_target(shot.team);
+                self.record_shot_on_target_rewards(shot.team, shot.shooter);
+                self.stat_save(defending_team);
+                if let Some(keeper) = self
+                    .players
+                    .iter_mut()
+                    .find(|player| player.id == keeper_id)
+                {
+                    keeper.position = save_position;
+                    keeper.velocity = Vec2::zero();
+                    keeper.acceleration = Vec2::zero();
+                    keeper.jerk = Vec2::zero();
+                    keeper.movement_gait = MovementGait::Stand;
+                }
+                let keeper_name = self
+                    .players
+                    .iter()
+                    .find(|player| player.id == keeper_id)
+                    .map(|player| player.name.as_str())
+                    .unwrap_or("Keeper");
+                let shooter_name = self
+                    .players
+                    .iter()
+                    .find(|player| player.id == shot.shooter)
+                    .map(|player| player.name.as_str())
+                    .unwrap_or("shooter");
+                self.events.push(MatchEvent {
+                    tick: self.tick,
+                    clock_seconds: self.clock_seconds,
+                    kind: "keeper-parry".to_string(),
+                    team: Some(defending_team),
+                    player_id: Some(keeper_id),
+                    description: format!("{keeper_name} parried a shot by {shooter_name}"),
                 });
             }
             BallStepOutcome::Goal { scoring_team, shot } => {
@@ -45691,6 +45931,85 @@ fn time_on_ball_seconds(pressure: f64) -> f64 {
     (2.8 - pressure.clamp(0.0, 1.0) * 2.35).clamp(0.25, 3.0)
 }
 
+fn dribble_hold_base_seconds(dribbling: f64) -> f64 {
+    let dribbling = dribbling.clamp(0.0, 1.0);
+    let elite_fit =
+        ((dribbling - 0.72) / (NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF - 0.72)).clamp(0.0, 1.0);
+    NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS
+        + (ELITE_DRIBBLE_HOLD_BASE_SECONDS - NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS) * elite_fit
+}
+
+fn excessive_hold_pressure(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
+    let actual_hold = observation.actual_time_on_ball_seconds.max(0.0);
+    if actual_hold <= 0.0 {
+        return 0.0;
+    }
+    let urgency = observation
+        .pressure_urgency
+        .max(observation.defensive_urgency)
+        .max(observation.perceived_pressure)
+        .clamp(0.0, 1.0);
+    let allowed_seconds = (dribble_hold_base_seconds(dribbling)
+        - urgency * 0.85
+        - observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.45)
+        .clamp(1.15, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
+    ((actual_hold - allowed_seconds) / 3.2).clamp(0.0, 1.0)
+}
+
+fn dribble_hold_score_multiplier(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
+    let hold_pressure = excessive_hold_pressure(observation, dribbling);
+    if hold_pressure <= 0.0 {
+        return 1.0;
+    }
+    let non_elite_fit =
+        ((NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF - dribbling.clamp(0.0, 1.0)) / 0.34).clamp(0.0, 1.0);
+    let pressure_fit = observation
+        .pressure_urgency
+        .max(observation.perceived_pressure)
+        .clamp(0.0, 1.0);
+    (1.0 - hold_pressure * (0.24 + non_elite_fit * 0.54 + pressure_fit * 0.18)).clamp(
+        if dribbling >= NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF {
+            0.74
+        } else {
+            0.26
+        },
+        1.0,
+    )
+}
+
+fn release_after_hold_multiplier(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
+    let hold_pressure = excessive_hold_pressure(observation, dribbling);
+    if hold_pressure <= 0.0 {
+        return 1.0;
+    }
+    let non_elite_fit =
+        ((NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF - dribbling.clamp(0.0, 1.0)) / 0.34).clamp(0.0, 1.0);
+    let urgency_fit = observation
+        .pressure_urgency
+        .max(observation.defensive_urgency)
+        .max(observation.immediate_dispossession_risk)
+        .clamp(0.0, 1.0);
+    (1.0 + hold_pressure * (0.34 + non_elite_fit * 0.46 + urgency_fit * 0.36)).clamp(1.0, 2.05)
+}
+
+fn excessive_hold_penalty_points(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
+    let hold_pressure = excessive_hold_pressure(observation, dribbling);
+    if hold_pressure <= 0.0 {
+        return 0.0;
+    }
+    let non_elite_fit =
+        ((NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF - dribbling.clamp(0.0, 1.0)) / 0.34).clamp(0.0, 1.0);
+    let urgency_fit = observation
+        .pressure_urgency
+        .max(observation.defensive_urgency)
+        .max(observation.immediate_dispossession_risk)
+        .clamp(0.0, 1.0);
+    (EXCESSIVE_HOLD_PENALTY_POINTS
+        * hold_pressure
+        * (0.35 + non_elite_fit * 0.52 + urgency_fit * 0.30))
+        .clamp(0.0, EXCESSIVE_HOLD_PENALTY_POINTS * 1.25)
+}
+
 fn immediate_dispossession_risk_for_player(
     player: &PlayerSnapshot,
     nearest_opponent_distance: f64,
@@ -47573,6 +47892,36 @@ fn shot_block_assessment_for_agents(
     combine_shot_block_assessments(assessments)
 }
 
+fn shot_sightline_screen_probability_for_agents(
+    players: &[PlayerAgent],
+    from: Vec2,
+    to: Vec2,
+    attacking_team: Team,
+    shot_speed_yps: f64,
+    quick_release: bool,
+) -> f64 {
+    let clear_probability = players
+        .iter()
+        .filter(|player| {
+            player.team == attacking_team.other() && player.role != PlayerRole::Goalkeeper
+        })
+        .filter_map(|player| {
+            shot_block_probability_for_candidate(
+                &player.skills,
+                player.role,
+                player.fatigue,
+                from,
+                to,
+                player.position,
+                shot_speed_yps,
+                quick_release,
+            )
+            .map(|(probability, _, _, _, _)| 1.0 - probability.clamp(0.0, 1.0))
+        })
+        .product::<f64>();
+    (1.0 - clear_probability).clamp(0.0, 1.0)
+}
+
 fn shot_block_assessment_for_snapshot(
     snapshot: &WorldSnapshot,
     from: Vec2,
@@ -47677,13 +48026,15 @@ fn goalkeeper_save_probability_from_traits(
     shot_crossing: Vec2,
     shot_speed: f64,
     goal_width: f64,
+    sightline_screen_probability: f64,
 ) -> f64 {
     let reaction = ability01(skills.goalkeeping) * 0.48
         + ability01(skills.defending) * 0.18
         + ability01(skills.first_touch) * 0.20
         + ability01(skills.acceleration) * 0.14;
     let reaction_time = goalkeeper_reaction_time_seconds(skills, keeper_fatigue);
-    let shot_travel_time = shooter_position.distance(shot_crossing) / shot_speed.max(1.0);
+    let shot_distance = shooter_position.distance(shot_crossing);
+    let shot_travel_time = shot_distance / shot_speed.max(1.0);
     let available_move_time = (shot_travel_time - reaction_time).max(0.0);
     let acceleration_reach = 0.5
         * acceleration_yps2_from_score(skills.acceleration)
@@ -47715,12 +48066,28 @@ fn goalkeeper_save_probability_from_traits(
     let rush_speed = dot(keeper_velocity, rush_dir).max(0.0);
     let rush_bonus =
         (rush_speed / top_speed_yps_from_score(skills.top_speed).max(1.0)).clamp(0.0, 1.0) * 0.08;
-    let raw_save_probability = (0.34 + reaction * 0.78 + angle_cut_score * 0.18 + rush_bonus
+    let clean_sightline = (1.0 - sightline_screen_probability.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let distance_save_bonus = ((shot_distance - 18.0) / 42.0).clamp(0.0, 1.0) * 0.12;
+    let clear_long_shot_bonus =
+        clean_sightline * ((shot_distance - 24.0) / 38.0).clamp(0.0, 1.0) * 0.10;
+    let screened_penalty = sightline_screen_probability.clamp(0.0, 1.0) * 0.16;
+    let raw_save_probability = (0.34
+        + reaction * 0.78
+        + angle_cut_score * 0.18
+        + rush_bonus
+        + distance_save_bonus
+        + clear_long_shot_bonus
         - reach_penalty * 0.24
         - speed_penalty
-        - reaction_penalty)
+        - reaction_penalty
+        - screened_penalty)
         .clamp(0.12, 0.94);
-    (raw_save_probability * 0.50).clamp(0.0, 0.50)
+    let long_clear_fit =
+        (clean_sightline * ((shot_distance - 24.0) / 38.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let contextual_cap = (0.50 + long_clear_fit * (GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP - 0.50)
+        - sightline_screen_probability.clamp(0.0, 1.0) * 0.08)
+        .clamp(0.36, GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP);
+    (raw_save_probability * (0.50 + long_clear_fit * 0.24)).clamp(0.0, contextual_cap)
 }
 
 fn goalkeeper_save_probability(
@@ -47729,6 +48096,7 @@ fn goalkeeper_save_probability(
     shot_crossing: Vec2,
     shot_speed: f64,
     goal_width: f64,
+    sightline_screen_probability: f64,
 ) -> f64 {
     goalkeeper_save_probability_from_traits(
         &keeper.skills,
@@ -47739,7 +48107,38 @@ fn goalkeeper_save_probability(
         shot_crossing,
         shot_speed,
         goal_width,
+        sightline_screen_probability,
     )
+}
+
+fn goalkeeper_catch_probability_after_save(
+    keeper: &PlayerAgent,
+    shooter_position: Vec2,
+    shot_crossing: Vec2,
+    shot_speed: f64,
+    goal_width: f64,
+    sightline_screen_probability: f64,
+) -> f64 {
+    let shot_distance = shooter_position.distance(shot_crossing);
+    let clean_sightline = (1.0 - sightline_screen_probability.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let handling = (ability01(keeper.skills.goalkeeping) * 0.58
+        + ability01(keeper.skills.first_touch) * 0.42)
+        .clamp(0.0, 1.0);
+    let distance_fit = ((shot_distance - 18.0) / 42.0).clamp(0.0, 1.0);
+    let high_speed_fit = (shot_speed / mph_to_yps(60.0)).clamp(0.0, 1.25);
+    let near_keeper_fit = (1.0
+        - keeper.position.distance(shot_crossing) / (goal_width * 0.72).max(0.1))
+    .clamp(0.0, 1.0);
+    let short_medium_fit = if shot_distance <= 32.0 {
+        (1.0 - (shot_distance - 18.0).abs() / 22.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (0.20 + handling * 0.30 + clean_sightline * 0.18 + distance_fit * 0.24
+        - high_speed_fit * 0.18
+        - short_medium_fit * near_keeper_fit * 0.28
+        - sightline_screen_probability.clamp(0.0, 1.0) * 0.16)
+        .clamp(0.08, 0.92)
 }
 
 fn shot_beat_goalkeeper_probability_for_snapshot(
@@ -47790,6 +48189,7 @@ fn shot_beat_goalkeeper_probability_for_snapshot(
         shot_crossing,
         shot_speed,
         snapshot.goal_width,
+        0.0,
     );
     (1.0 - save_probability).clamp(0.0, 1.0)
 }
@@ -67241,6 +67641,51 @@ mod tests {
     }
 
     #[test]
+    fn pressure_clearance_target_bends_toward_visible_aerial_outlet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let runner = 9;
+        park_players_except(&mut sim, &[defender, runner]);
+        sim.players[defender].position = Vec2::new(30.0, 24.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+        sim.players[defender].action_facing = FacingBucket::South;
+        sim.players[defender].receive_facing = FacingBucket::South;
+        sim.players[defender].skills.passing_completion_rate = 7.2;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(52.0, 62.0);
+        sim.players[runner].home_position = sim.players[runner].position;
+        sim.players[runner].velocity = Vec2::new(0.0, 3.0);
+        sim.ball.holder = Some(defender);
+        sim.ball.position = sim.players[defender].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let base = clearance_target_for_player(
+            Team::Home,
+            sim.players[defender].position,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let target = snapshot
+            .pressure_clearance_target_for(defender)
+            .expect("visible forward outlet should shape clearance");
+
+        assert!(
+            target.y > sim.players[defender].position.y + 40.0,
+            "pressure clearance should still be a long territorial ball: target={target:?}"
+        );
+        assert!(
+            target.x > base.x + 10.0,
+            "target should bend toward the visible runner lane instead of static channel: base={base:?} target={target:?}"
+        );
+        assert!(
+            target.distance(sim.players[runner].position)
+                < base.distance(sim.players[runner].position),
+            "teammate-shaped clearance should land closer to the aerial outlet"
+        );
+    }
+
+    #[test]
     fn route_one_ball_targets_opponent_half_without_pass_attempt() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 6;
@@ -67558,6 +68003,7 @@ mod tests {
         let mut calm_observation = observation.clone();
         calm_observation.perceived_pressure = 0.05;
         calm_observation.pressure_urgency = 0.05;
+        calm_observation.immediate_dispossession_risk = 0.05;
         calm_observation.decision_urgency = calm_observation
             .offensive_urgency
             .max(calm_observation.defensive_urgency);
@@ -71126,6 +71572,137 @@ mod tests {
     }
 
     #[test]
+    fn non_elite_long_hold_shifts_choice_from_carry_to_release() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_104,
+            ..Default::default()
+        });
+        let holder = 6;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].skills.dribbling = 7.2;
+        sim.players[holder].skills.passing_completion_rate = 7.6;
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut fresh = snapshot.observation_for(holder);
+        fresh.has_ball = true;
+        fresh.visible_pass_options = 1;
+        fresh.visible_forward_pass_options = 1;
+        fresh.forward_dribble_space_yards = 10.0;
+        fresh.expected_pass_completion = 0.82;
+        fresh.best_pass_receiver_openness = 0.76;
+        fresh.floor_pass_lane_score = 0.78;
+        fresh.perceived_pressure = 0.54;
+        fresh.pressure_urgency = 0.56;
+        fresh.immediate_dispossession_risk = 0.46;
+        fresh.yards_to_goal = 58.0;
+        fresh.yards_to_own_goal = 62.0;
+        fresh.actual_time_on_ball_seconds = 0.8;
+        let mut overheld = fresh.clone();
+        overheld.actual_time_on_ball_seconds = 7.2;
+
+        let player = sim.players[holder].clone();
+        let directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        );
+        let fresh_options = player.possession_action_options(
+            &fresh,
+            &directive,
+            1,
+            0,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        let overheld_options = player.possession_action_options(
+            &overheld,
+            &directive,
+            1,
+            0,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        let fresh_carry = action_option_score(&fresh_options, "carry-forward");
+        let overheld_carry = action_option_score(&overheld_options, "carry-forward");
+        let fresh_pass = action_option_score(&fresh_options, "pass1");
+        let overheld_pass = action_option_score(&overheld_options, "pass1");
+
+        assert!(
+            overheld_carry < fresh_carry * 0.72,
+            "non-elite overheld carry should shrink: fresh={fresh_carry} overheld={overheld_carry}"
+        );
+        assert!(
+            overheld_pass / overheld_carry > fresh_pass / fresh_carry * 1.35,
+            "non-elite overheld possession should shift release-vs-carry ratio: fresh={fresh_pass}/{fresh_carry} overheld={overheld_pass}/{overheld_carry}"
+        );
+    }
+
+    #[test]
+    fn pressured_defender_long_hold_boosts_clearance() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_105,
+            ..Default::default()
+        });
+        let defender = 2;
+        sim.players[defender].role = PlayerRole::Defender;
+        sim.players[defender].skills.dribbling = 6.4;
+        sim.players[defender].skills.defending = 8.0;
+        sim.players[defender].skills.passing_completion_rate = 6.8;
+        let player = sim.players[defender].clone();
+        let directive = TeamTacticalDirective::neutral(
+            Team::Home,
+            DEFAULT_FIELD_WIDTH_YARDS,
+            DEFAULT_FIELD_LENGTH_YARDS,
+        );
+        let mut observation = WorldSnapshot::from_match(&sim).observation_for(defender);
+        observation.has_ball = true;
+        observation.yards_to_own_goal = 24.0;
+        observation.yards_to_goal = 96.0;
+        observation.perceived_pressure = 0.70;
+        observation.pressure_urgency = 0.74;
+        observation.defensive_urgency = 0.86;
+        observation.immediate_dispossession_risk = 0.66;
+        observation.expected_pass_completion = 0.42;
+        observation.actual_time_on_ball_seconds = 0.6;
+        let quick_options = player.possession_action_options(
+            &observation,
+            &directive,
+            1,
+            1,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        observation.actual_time_on_ball_seconds = 6.6;
+        let held_options = player.possession_action_options(
+            &observation,
+            &directive,
+            1,
+            1,
+            false,
+            0.1,
+            DEFAULT_FIELD_WIDTH_YARDS,
+        );
+        let quick_clearance = action_option_score(&quick_options, "clearance");
+        let held_clearance = action_option_score(&held_options, "clearance");
+        let clearance = held_options
+            .iter()
+            .find(|option| option.label == "clearance")
+            .expect("clearance option");
+
+        assert!(clearance.legal);
+        assert!(
+            held_clearance > quick_clearance * 1.20,
+            "pressured overheld defender should prefer clearing: quick={quick_clearance} held={held_clearance}"
+        );
+    }
+
+    #[test]
     fn pressured_holder_can_protect_ball_with_body_shield() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -72357,6 +72934,7 @@ mod tests {
             Vec2::new(40.0, 120.0),
             mph_to_yps(54.0),
             sim.config.goal_width_yards,
+            0.0,
         );
 
         assert!(
@@ -72367,6 +72945,116 @@ mod tests {
             save_probability >= 0.06,
             "keeper should still have a nonzero chance on direct shots"
         );
+    }
+
+    #[test]
+    fn goalkeeper_save_probability_improves_with_distance_and_clear_sightline() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper_id = sim.goalkeeper_for(Team::Away).expect("away keeper");
+        sim.players[keeper_id].position = Vec2::new(40.0, 118.4);
+        sim.players[keeper_id].skills.goalkeeping = 9.2;
+        sim.players[keeper_id].skills.defending = 8.6;
+        sim.players[keeper_id].skills.first_touch = 9.0;
+        sim.players[keeper_id].skills.acceleration = 8.8;
+
+        let long_clean = goalkeeper_save_probability(
+            &sim.players[keeper_id],
+            Vec2::new(40.0, 62.0),
+            Vec2::new(40.0, 120.0),
+            mph_to_yps(42.0),
+            sim.config.goal_width_yards,
+            0.0,
+        );
+        let close_hard_screened = goalkeeper_save_probability(
+            &sim.players[keeper_id],
+            Vec2::new(40.0, 108.0),
+            Vec2::new(40.0, 120.0),
+            mph_to_yps(64.0),
+            sim.config.goal_width_yards,
+            0.82,
+        );
+
+        assert!(
+            long_clean > close_hard_screened + 0.18,
+            "long clear-sightline shots should be more keeper-friendly: long={long_clean} close={close_hard_screened}"
+        );
+        assert!(
+            long_clean > 0.50,
+            "long clear-sightline shots can exceed the short direct-shot cap, got {long_clean}"
+        );
+    }
+
+    #[test]
+    fn keeper_catches_long_clear_sightline_shots_more_than_close_hard_shots() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper_id = sim.goalkeeper_for(Team::Away).expect("away keeper");
+        let keeper = &mut sim.players[keeper_id];
+        keeper.position = Vec2::new(40.0, 118.4);
+        keeper.skills.goalkeeping = 8.0;
+        keeper.skills.first_touch = 8.0;
+        keeper.skills.acceleration = 7.4;
+        let long_clean = goalkeeper_catch_probability_after_save(
+            keeper,
+            Vec2::new(40.0, 72.0),
+            Vec2::new(40.0, 120.0),
+            mph_to_yps(42.0),
+            sim.config.goal_width_yards,
+            0.0,
+        );
+        let close_hard_screened = goalkeeper_catch_probability_after_save(
+            keeper,
+            Vec2::new(40.0, 106.0),
+            Vec2::new(40.0, 120.0),
+            mph_to_yps(60.0),
+            sim.config.goal_width_yards,
+            0.72,
+        );
+
+        assert!(
+            long_clean > close_hard_screened + 0.25,
+            "long clean shots should be catchable; close hard screened shots should invite parries: long={long_clean} close={close_hard_screened}"
+        );
+    }
+
+    #[test]
+    fn keeper_parry_records_save_and_leaves_live_rebound() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper_id = sim.goalkeeper_for(Team::Away).expect("away keeper");
+        let shot = PendingShot {
+            team: Team::Home,
+            shooter: 9,
+            origin: Vec2::new(40.0, 104.0),
+        };
+        sim.pending_shot = Some(shot.clone());
+        sim.ball.holder = Some(keeper_id);
+
+        sim.apply_ball_outcome(BallStepOutcome::KeeperParry {
+            shot,
+            defending_team: Team::Away,
+            keeper_id,
+            save_position: Vec2::new(40.0, 118.4),
+            parry_position: Vec2::new(41.4, 115.2),
+            velocity: Vec2::new(1.2, -7.4),
+        });
+
+        assert!(sim.pending_shot.is_none());
+        assert_eq!(sim.ball.holder, None);
+        assert_eq!(sim.ball.last_touch_team, Some(Team::Away));
+        assert_eq!(sim.players[keeper_id].position, Vec2::new(40.0, 118.4));
+        assert!(
+            (GOALKEEPER_PARRY_MIN_YARDS..=GOALKEEPER_PARRY_MAX_YARDS)
+                .contains(&sim.ball.position.distance(sim.players[keeper_id].position)),
+            "parried rebounds should land 2-5 yards from the keeper, keeper={:?} ball={:?}",
+            sim.players[keeper_id].position,
+            sim.ball.position
+        );
+        assert!(sim.ball.velocity.len() > 0.0);
+        assert_eq!(sim.stats.shots_on_target_home, 1);
+        assert_eq!(sim.stats.saves_away, 1);
+        assert!(sim
+            .events
+            .iter()
+            .any(|event| event.kind == "keeper-parry" && event.player_id == Some(keeper_id)));
     }
 
     #[test]
@@ -72395,7 +73083,14 @@ mod tests {
 
             assert_eq!(sim.stats.shots_on_target_home, 1);
             if sim.stats.saves_away == 1 {
-                assert_eq!(sim.ball.holder, Some(keeper_id));
+                assert!(
+                    sim.ball.holder == Some(keeper_id) || sim.ball.holder.is_none(),
+                    "saves may be caught or parried into a live rebound"
+                );
+                if sim.ball.holder.is_none() {
+                    assert_eq!(sim.ball.last_touch_team, Some(Team::Away));
+                    assert!(sim.ball.velocity.len() > 0.0);
+                }
                 assert_eq!(sim.score_home, 0);
                 saw_save = true;
                 break;

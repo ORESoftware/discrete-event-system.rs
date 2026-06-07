@@ -468,6 +468,12 @@ fn default_live_http_worker_threads() -> usize {
     4
 }
 
+const MAX_LIVE_HTTP_WORKER_THREADS: usize = 32;
+
+fn live_http_worker_threads(worker_threads: usize) -> usize {
+    worker_threads.clamp(1, MAX_LIVE_HTTP_WORKER_THREADS)
+}
+
 fn default_soccer_moment_embedder_version() -> String {
     SOCCER_MOMENT_EMBEDDER_VERSION.to_string()
 }
@@ -31238,9 +31244,10 @@ pub struct SoccerLiveHttpStatus {
 
 impl SoccerLiveHttpStatus {
     fn worker_pool(worker_threads: usize) -> Self {
+        let worker_threads = live_http_worker_threads(worker_threads);
         SoccerLiveHttpStatus {
             worker_model: "worker-pool".to_string(),
-            worker_threads: worker_threads.max(1),
+            worker_threads,
             reuses_workers: true,
             spawns_per_request: false,
             batches_step_ticks: true,
@@ -40985,7 +40992,7 @@ impl SoccerLiveServer {
     pub fn run(self) -> std::io::Result<()> {
         let listener = TcpListener::bind((self.config.host.as_str(), self.config.port))?;
         println!("# Live soccer UI: {}", self.local_url());
-        let worker_count = self.config.http_worker_threads.max(1);
+        let worker_count = live_http_worker_threads(self.config.http_worker_threads);
         let (stream_tx, stream_rx) = mpsc::channel::<TcpStream>();
         let stream_rx = Arc::new(Mutex::new(stream_rx));
         for worker_id in 0..worker_count {
@@ -80769,6 +80776,54 @@ mod tests {
         let bad = bridge.handle_request("GET /oops", "/des-rs/api/state", "");
         assert_eq!(bad.status, 400);
         assert!(bad.body.contains("single HTTP request-line tokens"));
+    }
+
+    #[test]
+    fn live_http_worker_pool_count_is_sanitized_and_bounded() {
+        assert_eq!(live_http_worker_threads(0), 1);
+        assert_eq!(live_http_worker_threads(1), 1);
+        assert_eq!(
+            live_http_worker_threads(MAX_LIVE_HTTP_WORKER_THREADS + 100),
+            MAX_LIVE_HTTP_WORKER_THREADS
+        );
+
+        let zero_worker_server = SoccerLiveServer::new(SoccerLiveServerConfig {
+            match_config: MatchConfig {
+                duration_seconds: 0.0,
+                max_human_players: 0,
+                seed: 72,
+                ..Default::default()
+            },
+            http_worker_threads: 0,
+            autoload_team_policy: false,
+            autosave_team_policy: false,
+            ..Default::default()
+        });
+        let zero_state = zero_worker_server.session.lock().unwrap().state_response();
+        assert_eq!(zero_state.live_http.worker_model, "worker-pool");
+        assert_eq!(zero_state.live_http.worker_threads, 1);
+        assert!(zero_state.live_http.reuses_workers);
+        assert!(!zero_state.live_http.spawns_per_request);
+
+        let oversized_server = SoccerLiveServer::new(SoccerLiveServerConfig {
+            match_config: MatchConfig {
+                duration_seconds: 0.0,
+                max_human_players: 0,
+                seed: 73,
+                ..Default::default()
+            },
+            http_worker_threads: usize::MAX,
+            autoload_team_policy: false,
+            autosave_team_policy: false,
+            ..Default::default()
+        });
+        let oversized_state = oversized_server.session.lock().unwrap().state_response();
+        assert_eq!(
+            oversized_state.live_http.worker_threads,
+            MAX_LIVE_HTTP_WORKER_THREADS
+        );
+        assert!(oversized_state.live_http.reuses_workers);
+        assert!(!oversized_state.live_http.spawns_per_request);
     }
 
     #[test]

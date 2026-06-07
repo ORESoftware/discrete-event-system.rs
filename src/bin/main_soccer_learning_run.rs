@@ -3509,7 +3509,8 @@ mod tests {
             Some("false")
         );
         assert_continuous_manifest_contains("key: RDS_DATABASE_URL");
-        assert_continuous_manifest_contains("memory: 64Gi");
+        assert_continuous_manifest_contains("memory: 24Gi");
+        assert_continuous_manifest_contains("memory: 96Gi");
         assert_continuous_manifest_contains("cpu: \"4\"");
     }
 

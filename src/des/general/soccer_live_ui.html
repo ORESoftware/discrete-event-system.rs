@@ -3191,7 +3191,15 @@ function queueInput(pass = false, shoot = false, slot = Number(slotPick.value ||
 function playerCanShoot(p) {
   if (!p || !state?.config) return false;
   const goalY = p.team === "Home" ? Number(state.config.fieldLengthYards || 120) : 0;
-  return Math.abs(goalY - Number(p.position?.y || 0)) <= 20;
+  const yardsToGoal = Math.abs(goalY - Number(p.position?.y || 0));
+  const observation = p.lastDecision?.observation;
+  if (observation) {
+    return yardsToGoal <= 25
+      && observation.shotLaneOpen === true
+      && Number(observation.shotBlockProbability ?? 1) <= 0.62
+      && Number(observation.shotOnFrameProbability ?? 0) >= 0.18;
+  }
+  return yardsToGoal <= 20;
 }
 function queueSlotAction(slot) {
   const p = playerForSlot(slot);

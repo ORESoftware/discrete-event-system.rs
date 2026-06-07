@@ -5794,11 +5794,24 @@ fn deterministic_unit_draw(tick: u64, player_id: usize, salt: u64) -> f64 {
 }
 
 fn smoothstep_unit(value: f64) -> f64 {
-    let value = value.clamp(0.0, 1.0);
+    let value = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     value * value * (3.0 - 2.0 * value)
 }
 
 fn logistic_probability(score: f64) -> f64 {
+    if score.is_nan() {
+        return 0.5;
+    }
+    if score == f64::INFINITY {
+        return 1.0;
+    }
+    if score == f64::NEG_INFINITY {
+        return 0.0;
+    }
     if score >= 0.0 {
         1.0 / (1.0 + (-score).exp())
     } else {
@@ -5808,8 +5821,16 @@ fn logistic_probability(score: f64) -> f64 {
 }
 
 fn probability_with_odds_multiplier(probability: f64, multiplier: f64) -> f64 {
-    let probability = probability.clamp(0.0, 1.0);
-    let multiplier = multiplier.max(0.0);
+    let probability = if probability.is_finite() {
+        probability.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let multiplier = if multiplier.is_finite() {
+        multiplier.max(0.0)
+    } else {
+        0.0
+    };
     if probability <= 0.0 || multiplier <= 0.0 {
         return 0.0;
     }
@@ -6950,6 +6971,39 @@ impl PlayerAgent {
             .clamp_to_pitch(snapshot.field_width, snapshot.field_length)
     }
 
+    fn human_shoot_or_carry_action(
+        &self,
+        snapshot: &WorldSnapshot,
+        observation: &SoccerPomdpObservation,
+    ) -> (SoccerAction, String) {
+        if shot_decision_is_qualified_for_role(observation, self.role) {
+            return (SoccerAction::Shoot { power: 1.0 }, "shoot".to_string());
+        }
+
+        let mut kind = if observation.perceived_pressure >= 0.42
+            && observation.forward_dribble_space_yards < 1.25
+        {
+            DribbleMoveKind::ProtectBall
+        } else {
+            DribbleMoveKind::CarryForward
+        };
+        kind = goal_approach_dribble_kind(kind, observation, self.role);
+        let touch = snapshot.deterministic_dribble_touch_decision_for(self.id, kind);
+        (
+            SoccerAction::DribbleMove {
+                target: snapshot.dribble_move_target_for_touch(
+                    self.id,
+                    self.home_position,
+                    kind,
+                    touch,
+                ),
+                kind,
+                touch,
+            },
+            kind.label().to_string(),
+        )
+    }
+
     fn explicit_human_action(
         &self,
         input: &HumanInputFrame,
@@ -6959,7 +7013,7 @@ impl PlayerAgent {
         let action = normalize_soccer_action_label(input.action.as_deref()?);
         match action {
             "shoot" if observation.has_ball => {
-                Some((SoccerAction::Shoot { power: 1.0 }, action.to_string()))
+                Some(self.human_shoot_or_carry_action(snapshot, observation))
             }
             "pass" if observation.has_ball => Some((
                 SoccerAction::Pass {
@@ -7083,7 +7137,17 @@ impl PlayerAgent {
             {
                 explicit
             } else if input.shoot {
-                (SoccerAction::Shoot { power: 1.0 }, "shoot".to_string())
+                if has_ball {
+                    self.human_shoot_or_carry_action(snapshot, &observation)
+                } else {
+                    let dir = input.axis.normalized();
+                    (
+                        SoccerAction::MoveTo(
+                            self.position + dir * if input.sprint { 7.0 } else { 4.5 },
+                        ),
+                        "human-move".to_string(),
+                    )
+                }
             } else if input.pass {
                 let pass_flight = input.pass_flight;
                 (
@@ -18879,7 +18943,10 @@ impl WorldSnapshot {
             .iter()
             .filter(|player| player.team == team && player.role == PlayerRole::Defender)
             .filter(|player| !self.is_wide_defender(player))
-            .filter_map(|player| self.player_position(player.id))
+            .filter_map(|player| {
+                let position = self.player_position(player.id)?;
+                vec2_is_finite(position).then_some(position)
+            })
             .collect::<Vec<_>>();
         if center_backs.is_empty() {
             return 0.0;
@@ -18895,6 +18962,9 @@ impl WorldSnapshot {
             .filter(|player| player.team == team && player.role == PlayerRole::Midfielder)
             .filter_map(|player| {
                 let position = self.player_position(player.id)?;
+                if !vec2_is_finite(position) {
+                    return None;
+                }
                 let nearest_center_back = center_backs
                     .iter()
                     .map(|center_back| position.distance(*center_back))
@@ -18905,12 +18975,17 @@ impl WorldSnapshot {
                 let screen_depth = (position.y - center_back_centroid.y) * team.attack_dir();
                 let screen_fit = logistic_probability((screen_depth + 1.5) / 2.6)
                     * logistic_probability((14.0 - screen_depth) / 3.6);
-                let defensive_fit = ((player.preferences.defensive_mindedness
-                    - player.preferences.offensive_mindedness
-                    + 0.18)
-                    / 0.58)
-                    .clamp(0.0, 1.0);
-                Some(distance_fit * (0.55 + screen_fit * 0.45) * defensive_fit)
+                let defensive_fit = soccer_lp_clamped(
+                    (player.preferences.defensive_mindedness
+                        - player.preferences.offensive_mindedness
+                        + 0.18)
+                        / 0.58,
+                    0.0,
+                    1.0,
+                    0.0,
+                );
+                let score = distance_fit * (0.55 + screen_fit * 0.45) * defensive_fit;
+                score.is_finite().then_some(score)
             })
             .fold(0.0, f64::max)
             .clamp(0.0, 1.0)
@@ -18924,8 +18999,9 @@ impl WorldSnapshot {
         let forward_space = self.forward_dribble_space_yards(player.id);
         let space_fit = smoothstep_unit((forward_space - 5.0) / 22.0);
         let cover_fit = self.defensive_midfield_center_back_cover_score(player.team);
+        let risk_tolerance = soccer_lp_clamped(directive.risk_tolerance, 0.0, 1.0, 0.50);
         let center_back_advance_probability =
-            (0.34 + directive.risk_tolerance * 0.14 + space_fit * 0.08).clamp(0.18, 0.68);
+            (0.34 + risk_tolerance * 0.14 + space_fit * 0.08).clamp(0.18, 0.68);
         let wingback_advance_probability = probability_with_odds_multiplier(
             center_back_advance_probability,
             WINGBACK_ADVANCE_ODDS_MULTIPLIER,
@@ -18937,9 +19013,9 @@ impl WorldSnapshot {
             + wingback_advance_probability * 4.6
             + space_fit * 3.4
             + cover_fit * 3.2
-            + directive.risk_tolerance * 1.1;
+            + risk_tolerance * 1.1;
         let spread = 0.85 + (1.0 - space_fit) * 0.55 + (1.0 - cover_fit) * 0.35;
-        (mean_push + draw * spread).clamp(0.0, 12.5)
+        soccer_lp_clamped(mean_push + draw * spread, 0.0, 12.5, 0.0)
     }
 
     fn defender_possession_line_y(&self, player: &PlayerSnapshot, home: Vec2) -> f64 {
@@ -67053,6 +67129,51 @@ mod tests {
     }
 
     #[test]
+    fn smooth_probability_helpers_are_non_finite_safe() {
+        assert_eq!(smoothstep_unit(f64::NAN), 0.0);
+        assert_eq!(smoothstep_unit(f64::INFINITY), 0.0);
+        assert_eq!(logistic_probability(f64::NAN), 0.5);
+        assert_eq!(logistic_probability(f64::INFINITY), 1.0);
+        assert_eq!(logistic_probability(f64::NEG_INFINITY), 0.0);
+        assert_eq!(probability_with_odds_multiplier(f64::NAN, 1.7), 0.0);
+        assert_eq!(probability_with_odds_multiplier(0.5, f64::NAN), 0.0);
+        assert!(probability_with_odds_multiplier(0.5, 1.7).is_finite());
+    }
+
+    #[test]
+    fn wingback_push_ignores_non_finite_cover_and_directive_inputs() {
+        let holder = 7;
+        let lb = 1usize;
+        let lcb = 2usize;
+        let dm = 6usize;
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        sim.ball.holder = Some(holder);
+        sim.ball.position = Vec2::new(40.0, 62.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[holder].position = sim.ball.position;
+        sim.players[lcb].position = Vec2::new(f64::NAN, f64::INFINITY);
+        sim.players[dm].position = Vec2::new(f64::INFINITY, f64::NAN);
+        sim.players[dm].preferences.defensive_mindedness = f64::NAN;
+        sim.players[dm].preferences.offensive_mindedness = f64::INFINITY;
+        sim.central_brain.home_directive.risk_tolerance = f64::NAN;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let lb_snapshot = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == lb)
+            .expect("left back");
+        let cover = snapshot.defensive_midfield_center_back_cover_score(Team::Home);
+        let push = snapshot.wingback_extra_push_yards(lb_snapshot);
+        let target = snapshot.positional_open_space_for(lb, sim.players[lb].home_position, false);
+
+        assert!(cover.is_finite());
+        assert!(push.is_finite());
+        assert!(vec2_is_finite(target));
+    }
+
+    #[test]
     fn no_pressure_pass_ranking_filters_backward_outlets() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let passer = 6;
@@ -75239,99 +75360,127 @@ mod tests {
     }
 
     #[test]
-    fn human_controller_shot_into_covered_lane_is_blocked_by_ball_agent() {
+    fn human_controller_shot_input_respects_shot_lane_qualification() {
         let attacker = 9;
         let keeper = 11;
         let blockers = [12, 13, 14, 15];
         let kept_players = [attacker, keeper, 12, 13, 14, 15];
-        let trials = 24;
-        let mut blocked_count = 0;
-
-        for seed_offset in 0..trials {
-            let mut sim = SoccerMatch::default_11v11(MatchConfig {
-                duration_seconds: 0.4,
-                max_human_players: 1,
-                seed: 23_100 + seed_offset,
-                ..Default::default()
-            });
-            sim.active_set_play = None;
-            park_players_except(&mut sim, &kept_players);
-            sim.players[attacker].controller_slot = Some(0);
-            sim.players[attacker].position = Vec2::new(40.0, 104.0);
-            sim.players[attacker].home_position = sim.players[attacker].position;
-            sim.players[attacker].skills.shooting = 9.8;
-            sim.players[attacker].skills.right_foot_shot_power = 9.7;
-            sim.players[attacker].skills.left_foot_shot_power = 9.4;
-            sim.players[attacker].skills.decision_noise = 0.0;
-            sim.players[keeper].position = Vec2::new(42.0, 116.5);
-            sim.players[keeper].skills.goalkeeping = 7.0;
-            for (idx, blocker) in blockers.iter().copied().enumerate() {
-                sim.players[blocker].position =
-                    Vec2::new(39.6 + idx as f64 * 0.28, 108.0 + idx as f64 * 1.35);
-                sim.players[blocker].velocity = Vec2::zero();
-                sim.players[blocker].fatigue = 0.0;
-                sim.players[blocker].skills.defending = 10.0;
-                sim.players[blocker].skills.defensive_tracking = 10.0;
-                sim.players[blocker].skills.aggression = 10.0;
-                sim.players[blocker].skills.strength = 9.5;
-            }
-            sim.ball.holder = Some(attacker);
-            sim.ball.position = sim.players[attacker].position;
-            sim.ball.velocity = Vec2::zero();
-            sim.ball.last_touch_team = Some(Team::Home);
-            sim.pending_pass = None;
-            sim.pending_shot = None;
-
-            let snapshot = WorldSnapshot::from_match(&sim);
-            let observation = snapshot.observation_for(attacker);
-            assert!(!observation.shot_lane_open);
-            assert!(
-                observation.shot_block_probability >= 0.90,
-                "covered human shot setup should have very high block odds, got {:.3}",
-                observation.shot_block_probability
-            );
-
-            let input = HumanInputFrame {
-                controller_slot: 0,
-                player_id: Some(attacker),
-                seq: 1,
-                axis: Vec2::zero(),
-                sprint: false,
-                pass: false,
-                pass_flight: PassFlight::Floor,
-                shoot: true,
-                action: None,
-                target_player: None,
-            };
-            let mut player = sim.players[attacker].clone();
-            let intent =
-                player.run_time_step(&snapshot, Some(&input), None, &mut mulberry32(23_400));
-            assert!(matches!(intent.action, SoccerAction::Shoot { .. }));
-            assert_eq!(
-                player
-                    .last_decision
-                    .as_ref()
-                    .map(|decision| decision.action.as_str()),
-                Some("shoot")
-            );
-            sim.players[attacker] = player;
-            sim.apply_player_intent(intent);
-            assert!(sim.pending_shot.is_some());
-
-            for _ in 0..4 {
-                sim.integrate_ball();
-                if sim.events.iter().any(|event| event.kind == "shot-blocked") {
-                    blocked_count += 1;
-                    break;
-                }
-                sim.tick += 1;
-                sim.clock_seconds += sim.config.dt_seconds;
-            }
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.4,
+            max_human_players: 1,
+            seed: 23_100,
+            ..Default::default()
+        });
+        sim.active_set_play = None;
+        park_players_except(&mut sim, &kept_players);
+        sim.players[attacker].controller_slot = Some(0);
+        sim.players[attacker].position = Vec2::new(40.0, 104.0);
+        sim.players[attacker].home_position = sim.players[attacker].position;
+        sim.players[attacker].skills.shooting = 9.8;
+        sim.players[attacker].skills.right_foot_shot_power = 9.7;
+        sim.players[attacker].skills.left_foot_shot_power = 9.4;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[keeper].position = Vec2::new(42.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 7.0;
+        for (idx, blocker) in blockers.iter().copied().enumerate() {
+            sim.players[blocker].position =
+                Vec2::new(39.6 + idx as f64 * 0.28, 108.0 + idx as f64 * 1.35);
+            sim.players[blocker].velocity = Vec2::zero();
+            sim.players[blocker].fatigue = 0.0;
+            sim.players[blocker].skills.defending = 10.0;
+            sim.players[blocker].skills.defensive_tracking = 10.0;
+            sim.players[blocker].skills.aggression = 10.0;
+            sim.players[blocker].skills.strength = 9.5;
         }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.pending_pass = None;
+        sim.pending_shot = None;
 
+        let input = HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(attacker),
+            seq: 1,
+            axis: Vec2::zero(),
+            sprint: false,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: true,
+            action: Some("shoot".to_string()),
+            target_player: None,
+        };
+
+        let blocked_snapshot = WorldSnapshot::from_match(&sim);
+        let blocked_observation = blocked_snapshot.observation_for(attacker);
+        assert!(!blocked_observation.shot_lane_open);
         assert!(
-            blocked_count >= trials * 3 / 4,
-            "covered human shots should mostly be blocked, got {blocked_count}/{trials}"
+            blocked_observation.shot_block_probability >= 0.90,
+            "covered human shot setup should have very high block odds, got {:.3}",
+            blocked_observation.shot_block_probability
+        );
+        let mut blocked_player = sim.players[attacker].clone();
+        let blocked_intent = blocked_player.run_time_step(
+            &blocked_snapshot,
+            Some(&input),
+            None,
+            &mut mulberry32(23_400),
+        );
+        assert!(
+            matches!(blocked_intent.action, SoccerAction::DribbleMove { .. }),
+            "covered human shoot input should become carry/protect, got {blocked_intent:?}"
+        );
+        assert_ne!(
+            blocked_player
+                .last_decision
+                .as_ref()
+                .map(|decision| decision.action.as_str()),
+            Some("shoot")
+        );
+
+        sim.ball.holder = None;
+        let no_ball_snapshot = WorldSnapshot::from_match(&sim);
+        let mut no_ball_player = sim.players[attacker].clone();
+        let no_ball_intent = no_ball_player.run_time_step(
+            &no_ball_snapshot,
+            Some(&input),
+            None,
+            &mut mulberry32(23_401),
+        );
+        assert!(
+            matches!(no_ball_intent.action, SoccerAction::MoveTo(_)),
+            "human shoot input without possession should not become a shot, got {no_ball_intent:?}"
+        );
+
+        sim.ball.holder = Some(attacker);
+        for blocker in blockers {
+            sim.players[blocker].position = Vec2::new(72.0, 18.0 + blocker as f64);
+        }
+        let clear_snapshot = WorldSnapshot::from_match(&sim);
+        let clear_observation = clear_snapshot.observation_for(attacker);
+        assert!(clear_observation.shot_lane_open);
+        assert!(shot_decision_is_qualified_for_role(
+            &clear_observation,
+            sim.players[attacker].role
+        ));
+        let mut clear_player = sim.players[attacker].clone();
+        let clear_intent = clear_player.run_time_step(
+            &clear_snapshot,
+            Some(&input),
+            None,
+            &mut mulberry32(23_402),
+        );
+        assert!(
+            matches!(clear_intent.action, SoccerAction::Shoot { .. }),
+            "clear human shoot input should remain a shot, got {clear_intent:?}"
+        );
+        assert_eq!(
+            clear_player
+                .last_decision
+                .as_ref()
+                .map(|decision| decision.action.as_str()),
+            Some("shoot")
         );
     }
 
@@ -76728,6 +76877,8 @@ mod tests {
         assert!(html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t"));
         assert!(html.contains("return configuredSimTicksPerPulse();"));
         assert!(html.contains("const inputText = liveControllerAssigned() ? \" + input\" : \"\";"));
+        assert!(html.contains("observation.shotLaneOpen === true"));
+        assert!(html.contains("observation.shotBlockProbability"));
     }
 
     #[test]

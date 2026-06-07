@@ -42445,16 +42445,7 @@ fn handle_live_soccer_request_inner(
         | ("GET", "/soccer/live/new_match") => LiveHttpResponse::html(soccer_live_page_html()),
         ("GET", "/api/state") => {
             let state = {
-                let guard = match session.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        return LiveHttpResponse::error(
-                            500,
-                            "Internal Server Error",
-                            "soccer session lock poisoned",
-                        )
-                    }
-                };
+                let guard = soccer_mutex_lock(session, "soccer_live_session");
                 guard.state_response()
             };
             LiveHttpResponse::json(&state.compact_for_live_http())
@@ -43079,16 +43070,7 @@ fn handle_live_soccer_request_inner(
             let request_started = Instant::now();
             let lock_wait_started = Instant::now();
             let step_response = {
-                let mut guard = match session.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        return LiveHttpResponse::error(
-                            500,
-                            "Internal Server Error",
-                            "soccer session lock poisoned",
-                        )
-                    }
-                };
+                let mut guard = soccer_mutex_lock(session, "soccer_live_session");
                 let lock_wait = lock_wait_started.elapsed();
                 let step_started = Instant::now();
                 let step_response = guard.step_for_live_http(step_req);
@@ -83077,6 +83059,52 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(step.status, 200);
         let step_value: serde_json::Value =
             serde_json::from_str(&step.body).expect("mounted step json");
+        assert_eq!(step_value["summary"]["ticks"], 1);
+    }
+
+    #[test]
+    fn live_http_state_and_step_recover_from_poisoned_session_lock() {
+        let realtime = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 68,
+            ..Default::default()
+        });
+        let input_queue = realtime.input_queue();
+        let session = Arc::new(Mutex::new(realtime));
+        let poisoner = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let _guard = session.lock().expect("test poison live session lock");
+                panic!("poison soccer live session lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+
+        let state = handle_live_soccer_request(
+            "GET /api/state HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(state.status, 200);
+        let state_value: serde_json::Value =
+            serde_json::from_str(&state.body).expect("recovered state json");
+        assert_eq!(state_value["config"]["seed"], 68);
+        assert_eq!(state_value["summary"]["ticks"], 0);
+
+        let body = r#"{"ticks":1,"recordEveryTicks":1}"#;
+        let step = handle_live_soccer_request(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nHost: local\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(step.status, 200);
+        let step_value: serde_json::Value =
+            serde_json::from_str(&step.body).expect("recovered step json");
         assert_eq!(step_value["summary"]["ticks"], 1);
     }
 

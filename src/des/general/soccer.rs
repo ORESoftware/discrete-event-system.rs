@@ -159,6 +159,8 @@ const DEFENSIVE_CLEAR_AND_HOLD_SECOND_REWARD_POINTS: f64 = 20.0;
 const DEFENSIVE_DISPOSSESSION_REWARD_POINTS: f64 = 10.0;
 const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 2.0;
 const LOST_FIFTY_FIFTY_DUEL_PENALTY_POINTS: f64 = FAILED_DISPOSSESSION_PENALTY_POINTS;
+const UNTARGETED_LONG_BALL_RECOVERY_REWARD_POINTS: f64 = 5.2;
+const UNTARGETED_LONG_BALL_LOSS_PENALTY_POINTS: f64 = 2.6;
 const BEATEN_BY_DRIBBLE_PENALTY_POINTS: f64 = 3.0;
 // A defender is beaten by dribble only from a close challenge: the ballholder is
 // not already past the defender, starts within this radius, then gets in behind.
@@ -6162,12 +6164,24 @@ fn loose_long_ball_altitude_yards(speed_yps: f64) -> f64 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UntargetedLongBallFlight {
+    action: String,
     origin: Vec2,
     target: Vec2,
     launch_speed_yps: f64,
+    distance_yards: f64,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedUntargetedLongBall {
+    launcher_id: usize,
+    launch_tick: u64,
+    team: Team,
+    action: String,
+    origin: Vec2,
+    target: Vec2,
     distance_yards: f64,
 }
 
@@ -11874,6 +11888,24 @@ impl BallAgent {
                     rng,
                 )
             {
+                let untargeted_long_ball = self
+                    .untargeted_long_ball_team(context.pending_pass.as_ref())
+                    .and_then(|team| {
+                        self.untargeted_long_ball_launcher
+                            .and_then(|(launcher_id, launch_tick)| {
+                                self.untargeted_long_ball_flight.as_ref().map(|flight| {
+                                    ResolvedUntargetedLongBall {
+                                        launcher_id,
+                                        launch_tick,
+                                        team,
+                                        action: flight.action.clone(),
+                                        origin: flight.origin,
+                                        target: flight.target,
+                                        distance_yards: flight.distance_yards,
+                                    }
+                                })
+                            })
+                    });
                 self.holder = Some(holder);
                 self.position =
                     control_position.clamp_to_pitch(context.field_width, context.field_length);
@@ -11894,6 +11926,7 @@ impl BallAgent {
                     holder,
                     holder_team,
                     possession_result,
+                    untargeted_long_ball,
                 };
             }
         }
@@ -13291,6 +13324,7 @@ enum BallStepOutcome {
         holder: usize,
         holder_team: Team,
         possession_result: BallPossessionResult,
+        untargeted_long_ball: Option<ResolvedUntargetedLongBall>,
     },
     Save {
         shot: PendingShot,
@@ -35878,6 +35912,60 @@ impl SoccerMatch {
         }
     }
 
+    fn record_untargeted_long_ball_outcome(
+        &mut self,
+        long_ball: Option<ResolvedUntargetedLongBall>,
+        holder: usize,
+        holder_team: Team,
+    ) {
+        let Some(long_ball) = long_ball else {
+            return;
+        };
+        if long_ball.launcher_id >= self.players.len()
+            || long_ball.launcher_id == holder
+            || self.players[long_ball.launcher_id].team != long_ball.team
+        {
+            return;
+        }
+
+        let attack_dir = long_ball.team.attack_dir();
+        let control_position = self.ball.position;
+        let forward_yards = (control_position.y - long_ball.origin.y) * attack_dir;
+        let intended_forward_yards = (long_ball.target.y - long_ball.origin.y) * attack_dir;
+        let own_goal_relief = ball_distance_from_own_goal(
+            long_ball.team,
+            control_position,
+            self.config.field_length_yards,
+        ) - ball_distance_from_own_goal(
+            long_ball.team,
+            long_ball.origin,
+            self.config.field_length_yards,
+        );
+        let outcome_fit = (forward_yards.max(own_goal_relief).max(0.0) / 44.0).clamp(0.0, 1.0);
+        let intent_fit = (intended_forward_yards.max(0.0) / 44.0).clamp(0.0, 1.0);
+        let distance_fit = (long_ball.distance_yards / 50.0).clamp(0.0, 1.0);
+        let age_ticks = self.tick.saturating_sub(long_ball.launch_tick);
+        let freshness = (1.0 - age_ticks as f64 / 180.0).clamp(0.45, 1.0);
+        let action_scale = match normalize_soccer_action_label(&long_ball.action) {
+            "clearance" => 0.92,
+            "route-one" => 1.08,
+            _ => 1.0,
+        };
+
+        let amount = if holder_team == long_ball.team {
+            UNTARGETED_LONG_BALL_RECOVERY_REWARD_POINTS
+                * (0.34 + outcome_fit * 0.36 + intent_fit * 0.18 + distance_fit * 0.12)
+                * freshness
+                * action_scale
+        } else {
+            -UNTARGETED_LONG_BALL_LOSS_PENALTY_POINTS
+                * (0.42 + (1.0 - outcome_fit) * 0.36 + (1.0 - intent_fit) * 0.14)
+                * freshness
+                * action_scale
+        };
+        self.record_reward_event(long_ball.launcher_id, amount);
+    }
+
     fn recent_possession_reward_sequence(
         &self,
         team: Team,
@@ -37703,6 +37791,7 @@ impl SoccerMatch {
                 holder,
                 holder_team,
                 possession_result,
+                untargeted_long_ball,
             } => {
                 let pending_pass_for_reward = self.pending_pass.clone();
                 self.pending_rebound = None;
@@ -37745,6 +37834,11 @@ impl SoccerMatch {
                         self.stat_interception(team);
                     }
                     BallPossessionResult::LooseBallRecovery(team) => {
+                        self.record_untargeted_long_ball_outcome(
+                            untargeted_long_ball,
+                            holder,
+                            holder_team,
+                        );
                         self.stat_loose_ball_recovery(team);
                     }
                 }
@@ -39377,6 +39471,7 @@ impl SoccerMatch {
         self.ball.last_touch_team = Some(player_team);
         self.ball.untargeted_long_ball_launcher = Some((player_id, self.tick));
         self.ball.untargeted_long_ball_flight = Some(UntargetedLongBallFlight {
+            action: action_label.to_string(),
             origin: player_pos,
             target,
             launch_speed_yps: speed,
@@ -64768,6 +64863,7 @@ mod tests {
             holder: receiver,
             holder_team: Team::Home,
             possession_result: BallPossessionResult::PassCompleted(Team::Home),
+            untargeted_long_ball: None,
         });
 
         let snapshot = WorldSnapshot::from_match(&sim);
@@ -65009,6 +65105,7 @@ mod tests {
             holder: 8,
             holder_team: Team::Home,
             possession_result: BallPossessionResult::LooseBallRecovery(Team::Home),
+            untargeted_long_ball: None,
         });
 
         assert_eq!(sim.ball.holder, Some(8));
@@ -71935,6 +72032,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             holder: receiving_teammate,
             holder_team: Team::Home,
             possession_result: BallPossessionResult::PassCompleted(Team::Home),
+            untargeted_long_ball: None,
         });
 
         assert_eq!(sim.stats.offsides_home, 0);
@@ -71979,6 +72077,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             holder: defender,
             holder_team: Team::Away,
             possession_result: BallPossessionResult::Interception(Team::Away),
+            untargeted_long_ball: None,
         });
 
         assert_eq!(sim.stats.offsides_home, 0);
@@ -73793,7 +73892,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let flight = sim
             .ball
             .untargeted_long_ball_flight
+            .as_ref()
             .expect("route-one launch stores flight path");
+        assert_eq!(flight.action, "route-one");
         assert_eq!(flight.origin, Vec2::new(40.0, 36.0));
         assert_eq!(flight.target, target);
         assert!(flight.launch_speed_yps > 18.0);
@@ -74005,6 +74106,86 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             opponent_high_reward > 1.2,
             "opponent winning far upfield should not be treated as an own-half giveaway: {opponent_high_reward}"
         );
+    }
+
+    #[test]
+    fn untargeted_long_ball_rewards_launcher_only_after_teammate_controls() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let launcher = 2;
+        let receiver = 8;
+        sim.players[launcher].position = Vec2::new(32.0, 24.0);
+        sim.players[receiver].position = Vec2::new(38.0, 64.0);
+        sim.ball.position = sim.players[receiver].position;
+        sim.ball.holder = None;
+        let event_start = sim.reward_events.len();
+
+        sim.apply_ball_outcome(BallStepOutcome::Controlled {
+            holder: receiver,
+            holder_team: Team::Home,
+            possession_result: BallPossessionResult::LooseBallRecovery(Team::Home),
+            untargeted_long_ball: Some(ResolvedUntargetedLongBall {
+                launcher_id: launcher,
+                launch_tick: sim.tick,
+                team: Team::Home,
+                action: "clearance".to_string(),
+                origin: sim.players[launcher].position,
+                target: Vec2::new(40.0, 68.0),
+                distance_yards: 44.0,
+            }),
+        });
+
+        let launcher_reward = sim.reward_events[event_start..]
+            .iter()
+            .filter(|event| event.player_id == launcher)
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert!(
+            launcher_reward > 2.0,
+            "teammate-controlled long clearance should reward the launcher, got {launcher_reward}"
+        );
+        assert_eq!(sim.stats.loose_ball_recoveries_home, 1);
+        assert_eq!(sim.stats.passes_attempted_home, 0);
+        assert_eq!(sim.stats.passes_completed_home, 0);
+    }
+
+    #[test]
+    fn untargeted_long_ball_penalizes_launcher_when_opponent_controls() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let launcher = 6;
+        let opponent = 16;
+        sim.players[launcher].position = Vec2::new(35.0, 38.0);
+        sim.players[opponent].position = Vec2::new(42.0, 72.0);
+        sim.ball.position = sim.players[opponent].position;
+        sim.ball.holder = None;
+        let event_start = sim.reward_events.len();
+
+        sim.apply_ball_outcome(BallStepOutcome::Controlled {
+            holder: opponent,
+            holder_team: Team::Away,
+            possession_result: BallPossessionResult::LooseBallRecovery(Team::Away),
+            untargeted_long_ball: Some(ResolvedUntargetedLongBall {
+                launcher_id: launcher,
+                launch_tick: sim.tick,
+                team: Team::Home,
+                action: "route-one".to_string(),
+                origin: sim.players[launcher].position,
+                target: Vec2::new(42.0, 76.0),
+                distance_yards: 39.0,
+            }),
+        });
+
+        let launcher_reward = sim.reward_events[event_start..]
+            .iter()
+            .filter(|event| event.player_id == launcher)
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert!(
+            launcher_reward < -0.7,
+            "opponent-controlled route-one should penalize the launcher, got {launcher_reward}"
+        );
+        assert_eq!(sim.stats.loose_ball_recoveries_away, 1);
+        assert_eq!(sim.stats.passes_attempted_home, 0);
+        assert_eq!(sim.stats.passes_completed_home, 0);
     }
 
     #[test]

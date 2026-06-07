@@ -86273,9 +86273,16 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function applyControllerAssignments"));
         assert!(html.contains("frame.centralBrain.controllerAssignments = normalized"));
         assert!(html.contains("const LIVE_INPUT_FLUSH_INTERVAL_MS = 33"));
+        assert!(html.contains("const LIVE_INPUT_RETRY_MIN_MS = 120"));
+        assert!(html.contains("const LIVE_INPUT_RETRY_MAX_MS = 1000"));
+        assert!(html.contains("let inputFlushRetryAttempt = 0"));
         assert!(html.contains("function scheduleInputFlush"));
+        assert!(html.contains("function scheduleInputRetry"));
         assert!(html.contains("function flushQueuedInputsToInputApi"));
         assert!(html.contains("postSoccerJson(\"/api/input\", inputs, \"input\")"));
+        assert!(html.contains("inputFlushRetryAttempt = 0"));
+        assert!(html.contains("!accepted && window.__humanInputQueue.length > 0"));
+        assert!(html.contains("scheduleInputRetry();"));
         assert!(html.contains("ballAgent.textContent = playbackBallAgentLabel(f.ball)"));
         assert!(html.contains("ballAgent.title = Array.isArray(f.ball?.operationOrder)"));
         assert!(html.contains("function officialAgentsLabel"));

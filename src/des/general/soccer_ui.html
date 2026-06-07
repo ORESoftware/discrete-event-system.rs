@@ -379,6 +379,8 @@ const FALLBACK_CONFIG = {
   dtSeconds: 0.1
 };
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
+const LIVE_INPUT_RETRY_MIN_MS = 120;
+const LIVE_INPUT_RETRY_MAX_MS = 1000;
 function emptyStats() {
   return {
     shotsHome: 0,
@@ -506,11 +508,12 @@ let runningNewSimulation = false;
 let controllerAssignmentSyncSeq = 0;
 let inputFlushTimer = null;
 let inputFlushInFlight = false;
+let inputFlushRetryAttempt = 0;
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
   if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
-  scheduleInputFlush();
+  scheduleInputFlush(0);
 };
 
 function formatBytes(bytes) {
@@ -1570,26 +1573,44 @@ async function syncControllerAssignment(slot, playerId) {
     console.warn("controller assignment sync unavailable; keeping local selection", err);
   }
 }
-function scheduleInputFlush() {
+function scheduleInputFlush(delayMs = LIVE_INPUT_FLUSH_INTERVAL_MS) {
   if (inputFlushTimer != null || inputFlushInFlight) return;
-  inputFlushTimer = window.setTimeout(flushQueuedInputsToInputApi, LIVE_INPUT_FLUSH_INTERVAL_MS);
+  inputFlushTimer = window.setTimeout(
+    flushQueuedInputsToInputApi,
+    Math.max(0, Number(delayMs || 0))
+  );
+}
+function scheduleInputRetry() {
+  inputFlushRetryAttempt = Math.min(inputFlushRetryAttempt + 1, 6);
+  const delay = Math.min(
+    LIVE_INPUT_RETRY_MAX_MS,
+    LIVE_INPUT_RETRY_MIN_MS * inputFlushRetryAttempt
+  );
+  scheduleInputFlush(delay);
 }
 async function flushQueuedInputsToInputApi() {
   inputFlushTimer = null;
   if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
   inputFlushInFlight = true;
   const inputs = window.__humanInputQueue.slice();
+  let accepted = false;
   try {
     const ack = await postSoccerJson("/api/input", inputs, "input");
     if (Number(ack?.acceptedInputs ?? 0) > 0 || ack?.queued) {
       const newestSeq = inputs.reduce((max, input) => Math.max(max, Number(input.seq || 0)), 0);
       window.__humanInputQueue = window.__humanInputQueue.filter(input => Number(input.seq || 0) > newestSeq);
+      inputFlushRetryAttempt = 0;
+      accepted = true;
     }
   } catch (err) {
     console.warn("live input sync unavailable; keeping local input queue", err);
   } finally {
     inputFlushInFlight = false;
-    if (window.__humanInputQueue.length > inputs.length) scheduleInputFlush();
+    if (window.__humanInputQueue.length > inputs.length) {
+      scheduleInputFlush(0);
+    } else if (!accepted && window.__humanInputQueue.length > 0) {
+      scheduleInputRetry();
+    }
   }
 }
 function updateAgentStatePanel() {

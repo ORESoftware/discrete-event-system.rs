@@ -191,6 +191,7 @@ const DENSE_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.12;
 const DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD: f64 = 0.145;
 const NOT_FACING_BALL_INTERCEPTION_MULTIPLIER: f64 = 0.40;
 const FACING_BALL_MIN_DOT: f64 = 0.12;
+const STABLE_CURRENT_FACING_BALL_DOT: f64 = 0.45;
 const STRIKER_HOLD_UP_MIN_GOAL_DISTANCE_YARDS: f64 = GOAL_APPROACH_CARRY_YARDS;
 const STRIKER_HOLD_UP_SIDEWAYS_YARDS: f64 = 7.5;
 const STRIKER_HOLD_UP_FORWARD_YARDS: f64 = 2.8;
@@ -48345,6 +48346,14 @@ fn movement_action_facing_bucket(
         return facing_bucket_from_vector(velocity);
     }
 
+    if let Some(current) = facing_bucket_to_vector(current_facing) {
+        if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS
+            && current.normalized().dot(to_ball.normalized()) >= STABLE_CURRENT_FACING_BALL_DOT
+        {
+            return current_facing;
+        }
+    }
+
     ball_facing
 }
 
@@ -53554,7 +53563,7 @@ mod tests {
         sim.players[player].position = Vec2::new(40.0, 60.0);
         sim.players[player].velocity = Vec2::zero();
 
-        sim.move_player_towards(player, Vec2::new(48.0, 60.0), false);
+        sim.move_player_towards(player, Vec2::new(46.0, 60.0), false);
         assert_eq!(sim.players[player].movement_gait, MovementGait::SideStep);
         assert_eq!(
             sim.players[player].action_facing,
@@ -53596,6 +53605,44 @@ mod tests {
             sim.players[player].action_facing,
             FacingBucket::East,
             "when the ball is too close for a stable facing vector, keep the player's previous look direction instead of snapping to a team default"
+        );
+    }
+
+    #[test]
+    fn support_movement_keeps_broad_ball_facing_to_avoid_bucket_spin() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.1,
+            duration_seconds: 0.1,
+            seed: 2114,
+            ..Default::default()
+        });
+        let player = 2;
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(44.0, 70.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+        sim.players[player].action_facing = FacingBucket::South;
+
+        sim.move_player_towards(player, Vec2::new(46.0, 60.0), false);
+
+        assert_eq!(sim.players[player].movement_gait, MovementGait::SideStep);
+        assert_eq!(
+            sim.players[player].action_facing,
+            FacingBucket::South,
+            "slight diagonal ball movement should not make a defender spin across adjacent facing buckets"
+        );
+
+        sim.ball.position = Vec2::new(62.0, 60.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+        sim.players[player].action_facing = FacingBucket::South;
+
+        sim.move_player_towards(player, Vec2::new(48.0, 60.0), false);
+
+        assert_eq!(
+            sim.players[player].action_facing,
+            FacingBucket::East,
+            "stale facing still turns when the ball is no longer in the player's broad forward view"
         );
     }
 

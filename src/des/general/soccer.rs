@@ -52869,6 +52869,65 @@ mod tests {
     }
 
     #[test]
+    fn short_autonomous_match_circulates_ball_between_players() {
+        let trace = run_simulation(
+            MatchConfig {
+                duration_seconds: 20.0,
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..SoccerNeuralLearningConfig::default()
+                },
+                max_human_players: 0,
+                seed: 22_901,
+                ..MatchConfig::default()
+            },
+            1,
+        );
+        let stats = &trace.summary.stats;
+        let attempted_passes = stats
+            .passes_attempted_home
+            .saturating_add(stats.passes_attempted_away);
+        let completed_passes = stats
+            .passes_completed_home
+            .saturating_add(stats.passes_completed_away);
+        let holders = trace
+            .frames
+            .iter()
+            .filter_map(|frame| frame.ball.holder)
+            .collect::<std::collections::BTreeSet<_>>();
+        let initial_ball = trace
+            .frames
+            .first()
+            .map(|frame| frame.ball.position)
+            .expect("initial frame");
+        let max_ball_displacement = trace
+            .frames
+            .iter()
+            .map(|frame| frame.ball.position.distance(initial_ball))
+            .fold(0.0, f64::max);
+
+        assert_eq!(trace.summary.ticks, 200);
+        assert!(
+            attempted_passes >= 2,
+            "short autonomous match should attempt real passes, got {attempted_passes}; stats={stats:?}"
+        );
+        assert!(
+            completed_passes >= 1,
+            "short autonomous match should complete at least one pass, got {completed_passes}; stats={stats:?}"
+        );
+        assert!(
+            holders.len() >= 2,
+            "ball possession should circulate between multiple players: holders={holders:?}"
+        );
+        assert!(
+            max_ball_displacement >= 8.0,
+            "ball should materially move from kickoff during autonomous play: displacement={max_ball_displacement:.2}"
+        );
+    }
+
+    #[test]
     fn two_half_match_uses_configured_half_duration() {
         let config = MatchConfig {
             dt_seconds: 1.0,

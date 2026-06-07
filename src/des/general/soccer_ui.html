@@ -313,6 +313,7 @@
       <div class="metric"><span>Ball</span><b id="ballPhysics">0.0y/s 0.0y/s2</b></div>
       <div class="metric"><span>Ball Hist</span><b id="ballKinematics">H0 V0.0 A0.0 J0.0</b></div>
       <div class="metric"><span>Ball Agent</span><b id="ballAgent">waiting</b></div>
+      <div class="metric"><span>Refs</span><b id="officialAgents">waiting</b></div>
       <div class="metric"><span>Intent</span><b id="actionIntent">Idle</b></div>
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
@@ -438,6 +439,7 @@ const awayBrain = document.getElementById("awayBrain");
 const ballPhysics = document.getElementById("ballPhysics");
 const ballKinematics = document.getElementById("ballKinematics");
 const ballAgent = document.getElementById("ballAgent");
+const officialAgents = document.getElementById("officialAgents");
 const actionIntent = document.getElementById("actionIntent");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
@@ -795,11 +797,41 @@ function agentScheduleLabel(f) {
 function playbackScheduleSlotLabel(value) {
   return Number.isInteger(value) ? ` S${value}` : "";
 }
+function operationOrderLabel(order, limit = 3) {
+  if (!Array.isArray(order) || order.length === 0) return "";
+  const head = order.slice(0, limit).map(item => String(item).replace(/-/g, " ")).join(" > ");
+  return order.length > limit ? `${head} +${order.length - limit}` : head;
+}
 function playbackBallAgentLabel(ball) {
   const action = String(ball?.lastAction || "waiting");
   const schedule = playbackScheduleSlotLabel(ball?.scheduledIndex);
   const holder = ball?.holder == null ? "" : ` #${ball.holder}`;
-  return `${action}${schedule}${holder}`;
+  const ops = operationOrderLabel(ball?.operationOrder, 2);
+  return `${action}${schedule}${holder}${ops ? ` ${ops}` : ""}`;
+}
+function officialKindShortLabel(kind) {
+  if (kind === "centerReferee") return "CR";
+  if (kind === "assistantRefereeNear") return "AR-N";
+  if (kind === "assistantRefereeFar") return "AR-F";
+  return String(kind || "Ref");
+}
+function officialAgentsLabel(f) {
+  const officials = Array.isArray(f?.officials) ? f.officials : [];
+  if (!officials.length) return "waiting";
+  return officials.map(o => {
+    const action = String(o.lastAction || "track");
+    return `${officialKindShortLabel(o.kind)} ${action}${playbackScheduleSlotLabel(o.scheduledIndex)}`;
+  }).join(" | ");
+}
+function officialAgentsTitle(f) {
+  const officials = Array.isArray(f?.officials) ? f.officials : [];
+  if (!officials.length) return "No official agent traces";
+  return officials.map(o => {
+    const ops = Array.isArray(o.operationOrder) && o.operationOrder.length
+      ? o.operationOrder.join(" > ")
+      : "no operation order";
+    return `${officialKindShortLabel(o.kind)}: ${String(o.lastAction || "track")} ${ops}`;
+  }).join("\n");
 }
 function primaryIntent(f) {
   const intents = Array.isArray(f?.intents) ? f.intents : [];
@@ -1199,6 +1231,11 @@ function render() {
   ballPhysics.textContent = `${vecLen(f.ball.velocity).toFixed(1)}y/s ${vecLen(f.ball.acceleration).toFixed(1)}y/s2 z${ballAltitudeYards(f.ball).toFixed(1)}y`;
   ballKinematics.textContent = ballHistoryKinematicsLabel(f, trace.config?.dtSeconds);
   ballAgent.textContent = playbackBallAgentLabel(f.ball);
+  ballAgent.title = Array.isArray(f.ball?.operationOrder) && f.ball.operationOrder.length
+    ? f.ball.operationOrder.join(" > ")
+    : "";
+  officialAgents.textContent = officialAgentsLabel(f);
+  officialAgents.title = officialAgentsTitle(f);
   actionIntent.textContent = intentLabel(primaryIntent(f));
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
   updateAgentStatePanel();
@@ -1271,6 +1308,31 @@ function selectedPlayerSnapshot() {
 }
 function playerLabel(p) {
   return `${p.team} ${p.shirt} ${p.name}`;
+}
+function syncStaticSlotAvailability() {
+  const assigned = new Map();
+  for (let slot = 0; slot < visibleHumanSlotCount(); slot++) {
+    const sel = document.getElementById(`slot-${slot}`);
+    if (!sel || sel.value === "") continue;
+    const playerId = Number(sel.value);
+    if (assigned.has(playerId)) {
+      sel.value = "";
+    } else {
+      assigned.set(playerId, slot);
+    }
+  }
+  for (let slot = 0; slot < visibleHumanSlotCount(); slot++) {
+    const sel = document.getElementById(`slot-${slot}`);
+    if (!sel) continue;
+    for (const opt of sel.options) {
+      if (opt.value === "") continue;
+      const assignedSlot = assigned.get(Number(opt.value));
+      const assignedElsewhere = assignedSlot != null && assignedSlot !== slot;
+      opt.disabled = assignedElsewhere;
+      const baseLabel = opt.dataset.baseLabel || opt.textContent;
+      opt.textContent = assignedElsewhere ? `${baseLabel} - S${assignedSlot + 1}` : baseLabel;
+    }
+  }
 }
 function updateAgentStatePanel() {
   const p = selectedPlayerSnapshot();
@@ -1397,14 +1459,16 @@ function buildSlots() {
       const opt = document.createElement("option");
       opt.value = p.id;
       opt.textContent = playerLabel(p);
+      opt.dataset.baseLabel = playerLabel(p);
       if (p.controllerSlot === i) opt.selected = true;
       select.appendChild(opt);
     }
-    select.addEventListener("focus", () => { activeSlot = i; rebuildPassTargets(); });
-    select.addEventListener("change", () => { activeSlot = i; rebuildPassTargets(); render(); });
+    select.addEventListener("focus", () => { activeSlot = i; syncStaticSlotAvailability(); rebuildPassTargets(); });
+    select.addEventListener("change", () => { activeSlot = i; syncStaticSlotAvailability(); rebuildPassTargets(); render(); });
     row.append(label, select);
     slots.appendChild(row);
   }
+  syncStaticSlotAvailability();
   rebuildPassTargets();
 }
 

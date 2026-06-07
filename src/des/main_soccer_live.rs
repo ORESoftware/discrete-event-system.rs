@@ -225,11 +225,15 @@ mod tests {
         assert_eq!(cfg.match_config.dt_seconds, DEFAULT_DT_SECONDS);
         assert_eq!(cfg.match_config.duration_seconds, DEFAULT_DURATION_SECONDS);
         assert_eq!(cfg.match_config.total_ticks(), 6_000);
-        assert!(!cfg.match_config.learning_enabled);
+        assert!(cfg.match_config.learning_enabled);
         assert!(!cfg.match_config.learning_logging_enabled);
-        assert!(!cfg.match_config.neural_learning.enabled);
+        assert!(cfg.match_config.neural_learning.enabled);
+        assert_eq!(
+            cfg.match_config.neural_learning.backend,
+            SoccerNeuralLearningBackend::Threaded
+        );
         assert!(!cfg.match_config.adversarial_embedding_exploitation_enabled);
-        assert!(cfg.match_config.full_game_learning_enabled);
+        assert!(!cfg.match_config.full_game_learning_enabled);
     }
 
     #[test]

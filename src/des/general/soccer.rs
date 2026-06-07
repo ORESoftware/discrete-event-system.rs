@@ -35806,19 +35806,21 @@ impl SoccerMatch {
                         }
                     };
                     field_snapshot_elapsed += phase_started.elapsed();
-                    let phase_started = Instant::now();
                     let controller_slot = self.players[actor].controller_slot;
                     if let Some(slot) = controller_slot {
                         if controller_late_yield_enabled
                             && controller_late_yield_budget > Duration::from_secs(0)
                         {
+                            let late_yield_started = Instant::now();
                             self.late_yield_for_controller_slot(
                                 slot,
                                 controller_late_yield_assigned_players,
                                 &mut controller_late_yield_budget,
                             );
+                            controller_yield_elapsed += late_yield_started.elapsed();
                         }
                     }
+                    let phase_started = Instant::now();
                     let input_frame = controller_slot
                         .and_then(|slot| self.human_inputs.drain_latest_for_slot_with_age(slot))
                         .filter(|frame| {
@@ -61716,6 +61718,37 @@ mod tests {
         assert!(decision.observation.human_controlled);
         assert!(decision.observation.human_input_present);
         assert_eq!(decision.observation.human_input_seq, Some(1));
+    }
+
+    #[test]
+    fn late_controller_wait_time_is_reported_as_controller_yield_timing() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 1,
+            seed: 789,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(0))
+            .expect("assign slot 0");
+
+        sim.run_time_step();
+
+        let yield_stats = sim.controller_yield_stats();
+        let timing = sim.step_timing_stats();
+        assert_eq!(yield_stats.assigned_players, 1);
+        assert!(
+            yield_stats.late_wait_attempts >= 1,
+            "no input should trigger a late assigned-slot wait after the initial yield: {yield_stats:?}"
+        );
+        assert!(
+            yield_stats.total_wait_ms > 0.0,
+            "controller wait stats should record the late timeout budget"
+        );
+        assert!(
+            timing.controller_yield_ms + 0.05 >= yield_stats.total_wait_ms,
+            "late waits should be charged to controllerYieldMs, not hidden inside player decision timing: timing={timing:?} yield={yield_stats:?}"
+        );
     }
 
     #[test]

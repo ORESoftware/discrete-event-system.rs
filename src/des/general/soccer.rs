@@ -51991,9 +51991,13 @@ fn movement_action_facing_bucket(
         {
             return current_facing;
         }
-        if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS
-            && current.normalized().dot(to_ball_dir) >= -0.10
-        {
+        if to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS {
+            let urgent_ball_recovery = matches!(gait, MovementGait::Run | MovementGait::Sprint)
+                && to_target.len() > PLAYER_CONTROL_RADIUS_YARDS
+                && to_target.normalized().dot(to_ball_dir) >= 0.45;
+            if urgent_ball_recovery {
+                return ball_facing;
+            }
             return facing_bucket_rotate_one_step_toward(current_facing, ball_facing);
         }
     }
@@ -58453,6 +58457,26 @@ mod tests {
             committed_away_facing,
             FacingBucket::South,
             "a true sprint away from the ball can turn the body toward the run"
+        );
+    }
+
+    #[test]
+    fn stale_opposite_facing_turns_toward_ball_without_single_tick_spin() {
+        let facing = movement_action_facing_bucket(
+            Team::Home,
+            Vec2::new(40.0, 60.0),
+            Vec2::new(40.0, 40.0),
+            Vec2::new(6.0, 0.0),
+            Vec2::new(0.0, 0.0),
+            MovementGait::SideStep,
+            false,
+            FacingBucket::South,
+        );
+
+        assert_eq!(
+            facing,
+            FacingBucket::SouthWest,
+            "a stale look-away posture should rotate toward the ball instead of snapping 180 degrees in one tick"
         );
     }
 

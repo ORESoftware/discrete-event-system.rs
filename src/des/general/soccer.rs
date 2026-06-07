@@ -48528,11 +48528,7 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
         "shoot" => {
             observation.has_ball && shot_decision_is_qualified_for_role(&observation, player.role)
         }
-        "pass" => {
-            observation.has_ball
-                && (snapshot.best_visible_pass_target(player_id).is_some()
-                    || snapshot.best_pass_target(player_id).is_some())
-        }
+        "pass" => observation.has_ball && snapshot.best_visible_pass_target(player_id).is_some(),
         "aerial-pass" => {
             observation.has_ball && snapshot.best_aerial_pass_target(player_id).is_some()
         }
@@ -53381,7 +53377,7 @@ mod tests {
         assert!(visible.visible_ball);
         assert_eq!(visible.visible_opponents, 0);
 
-        sim.ball.position = Vec2::new(10.0, 60.0);
+        sim.ball.position = Vec2::new(2.0, 4.0);
         let snapshot = WorldSnapshot::from_match(&sim);
         let hidden = snapshot.observation_for(observer);
         assert!(!hidden.visible_ball);
@@ -53397,6 +53393,8 @@ mod tests {
         let hidden_teammate = 8;
         sim.players[passer].position = Vec2::new(40.0, 60.0);
         sim.players[passer].velocity = Vec2::new(4.0, 0.0);
+        sim.players[passer].action_facing = FacingBucket::East;
+        sim.players[passer].receive_facing = FacingBucket::East;
         sim.players[visible_teammate].position = Vec2::new(56.0, 60.0);
         sim.players[hidden_teammate].position = Vec2::new(18.0, 60.0);
         for home in 0..11 {
@@ -53431,6 +53429,8 @@ mod tests {
         let hidden_teammate = 8;
         sim.players[passer].position = Vec2::new(40.0, 60.0);
         sim.players[passer].velocity = Vec2::new(4.0, 0.0);
+        sim.players[passer].action_facing = FacingBucket::East;
+        sim.players[passer].receive_facing = FacingBucket::East;
         sim.players[visible_teammate].position = Vec2::new(56.0, 60.0);
         sim.players[hidden_teammate].position = Vec2::new(18.0, 60.0);
         for home in 0..11 {
@@ -59753,9 +59753,13 @@ mod tests {
         let before = WorldSnapshot::from_match(&sim);
         let mut rng = mulberry32(1501);
         sim.central_brain.run_time_step(&before, &mut rng);
+        sim.players[5].action_facing = FacingBucket::South;
+        sim.players[5].receive_facing = FacingBucket::South;
+        sim.players[6].position = sim.players[5].position + Vec2::new(0.0, 14.0);
+        sim.players[6].home_position = sim.players[6].position;
         let snapshot = WorldSnapshot::from_match(&sim);
         assert_eq!(snapshot.ball.holder, Some(5));
-        assert!(snapshot.best_pass_target(5).is_some());
+        assert!(snapshot.best_visible_pass_target(5).is_some());
 
         let mut policy = SoccerQPolicy::default();
         assert!(policy.set_action_value_for_snapshot(&snapshot, 5, "pass", 5.0));
@@ -62111,9 +62115,13 @@ mod tests {
         let before = WorldSnapshot::from_match(&sim);
         let mut rng = mulberry32(1502);
         sim.central_brain.run_time_step(&before, &mut rng);
+        sim.players[5].action_facing = FacingBucket::South;
+        sim.players[5].receive_facing = FacingBucket::South;
+        sim.players[6].position = sim.players[5].position + Vec2::new(0.0, 14.0);
+        sim.players[6].home_position = sim.players[6].position;
         let snapshot = WorldSnapshot::from_match(&sim);
         assert_eq!(snapshot.ball.holder, Some(5));
-        assert!(snapshot.best_pass_target(5).is_some());
+        assert!(snapshot.best_visible_pass_target(5).is_some());
 
         let mut policies = SoccerTeamQPolicies::new(SoccerQPolicyOptions::default());
         assert!(policies
@@ -68035,7 +68043,8 @@ mod tests {
         sim.ball.last_touch_team = Some(Team::Home);
         sim.players[crosser].position = sim.ball.position;
         sim.players[crosser].velocity = Vec2::new(0.0, 1.0);
-        sim.players[crosser].action_facing = FacingBucket::North;
+        sim.players[crosser].action_facing = FacingBucket::South;
+        sim.players[crosser].receive_facing = FacingBucket::South;
         sim.players[crosser].skills.crossing_left = 8.6;
         sim.players[crosser].skills.crossing_right = 8.8;
         sim.players[striker].position = Vec2::new(62.0, 102.0);
@@ -76488,6 +76497,8 @@ mod tests {
         sim.players[attacker].role = PlayerRole::Midfielder;
         sim.players[attacker].position = Vec2::new(40.0, 96.5);
         sim.players[attacker].velocity = Vec2::new(0.0, -1.0);
+        sim.players[attacker].action_facing = FacingBucket::North;
+        sim.players[attacker].receive_facing = FacingBucket::North;
         sim.players[attacker].skills.shooting = 7.6;
         sim.players[attacker].skills.right_foot_shot_power = 7.8;
         sim.players[attacker].skills.left_foot_shot_power = 7.2;
@@ -77288,6 +77299,7 @@ mod tests {
         assert!(html.contains("goalWidthYards"));
         assert!(html.contains("ctx.arc(post.x, post.y, postRadius"));
         assert!(html.contains("id=\"agentKinematics\""));
+        assert!(html.contains("id=\"agentShotLane\""));
         assert!(html.contains("historyKinematicsFromPositions"));
         assert!(html.contains("playbackPlayerHistoryForFrame"));
         assert!(html.contains("playerHistoryKinematicsLabel"));
@@ -77296,6 +77308,9 @@ mod tests {
         assert!(html.contains("H${k.samples} V${vecLen(velocity).toFixed(1)}"));
         assert!(html.contains("function pointSegmentDistance"));
         assert!(html.contains("function staticShotLaneOpen"));
+        assert!(html.contains("function selectedPlayerShotContext"));
+        assert!(html.contains("function selectedPlayerShotLaneLabel"));
+        assert!(html.contains("agentShotLane.textContent = selectedPlayerShotLaneLabel()"));
         assert!(html.contains("return nearGoal && staticShotLaneOpen(frame, p, goal)"));
         assert!(html.contains("drawGaitCue"));
         assert!(html.contains("movementGait"));

@@ -56,7 +56,7 @@ spec:
             - name: SOCCER_GAMES
               value: "25"
             - name: SOCCER_PARALLEL_GAMES
-              value: "3"
+              value: "1"
             - name: SOCCER_HALVES
               value: "2"
             - name: SOCCER_HALF_MINUTES
@@ -74,13 +74,13 @@ spec:
             - name: SOCCER_NEURAL_LEARNING_BACKEND
               value: threaded
             - name: SOCCER_NEURAL_REPLAY_CAPACITY
-              value: "256"
+              value: "128"
             - name: SOCCER_NEURAL_MAX_PENDING_BATCHES
-              value: "64"
+              value: "16"
             - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
-              value: "3"
+              value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
-              value: "3"
+              value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
               value: "200"
             - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
@@ -94,11 +94,11 @@ spec:
             - name: SOCCER_EVOLUTION_ENABLED
               value: "true"
             - name: SOCCER_EVOLUTION_INTERVAL_GAMES
-              value: "3"
+              value: "1"
             - name: SOCCER_EVOLUTION_ELITE_GAMES
-              value: "3"
+              value: "1"
             - name: SOCCER_EVOLUTION_POPULATION_SIZE
-              value: "12"
+              value: "4"
             - name: SOCCER_CHECKPOINT_INTERVAL_GAMES
               value: "0"
             - name: SOCCER_GAME_ARTIFACT_MODE
@@ -128,10 +128,10 @@ spec:
           resources:
             requests:
               cpu: 1500m
-              memory: 3Gi
+              memory: 8Gi
             limits:
-              cpu: "6"
-              memory: 16Gi
+              cpu: "4"
+              memory: 64Gi
           volumeMounts:
             - name: tmp
               mountPath: /tmp

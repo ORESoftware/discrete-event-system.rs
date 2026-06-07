@@ -1047,7 +1047,8 @@ function officialAgentsTitle(f) {
     const ops = Array.isArray(o.operationOrder) && o.operationOrder.length
       ? o.operationOrder.join(" > ")
       : "no operation order";
-    return `${officialKindShortLabel(o.kind)}: ${String(o.lastAction || "track")} ${ops}`;
+    const kinematics = officialHistoryKinematicsLabel(o, trace.config?.dtSeconds, playbackOfficialHistoryForFrame(o.id));
+    return `${officialKindShortLabel(o.kind)}: ${String(o.lastAction || "track")} ${kinematics} ${ops}`;
   }).join("\n");
 }
 function primaryIntent(f) {
@@ -1209,6 +1210,21 @@ function playerHistoryKinematicsLabel(p, dtSeconds = trace.config?.dtSeconds, hi
   const velocity = k.velocity || p?.velocity || {x: 0, y: 0};
   const acceleration = k.acceleration || p?.acceleration || {x: 0, y: 0};
   const jerk = k.jerk || p?.jerk || {x: 0, y: 0};
+  return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
+}
+function playbackOfficialHistoryForFrame(officialId, index = frameIndex) {
+  if (officialId == null) return [];
+  const start = Math.max(0, Number(index || 0) - 49);
+  return trace.frames.slice(start, Number(index || 0) + 1)
+    .map(frame => frame.officials?.find(official => official.id === officialId)?.position)
+    .filter(Boolean);
+}
+function officialHistoryKinematicsLabel(o, dtSeconds = trace.config?.dtSeconds, history = null) {
+  const sourceHistory = Array.isArray(history) ? history : o?.positionHistory || playbackOfficialHistoryForFrame(o?.id);
+  const k = historyKinematicsFromPositions(sourceHistory, dtSeconds);
+  const velocity = k.velocity || o?.velocity || {x: 0, y: 0};
+  const acceleration = k.acceleration || o?.acceleration || {x: 0, y: 0};
+  const jerk = k.jerk || o?.jerk || {x: 0, y: 0};
   return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
 }
 function playbackBallHistoryForFrame(index = frameIndex) {

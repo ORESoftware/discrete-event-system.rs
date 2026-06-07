@@ -88303,6 +88303,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function officialAgentsTitle"));
         assert!(html.contains("officialAgents.textContent = officialAgentsLabel(f)"));
         assert!(html.contains("officialAgents.title = officialAgentsTitle(f)"));
+        assert!(html.contains("playbackOfficialHistoryForFrame"));
+        assert!(html.contains("officialHistoryKinematicsLabel"));
+        assert!(html
+            .contains("frame.officials?.find(official => official.id === officialId)?.position"));
+        assert!(html.contains(
+            "officialHistoryKinematicsLabel(o, trace.config?.dtSeconds, playbackOfficialHistoryForFrame(o.id))"
+        ));
         assert!(html.contains("id=\"clearances\""));
         assert!(html.contains("id=\"routeOne\""));
         assert!(html.contains("id=\"tackles\""));

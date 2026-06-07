@@ -3716,6 +3716,12 @@ struct SoccerQTargetSpatialIndexKey {
     action: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SoccerQTargetRelaxedSpatialIndexKey {
+    source: SoccerQRelaxedSpatialIndexKey,
+    action: String,
+}
+
 const SOCCER_FACING_INDEX_VALUES: [FacingBucket; 9] = [
     FacingBucket::Unknown,
     FacingBucket::North,
@@ -3878,12 +3884,42 @@ pub struct SoccerQPolicy {
     action_spatial_index: HashMap<SoccerQSpatialIndexKey, Vec<usize>>,
     action_relaxed_spatial_index: HashMap<SoccerQRelaxedSpatialIndexKey, Vec<usize>>,
     target_spatial_index: HashMap<SoccerQTargetSpatialIndexKey, Vec<usize>>,
+    target_relaxed_spatial_index: HashMap<SoccerQTargetRelaxedSpatialIndexKey, Vec<usize>>,
     pub options: SoccerQPolicyOptions,
 }
 
 impl Default for SoccerQPolicy {
     fn default() -> Self {
         Self::new(SoccerQPolicyOptions::default())
+    }
+}
+
+fn update_best_target_grid_candidate<'a>(
+    policy: &SoccerQPolicy,
+    best: &mut Option<(&'a SoccerQTargetKey, f64, u32)>,
+    key: &'a SoccerQTargetKey,
+) {
+    let Some(value) = policy
+        .target_values
+        .get(key)
+        .copied()
+        .and_then(soccer_q_sanitized_value)
+    else {
+        return;
+    };
+    let visits = policy.target_visits.get(key).copied().unwrap_or(0);
+    let replace = best
+        .as_ref()
+        .map(|(_, best_value, best_visits)| {
+            value
+                .partial_cmp(best_value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| visits.cmp(best_visits))
+                .is_gt()
+        })
+        .unwrap_or(true);
+    if replace {
+        *best = Some((key, value, visits));
     }
 }
 
@@ -3900,6 +3936,7 @@ impl SoccerQPolicy {
             action_spatial_index: HashMap::new(),
             action_relaxed_spatial_index: HashMap::new(),
             target_spatial_index: HashMap::new(),
+            target_relaxed_spatial_index: HashMap::new(),
             options,
         }
     }
@@ -4127,6 +4164,13 @@ impl SoccerQPolicy {
             self.target_spatial_index
                 .entry(SoccerQTargetSpatialIndexKey {
                     source,
+                    action: key.action.clone(),
+                })
+                .or_default()
+                .push(key_id);
+            self.target_relaxed_spatial_index
+                .entry(SoccerQTargetRelaxedSpatialIndexKey {
+                    source: Self::relaxed_spatial_index_key_for_state(&key.state, level),
                     action: key.action.clone(),
                 })
                 .or_default()
@@ -4608,6 +4652,7 @@ impl SoccerQPolicy {
             self.target_visits.clear();
             self.target_index_keys.clear();
             self.target_spatial_index.clear();
+            self.target_relaxed_spatial_index.clear();
             for (key, value, visits) in kept_targets {
                 if self.insert_target_value(key.clone(), value) {
                     self.target_visits.insert(key, visits);
@@ -4628,45 +4673,55 @@ impl SoccerQPolicy {
         state: &SoccerQStateKey,
         action: &str,
     ) -> Option<SoccerQTargetEntry> {
+        self.best_target_grid_for_state_action_with_context(state, action, false)
+            .or_else(|| self.best_target_grid_for_state_action_with_context(state, action, true))
+    }
+
+    fn best_target_grid_for_state_action_with_context(
+        &self,
+        state: &SoccerQStateKey,
+        action: &str,
+        relaxed: bool,
+    ) -> Option<SoccerQTargetEntry> {
         let action = normalize_soccer_action_label(action);
         PITCH_GRID_BACKOFF_LEVELS.iter().find_map(|level| {
             let mut best: Option<(&SoccerQTargetKey, f64, u32)> = None;
-            for source in Self::spatial_query_keys(state, *level) {
-                let index_key = SoccerQTargetSpatialIndexKey {
-                    source,
+            if relaxed {
+                let index_key = SoccerQTargetRelaxedSpatialIndexKey {
+                    source: Self::relaxed_spatial_index_key_for_state(state, *level),
                     action: action.to_string(),
                 };
-                let Some(keys) = self.target_spatial_index.get(&index_key) else {
-                    continue;
+                let Some(keys) = self.target_relaxed_spatial_index.get(&index_key) else {
+                    return None;
                 };
                 for key_id in keys {
                     let Some(key) = self.target_index_keys.get(*key_id) else {
                         continue;
                     };
-                    if key.action != action || !key.state.matches_spatial_level(state, *level) {
+                    if key.action != action
+                        || !key.state.matches_relaxed_spatial_level(state, *level)
+                    {
                         continue;
                     }
-                    let Some(value) = self
-                        .target_values
-                        .get(key)
-                        .copied()
-                        .and_then(soccer_q_sanitized_value)
-                    else {
+                    update_best_target_grid_candidate(self, &mut best, key);
+                }
+            } else {
+                for source in Self::spatial_query_keys(state, *level) {
+                    let index_key = SoccerQTargetSpatialIndexKey {
+                        source,
+                        action: action.to_string(),
+                    };
+                    let Some(keys) = self.target_spatial_index.get(&index_key) else {
                         continue;
                     };
-                    let visits = self.target_visits.get(key).copied().unwrap_or(0);
-                    let replace = best
-                        .as_ref()
-                        .map(|(_, best_value, best_visits)| {
-                            value
-                                .partial_cmp(best_value)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                                .then_with(|| visits.cmp(best_visits))
-                                .is_gt()
-                        })
-                        .unwrap_or(true);
-                    if replace {
-                        best = Some((key, value, visits));
+                    for key_id in keys {
+                        let Some(key) = self.target_index_keys.get(*key_id) else {
+                            continue;
+                        };
+                        if key.action != action || !key.state.matches_spatial_level(state, *level) {
+                            continue;
+                        }
+                        update_best_target_grid_candidate(self, &mut best, key);
                     }
                 }
             }
@@ -5088,7 +5143,17 @@ impl SoccerQPolicy {
         for source_level in PITCH_GRID_BACKOFF_LEVELS {
             let mut best: Option<(f64, u32)> = None;
             if relaxed {
-                for key in &self.target_index_keys {
+                let index_key = SoccerQTargetRelaxedSpatialIndexKey {
+                    source: Self::relaxed_spatial_index_key_for_state(state, source_level),
+                    action: action.to_string(),
+                };
+                let Some(keys) = self.target_relaxed_spatial_index.get(&index_key) else {
+                    continue;
+                };
+                for key_id in keys {
+                    let Some(key) = self.target_index_keys.get(*key_id) else {
+                        continue;
+                    };
                     if key.action != action
                         || !key.state.matches_relaxed_spatial_level(state, source_level)
                     {
@@ -61583,6 +61648,60 @@ mod tests {
 
         base_state.action_facing = FacingBucket::North;
         assert_eq!(policy.best_action_hierarchical(&base_state), None);
+    }
+
+    #[test]
+    fn q_policy_uses_relaxed_indexed_backoff_for_target_grid_preferences() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14212,
+            ..Default::default()
+        });
+        let passer = 5;
+        let receiver = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(30.0, 62.0);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[receiver].position = Vec2::new(52.0, 78.0);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let state = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(passer),
+            &snapshot.observation_for(passer),
+            Team::Home,
+            sim.players[passer].role,
+        );
+        let target_grid = pitch_grid_address(
+            sim.players[receiver].position,
+            snapshot.field_width,
+            snapshot.field_length,
+        );
+        let mut policy = SoccerQPolicy::default();
+        assert!(policy.set_target_value(state.clone(), "pass", target_grid, 4.25));
+        assert!(!policy.target_relaxed_spatial_index.is_empty());
+
+        let mut volatile_context = state.clone();
+        volatile_context.pressure_bin = volatile_context.pressure_bin.saturating_add(1);
+        volatile_context.decision_urgency_bin =
+            volatile_context.decision_urgency_bin.saturating_add(1);
+        assert!(!state.matches_spatial_level(&volatile_context, PitchGridLevel::Fine));
+        assert!(state.matches_relaxed_spatial_level(&volatile_context, PitchGridLevel::Fine));
+
+        let learned_target = policy
+            .best_target_grid_for_state_action(&volatile_context, "pass")
+            .expect("relaxed indexed target grid");
+        assert_eq!(learned_target.target_fine_cell_id, target_grid.fine.id);
+        assert_eq!(
+            learned_target.target_tactical_cell_id,
+            target_grid.tactical.id
+        );
+        assert!(
+            policy
+                .target_preference_for_grid(&volatile_context, "pass", &target_grid)
+                .expect("relaxed indexed target preference")
+                > 4.0,
+            "relaxed indexed preference should preserve strong learned target value"
+        );
     }
 
     #[test]

@@ -329,6 +329,7 @@
       <div class="metric"><span>Restarts</span><b id="restarts">0 - 0</b></div>
       <div class="metric"><span>Fouls</span><b id="fouls">0 - 0</b></div>
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
+      <div class="metric"><span>Cadence</span><b id="cadence">0.1s x 6001</b></div>
       <div class="metric"><span>Seed</span><b id="seed">-</b></div>
       <div class="metric"><span>Run ID</span><b id="runId">-</b></div>
       <div class="section">Controller Slots</div>
@@ -451,6 +452,7 @@ const offsides = document.getElementById("offsides");
 const restarts = document.getElementById("restarts");
 const fouls = document.getElementById("fouls");
 const ticks = document.getElementById("ticks");
+const cadence = document.getElementById("cadence");
 const seed = document.getElementById("seed");
 const runId = document.getElementById("runId");
 const scrub = document.getElementById("scrub");
@@ -857,6 +859,11 @@ function fmtClock(s) {
   const sec = (s - m * 60).toFixed(1).padStart(4, "0");
   return `${m}:${sec}`;
 }
+function fmtDuration(seconds) {
+  const total = Number(seconds || 0);
+  if (total >= 60) return `${(total / 60).toFixed(1)}m`;
+  return `${total.toFixed(1)}s`;
+}
 function pitchRect() {
   const pad = 34;
   const w = canvas.width - pad * 2;
@@ -1179,6 +1186,10 @@ function updateMetrics() {
   const awayRestarts = (s.throwInsAway ?? 0) + (s.goalKicksAway ?? 0) + (s.cornerKicksAway ?? 0) + (s.freeKicksAway ?? 0);
   restarts.textContent = `${homeRestarts} - ${awayRestarts}`;
   fouls.textContent = `${s.foulsHome ?? 0} - ${s.foulsAway ?? 0}`;
+  const dt = Number(trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
+  const expectedFrames = expectedFrameCount();
+  const duration = Math.max(0, expectedFrames - 1) * dt;
+  cadence.textContent = `${dt.toFixed(2)}s; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f`;
   seed.textContent = trace.config?.seed ?? "-";
   runId.textContent = runIdLabel();
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");

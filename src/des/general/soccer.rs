@@ -77224,6 +77224,13 @@ mod tests {
         assert!(html.contains("runNewSimulation"));
         assert!(html.contains("id=\"seed\""));
         assert!(html.contains("id=\"runId\""));
+        assert!(html.contains("id=\"cadence\""));
+        assert!(html.contains("0.1s x 6001"));
+        assert!(html.contains("const cadence = document.getElementById(\"cadence\")"));
+        assert!(html.contains("function fmtDuration"));
+        assert!(html.contains(
+            "cadence.textContent = `${dt.toFixed(2)}s; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f`"
+        ));
         assert!(html.contains("trace.config?.seed"));
         assert!(html.contains("trace.runId"));
         assert!(html.contains("generatedAtUnixMs"));

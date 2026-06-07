@@ -50803,13 +50803,28 @@ mod tests {
 
     #[test]
     fn default_match_has_22_players_and_3_officials() {
-        let sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         assert_eq!(sim.players.len(), 22);
         assert_eq!(sim.officials.len(), 3);
-        assert_eq!(sim.config.dt_seconds, 0.1);
-        assert_eq!(sim.config.duration_seconds, 600.0);
+        assert_eq!(sim.config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(
+            sim.config.effective_duration_seconds(),
+            DEFAULT_DURATION_SECONDS
+        );
         assert_eq!(sim.config.half_count(), 1);
-        assert_eq!(sim.config.total_ticks(), 6000);
+        assert_eq!(sim.config.total_ticks(), 6_000);
+        assert_eq!(sim.config.max_human_players, 4);
+        assert_eq!(sim.config.human_slots(), 4);
+        assert_eq!(sim.ball.id, BALL_AGENT_ID);
+        assert_eq!(sim.ball.holder, sim.possession_chain.back().copied());
+        assert!(sim.last_agent_schedule.is_empty());
+        let initial_clock = sim.match_clock();
+        assert_eq!(initial_clock.tick, 0);
+        assert_eq!(initial_clock.total_ticks, 6_000);
+        assert_eq!(initial_clock.remaining_ticks, 6_000);
+        assert_eq!(initial_clock.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(initial_clock.total_seconds, DEFAULT_DURATION_SECONDS);
+        assert!(!initial_clock.done);
         assert_eq!(
             sim.ball.position,
             Vec2::new(
@@ -50832,6 +50847,39 @@ mod tests {
             .expect("far assistant");
         assert!(far_assistant.position.x > sim.config.field_width_yards);
         assert!(far_assistant.position.y >= sim.config.field_length_yards * 0.5);
+
+        sim.run_time_step();
+        let frame = sim.to_frame();
+        let ball_schedule_index = frame
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
+            .expect("ball agent scheduled after first tick");
+        assert_eq!(frame.tick, 1);
+        assert_eq!(frame.clock_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(frame.players.len(), 22);
+        assert_eq!(frame.officials.len(), 3);
+        assert_eq!(frame.agent_schedule.len(), 27);
+        assert_eq!(
+            frame
+                .agent_schedule
+                .first()
+                .map(|entry| (&entry.kind, entry.id)),
+            Some((&AgentScheduleKind::CentralBrain, CENTRAL_BRAIN_AGENT_ID))
+        );
+        assert_eq!(frame.central_brain.scheduled_index, Some(0));
+        assert_eq!(frame.central_brain.tracked_players.len(), 22);
+        assert_eq!(frame.central_brain.tracked_officials, 3);
+        assert_eq!(frame.ball.scheduled_index, Some(ball_schedule_index));
+        assert_eq!(
+            frame
+                .ball
+                .last_decision
+                .as_ref()
+                .and_then(|decision| decision.scheduled_index),
+            Some(ball_schedule_index)
+        );
+        assert_eq!(sim.match_clock().remaining_ticks, 5_999);
     }
 
     #[test]

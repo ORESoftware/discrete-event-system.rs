@@ -20607,14 +20607,11 @@ impl WorldSnapshot {
     }
 
     fn active_rebound_for_player(&self, player_id: usize) -> Option<&PendingRebound> {
-        let player = self.players.iter().find(|player| player.id == player_id)?;
         let rebound = self.pending_rebound.as_ref()?;
-        if self.ball.holder.is_some()
-            || player.team != rebound.attacking_team
-            || self.tick.saturating_sub(rebound.launch_tick) > 16
-        {
+        if self.ball.holder.is_some() || self.tick.saturating_sub(rebound.launch_tick) > 16 {
             return None;
         }
+        self.players.iter().find(|player| player.id == player_id)?;
         Some(rebound)
     }
 
@@ -84165,6 +84162,56 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             intent.sprint,
             "attacker should sprint to a keeper parry rebound: {intent:?}"
+        );
+    }
+
+    #[test]
+    fn defending_players_sprint_to_clear_keeper_parry_rebound() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 13;
+        let attacker = 9;
+        let keeper_id = sim.goalkeeper_for(Team::Away).expect("away keeper");
+        park_players_except(&mut sim, &[defender, attacker, keeper_id]);
+        sim.players[defender].position = Vec2::new(42.4, 111.9);
+        sim.players[attacker].position = Vec2::new(38.0, 111.2);
+        sim.players[keeper_id].position = Vec2::new(40.0, 118.4);
+        let parry_position = Vec2::new(41.2, 114.6);
+        let shot = PendingShot {
+            team: Team::Home,
+            shooter: attacker,
+            origin: Vec2::new(40.0, 104.0),
+        };
+
+        sim.apply_ball_outcome(BallStepOutcome::KeeperParry {
+            shot,
+            defending_team: Team::Away,
+            keeper_id,
+            save_position: sim.players[keeper_id].position,
+            parry_position,
+            velocity: Vec2::zero(),
+        });
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert_eq!(snapshot.controlled_possession_team(), None);
+        assert!(snapshot.pending_rebound.is_some());
+        assert!(snapshot.rebound_recovery_sprint_active(defender));
+        assert_eq!(
+            snapshot.loose_ball_recovery_target_for(defender),
+            parry_position
+        );
+
+        let mut player = sim.players[defender].clone();
+        let intent = player.run_time_step(&snapshot, None, None, &mut SeededRandom::new(76_325));
+        let SoccerAction::MoveTo(target) = intent.action else {
+            panic!("defender should recover the parried ball, got {intent:?}");
+        };
+        assert!(
+            target.distance(parry_position) < 1e-9,
+            "defender should target the parried ball: target={target:?} parry={parry_position:?}"
+        );
+        assert!(
+            intent.sprint,
+            "defender should sprint to clear a keeper parry rebound: {intent:?}"
         );
     }
 

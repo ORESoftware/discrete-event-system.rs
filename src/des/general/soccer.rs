@@ -75211,6 +75211,97 @@ mod tests {
         assert!(pressured_error > clean_error * 2.0);
     }
 
+    #[test]
+    fn clean_targeted_floor_pass_completes_through_ball_agent_loop() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 2.0,
+            seed: 2_302,
+            ..Default::default()
+        });
+        let passer = 6;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].position = Vec2::new(40.0, 40.0);
+        sim.players[passer].home_position = sim.players[passer].position;
+        sim.players[passer].velocity = Vec2::zero();
+        sim.players[passer].skills.passing_completion_rate = 10.0;
+        sim.players[passer].skills.passing = 10.0;
+        sim.players[passer].skills.flair_passing = 1.0;
+        sim.players[receiver].position = Vec2::new(40.0, 48.0);
+        sim.players[receiver].home_position = sim.players[receiver].position;
+        sim.players[receiver].velocity = Vec2::zero();
+        sim.players[receiver].skills.first_touch = 10.0;
+        sim.players[receiver].skills.acceleration = 10.0;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.pending_pass = None;
+        sim.pending_shot = None;
+
+        sim.apply_player_intent(PlayerIntent {
+            player_id: passer,
+            action: SoccerAction::Pass {
+                target_player: Some(receiver),
+                power: 0.45,
+                flight: PassFlight::Floor,
+            },
+            sprint: false,
+        });
+
+        let pending = sim.pending_pass.as_ref().expect("pending pass");
+        assert_eq!(pending.from, passer);
+        assert_eq!(pending.target, Some(receiver));
+        assert_eq!(pending.flight, PassFlight::Floor);
+        assert_eq!(sim.ball.holder, None);
+        assert_eq!(sim.stats.passes_attempted_home, 1);
+        sim.players[passer].position = Vec2::new(34.0, 36.0);
+        sim.players[passer].home_position = sim.players[passer].position;
+        sim.players[passer].velocity = Vec2::zero();
+
+        let mut completed_tick = None;
+        for step in 0..80 {
+            sim.integrate_ball();
+            if sim.ball.holder == Some(receiver) {
+                completed_tick = Some(step);
+                break;
+            }
+            if sim.ball.holder.is_some() {
+                break;
+            }
+            sim.tick += 1;
+            sim.clock_seconds += sim.config.dt_seconds;
+        }
+
+        assert!(
+            completed_tick.is_some(),
+            "open targeted pass should be controlled by the intended receiver, holder={:?} ball={:?}",
+            sim.ball.holder,
+            sim.ball.position
+        );
+        assert_eq!(sim.ball.holder, Some(receiver));
+        assert_eq!(sim.ball.last_touch_team, Some(Team::Home));
+        assert!(sim.pending_pass.is_none());
+        assert_eq!(sim.stats.passes_completed_home, 1);
+        assert_eq!(
+            sim.ball
+                .last_decision
+                .as_ref()
+                .map(|decision| decision.action.as_str()),
+            Some("controlled")
+        );
+        let incoming = sim.players[receiver]
+            .incoming_ball
+            .as_ref()
+            .expect("receiver incoming context");
+        assert_eq!(incoming.from_player, Some(passer));
+        assert_eq!(incoming.target_player, Some(receiver));
+        assert_eq!(incoming.team, Some(Team::Home));
+        assert_eq!(incoming.kind, IncomingBallKind::GroundPass);
+        assert!(!incoming.is_aerial);
+        assert!(!incoming.is_cross);
+    }
+
     fn targeted_pass_completed_with_receiver_pressure(seed: u32, marked: bool) -> bool {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 8.0,

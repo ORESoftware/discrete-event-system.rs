@@ -51592,6 +51592,74 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_ball_agent_tick_moves_free_ball_and_records_history() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 311,
+            ball_drag_per_tick: 0.04,
+            ball_air_resistance: 0.004,
+            ball_grass_resistance_yps2: 0.8,
+            ..Default::default()
+        });
+        park_players_except(&mut sim, &[]);
+        sim.active_set_play = None;
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(40.0, 60.0);
+        sim.ball.velocity = Vec2::new(9.0, 1.5);
+        sim.ball.acceleration = Vec2::zero();
+        sim.ball.jerk = Vec2::zero();
+        sim.ball.curl_acceleration = Vec2::zero();
+        sim.ball.altitude_yards = 0.0;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.last_decision = None;
+        sim.ball.position_history.clear();
+        sim.ball.record_position_history(0, 0.0);
+        sim.pending_pass = None;
+        sim.pending_shot = None;
+        let origin = sim.ball.position;
+        let initial_speed = sim.ball.velocity.len();
+
+        sim.run_time_step();
+        let frame = sim.to_frame();
+        let ball_slot = frame
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
+            .expect("ball scheduled");
+        let decision = frame.ball.last_decision.as_ref().expect("ball decision");
+
+        assert_eq!(sim.tick, 1);
+        assert_eq!(frame.ball.scheduled_index, Some(ball_slot));
+        assert_eq!(decision.scheduled_index, Some(ball_slot));
+        assert_eq!(decision.action, "roll");
+        assert!(sim.ball.position.x > origin.x);
+        assert!(sim.ball.position.y > origin.y);
+        assert!(
+            sim.ball.velocity.len() < initial_speed,
+            "scheduled ball agent should apply configured drag/resistance: before={initial_speed} after={}",
+            sim.ball.velocity.len()
+        );
+        assert_eq!(sim.ball.holder, None);
+        assert!(sim.ball.acceleration.len().is_finite());
+        assert!(sim.ball.jerk.len().is_finite());
+        assert_eq!(sim.ball.position_history.len(), 2);
+        assert_eq!(
+            sim.ball
+                .position_history
+                .back()
+                .map(|sample| (sample.tick, sample.position)),
+            Some((1, sim.ball.position))
+        );
+        assert_eq!(
+            sim.shared_positions
+                .ball_history()
+                .last()
+                .map(|sample| sample.position),
+            Some(sim.ball.position)
+        );
+    }
+
+    #[test]
     fn ball_agent_tracks_acceleration_and_rolling_history() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             seed: 204,

@@ -299,7 +299,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 106;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 108;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 38;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 39;
 const SOCCER_NEURAL_FEATURE_BALL_SPEED: usize = 42;
@@ -1424,6 +1424,14 @@ pub struct SoccerPomdpObservation {
     #[serde(default)]
     pub player_position_confidences: Vec<PlayerPositionConfidence>,
     #[serde(default)]
+    pub look_behind_scan_active: bool,
+    #[serde(default)]
+    pub look_behind_scan_seconds: f64,
+    #[serde(default)]
+    pub look_behind_confidence_bonus: f64,
+    #[serde(default)]
+    pub look_behind_drift_risk: f64,
+    #[serde(default)]
     pub scheduled_index: Option<usize>,
     #[serde(default)]
     pub ball_scheduled_index: Option<usize>,
@@ -1662,6 +1670,14 @@ pub struct PlayerPositionConfidence {
     pub distance_yards: f64,
     pub in_front: bool,
     pub confidence: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LookBehindScanContext {
+    active: bool,
+    duration_seconds: f64,
+    confidence_bonus: f64,
+    drift_risk: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2850,6 +2866,10 @@ pub struct SoccerQStateKey {
     pub teammate_position_confidence_bin: u8,
     #[serde(default)]
     pub opponent_position_confidence_bin: u8,
+    #[serde(default)]
+    pub look_behind_scan: bool,
+    #[serde(default)]
+    pub look_behind_drift_risk_bin: u8,
     pub ball_distance_bin: u8,
     pub yards_to_goal_bin: u8,
     #[serde(default)]
@@ -3211,6 +3231,11 @@ impl SoccerQStateKey {
             opponent_position_confidence_bin: confidence_bucket(
                 observation.opponent_position_confidence,
             ),
+            look_behind_scan: observation.look_behind_scan_active,
+            look_behind_drift_risk_bin: distance_bucket(
+                observation.look_behind_drift_risk,
+                &[0.10, 0.25, 0.45, 0.70],
+            ),
             ball_distance_bin: distance_bucket(observation.ball_distance, &[3.0, 8.0, 18.0, 36.0]),
             yards_to_goal_bin: distance_bucket(
                 observation.yards_to_goal,
@@ -3460,6 +3485,8 @@ impl SoccerQStateKey {
             && self.ball_position_confidence_bin == other.ball_position_confidence_bin
             && self.teammate_position_confidence_bin == other.teammate_position_confidence_bin
             && self.opponent_position_confidence_bin == other.opponent_position_confidence_bin
+            && self.look_behind_scan == other.look_behind_scan
+            && self.look_behind_drift_risk_bin == other.look_behind_drift_risk_bin
             && self.ball_distance_bin == other.ball_distance_bin
             && self.yards_to_goal_bin == other.yards_to_goal_bin
             && self.yards_to_own_goal_bin == other.yards_to_own_goal_bin
@@ -16802,6 +16829,10 @@ impl WorldSnapshot {
                 teammate_position_confidence: 0.0,
                 opponent_position_confidence: 0.0,
                 player_position_confidences: Vec::new(),
+                look_behind_scan_active: false,
+                look_behind_scan_seconds: 0.0,
+                look_behind_confidence_bonus: 0.0,
+                look_behind_drift_risk: 0.0,
                 scheduled_index: None,
                 ball_scheduled_index: None,
                 ball_schedule_order: 0,
@@ -16993,6 +17024,15 @@ impl WorldSnapshot {
         );
         let has_ball = self.ball.holder == Some(player_id);
         let visible_ball = has_ball || self.player_can_see_point(me.id, self.ball.position);
+        let action_facing = self.player_state_action_facing(me);
+        let look_behind_scan = look_behind_scan_context_for_observer(
+            self.tick,
+            self.dt_seconds,
+            me,
+            me_position,
+            self.ball.position,
+            self.ball.velocity.len(),
+        );
         let loose_ball_race = loose_ball_race_context_for_snapshot(self, player_id);
         let ball_position_confidence = if has_ball {
             1.0
@@ -17000,16 +17040,26 @@ impl WorldSnapshot {
             self.player_position_confidence_for_point(me.id, self.ball.position)
                 .unwrap_or(0.0)
         };
-        let teammate_position_confidence =
-            average_player_position_confidence(self, me.id, teammates.iter().map(|p| p.id));
-        let opponent_position_confidence =
-            average_player_position_confidence(self, me.id, opponents.iter().map(|p| p.id));
-        let player_position_confidences = self
+        let mut player_position_confidences = self
             .players
             .iter()
             .filter(|player| player.id != me.id)
             .filter_map(|player| self.player_position_confidence_entry(me.id, player))
             .collect::<Vec<_>>();
+        if look_behind_scan.active {
+            for entry in &mut player_position_confidences {
+                if !entry.in_front {
+                    entry.confidence =
+                        (entry.confidence + look_behind_scan.confidence_bonus).clamp(0.0, 1.0);
+                }
+            }
+        }
+        let teammate_position_confidence =
+            average_player_position_confidence_entries(&player_position_confidences, me.team);
+        let opponent_position_confidence = average_player_position_confidence_entries(
+            &player_position_confidences,
+            me.team.other(),
+        );
         let scheduled_index = self
             .agent_schedule
             .iter()
@@ -17141,7 +17191,6 @@ impl WorldSnapshot {
         let pass_eval_elapsed = phase_started.elapsed();
         let phase_started = Instant::now();
         let player_grid = pitch_grid_address(me_position, self.field_width, self.field_length);
-        let action_facing = self.player_state_action_facing(me);
         let real_pressure = pressure_from_nearest_distance(nearest_opponent_distance);
         let perceived_pressure =
             perceived_pressure_for_player(me, real_pressure, visible_opponents);
@@ -17467,6 +17516,10 @@ impl WorldSnapshot {
             teammate_position_confidence,
             opponent_position_confidence,
             player_position_confidences,
+            look_behind_scan_active: look_behind_scan.active,
+            look_behind_scan_seconds: look_behind_scan.duration_seconds,
+            look_behind_confidence_bonus: look_behind_scan.confidence_bonus,
+            look_behind_drift_risk: look_behind_scan.drift_risk,
             scheduled_index,
             ball_scheduled_index,
             ball_schedule_order,
@@ -30588,6 +30641,8 @@ fn soccer_neural_transition_features(
         1.0 - soccer_neural_bin(state.role_line_deviation_bin, 5.0),
         1.0 - soccer_neural_bin(state.effective_teammate_spacing_pressure_bin, 5.0),
         soccer_neural_bin(state.positional_shape_exception_relief_bin, 5.0),
+        soccer_neural_bool(state.look_behind_scan),
+        soccer_neural_bin(state.look_behind_drift_risk_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -45965,6 +46020,64 @@ where
     }
 }
 
+fn average_player_position_confidence_entries(
+    entries: &[PlayerPositionConfidence],
+    team: Team,
+) -> f64 {
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for entry in entries.iter().filter(|entry| entry.team == team) {
+        total += finite_metric(entry.confidence).clamp(0.0, 1.0);
+        count += 1;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
+}
+
+fn look_behind_scan_context_for_observer(
+    tick: u64,
+    dt_seconds: f64,
+    observer: &PlayerSnapshot,
+    observer_position: Vec2,
+    ball_position: Vec2,
+    ball_speed_yps: f64,
+) -> LookBehindScanContext {
+    let to_ball = ball_position - observer_position;
+    if to_ball.len() <= PLAYER_CONTROL_RADIUS_YARDS * 0.6 {
+        return LookBehindScanContext::default();
+    }
+    let Some(action_facing) = facing_bucket_to_vector(observer.action_facing) else {
+        return LookBehindScanContext::default();
+    };
+    let ball_facing = to_ball.normalized();
+    if action_facing.normalized().dot(ball_facing) > -0.25 {
+        return LookBehindScanContext::default();
+    }
+
+    let dt = sane_dt_seconds(dt_seconds, DEFAULT_DT_SECONDS);
+    let last_tick = observer
+        .last_decision
+        .as_ref()
+        .map(|decision| decision.mdp_state.tick)
+        .unwrap_or(tick.saturating_sub(1));
+    let elapsed_ticks = tick.saturating_sub(last_tick).max(1);
+    let duration_seconds = (elapsed_ticks as f64 * dt).clamp(dt, 4.0);
+    let confidence_bonus = (0.18 + duration_seconds.min(1.2) / 1.2 * 0.24).clamp(0.0, 0.42);
+    let moving_ball_risk = (finite_metric(ball_speed_yps).max(0.0) / 14.0).clamp(0.0, 0.65);
+    let drift_risk =
+        ((duration_seconds / 2.5).clamp(0.0, 1.0) * (0.35 + moving_ball_risk)).clamp(0.0, 1.0);
+
+    LookBehindScanContext {
+        active: true,
+        duration_seconds,
+        confidence_bonus,
+        drift_risk,
+    }
+}
+
 fn position_confidence_for_observer(
     observer: &PlayerSnapshot,
     observer_position: Vec2,
@@ -58165,6 +58278,121 @@ mod tests {
         assert!(!behind.in_front);
         assert!(front.confidence > behind.confidence * 1.75);
         assert!(observation.teammate_position_confidence > 0.0);
+    }
+
+    #[test]
+    fn pomdp_observation_tracks_look_behind_scan_confidence_and_drift_risk() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14121,
+            ..Default::default()
+        });
+        let observer = 6;
+        let front_teammate = 7;
+        let behind_teammate = 8;
+        sim.tick = 20;
+        sim.players[observer].position = Vec2::new(40.0, 60.0);
+        sim.players[front_teammate].position = Vec2::new(40.0, 80.0);
+        sim.players[behind_teammate].position = Vec2::new(40.0, 40.0);
+        sim.ball.position = Vec2::new(40.0, 84.0);
+        sim.ball.velocity = Vec2::new(0.0, 16.0);
+        sim.ball.holder = Some(9);
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let previous = WorldSnapshot::from_match(&sim);
+        let baseline = previous.observation_for(observer);
+        let baseline_behind = baseline
+            .player_position_confidences
+            .iter()
+            .find(|entry| entry.player_id == behind_teammate)
+            .expect("baseline behind confidence")
+            .confidence;
+
+        sim.tick = 42;
+        sim.players[observer].action_facing = FacingBucket::North;
+        sim.players[observer].last_decision =
+            Some(test_decision_trace(&previous, observer, "look-behind"));
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(observer);
+        let front = observation
+            .player_position_confidences
+            .iter()
+            .find(|entry| entry.player_id == front_teammate)
+            .expect("front confidence entry");
+        let behind = observation
+            .player_position_confidences
+            .iter()
+            .find(|entry| entry.player_id == behind_teammate)
+            .expect("behind confidence entry");
+
+        assert!(front.in_front);
+        assert!(!behind.in_front);
+        assert!(observation.look_behind_scan_active);
+        assert!(observation.look_behind_scan_seconds >= 2.0);
+        assert!(observation.look_behind_confidence_bonus > 0.25);
+        assert!(observation.look_behind_drift_risk > 0.45);
+        assert!(
+            behind.confidence > baseline_behind + 0.20,
+            "look-behind scan should improve confidence behind the player: baseline={baseline_behind} scan={}",
+            behind.confidence
+        );
+    }
+
+    #[test]
+    fn pomdp_q_state_and_neural_features_track_look_behind_scan_risk() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14122,
+            ..Default::default()
+        });
+        let observer = 6;
+        sim.tick = 12;
+        sim.players[observer].position = Vec2::new(40.0, 60.0);
+        sim.ball.position = Vec2::new(40.0, 82.0);
+        sim.ball.velocity = Vec2::new(0.0, 18.0);
+        sim.ball.holder = Some(9);
+        sim.ball.last_touch_team = Some(Team::Home);
+        let previous = WorldSnapshot::from_match(&sim);
+        sim.tick = 36;
+        sim.players[observer].action_facing = FacingBucket::North;
+        sim.players[observer].last_decision =
+            Some(test_decision_trace(&previous, observer, "look-behind"));
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(observer);
+        let state = snapshot.mdp_state_for_player(observer);
+        let key =
+            SoccerQStateKey::from_parts(&state, &observation, Team::Home, PlayerRole::Midfielder);
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: observer,
+            team: Team::Home,
+            role: PlayerRole::Midfielder,
+            state,
+            observation: observation.clone(),
+            belief: belief_from_observation(&observation),
+            action: "support-shape".to_string(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(observer),
+            next_observation: observation.clone(),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
+
+        assert!(key.look_behind_scan);
+        assert!(key.look_behind_drift_risk_bin >= 2);
+        assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_DIM - 2] > 0.9,
+            "neural learner should see the look-behind scan flag"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_DIM - 1] > 0.1,
+            "neural learner should see the look-behind drift-risk bin"
+        );
     }
 
     #[test]

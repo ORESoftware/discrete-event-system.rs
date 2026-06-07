@@ -9027,6 +9027,11 @@ impl PlayerAgent {
             | "fake-right-cut-left"
                 if observation.has_ball =>
             {
+                if let Some(release) =
+                    self.learned_stale_dribble_release_override(snapshot, observation)
+                {
+                    return Some(release);
+                }
                 let kind = match label {
                     "carry-forward" => DribbleMoveKind::CarryForward,
                     "carry-out-left" => DribbleMoveKind::CarryOutLeft,
@@ -9068,6 +9073,11 @@ impl PlayerAgent {
                 ))
             }
             "side-step" if observation.has_ball => {
+                if let Some(release) =
+                    self.learned_stale_dribble_release_override(snapshot, observation)
+                {
+                    return Some(release);
+                }
                 let kind = snapshot.side_step_dribble_kind_for(self.id);
                 let force_goal_drive = goal_approach_forces_goalmouth_carry(observation, self.role);
                 let kind = goal_approach_dribble_kind(kind, observation, self.role);
@@ -9218,6 +9228,50 @@ impl PlayerAgent {
             "hold" => Some((SoccerAction::MoveTo(self.home_position), "hold".to_string())),
             _ => None,
         }
+    }
+
+    fn learned_stale_dribble_release_override(
+        &self,
+        snapshot: &WorldSnapshot,
+        observation: &SoccerPomdpObservation,
+    ) -> Option<(SoccerAction, String)> {
+        if !observation.has_ball
+            || !matches!(self.role, PlayerRole::Goalkeeper | PlayerRole::Defender)
+            || observation.yards_to_own_goal >= observation.yards_to_goal
+        {
+            return None;
+        }
+
+        let dribbling = ability01(self.skills.dribbling);
+        let hold_pressure = observation
+            .excessive_hold_pressure
+            .max(excessive_hold_pressure(observation, dribbling));
+        let danger_pressure = observation
+            .pressure_urgency
+            .max(observation.defensive_urgency)
+            .max(observation.immediate_dispossession_risk)
+            .max(observation.perceived_pressure)
+            .clamp(0.0, 1.0);
+        if hold_pressure < 0.18 || danger_pressure < 0.42 {
+            return None;
+        }
+
+        Some((
+            SoccerAction::Clearance {
+                target: snapshot
+                    .pressure_clearance_target_for(self.id)
+                    .unwrap_or_else(|| {
+                        clearance_target_for_player(
+                            self.team,
+                            self.position,
+                            snapshot.field_width,
+                            snapshot.field_length,
+                        )
+                    }),
+                power: (0.88 + danger_pressure * 0.10 + hold_pressure * 0.06).clamp(0.88, 0.98),
+            },
+            "clearance".to_string(),
+        ))
     }
 }
 
@@ -79649,6 +79703,82 @@ mod tests {
             stale_dribbles <= 15,
             "stale pressured dribbles should be rare once the safety valve is active, got {stale_dribbles}/{trials}"
         );
+    }
+
+    #[test]
+    fn learned_stale_defender_dribble_is_overridden_to_clearance() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 2267,
+            ..Default::default()
+        });
+        let defender = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Defender)
+            .map(|player| player.id)
+            .expect("home defender");
+        let pressure = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Away && player.role == PlayerRole::Forward)
+            .map(|player| player.id)
+            .expect("away forward");
+        park_players_except(&mut sim, &[defender, pressure]);
+        sim.tick = 36;
+        sim.clock_seconds = 3.6;
+        sim.players[defender].position = Vec2::new(39.0, 21.5);
+        sim.players[defender].home_position = sim.players[defender].position;
+        sim.players[defender].skills.dribbling = 7.2;
+        sim.players[defender].skills.defending = 8.5;
+        sim.players[defender].preferences.dribble_bias = 1.20;
+        sim.players[pressure].position = Vec2::new(39.7, 21.7);
+        sim.ball.holder = Some(defender);
+        sim.ball.position = sim.players[defender].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball.position_history.clear();
+        sim.ball.position_history.push_back(BallPositionSample {
+            tick: 0,
+            clock_seconds: 0.0,
+            position: sim.ball.position,
+            velocity: Vec2::zero(),
+            acceleration: Vec2::zero(),
+            jerk: Vec2::zero(),
+            curl_acceleration: Vec2::zero(),
+            altitude_yards: 0.0,
+            holder: Some(defender),
+            last_touch_team: Some(Team::Home),
+        });
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(defender);
+        let plan = SoccerLearnedPlan {
+            action: "carry_forward".to_string(),
+            target_player: None,
+            target_point: Some(Vec2::new(39.0, 28.0)),
+        };
+        let (action, label) = sim.players[defender]
+            .action_from_learned_plan(&plan, &snapshot, &observation)
+            .expect("learned stale carry should resolve through the safety valve");
+
+        assert!(
+            observation.excessive_hold_pressure >= 0.18,
+            "test setup should expose excessive hold pressure: {:?}",
+            observation.excessive_hold_pressure
+        );
+        assert!(
+            observation.yards_to_own_goal < observation.yards_to_goal,
+            "defender should be overholding in his own half"
+        );
+        assert_eq!(label, "clearance");
+        let SoccerAction::Clearance { target, power } = action else {
+            panic!("learned stale defender carry should become clearance, got {action:?}");
+        };
+        assert!(
+            (target.y - sim.players[defender].position.y) * Team::Home.attack_dir() > 25.0,
+            "clearance should send the ball upfield: target={target:?}"
+        );
+        assert!(power >= 0.90);
     }
 
     #[test]

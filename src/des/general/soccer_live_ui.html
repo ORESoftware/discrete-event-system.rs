@@ -1405,6 +1405,15 @@ function effectiveMatchDurationSeconds(config = state?.config) {
   return Number(config.durationSeconds ?? 600);
 }
 function matchStepLabel(config = state?.config) {
+  const clock = state?.matchClock;
+  if (clock) {
+    const dt = Number(clock.dtSeconds ?? config?.dtSeconds ?? 0.1);
+    const total = Number(clock.totalSeconds ?? effectiveMatchDurationSeconds(config));
+    const remaining = Number(clock.remainingSeconds ?? Math.max(0, total - Number(clock.elapsedSeconds ?? 0)));
+    const totalTicks = Math.max(0, Math.round(Number(clock.totalTicks ?? 0)));
+    const done = clock.done ? " FT" : "";
+    return `dt ${dt.toFixed(1)}s ${fmtClock(total)} left ${fmtClock(remaining)} ${totalTicks}t${done}`;
+  }
   if (!config) return "dt 0.1s 10:00";
   const dt = Number(config.dtSeconds ?? 0.1);
   const duration = effectiveMatchDurationSeconds(config);
@@ -2717,10 +2726,18 @@ function render() {
   episode.textContent = episodeLabel();
   seed.textContent = state.config.seed ?? "-";
   syncSeedInput();
-  const totalTicks = Math.round(
-    effectiveMatchDurationSeconds(state.config) / state.config.dtSeconds
-  );
-  ticks.textContent = `${state.summary.ticks} / ${totalTicks}`;
+  const totalTicks = Math.round(Number(
+    state.matchClock?.totalTicks
+      ?? (effectiveMatchDurationSeconds(state.config) / state.config.dtSeconds)
+  ));
+  const remainingTicks = Math.max(0, Math.round(Number(
+    state.matchClock?.remainingTicks ?? (totalTicks - state.summary.ticks)
+  )));
+  const remainingSeconds = Number(state.matchClock?.remainingSeconds ?? NaN);
+  const remainingText = Number.isFinite(remainingSeconds)
+    ? ` ${fmtClock(remainingSeconds)} left`
+    : ` ${remainingTicks}t left`;
+  ticks.textContent = `${state.summary.ticks} / ${totalTicks}${remainingText}`;
   matchStep.textContent = matchStepLabel();
   simSpeed.textContent = simSpeedLabel();
   learning.textContent = learningLabel(state.learning);

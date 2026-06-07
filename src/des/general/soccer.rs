@@ -27806,6 +27806,20 @@ pub struct MatchSummary {
     pub stats: MatchStats,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerMatchClock {
+    pub tick: u64,
+    pub total_ticks: u64,
+    pub dt_seconds: f64,
+    pub elapsed_seconds: f64,
+    pub total_seconds: f64,
+    pub remaining_ticks: u64,
+    pub remaining_seconds: f64,
+    pub progress: f64,
+    pub done: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerAssignment {
@@ -27954,6 +27968,8 @@ pub struct SoccerStepResponse {
     pub completed_episodes: Vec<SoccerLiveEpisodeSummary>,
     pub summary: MatchSummary,
     #[serde(default)]
+    pub match_clock: SoccerMatchClock,
+    #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
     #[serde(default)]
@@ -27994,6 +28010,8 @@ pub struct SoccerLiveStateResponse {
     pub episode_index: usize,
     pub completed_episodes: Vec<SoccerLiveEpisodeSummary>,
     pub summary: MatchSummary,
+    #[serde(default)]
+    pub match_clock: SoccerMatchClock,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
@@ -31208,6 +31226,34 @@ impl SoccerMatch {
             ticks: self.tick,
             simulated_seconds: self.clock_seconds,
             stats: self.stats.clone(),
+        }
+    }
+
+    pub fn match_clock(&self) -> SoccerMatchClock {
+        let total_ticks = self.config.total_ticks();
+        let total_seconds = self.config.effective_duration_seconds().max(0.0);
+        let elapsed_seconds = self
+            .clock_seconds
+            .clamp(0.0, total_seconds.max(self.clock_seconds));
+        let remaining_ticks = total_ticks.saturating_sub(self.tick);
+        let remaining_seconds = (total_seconds - elapsed_seconds).max(0.0);
+        let progress = if total_ticks > 0 {
+            (self.tick as f64 / total_ticks as f64).clamp(0.0, 1.0)
+        } else if total_seconds > 0.0 {
+            (elapsed_seconds / total_seconds).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        SoccerMatchClock {
+            tick: self.tick,
+            total_ticks,
+            dt_seconds: self.config.dt_seconds,
+            elapsed_seconds,
+            total_seconds,
+            remaining_ticks,
+            remaining_seconds,
+            progress,
+            done: self.is_done(),
         }
     }
 
@@ -37537,6 +37583,7 @@ impl SoccerRealtimeSession {
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
+            match_clock: self.sim.match_clock(),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -37592,6 +37639,7 @@ impl SoccerRealtimeSession {
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
+            match_clock: self.sim.match_clock(),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -38164,6 +38212,7 @@ impl SoccerRealtimeSession {
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
+            match_clock: self.sim.match_clock(),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -53988,6 +54037,13 @@ mod tests {
         assert_eq!(initial.controller_threads.len(), 4);
         assert!(initial.controller_assignments.is_empty());
         assert_eq!(initial.summary.ticks, 0);
+        assert_eq!(initial.match_clock.tick, 0);
+        assert_eq!(initial.match_clock.total_ticks, 6_000);
+        assert_eq!(initial.match_clock.remaining_ticks, 6_000);
+        assert!((initial.match_clock.total_seconds - DEFAULT_DURATION_SECONDS).abs() < 1e-9);
+        assert!((initial.match_clock.remaining_seconds - DEFAULT_DURATION_SECONDS).abs() < 1e-9);
+        assert_eq!(initial.match_clock.progress, 0.0);
+        assert!(!initial.match_clock.done);
         assert!(!initial.done);
 
         let step = session.step(SoccerStepRequest {
@@ -53996,6 +54052,12 @@ mod tests {
             ..SoccerStepRequest::default()
         });
         assert_eq!(step.summary.ticks, 1);
+        assert_eq!(step.match_clock.tick, 1);
+        assert_eq!(step.match_clock.total_ticks, 6_000);
+        assert_eq!(step.match_clock.remaining_ticks, 5_999);
+        assert!((step.match_clock.remaining_seconds - 599.9).abs() < 1e-9);
+        assert!(step.match_clock.progress > 0.0);
+        assert!(!step.match_clock.done);
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
         assert_eq!(step.frame.central_brain.tracked_officials, 3);
@@ -72222,6 +72284,9 @@ mod tests {
         assert!(html.body.contains("function liveHttpLabel"));
         assert!(html.body.contains("id=\"runtimeTiming\""));
         assert!(html.body.contains("function runtimeTimingLabel"));
+        assert!(html.body.contains("state.matchClock"));
+        assert!(html.body.contains("remainingSeconds"));
+        assert!(html.body.contains("remainingTicks"));
         assert!(html.body.contains("id=\"shapeLearning\""));
         assert!(html.body.contains("function shapeLearningLabel"));
         assert!(html.body.contains("meanVerticalLaneAffinityScore"));
@@ -72286,6 +72351,13 @@ mod tests {
         let state_value: serde_json::Value = serde_json::from_str(&state.body).expect("state json");
         assert_eq!(state_value["learning"]["teamPoliciesEnabled"], true);
         assert_eq!(state_value["config"]["seed"], 55);
+        assert_eq!(state_value["matchClock"]["tick"], 0);
+        assert_eq!(state_value["matchClock"]["totalTicks"], 10);
+        assert_eq!(state_value["matchClock"]["remainingTicks"], 10);
+        assert_eq!(state_value["matchClock"]["totalSeconds"], 1.0);
+        assert_eq!(state_value["matchClock"]["remainingSeconds"], 1.0);
+        assert_eq!(state_value["matchClock"]["progress"], 0.0);
+        assert_eq!(state_value["matchClock"]["done"], false);
         assert!(state_value["frame"]["homeDirective"]
             .get("flankAttackPolicy")
             .is_some());
@@ -72414,6 +72486,12 @@ mod tests {
         assert_eq!(step.status, 200);
         let value: serde_json::Value = serde_json::from_str(&step.body).expect("step json");
         assert_eq!(value["summary"]["ticks"], 2);
+        assert_eq!(value["matchClock"]["tick"], 2);
+        assert_eq!(value["matchClock"]["totalTicks"], 10);
+        assert_eq!(value["matchClock"]["remainingTicks"], 8);
+        assert!((value["matchClock"]["remainingSeconds"].as_f64().unwrap() - 0.8).abs() < 1e-9);
+        assert!(value["matchClock"]["progress"].as_f64().unwrap() > 0.0);
+        assert_eq!(value["matchClock"]["done"], false);
         assert_eq!(value["episodeIndex"], 0);
         assert!(value["completedEpisodes"].as_array().unwrap().is_empty());
         assert_eq!(value["controllerThreads"].as_array().unwrap().len(), 2);

@@ -81985,6 +81985,11 @@ mod tests {
         assert!(html.contains("ball?.lastAction"));
         assert!(html.contains("function operationOrderLabel"));
         assert!(html.contains("ball?.operationOrder"));
+        assert!(html.contains("function centralBrainControllerAssignmentLabel"));
+        assert!(html.contains("controlledHumanPlayers"));
+        assert!(html.contains("controllerAssignments"));
+        assert!(html.contains("S${Number(a.controllerSlot ?? 0) + 1}#${Number(a.playerId ?? 0)}"));
+        assert!(html.contains("centralBrainControllerAssignmentLabel(b)"));
         assert!(html.contains("ballAgent.textContent = playbackBallAgentLabel(f.ball)"));
         assert!(html.contains("ballAgent.title = Array.isArray(f.ball?.operationOrder)"));
         assert!(html.contains("function officialAgentsLabel"));
@@ -82296,6 +82301,11 @@ mod tests {
         assert!(html.contains("teamPlayersNearBall"));
         assert!(html.contains("teamForwardVelocityYps"));
         assert!(html.contains("label: \"Shape\""));
+        assert!(html.contains("function centralBrainControllerAssignmentLabel"));
+        assert!(html.contains("controlledHumanPlayers"));
+        assert!(html.contains("controllerAssignments"));
+        assert!(html.contains("S${Number(a.controllerSlot ?? 0) + 1}#${Number(a.playerId ?? 0)}"));
+        assert!(html.contains("centralBrainControllerAssignmentLabel(b)"));
     }
 
     #[test]

@@ -731,6 +731,16 @@ function teamBrainLabel(brain, fallbackDirective) {
     : "";
   return `${teamBrainModeLabel(brain.mode)} P${Number(brain.pressIntensity ?? d.pressIntensity ?? 0).toFixed(2)} R${Number(brain.riskTolerance ?? d.riskTolerance ?? 0).toFixed(2)}${cover} Q${actions}/${targets}${flank}${shape}`;
 }
+function centralBrainControllerAssignmentLabel(b) {
+  const assignments = Array.isArray(b?.controllerAssignments) ? b.controllerAssignments : [];
+  const humans = Number(b?.controlledHumanPlayers ?? assignments.length);
+  if (!humans && assignments.length === 0) return "";
+  const slots = assignments
+    .slice(0, 4)
+    .map(a => `S${Number(a.controllerSlot ?? 0) + 1}#${Number(a.playerId ?? 0)}`)
+    .join(",");
+  return slots ? ` H${humans} ${slots}` : ` H${humans}`;
+}
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
@@ -745,7 +755,8 @@ function centralBrainLabel(b) {
   const ballJerk = vecLen(b.ballJerk || {x: 0, y: 0});
   const ballZ = Number(b.ballAltitudeYards ?? 0);
   const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}`;
-  return `${players}p ${officials}o${schedule} ${possession}${holder}${centerText}${ballText}`;
+  const controllerText = centralBrainControllerAssignmentLabel(b);
+  return `${players}p ${officials}o${schedule} ${possession}${holder}${controllerText}${centerText}${ballText}`;
 }
 function agentScheduleGlyph(entry) {
   if (!entry) return "?";

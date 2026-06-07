@@ -52668,6 +52668,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_match_config_preserves_initial_runtime_contract() {
+        let config = MatchConfig::default().sanitized_for_runtime();
+        assert_eq!(config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(config.dt_seconds, 0.1);
+        assert_eq!(config.duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(config.duration_seconds, 10.0 * 60.0);
+        assert_eq!(config.effective_duration_seconds(), 600.0);
+        assert_eq!(config.total_ticks(), 6_000);
+        assert_eq!(config.human_slots(), 4);
+        assert!(config.learning_enabled);
+        assert!(config.learning_logging_enabled);
+        assert!(config.full_game_learning_enabled);
+
+        let sim = SoccerMatch::default_11v11(config);
+        assert_eq!(sim.players.len(), 22);
+        assert_eq!(sim.officials.len(), 3);
+        assert_eq!(sim.ball.id, BALL_AGENT_ID);
+        assert_eq!(sim.config.total_ticks(), 6_000);
+        assert_eq!(sim.config.human_slots(), 4);
+        assert_eq!(sim.config.field_length_yards, DEFAULT_FIELD_LENGTH_YARDS);
+        assert_eq!(sim.config.field_width_yards, DEFAULT_FIELD_WIDTH_YARDS);
+        assert_eq!(sim.config.goal_width_yards, DEFAULT_GOAL_WIDTH_YARDS);
+    }
+
     fn assert_kickoff_shape(sim: &SoccerMatch, kickoff_team: Team) {
         let center = Vec2::new(
             sim.config.field_width_yards * 0.5,

@@ -77232,8 +77232,12 @@ mod tests {
         assert!(html.contains("JSON.parse(raw)"));
         assert!(html.contains("expectedFrameCount"));
         assert!(html.contains("Math.max(ticks + 1, trace.frames.length, 0)"));
+        assert!(html.contains("totalLoadedSeconds"));
+        assert!(html.contains("bufferedFrameCountAhead"));
         assert!(html.contains("bufferedSeconds"));
-        assert!(html.contains("Math.max(0, trace.frames.length - 1)"));
+        assert!(html.contains("Math.max(0, trace.frames.length - 1 - frameIndex)"));
+        assert!(html.contains("s ahead"));
+        assert!(html.contains("s loaded"));
         assert!(html.contains("fps incoming"));
         assert!(html.contains("Playback ready"));
         assert!(html.contains("ballAltitudeYards"));

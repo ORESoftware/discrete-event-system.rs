@@ -585,8 +585,14 @@ function expectedFrameCount() {
   const ticks = Number(trace.summary?.ticks || 0);
   return Math.max(ticks + 1, trace.frames.length, 0);
 }
-function bufferedSeconds() {
+function totalLoadedSeconds() {
   return Math.max(0, trace.frames.length - 1) * Number(trace.config.dtSeconds || 0.1);
+}
+function bufferedFrameCountAhead() {
+  return Math.max(0, trace.frames.length - 1 - frameIndex);
+}
+function bufferedSeconds() {
+  return bufferedFrameCountAhead() * Number(trace.config.dtSeconds || 0.1);
 }
 function canStartPlayback() {
   if (trace.frames.length < 2) return false;
@@ -659,7 +665,7 @@ function updateLoadingProgress(loadedBytes = 0, totalBytes = 0, message = "Loadi
   const ready = canStartPlayback() && !traceFramesComplete ? "Playback ready" : message;
   setLoadingTitle(ready);
   const rate = loadedFrameRate();
-  loadingStatus.textContent = `${ready}; ${trace.frames.length}/${expectedFrames || "?"} frames; ${bufferedSeconds().toFixed(1)}s buffered; ${rate.toFixed(1)} fps incoming`;
+  loadingStatus.textContent = `${ready}; ${trace.frames.length}/${expectedFrames || "?"} frames; ${bufferedSeconds().toFixed(1)}s ahead; ${totalLoadedSeconds().toFixed(1)}s loaded; ${rate.toFixed(1)} fps incoming`;
   const frameProgress = expectedFrames > 0 ? `${trace.frames.length} / ${expectedFrames} frames` : `${trace.frames.length} frames`;
   loadingBytes.textContent = totalBytes > 0
     ? `${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)}; ${frameProgress}`

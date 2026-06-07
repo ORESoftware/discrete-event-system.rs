@@ -192,6 +192,8 @@ const DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD: f64 = 0.145;
 const NOT_FACING_BALL_INTERCEPTION_MULTIPLIER: f64 = 0.40;
 const FACING_BALL_MIN_DOT: f64 = 0.12;
 const STABLE_CURRENT_FACING_BALL_DOT: f64 = 0.45;
+const FAST_AWAY_FACING_MIN_SPEED_YPS: f64 = 0.35;
+const FAST_AWAY_FACING_BALL_DOT: f64 = -0.55;
 const STRIKER_HOLD_UP_MIN_GOAL_DISTANCE_YARDS: f64 = GOAL_APPROACH_CARRY_YARDS;
 const STRIKER_HOLD_UP_SIDEWAYS_YARDS: f64 = 7.5;
 const STRIKER_HOLD_UP_FORWARD_YARDS: f64 = 2.8;
@@ -48363,11 +48365,13 @@ fn movement_action_facing_bucket(
 
     let ball_facing = ball_facing_bucket_from_position(team, position, ball_position);
     if matches!(gait, MovementGait::Run | MovementGait::Sprint)
-        && velocity.len() > 0.35
+        && velocity.len() >= FAST_AWAY_FACING_MIN_SPEED_YPS
         && to_ball.len() > PLAYER_CONTROL_RADIUS_YARDS
-        && velocity.normalized().dot(to_ball.normalized()) < -0.20
+        && to_target.len() > PLAYER_CONTROL_RADIUS_YARDS
+        && velocity.normalized().dot(to_ball.normalized()) <= FAST_AWAY_FACING_BALL_DOT
+        && to_target.normalized().dot(to_ball.normalized()) <= FAST_AWAY_FACING_BALL_DOT
     {
-        return facing_bucket_from_vector(velocity);
+        return facing_bucket_from_vector(to_target);
     }
 
     if let Some(current) = facing_bucket_to_vector(current_facing) {
@@ -53667,6 +53671,46 @@ mod tests {
             sim.players[player].action_facing,
             FacingBucket::East,
             "stale facing still turns when the ball is no longer in the player's broad forward view"
+        );
+    }
+
+    #[test]
+    fn fast_away_facing_requires_target_and_velocity_away_from_ball() {
+        let team = Team::Home;
+        let position = Vec2::new(40.0, 60.0);
+        let ball_position = Vec2::new(40.0, 40.0);
+        let away_velocity = Vec2::new(0.0, 2.0);
+
+        let recovering_facing = movement_action_facing_bucket(
+            team,
+            position,
+            ball_position,
+            Vec2::new(0.0, -12.0),
+            away_velocity,
+            MovementGait::Sprint,
+            false,
+            FacingBucket::South,
+        );
+        assert_eq!(
+            recovering_facing,
+            FacingBucket::North,
+            "stale away momentum should not keep a defender facing away once the new target is back toward the ball"
+        );
+
+        let committed_away_facing = movement_action_facing_bucket(
+            team,
+            position,
+            ball_position,
+            Vec2::new(0.0, 18.0),
+            away_velocity,
+            MovementGait::Sprint,
+            false,
+            FacingBucket::South,
+        );
+        assert_eq!(
+            committed_away_facing,
+            FacingBucket::South,
+            "a true sprint away from the ball can turn the body toward the run"
         );
     }
 

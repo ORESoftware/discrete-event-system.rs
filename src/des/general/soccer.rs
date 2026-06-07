@@ -191,7 +191,7 @@ const DENSE_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.12;
 const DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD: f64 = 0.145;
 const NOT_FACING_BALL_INTERCEPTION_MULTIPLIER: f64 = 0.40;
 const FACING_BALL_MIN_DOT: f64 = 0.12;
-const STABLE_CURRENT_FACING_BALL_DOT: f64 = 0.45;
+const STABLE_CURRENT_FACING_BALL_DOT: f64 = 0.18;
 const FAST_AWAY_FACING_MIN_SPEED_YPS: f64 = 0.35;
 const FAST_AWAY_FACING_BALL_DOT: f64 = -0.55;
 const STRIKER_HOLD_UP_MIN_GOAL_DISTANCE_YARDS: f64 = GOAL_APPROACH_CARRY_YARDS;
@@ -53693,6 +53693,44 @@ mod tests {
             sim.players[player].action_facing,
             FacingBucket::East,
             "stale facing still turns when the ball is no longer in the player's broad forward view"
+        );
+    }
+
+    #[test]
+    fn broad_forward_view_keeps_defensive_facing_stable_until_ball_is_square() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.1,
+            duration_seconds: 0.1,
+            seed: 2115,
+            ..Default::default()
+        });
+        let player = 2;
+        sim.ball.holder = Some(9);
+        sim.ball.position = Vec2::new(58.0, 65.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+        sim.players[player].action_facing = FacingBucket::South;
+
+        sim.move_player_towards(player, Vec2::new(46.0, 60.0), false);
+
+        assert_eq!(sim.players[player].movement_gait, MovementGait::SideStep);
+        assert_eq!(
+            sim.players[player].action_facing,
+            FacingBucket::South,
+            "defenders should not spin from south to east while the ball is still in a broad forward view"
+        );
+
+        sim.ball.position = Vec2::new(62.0, 60.0);
+        sim.players[player].position = Vec2::new(40.0, 60.0);
+        sim.players[player].velocity = Vec2::zero();
+        sim.players[player].action_facing = FacingBucket::South;
+
+        sim.move_player_towards(player, Vec2::new(48.0, 60.0), false);
+
+        assert_eq!(
+            sim.players[player].action_facing,
+            FacingBucket::East,
+            "players still turn once the ball is squarely outside the broad forward view"
         );
     }
 

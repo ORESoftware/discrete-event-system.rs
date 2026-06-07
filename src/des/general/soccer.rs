@@ -432,6 +432,7 @@ const SOCCER_COMPUTATION_HEAVY_RECORD_MS: f64 = 16.0;
 const SOCCER_COMPUTATION_MAX_RECORD_MS: f64 = 250.0;
 const SOCCER_COMPUTATION_MAX_TOTAL_MS: f64 = 600_000.0;
 const SOCCER_COMPUTATION_MAX_RECORDS: usize = 1_000_000;
+const SOCCER_LEARNING_TICK_BUDGET_RATIO: f64 = 0.35;
 static SOCCER_FRESH_SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SOCCER_LAST_SITE_PLAYBACK_SEED: AtomicU32 = AtomicU32::new(0);
 const GOAL_URGENCY_MAX_YARDS: f64 = 30.0;
@@ -11207,6 +11208,12 @@ pub struct BallState {
     pub curl_acceleration: Vec2,
     #[serde(default)]
     pub altitude_yards: f64,
+    #[serde(default)]
+    pub decision_speed_yps: f64,
+    #[serde(default)]
+    pub decision_altitude_yards: f64,
+    #[serde(default)]
+    pub decision_curl_yps2: f64,
     pub holder: Option<usize>,
     pub last_touch_team: Option<Team>,
     #[serde(default)]
@@ -11308,6 +11315,7 @@ impl BallAgent {
     }
 
     pub fn to_state(&self) -> BallState {
+        let decision = self.last_decision.as_ref();
         BallState {
             position: self.position,
             velocity: self.velocity,
@@ -11315,6 +11323,15 @@ impl BallAgent {
             jerk: self.jerk,
             curl_acceleration: self.curl_acceleration,
             altitude_yards: self.altitude_yards,
+            decision_speed_yps: decision
+                .map(|decision| decision.velocity.len())
+                .unwrap_or_else(|| self.velocity.len()),
+            decision_altitude_yards: decision
+                .map(|decision| decision.altitude_yards)
+                .unwrap_or(self.altitude_yards),
+            decision_curl_yps2: decision
+                .map(|decision| decision.curl_acceleration.len())
+                .unwrap_or_else(|| self.curl_acceleration.len()),
             holder: self.holder,
             last_touch_team: self.last_touch_team,
             scheduled_index: None,
@@ -33248,6 +33265,14 @@ pub struct SoccerMatch {
 #[serde(rename_all = "camelCase")]
 pub struct SoccerStepTimingStats {
     pub ticks: u64,
+    pub tick_budget_ms: f64,
+    pub learning_budget_ms: f64,
+    pub over_budget: bool,
+    pub learning_over_budget: bool,
+    pub over_budget_ticks: u64,
+    pub learning_over_budget_ticks: u64,
+    pub max_budget_overrun_ms: f64,
+    pub max_learning_budget_overrun_ms: f64,
     pub total_ms: f64,
     pub pre_field_ms: f64,
     pub pre_field_snapshot_ms: f64,
@@ -33287,6 +33312,24 @@ enum SoccerPlayerDecisionTimingContext {
 impl SoccerStepTimingStats {
     fn record(&mut self, sample: SoccerStepTimingStats) {
         self.ticks = self.ticks.saturating_add(sample.ticks);
+        if sample.tick_budget_ms > 0.0 {
+            self.tick_budget_ms = sample.tick_budget_ms;
+        }
+        if sample.learning_budget_ms > 0.0 {
+            self.learning_budget_ms = sample.learning_budget_ms;
+        }
+        self.over_budget |= sample.over_budget;
+        self.learning_over_budget |= sample.learning_over_budget;
+        self.over_budget_ticks = self
+            .over_budget_ticks
+            .saturating_add(sample.over_budget_ticks);
+        self.learning_over_budget_ticks = self
+            .learning_over_budget_ticks
+            .saturating_add(sample.learning_over_budget_ticks);
+        self.max_budget_overrun_ms = self.max_budget_overrun_ms.max(sample.max_budget_overrun_ms);
+        self.max_learning_budget_overrun_ms = self
+            .max_learning_budget_overrun_ms
+            .max(sample.max_learning_budget_overrun_ms);
         self.total_ms += sample.total_ms;
         self.pre_field_ms += sample.pre_field_ms;
         self.pre_field_snapshot_ms += sample.pre_field_snapshot_ms;
@@ -33407,6 +33450,9 @@ impl SoccerMatch {
                     jerk: Vec2::zero(),
                     curl_acceleration: Vec2::zero(),
                     altitude_yards: 0.0,
+                    decision_speed_yps: 0.0,
+                    decision_altitude_yards: 0.0,
+                    decision_curl_yps2: 0.0,
                     holder: kickoff,
                     last_touch_team: Some(Team::Home),
                     scheduled_index: None,
@@ -35191,9 +35237,37 @@ impl SoccerMatch {
             self.reset_for_new_half((self.tick / half_ticks) as usize);
         }
         let total_elapsed = step_started.elapsed();
+        let total_ms = soccer_live_duration_ms(total_elapsed);
+        let learning_ms = soccer_live_duration_ms(learning_defense_elapsed)
+            + soccer_live_duration_ms(learning_transition_elapsed)
+            + soccer_live_duration_ms(recent_learning_elapsed)
+            + soccer_live_duration_ms(neural_sample_elapsed)
+            + soccer_live_duration_ms(policy_train_elapsed)
+            + soccer_live_duration_ms(learning_log_elapsed)
+            + soccer_live_duration_ms(full_game_learning_elapsed);
+        let tick_budget_ms = finite_metric((self.config.dt_seconds * 1000.0).max(0.0));
+        let learning_budget_ms = tick_budget_ms * SOCCER_LEARNING_TICK_BUDGET_RATIO;
+        let over_budget = tick_budget_ms > 0.0 && total_ms > tick_budget_ms;
+        let learning_over_budget = learning_budget_ms > 0.0 && learning_ms > learning_budget_ms;
         let timing_sample = SoccerStepTimingStats {
             ticks: 1,
-            total_ms: soccer_live_duration_ms(total_elapsed),
+            tick_budget_ms,
+            learning_budget_ms,
+            over_budget,
+            learning_over_budget,
+            over_budget_ticks: u64::from(over_budget),
+            learning_over_budget_ticks: u64::from(learning_over_budget),
+            max_budget_overrun_ms: if over_budget {
+                total_ms - tick_budget_ms
+            } else {
+                0.0
+            },
+            max_learning_budget_overrun_ms: if learning_over_budget {
+                learning_ms - learning_budget_ms
+            } else {
+                0.0
+            },
+            total_ms,
             pre_field_ms: soccer_live_duration_ms(pre_field_elapsed),
             pre_field_snapshot_ms: soccer_live_duration_ms(pre_field_snapshot_elapsed),
             pre_field_adversarial_ms: soccer_live_duration_ms(pre_field_adversarial_elapsed),
@@ -47313,6 +47387,9 @@ fn tracking_frame_to_world_snapshot(
             jerk: frame.ball_jerk.unwrap_or_default(),
             curl_acceleration: frame.ball_curl_acceleration.unwrap_or_default(),
             altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
+            decision_speed_yps: frame.ball_velocity.unwrap_or_default().len(),
+            decision_altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
+            decision_curl_yps2: frame.ball_curl_acceleration.unwrap_or_default().len(),
             holder: frame.ball_holder,
             last_touch_team,
             scheduled_index: None,
@@ -80686,6 +80763,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
 
         let stats = sim.step_timing_stats();
         assert_eq!(stats.ticks, 2);
+        assert_eq!(stats.tick_budget_ms, 100.0);
+        assert_eq!(
+            stats.learning_budget_ms,
+            100.0 * SOCCER_LEARNING_TICK_BUDGET_RATIO
+        );
+        assert_eq!(stats.over_budget, stats.over_budget_ticks > 0);
+        assert_eq!(
+            stats.learning_over_budget,
+            stats.learning_over_budget_ticks > 0
+        );
+        assert!(stats.over_budget_ticks <= stats.ticks);
+        assert!(stats.learning_over_budget_ticks <= stats.ticks);
+        assert!(stats.max_budget_overrun_ms >= 0.0);
+        assert!(stats.max_learning_budget_overrun_ms >= 0.0);
         assert!(stats.total_ms > 0.0);
         assert!(stats.max_step_ms > 0.0);
         assert!(stats.pre_field_ms >= 0.0);
@@ -80724,6 +80815,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         sim.reset_step_timing_stats();
         assert_eq!(sim.step_timing_stats().ticks, 0);
         assert_eq!(sim.step_timing_stats().total_ms, 0.0);
+        assert_eq!(sim.step_timing_stats().over_budget_ticks, 0);
     }
 
     #[test]
@@ -82036,6 +82128,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(state_value["liveHttp"]["spawnsPerRequest"], false);
         assert_eq!(state_value["liveHttp"]["batchesStepTicks"], true);
         assert_eq!(state_value["stepTiming"]["ticks"], 0);
+        assert_eq!(state_value["stepTiming"]["tickBudgetMs"], 0.0);
+        assert_eq!(state_value["stepTiming"]["learningBudgetMs"], 0.0);
+        assert_eq!(state_value["stepTiming"]["overBudget"], false);
+        assert_eq!(state_value["stepTiming"]["learningOverBudget"], false);
+        assert_eq!(state_value["stepTiming"]["overBudgetTicks"], 0);
+        assert_eq!(state_value["stepTiming"]["learningOverBudgetTicks"], 0);
         assert_eq!(state_value["stepTiming"]["totalMs"], 0.0);
         assert_eq!(
             state_value["controllerLatencyBudget"]["tickBudgetMs"],
@@ -82087,6 +82185,30 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(value["liveHttp"]["spawnsPerRequest"], false);
         assert_eq!(value["liveHttp"]["batchesStepTicks"], true);
         assert_eq!(value["stepTiming"]["ticks"], 2);
+        assert_eq!(value["stepTiming"]["tickBudgetMs"], 100.0);
+        assert_eq!(
+            value["stepTiming"]["learningBudgetMs"],
+            100.0 * SOCCER_LEARNING_TICK_BUDGET_RATIO
+        );
+        assert!(value["stepTiming"]["overBudget"].is_boolean());
+        assert!(value["stepTiming"]["learningOverBudget"].is_boolean());
+        assert!(
+            value["stepTiming"]["overBudgetTicks"].as_u64().unwrap()
+                <= value["stepTiming"]["ticks"].as_u64().unwrap()
+        );
+        assert!(
+            value["stepTiming"]["learningOverBudgetTicks"]
+                .as_u64()
+                .unwrap()
+                <= value["stepTiming"]["ticks"].as_u64().unwrap()
+        );
+        assert!(value["stepTiming"]["maxBudgetOverrunMs"].as_f64().unwrap() >= 0.0);
+        assert!(
+            value["stepTiming"]["maxLearningBudgetOverrunMs"]
+                .as_f64()
+                .unwrap()
+                >= 0.0
+        );
         assert!(value["stepTiming"]["totalMs"].as_f64().unwrap() > 0.0);
         assert!(value["stepTiming"]["preFieldMs"].as_f64().unwrap() >= 0.0);
         assert!(value["stepTiming"]["preFieldSnapshotMs"].as_f64().unwrap() >= 0.0);

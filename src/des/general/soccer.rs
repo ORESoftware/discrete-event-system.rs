@@ -141,9 +141,9 @@ const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS: f64 = 30.0;
 const COMPLETED_DANGEROUS_CROSS_BONUS_POINTS: f64 = 3.8;
 const COMPLETED_CROSS_MAX_BONUS_POINTS: f64 = 5.0;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
-const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 1.15;
+const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 1.50;
 const NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF: f64 = 0.90;
-const NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS: f64 = 2.7;
+const NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS: f64 = 2.35;
 const ELITE_DRIBBLE_HOLD_BASE_SECONDS: f64 = 4.8;
 const GOALMOUTH_CARRY_REWARD_POINTS: f64 = 1.35;
 const ENDLINE_DRIBBLE_TRAP_PENALTY_POINTS: f64 = 1.85;
@@ -6300,18 +6300,19 @@ impl PlayerAgent {
         let clearance_legal = own_half
             && (clearance_pressure_signal >= 0.34
                 || (defensive_urgency >= 0.42 && clearance_pressure_signal >= 0.24)
+                || (defensive_urgency >= 0.58 && observation.yards_to_own_goal <= 40.0)
                 || excessive_hold_pressure(observation, dribbling) >= 0.18)
             && matches!(self.role, PlayerRole::Goalkeeper | PlayerRole::Defender);
         let clearance_score = ((pressure * 0.48
-            + defensive_urgency * 0.46
-            + defensive_third_pressure * 0.42
-            + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.24
-            + excessive_hold_pressure(observation, dribbling) * 0.32
+            + defensive_urgency * 0.56
+            + defensive_third_pressure * 0.48
+            + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.36
+            + excessive_hold_pressure(observation, dribbling) * 0.46
             + (1.0 - observation.expected_pass_completion.clamp(0.0, 1.0)) * 0.20)
             * clearance_role_bias
             * (0.78 + ability01(self.skills.defending) * 0.22)
             * hold_release_multiplier
-            * (1.0 + emergency_clearance_pressure * 0.18))
+            * (1.0 + emergency_clearance_pressure * 0.28))
             .clamp(0.01, 1.78);
         let route_one_role_bias = match self.role {
             PlayerRole::Goalkeeper => 0.76,
@@ -6499,11 +6500,12 @@ impl PlayerAgent {
         if clearance_legal {
             let hold_pressure = excessive_hold_pressure(observation, dribbling);
             let min_clearance_probability = (0.16
-                + clearance_pressure_signal * 0.10
-                + defensive_urgency * 0.06
-                + defensive_third_pressure * 0.06
-                + hold_pressure * 0.14)
-                .clamp(0.18, 0.36);
+                + clearance_pressure_signal * 0.18
+                + defensive_urgency * 0.10
+                + defensive_third_pressure * 0.08
+                + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.08
+                + hold_pressure * 0.18)
+                .clamp(0.22, 0.52);
             ensure_min_legal_option_probability(
                 &mut options,
                 "clearance",
@@ -6785,10 +6787,20 @@ impl PlayerAgent {
         let defensive_mindedness = self.preferences.defensive_mindedness.clamp(0.0, 1.0);
         let offensive_mindedness = self.preferences.offensive_mindedness.clamp(0.0, 1.0);
         let press = directive.press_intensity.clamp(0.0, 1.0);
-        let shape_score =
-            (0.44 + defensive_mindedness * 0.46 + (1.0 - press) * 0.18).clamp(0.10, 1.18);
-        let roam_score = (0.08 + offensive_mindedness * 0.22 + aggression * 0.14 + press * 0.30)
-            .clamp(0.04, 0.82);
+        let (shape_score, roam_score) = if self.role == PlayerRole::Goalkeeper {
+            let ball_distance = self.position.distance(snapshot.ball.position);
+            let close_ball = (1.0 - ball_distance / 12.0).clamp(0.0, 1.0);
+            (
+                (3.80 + defensive_mindedness * 0.36).clamp(3.80, 4.30),
+                (0.08 + close_ball * 0.14 + press * 0.02).clamp(0.08, 0.24),
+            )
+        } else {
+            (
+                (0.44 + defensive_mindedness * 0.46 + (1.0 - press) * 0.18).clamp(0.10, 1.18),
+                (0.08 + offensive_mindedness * 0.22 + aggression * 0.14 + press * 0.30)
+                    .clamp(0.04, 0.82),
+            )
+        };
         let mut options = normalize_action_options(vec![
             AgentActionOptionTrace::new("tackle", tackle_score, tackle_legal),
             AgentActionOptionTrace::new("defend-shape", shape_score, true),
@@ -17006,6 +17018,76 @@ impl WorldSnapshot {
             <= DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS
     }
 
+    fn goalkeeper_ball_goal_tracking_target(&self, team: Team) -> Vec2 {
+        let goal = Vec2::new(self.field_width * 0.5, self.own_goal_y_for(team));
+        let to_ball = self.ball.position - goal;
+        let ball_distance = to_ball.len();
+        if ball_distance <= 1e-9 {
+            return goal.clamp_to_pitch(self.field_width, self.field_length);
+        }
+        let ball_pressure = (1.0 - ball_distance / 72.0).clamp(0.0, 1.0);
+        let depth = (2.2 + ball_pressure * 10.8).clamp(2.2, 13.0);
+        (goal + to_ball.normalized() * depth).clamp_to_pitch(self.field_width, self.field_length)
+    }
+
+    fn opponent_breakthrough_ball_carrier(&self, team: Team) -> Option<(Vec2, f64)> {
+        let holder_id = self.ball.holder?;
+        let holder = self
+            .players
+            .iter()
+            .find(|player| player.id == holder_id && player.team == team.other())?;
+        if holder.role == PlayerRole::Goalkeeper {
+            return None;
+        }
+        let holder_position = self.player_snapshot_position(holder);
+        let own_goal_y = self.own_goal_y_for(team);
+        let ball_goal_distance = (holder_position.y - own_goal_y).abs();
+        if ball_goal_distance > self.field_length * 0.55 {
+            return None;
+        }
+
+        let mut defender_y_total = 0.0;
+        let mut defender_count = 0usize;
+        for defender in self
+            .players
+            .iter()
+            .filter(|player| player.team == team && player.role == PlayerRole::Defender)
+        {
+            defender_y_total += self.player_snapshot_position(defender).y;
+            defender_count += 1;
+        }
+        if defender_count < 3 {
+            return None;
+        }
+        let defensive_line_y = defender_y_total / defender_count as f64;
+        let line_gap = (holder_position.y - defensive_line_y) * team.attack_dir();
+        if !(-8.0..=18.0).contains(&line_gap) {
+            return None;
+        }
+        Some((holder_position, line_gap))
+    }
+
+    fn defensive_line_break_retreat_target_y(
+        &self,
+        team: Team,
+        holder: Vec2,
+        line_gap: f64,
+    ) -> f64 {
+        let urgency = ((18.0 - line_gap) / 26.0).clamp(0.0, 1.0);
+        let retreat_gap = 9.5 + urgency * 4.0;
+        let target_y = holder.y - team.attack_dir() * retreat_gap;
+        let own_goal_y = self.own_goal_y_for(team);
+        if !self.ball_near_own_goal_line(team) {
+            if own_goal_y <= self.field_length * 0.5 {
+                target_y.max(own_goal_y + DEFENSIVE_GOAL_LINE_BUFFER_YARDS)
+            } else {
+                target_y.min(own_goal_y - DEFENSIVE_GOAL_LINE_BUFFER_YARDS)
+            }
+        } else {
+            target_y
+        }
+    }
+
     fn likely_next_opponent_pass_target_for_defense(&self, defending_team: Team) -> Option<Vec2> {
         let attacking_team = defending_team.other();
         if let Some(pass) = self
@@ -20492,6 +20574,14 @@ impl WorldSnapshot {
         };
         let ball_y = self.ball.position.y;
         let directive = self.tactical_directive(me.team);
+        if me.role == PlayerRole::Goalkeeper
+            && self
+                .controlled_possession_team()
+                .or_else(|| self.possession_team())
+                != Some(me.team)
+        {
+            return self.goalkeeper_ball_goal_tracking_target(me.team);
+        }
         let role_line_bias = match me.role {
             PlayerRole::Goalkeeper => 0.10,
             PlayerRole::Defender => 0.70,
@@ -20542,6 +20632,19 @@ impl WorldSnapshot {
                 } * directive.press_intensity.clamp(0.55, 1.0);
                 compact_x = compact_x * (1.0 - press_blend) + striker_pos.x * press_blend;
                 compact_y = compact_y * (1.0 - press_blend) + press_y * press_blend;
+            }
+        }
+        if me.role == PlayerRole::Defender {
+            if let Some((holder_position, line_gap)) =
+                self.opponent_breakthrough_ball_carrier(me.team)
+            {
+                let threat_fit = ((18.0 - line_gap) / 26.0).clamp(0.0, 1.0);
+                let retreat_y =
+                    self.defensive_line_break_retreat_target_y(me.team, holder_position, line_gap);
+                let retreat_blend =
+                    (0.34 + threat_fit * 0.24) * directive.press_intensity.clamp(0.55, 1.0);
+                compact_y = compact_y * (1.0 - retreat_blend) + retreat_y * retreat_blend;
+                compact_x = compact_x * 0.92 + holder_position.x * 0.08;
             }
         }
         Vec2::new(compact_x, compact_y).clamp_to_pitch(self.field_width, self.field_length)
@@ -23183,6 +23286,14 @@ fn dense_soccer_transition_reward(
         reward +=
             (before_distance - after_distance).clamp(-6.0, 6.0) * (0.055 + tracking_skill * 0.045);
         reward += defensive_goal_side_reward(player.team, before_pos, before);
+        if player.role == PlayerRole::Goalkeeper {
+            let before_line_score =
+                goalkeeper_ball_goal_line_alignment_score(player.team, before_pos, before);
+            let after_line_score =
+                goalkeeper_ball_goal_line_alignment_score(player.team, after_pos, after);
+            reward += after_line_score.clamp(-1.0, 1.0) * 0.24
+                + (after_line_score - before_line_score).clamp(-1.0, 1.0) * 0.42;
+        }
         reward += defensive_cross_arrival_coverage_learning_reward(
             player, action, before, before_pos, after_pos,
         );
@@ -24178,6 +24289,33 @@ fn defensive_ball_gap_score(team: Team, player_position: Vec2, snapshot: &WorldS
     } else {
         -((gap - DEFENSIVE_MAX_BEHIND_BALL_YARDS) / DEFENSIVE_MAX_BEHIND_BALL_YARDS).clamp(0.0, 1.0)
     }
+}
+
+fn goalkeeper_ball_goal_line_alignment_score(
+    team: Team,
+    player_position: Vec2,
+    snapshot: &WorldSnapshot,
+) -> f64 {
+    let goal = Vec2::new(
+        snapshot.field_width * 0.5,
+        team.other().goal_y(snapshot.field_length),
+    );
+    let ball = snapshot.ball.position;
+    let ball_goal_distance = goal.distance(ball);
+    if ball_goal_distance <= 1e-9 {
+        return 1.0;
+    }
+    let line_distance = segment_distance_to_point(goal, ball, player_position);
+    let projection = segment_projection_factor(goal, ball, player_position);
+    let line_score = (1.0 - line_distance / 8.0).clamp(-1.0, 1.0);
+    let projection_score = if (0.0..=1.0).contains(&projection) {
+        1.0
+    } else {
+        (1.0 - projection.min(0.0).abs().max((projection - 1.0).max(0.0)) / 0.35).clamp(-1.0, 1.0)
+    };
+    let ideal = snapshot.goalkeeper_ball_goal_tracking_target(team);
+    let depth_score = (1.0 - player_position.distance(ideal) / 12.0).clamp(-1.0, 1.0);
+    (line_score * 0.62 + projection_score * 0.16 + depth_score * 0.22).clamp(-1.0, 1.0)
 }
 
 fn defensive_endline_depth_yards(
@@ -46103,8 +46241,10 @@ fn time_on_ball_seconds(pressure: f64) -> f64 {
 
 fn dribble_hold_base_seconds(dribbling: f64) -> f64 {
     let dribbling = dribbling.clamp(0.0, 1.0);
-    let elite_fit =
-        ((dribbling - 0.72) / (NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF - 0.72)).clamp(0.0, 1.0);
+    let elite_hold_start = 0.86;
+    let elite_fit = ((dribbling - elite_hold_start)
+        / (NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF - elite_hold_start))
+        .clamp(0.0, 1.0);
     NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS
         + (ELITE_DRIBBLE_HOLD_BASE_SECONDS - NON_ELITE_DRIBBLE_HOLD_BASE_SECONDS) * elite_fit
 }
@@ -46120,9 +46260,9 @@ fn excessive_hold_pressure(observation: &SoccerPomdpObservation, dribbling: f64)
         .max(observation.perceived_pressure)
         .clamp(0.0, 1.0);
     let allowed_seconds = (dribble_hold_base_seconds(dribbling)
-        - urgency * 1.10
-        - observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.62)
-        .clamp(0.90, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
+        - urgency * 1.35
+        - observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.85)
+        .clamp(0.75, ELITE_DRIBBLE_HOLD_BASE_SECONDS + 0.75);
     ((actual_hold - allowed_seconds) / 3.2).clamp(0.0, 1.0)
 }
 
@@ -46137,11 +46277,11 @@ fn dribble_hold_score_multiplier(observation: &SoccerPomdpObservation, dribbling
         .pressure_urgency
         .max(observation.perceived_pressure)
         .clamp(0.0, 1.0);
-    (1.0 - hold_pressure * (0.30 + non_elite_fit * 0.66 + pressure_fit * 0.24)).clamp(
+    (1.0 - hold_pressure * (0.34 + non_elite_fit * 0.74 + pressure_fit * 0.30)).clamp(
         if dribbling >= NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF {
             0.66
         } else {
-            0.14
+            0.10
         },
         1.0,
     )
@@ -46159,7 +46299,7 @@ fn release_after_hold_multiplier(observation: &SoccerPomdpObservation, dribbling
         .max(observation.defensive_urgency)
         .max(observation.immediate_dispossession_risk)
         .clamp(0.0, 1.0);
-    (1.0 + hold_pressure * (0.42 + non_elite_fit * 0.58 + urgency_fit * 0.46)).clamp(1.0, 2.40)
+    (1.0 + hold_pressure * (0.50 + non_elite_fit * 0.70 + urgency_fit * 0.56)).clamp(1.0, 2.75)
 }
 
 fn excessive_hold_penalty_points(observation: &SoccerPomdpObservation, dribbling: f64) -> f64 {
@@ -69958,6 +70098,158 @@ mod tests {
     }
 
     #[test]
+    fn defenders_drop_when_ball_carrier_threatens_back_line_break() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        let threat = 17;
+        for id in 1..=4 {
+            sim.players[id].position = Vec2::new(22.0 + id as f64 * 9.0, 34.0);
+            sim.players[id].home_position = sim.players[id].position;
+        }
+        sim.players[threat].position = Vec2::new(40.0, 43.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let (holder_position, line_gap) = snapshot
+            .opponent_breakthrough_ball_carrier(Team::Home)
+            .expect("line-break threat");
+        let retreat_y =
+            snapshot.defensive_line_break_retreat_target_y(Team::Home, holder_position, line_gap);
+        let target =
+            snapshot.defensive_assignment_for(defender, sim.players[defender].home_position, false);
+
+        assert!(
+            line_gap <= 18.0,
+            "test setup should put ball carrier close enough to the back line: {line_gap}"
+        );
+        assert!(
+            target.y < sim.players[defender].home_position.y + 5.0,
+            "line-break threat should pull defender back toward goal rather than stepping high: target={target:?} home={:?}",
+            sim.players[defender].home_position
+        );
+        assert!(
+            target.y <= retreat_y + 5.0,
+            "defender target should honor the computed retreat band: target={target:?} retreat_y={retreat_y}"
+        );
+        assert!(
+            target.y >= DEFENSIVE_GOAL_LINE_BUFFER_YARDS - 1e-9,
+            "defender should not retreat inside the six-yard endline buffer while the ball is outside it: {target:?}"
+        );
+    }
+
+    #[test]
+    fn goalkeeper_defensive_shape_tracks_direct_ball_goal_line() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let threat = 17;
+        sim.players[keeper].position = Vec2::new(25.0, 8.0);
+        sim.players[threat].position = Vec2::new(58.0, 35.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let target = snapshot.defensive_shape_for(keeper, sim.players[keeper].home_position);
+        let goal = Vec2::new(
+            snapshot.field_width * 0.5,
+            snapshot.own_goal_y_for(Team::Home),
+        );
+        let line_distance = segment_distance_to_point(goal, snapshot.ball.position, target);
+        let line_projection = segment_projection_factor(goal, snapshot.ball.position, target);
+        let options = sim.players[keeper].defensive_action_options(
+            &snapshot,
+            snapshot.tactical_directive(Team::Home),
+            snapshot.dt_seconds,
+        );
+        let shape = options
+            .iter()
+            .find(|option| option.label == "defend-shape")
+            .expect("keeper shape option");
+        let roam = options
+            .iter()
+            .find(|option| option.label == "defend-roam")
+            .expect("keeper roam option");
+
+        assert!(
+            line_distance < 1e-9 && (0.0..=1.0).contains(&line_projection),
+            "keeper target should sit directly on the ball-goal line: target={target:?} line_distance={line_distance} projection={line_projection}"
+        );
+        assert!(
+            shape.probability >= 0.95,
+            "keeper should almost always prefer ball-goal-line shape tracking: shape={shape:?} roam={roam:?}"
+        );
+        assert!(
+            roam.probability <= 0.05,
+            "keeper roam should be rare unless making a close intervention: shape={shape:?} roam={roam:?}"
+        );
+    }
+
+    #[test]
+    fn goalkeeper_learning_rewards_ball_goal_line_recovery() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let keeper = sim.goalkeeper_for(Team::Home).expect("home keeper");
+        let threat = 17;
+        sim.players[keeper].position = Vec2::new(24.0, 9.0);
+        sim.players[threat].position = Vec2::new(58.0, 36.0);
+        sim.ball.holder = Some(threat);
+        sim.ball.position = sim.players[threat].position;
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let before = WorldSnapshot::from_match(&sim);
+        let before_pos = sim.players[keeper].position;
+        let line_target = before.goalkeeper_ball_goal_tracking_target(Team::Home);
+        let off_line_target = Vec2::new(18.0, line_target.y + 1.0);
+        let mut line_after = before.clone();
+        let mut off_line_after = before.clone();
+        line_after.set_player_position(keeper, line_target);
+        off_line_after.set_player_position(keeper, off_line_target);
+        let decision = test_decision_trace(&before, keeper, "defend");
+        let line_reward = soccer_transition_reward(
+            &sim.players[keeper],
+            &decision,
+            &before,
+            &line_after,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+        let off_line_reward = soccer_transition_reward(
+            &sim.players[keeper],
+            &decision,
+            &before,
+            &off_line_after,
+            0,
+            0,
+            0,
+            0,
+            false,
+        );
+        let before_score =
+            goalkeeper_ball_goal_line_alignment_score(Team::Home, before_pos, &before);
+        let line_score =
+            goalkeeper_ball_goal_line_alignment_score(Team::Home, line_target, &line_after);
+        let off_line_score =
+            goalkeeper_ball_goal_line_alignment_score(Team::Home, off_line_target, &off_line_after);
+
+        assert!(
+            line_score > before_score + 0.65,
+            "line target should substantially improve keeper alignment: before={before_score} line={line_score}"
+        );
+        assert!(
+            line_score > off_line_score + 0.80,
+            "off-line target should be much worse than ball-goal-line tracking: line={line_score} off={off_line_score}"
+        );
+        assert!(
+            line_reward > off_line_reward + 0.45,
+            "dense learner should prefer keeper recovery onto the ball-goal line: line={line_reward} off={off_line_reward}"
+        );
+    }
+
+    #[test]
     fn defenders_press_opponent_midfielders_and_mids_press_next_pass_focus() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let defender = 2;
@@ -73483,6 +73775,131 @@ mod tests {
             !carry_right.legal,
             "custom pitch width should make right touchline carry illegal: width={} x={}",
             snapshot.field_width, sim.players[holder].position.x
+        );
+    }
+
+    #[test]
+    fn non_elite_overheld_dribble_is_suppressed_under_pressure() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let holder = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Midfielder)
+            .map(|player| player.id)
+            .expect("home midfielder");
+        park_players_except(&mut sim, &[holder]);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(holder);
+        observation.actual_time_on_ball_seconds = 3.2;
+        observation.perceived_pressure = 0.82;
+        observation.pressure_urgency = 0.86;
+        observation.defensive_urgency = 0.58;
+        observation.immediate_dispossession_risk = 0.70;
+
+        let non_elite = ability01(7.8);
+        let elite = ability01(9.3);
+        let non_elite_hold_pressure = excessive_hold_pressure(&observation, non_elite);
+        let elite_hold_pressure = excessive_hold_pressure(&observation, elite);
+        let non_elite_hold_multiplier = dribble_hold_score_multiplier(&observation, non_elite);
+        let elite_hold_multiplier = dribble_hold_score_multiplier(&observation, elite);
+        let non_elite_release = release_after_hold_multiplier(&observation, non_elite);
+        let elite_release = release_after_hold_multiplier(&observation, elite);
+
+        assert!(
+            non_elite_hold_pressure > elite_hold_pressure + 0.55,
+            "ordinary good dribblers should be forced off stale carries sooner: non_elite={non_elite_hold_pressure} elite={elite_hold_pressure}"
+        );
+        assert!(
+            non_elite_hold_multiplier < 0.40,
+            "non-elite stale carries should be sharply suppressed, got {non_elite_hold_multiplier}"
+        );
+        assert!(
+            elite_hold_multiplier > 0.88,
+            "9+/10 dribblers should retain more carry permission, got {elite_hold_multiplier}"
+        );
+        assert!(
+            non_elite_release > elite_release + 0.80,
+            "overheld non-elite carries should boost pass/clear release more than elite carries: non_elite={non_elite_release} elite={elite_release}"
+        );
+    }
+
+    #[test]
+    fn pressured_defender_in_own_half_gets_clearance_probability_floor() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 2265,
+            ..Default::default()
+        });
+        let defender = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Home && player.role == PlayerRole::Defender)
+            .map(|player| player.id)
+            .expect("home defender");
+        let pressure = sim
+            .players
+            .iter()
+            .find(|player| player.team == Team::Away && player.role == PlayerRole::Forward)
+            .map(|player| player.id)
+            .expect("away forward");
+        park_players_except(&mut sim, &[defender, pressure]);
+        sim.players[defender].position = Vec2::new(40.0, 22.0);
+        sim.players[defender].home_position = sim.players[defender].position;
+        sim.players[defender].skills.dribbling = 7.4;
+        sim.players[defender].skills.defending = 8.4;
+        sim.players[defender].preferences.dribble_bias = 1.0;
+        sim.players[defender].preferences.pass_bias = 0.40;
+        sim.players[pressure].position = Vec2::new(40.9, 22.2);
+        sim.ball.holder = Some(defender);
+        sim.ball.position = sim.players[defender].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(defender);
+        observation.actual_time_on_ball_seconds = 3.4;
+        observation.perceived_pressure = 0.88;
+        observation.pressure_urgency = 0.86;
+        observation.defensive_urgency = 0.82;
+        observation.immediate_dispossession_risk = 0.78;
+        observation.yards_to_own_goal = 22.0;
+        observation.yards_to_goal = 98.0;
+        observation.forward_dribble_space_yards = 7.0;
+        observation.expected_pass_completion = 0.18;
+        observation.best_pass_receiver_openness = 0.18;
+
+        let options = sim.players[defender].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            0,
+            0,
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let clearance = options
+            .iter()
+            .find(|option| option.label == "clearance")
+            .expect("clearance option");
+        let carry_forward = options
+            .iter()
+            .find(|option| option.label == "carry-forward")
+            .expect("carry-forward option");
+        let dribble = options
+            .iter()
+            .find(|option| option.label == "dribble")
+            .expect("dribble option");
+
+        assert!(clearance.legal);
+        assert!(
+            clearance.probability >= 0.50,
+            "pressured defenders in their own half need a strong clearance floor, got {clearance:?}"
+        );
+        assert!(
+            clearance.probability > carry_forward.probability
+                && clearance.probability > dribble.probability,
+            "clearance should beat stale carry choices under own-half pressure: clearance={clearance:?} carry={carry_forward:?} dribble={dribble:?}"
         );
     }
 

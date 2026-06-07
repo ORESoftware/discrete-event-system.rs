@@ -55223,9 +55223,9 @@ mod tests {
         assert_eq!(config.effective_duration_seconds(), 12.0);
         assert_eq!(config.total_ticks(), 120);
         assert!(!config.learning_enabled);
-        assert!(config.learning_logging_enabled);
-        assert!(config.full_game_learning_enabled);
-        assert!(config.formation_lp_enabled);
+        assert!(!config.learning_logging_enabled);
+        assert!(!config.full_game_learning_enabled);
+        assert!(!config.formation_lp_enabled);
         assert!(!config.neural_learning.enabled);
         assert!(!config.adversarial_embedding_exploitation_enabled);
         assert_eq!(config.max_human_players, 0);

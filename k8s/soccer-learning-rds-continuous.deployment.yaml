@@ -9,6 +9,8 @@ metadata:
     app.kubernetes.io/part-of: des-soccer-learning
 spec:
   replicas: 1
+  revisionHistoryLimit: 2
+  progressDeadlineSeconds: 1200
   strategy:
     type: Recreate
   selector:
@@ -45,9 +47,33 @@ spec:
               export PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
               run_prefix="${SOCCER_RUN_ID_PREFIX:-codex-soccer-learning-continuous}"
-              work="/tmp/${run_prefix}-src"
+              source_repo="${SOCCER_SOURCE_REPO:-https://github.com/ORESoftware/discrete-event-system.rs.git}"
+              source_ref="${SOCCER_SOURCE_REF:-main}"
+              work_base="/tmp/${run_prefix}-src"
+              work="${work_base}"
               target="/tmp/${run_prefix}-target"
+              ready_file="/tmp/${run_prefix}-ready"
               export CARGO_TARGET_DIR="${target}"
+
+              require_value() {
+                name="$1"
+                expected="$2"
+                actual="${!name:-}"
+                if [ "${actual}" != "${expected}" ]; then
+                  echo "continuous_config_invalid ${name}=${actual:-unset} expected=${expected}" >&2
+                  exit 78
+                fi
+              }
+
+              require_value SOCCER_REQUIRE_POSTGRES true
+              require_value SOCCER_NEURAL_LEARNING_ENABLED true
+              require_value SOCCER_NEURAL_LEARNING_BACKEND threaded
+              require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 1
+              require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 1
+              require_value SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE true
+              require_value SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT true
+              require_value SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM true
+              require_value SOCCER_EVOLUTION_ENABLED true
 
               echo "continuous_started_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               echo "postgres_required=${SOCCER_REQUIRE_POSTGRES}"
@@ -60,22 +86,41 @@ spec:
               echo "completed_batch_games=${SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES}"
               echo "flush_before_new_sim=${SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM}"
               echo "refresh_with_resume=${SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT}"
+              echo "source_ref=${source_ref}"
 
-              git clone --depth 1 --branch main https://github.com/ORESoftware/discrete-event-system.rs.git "${work}"
+              if [ -d "${work}/.git" ]; then
+                echo "source_checkout_mode=fetch work=${work}"
+                git -C "${work}" fetch --depth 1 origin "${source_ref}"
+                git -C "${work}" checkout --force FETCH_HEAD
+              else
+                if [ -e "${work}" ]; then
+                  work="${work_base}-$(date -u +%Y%m%dT%H%M%SZ)"
+                  echo "source_checkout_mode=clone-after-existing-path work=${work}"
+                else
+                  echo "source_checkout_mode=clone work=${work}"
+                fi
+                git clone --depth 1 --branch "${source_ref}" "${source_repo}" "${work}"
+              fi
               cd "${work}"
               actual_commit="$(git rev-parse HEAD)"
               echo "source_commit_actual=${actual_commit}"
               export SOCCER_SOURCE_COMMIT="${actual_commit}"
 
               /usr/local/cargo/bin/cargo build --release --bin main_soccer_learning_run
+              touch "${ready_file}"
 
               cycle=0
+              seed_base="${SOCCER_SEED_BASE:-2026}"
+              seed_stride="${SOCCER_SEED_STRIDE:-1000}"
+              evolution_seed_base="${SOCCER_EVOLUTION_SEED_BASE:-20260607}"
               while true; do
                 cycle="$((cycle + 1))"
                 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                export SOCCER_SEED="$((seed_base + cycle * seed_stride))"
+                export SOCCER_EVOLUTION_SEED="$((evolution_seed_base + cycle))"
                 export SOCCER_RUN_ID="${run_prefix}-${stamp}-c${cycle}"
                 export SOCCER_RUN_DIR="/tmp/${SOCCER_RUN_ID}"
-                echo "continuous_cycle_start cycle=${cycle} run_id=${SOCCER_RUN_ID} started_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "continuous_cycle_start cycle=${cycle} run_id=${SOCCER_RUN_ID} seed=${SOCCER_SEED} evolution_seed=${SOCCER_EVOLUTION_SEED} started_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                 if "${target}/release/main_soccer_learning_run"; then
                   echo "continuous_cycle_complete cycle=${cycle} run_id=${SOCCER_RUN_ID} finished_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                   sleep "${SOCCER_CYCLE_SLEEP_SECONDS:-30}"
@@ -92,6 +137,14 @@ spec:
               value: /tmp/cargo
             - name: CARGO_BUILD_JOBS
               value: "2"
+            - name: CARGO_NET_RETRY
+              value: "5"
+            - name: RUST_BACKTRACE
+              value: "1"
+            - name: SOCCER_SOURCE_REPO
+              value: https://github.com/ORESoftware/discrete-event-system.rs.git
+            - name: SOCCER_SOURCE_REF
+              value: main
             - name: SOCCER_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -101,6 +154,10 @@ spec:
               value: "true"
             - name: SOCCER_RUN_ID_PREFIX
               value: codex-soccer-learning-continuous
+            - name: SOCCER_SEED_BASE
+              value: "2026"
+            - name: SOCCER_SEED_STRIDE
+              value: "1000"
             - name: SOCCER_EXPERIMENT_SLUG
               value: soccer-self-play-k8s-smoke
             - name: SOCCER_EXPERIMENT_NAME
@@ -181,7 +238,7 @@ spec:
               value: "0.08"
             - name: SOCCER_EVOLUTION_POPULATION_SIZE
               value: "4"
-            - name: SOCCER_EVOLUTION_SEED
+            - name: SOCCER_EVOLUTION_SEED_BASE
               value: "20260607"
             - name: SOCCER_GAME_ARTIFACT_MODE
               value: summary
@@ -217,6 +274,15 @@ spec:
             capabilities:
               drop:
                 - ALL
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -lc
+                - test -f /tmp/codex-soccer-learning-continuous-ready
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 90
           volumeMounts:
             - name: tmp
               mountPath: /tmp

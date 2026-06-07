@@ -403,7 +403,7 @@
         </select>
       </div>
       <div class="metric"><span>Learning</span><b id="learning">T0 H0 A0</b></div>
-      <div class="metric"><span>Shape Learn</span><b id="shapeLearning">L0.00 C0.00 D0.0 K0.00 B0.00 R0.00</b></div>
+      <div class="metric"><span>Shape Learn</span><b id="shapeLearning">L0.00 C0.00 D0.0 K0.00 B0.00 R0.00 Look0 D0.00 P0.00</b></div>
       <div class="metric"><span>Policy Save</span><b id="policyAutosave">Off</b></div>
       <div class="metric"><span>Policy Store</span><b id="policyStorage">JSON</b></div>
       <div class="metric"><span>Policy Prob</span><b id="policyProbability">H0/0 A0/0</b></div>
@@ -1053,7 +1053,7 @@ function learningLabel(l) {
   return `${mode}${log}${neural} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
 }
 function shapeLearningLabel(summary = state?.tacticalSummary) {
-  if (!summary) return "L0.00 C0.00 D0.0 K0.00 B0.00 R0.00";
+  if (!summary) return "L0.00 C0.00 D0.0 K0.00 B0.00 R0.00 Look0 D0.00 P0.00";
   const lane = Number(summary.meanVerticalLaneAffinityScore ?? 0);
   const laneDelta = Number(summary.meanVerticalLaneAffinityDelta ?? 0);
   const congestion = Number(summary.meanTeammateCongestionPressure ?? 0);
@@ -1062,12 +1062,15 @@ function shapeLearningLabel(summary = state?.tacticalSummary) {
   const keeperLine = Number(summary.meanGoalkeeperBallGoalLineAlignmentScore ?? 0);
   const breakThreat = Number(summary.meanDefensiveLineBreakThreat ?? 0);
   const reward = Number(summary.meanPositionalShapeReward ?? 0);
+  const lookBehindScans = Math.max(0, Math.round(Number(summary.lookBehindScanTransitions ?? 0)));
+  const lookBehindDrift = Number(summary.meanLookBehindDriftRisk ?? 0);
+  const lookBehindPenalty = Number(summary.meanLookBehindShapePenalty ?? 0);
   const shapeTransitions = Math.max(0, Math.round(Number(summary.shapeTransitions ?? 0)));
   const keeperSamples = Math.max(0, Math.round(Number(summary.goalkeeperLineAlignmentTransitions ?? 0)));
   const breakSamples = Math.max(0, Math.round(Number(summary.defensiveLineBreakThreatTransitions ?? 0)));
   const laneDeltaText = laneDelta ? `${laneDelta >= 0 ? "+" : ""}${laneDelta.toFixed(2)}` : "+0.00";
   const congestionDeltaText = congestionDelta ? `${congestionDelta >= 0 ? "+" : ""}${congestionDelta.toFixed(2)}` : "+0.00";
-  return `L${lane.toFixed(2)}(${laneDeltaText}) C${congestion.toFixed(2)}(${congestionDeltaText}) D${line.toFixed(1)} K${keeperLine.toFixed(2)}/${keeperSamples} B${breakThreat.toFixed(2)}/${breakSamples} R${reward.toFixed(2)} S${shapeTransitions}`;
+  return `L${lane.toFixed(2)}(${laneDeltaText}) C${congestion.toFixed(2)}(${congestionDeltaText}) D${line.toFixed(1)} K${keeperLine.toFixed(2)}/${keeperSamples} B${breakThreat.toFixed(2)}/${breakSamples} R${reward.toFixed(2)} Look${lookBehindScans} D${lookBehindDrift.toFixed(2)} P${lookBehindPenalty.toFixed(2)} S${shapeTransitions}`;
 }
 function ballAgentLabel(ball = state?.frame?.ball) {
   const decision = ball?.lastDecision;

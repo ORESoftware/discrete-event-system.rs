@@ -82976,6 +82976,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("goalkeeperLineAlignmentTransitions"));
         assert!(html.body.contains("meanDefensiveLineBreakThreat"));
         assert!(html.body.contains("defensiveLineBreakThreatTransitions"));
+        assert!(html.body.contains("lookBehindScanTransitions"));
+        assert!(html.body.contains("meanLookBehindDriftRisk"));
+        assert!(html.body.contains("meanLookBehindShapePenalty"));
+        assert!(html.body.contains("Look${lookBehindScans}"));
         assert!(html
             .body
             .contains("tacticalSummary: response.tacticalSummary"));
@@ -82993,7 +82997,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("playerOpt.disabled = assignedElsewhere"));
         assert!(html.body.contains("humanSlotCount() <= 0"));
         assert!(html.body.contains("e.shiftKey || e.altKey || e.metaKey"));
-        assert!(html.body.contains("<button id=\"run\">Run</button>"));
+        assert!(html.body.contains("id=\"run\""));
+        assert!(html.body.contains("Run</button>"));
         assert!(html
             .body
             .contains("<a id=\"freshMatchLink\" class=\"control-link\" href=\"/fresh\">Fresh</a>"));

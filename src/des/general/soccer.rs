@@ -12071,11 +12071,16 @@ impl MatchConfig {
 
     pub fn live_gameplay() -> Self {
         MatchConfig {
+            learning_enabled: true,
+            learning_logging_enabled: false,
+            full_game_learning_enabled: false,
+            formation_lp_enabled: false,
             neural_learning: SoccerNeuralLearningConfig {
                 enabled: true,
                 backend: SoccerNeuralLearningBackend::Threaded,
                 ..SoccerNeuralLearningConfig::default()
             },
+            adversarial_embedding_exploitation_enabled: false,
             max_human_players: 4,
             ..MatchConfig::default()
         }
@@ -54850,15 +54855,15 @@ mod tests {
         assert_eq!(config.max_human_players, 4);
         assert_eq!(config.human_slots(), 4);
         assert!(config.learning_enabled);
-        assert!(config.learning_logging_enabled);
-        assert!(config.full_game_learning_enabled);
-        assert!(config.formation_lp_enabled);
+        assert!(!config.learning_logging_enabled);
+        assert!(!config.full_game_learning_enabled);
+        assert!(!config.formation_lp_enabled);
         assert!(config.neural_learning.enabled);
         assert_eq!(
             config.neural_learning.backend,
             SoccerNeuralLearningBackend::Threaded
         );
-        assert!(config.adversarial_embedding_exploitation_enabled);
+        assert!(!config.adversarial_embedding_exploitation_enabled);
 
         let mut session = SoccerRealtimeSession::new(config);
         assert_eq!(session.owned_controller_thread_count(), 4);
@@ -54891,6 +54896,12 @@ mod tests {
             ..SoccerStepRequest::default()
         });
         assert_eq!(step.summary.ticks, 1);
+        assert_eq!(step.step_timing.ticks, 1);
+        assert!(
+            step.step_timing.pre_field_ms < 25.0,
+            "live default pre-field work should stay under one 10Hz tick budget slice; got {:.2}ms",
+            step.step_timing.pre_field_ms
+        );
         assert_eq!(step.match_clock.tick, 1);
         assert_eq!(step.match_clock.total_ticks, 6_000);
         assert_eq!(step.match_clock.remaining_ticks, 5_999);
@@ -61741,7 +61752,7 @@ mod tests {
     }
 
     #[test]
-    fn live_gameplay_defaults_enable_learning_work() {
+    fn live_gameplay_defaults_keep_learning_threaded_and_bounded() {
         let live_config = SoccerLiveServerConfig::default();
         let config = live_config.match_config;
 
@@ -61750,15 +61761,15 @@ mod tests {
         assert_eq!(config.total_ticks(), 6_000);
         assert_eq!(config.human_slots(), 4);
         assert!(config.learning_enabled);
-        assert!(config.learning_logging_enabled);
-        assert!(config.full_game_learning_enabled);
-        assert!(config.formation_lp_enabled);
+        assert!(!config.learning_logging_enabled);
+        assert!(!config.full_game_learning_enabled);
+        assert!(!config.formation_lp_enabled);
         assert!(config.neural_learning.enabled);
         assert_eq!(
             config.neural_learning.backend,
             SoccerNeuralLearningBackend::Threaded
         );
-        assert!(config.adversarial_embedding_exploitation_enabled);
+        assert!(!config.adversarial_embedding_exploitation_enabled);
         assert!(live_config.autosave_team_policy);
     }
 

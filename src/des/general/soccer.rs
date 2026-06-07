@@ -5763,6 +5763,34 @@ fn deterministic_unit_draw(tick: u64, player_id: usize, salt: u64) -> f64 {
     (value % 10_000) as f64 / 10_000.0
 }
 
+fn smoothstep_unit(value: f64) -> f64 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
+}
+
+fn logistic_probability(score: f64) -> f64 {
+    if score >= 0.0 {
+        1.0 / (1.0 + (-score).exp())
+    } else {
+        let exp_score = score.exp();
+        exp_score / (1.0 + exp_score)
+    }
+}
+
+fn probability_with_odds_multiplier(probability: f64, multiplier: f64) -> f64 {
+    let probability = probability.clamp(0.0, 1.0);
+    let multiplier = multiplier.max(0.0);
+    if probability <= 0.0 || multiplier <= 0.0 {
+        return 0.0;
+    }
+    if probability >= 1.0 {
+        return 1.0;
+    }
+    let odds = probability / (1.0 - probability);
+    let adjusted_odds = odds * multiplier;
+    (adjusted_odds / (1.0 + adjusted_odds)).clamp(0.0, 1.0)
+}
+
 fn deterministic_dribble_touch_bucket(tick: u64, player_id: usize, kind: DribbleMoveKind) -> u8 {
     sample_dribble_touch_bucket(kind, deterministic_unit_draw(tick, player_id, 17))
 }

@@ -16599,6 +16599,18 @@ pub struct CentralBrainDecisionTrace {
     pub phase: TacticalPhase,
     pub possession_team: Option<Team>,
     pub ball_holder: Option<usize>,
+    #[serde(default)]
+    pub ball_position: Vec2,
+    #[serde(default)]
+    pub ball_velocity: Vec2,
+    #[serde(default)]
+    pub ball_acceleration: Vec2,
+    #[serde(default)]
+    pub ball_jerk: Vec2,
+    #[serde(default)]
+    pub ball_altitude_yards: f64,
+    #[serde(default)]
+    pub ball_scheduled_index: Option<usize>,
     pub tracked_players: usize,
     pub tracked_officials: usize,
     #[serde(default)]
@@ -16780,6 +16792,10 @@ impl CentralBrain {
             })
             .collect::<Vec<_>>();
         controller_assignments.sort_by_key(|assignment| assignment.controller_slot);
+        let ball_scheduled_index = snapshot
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
         self.last_decision = Some(CentralBrainDecisionTrace {
             tick: snapshot.tick,
             scheduled_index: Some(0),
@@ -16787,6 +16803,12 @@ impl CentralBrain {
             phase: self.phase,
             possession_team: self.possession_team,
             ball_holder: snapshot.ball.holder,
+            ball_position: snapshot.ball.position,
+            ball_velocity: snapshot.ball.velocity,
+            ball_acceleration: snapshot.ball.acceleration,
+            ball_jerk: snapshot.ball.jerk,
+            ball_altitude_yards: snapshot.ball.altitude_yards,
+            ball_scheduled_index,
             tracked_players: snapshot.players.len(),
             tracked_officials: snapshot.shared_positions.official_latest.len(),
             controlled_human_players: controller_assignments.len(),
@@ -55521,6 +55543,46 @@ mod tests {
             soccer_formation_lp_state_values(&post_step, Team::Away, away_lp_weights);
         assert!(home_state_values[context_base + 41] > 0.90);
         assert!(away_state_values[context_base + 42] > 0.90);
+    }
+
+    #[test]
+    fn central_brain_decision_trace_tracks_ball_agent_state() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1702,
+            ..Default::default()
+        });
+        sim.ball.position = Vec2::new(31.5, 77.25);
+        sim.ball.velocity = Vec2::new(4.0, 9.5);
+        sim.ball.acceleration = Vec2::new(-0.3, -1.1);
+        sim.ball.jerk = Vec2::new(0.05, 0.15);
+        sim.ball.altitude_yards = 1.8;
+        sim.ball.holder = None;
+        sim.last_agent_schedule = vec![
+            AgentScheduleEntry {
+                kind: AgentScheduleKind::CentralBrain,
+                id: CENTRAL_BRAIN_AGENT_ID,
+                label: "Central brain".to_string(),
+            },
+            AgentScheduleEntry {
+                kind: AgentScheduleKind::Ball,
+                id: BALL_AGENT_ID,
+                label: "Ball".to_string(),
+            },
+        ];
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut brain = CentralBrain::default();
+        brain.run_time_step(&snapshot, &mut mulberry32(1702));
+        let decision = brain.last_decision.expect("central brain decision");
+
+        assert_eq!(decision.ball_holder, snapshot.ball.holder);
+        assert_eq!(decision.ball_position, snapshot.ball.position);
+        assert_eq!(decision.ball_velocity, snapshot.ball.velocity);
+        assert_eq!(decision.ball_acceleration, snapshot.ball.acceleration);
+        assert_eq!(decision.ball_jerk, snapshot.ball.jerk);
+        assert_eq!(decision.ball_altitude_yards, snapshot.ball.altitude_yards);
+        assert_eq!(decision.ball_scheduled_index, Some(1));
     }
 
     fn home_numbers_up_overload_match() -> SoccerMatch {

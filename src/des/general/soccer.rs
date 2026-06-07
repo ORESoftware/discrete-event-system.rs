@@ -18687,14 +18687,114 @@ impl WorldSnapshot {
         Some((total / count as f64 + team.attack_dir() * 16.0).clamp(0.0, self.field_length))
     }
 
-    fn defender_possession_line_y(&self, team: Team, home: Vec2, wide: bool) -> f64 {
-        let behind_ball = self.ball.position.y - team.attack_dir() * if wide { 15.0 } else { 22.0 };
-        let home_push = home.y + team.attack_dir() * if wide { 23.0 } else { 18.0 };
+    fn defensive_midfield_center_back_cover_score(&self, team: Team) -> f64 {
+        let center_backs = self
+            .players
+            .iter()
+            .filter(|player| player.team == team && player.role == PlayerRole::Defender)
+            .filter(|player| !self.is_wide_defender(player))
+            .filter_map(|player| self.player_position(player.id))
+            .collect::<Vec<_>>();
+        if center_backs.is_empty() {
+            return 0.0;
+        }
+        let center_back_centroid = center_backs
+            .iter()
+            .copied()
+            .fold(Vec2::zero(), |sum, position| sum + position)
+            / center_backs.len() as f64;
+
+        self.players
+            .iter()
+            .filter(|player| player.team == team && player.role == PlayerRole::Midfielder)
+            .filter_map(|player| {
+                let position = self.player_position(player.id)?;
+                let nearest_center_back = center_backs
+                    .iter()
+                    .map(|center_back| position.distance(*center_back))
+                    .fold(f64::INFINITY, f64::min);
+                let distance_fit = logistic_probability(
+                    (DEFENSIVE_MID_CENTER_BACK_COVER_RADIUS_YARDS - nearest_center_back) / 2.4,
+                );
+                let screen_depth = (position.y - center_back_centroid.y) * team.attack_dir();
+                let screen_fit =
+                    logistic_probability((screen_depth + 1.5) / 2.6)
+                        * logistic_probability((14.0 - screen_depth) / 3.6);
+                let defensive_fit = ((player.preferences.defensive_mindedness
+                    - player.preferences.offensive_mindedness
+                    + 0.18)
+                    / 0.58)
+                    .clamp(0.0, 1.0);
+                Some(distance_fit * (0.55 + screen_fit * 0.45) * defensive_fit)
+            })
+            .fold(0.0, f64::max)
+            .clamp(0.0, 1.0)
+    }
+
+    fn wingback_extra_push_yards(&self, player: &PlayerSnapshot) -> f64 {
+        if self.possession_team() != Some(player.team) || !self.is_wide_defender(player) {
+            return 0.0;
+        }
+        let directive = self.tactical_directive(player.team);
+        let forward_space = self.forward_dribble_space_yards(player.id);
+        let space_fit = smoothstep_unit((forward_space - 5.0) / 22.0);
+        let cover_fit = self.defensive_midfield_center_back_cover_score(player.team);
+        let center_back_advance_probability =
+            (0.34 + directive.risk_tolerance * 0.14 + space_fit * 0.08).clamp(0.18, 0.68);
+        let wingback_advance_probability = probability_with_odds_multiplier(
+            center_back_advance_probability,
+            WINGBACK_ADVANCE_ODDS_MULTIPLIER,
+        );
+        let draw = deterministic_unit_draw(self.tick, player.id, 337)
+            + deterministic_unit_draw(self.tick, player.id, 353)
+            - 1.0;
+        let mean_push = 1.4
+            + wingback_advance_probability * 4.6
+            + space_fit * 3.4
+            + cover_fit * 3.2
+            + directive.risk_tolerance * 1.1;
+        let spread = 0.85 + (1.0 - space_fit) * 0.55 + (1.0 - cover_fit) * 0.35;
+        (mean_push + draw * spread).clamp(0.0, 12.5)
+    }
+
+    fn defender_possession_line_y(&self, player: &PlayerSnapshot, home: Vec2) -> f64 {
+        let team = player.team;
+        let wide = self.is_wide_defender(player);
+        let wingback_push = if wide {
+            self.wingback_extra_push_yards(player)
+        } else {
+            0.0
+        };
+        let base_gap = if wide { 15.0 } else { 22.0 };
+        let base_home_push = if wide { 23.0 } else { 18.0 };
+        let behind_ball =
+            self.ball.position.y - team.attack_dir() * (base_gap - wingback_push * 0.55).max(8.0);
+        let home_push = home.y + team.attack_dir() * (base_home_push + wingback_push);
         match team {
             Team::Home => behind_ball.max(home_push),
             Team::Away => behind_ball.min(home_push),
         }
         .clamp(0.0, self.field_length)
+    }
+
+    fn defender_open_space_depth_yards(
+        &self,
+        player: &PlayerSnapshot,
+        own_half_possession: bool,
+    ) -> f64 {
+        let wide = self.is_wide_defender(player);
+        let base = match (wide, own_half_possession) {
+            (true, true) => 13.0,
+            (true, false) => 18.0,
+            (false, true) => 9.0,
+            (false, false) => 11.0,
+        };
+        if wide {
+            base + self.wingback_extra_push_yards(player)
+                * if own_half_possession { 0.45 } else { 0.62 }
+        } else {
+            base
+        }
     }
 
     pub fn open_space_for(&self, player_id: usize, home: Vec2) -> Vec2 {

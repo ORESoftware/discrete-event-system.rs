@@ -10509,10 +10509,7 @@ impl SharedControllerAssignments {
     }
 
     pub fn set_human_slots(&self, human_slots: usize) {
-        let mut store = self
-            .inner
-            .write()
-            .expect("controller assignment lock poisoned");
+        let mut store = soccer_rwlock_write(&self.inner, "controller_assignment");
         store.human_slots = human_slots.min(4);
         let human_slots = store.human_slots;
         store.player_by_slot.retain(|slot, _| *slot < human_slots);
@@ -10523,10 +10520,7 @@ impl SharedControllerAssignments {
         human_slots: usize,
         assignments: &[ControllerAssignment],
     ) {
-        let mut store = self
-            .inner
-            .write()
-            .expect("controller assignment lock poisoned");
+        let mut store = soccer_rwlock_write(&self.inner, "controller_assignment");
         store.human_slots = human_slots.min(4);
         store.player_by_slot.clear();
         for assignment in assignments {
@@ -10542,10 +10536,7 @@ impl SharedControllerAssignments {
     }
 
     pub fn assign_slot(&self, controller_slot: usize, player_id: Option<usize>) {
-        let mut store = self
-            .inner
-            .write()
-            .expect("controller assignment lock poisoned");
+        let mut store = soccer_rwlock_write(&self.inner, "controller_assignment");
         if controller_slot >= store.human_slots {
             return;
         }
@@ -10560,19 +10551,14 @@ impl SharedControllerAssignments {
     }
 
     pub fn assigned_player_for_slot(&self, controller_slot: usize) -> Option<usize> {
-        self.inner
-            .read()
-            .expect("controller assignment lock poisoned")
+        soccer_rwlock_read(&self.inner, "controller_assignment")
             .player_by_slot
             .get(&controller_slot)
             .copied()
     }
 
     pub fn accepts_input(&self, input: &HumanInputFrame) -> bool {
-        let store = self
-            .inner
-            .read()
-            .expect("controller assignment lock poisoned");
+        let store = soccer_rwlock_read(&self.inner, "controller_assignment");
         if input.controller_slot >= store.human_slots {
             return false;
         }
@@ -60395,6 +60381,37 @@ mod tests {
         assert!(assignments.accepts_input(&test_human_input(1, Some(7), 1)));
         assert!(assignments.accepts_input(&test_human_input(2, Some(8), 1)));
         assert!(!assignments.accepts_input(&test_human_input(5, Some(9), 1)));
+    }
+
+    #[test]
+    fn shared_controller_assignments_recover_from_poisoned_lock() {
+        let assignments = SharedControllerAssignments::new(4);
+        let poisoner = {
+            let assignments = assignments.clone();
+            std::thread::spawn(move || {
+                let _guard = assignments
+                    .inner
+                    .write()
+                    .expect("test poison controller assignment lock");
+                panic!("poison controller assignment lock");
+            })
+        };
+        assert!(poisoner.join().is_err());
+
+        assignments.assign_slot(0, Some(10));
+        assignments.assign_slot(1, Some(11));
+        assert_eq!(assignments.assigned_player_for_slot(0), Some(10));
+        assert_eq!(assignments.assigned_player_for_slot(1), Some(11));
+        assert!(assignments.accepts_input(&test_human_input(0, Some(10), 1)));
+        assert!(!assignments.accepts_input(&test_human_input(0, Some(11), 2)));
+
+        assignments.replace_from_assignments(2, &[test_controller_assignment(1, 10)]);
+        assert_eq!(assignments.assigned_player_for_slot(0), None);
+        assert_eq!(assignments.assigned_player_for_slot(1), Some(10));
+        assert!(assignments.accepts_input(&test_human_input(1, None, 3)));
+
+        assignments.set_human_slots(1);
+        assert_eq!(assignments.assigned_player_for_slot(1), None);
     }
 
     #[test]

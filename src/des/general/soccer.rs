@@ -15646,6 +15646,28 @@ struct ForwardSupportContext {
     nearest_forward_teammate_distance_yards: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CandidateOccupancy {
+    open_space_score: f64,
+    nearest_teammate_distance: f64,
+}
+
+impl CandidateOccupancy {
+    fn teammate_occupied_space_pressure(self) -> f64 {
+        teammate_occupied_space_pressure_from_distance(self.nearest_teammate_distance)
+    }
+
+    fn teammate_occupied_space_penalty(self, relief: f64) -> f64 {
+        TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY
+            * self.teammate_occupied_space_pressure()
+            * (1.0 - relief.clamp(0.0, 0.78))
+    }
+
+    fn team_spacing_score(self, mode: TeamSpacingMode) -> f64 {
+        spacing_score_from_distance(self.nearest_teammate_distance, mode)
+    }
+}
+
 impl TeamSpacingMode {
     fn band(self) -> (f64, f64, f64) {
         match self {
@@ -15684,6 +15706,25 @@ fn spacing_score_from_distance(distance_yards: f64, mode: TeamSpacingMode) -> f6
         };
         (1.0 - ((distance_yards - ideal).abs() / span) * 0.45).clamp(0.55, 1.0)
     }
+}
+
+fn teammate_occupied_space_pressure_from_distance(nearest_teammate_distance: f64) -> f64 {
+    if nearest_teammate_distance <= TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS {
+        1.0
+    } else {
+        ((TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - nearest_teammate_distance)
+            / (TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS)
+                .max(1e-6))
+        .clamp(0.0, 1.0)
+    }
+}
+
+fn open_space_score_from_distances(opponent_distance: f64, teammate_crowding: f64) -> f64 {
+    let opponent_distance = opponent_distance.min(35.0);
+    let teammate_crowding = teammate_crowding.min(25.0);
+    let teammate_pressure = teammate_occupied_space_pressure_from_distance(teammate_crowding);
+    opponent_distance * 0.68 + teammate_crowding * 0.32
+        - TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY * teammate_pressure * 0.72
 }
 
 fn pending_pass_snapshot_from(
@@ -16356,29 +16397,51 @@ impl WorldSnapshot {
         self.nearest_opponent_distance_at(team, position) > NO_PRESSURE_BACK_PASS_THRESHOLD_YARDS
     }
 
+    fn candidate_occupancy_at(
+        &self,
+        team: Team,
+        position: Vec2,
+        exclude_player_id: Option<usize>,
+    ) -> CandidateOccupancy {
+        let (width, length) = sane_pitch_dimensions(self.field_width, self.field_length);
+        let center = Vec2::new(width * 0.5, length * 0.5);
+        let position = finite_pitch_point(position, width, length, center);
+        let mut opponent_distance: f64 = 35.0;
+        let mut teammate_crowding: f64 = 25.0;
+        let mut nearest_teammate_distance = f64::INFINITY;
+        for player in &self.players {
+            let player_position = finite_pitch_point(
+                self.player_snapshot_position(player),
+                width,
+                length,
+                player.home_position,
+            );
+            let distance = player_position.distance(position);
+            if player.team != team {
+                opponent_distance = opponent_distance.min(distance);
+            } else {
+                if distance > 0.1 {
+                    teammate_crowding = teammate_crowding.min(distance);
+                }
+                if exclude_player_id != Some(player.id) {
+                    nearest_teammate_distance = nearest_teammate_distance.min(distance);
+                }
+            }
+        }
+        CandidateOccupancy {
+            open_space_score: open_space_score_from_distances(opponent_distance, teammate_crowding),
+            nearest_teammate_distance,
+        }
+    }
+
     fn nearest_teammate_distance_at(
         &self,
         team: Team,
         position: Vec2,
         exclude_player_id: Option<usize>,
     ) -> f64 {
-        let (width, length) = sane_pitch_dimensions(self.field_width, self.field_length);
-        let center = Vec2::new(width * 0.5, length * 0.5);
-        let position = finite_pitch_point(position, width, length, center);
-        self.players
-            .iter()
-            .filter(|player| player.team == team)
-            .filter(|player| exclude_player_id != Some(player.id))
-            .map(|player| {
-                finite_pitch_point(
-                    self.player_snapshot_position(player),
-                    width,
-                    length,
-                    player.home_position,
-                )
-                .distance(position)
-            })
-            .fold(f64::INFINITY, f64::min)
+        self.candidate_occupancy_at(team, position, exclude_player_id)
+            .nearest_teammate_distance
     }
 
     fn teammate_occupied_space_pressure_at(
@@ -16387,16 +16450,8 @@ impl WorldSnapshot {
         position: Vec2,
         exclude_player_id: Option<usize>,
     ) -> f64 {
-        let nearest = self.nearest_teammate_distance_at(team, position, exclude_player_id);
-        if nearest <= TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS {
-            1.0
-        } else {
-            ((TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - nearest)
-                / (TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS
-                    - TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS)
-                    .max(1e-6))
-            .clamp(0.0, 1.0)
-        }
+        self.candidate_occupancy_at(team, position, exclude_player_id)
+            .teammate_occupied_space_pressure()
     }
 
     fn teammate_occupied_space_penalty_at(
@@ -16429,10 +16484,8 @@ impl WorldSnapshot {
         position: Vec2,
         mode: TeamSpacingMode,
     ) -> f64 {
-        spacing_score_from_distance(
-            self.nearest_teammate_distance_at(team, position, exclude_player_id),
-            mode,
-        )
+        self.candidate_occupancy_at(team, position, exclude_player_id)
+            .team_spacing_score(mode)
     }
 
     fn vertical_lane_fit_for_player_target(
@@ -19022,13 +19075,10 @@ impl WorldSnapshot {
                 } else {
                     0.0
                 };
+                let occupancy = self.candidate_occupancy_at(me.team, p, Some(me.id));
                 let spacing_bonus = if possession {
-                    self.team_spacing_score_for_candidate(
-                        me.team,
-                        Some(me.id),
-                        p,
-                        TeamSpacingMode::InPossession,
-                    ) * (1.0 + self.possession_spacing_weight(me.team) * 1.5)
+                    occupancy.team_spacing_score(TeamSpacingMode::InPossession)
+                        * (1.0 + self.possession_spacing_weight(me.team) * 1.5)
                 } else {
                     0.0
                 };
@@ -19053,15 +19103,11 @@ impl WorldSnapshot {
                     self.positional_shape_exception_relief_for_player_target(me, p);
                 let lane_position_penalty =
                     self.vertical_lane_penalty_for_player_target(me, p, movement_relief);
-                let teammate_occupation_penalty = self.teammate_occupied_space_penalty_at(
-                    me.team,
-                    p,
-                    Some(me.id),
-                    movement_relief,
-                );
+                let teammate_occupation_penalty =
+                    occupancy.teammate_occupied_space_penalty(movement_relief);
                 let line_shape_penalty =
                     self.role_line_penalty_for_player_target(me, p, movement_relief);
-                let score = self.space_score_at(p, me.team)
+                let score = occupancy.open_space_score
                     + forward.max(-4.0) * (0.04 + directive.risk_tolerance * 0.08)
                     + forward_from_ball.clamp(-6.0, 28.0)
                         * (0.08 + directive.risk_tolerance * 0.09)
@@ -20424,29 +20470,7 @@ impl WorldSnapshot {
     }
 
     fn space_score_at(&self, p: Vec2, team: Team) -> f64 {
-        let mut opponent_dist: f64 = 35.0;
-        let mut teammate_crowding: f64 = 25.0;
-        for other in &self.players {
-            let distance = self.player_snapshot_position(other).distance(p);
-            if other.team != team {
-                opponent_dist = opponent_dist.min(distance);
-            } else if distance > 0.1 {
-                teammate_crowding = teammate_crowding.min(distance);
-            }
-        }
-        let opponent_dist = opponent_dist.min(35.0);
-        let teammate_crowding = teammate_crowding.min(25.0);
-        let teammate_pressure = if teammate_crowding <= TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS {
-            1.0
-        } else {
-            ((TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS - teammate_crowding)
-                / (TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS
-                    - TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS)
-                    .max(1e-6))
-            .clamp(0.0, 1.0)
-        };
-        opponent_dist * 0.68 + teammate_crowding * 0.32
-            - TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY * teammate_pressure * 0.72
+        self.candidate_occupancy_at(team, p, None).open_space_score
     }
 
     fn clear_line(&self, from: Vec2, to: Vec2, defending_team: Team, radius: f64) -> bool {
@@ -65888,6 +65912,68 @@ mod tests {
         assert!(
             snapshot.nearest_opponent_distance_at(Team::Home, target) > 12.0,
             "wide outlet should prefer low-pressure space: {target:?}"
+        );
+    }
+
+    #[test]
+    fn candidate_occupancy_matches_existing_spacing_helpers() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        let nearby_teammate = 10;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        sim.players[nearby_teammate].position = Vec2::new(66.0, 63.0);
+        sim.players[14].position = Vec2::new(68.0, 64.0);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let candidate = Vec2::new(65.0, 63.5);
+        let relief = 0.23;
+        let occupancy = snapshot.candidate_occupancy_at(Team::Home, candidate, Some(winger));
+
+        assert!(
+            (occupancy.open_space_score - snapshot.space_score_at(candidate, Team::Home)).abs()
+                < 1e-9
+        );
+        assert!(
+            (occupancy.nearest_teammate_distance
+                - snapshot.nearest_teammate_distance_at(Team::Home, candidate, Some(winger)))
+            .abs()
+                < 1e-9
+        );
+        assert!(
+            (occupancy.teammate_occupied_space_pressure()
+                - snapshot.teammate_occupied_space_pressure_at(
+                    Team::Home,
+                    candidate,
+                    Some(winger)
+                ))
+            .abs()
+                < 1e-9
+        );
+        assert!(
+            (occupancy.teammate_occupied_space_penalty(relief)
+                - snapshot.teammate_occupied_space_penalty_at(
+                    Team::Home,
+                    candidate,
+                    Some(winger),
+                    relief
+                ))
+            .abs()
+                < 1e-9
+        );
+        assert!(
+            (occupancy.team_spacing_score(TeamSpacingMode::InPossession)
+                - snapshot.team_spacing_score_for_candidate(
+                    Team::Home,
+                    Some(winger),
+                    candidate,
+                    TeamSpacingMode::InPossession
+                ))
+            .abs()
+                < 1e-9
         );
     }
 

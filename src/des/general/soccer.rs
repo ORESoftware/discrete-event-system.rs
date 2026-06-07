@@ -16826,6 +16826,58 @@ impl WorldSnapshotOptions {
     };
 }
 
+fn player_sample_forward_progress_over_seconds(
+    history: &[PlayerPositionSample],
+    current_position: Vec2,
+    attack_dir: f64,
+    current_clock_seconds: f64,
+    seconds: f64,
+) -> Option<f64> {
+    if history.len() < 2 || seconds <= 0.0 {
+        return None;
+    }
+
+    let latest_clock = if current_clock_seconds.is_finite() {
+        current_clock_seconds
+    } else {
+        history
+            .iter()
+            .rev()
+            .find(|sample| sample.clock_seconds.is_finite())
+            .map(|sample| sample.clock_seconds)?
+    };
+    let target_clock = latest_clock - seconds;
+    let mut oldest: Option<&PlayerPositionSample> = None;
+    let mut previous: Option<&PlayerPositionSample> = None;
+
+    for sample in history
+        .iter()
+        .filter(|sample| sample.clock_seconds.is_finite() && sample.clock_seconds <= latest_clock)
+    {
+        oldest.get_or_insert(sample);
+        if let Some(prev) = previous {
+            if prev.clock_seconds <= target_clock && target_clock <= sample.clock_seconds {
+                let dt_seconds = sample.clock_seconds - prev.clock_seconds;
+                if dt_seconds > 1e-9 {
+                    let t = ((target_clock - prev.clock_seconds) / dt_seconds).clamp(0.0, 1.0);
+                    let start_position = prev.position + (sample.position - prev.position) * t;
+                    return Some((current_position.y - start_position.y) * attack_dir);
+                }
+            }
+        }
+        previous = Some(sample);
+    }
+
+    let oldest = oldest?;
+    let elapsed_seconds = (latest_clock - oldest.clock_seconds).max(0.0);
+    if elapsed_seconds >= seconds * 0.5 {
+        let observed = (current_position.y - oldest.position.y) * attack_dir;
+        Some(observed * (seconds / elapsed_seconds.max(1e-9)).clamp(0.5, 2.0))
+    } else {
+        None
+    }
+}
+
 impl WorldSnapshot {
     fn from_match(m: &SoccerMatch) -> Self {
         Self::from_match_with_options(m, WorldSnapshotOptions::FULL)
@@ -19589,6 +19641,17 @@ impl WorldSnapshot {
         }
         let current = self.player_snapshot_position(player);
         let attack_dir = player.team.attack_dir();
+        if let Some(progress) = self.player_position_history(player.id).and_then(|history| {
+            player_sample_forward_progress_over_seconds(
+                history,
+                current,
+                attack_dir,
+                self.clock_seconds,
+                seconds,
+            )
+        }) {
+            return progress;
+        }
         let dt = self.dt_seconds.max(0.0);
         if dt > 0.0 {
             let steps = (seconds / dt).round().max(1.0) as usize;
@@ -46667,11 +46730,35 @@ fn tracking_frame_to_world_snapshot_with_history(
     debug_assert!(!frames.is_empty());
     let frame = &frames[frame_idx.min(frames.len().saturating_sub(1))];
     let mut snapshot = tracking_frame_to_world_snapshot(config, frame, home_positions);
+    let mut shared_player_histories = Vec::new();
     for player in &mut snapshot.players {
         let history = tracking_player_position_history_at(frames, frame_idx, player.id);
         if !history.is_empty() {
             player.position_history = history;
         }
+        let sample_history =
+            tracking_player_position_sample_history_at(frames, frame_idx, player.id);
+        if !sample_history.is_empty() {
+            shared_player_histories.push((player.id, sample_history));
+        }
+    }
+    for (player_id, sample_history) in shared_player_histories {
+        if let Some(latest) = sample_history.last().cloned() {
+            if let Some(existing) = snapshot
+                .shared_positions
+                .latest
+                .iter_mut()
+                .find(|sample| sample.player_id == player_id)
+            {
+                *existing = latest;
+            } else {
+                snapshot.shared_positions.latest.push(latest);
+            }
+        }
+        snapshot
+            .shared_positions
+            .histories
+            .insert(player_id, sample_history);
     }
     let ball_history = tracking_ball_position_history_at(frames, frame_idx);
     if !ball_history.is_empty() {
@@ -46860,6 +46947,36 @@ fn tracking_player_position_history_at(
                 .iter()
                 .find(|player| player.id == player_id)
                 .map(|player| player.position)
+        })
+        .collect()
+}
+
+fn tracking_player_position_sample_history_at(
+    frames: &[SoccerTrackingFrame],
+    frame_idx: usize,
+    player_id: usize,
+) -> Vec<PlayerPositionSample> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let end = frame_idx.min(frames.len() - 1);
+    let start = (end + 1).saturating_sub(PLAYER_POSITION_HISTORY_LIMIT);
+    frames[start..=end]
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .players
+                .iter()
+                .find(|player| player.id == player_id)
+                .map(|player| PlayerPositionSample {
+                    player_id,
+                    tick: frame.tick,
+                    clock_seconds: frame.clock_seconds,
+                    position: player.position,
+                    velocity: player.velocity.unwrap_or_default(),
+                    acceleration: player.motion_acceleration.unwrap_or_default(),
+                    jerk: player.motion_jerk.unwrap_or_default(),
+                })
         })
         .collect()
 }
@@ -53524,6 +53641,62 @@ mod tests {
             (jerk.x + 38.095_238_095_238_11).abs() < 1e-9,
             "jerk should use uneven acceleration midpoint deltas, got {}",
             jerk.x
+        );
+    }
+
+    #[test]
+    fn player_forward_progress_uses_timestamped_shared_history() {
+        let history = vec![
+            PlayerPositionSample {
+                player_id: 9,
+                tick: 0,
+                clock_seconds: 0.0,
+                position: Vec2::new(40.0, 10.0),
+                velocity: Vec2::zero(),
+                acceleration: Vec2::zero(),
+                jerk: Vec2::zero(),
+            },
+            PlayerPositionSample {
+                player_id: 9,
+                tick: 7,
+                clock_seconds: 0.7,
+                position: Vec2::new(40.0, 11.4),
+                velocity: Vec2::new(0.0, 2.0),
+                acceleration: Vec2::zero(),
+                jerk: Vec2::zero(),
+            },
+            PlayerPositionSample {
+                player_id: 9,
+                tick: 19,
+                clock_seconds: 1.9,
+                position: Vec2::new(40.0, 17.0),
+                velocity: Vec2::new(0.0, 5.0),
+                acceleration: Vec2::zero(),
+                jerk: Vec2::zero(),
+            },
+            PlayerPositionSample {
+                player_id: 9,
+                tick: 25,
+                clock_seconds: 2.5,
+                position: Vec2::new(40.0, 20.0),
+                velocity: Vec2::new(0.0, 5.0),
+                acceleration: Vec2::zero(),
+                jerk: Vec2::zero(),
+            },
+        ];
+
+        let progress = player_sample_forward_progress_over_seconds(
+            &history,
+            Vec2::new(40.0, 20.0),
+            Team::Home.attack_dir(),
+            2.5,
+            2.0,
+        )
+        .expect("progress from timestamped history");
+
+        assert!(
+            (progress - 9.0).abs() < 1e-9,
+            "progress should interpolate the 0.5s lookback sample from uneven clocks, got {progress}"
         );
     }
 
@@ -68553,6 +68726,24 @@ mod tests {
                 Vec2::new(40.0, 10.4),
             ]
         );
+        let shared_player_history = history_snapshot
+            .player_position_history(0)
+            .expect("timestamped shared player history");
+        assert_eq!(shared_player_history.len(), 3);
+        assert_eq!(shared_player_history[0].clock_seconds, 0.0);
+        assert_eq!(shared_player_history[2].clock_seconds, 0.2);
+        assert_eq!(
+            shared_player_history[2].position,
+            history_snapshot.players[0].position
+        );
+        assert!(
+            (history_snapshot
+                .player_forward_progress_over_seconds(&history_snapshot.players[0], 0.2)
+                - 0.4)
+                .abs()
+                < 1e-9,
+            "tracking forward-progress queries should use timestamped shared player history"
+        );
         assert_eq!(history_snapshot.ball_history.len(), 3);
         assert_eq!(
             history_snapshot.ball_history[0].position,
@@ -70121,12 +70312,33 @@ mod tests {
         let defender = 2;
         let midfielder = 6;
         let striker = 9;
+        sim.tick = 20;
+        sim.clock_seconds = 2.0;
         sim.players[defender].position = Vec2::new(40.0, 44.0);
         sim.players[midfielder].position = Vec2::new(40.0, 56.0);
         sim.players[striker].position = Vec2::new(40.0, 72.0);
         sim.players[striker].velocity = Vec2::new(0.0, 3.2);
         sim.players[striker].position_history =
-            VecDeque::from_iter((0..=20).map(|step| Vec2::new(40.0, 66.0 + step as f64 * 0.3)));
+            VecDeque::from_iter((0..=20).map(|_| sim.players[striker].position));
+        {
+            let mut store = sim
+                .shared_positions
+                .inner
+                .write()
+                .expect("shared position lock");
+            store.histories.insert(
+                striker,
+                VecDeque::from_iter((0..=20).map(|step| PlayerPositionSample {
+                    player_id: striker,
+                    tick: step,
+                    clock_seconds: step as f64 * 0.1,
+                    position: Vec2::new(40.0, 66.0 + step as f64 * 0.3),
+                    velocity: Vec2::new(0.0, 3.0),
+                    acceleration: Vec2::zero(),
+                    jerk: Vec2::zero(),
+                })),
+            );
+        }
         for away in 11..22 {
             sim.players[away].position = Vec2::new(72.0, 96.0);
         }

@@ -15,7 +15,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-    mpsc, Arc, Condvar, Mutex, RwLock,
+    mpsc, Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 use std::thread;
 use std::thread::JoinHandle;
@@ -9845,6 +9845,53 @@ impl HumanInputWaitResult {
     }
 }
 
+fn recover_poisoned_soccer_lock(lock_name: &str, access: &str) {
+    eprintln!(
+        "{{\"event\":\"soccer_lock_poison_recovered\",\"lock\":\"{}\",\"access\":\"{}\"}}",
+        lock_name, access
+    );
+}
+
+fn soccer_rwlock_read<'a, T>(lock: &'a RwLock<T>, lock_name: &str) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        recover_poisoned_soccer_lock(lock_name, "read");
+        poisoned.into_inner()
+    })
+}
+
+fn soccer_rwlock_write<'a, T>(lock: &'a RwLock<T>, lock_name: &str) -> RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        recover_poisoned_soccer_lock(lock_name, "write");
+        poisoned.into_inner()
+    })
+}
+
+fn soccer_mutex_lock<'a, T>(lock: &'a Mutex<T>, lock_name: &str) -> MutexGuard<'a, T> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        recover_poisoned_soccer_lock(lock_name, "mutex");
+        poisoned.into_inner()
+    })
+}
+
+fn soccer_condvar_wait_timeout_while<'a, T, F>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+    condition: F,
+    lock_name: &str,
+) -> MutexGuard<'a, T>
+where
+    F: FnMut(&mut T) -> bool,
+{
+    condvar
+        .wait_timeout_while(guard, timeout, condition)
+        .map(|(guard, _)| guard)
+        .unwrap_or_else(|poisoned| {
+            recover_poisoned_soccer_lock(lock_name, "condvar-wait");
+            poisoned.into_inner().0
+        })
+}
+
 impl Default for SharedHumanInputs {
     fn default() -> Self {
         SharedHumanInputs {
@@ -9868,14 +9915,11 @@ impl SharedHumanInputs {
 
     fn push_with_enqueue_unix_ms(&self, input: HumanInputFrame, enqueued_unix_ms: u64) -> bool {
         let controller_slot = input.controller_slot;
-        let accepted = self
-            .inner
-            .write()
-            .expect("human input queue lock poisoned")
-            .push(input, enqueued_unix_ms);
+        let accepted =
+            soccer_rwlock_write(&self.inner, "human_input_queue").push(input, enqueued_unix_ms);
         if accepted {
             let (lock, condvar) = &*self.notifier;
-            let mut notifier = lock.lock().expect("human input notifier lock poisoned");
+            let mut notifier = soccer_mutex_lock(lock, "human_input_notifier");
             notifier.record_slot_change(controller_slot);
             condvar.notify_all();
         }
@@ -9883,52 +9927,37 @@ impl SharedHumanInputs {
     }
 
     pub fn prune_expired(&self) -> u64 {
-        self.inner
-            .write()
-            .expect("human input queue lock poisoned")
+        soccer_rwlock_write(&self.inner, "human_input_queue")
             .prune_expired_for_slots(None, soccer_unix_millis())
     }
 
     pub fn prune_expired_for_slots(&self, controller_slots: &[usize]) -> u64 {
-        self.inner
-            .write()
-            .expect("human input queue lock poisoned")
+        soccer_rwlock_write(&self.inner, "human_input_queue")
             .prune_expired_for_slots(Some(controller_slots), soccer_unix_millis())
     }
 
     pub fn drain_latest_by_slot(&self) -> HashMap<usize, HumanInputFrame> {
-        self.inner
-            .write()
-            .expect("human input queue lock poisoned")
-            .drain_latest_by_slot()
+        soccer_rwlock_write(&self.inner, "human_input_queue").drain_latest_by_slot()
     }
 
     pub fn drain_latest_for_slot(&self, controller_slot: usize) -> Option<HumanInputFrame> {
-        self.inner
-            .write()
-            .expect("human input queue lock poisoned")
-            .drain_latest_for_slot(controller_slot)
+        soccer_rwlock_write(&self.inner, "human_input_queue").drain_latest_for_slot(controller_slot)
     }
 
     pub fn drain_latest_for_slot_with_age(
         &self,
         controller_slot: usize,
     ) -> Option<HumanInputDrainResult> {
-        self.inner
-            .write()
-            .expect("human input queue lock poisoned")
+        soccer_rwlock_write(&self.inner, "human_input_queue")
             .drain_latest_for_slot_with_age(controller_slot, soccer_unix_millis())
     }
 
     pub fn clear_slot(&self, controller_slot: usize) {
-        let cleared = self
-            .inner
-            .write()
-            .expect("human input queue lock poisoned")
-            .clear_slot(controller_slot);
+        let cleared =
+            soccer_rwlock_write(&self.inner, "human_input_queue").clear_slot(controller_slot);
         if cleared {
             let (lock, condvar) = &*self.notifier;
-            let mut notifier = lock.lock().expect("human input notifier lock poisoned");
+            let mut notifier = soccer_mutex_lock(lock, "human_input_notifier");
             notifier.record_slot_change(controller_slot);
             condvar.notify_all();
         }
@@ -9936,17 +9965,19 @@ impl SharedHumanInputs {
 
     pub fn notification_version(&self) -> u64 {
         let (lock, _) = &*self.notifier;
-        lock.lock()
-            .expect("human input notifier lock poisoned")
-            .version
+        soccer_mutex_lock(lock, "human_input_notifier").version
     }
 
     pub fn wait_for_change_since(&self, version: u64, timeout: Duration) -> u64 {
         let (lock, condvar) = &*self.notifier;
-        let guard = lock.lock().expect("human input notifier lock poisoned");
-        let (guard, _) = condvar
-            .wait_timeout_while(guard, timeout, |current| current.version <= version)
-            .expect("human input notifier wait poisoned");
+        let guard = soccer_mutex_lock(lock, "human_input_notifier");
+        let guard = soccer_condvar_wait_timeout_while(
+            condvar,
+            guard,
+            timeout,
+            |current| current.version <= version,
+            "human_input_notifier",
+        );
         guard.version
     }
 
@@ -9960,12 +9991,14 @@ impl SharedHumanInputs {
             return self.notification_version();
         }
         let (lock, condvar) = &*self.notifier;
-        let guard = lock.lock().expect("human input notifier lock poisoned");
-        let (guard, _) = condvar
-            .wait_timeout_while(guard, timeout, |current| {
-                !current.slots_changed_since(controller_slots, version)
-            })
-            .expect("human input notifier wait poisoned");
+        let guard = soccer_mutex_lock(lock, "human_input_notifier");
+        let guard = soccer_condvar_wait_timeout_while(
+            condvar,
+            guard,
+            timeout,
+            |current| !current.slots_changed_since(controller_slots, version),
+            "human_input_notifier",
+        );
         guard.version
     }
 
@@ -10105,41 +10138,28 @@ impl SharedHumanInputs {
     }
 
     pub fn queued_len(&self) -> usize {
-        self.inner
-            .read()
-            .expect("human input queue lock poisoned")
+        soccer_rwlock_read(&self.inner, "human_input_queue")
             .pending
             .len()
     }
 
     pub fn queued_len_for_slots(&self, controller_slots: &[usize]) -> usize {
-        self.inner
-            .read()
-            .expect("human input queue lock poisoned")
-            .pending_len_for_slots(controller_slots)
+        soccer_rwlock_read(&self.inner, "human_input_queue").pending_len_for_slots(controller_slots)
     }
 
     pub fn last_seq_for_slot(&self, controller_slot: usize) -> Option<u64> {
-        self.inner
-            .read()
-            .expect("human input queue lock poisoned")
+        soccer_rwlock_read(&self.inner, "human_input_queue")
             .latest_seq_by_slot
             .get(&controller_slot)
             .copied()
     }
 
     pub fn expired_len_for_slot(&self, controller_slot: usize) -> u64 {
-        self.inner
-            .read()
-            .expect("human input queue lock poisoned")
-            .expired_len_for_slot(controller_slot)
+        soccer_rwlock_read(&self.inner, "human_input_queue").expired_len_for_slot(controller_slot)
     }
 
     pub fn expired_len(&self) -> u64 {
-        self.inner
-            .read()
-            .expect("human input queue lock poisoned")
-            .expired_len()
+        soccer_rwlock_read(&self.inner, "human_input_queue").expired_len()
     }
 }
 
@@ -59648,6 +59668,53 @@ mod tests {
         let latest = q.drain_latest_by_slot();
         assert_eq!(latest.get(&0).unwrap().seq, 2);
         assert!(latest.get(&0).unwrap().sprint);
+    }
+
+    #[test]
+    fn human_input_queue_recovers_from_poisoned_controller_locks() {
+        let q = SharedHumanInputs::new();
+        let queue_poisoner = {
+            let q = q.clone();
+            std::thread::spawn(move || {
+                let _guard = q.inner.write().expect("test poison queue lock");
+                panic!("poison human input queue lock");
+            })
+        };
+        assert!(queue_poisoner.join().is_err());
+
+        let notifier_poisoner = {
+            let notifier = q.notifier.clone();
+            std::thread::spawn(move || {
+                let (lock, _) = &*notifier;
+                let _guard = lock.lock().expect("test poison notifier lock");
+                panic!("poison human input notifier lock");
+            })
+        };
+        assert!(notifier_poisoner.join().is_err());
+
+        assert!(
+            q.push(HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(1),
+                seq: 7,
+                axis: Vec2::new(0.2, 0.9),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            }),
+            "controller input should still be accepted after a thread poisons shared locks"
+        );
+        assert_eq!(q.queued_len(), 1);
+        assert!(q.notification_version() > 0);
+
+        let recovered = q
+            .drain_latest_for_slot(0)
+            .expect("recovered queue should drain latest input");
+        assert_eq!(recovered.seq, 7);
+        assert!(recovered.sprint);
     }
 
     #[test]

@@ -50215,6 +50215,7 @@ pub fn soccer_live_page_html() -> String {
 }
 
 pub fn soccer_simulation_trace_jsonl(trace: &SimulationTrace) -> String {
+    let tactical_liveness = soccer_playback_tactical_liveness_json(&trace.summary);
     let mut lines = Vec::with_capacity(trace.frames.len() + trace.events.len() + 2);
     lines.push(
         serde_json::to_string(&serde_json::json!({
@@ -50249,13 +50250,41 @@ pub fn soccer_simulation_trace_jsonl(trace: &SimulationTrace) -> String {
     lines.push(
         serde_json::to_string(&serde_json::json!({
             "kind": "soccer-sim-summary",
-            "summary": &trace.summary
+            "summary": &trace.summary,
+            "tacticalLiveness": tactical_liveness
         }))
         .unwrap_or_else(|_| "{}".to_string()),
     );
     let mut jsonl = lines.join("\n");
     jsonl.push('\n');
     jsonl
+}
+
+fn soccer_playback_tactical_liveness_json(summary: &MatchSummary) -> serde_json::Value {
+    let pass_attempts = summary
+        .stats
+        .passes_attempted_home
+        .saturating_add(summary.stats.passes_attempted_away);
+    let completed_passes = summary
+        .stats
+        .passes_completed_home
+        .saturating_add(summary.stats.passes_completed_away);
+    let shot_attempts = summary
+        .stats
+        .shots_home
+        .saturating_add(summary.stats.shots_away);
+    let sustained_pass_window = summary.ticks >= 200;
+    let sustained_shot_window = summary.ticks >= 450;
+    serde_json::json!({
+        "passAttempts": pass_attempts,
+        "completedPasses": completed_passes,
+        "shotAttempts": shot_attempts,
+        "sustainedPassWindow": sustained_pass_window,
+        "sustainedShotWindow": sustained_shot_window,
+        "passActivityOk": !sustained_pass_window || pass_attempts > 0,
+        "completedPassActivityOk": !sustained_pass_window || completed_passes > 0,
+        "shotActivityOk": !sustained_shot_window || shot_attempts > 0,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -50303,6 +50332,7 @@ fn soccer_playback_metadata_json(
 ) -> serde_json::Value {
     let generated_at_unix_ms = soccer_artifact_generated_at_unix_ms();
     let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
+    let tactical_liveness = soccer_playback_tactical_liveness_json(summary);
     let controller_contract = soccer_controller_runtime_contract(config);
     let ui_contract = soccer_ui_runtime_contract();
     let rules_contract = soccer_rules_runtime_contract(config);
@@ -50313,6 +50343,7 @@ fn soccer_playback_metadata_json(
         "generatedAtUnixMs": generated_at_unix_ms,
         "config": config,
         "summary": summary,
+        "tacticalLiveness": tactical_liveness,
         "stepTiming": step_timing,
         "controllerYield": controller_yield,
         "cadence": cadence,
@@ -50330,6 +50361,7 @@ fn soccer_playback_metadata_json(
             "recordEveryTicks": record_every_ticks.map(|ticks| ticks.max(1)),
             "expectedFrameCount": expected_frame_count,
             "cadence": cadence,
+            "tacticalLiveness": tactical_liveness,
             "controllerYield": controller_yield,
             "agentContract": soccer_playback_agent_contract(),
             "decisionModel": soccer_decision_model_contract(),
@@ -66990,6 +67022,68 @@ mod tests {
             records.last().unwrap()["summary"]["ticks"],
             trace.summary.ticks
         );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["passAttempts"],
+            trace
+                .summary
+                .stats
+                .passes_attempted_home
+                .saturating_add(trace.summary.stats.passes_attempted_away)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["completedPasses"],
+            trace
+                .summary
+                .stats
+                .passes_completed_home
+                .saturating_add(trace.summary.stats.passes_completed_away)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["shotAttempts"],
+            trace
+                .summary
+                .stats
+                .shots_home
+                .saturating_add(trace.summary.stats.shots_away)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["sustainedPassWindow"],
+            false
+        );
+    }
+
+    #[test]
+    fn playback_tactical_liveness_flags_sustained_silence() {
+        let mut summary = MatchSummary {
+            score_home: 0,
+            score_away: 0,
+            ticks: 449,
+            simulated_seconds: 44.9,
+            stats: MatchStats::default(),
+        };
+        let pre_shot_window = soccer_playback_tactical_liveness_json(&summary);
+        assert_eq!(pre_shot_window["sustainedPassWindow"], true);
+        assert_eq!(pre_shot_window["sustainedShotWindow"], false);
+        assert_eq!(pre_shot_window["passActivityOk"], false);
+        assert_eq!(pre_shot_window["completedPassActivityOk"], false);
+        assert_eq!(pre_shot_window["shotActivityOk"], true);
+
+        summary.ticks = 450;
+        summary.simulated_seconds = 45.0;
+        let silent = soccer_playback_tactical_liveness_json(&summary);
+        assert_eq!(silent["sustainedShotWindow"], true);
+        assert_eq!(silent["shotActivityOk"], false);
+
+        summary.stats.passes_attempted_home = 1;
+        summary.stats.passes_completed_home = 1;
+        summary.stats.shots_away = 1;
+        let active = soccer_playback_tactical_liveness_json(&summary);
+        assert_eq!(active["passAttempts"], 1);
+        assert_eq!(active["completedPasses"], 1);
+        assert_eq!(active["shotAttempts"], 1);
+        assert_eq!(active["passActivityOk"], true);
+        assert_eq!(active["completedPassActivityOk"], true);
+        assert_eq!(active["shotActivityOk"], true);
     }
 
     #[test]
@@ -100299,6 +100393,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("policyPersistenceBackend"));
         assert!(html.contains("policyPersistenceStoresAllWeightHistory"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
+        assert!(html.contains(
+            "trace.tacticalLiveness = meta.tacticalLiveness || meta.playback?.tacticalLiveness || null"
+        ));
+        assert!(html.contains("id=\"tacticalLiveness\""));
+        assert!(html.contains("function tacticalLivenessLabel()"));
+        assert!(html.contains("function tacticalLivenessTitle()"));
+        assert!(html.contains("tacticalLiveness.textContent = tacticalLivenessLabel()"));
+        assert!(html.contains("tacticalLiveness.title = tacticalLivenessTitle()"));
         assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
             "cadence.textContent = `${dt.toFixed(2)}s/${tickHz.toFixed(0)}Hz; ${fmtDuration(duration)}; ${expectedFrames || trace.frames.length}f${contract}`"
@@ -100463,7 +100565,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("killerPassGoalPressure"));
         assert!(html.contains("singleThreadGoalPressure"));
         assert!(html.contains("function liveIntentTitle"));
-        assert!(html.contains("actionIntent.title = liveIntentTitle(primaryIntent)"));
+        assert!(html.contains("actionIntent.title = liveIntentTitle(primaryIntent(f))"));
         assert!(
             html.contains("D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}")
         );
@@ -101281,6 +101383,35 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&fs::read_to_string(&paths.meta_path).expect("meta asset"))
                 .expect("meta json");
         assert_eq!(meta["summary"]["ticks"], trace.summary.ticks);
+        assert_eq!(
+            meta["tacticalLiveness"],
+            meta["playback"]["tacticalLiveness"]
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["passAttempts"],
+            trace
+                .summary
+                .stats
+                .passes_attempted_home
+                .saturating_add(trace.summary.stats.passes_attempted_away)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["completedPasses"],
+            trace
+                .summary
+                .stats
+                .passes_completed_home
+                .saturating_add(trace.summary.stats.passes_completed_away)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["shotAttempts"],
+            trace
+                .summary
+                .stats
+                .shots_home
+                .saturating_add(trace.summary.stats.shots_away)
+        );
+        assert_eq!(meta["tacticalLiveness"]["sustainedPassWindow"], false);
         assert_eq!(meta["stepTiming"]["ticks"], trace.step_timing.ticks);
         assert_eq!(meta["stepTiming"]["totalMs"], trace.step_timing.total_ms);
         assert_eq!(
@@ -101438,6 +101569,16 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&fs::read_to_string(&paths.meta_path).expect("meta asset"))
                 .expect("meta json");
         assert_eq!(meta["summary"]["ticks"], config.total_ticks());
+        assert_eq!(
+            meta["tacticalLiveness"],
+            meta["playback"]["tacticalLiveness"]
+        );
+        assert!(meta["tacticalLiveness"]["passAttempts"].as_u64().is_some());
+        assert!(meta["tacticalLiveness"]["completedPasses"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["shotAttempts"].as_u64().is_some());
+        assert_eq!(meta["tacticalLiveness"]["sustainedPassWindow"], false);
         assert_eq!(meta["stepTiming"]["ticks"], config.total_ticks());
         assert_eq!(meta["controllerYield"], meta["playback"]["controllerYield"]);
         assert_eq!(meta["controllerYield"]["assignedPlayers"], 0);

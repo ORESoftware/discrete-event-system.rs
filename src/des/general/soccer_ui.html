@@ -352,6 +352,7 @@
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
       <div class="metric"><span>GK Physics</span><b id="gkPhysics">save/parry</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
+      <div class="metric"><span>Tactical Live</span><b id="tacticalLiveness">P0/0 S0</b></div>
       <div class="metric"><span>Dribble Beats</span><b id="dribbleBeats">0 - 0</b></div>
       <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
       <div class="metric"><span>Route 1</span><b id="routeOne">0 - 0</b></div>
@@ -388,6 +389,9 @@
         <button id="shoot">Shoot</button>
         <button id="carryAction">Carry</button>
         <button id="protectAction">Protect</button>
+        <button id="killerPassAction">Thread T</button>
+        <button id="clearanceAction">Clear C</button>
+        <button id="routeOneAction">Route R</button>
       </div>
       <div class="legend">
         <span><i class="swatch" style="background:var(--home)"></i>Home</span>
@@ -469,6 +473,7 @@ const trace = {
   learningContract: null,
   stepTiming: null,
   controllerYield: null,
+  tacticalLiveness: null,
   frames: [],
   events: [],
   runId: null,
@@ -494,6 +499,7 @@ const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
 const gkPhysics = document.getElementById("gkPhysics");
 const passes = document.getElementById("passes");
+const tacticalLiveness = document.getElementById("tacticalLiveness");
 const dribbleBeats = document.getElementById("dribbleBeats");
 const clearances = document.getElementById("clearances");
 const routeOne = document.getElementById("routeOne");
@@ -526,6 +532,9 @@ const passTarget = document.getElementById("passTarget");
 const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
 const protectActionButton = document.getElementById("protectAction");
+const killerPassActionButton = document.getElementById("killerPassAction");
+const clearanceActionButton = document.getElementById("clearanceAction");
+const routeOneActionButton = document.getElementById("routeOneAction");
 const loadingOverlay = document.getElementById("loadingOverlay");
 const loadingTitle = document.getElementById("loadingTitle");
 const loadingTitleText = document.getElementById("loadingTitleText");
@@ -538,7 +547,7 @@ const authToken = document.getElementById("authToken");
 const keys = new Set();
 const MOVE_KEY_CODES = new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD"]);
 const SPRINT_KEY_CODES = new Set(["ShiftLeft","ShiftRight"]);
-const HUMAN_ACTION_KEY_CODES = new Set(["Enter","Space"]);
+const HUMAN_ACTION_KEY_CODES = new Set(["Enter","Space","KeyT","KeyC","KeyR"]);
 const CONTROLLER_KEYMAPS = [
   {left: "ArrowLeft", right: "ArrowRight", up: "ArrowUp", down: "ArrowDown", sprint: "ShiftLeft", pass: "Enter", shoot: "Space"},
   {left: "KeyA", right: "KeyD", up: "KeyW", down: "KeyS", sprint: "ShiftRight", pass: "KeyF", shoot: "KeyG"},
@@ -553,6 +562,7 @@ const GAMEPAD_BUTTONS = {
   clearance: 4,
   sprint: 5,
   routeOne: 6,
+  killerPass: 7,
   dpadUp: 12,
   dpadDown: 13,
   dpadLeft: 14,
@@ -860,6 +870,36 @@ function stepBudgetTitle() {
   if (status.ticks <= 0) return `tick budget ${status.budget.toFixed(0)}ms; learning ${status.learningBudget.toFixed(0)}ms`;
   return `${status.ticks} ticks; over ${status.overTicks}; learning over ${status.learningOverTicks}; max step ${status.maxStep.toFixed(1)}ms; max field ${status.maxField.toFixed(1)}ms; max player ${status.maxPlayerDecision.toFixed(1)}ms; max learning ${status.maxLearning.toFixed(1)}ms; budget over ${status.maxOver.toFixed(1)}ms; learning over ${status.maxLearningOver.toFixed(1)}ms`;
 }
+function tacticalLivenessState() {
+  const s = trace.summary?.stats || emptyStats();
+  const meta = trace.tacticalLiveness || {};
+  const passAttempts = Number(meta.passAttempts ?? ((s.passesAttemptedHome ?? 0) + (s.passesAttemptedAway ?? 0)));
+  const completedPasses = Number(meta.completedPasses ?? ((s.passesCompletedHome ?? 0) + (s.passesCompletedAway ?? 0)));
+  const shotAttempts = Number(meta.shotAttempts ?? ((s.shotsHome ?? 0) + (s.shotsAway ?? 0)));
+  const sustainedPassWindow = Boolean(meta.sustainedPassWindow);
+  const sustainedShotWindow = Boolean(meta.sustainedShotWindow);
+  const passOk = meta.passActivityOk == null ? (!sustainedPassWindow || passAttempts > 0) : Boolean(meta.passActivityOk);
+  const completedOk = meta.completedPassActivityOk == null ? (!sustainedPassWindow || completedPasses > 0) : Boolean(meta.completedPassActivityOk);
+  const shotOk = meta.shotActivityOk == null ? (!sustainedShotWindow || shotAttempts > 0) : Boolean(meta.shotActivityOk);
+  return {passAttempts, completedPasses, shotAttempts, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk};
+}
+function tacticalLivenessLabel() {
+  const live = tacticalLivenessState();
+  const ok = live.passOk && live.completedOk && live.shotOk;
+  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts}${ok ? "" : " !"}`;
+}
+function tacticalLivenessTitle() {
+  const live = tacticalLivenessState();
+  const parts = [
+    `pass attempts=${live.passAttempts}`,
+    `completed passes=${live.completedPasses}`,
+    `shots=${live.shotAttempts}`,
+  ];
+  if (!live.passOk) parts.push("20s+ run has no pass attempts");
+  if (!live.completedOk) parts.push("20s+ run has no completed passes");
+  if (!live.shotOk) parts.push("45s+ run has no shots");
+  return parts.join("; ");
+}
 function totalLoadedSeconds() {
   return Math.max(0, trace.frames.length - 1) * cadenceDtSeconds();
 }
@@ -884,6 +924,9 @@ function setControlsEnabled(enabled) {
   document.getElementById("shoot").disabled = !enabled;
   carryActionButton.disabled = !enabled;
   protectActionButton.disabled = !enabled;
+  killerPassActionButton.disabled = !enabled;
+  clearanceActionButton.disabled = !enabled;
+  routeOneActionButton.disabled = !enabled;
   scrub.disabled = !enabled;
   passTarget.disabled = !enabled;
   passFlight.disabled = !enabled;
@@ -904,6 +947,8 @@ function resetTraceState() {
   trace.physicsContract = null;
   trace.learningContract = null;
   trace.stepTiming = null;
+  trace.controllerYield = null;
+  trace.tacticalLiveness = null;
   trace.frames = [];
   trace.events = [];
   trace.runId = null;
@@ -1222,6 +1267,29 @@ function intentLabel(i) {
     ? ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}`
     : "";
   return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}${probabilityLabel}${intentTargetGridLabel(i)}`;
+}
+function liveIntentTitle(decision) {
+  if (!decision) return "";
+  const pressure = Number(decision.decisiveGoalActionPressure ?? 0);
+  const killer = Number(decision.killerPassGoalPressure ?? 0);
+  const single = Number(decision.singleThreadGoalPressure ?? 0);
+  const space = Number(decision.targetOpenSpaceScore ?? 0);
+  const teammatePressure = Number(decision.targetTeammateOccupiedSpacePressure ?? 0);
+  const parts = [
+    `action=${String(decision.action || "move")}`,
+    `player=${Number(decision.playerId ?? 0)}`,
+    `D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}`,
+    `S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`,
+    `targetOpenSpaceScore=${space.toFixed(2)}`,
+    `targetTeammateOccupiedSpacePressure=${teammatePressure.toFixed(2)}`,
+    `singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled}`,
+    `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled}`,
+    `shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,
+  ];
+  if (decision.actionTarget) {
+    parts.push(`target=${JSON.stringify(decision.actionTarget)}`);
+  }
+  return parts.join("; ");
 }
 function selectedPlayerDecisionProbabilityLabel(p) {
   const compactConsidered = Number(p?.consideredActions ?? 0);
@@ -1938,7 +2006,9 @@ function render() {
     : "";
   officialAgents.textContent = officialAgentsLabel(f);
   officialAgents.title = officialAgentsTitle(f);
-  actionIntent.textContent = intentLabel(primaryIntent(f));
+  const intent = primaryIntent(f);
+  actionIntent.textContent = intentLabel(intent);
+  actionIntent.title = liveIntentTitle(primaryIntent(f));
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
   updateAgentStatePanel();
   scrub.value = frameIndex;
@@ -1951,6 +2021,8 @@ function updateMetrics() {
   gkPhysics.textContent = goalkeeperPhysicsLabel();
   gkPhysics.title = goalkeeperPhysicsTitle();
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
+  tacticalLiveness.textContent = tacticalLivenessLabel();
+  tacticalLiveness.title = tacticalLivenessTitle();
   dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
   clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
   routeOne.textContent = `${s.routeOneBallsHome ?? 0} - ${s.routeOneBallsAway ?? 0}`;
@@ -2386,9 +2458,14 @@ function controllerSprintForSlot(slot) {
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   return keys.has(map.sprint);
 }
+function isPassLikeHumanAction(action) {
+  const normalizedAction = String(action || "").toLowerCase();
+  return ["pass", "aerial-pass", "killer-pass"].includes(normalizedAction);
+}
 function queueControllerFrame(slot, axis, sprint, pass = false, shoot = false, action = null) {
   const playerId = selectedPlayer(slot);
   if (playerId == null) return false;
+  const passLike = pass || isPassLikeHumanAction(action);
   setActiveSlot(slot);
   window.dispatchHumanInput({
     controllerSlot: slot,
@@ -2396,11 +2473,11 @@ function queueControllerFrame(slot, axis, sprint, pass = false, shoot = false, a
     seq: ++inputSeq,
     axis,
     sprint: controllerSprintForSlot(slot),
-    pass,
-    passFlight: pass ? passFlight.value : "floor",
+    pass: passLike,
+    passFlight: passLike ? passFlight.value : "floor",
     shoot,
     action,
-    targetPlayer: pass ? selectedPassTarget() : null
+    targetPlayer: passLike ? selectedPassTarget() : null
   });
   return true;
 }
@@ -2458,6 +2535,7 @@ function gamepadActionForSlot(slot, gamepad) {
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.protect)) return "protect-ball";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.clearance)) return "clearance";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.routeOne)) return "route-one";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.killerPass)) return "killer-pass";
   return null;
 }
 function queueGamepadInputs() {
@@ -2583,6 +2661,7 @@ async function loadTraceMeta(signal) {
   trace.learningContract = meta.learningContract || meta.playback?.learningContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.controllerYield = meta.controllerYield || meta.controller_yield || meta.playback?.controllerYield || null;
+  trace.tacticalLiveness = meta.tacticalLiveness || meta.playback?.tacticalLiveness || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;
   trace.generatedAtUnixMs = meta.generatedAtUnixMs || null;
@@ -2746,9 +2825,19 @@ document.getElementById("pass").addEventListener("click", () => pushInput(true, 
 document.getElementById("shoot").addEventListener("click", () => pushInput(false, true));
 carryActionButton.addEventListener("click", () => pushInput(false, false, "carry-forward"));
 protectActionButton.addEventListener("click", () => pushInput(false, false, "protect-ball"));
+killerPassActionButton.addEventListener("click", () => pushInput(true, false, "killer-pass"));
+clearanceActionButton.addEventListener("click", () => pushInput(false, false, "clearance"));
+routeOneActionButton.addEventListener("click", () => pushInput(false, false, "route-one"));
 window.addEventListener("keydown", e => {
   if (isFormEditingTarget(e.target)) return;
   keys.add(e.code);
+  if (e.code === "KeyT" || e.code === "KeyC" || e.code === "KeyR") {
+    e.preventDefault();
+    if (!e.repeat && e.code === "KeyT") pushInput(true, false, "killer-pass");
+    if (!e.repeat && e.code === "KeyC") pushInput(false, false, "clearance");
+    if (!e.repeat && e.code === "KeyR") pushInput(false, false, "route-one");
+    return;
+  }
   if (/^Digit[1-4]$/.test(e.code)) {
     const slot = Number(e.code.slice(-1)) - 1;
     if (slot < visibleHumanSlotCount()) {

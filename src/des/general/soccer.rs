@@ -6675,6 +6675,10 @@ impl PlayerAgent {
                 self.role,
             ))
             .clamp(0.0, 1.0);
+        let final_ball_goal_decision_fit = goal_entry_pressure
+            .max(goal_proximity_shot_pressure)
+            .max(decisive_goal_pressure * 0.72)
+            .clamp(0.0, 1.0);
         let shot_score = (self.preferences.shoot_bias
             * (0.52 + shooting * 0.62)
             * (1.0 + directive.risk_tolerance * 0.35)
@@ -6687,6 +6691,7 @@ impl PlayerAgent {
             * (1.0 + goal_entry_pressure * 0.74)
             * (1.0 + striker_shot_bonus * 1.35)
             * (1.0 + decisive_goal_pressure * 1.18)
+            * (1.0 + final_ball_goal_decision_fit * 0.42)
             * 0.042)
             .clamp(
                 0.004,
@@ -7084,6 +7089,7 @@ impl PlayerAgent {
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
             * (1.0 + decisive_goal_pressure * 0.72)
+            * (1.0 + final_ball_goal_decision_fit * 0.28)
             * near_goal_pass_multiplier.max(0.72)
             * floor_pass_patience_multiplier
             * hold_release_multiplier
@@ -7277,7 +7283,8 @@ impl PlayerAgent {
                     0.0
                 }
                 - goal_entry_pressure * 0.16
-                - goal_attack * 0.10)
+                - goal_attack * 0.10
+                - final_ball_goal_decision_fit * 0.16)
                 .clamp(0.16, 1.0);
             for label in [
                 "pass1",
@@ -7306,7 +7313,8 @@ impl PlayerAgent {
                 + goal_attack * 0.10
                 + offensive_urgency * 0.06
                 + single_thread_goal_pressure * 0.10
-                + approaching_threaded_goal_fit * 0.08)
+                + approaching_threaded_goal_fit * 0.08
+                + final_ball_goal_decision_fit * 0.10)
                 .clamp(
                     0.0,
                     if goal_attack_shot_required {
@@ -31623,6 +31631,12 @@ struct SoccerFrameLivenessMetrics {
     ball_movement_yards: f64,
     ball_goalward_progress_yards: f64,
     ball_active_frames: usize,
+    clear_shot_window_frames: usize,
+    clear_shot_window_decisive_actions: usize,
+    clear_shot_window_recycles: usize,
+    killer_pass_window_frames: usize,
+    killer_pass_window_passes: usize,
+    killer_pass_window_recycles: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -31654,6 +31668,9 @@ impl SoccerFrameLivenessAccumulator {
         let possession_team = soccer_accounting_frame_ball_team(frame);
         let holder = frame.ball.holder;
         for player in &frame.players {
+            if holder == Some(player.id) {
+                self.observe_possession_decision_window(player);
+            }
             let previous = self.previous_players.insert(player.id, player.position);
             let Some(prev) = previous else {
                 continue;
@@ -31683,9 +31700,61 @@ impl SoccerFrameLivenessAccumulator {
         }
     }
 
+    fn observe_possession_decision_window(&mut self, player: &PlayerSnapshot) {
+        let Some(decision) = player.last_decision.as_ref() else {
+            return;
+        };
+        if !decision.observation.has_ball {
+            return;
+        }
+        let action = decision.action.as_str();
+        let decisive_goal_action =
+            soccer_frame_liveness_action_is_shot(action) || action == "killer-pass";
+        if clean_twenty_yard_shot_is_qualified(&decision.observation, player.role) {
+            self.metrics.clear_shot_window_frames =
+                self.metrics.clear_shot_window_frames.saturating_add(1);
+            if decisive_goal_action {
+                self.metrics.clear_shot_window_decisive_actions = self
+                    .metrics
+                    .clear_shot_window_decisive_actions
+                    .saturating_add(1);
+            } else {
+                self.metrics.clear_shot_window_recycles =
+                    self.metrics.clear_shot_window_recycles.saturating_add(1);
+            }
+        }
+
+        let killer_pressure = decision
+            .observation
+            .killer_pass_goal_pressure
+            .max(killer_pass_goal_pressure_score(&decision.observation))
+            .max(single_pass_goal_thread_pressure_score(
+                &decision.observation,
+            ));
+        if decision.observation.threaded_goal_pass_available
+            && decision.observation.visible_forward_pass_options > 0
+            && decision.observation.yards_to_goal <= KILLER_PASS_MAX_YARDS_TO_GOAL
+            && killer_pressure >= 0.32
+        {
+            self.metrics.killer_pass_window_frames =
+                self.metrics.killer_pass_window_frames.saturating_add(1);
+            if action == "killer-pass" {
+                self.metrics.killer_pass_window_passes =
+                    self.metrics.killer_pass_window_passes.saturating_add(1);
+            } else if !soccer_frame_liveness_action_is_shot(action) {
+                self.metrics.killer_pass_window_recycles =
+                    self.metrics.killer_pass_window_recycles.saturating_add(1);
+            }
+        }
+    }
+
     fn metrics(&self) -> SoccerFrameLivenessMetrics {
         self.metrics.clone()
     }
+}
+
+fn soccer_frame_liveness_action_is_shot(action: &str) -> bool {
+    matches!(action, "shoot" | "first-time-shot" | "first-time-header")
 }
 
 fn soccer_frame_liveness_for_frames(frames: &[MatchFrame]) -> SoccerFrameLivenessMetrics {
@@ -50408,6 +50477,12 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
     let goalward_progress_ok = summary.ticks < 5
         || !frame_liveness_known
         || frame_liveness.ball_goalward_progress_yards > 0.10;
+    let clear_shot_window_ok = !frame_liveness_known
+        || frame_liveness.clear_shot_window_frames == 0
+        || frame_liveness.clear_shot_window_decisive_actions > 0;
+    let killer_pass_window_ok = !frame_liveness_known
+        || frame_liveness.killer_pass_window_frames == 0
+        || frame_liveness.killer_pass_window_passes > 0;
     serde_json::json!({
         "passAttempts": pass_attempts,
         "completedPasses": completed_passes,
@@ -50419,6 +50494,12 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "ballMovementYards": frame_liveness.ball_movement_yards,
         "ballGoalwardProgressYards": frame_liveness.ball_goalward_progress_yards,
         "ballActiveFrames": frame_liveness.ball_active_frames,
+        "clearShotWindowFrames": frame_liveness.clear_shot_window_frames,
+        "clearShotWindowDecisiveActions": frame_liveness.clear_shot_window_decisive_actions,
+        "clearShotWindowRecycles": frame_liveness.clear_shot_window_recycles,
+        "killerPassWindowFrames": frame_liveness.killer_pass_window_frames,
+        "killerPassWindowPasses": frame_liveness.killer_pass_window_passes,
+        "killerPassWindowRecycles": frame_liveness.killer_pass_window_recycles,
         "sustainedPassWindow": sustained_pass_window,
         "sustainedShotWindow": sustained_shot_window,
         "passActivityOk": !sustained_pass_window || pass_attempts > 0,
@@ -50426,6 +50507,8 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "shotActivityOk": !sustained_shot_window || shot_attempts > 0,
         "openSpaceSupportOk": open_space_support_ok,
         "goalwardProgressOk": goalward_progress_ok,
+        "clearShotWindowOk": clear_shot_window_ok,
+        "killerPassWindowOk": killer_pass_window_ok,
     })
 }
 
@@ -67231,6 +67314,22 @@ mod tests {
             Some(frame_liveness.ball_active_frames as u64)
         );
         assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["clearShotWindowFrames"].as_u64(),
+            Some(frame_liveness.clear_shot_window_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["clearShotWindowDecisiveActions"].as_u64(),
+            Some(frame_liveness.clear_shot_window_decisive_actions as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["killerPassWindowFrames"].as_u64(),
+            Some(frame_liveness.killer_pass_window_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["killerPassWindowPasses"].as_u64(),
+            Some(frame_liveness.killer_pass_window_passes as u64)
+        );
+        assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["sustainedPassWindow"],
             false
         );
@@ -67274,14 +67373,39 @@ mod tests {
                 ball_movement_yards: 9.0,
                 ball_goalward_progress_yards: 2.25,
                 ball_active_frames: 8,
+                clear_shot_window_frames: 4,
+                clear_shot_window_decisive_actions: 2,
+                clear_shot_window_recycles: 2,
+                killer_pass_window_frames: 3,
+                killer_pass_window_passes: 1,
+                killer_pass_window_recycles: 2,
             }),
         );
         assert_eq!(support["offBallOpenSpaceMoves"], 3);
         assert_eq!(support["offBallOpenSpaceGain"], 4.5);
         assert_eq!(support["ballGoalwardProgressYards"], 2.25);
         assert_eq!(support["ballActiveFrames"], 8);
+        assert_eq!(support["clearShotWindowFrames"], 4);
+        assert_eq!(support["clearShotWindowDecisiveActions"], 2);
+        assert_eq!(support["killerPassWindowFrames"], 3);
+        assert_eq!(support["killerPassWindowPasses"], 1);
         assert_eq!(support["openSpaceSupportOk"], true);
         assert_eq!(support["goalwardProgressOk"], true);
+        assert_eq!(support["clearShotWindowOk"], true);
+        assert_eq!(support["killerPassWindowOk"], true);
+
+        let recycled_goal_window = soccer_playback_tactical_liveness_json_with_frame_liveness(
+            &summary,
+            Some(SoccerFrameLivenessMetrics {
+                clear_shot_window_frames: 2,
+                clear_shot_window_recycles: 2,
+                killer_pass_window_frames: 2,
+                killer_pass_window_recycles: 2,
+                ..SoccerFrameLivenessMetrics::default()
+            }),
+        );
+        assert_eq!(recycled_goal_window["clearShotWindowOk"], false);
+        assert_eq!(recycled_goal_window["killerPassWindowOk"], false);
 
         summary.ticks = 450;
         summary.simulated_seconds = 45.0;
@@ -99257,10 +99381,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                     killer_score > previous_killer_score,
                     "single threaded killer-pass score should rise with goal proximity: y={y} killer={killer_score} previous={previous_killer_score} options={options:?}"
                 );
-                assert!(
-                    decisive_probability > previous_decisive_probability + 0.035,
-                    "combined shot/killer-pass probability should ramp toward goal: y={y} decisive={decisive_probability} previous={previous_decisive_probability} options={options:?}"
-                );
+                if previous_decisive_probability < 0.95 {
+                    assert!(
+                        decisive_probability > previous_decisive_probability + 0.035,
+                        "combined shot/killer-pass probability should ramp toward goal before saturation: y={y} decisive={decisive_probability} previous={previous_decisive_probability} options={options:?}"
+                    );
+                } else {
+                    assert!(
+                        decisive_probability >= 0.95,
+                        "combined shot/killer-pass probability should stay saturated near goal: y={y} decisive={decisive_probability} previous={previous_decisive_probability} options={options:?}"
+                    );
+                }
                 assert!(
                     recycle_probability < previous_recycle_probability,
                     "generic recycling should be damped as the ball gets closer to goal: y={y} recycle={recycle_probability} previous={previous_recycle_probability} options={options:?}"
@@ -100701,10 +100832,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ballGoalwardProgressYards"));
         assert!(html.contains("goalwardProgressOk"));
         assert!(html.contains("openSpaceSupportOk"));
+        assert!(html.contains("clearShotWindowFrames"));
+        assert!(html.contains("clearShotWindowOk"));
+        assert!(html.contains("killerPassWindowFrames"));
+        assert!(html.contains("killerPassWindowOk"));
+        assert!(html.contains("C${clear}"));
+        assert!(html.contains("K${killer}"));
         assert!(html.contains("O${support}"));
         assert!(html.contains("G${goalward}"));
         assert!(html.contains("off-ball open-space moves="));
         assert!(html.contains("ball goalward progress="));
+        assert!(html.contains("clear shot windows="));
+        assert!(html.contains("killer-pass windows="));
         assert!(html.contains("tacticalLiveness.textContent = tacticalLivenessLabel()"));
         assert!(html.contains("tacticalLiveness.title = tacticalLivenessTitle()"));
         assert!(html.contains("defaultTenMinuteContract"));
@@ -101747,10 +101886,36 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             meta["tacticalLiveness"]["ballActiveFrames"].as_u64(),
             Some(frame_liveness.ball_active_frames as u64)
         );
+        assert_eq!(
+            meta["tacticalLiveness"]["clearShotWindowFrames"].as_u64(),
+            Some(frame_liveness.clear_shot_window_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["clearShotWindowDecisiveActions"].as_u64(),
+            Some(frame_liveness.clear_shot_window_decisive_actions as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["killerPassWindowFrames"].as_u64(),
+            Some(frame_liveness.killer_pass_window_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["killerPassWindowPasses"].as_u64(),
+            Some(frame_liveness.killer_pass_window_passes as u64)
+        );
         assert_eq!(meta["tacticalLiveness"]["openSpaceSupportOk"], true);
         assert_eq!(
             meta["tacticalLiveness"]["goalwardProgressOk"],
             trace.summary.ticks < 5 || frame_liveness.ball_goalward_progress_yards > 0.10
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["clearShotWindowOk"],
+            frame_liveness.clear_shot_window_frames == 0
+                || frame_liveness.clear_shot_window_decisive_actions > 0
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["killerPassWindowOk"],
+            frame_liveness.killer_pass_window_frames == 0
+                || frame_liveness.killer_pass_window_passes > 0
         );
         assert_eq!(meta["tacticalLiveness"]["sustainedPassWindow"], false);
         assert_eq!(meta["stepTiming"]["ticks"], trace.step_timing.ticks);
@@ -101936,10 +102101,28 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(meta["tacticalLiveness"]["ballActiveFrames"]
             .as_u64()
             .is_some());
+        assert!(meta["tacticalLiveness"]["clearShotWindowFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["clearShotWindowDecisiveActions"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["killerPassWindowFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["killerPassWindowPasses"]
+            .as_u64()
+            .is_some());
         assert!(meta["tacticalLiveness"]["openSpaceSupportOk"]
             .as_bool()
             .is_some());
         assert!(meta["tacticalLiveness"]["goalwardProgressOk"]
+            .as_bool()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["clearShotWindowOk"]
+            .as_bool()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["killerPassWindowOk"]
             .as_bool()
             .is_some());
         assert_eq!(meta["tacticalLiveness"]["sustainedPassWindow"], false);

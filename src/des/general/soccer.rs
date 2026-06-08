@@ -6427,6 +6427,8 @@ impl PlayerAgent {
         let striker_shot_bonus = striker_legal_shot_attempt_bonus(observation, self.role);
         let goal_proximity_shot_pressure =
             goal_proximity_shot_pressure_score(observation, self.role, shooting);
+        let decisive_goal_pressure =
+            near_goal_decisive_action_pressure_score(observation, self.role);
         let shot_score = (self.preferences.shoot_bias
             * (0.52 + shooting * 0.62)
             * (1.0 + directive.risk_tolerance * 0.35)
@@ -6437,13 +6439,15 @@ impl PlayerAgent {
             * (1.0 + goal_attack * 1.20)
             * (1.0 + goal_proximity_shot_pressure * 0.74)
             * (1.0 + striker_shot_bonus * 1.35)
+            * (1.0 + decisive_goal_pressure * 0.72)
             * 0.042)
             .clamp(
                 0.004,
                 0.12 + offensive_urgency * 0.30
                     + striker_shot_bonus * 0.18
                     + goal_attack * 0.22
-                    + goal_proximity_shot_pressure * 0.20,
+                    + goal_proximity_shot_pressure * 0.24
+                    + decisive_goal_pressure * 0.20,
             )
             .max(close_shot_attempt)
             .max(goal_proximity_shot_pressure_floor(
@@ -6804,11 +6808,12 @@ impl PlayerAgent {
                 + killer_pass_goal_pressure * 0.96
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
+            * (1.0 + decisive_goal_pressure * 0.54)
             * near_goal_pass_multiplier.max(0.72)
             * floor_pass_patience_multiplier
             * hold_release_multiplier
             * pressured_release_multiplier(observation))
-        .clamp(0.01, 1.18);
+        .clamp(0.01, 1.32);
         options.push(AgentActionOptionTrace::new(
             "killer-pass",
             killer_pass_score,
@@ -6944,15 +6949,13 @@ impl PlayerAgent {
         let shot_floor = near_goal_shot_pressure_floor(observation, self.role, shooting).max(
             goal_proximity_shot_pressure_floor(observation, self.role, shooting),
         );
-        let decisive_goal_pressure =
-            near_goal_decisive_action_pressure_score(observation, self.role);
         if shot_floor > 0.0 {
             let decisive_shot_floor = if shot_legal && decisive_goal_pressure > 0.0 {
                 let shot_lane_fit = (observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.42
                     + observation.shot_beat_goalkeeper_probability.clamp(0.0, 1.0) * 0.28
                     + (1.0 - observation.shot_block_probability.clamp(0.0, 1.0)) * 0.30)
                     .clamp(0.0, 1.0);
-                (0.10 + decisive_goal_pressure * 0.40 + shot_lane_fit * 0.14).clamp(0.0, 0.78)
+                (0.12 + decisive_goal_pressure * 0.46 + shot_lane_fit * 0.16).clamp(0.0, 0.84)
             } else {
                 0.0
             };
@@ -6970,13 +6973,19 @@ impl PlayerAgent {
                 + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
                 + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
                 .clamp(0.0, 1.0);
+            let close_threaded_goal_fit =
+                ((36.0 - observation.yards_to_goal) / 18.0).clamp(0.0, 1.0);
             let killer_floor = killer_pass_goal_pressure_floor(observation).max(
-                (0.08 + decisive_goal_pressure * 0.34 + threaded_lane_fit * 0.12).clamp(0.0, 0.62),
+                (0.10
+                    + decisive_goal_pressure * 0.42
+                    + threaded_lane_fit * 0.16
+                    + close_threaded_goal_fit * 0.10)
+                    .clamp(0.0, 0.78),
             );
             ensure_min_legal_option_probability(&mut options, "killer-pass", killer_floor);
         }
         if decisive_goal_pressure >= 0.18 && (shot_legal || killer_pass_legal) {
-            let recycle_multiplier = (1.0 - decisive_goal_pressure * 0.52).clamp(0.42, 1.0);
+            let recycle_multiplier = (1.0 - decisive_goal_pressure * 0.68).clamp(0.32, 1.0);
             for label in [
                 "pass1",
                 "pass2",

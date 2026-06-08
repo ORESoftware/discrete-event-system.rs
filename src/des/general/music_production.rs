@@ -5336,6 +5336,26 @@ fn is_audio_or_video_content_type(content_type: &str) -> bool {
         || lower.contains("video/")
 }
 
+fn compact_music_descriptor_value(value: &str, max_chars: usize) -> String {
+    let compact = value
+        .split_whitespace()
+        .map(|part| {
+            if part.starts_with("http://") || part.starts_with("https://") {
+                "[media-url]"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut out = compact.chars().take(max_chars.saturating_sub(3)).collect::<String>();
+    out.push_str("...");
+    out
+}
+
 pub fn song_spec_from_music_url_source(
     source: &MusicUrlSourceSpec,
     title: impl Into<String>,
@@ -5368,8 +5388,20 @@ pub fn render_music_url_seed_wav(
         .or_else(|| nonempty_music_form_value(fields, "music_url_prompt"));
 
     let sample_seed = if selected_source.spec.kind == MusicUrlSourceKind::YouTube {
-        derive_music_sample_seed_from_public_media_link_source(&selected_source.spec)
-            .map_err(|err| format!("could not resolve/download YouTube media sample: {err}"))?
+        match derive_music_sample_seed_from_public_media_link_source(&selected_source.spec) {
+            Ok(sample_seed) => sample_seed,
+            Err(err) => {
+                let mut fallback = derive_music_sample_seed_from_url_source(&selected_source.spec);
+                fallback
+                    .descriptors
+                    .push("media-download-fallback=url-only".to_string());
+                fallback.descriptors.push(format!(
+                    "media-download-error={}",
+                    compact_music_descriptor_value(&err, 180)
+                ));
+                fallback
+            }
+        }
     } else {
         derive_music_sample_seed_from_url_source(&selected_source.spec)
     };

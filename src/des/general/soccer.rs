@@ -32038,9 +32038,16 @@ pub struct SoccerSimulationCadence {
     pub tick_millis: f64,
     pub duration_seconds: f64,
     pub total_ticks: u64,
+    pub default_dt_seconds: f64,
+    pub default_tick_hz: f64,
+    pub default_tick_millis: f64,
+    pub default_duration_seconds: f64,
+    pub default_total_ticks: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_every_ticks: Option<u64>,
     pub expected_frame_count: usize,
+    pub ten_hz_timestep_contract: bool,
+    pub ten_minute_duration_contract: bool,
     pub default_ten_minute_contract: bool,
 }
 
@@ -32068,6 +32075,12 @@ pub struct SoccerPlaybackAgentContract {
     pub player_operation_order_randomized: bool,
     pub official_operation_order_randomized: bool,
     pub ball_operation_order_randomized: bool,
+    pub central_brain_tracks_all_players: bool,
+    pub central_brain_tracks_all_officials: bool,
+    pub central_brain_tracks_ball_kinematics: bool,
+    pub central_brain_tracks_controller_assignments: bool,
+    pub central_brain_tracks_team_shape: bool,
+    pub central_brain_exports_team_directives: bool,
     pub per_frame_schedule_summary_required: bool,
     pub slim_frames_omit_full_agent_schedule: bool,
 }
@@ -32100,8 +32113,20 @@ pub struct SoccerDecisionModelContract {
     pub killer_pass_max_yards_to_goal: f64,
     pub single_threaded_killer_pass_enabled: bool,
     pub threaded_goal_pass_can_override_forced_shot: bool,
+    pub decisive_goal_action_pressure_enabled: bool,
+    pub decisive_goal_action_probability_ramps_toward_goal: bool,
+    pub near_goal_decision_prioritizes_shot_or_killer_pass: bool,
+    pub generic_recycling_damped_by_decisive_goal_pressure: bool,
     pub near_goal_recycling_dampening_enabled: bool,
     pub forward_progress_bias_enabled: bool,
+    pub player_skill_profile_enabled: bool,
+    pub player_skill_scale_min: f64,
+    pub player_skill_scale_max: f64,
+    pub player_skill_fields: Vec<String>,
+    pub player_physical_trait_fields: Vec<String>,
+    pub player_skills_in_pomdp_observation: bool,
+    pub player_skills_binned_in_mdp_state: bool,
+    pub role_biased_skill_generation_enabled: bool,
     pub receive_facing_enabled: bool,
     pub action_facing_enabled: bool,
     pub facing_bucket_count: usize,
@@ -32141,6 +32166,31 @@ pub struct SoccerControllerRuntimeContract {
     pub queue_limit: usize,
     pub max_queue_age_ms: u64,
     pub thread_name_prefix: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerUiRuntimeContract {
+    pub html_ui_enabled: bool,
+    pub bird_eye_canvas_2d_enabled: bool,
+    pub pitch_canvas_id: String,
+    pub pitch_canvas_width_px: u32,
+    pub pitch_canvas_height_px: u32,
+    pub split_metadata_json_enabled: bool,
+    pub split_frames_jsonl_enabled: bool,
+    pub newline_delimited_frames_enabled: bool,
+    pub streaming_load_progress_enabled: bool,
+    pub run_new_simulation_button_enabled: bool,
+    pub four_human_controller_slots_enabled: bool,
+    pub max_human_controller_slots: usize,
+    pub keyboard_controller_keymaps_enabled: bool,
+    pub gamepad_controller_polling_enabled: bool,
+    pub pitch_grid_overlay_enabled: bool,
+    pub goalposts_rendered: bool,
+    pub action_intent_overlay_enabled: bool,
+    pub shared_position_panel_enabled: bool,
+    pub agent_kinematics_panel_enabled: bool,
+    pub central_brain_panel_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32292,6 +32342,12 @@ fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
         player_operation_order_randomized: true,
         official_operation_order_randomized: true,
         ball_operation_order_randomized: true,
+        central_brain_tracks_all_players: true,
+        central_brain_tracks_all_officials: true,
+        central_brain_tracks_ball_kinematics: true,
+        central_brain_tracks_controller_assignments: true,
+        central_brain_tracks_team_shape: true,
+        central_brain_exports_team_directives: true,
         per_frame_schedule_summary_required: true,
         slim_frames_omit_full_agent_schedule: true,
     }
@@ -32468,6 +32524,65 @@ fn soccer_controller_runtime_contract(config: &MatchConfig) -> SoccerControllerR
     }
 }
 
+fn soccer_ui_runtime_contract() -> SoccerUiRuntimeContract {
+    SoccerUiRuntimeContract {
+        html_ui_enabled: true,
+        bird_eye_canvas_2d_enabled: true,
+        pitch_canvas_id: "pitch".to_string(),
+        pitch_canvas_width_px: 1280,
+        pitch_canvas_height_px: 720,
+        split_metadata_json_enabled: true,
+        split_frames_jsonl_enabled: true,
+        newline_delimited_frames_enabled: true,
+        streaming_load_progress_enabled: true,
+        run_new_simulation_button_enabled: true,
+        four_human_controller_slots_enabled: true,
+        max_human_controller_slots: SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
+        keyboard_controller_keymaps_enabled: true,
+        gamepad_controller_polling_enabled: true,
+        pitch_grid_overlay_enabled: true,
+        goalposts_rendered: true,
+        action_intent_overlay_enabled: true,
+        shared_position_panel_enabled: true,
+        agent_kinematics_panel_enabled: true,
+        central_brain_panel_enabled: true,
+    }
+}
+
+fn soccer_player_skill_contract_fields() -> Vec<String> {
+    [
+        "topSpeed",
+        "acceleration",
+        "shooting",
+        "rightFootShotPower",
+        "leftFootShotPower",
+        "passing",
+        "passingCompletionRate",
+        "flairPassing",
+        "crossingLeft",
+        "crossingRight",
+        "dribbling",
+        "firstTouch",
+        "defending",
+        "goalkeeping",
+        "defensiveTracking",
+        "stamina",
+        "vision",
+        "decisionNoise",
+        "aggression",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn soccer_player_physical_trait_contract_fields() -> Vec<String> {
+    ["strength", "height", "weightPounds"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
     SoccerDecisionModelContract {
         mdp_state_grid_enabled: true,
@@ -32484,8 +32599,20 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         killer_pass_max_yards_to_goal: KILLER_PASS_MAX_YARDS_TO_GOAL,
         single_threaded_killer_pass_enabled: true,
         threaded_goal_pass_can_override_forced_shot: true,
+        decisive_goal_action_pressure_enabled: true,
+        decisive_goal_action_probability_ramps_toward_goal: true,
+        near_goal_decision_prioritizes_shot_or_killer_pass: true,
+        generic_recycling_damped_by_decisive_goal_pressure: true,
         near_goal_recycling_dampening_enabled: true,
         forward_progress_bias_enabled: true,
+        player_skill_profile_enabled: true,
+        player_skill_scale_min: 1.0,
+        player_skill_scale_max: 10.0,
+        player_skill_fields: soccer_player_skill_contract_fields(),
+        player_physical_trait_fields: soccer_player_physical_trait_contract_fields(),
+        player_skills_in_pomdp_observation: true,
+        player_skills_binned_in_mdp_state: true,
+        role_biased_skill_generation_enabled: true,
         receive_facing_enabled: true,
         action_facing_enabled: true,
         facing_bucket_count: SOCCER_FACING_INDEX_VALUES.len(),
@@ -32542,17 +32669,29 @@ fn soccer_simulation_cadence(
     };
     let duration_seconds = config.effective_duration_seconds().max(0.0);
     let total_ticks = config.total_ticks();
+    let default_tick_hz = 1.0 / DEFAULT_DT_SECONDS;
+    let default_tick_millis = DEFAULT_DT_SECONDS * 1_000.0;
+    let default_total_ticks = (DEFAULT_DURATION_SECONDS / DEFAULT_DT_SECONDS).round() as u64;
+    let ten_hz_timestep_contract = (dt_seconds - DEFAULT_DT_SECONDS).abs() < 1e-9;
+    let ten_minute_duration_contract = (duration_seconds - DEFAULT_DURATION_SECONDS).abs() < 1e-9;
     SoccerSimulationCadence {
         dt_seconds,
         tick_hz,
         tick_millis: dt_seconds * 1_000.0,
         duration_seconds,
         total_ticks,
+        default_dt_seconds: DEFAULT_DT_SECONDS,
+        default_tick_hz,
+        default_tick_millis,
+        default_duration_seconds: DEFAULT_DURATION_SECONDS,
+        default_total_ticks,
         record_every_ticks: record_every_ticks.map(|ticks| ticks.max(1)),
         expected_frame_count,
-        default_ten_minute_contract: (dt_seconds - DEFAULT_DT_SECONDS).abs() < 1e-9
-            && (duration_seconds - DEFAULT_DURATION_SECONDS).abs() < 1e-9
-            && total_ticks == 6_000,
+        ten_hz_timestep_contract,
+        ten_minute_duration_contract,
+        default_ten_minute_contract: ten_hz_timestep_contract
+            && ten_minute_duration_contract
+            && total_ticks == default_total_ticks,
     }
 }
 
@@ -47989,6 +48128,7 @@ fn soccer_playback_metadata_json(
     let generated_at_unix_ms = soccer_artifact_generated_at_unix_ms();
     let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
     let controller_contract = soccer_controller_runtime_contract(config);
+    let ui_contract = soccer_ui_runtime_contract();
     let physics_contract = soccer_physics_runtime_contract(config);
     let learning_contract = soccer_learning_runtime_contract(config);
     serde_json::json!({
@@ -48002,6 +48142,7 @@ fn soccer_playback_metadata_json(
         "agentContract": soccer_playback_agent_contract(),
         "decisionModel": soccer_decision_model_contract(),
         "controllerContract": controller_contract,
+        "uiContract": ui_contract,
         "physicsContract": physics_contract,
         "learningContract": learning_contract,
         "playback": {
@@ -48015,6 +48156,7 @@ fn soccer_playback_metadata_json(
             "agentContract": soccer_playback_agent_contract(),
             "decisionModel": soccer_decision_model_contract(),
             "controllerContract": controller_contract,
+            "uiContract": ui_contract,
             "physicsContract": physics_contract,
             "learningContract": learning_contract,
         },
@@ -63100,8 +63242,15 @@ mod tests {
         assert_eq!(cadence.tick_millis, 100.0);
         assert_eq!(cadence.duration_seconds, DEFAULT_DURATION_SECONDS);
         assert_eq!(cadence.total_ticks, 6_000);
+        assert_eq!(cadence.default_dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(cadence.default_tick_hz, 10.0);
+        assert_eq!(cadence.default_tick_millis, 100.0);
+        assert_eq!(cadence.default_duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(cadence.default_total_ticks, 6_000);
         assert_eq!(cadence.record_every_ticks, Some(1));
         assert_eq!(cadence.expected_frame_count, 6_001);
+        assert!(cadence.ten_hz_timestep_contract);
+        assert!(cadence.ten_minute_duration_contract);
         assert!(cadence.default_ten_minute_contract);
         assert_ne!(config.seed, 0);
         assert!(!config.learning_enabled);
@@ -63194,8 +63343,17 @@ mod tests {
         assert_eq!(initial.cadence.dt_seconds, DEFAULT_DT_SECONDS);
         assert_eq!(initial.cadence.tick_hz, 10.0);
         assert_eq!(initial.cadence.total_ticks, 6_000);
+        assert_eq!(initial.cadence.default_dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(initial.cadence.default_tick_hz, 10.0);
+        assert_eq!(
+            initial.cadence.default_duration_seconds,
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(initial.cadence.default_total_ticks, 6_000);
         assert_eq!(initial.cadence.expected_frame_count, 6_001);
         assert_eq!(initial.cadence.record_every_ticks, Some(1));
+        assert!(initial.cadence.ten_hz_timestep_contract);
+        assert!(initial.cadence.ten_minute_duration_contract);
         assert!(initial.cadence.default_ten_minute_contract);
         assert!(!initial.done);
 
@@ -63220,8 +63378,17 @@ mod tests {
         assert_eq!(step.cadence.dt_seconds, DEFAULT_DT_SECONDS);
         assert_eq!(step.cadence.tick_hz, 10.0);
         assert_eq!(step.cadence.total_ticks, 6_000);
+        assert_eq!(step.cadence.default_dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(step.cadence.default_tick_hz, 10.0);
+        assert_eq!(
+            step.cadence.default_duration_seconds,
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(step.cadence.default_total_ticks, 6_000);
         assert_eq!(step.cadence.expected_frame_count, 6_001);
         assert_eq!(step.cadence.record_every_ticks, Some(1));
+        assert!(step.cadence.ten_hz_timestep_contract);
+        assert!(step.cadence.ten_minute_duration_contract);
         assert!(step.cadence.default_ten_minute_contract);
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
@@ -94613,8 +94780,26 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(model["singleThreadedKillerPassEnabled"], true);
         assert_eq!(model["threadedGoalPassCanOverrideForcedShot"], true);
+        assert_eq!(model["decisiveGoalActionPressureEnabled"], true);
+        assert_eq!(model["decisiveGoalActionProbabilityRampsTowardGoal"], true);
+        assert_eq!(model["nearGoalDecisionPrioritizesShotOrKillerPass"], true);
+        assert_eq!(model["genericRecyclingDampedByDecisiveGoalPressure"], true);
         assert_eq!(model["nearGoalRecyclingDampeningEnabled"], true);
         assert_eq!(model["forwardProgressBiasEnabled"], true);
+        assert_eq!(model["playerSkillProfileEnabled"], true);
+        assert_eq!(model["playerSkillScaleMin"], 1.0);
+        assert_eq!(model["playerSkillScaleMax"], 10.0);
+        assert_eq!(
+            model["playerSkillFields"],
+            serde_json::json!(soccer_player_skill_contract_fields())
+        );
+        assert_eq!(
+            model["playerPhysicalTraitFields"],
+            serde_json::json!(soccer_player_physical_trait_contract_fields())
+        );
+        assert_eq!(model["playerSkillsInPomdpObservation"], true);
+        assert_eq!(model["playerSkillsBinnedInMdpState"], true);
+        assert_eq!(model["roleBiasedSkillGenerationEnabled"], true);
         assert_eq!(model["receiveFacingEnabled"], true);
         assert_eq!(model["actionFacingEnabled"], true);
         assert_eq!(model["facingBucketCount"], SOCCER_FACING_INDEX_VALUES.len());
@@ -94699,6 +94884,34 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["queueLimit"], HUMAN_INPUT_QUEUE_LIMIT);
         assert_eq!(contract["maxQueueAgeMs"], HUMAN_INPUT_MAX_QUEUE_AGE_MS);
         assert_eq!(contract["threadNamePrefix"], "soccer-human-controller-");
+    }
+
+    fn assert_soccer_ui_contract_json(meta: &serde_json::Value) {
+        assert_eq!(meta["uiContract"], meta["playback"]["uiContract"]);
+        let contract = &meta["uiContract"];
+        assert_eq!(contract["htmlUiEnabled"], true);
+        assert_eq!(contract["birdEyeCanvas2dEnabled"], true);
+        assert_eq!(contract["pitchCanvasId"], "pitch");
+        assert_eq!(contract["pitchCanvasWidthPx"], 1280);
+        assert_eq!(contract["pitchCanvasHeightPx"], 720);
+        assert_eq!(contract["splitMetadataJsonEnabled"], true);
+        assert_eq!(contract["splitFramesJsonlEnabled"], true);
+        assert_eq!(contract["newlineDelimitedFramesEnabled"], true);
+        assert_eq!(contract["streamingLoadProgressEnabled"], true);
+        assert_eq!(contract["runNewSimulationButtonEnabled"], true);
+        assert_eq!(contract["fourHumanControllerSlotsEnabled"], true);
+        assert_eq!(
+            contract["maxHumanControllerSlots"],
+            SOCCER_MAX_HUMAN_CONTROLLER_SLOTS
+        );
+        assert_eq!(contract["keyboardControllerKeymapsEnabled"], true);
+        assert_eq!(contract["gamepadControllerPollingEnabled"], true);
+        assert_eq!(contract["pitchGridOverlayEnabled"], true);
+        assert_eq!(contract["goalpostsRendered"], true);
+        assert_eq!(contract["actionIntentOverlayEnabled"], true);
+        assert_eq!(contract["sharedPositionPanelEnabled"], true);
+        assert_eq!(contract["agentKinematicsPanelEnabled"], true);
+        assert_eq!(contract["centralBrainPanelEnabled"], true);
     }
 
     fn assert_soccer_physics_contract_json(meta: &serde_json::Value, config: &MatchConfig) {
@@ -95062,6 +95275,24 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             true
         );
         assert_eq!(meta["agentContract"]["ballOperationOrderRandomized"], true);
+        assert_eq!(meta["agentContract"]["centralBrainTracksAllPlayers"], true);
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksAllOfficials"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksBallKinematics"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksControllerAssignments"],
+            true
+        );
+        assert_eq!(meta["agentContract"]["centralBrainTracksTeamShape"], true);
+        assert_eq!(
+            meta["agentContract"]["centralBrainExportsTeamDirectives"],
+            true
+        );
         assert_eq!(
             meta["agentContract"]["perFrameScheduleSummaryRequired"],
             true
@@ -95072,6 +95303,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &trace.config);
+        assert_soccer_ui_contract_json(&meta);
         assert_soccer_physics_contract_json(&meta, &trace.config);
         assert_soccer_learning_contract_json(&meta, &trace.config);
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
@@ -95095,8 +95327,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             trace.config.effective_duration_seconds()
         );
         assert_eq!(meta["cadence"]["totalTicks"], trace.config.total_ticks());
+        assert_eq!(meta["cadence"]["defaultDtSeconds"], DEFAULT_DT_SECONDS);
+        assert_eq!(meta["cadence"]["defaultTickHz"], 10.0);
+        assert_eq!(meta["cadence"]["defaultTickMillis"], 100.0);
+        assert_eq!(
+            meta["cadence"]["defaultDurationSeconds"],
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(meta["cadence"]["defaultTotalTicks"], 6_000);
         assert!(meta["cadence"].get("recordEveryTicks").is_none());
         assert_eq!(meta["cadence"]["expectedFrameCount"], trace.frames.len());
+        assert_eq!(meta["cadence"]["tenHzTimestepContract"], true);
+        assert_eq!(meta["cadence"]["tenMinuteDurationContract"], false);
         assert_eq!(meta["cadence"]["defaultTenMinuteContract"], false);
         assert!(meta["generatedAtUnixMs"].as_u64().unwrap() > 0);
         assert!(meta["runId"]
@@ -95154,9 +95396,28 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["agentContract"]["expectedOfficialCount"], 3);
         assert_eq!(meta["agentContract"]["expectedBallAgents"], 1);
         assert_eq!(meta["agentContract"]["expectedCentralBrains"], 1);
+        assert_eq!(meta["agentContract"]["centralBrainTracksAllPlayers"], true);
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksAllOfficials"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksBallKinematics"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksControllerAssignments"],
+            true
+        );
+        assert_eq!(meta["agentContract"]["centralBrainTracksTeamShape"], true);
+        assert_eq!(
+            meta["agentContract"]["centralBrainExportsTeamDirectives"],
+            true
+        );
         assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &config);
+        assert_soccer_ui_contract_json(&meta);
         assert_soccer_physics_contract_json(&meta, &config);
         assert_soccer_learning_contract_json(&meta, &config);
         assert_eq!(
@@ -95186,10 +95447,23 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             config.effective_duration_seconds()
         );
         assert_eq!(meta["cadence"]["totalTicks"], config.total_ticks());
+        assert_eq!(meta["cadence"]["defaultDtSeconds"], DEFAULT_DT_SECONDS);
+        assert_eq!(meta["cadence"]["defaultTickHz"], 10.0);
+        assert_eq!(meta["cadence"]["defaultTickMillis"], 100.0);
+        assert_eq!(
+            meta["cadence"]["defaultDurationSeconds"],
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(meta["cadence"]["defaultTotalTicks"], 6_000);
         assert_eq!(meta["cadence"]["recordEveryTicks"], 1);
         assert_eq!(
             meta["cadence"]["expectedFrameCount"],
             config.total_ticks() + 1
+        );
+        assert_eq!(meta["cadence"]["tenHzTimestepContract"], true);
+        assert_eq!(
+            meta["cadence"]["tenMinuteDurationContract"],
+            (config.effective_duration_seconds() - DEFAULT_DURATION_SECONDS).abs() < 1e-9
         );
         assert_eq!(
             meta["cadence"]["defaultTenMinuteContract"],

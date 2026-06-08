@@ -89256,6 +89256,16 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("p?.playerGrid"));
         assert!(html.contains("G${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0}"));
         assert!(html.contains("F${receive}->${action}"));
+        assert!(html.contains("function drawPitch(r)"));
+        assert!(html.contains("function drawPlayer(p, r)"));
+        assert!(html.contains("function drawOfficial(o, r)"));
+        assert!(html.contains("function drawBall(ball, r)"));
+        assert!(html.contains("for (const o of f.officials) drawOfficial(o, r);"));
+        assert!(html.contains("for (const p of f.players) drawPlayer(p, r);"));
+        assert!(html.contains("drawBall(f.ball, r);"));
+        assert!(html.contains("p.controllerSlot === activeSlot ? 4 : 1.5"));
+        assert!(html.contains("ctx.fillText(String(p.shirt), pt.x, pt.y);"));
+        assert!(html.contains("ctx.ellipse(pt.x + lift * 0.18"));
         assert!(html.contains("p?.lastDecision?.action || p?.lastAction"));
         assert!(html.contains("p?.lastDecision?.operationOrder || p?.operationOrder"));
         assert!(html.contains("agentTrace ? `${tactical} ${agentTrace}` : tactical"));

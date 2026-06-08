@@ -32252,6 +32252,10 @@ pub struct SoccerPhysicsRuntimeContract {
     pub shared_position_latest_tracks_players_officials_ball: bool,
     pub shared_position_history_tracks_players_officials_ball: bool,
     pub shared_position_history_limit: usize,
+    pub shared_position_expected_player_count: usize,
+    pub shared_position_expected_official_count: usize,
+    pub shared_position_expected_ball_count: usize,
+    pub shared_position_sample_fields: Vec<String>,
     pub shared_position_lightweight_decision_snapshots_enabled: bool,
     pub shared_position_poison_recovery_enabled: bool,
     pub ball_altitude_enabled: bool,
@@ -32478,6 +32482,21 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
     }
 }
 
+fn soccer_shared_position_sample_fields() -> Vec<String> {
+    [
+        "id",
+        "tick",
+        "clockSeconds",
+        "position",
+        "velocity",
+        "acceleration",
+        "jerk",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntimeContract {
     let movement_gaits = [
         MovementGait::Stand,
@@ -32521,6 +32540,10 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         shared_position_latest_tracks_players_officials_ball: true,
         shared_position_history_tracks_players_officials_ball: true,
         shared_position_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        shared_position_expected_player_count: SOCCER_MATCH_PLAYER_COUNT,
+        shared_position_expected_official_count: SOCCER_MATCH_OFFICIAL_COUNT,
+        shared_position_expected_ball_count: 1,
+        shared_position_sample_fields: soccer_shared_position_sample_fields(),
         shared_position_lightweight_decision_snapshots_enabled: true,
         shared_position_poison_recovery_enabled: true,
         ball_altitude_enabled: true,
@@ -95096,6 +95119,19 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             contract["sharedPositionHistoryLimit"],
             PLAYER_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            contract["sharedPositionExpectedPlayerCount"],
+            SOCCER_MATCH_PLAYER_COUNT
+        );
+        assert_eq!(
+            contract["sharedPositionExpectedOfficialCount"],
+            SOCCER_MATCH_OFFICIAL_COUNT
+        );
+        assert_eq!(contract["sharedPositionExpectedBallCount"], 1);
+        assert_eq!(
+            contract["sharedPositionSampleFields"],
+            serde_json::json!(soccer_shared_position_sample_fields())
         );
         assert_eq!(
             contract["sharedPositionLightweightDecisionSnapshotsEnabled"],

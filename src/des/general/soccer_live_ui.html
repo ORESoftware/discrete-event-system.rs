@@ -1277,6 +1277,9 @@ function runtimeTimingLabel(timing = state?.stepTiming) {
   const centralBrain = Number(timing.centralBrainMs ?? 0) / ticks;
   const snapshot = Number(timing.fieldSnapshotMs ?? 0) / ticks;
   const decision = Number(timing.fieldPlayerDecisionMs ?? 0) / ticks;
+  const maxField = Number(timing.maxFieldLoopMs ?? 0);
+  const maxPlayerDecision = Number(timing.maxFieldPlayerDecisionMs ?? 0);
+  const maxBall = Number(timing.maxFieldBallMs ?? 0);
   const learning = Number(timing.learningDefenseMs ?? 0)
     + Number(timing.learningTransitionsMs ?? 0)
     + Number(timing.recentLearningMs ?? 0)
@@ -1288,7 +1291,7 @@ function runtimeTimingLabel(timing = state?.stepTiming) {
   const fieldPct = Number(timing.totalMs ?? 0) > 0
     ? Number(timing.fieldLoopMs ?? 0) / Number(timing.totalMs) * 100
     : 0;
-  return `avg ${avg.toFixed(1)} max ${Number(timing.maxStepMs ?? 0).toFixed(1)} PF${preField.toFixed(1)} CB${centralBrain.toFixed(1)} snap ${snapshot.toFixed(1)} dec ${decision.toFixed(1)} F${fieldPct.toFixed(0)} L${learningPct.toFixed(0)}`;
+  return `avg ${avg.toFixed(1)} max ${Number(timing.maxStepMs ?? 0).toFixed(1)} PF${preField.toFixed(1)} CB${centralBrain.toFixed(1)} snap ${snapshot.toFixed(1)} dec ${decision.toFixed(1)} peak F${maxField.toFixed(1)} P${maxPlayerDecision.toFixed(1)} B${maxBall.toFixed(1)} F${fieldPct.toFixed(0)} L${learningPct.toFixed(0)}`;
 }
 function controllerYieldLabel(stats = state?.controllerYield) {
   if (!stats) return "idle";

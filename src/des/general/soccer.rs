@@ -34695,6 +34695,16 @@ pub struct SoccerStepTimingStats {
     pub learning_log_ms: f64,
     pub full_game_learning_ms: f64,
     pub max_step_ms: f64,
+    pub max_pre_field_ms: f64,
+    pub max_central_brain_ms: f64,
+    pub max_controller_yield_ms: f64,
+    pub max_field_loop_ms: f64,
+    pub max_field_snapshot_ms: f64,
+    pub max_field_player_decision_ms: f64,
+    pub max_field_official_ms: f64,
+    pub max_field_ball_ms: f64,
+    pub max_post_field_ms: f64,
+    pub max_learning_ms: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34752,6 +34762,20 @@ impl SoccerStepTimingStats {
         self.learning_log_ms += sample.learning_log_ms;
         self.full_game_learning_ms += sample.full_game_learning_ms;
         self.max_step_ms = self.max_step_ms.max(sample.max_step_ms);
+        self.max_pre_field_ms = self.max_pre_field_ms.max(sample.max_pre_field_ms);
+        self.max_central_brain_ms = self.max_central_brain_ms.max(sample.max_central_brain_ms);
+        self.max_controller_yield_ms = self
+            .max_controller_yield_ms
+            .max(sample.max_controller_yield_ms);
+        self.max_field_loop_ms = self.max_field_loop_ms.max(sample.max_field_loop_ms);
+        self.max_field_snapshot_ms = self.max_field_snapshot_ms.max(sample.max_field_snapshot_ms);
+        self.max_field_player_decision_ms = self
+            .max_field_player_decision_ms
+            .max(sample.max_field_player_decision_ms);
+        self.max_field_official_ms = self.max_field_official_ms.max(sample.max_field_official_ms);
+        self.max_field_ball_ms = self.max_field_ball_ms.max(sample.max_field_ball_ms);
+        self.max_post_field_ms = self.max_post_field_ms.max(sample.max_post_field_ms);
+        self.max_learning_ms = self.max_learning_ms.max(sample.max_learning_ms);
     }
 
     pub fn learning_ms(&self) -> f64 {
@@ -36700,6 +36724,16 @@ impl SoccerMatch {
             learning_log_ms: soccer_live_duration_ms(learning_log_elapsed),
             full_game_learning_ms: soccer_live_duration_ms(full_game_learning_elapsed),
             max_step_ms: soccer_live_duration_ms(total_elapsed),
+            max_pre_field_ms: soccer_live_duration_ms(pre_field_elapsed),
+            max_central_brain_ms: soccer_live_duration_ms(central_brain_elapsed),
+            max_controller_yield_ms: soccer_live_duration_ms(controller_yield_elapsed),
+            max_field_loop_ms: soccer_live_duration_ms(field_loop_elapsed),
+            max_field_snapshot_ms: soccer_live_duration_ms(field_snapshot_elapsed),
+            max_field_player_decision_ms: soccer_live_duration_ms(field_player_decision_elapsed),
+            max_field_official_ms: soccer_live_duration_ms(field_official_elapsed),
+            max_field_ball_ms: soccer_live_duration_ms(field_ball_elapsed),
+            max_post_field_ms: soccer_live_duration_ms(post_field_elapsed),
+            max_learning_ms: learning_ms,
         };
         self.step_timing_stats.record(timing_sample);
         if soccer_live_step_telemetry_forced() || total_elapsed > Duration::from_millis(25) {
@@ -85357,11 +85391,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(stats.max_learning_budget_overrun_ms >= 0.0);
         assert!(stats.total_ms > 0.0);
         assert!(stats.max_step_ms > 0.0);
+        assert!(stats.max_step_ms <= stats.total_ms);
         assert!(stats.pre_field_ms >= 0.0);
+        assert!(stats.max_pre_field_ms <= stats.pre_field_ms);
         assert!(stats.pre_field_snapshot_ms >= 0.0);
         assert!(stats.pre_field_adversarial_ms >= 0.0);
         assert!(stats.central_brain_ms >= 0.0);
+        assert!(stats.max_central_brain_ms <= stats.central_brain_ms);
         assert!(stats.controller_yield_ms >= 0.0);
+        assert!(stats.max_controller_yield_ms <= stats.controller_yield_ms);
         let pre_field_parts = stats.pre_field_snapshot_ms
             + stats.pre_field_adversarial_ms
             + stats.central_brain_ms
@@ -85372,9 +85410,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             stats.pre_field_ms
         );
         assert!(stats.field_loop_ms >= 0.0);
+        assert!(stats.max_field_loop_ms <= stats.field_loop_ms);
         assert!(stats.field_schedule_ms >= 0.0);
         assert!(stats.field_snapshot_ms > 0.0);
+        assert!(stats.max_field_snapshot_ms <= stats.field_snapshot_ms);
         assert!(stats.field_player_decision_ms > 0.0);
+        assert!(stats.max_field_player_decision_ms <= stats.field_player_decision_ms);
         let decision_bucket_ms = stats.field_player_possession_decision_ms
             + stats.field_player_support_decision_ms
             + stats.field_player_defensive_decision_ms
@@ -85386,7 +85427,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert!(stats.field_intent_ms >= 0.0);
         assert!(stats.field_official_ms >= 0.0);
+        assert!(stats.max_field_official_ms <= stats.field_official_ms);
         assert!(stats.field_ball_ms >= 0.0);
+        assert!(stats.max_field_ball_ms <= stats.field_ball_ms);
+        assert!(stats.max_post_field_ms <= stats.post_field_ms);
+        assert!(stats.max_learning_ms <= stats.learning_ms());
         assert!(stats.field_loop_pct() >= 0.0);
         assert!(stats.learning_pct() >= 0.0);
 
@@ -86930,6 +86975,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("id=\"runtimeTiming\""));
         assert!(html.body.contains("function runtimeTimingLabel"));
         assert!(html.body.contains("centralBrainMs"));
+        assert!(html.body.contains("maxFieldLoopMs"));
+        assert!(html.body.contains("maxFieldPlayerDecisionMs"));
+        assert!(html.body.contains("maxFieldBallMs"));
+        assert!(html.body.contains("peak F"));
         assert!(html.body.contains("preFieldMs"));
         assert!(html.body.contains("state.matchClock"));
         assert!(html.body.contains("remainingSeconds"));
@@ -87209,6 +87258,24 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert!(value["stepTiming"]["totalMs"].as_f64().unwrap() > 0.0);
         assert!(value["stepTiming"]["preFieldMs"].as_f64().unwrap() >= 0.0);
+        assert!(value["stepTiming"]["maxStepMs"].as_f64().unwrap() > 0.0);
+        assert!(value["stepTiming"]["maxFieldLoopMs"].as_f64().unwrap() >= 0.0);
+        assert!(
+            value["stepTiming"]["maxFieldPlayerDecisionMs"]
+                .as_f64()
+                .unwrap()
+                >= 0.0
+        );
+        let step_learning_ms = value["stepTiming"]["learningDefenseMs"].as_f64().unwrap()
+            + value["stepTiming"]["learningTransitionsMs"]
+                .as_f64()
+                .unwrap()
+            + value["stepTiming"]["recentLearningMs"].as_f64().unwrap()
+            + value["stepTiming"]["neuralSamplesMs"].as_f64().unwrap()
+            + value["stepTiming"]["policyTrainMs"].as_f64().unwrap()
+            + value["stepTiming"]["learningLogMs"].as_f64().unwrap()
+            + value["stepTiming"]["fullGameLearningMs"].as_f64().unwrap();
+        assert!(value["stepTiming"]["maxLearningMs"].as_f64().unwrap() <= step_learning_ms);
         assert!(value["stepTiming"]["preFieldSnapshotMs"].as_f64().unwrap() >= 0.0);
         assert!(
             value["stepTiming"]["preFieldAdversarialMs"]
@@ -91927,6 +91994,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("learningBudgetMs"));
         assert!(html.contains("overBudgetTicks"));
         assert!(html.contains("learningOverBudgetTicks"));
+        assert!(html.contains("maxFieldLoopMs"));
+        assert!(html.contains("maxFieldPlayerDecisionMs"));
+        assert!(html.contains("maxLearningMs"));
+        assert!(html.contains("max step"));
         assert!(html.contains("stepBudget.textContent = stepBudgetLabel()"));
         assert!(html.contains("stepBudget.title = stepBudgetTitle()"));
         assert!(html.contains("trace.cadence = meta.cadence || meta.playback?.cadence || null"));

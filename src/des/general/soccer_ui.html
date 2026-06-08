@@ -772,7 +772,11 @@ function stepBudgetStatus() {
       learningOverTicks: 0,
       ticks: 0,
       maxOver: 0,
-      maxLearningOver: 0
+      maxLearningOver: 0,
+      maxStep: 0,
+      maxField: 0,
+      maxPlayerDecision: 0,
+      maxLearning: 0
     };
   }
   const budget = timingNumber(timing, "tickBudgetMs", "tick_budget_ms") || cadenceBudget;
@@ -796,7 +800,11 @@ function stepBudgetStatus() {
     learningOverTicks,
     ticks: timingNumber(timing, "ticks"),
     maxOver: timingNumber(timing, "maxBudgetOverrunMs", "max_budget_overrun_ms"),
-    maxLearningOver: timingNumber(timing, "maxLearningBudgetOverrunMs", "max_learning_budget_overrun_ms")
+    maxLearningOver: timingNumber(timing, "maxLearningBudgetOverrunMs", "max_learning_budget_overrun_ms"),
+    maxStep: timingNumber(timing, "maxStepMs", "max_step_ms"),
+    maxField: timingNumber(timing, "maxFieldLoopMs", "max_field_loop_ms"),
+    maxPlayerDecision: timingNumber(timing, "maxFieldPlayerDecisionMs", "max_field_player_decision_ms"),
+    maxLearning: timingNumber(timing, "maxLearningMs", "max_learning_ms")
   };
 }
 function stepBudgetLabel() {
@@ -809,7 +817,7 @@ function stepBudgetLabel() {
 function stepBudgetTitle() {
   const status = stepBudgetStatus();
   if (status.ticks <= 0) return `tick budget ${status.budget.toFixed(0)}ms; learning ${status.learningBudget.toFixed(0)}ms`;
-  return `${status.ticks} ticks; over ${status.overTicks}; learning over ${status.learningOverTicks}; max ${status.maxOver.toFixed(1)}ms; learning max ${status.maxLearningOver.toFixed(1)}ms`;
+  return `${status.ticks} ticks; over ${status.overTicks}; learning over ${status.learningOverTicks}; max step ${status.maxStep.toFixed(1)}ms; max field ${status.maxField.toFixed(1)}ms; max player ${status.maxPlayerDecision.toFixed(1)}ms; max learning ${status.maxLearning.toFixed(1)}ms; budget over ${status.maxOver.toFixed(1)}ms; learning over ${status.maxLearningOver.toFixed(1)}ms`;
 }
 function totalLoadedSeconds() {
   return Math.max(0, trace.frames.length - 1) * cadenceDtSeconds();

@@ -7453,9 +7453,6 @@ impl PlayerAgent {
         let my_depth = snapshot.depth_from_own_goal_y(self.team, self.position.y);
         let holder_depth = snapshot.depth_from_own_goal_y(self.team, holder_position.y);
         let goal_side_or_level = my_depth <= holder_depth + 0.65;
-        if !goal_side_or_level {
-            return None;
-        }
 
         let defender_steal_skill = ability01(self.skills.defending) * 0.46
             + ability01(self.skills.aggression) * 0.18
@@ -7465,8 +7462,15 @@ impl PlayerAgent {
             + ability01(holder_player.skills.first_touch) * 0.28
             + ability01(holder_player.skills.strength) * 0.18
             + ability01(holder_player.skills.acceleration) * 0.12;
+        let wrong_side_emergency_contact = !goal_side_or_level
+            && distance <= DEFENSIVE_IMMEDIATE_STEAL_CLEAN_RADIUS_YARDS
+            && defender_steal_skill + 0.20 >= holder_security;
+        if !goal_side_or_level && !wrong_side_emergency_contact {
+            return None;
+        }
         let clean_contact = distance <= DEFENSIVE_IMMEDIATE_STEAL_CLEAN_RADIUS_YARDS
-            && defender_steal_skill + 0.10 >= holder_security;
+            && defender_steal_skill + if goal_side_or_level { 0.10 } else { 0.20 }
+                >= holder_security;
 
         let exposed_dribble = holder_player
             .last_decision
@@ -7480,6 +7484,7 @@ impl PlayerAgent {
             })
             .unwrap_or(false)
             && distance <= DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS
+            && goal_side_or_level
             && defender_steal_skill + 0.18 >= holder_security;
 
         (clean_contact || exposed_dribble).then_some(holder)

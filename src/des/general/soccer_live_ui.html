@@ -723,6 +723,7 @@ const LIVE_DEFAULT_TICKS_PER_PULSE = 1;
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
 const LIVE_INPUT_RETRY_MIN_MS = 120;
 const LIVE_INPUT_RETRY_MAX_MS = 1000;
+const LIVE_INPUT_CLIENT_QUEUE_LIMIT = 4;
 const LIVE_ROUTE_MARKER = "/soccer/live";
 const LIVE_FRESH_MATCH_ALIASES = [
   "/fresh",
@@ -3253,7 +3254,49 @@ function queueInput(pass = false, shoot = false, slot = Number(slotPick.value ||
     action: normalizedAction,
     targetPlayer: (pass || actionIsPass) ? (overrides.targetPlayer ?? passTargetForSlot(slot)) : null
   });
+  compactQueuedInputsForBrowser();
   return true;
+}
+function inputHasCommand(input) {
+  return !!(input?.pass || input?.shoot || input?.action);
+}
+function mergeControllerInputFrames(previous, next) {
+  const merged = {...next};
+  if (inputHasCommand(previous) && !inputHasCommand(next)) {
+    merged.pass = previous.pass;
+    merged.shoot = previous.shoot;
+    merged.passFlight = previous.passFlight;
+    merged.action = previous.action;
+    merged.targetPlayer = previous.targetPlayer;
+  }
+  return merged;
+}
+function coalesceQueuedInputsBySlot(inputs) {
+  const latestBySlot = new Map();
+  for (const input of inputs) {
+    const slot = Number(input?.controllerSlot ?? 0);
+    const current = latestBySlot.get(slot);
+    if (!current || Number(input.seq || 0) >= Number(current.seq || 0)) {
+      latestBySlot.set(slot, current ? mergeControllerInputFrames(current, input) : input);
+    } else if (inputHasCommand(input) && !inputHasCommand(current)) {
+      latestBySlot.set(slot, mergeControllerInputFrames(input, current));
+    }
+  }
+  return Array.from(latestBySlot.values())
+    .sort((a, b) => Number(a.controllerSlot ?? 0) - Number(b.controllerSlot ?? 0))
+    .slice(0, LIVE_INPUT_CLIENT_QUEUE_LIMIT);
+}
+function compactQueuedInputsForBrowser() {
+  if (queuedInputs.length > LIVE_INPUT_CLIENT_QUEUE_LIMIT) {
+    queuedInputs = coalesceQueuedInputsBySlot(queuedInputs);
+  }
+}
+function drainQueuedInputsForDispatch() {
+  queuedInputs = coalesceQueuedInputsBySlot(queuedInputs);
+  return queuedInputs.splice(0, queuedInputs.length);
+}
+function requeueInputFrames(inputs) {
+  queuedInputs = coalesceQueuedInputsBySlot(inputs.concat(queuedInputs));
 }
 function playerCanShoot(p) {
   if (!p || !state?.config) return false;
@@ -3889,16 +3932,23 @@ async function stepOnce(options = {}) {
     }
     queueMotionInputsForPressedControllers();
     queueGamepadInputs();
-    const inputs = queuedInputs.splice(0, queuedInputs.length);
+    const inputs = drainQueuedInputsForDispatch();
     const beforeAssignments = assignmentKey(state.controllerAssignments);
     const previousPolicyHistory = state.policyHistory || null;
     const previousHistoryRecords = Number(state.policyAutosave?.historyRecords ?? 0);
     const ticksThisPulse = options.manual ? 1 : effectiveSimTicksPerPulse();
-    const response = await postJson("/api/step", {
-      ticks: ticksThisPulse,
-      recordEveryTicks: Math.max(1, ticksThisPulse),
-      inputs
-    });
+    let response;
+    try {
+      response = await postJson("/api/step", {
+        ticks: ticksThisPulse,
+        recordEveryTicks: Math.max(1, ticksThisPulse),
+        inputs
+      });
+    } catch (err) {
+      requeueInputFrames(inputs);
+      scheduleInputRetry();
+      throw err;
+    }
     applyInputAck(response, inputs.length);
     state = {
       config: state.config,
@@ -3970,7 +4020,7 @@ function scheduleInputRetry() {
 async function flushQueuedInputsToInputApi() {
   if (!state || resetting || inputFlushInFlight || !queuedInputs.length) return;
   inputFlushInFlight = true;
-  const inputs = queuedInputs.splice(0, queuedInputs.length);
+  const inputs = drainQueuedInputsForDispatch();
   let delivered = false;
   try {
     const ack = await postJson("/api/input", inputs);
@@ -3979,7 +4029,7 @@ async function flushQueuedInputsToInputApi() {
     delivered = true;
     render();
   } catch (err) {
-    queuedInputs = inputs.concat(queuedInputs);
+    requeueInputFrames(inputs);
     statusEl.textContent = err.message;
   } finally {
     inputFlushInFlight = false;

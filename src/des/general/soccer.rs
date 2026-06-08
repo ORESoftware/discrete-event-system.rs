@@ -87181,6 +87181,125 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn live_http_step_coalesces_same_slot_controller_burst_to_latest_frame() {
+        let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 1,
+            seed: 186,
+            ..Default::default()
+        })));
+        let input_queue = session.lock().unwrap().input_queue();
+        {
+            session
+                .lock()
+                .unwrap()
+                .match_mut()
+                .assign_controller_slot(0, Some(0))
+                .expect("assign human controller");
+        }
+
+        let inputs = vec![
+            serde_json::json!({
+                "controllerSlot": 0,
+                "playerId": 0,
+                "seq": 1,
+                "axis": {"x": -1.0, "y": 0.0},
+                "sprint": false,
+                "pass": false,
+                "shoot": false,
+                "targetPlayer": null
+            }),
+            serde_json::json!({
+                "controllerSlot": 0,
+                "playerId": 0,
+                "seq": 3,
+                "axis": {"x": 1.0, "y": 0.0},
+                "sprint": true,
+                "pass": false,
+                "shoot": false,
+                "targetPlayer": null
+            }),
+            serde_json::json!({
+                "controllerSlot": 0,
+                "playerId": 0,
+                "seq": 2,
+                "axis": {"x": 0.0, "y": -1.0},
+                "sprint": false,
+                "pass": false,
+                "shoot": false,
+                "targetPlayer": null
+            }),
+            serde_json::json!({
+                "controllerSlot": 0,
+                "playerId": 1,
+                "seq": 4,
+                "axis": {"x": 0.0, "y": 1.0},
+                "sprint": false,
+                "pass": false,
+                "shoot": false,
+                "targetPlayer": null
+            }),
+            serde_json::json!({
+                "controllerSlot": 1,
+                "playerId": 1,
+                "seq": 5,
+                "axis": {"x": 1.0, "y": 1.0},
+                "sprint": true,
+                "pass": false,
+                "shoot": false,
+                "targetPlayer": null
+            }),
+        ];
+        let step_body = serde_json::json!({
+            "ticks": 1,
+            "recordEveryTicks": 1,
+            "inputs": inputs
+        })
+        .to_string();
+        let step = handle_live_soccer_request(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                step_body.len(),
+                step_body
+            ),
+            &session,
+            &input_queue,
+        );
+
+        assert_eq!(step.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&step.body).expect("step json");
+        assert_eq!(
+            value["acceptedInputs"], 1,
+            "same-slot bursts should be coalesced before entering the native controller mailbox"
+        );
+        assert_eq!(value["queuedHumanInputs"], 0);
+        assert_eq!(value["controllerYield"]["assignedPlayers"], 1);
+        assert_eq!(value["controllerYield"]["lastQueuedAfter"], 1);
+        assert_eq!(value["controllerThreads"].as_array().unwrap().len(), 1);
+        assert_eq!(value["controllerThreads"][0]["acceptedFrames"], 1);
+        assert_eq!(value["controllerThreads"][0]["latestSeqSeen"], 3);
+        assert_eq!(
+            value["controllerLatencyBudget"]["consumedInputs"], 1,
+            "main loop should consume one latest frame for the assigned slot"
+        );
+        let player = value["frame"]["players"]
+            .as_array()
+            .expect("frame players")
+            .iter()
+            .find(|player| player["id"] == 0)
+            .expect("controlled player");
+        assert_eq!(player["lastDecision"]["action"], "human-move");
+        assert_eq!(
+            player["lastDecision"]["observation"]["humanInputSeq"].as_u64(),
+            Some(3)
+        );
+        assert_eq!(
+            player["lastDecision"]["observation"]["humanInputPresent"],
+            true
+        );
+    }
+
+    #[test]
     fn live_http_surface_route_updates_ball_physics_config() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,
@@ -89493,6 +89612,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("const LIVE_INPUT_FLUSH_INTERVAL_MS = 33"));
         assert!(html.contains("const LIVE_INPUT_RETRY_MIN_MS = 120"));
         assert!(html.contains("const LIVE_INPUT_RETRY_MAX_MS = 1000"));
+        assert!(html.contains("const LIVE_INPUT_CLIENT_QUEUE_LIMIT = 4"));
         assert!(html.contains("let inputFlushRetryAttempt = 0"));
         assert!(html.contains("let lastInputAck = {acceptedInputs: 0"));
         assert!(html.contains("function inputStatusLabel"));
@@ -89617,6 +89737,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function controllerKeymapLabel"));
         assert!(html.contains("function controllerSlotForKey"));
         assert!(html.contains("function queueSlotInput"));
+        assert!(html.contains("function coalesceQueuedInputsBySlot"));
+        assert!(html.contains("function compactQueuedInputsForBrowser"));
+        assert!(html.contains("function drainQueuedInputsForDispatch"));
+        assert!(html.contains("function requeueInputFrames"));
         assert!(html.contains("function setActiveSlot"));
         assert!(html.contains("keymap.textContent = controllerKeymapLabel(i)"));
         assert!(html.contains("const slot = controllerSlotForKey(e.code)"));
@@ -89974,12 +90098,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("const LIVE_INPUT_FLUSH_INTERVAL_MS = 33"));
         assert!(html.contains("const LIVE_INPUT_RETRY_MIN_MS = 120"));
         assert!(html.contains("const LIVE_INPUT_RETRY_MAX_MS = 1000"));
+        assert!(html.contains("const LIVE_INPUT_CLIENT_QUEUE_LIMIT = 4"));
         assert!(html.contains("let inputFlushRetryAttempt = 0"));
         assert!(html.contains("function scheduleInputFlush"));
         assert!(html.contains("function scheduleInputRetry"));
         assert!(html.contains("function flushQueuedInputsToInputApi"));
         assert!(html.contains("postJson(\"/api/input\", inputs)"));
-        assert!(html.contains("queuedInputs = inputs.concat(queuedInputs)"));
+        assert!(html.contains("function coalesceQueuedInputsBySlot"));
+        assert!(html.contains("function compactQueuedInputsForBrowser"));
+        assert!(html.contains("function drainQueuedInputsForDispatch"));
+        assert!(html.contains("function requeueInputFrames"));
+        assert!(html.contains("queuedInputs = coalesceQueuedInputsBySlot"));
+        assert!(html.contains("requeueInputFrames(inputs)"));
         assert!(html.contains("inputFlushRetryAttempt = 0"));
         assert!(html.contains("scheduleInputRetry();"));
         assert!(html.contains("id=\"learningIntervalTicks\""));
@@ -90013,7 +90143,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("id=\"matchStep\""));
         assert!(html.contains("function matchStepLabel"));
         assert!(html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t"));
-        assert!(html.contains("return configuredSimTicksPerPulse();"));
+        assert!(
+            html.contains("return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();")
+        );
+        assert!(html
+            .contains("const ticksThisPulse = options.manual ? 1 : effectiveSimTicksPerPulse();"));
         assert!(html.contains("const inputText = liveControllerAssigned() ? \" + input\" : \"\";"));
         assert!(html.contains("observation.shotLaneOpen === true"));
         assert!(html.contains("observation.shotBlockProbability"));

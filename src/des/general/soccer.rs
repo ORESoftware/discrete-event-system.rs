@@ -32089,6 +32089,11 @@ pub struct SoccerDecisionModelContract {
     pub mdp_state_grid_enabled: bool,
     pub pomdp_observation_grid_enabled: bool,
     pub action_target_grid_enabled: bool,
+    pub shot_lane_through_line_required: bool,
+    pub blocked_shot_lane_makes_shoot_illegal: bool,
+    pub clean_shot_must_shoot_yards: f64,
+    pub clean_shot_uses_through_line_gate: bool,
+    pub forward_progress_bias_enabled: bool,
     pub receive_facing_enabled: bool,
     pub action_facing_enabled: bool,
     pub facing_bucket_count: usize,
@@ -32440,6 +32445,11 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         mdp_state_grid_enabled: true,
         pomdp_observation_grid_enabled: true,
         action_target_grid_enabled: true,
+        shot_lane_through_line_required: true,
+        blocked_shot_lane_makes_shoot_illegal: true,
+        clean_shot_must_shoot_yards: CLEAN_SHOT_MUST_SHOOT_YARDS,
+        clean_shot_uses_through_line_gate: true,
+        forward_progress_bias_enabled: true,
         receive_facing_enabled: true,
         action_facing_enabled: true,
         facing_bucket_count: SOCCER_FACING_INDEX_VALUES.len(),
@@ -94550,6 +94560,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(model["mdpStateGridEnabled"], true);
         assert_eq!(model["pomdpObservationGridEnabled"], true);
         assert_eq!(model["actionTargetGridEnabled"], true);
+        assert_eq!(model["shotLaneThroughLineRequired"], true);
+        assert_eq!(model["blockedShotLaneMakesShootIllegal"], true);
+        assert_eq!(
+            model["cleanShotMustShootYards"],
+            CLEAN_SHOT_MUST_SHOOT_YARDS
+        );
+        assert_eq!(model["cleanShotUsesThroughLineGate"], true);
+        assert_eq!(model["forwardProgressBiasEnabled"], true);
         assert_eq!(model["receiveFacingEnabled"], true);
         assert_eq!(model["actionFacingEnabled"], true);
         assert_eq!(model["facingBucketCount"], SOCCER_FACING_INDEX_VALUES.len());

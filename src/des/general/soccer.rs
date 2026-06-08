@@ -50139,6 +50139,20 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
             &home_positions,
         );
         tracking_goal_events(&before, &after, &mut events);
+        let implicit_goal_team = tracking_goal_line_scoring_team(&before, &after)
+            .filter(|team| !tracking_team_scored(*team, &before, &after));
+        let score_home_after_for_reward = after.score_home
+            + if implicit_goal_team == Some(Team::Home) {
+                1
+            } else {
+                0
+            };
+        let score_away_after_for_reward = after.score_away
+            + if implicit_goal_team == Some(Team::Away) {
+                1
+            } else {
+                0
+            };
 
         for player in &before.players {
             if !after.players.iter().any(|p| p.id == player.id) {
@@ -50165,8 +50179,8 @@ pub fn soccer_tracking_dataset_to_learning_dataset(
                 &after,
                 before.score_home,
                 before.score_away,
-                after.score_home,
-                after.score_away,
+                score_home_after_for_reward,
+                score_away_after_for_reward,
                 true,
             );
             let tracking_confidence = tracking_transition_confidence(&pair[0], &pair[1], player.id);
@@ -53121,7 +53135,7 @@ fn infer_tracking_action(
         {
             return action;
         }
-        if tracking_team_scored(player.team, before, after) {
+        if tracking_goal_line_scoring_team(before, after) == Some(player.team) {
             return "shoot".to_string();
         }
         if let Some(holder) = after.ball.holder {
@@ -53598,6 +53612,32 @@ fn tracking_team_scored(team: Team, before: &WorldSnapshot, after: &WorldSnapsho
     }
 }
 
+fn tracking_goal_line_scoring_team(before: &WorldSnapshot, after: &WorldSnapshot) -> Option<Team> {
+    if tracking_team_scored(Team::Home, before, after) {
+        return Some(Team::Home);
+    }
+    if tracking_team_scored(Team::Away, before, after) {
+        return Some(Team::Away);
+    }
+    let crossing_fraction = boundary_crossing_fraction(
+        before.ball.position.y,
+        after.ball.position.y,
+        0.0,
+        before.field_length,
+    )?;
+    let scoring_team = if after.ball.position.y > before.field_length {
+        Team::Home
+    } else if after.ball.position.y < 0.0 {
+        Team::Away
+    } else {
+        return None;
+    };
+    let crossing_x = before.ball.position.x
+        + (after.ball.position.x - before.ball.position.x) * crossing_fraction;
+    let goal_x = before.field_width * 0.5;
+    ((crossing_x - goal_x).abs() <= before.goal_width * 0.5).then_some(scoring_team)
+}
+
 fn tracking_ball_moved_toward_goal(
     before: &WorldSnapshot,
     after: &WorldSnapshot,
@@ -53638,6 +53678,18 @@ fn tracking_goal_events(
             player_id: before.ball.holder,
             description: "Away goal from tracking data".to_string(),
         });
+    }
+    if after.score_home == before.score_home && after.score_away == before.score_away {
+        if let Some(team) = tracking_goal_line_scoring_team(before, after) {
+            events.push(MatchEvent {
+                tick: after.tick,
+                clock_seconds: after.clock_seconds,
+                kind: "goal".to_string(),
+                team: Some(team),
+                player_id: before.ball.holder,
+                description: format!("{team:?} goal inferred from tracking goal-line crossing"),
+            });
+        }
     }
 }
 
@@ -79987,6 +80039,65 @@ mod tests {
         assert!(policy
             .best_target_grid_for_state_action(&state, "pass")
             .is_some());
+    }
+
+    #[test]
+    fn tracking_dataset_infers_goal_shot_from_position_only_goal_line_crossing() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 111,
+            ..Default::default()
+        };
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_holder,last_touch_team
+0,0.0,0,Home shooter,Home,Forward,9,40.0,111.0,40.0,111.0,0,Home
+0,0.0,1,Away keeper,Away,Goalkeeper,1,40.0,116.0,40.0,111.0,0,Home
+0,0.0,2,Away defender,Away,Defender,4,52.0,112.0,40.0,111.0,0,Home
+1,0.1,0,Home shooter,Home,Forward,9,40.2,111.4,40.0,121.0,,Home
+1,0.1,1,Away keeper,Away,Goalkeeper,1,40.0,116.0,40.0,121.0,,Home
+1,0.1,2,Away defender,Away,Defender,4,52.0,112.0,40.0,121.0,,Home
+"#;
+        let tracking =
+            soccer_tracking_dataset_from_csv(raw, config, "unit-position-only-goal-crossing")
+                .expect("position-only goal crossing tracking");
+        let dataset = tracking
+            .to_learning_dataset()
+            .expect("goal crossing tracking conversion");
+
+        assert_eq!(
+            dataset.summary.score_home, 0,
+            "omitted scoreboard columns should remain omitted in the summary"
+        );
+        assert_eq!(dataset.summary.score_away, 0);
+        assert_eq!(dataset.events.len(), 1);
+        assert_eq!(dataset.events[0].kind, "goal");
+        assert_eq!(dataset.events[0].team, Some(Team::Home));
+        assert_eq!(dataset.events[0].player_id, Some(0));
+
+        let shooter = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("shooter transition");
+        assert_eq!(shooter.action, "shoot");
+        assert!(
+            shooter.reward > 90.0,
+            "implicit goal-line crossing should feed the goal reward into tracking imitation: {}",
+            shooter.reward
+        );
+        let target = shooter.action_target.as_ref().expect("shot target trace");
+        assert_eq!(
+            target.point,
+            Some(Vec2::new(
+                tracking.config.field_width_yards * 0.5,
+                Team::Home.goal_y(tracking.config.field_length_yards)
+            ))
+        );
+
+        let policy =
+            train_soccer_q_policy_from_tracking(&tracking, SoccerQPolicyOptions::default())
+                .expect("tracking goal policy");
+        let state = SoccerQStateKey::from_transition(shooter);
+        assert!(policy.q_value(&state, "shoot").is_some());
     }
 
     #[test]

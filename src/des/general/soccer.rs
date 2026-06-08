@@ -87471,6 +87471,107 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn live_http_step_preserves_shoot_command_when_newer_same_slot_frame_is_motion() {
+        let attacker = 9;
+        let keeper = 11;
+        let session = Arc::new(Mutex::new(
+            SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+                duration_seconds: 1.0,
+                max_human_players: 1,
+                seed: 188,
+                ..Default::default()
+            }),
+        ));
+        let input_queue = session.lock().unwrap().input_queue();
+        {
+            let mut session = session.lock().unwrap();
+            let sim = session.match_mut();
+            sim.clear_controller_assignments();
+            sim.assign_controller_slot(0, Some(attacker))
+                .expect("assign human shooter");
+            park_players_except(sim, &[attacker, keeper]);
+            sim.players[attacker].position = Vec2::new(40.0, 104.0);
+            sim.players[attacker].home_position = sim.players[attacker].position;
+            sim.players[attacker].skills.shooting = 9.8;
+            sim.players[attacker].skills.right_foot_shot_power = 9.7;
+            sim.players[attacker].skills.left_foot_shot_power = 9.4;
+            sim.players[keeper].position = Vec2::new(48.0, 116.5);
+            sim.players[keeper].skills.goalkeeping = 5.0;
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+            sim.pending_pass = None;
+            sim.pending_shot = None;
+        }
+
+        let inputs = serde_json::json!([
+            {
+                "controllerSlot": 0,
+                "playerId": attacker,
+                "seq": 21,
+                "axis": {"x": 0.0, "y": 0.0},
+                "sprint": false,
+                "pass": false,
+                "shoot": true,
+                "targetPlayer": null
+            },
+            {
+                "controllerSlot": 0,
+                "playerId": attacker,
+                "seq": 22,
+                "axis": {"x": -1.0, "y": 0.0},
+                "sprint": true,
+                "pass": false,
+                "shoot": false,
+                "targetPlayer": null
+            }
+        ]);
+        let step_body = serde_json::json!({
+            "ticks": 1,
+            "recordEveryTicks": 1,
+            "inputs": inputs
+        })
+        .to_string();
+        let step = handle_live_soccer_request(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                step_body.len(),
+                step_body
+            ),
+            &session,
+            &input_queue,
+        );
+
+        assert_eq!(step.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&step.body).expect("step json");
+        assert_eq!(value["acceptedInputs"], 1);
+        assert_eq!(value["queuedHumanInputs"], 0);
+        let player = value["frame"]["players"]
+            .as_array()
+            .expect("frame players")
+            .iter()
+            .find(|player| player["id"] == attacker)
+            .expect("controlled shooter");
+        assert_eq!(player["lastDecision"]["action"], "shoot");
+        assert_eq!(
+            player["lastDecision"]["observation"]["humanInputSeq"].as_u64(),
+            Some(22)
+        );
+        assert_eq!(player["lastDecision"]["observation"]["shotLaneOpen"], true);
+        let session = session.lock().unwrap();
+        let sim = session.match_ref();
+        assert_eq!(sim.stats.shots_home, 1);
+        assert_eq!(
+            sim.players[attacker]
+                .last_decision
+                .as_ref()
+                .map(|decision| decision.action.as_str()),
+            Some("shoot")
+        );
+    }
+
+    #[test]
     fn live_http_surface_route_updates_ball_physics_config() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,

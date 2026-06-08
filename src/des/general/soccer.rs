@@ -31725,6 +31725,52 @@ pub struct SoccerControllerRuntimeContract {
     pub thread_name_prefix: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerMovementGaitContract {
+    pub gait: MovementGait,
+    pub speed_multiplier: f64,
+    pub backward: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPhysicsRuntimeContract {
+    pub space_units: String,
+    pub time_units: String,
+    pub speed_units: String,
+    pub acceleration_units: String,
+    pub jerk_units: String,
+    pub dt_seconds: f64,
+    pub tick_millis: f64,
+    pub player_position_history_limit: usize,
+    pub ball_position_history_limit: usize,
+    pub player_history_window_seconds: f64,
+    pub ball_history_window_seconds: f64,
+    pub history_tracks_velocity_acceleration_jerk: bool,
+    pub ball_altitude_enabled: bool,
+    pub ball_curl_enabled: bool,
+    pub ball_drag_per_tick: f64,
+    pub ball_air_resistance: f64,
+    pub ball_grass_resistance_yps2: f64,
+    pub ball_stop_speed_yps: f64,
+    pub ball_rolling_altitude_yards: f64,
+    pub air_resistance_enabled: bool,
+    pub grass_resistance_enabled: bool,
+    pub nonlinear_ground_resistance_enabled: bool,
+    pub altitude_reduces_grass_contact: bool,
+    pub player_max_speed_yps: f64,
+    pub ball_max_speed_yps: f64,
+    pub player_max_accel_yps2: f64,
+    pub ball_max_accel_yps2: f64,
+    pub pitch_margin_yards: f64,
+    pub frame_epsilon_yards: f64,
+    pub movement_gaits: Vec<SoccerMovementGaitContract>,
+    pub backward_run_allowed: bool,
+    pub backward_sprint_allowed: bool,
+    pub player_mass_strength_physics_enabled: bool,
+}
+
 fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
     SoccerPlaybackAgentContract {
         expected_total_agents: 1 + SOCCER_MATCH_PLAYER_COUNT + SOCCER_MATCH_OFFICIAL_COUNT + 1,
@@ -31743,6 +31789,64 @@ fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
         field_entities_use_fisher_yates: true,
         per_frame_schedule_summary_required: true,
         slim_frames_omit_full_agent_schedule: true,
+    }
+}
+
+fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntimeContract {
+    let movement_gaits = [
+        MovementGait::Stand,
+        MovementGait::Walk,
+        MovementGait::BackWalk,
+        MovementGait::BackJog,
+        MovementGait::Skip,
+        MovementGait::BackSkip,
+        MovementGait::SideStep,
+        MovementGait::Jog,
+        MovementGait::Run,
+        MovementGait::Sprint,
+    ]
+    .into_iter()
+    .map(|gait| SoccerMovementGaitContract {
+        gait,
+        speed_multiplier: gait.speed_multiplier(),
+        backward: gait.is_backward(),
+    })
+    .collect();
+    let dt_seconds = config.dt_seconds.max(0.0);
+    SoccerPhysicsRuntimeContract {
+        space_units: "yards".to_string(),
+        time_units: "seconds".to_string(),
+        speed_units: "yardsPerSecond".to_string(),
+        acceleration_units: "yardsPerSecondSquared".to_string(),
+        jerk_units: "yardsPerSecondCubed".to_string(),
+        dt_seconds,
+        tick_millis: dt_seconds * 1_000.0,
+        player_position_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        ball_position_history_limit: BALL_POSITION_HISTORY_LIMIT,
+        player_history_window_seconds: PLAYER_POSITION_HISTORY_LIMIT as f64 * dt_seconds,
+        ball_history_window_seconds: BALL_POSITION_HISTORY_LIMIT as f64 * dt_seconds,
+        history_tracks_velocity_acceleration_jerk: true,
+        ball_altitude_enabled: true,
+        ball_curl_enabled: true,
+        ball_drag_per_tick: config.ball_drag_per_tick,
+        ball_air_resistance: config.ball_air_resistance,
+        ball_grass_resistance_yps2: config.ball_grass_resistance_yps2,
+        ball_stop_speed_yps: config.ball_stop_speed_yps,
+        ball_rolling_altitude_yards: BALL_ROLLING_ALTITUDE_YARDS,
+        air_resistance_enabled: true,
+        grass_resistance_enabled: true,
+        nonlinear_ground_resistance_enabled: true,
+        altitude_reduces_grass_contact: true,
+        player_max_speed_yps: SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS,
+        ball_max_speed_yps: SOCCER_PHYSICS_BALL_MAX_SPEED_YPS,
+        player_max_accel_yps2: SOCCER_PHYSICS_PLAYER_MAX_ACCEL_YPS2,
+        ball_max_accel_yps2: SOCCER_PHYSICS_BALL_MAX_ACCEL_YPS2,
+        pitch_margin_yards: SOCCER_PHYSICS_PITCH_MARGIN_YARDS,
+        frame_epsilon_yards: SOCCER_PHYSICS_FRAME_EPSILON_YARDS,
+        movement_gaits,
+        backward_run_allowed: false,
+        backward_sprint_allowed: false,
+        player_mass_strength_physics_enabled: true,
     }
 }
 
@@ -47266,6 +47370,7 @@ fn soccer_playback_metadata_json(
     let generated_at_unix_ms = soccer_artifact_generated_at_unix_ms();
     let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
     let controller_contract = soccer_controller_runtime_contract(config);
+    let physics_contract = soccer_physics_runtime_contract(config);
     serde_json::json!({
         "runId": soccer_artifact_run_id(config.seed, generated_at_unix_ms),
         "generatedAtUnixMs": generated_at_unix_ms,
@@ -47276,6 +47381,7 @@ fn soccer_playback_metadata_json(
         "agentContract": soccer_playback_agent_contract(),
         "decisionModel": soccer_decision_model_contract(),
         "controllerContract": controller_contract,
+        "physicsContract": physics_contract,
         "playback": {
             "dtSeconds": config.dt_seconds,
             "durationSeconds": config.effective_duration_seconds(),
@@ -47286,6 +47392,7 @@ fn soccer_playback_metadata_json(
             "agentContract": soccer_playback_agent_contract(),
             "decisionModel": soccer_decision_model_contract(),
             "controllerContract": controller_contract,
+            "physicsContract": physics_contract,
         },
         "events": events,
     })
@@ -92202,12 +92309,19 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains(
             "trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null"
         ));
+        assert!(html.contains(
+            "trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null"
+        ));
         assert!(html.contains("expectedTotalAgents"));
         assert!(html.contains("expectedPlayerCount"));
         assert!(html.contains("decisionModel"));
         assert!(html.contains("controllerContract"));
         assert!(html.contains("maxHumanControllers"));
         assert!(html.contains("notificationDrivenInput"));
+        assert!(html.contains("physicsContract"));
+        assert!(html.contains("playerHistoryWindowSeconds"));
+        assert!(html.contains("ballHistoryWindowSeconds"));
+        assert!(html.contains("function physicsHistoryWindowSeconds()"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
@@ -92545,6 +92659,95 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["threadNamePrefix"], "soccer-human-controller-");
     }
 
+    fn assert_soccer_physics_contract_json(meta: &serde_json::Value, config: &MatchConfig) {
+        assert_eq!(meta["physicsContract"], meta["playback"]["physicsContract"]);
+        let contract = &meta["physicsContract"];
+        assert_eq!(contract["spaceUnits"], "yards");
+        assert_eq!(contract["timeUnits"], "seconds");
+        assert_eq!(contract["speedUnits"], "yardsPerSecond");
+        assert_eq!(contract["accelerationUnits"], "yardsPerSecondSquared");
+        assert_eq!(contract["jerkUnits"], "yardsPerSecondCubed");
+        assert_eq!(contract["dtSeconds"], config.dt_seconds);
+        assert_eq!(contract["tickMillis"], config.dt_seconds * 1_000.0);
+        assert_eq!(
+            contract["playerPositionHistoryLimit"],
+            PLAYER_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            contract["ballPositionHistoryLimit"],
+            BALL_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            contract["playerHistoryWindowSeconds"],
+            PLAYER_POSITION_HISTORY_LIMIT as f64 * config.dt_seconds
+        );
+        assert_eq!(
+            contract["ballHistoryWindowSeconds"],
+            BALL_POSITION_HISTORY_LIMIT as f64 * config.dt_seconds
+        );
+        assert_eq!(contract["historyTracksVelocityAccelerationJerk"], true);
+        assert_eq!(contract["ballAltitudeEnabled"], true);
+        assert_eq!(contract["ballCurlEnabled"], true);
+        assert_eq!(contract["ballDragPerTick"], config.ball_drag_per_tick);
+        assert_eq!(contract["ballAirResistance"], config.ball_air_resistance);
+        assert_eq!(
+            contract["ballGrassResistanceYps2"],
+            config.ball_grass_resistance_yps2
+        );
+        assert_eq!(contract["ballStopSpeedYps"], config.ball_stop_speed_yps);
+        assert_eq!(
+            contract["ballRollingAltitudeYards"],
+            BALL_ROLLING_ALTITUDE_YARDS
+        );
+        assert_eq!(contract["airResistanceEnabled"], true);
+        assert_eq!(contract["grassResistanceEnabled"], true);
+        assert_eq!(contract["nonlinearGroundResistanceEnabled"], true);
+        assert_eq!(contract["altitudeReducesGrassContact"], true);
+        assert_eq!(
+            contract["playerMaxSpeedYps"],
+            SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS
+        );
+        assert_eq!(
+            contract["ballMaxSpeedYps"],
+            SOCCER_PHYSICS_BALL_MAX_SPEED_YPS
+        );
+        assert_eq!(
+            contract["playerMaxAccelYps2"],
+            SOCCER_PHYSICS_PLAYER_MAX_ACCEL_YPS2
+        );
+        assert_eq!(
+            contract["ballMaxAccelYps2"],
+            SOCCER_PHYSICS_BALL_MAX_ACCEL_YPS2
+        );
+        assert_eq!(
+            contract["pitchMarginYards"],
+            SOCCER_PHYSICS_PITCH_MARGIN_YARDS
+        );
+        assert_eq!(
+            contract["frameEpsilonYards"],
+            SOCCER_PHYSICS_FRAME_EPSILON_YARDS
+        );
+        assert_eq!(contract["backwardRunAllowed"], false);
+        assert_eq!(contract["backwardSprintAllowed"], false);
+        assert_eq!(contract["playerMassStrengthPhysicsEnabled"], true);
+        let gaits = contract["movementGaits"]
+            .as_array()
+            .expect("movement gaits");
+        assert_eq!(gaits.len(), 10);
+        assert!(gaits
+            .iter()
+            .any(|gait| gait["gait"] == "backWalk" && gait["backward"] == true));
+        assert!(gaits
+            .iter()
+            .any(|gait| gait["gait"] == "backJog" && gait["backward"] == true));
+        assert!(gaits
+            .iter()
+            .any(|gait| gait["gait"] == "backSkip" && gait["backward"] == true));
+        assert!(!gaits
+            .iter()
+            .any(|gait| gait["gait"] == "backRun" || gait["gait"] == "backSprint"));
+    }
+
     #[test]
     fn soccer_playback_artifact_writer_persists_split_assets() {
         let trace = run_simulation(
@@ -92613,6 +92816,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &trace.config);
+        assert_soccer_physics_contract_json(&meta, &trace.config);
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(meta["playback"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(
@@ -92694,6 +92898,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &config);
+        assert_soccer_physics_contract_json(&meta, &config);
         assert_eq!(
             meta["stepTiming"]["tickBudgetMs"],
             config.dt_seconds * 1000.0

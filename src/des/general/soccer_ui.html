@@ -449,6 +449,7 @@ const trace = {
   agentContract: null,
   decisionModel: null,
   controllerContract: null,
+  physicsContract: null,
   stepTiming: null,
   frames: [],
   events: [],
@@ -748,7 +749,7 @@ function expectedFrameCount() {
   return Math.max(ticks + 1, trace.frames.length, 0);
 }
 function cadenceDtSeconds() {
-  return Number(trace.cadence?.dtSeconds || trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
+  return Number(trace.cadence?.dtSeconds || trace.physicsContract?.dtSeconds || trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
 }
 function stepTimingTelemetry() {
   return trace.stepTiming || trace.summary?.stepTiming || trace.cadence?.stepTiming || null;
@@ -863,6 +864,7 @@ function resetTraceState() {
   trace.agentContract = null;
   trace.decisionModel = null;
   trace.controllerContract = null;
+  trace.physicsContract = null;
   trace.stepTiming = null;
   trace.frames = [];
   trace.events = [];
@@ -1733,6 +1735,9 @@ function maxHumanControllerSlots() {
 function controllerInputRuntimeMode() {
   return trace.controllerContract?.notificationDrivenInput ? "notify" : "poll";
 }
+function physicsHistoryWindowSeconds() {
+  return Number(trace.physicsContract?.playerHistoryWindowSeconds || trace.physicsContract?.ballHistoryWindowSeconds || 0);
+}
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);
   const fallback = Number(FALLBACK_CONFIG.maxHumanPlayers || 4);
@@ -2142,6 +2147,7 @@ async function loadTraceMeta(signal) {
   trace.agentContract = meta.agentContract || meta.playback?.agentContract || null;
   trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null;
   trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null;
+  trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;

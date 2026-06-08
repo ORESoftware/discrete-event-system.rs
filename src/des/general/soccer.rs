@@ -59592,6 +59592,41 @@ mod tests {
     }
 
     #[test]
+    fn summary_only_autonomous_match_records_shot_liveness_without_frames() {
+        let summary = run_simulation_summary(MatchConfig {
+            duration_seconds: 45.0,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            max_human_players: 0,
+            seed: 22_902,
+            ..MatchConfig::default()
+        });
+        let stats = &summary.summary.stats;
+        let shots = stats.shots_home.saturating_add(stats.shots_away);
+        let shot_events = summary
+            .events
+            .iter()
+            .filter(|event| event.kind == "shot")
+            .count();
+
+        assert_eq!(summary.summary.ticks, 450);
+        assert_eq!(summary.step_timing.ticks, 450);
+        assert_eq!(summary.controller_yield.skipped_no_assignment, 450);
+        assert!(
+            shots >= 1,
+            "summary-only autonomous match should still record shot attempts without retaining frames; stats={stats:?}"
+        );
+        assert_eq!(
+            shot_events as u32, shots,
+            "summary-only shot events and shot stats should stay in sync"
+        );
+    }
+
+    #[test]
     fn final_third_pressure_exposes_killer_pass_option() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

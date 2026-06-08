@@ -30621,6 +30621,13 @@ fn soccer_accounting_check_agent_schedule(
     }
 
     let expected_len = 1 + frame.players.len() + frame.officials.len() + 1;
+    let expected_field_shuffle_len = frame.players.len() + frame.officials.len() + 1;
+    let field_shuffle_count = frame
+        .agent_schedule
+        .iter()
+        .filter(|entry| entry.kind != AgentScheduleKind::CentralBrain)
+        .count();
+    let duplicate_count = frame.agent_schedule.len().saturating_sub(seen.len());
     if frame.agent_schedule.len() != expected_len {
         report.push_violation(
             frame.tick,
@@ -30698,6 +30705,89 @@ fn soccer_accounting_check_agent_schedule(
                 "agent schedule has the wrong count for this agent kind",
             );
         }
+    }
+
+    let summary = &frame.agent_schedule_summary;
+    for (metric, expected, actual) in [
+        ("summaryTotalAgents", expected_len, summary.total_agents),
+        (
+            "summaryExpectedTotalAgents",
+            expected_len,
+            summary.expected_total_agents,
+        ),
+        (
+            "summaryFieldShuffleAgents",
+            expected_field_shuffle_len,
+            summary.field_shuffle_agents,
+        ),
+        (
+            "summaryExpectedFieldShuffleAgents",
+            expected_field_shuffle_len,
+            summary.expected_field_shuffle_agents,
+        ),
+        ("summaryUniqueAgents", seen.len(), summary.unique_agents),
+        (
+            "summaryDuplicateAgents",
+            duplicate_count,
+            summary.duplicate_agents,
+        ),
+        (
+            "summaryCentralBrainCount",
+            central_count,
+            summary.central_brain_count,
+        ),
+        ("summaryPlayerCount", player_count, summary.player_count),
+        (
+            "summaryExpectedPlayerCount",
+            frame.players.len(),
+            summary.expected_player_count,
+        ),
+        (
+            "summaryOfficialCount",
+            official_count,
+            summary.official_count,
+        ),
+        (
+            "summaryExpectedOfficialCount",
+            frame.officials.len(),
+            summary.expected_official_count,
+        ),
+        ("summaryBallCount", ball_count, summary.ball_count),
+        (
+            "summaryExpectedBallCount",
+            1usize,
+            summary.expected_ball_count,
+        ),
+    ] {
+        if expected != actual {
+            report.push_violation(
+                frame.tick,
+                "agentScheduleSummary",
+                metric,
+                expected.to_string(),
+                actual.to_string(),
+                "agent schedule summary should match the authoritative runtime schedule",
+            );
+        }
+    }
+    if summary.central_brain_first
+        != frame
+            .agent_schedule
+            .first()
+            .is_some_and(|entry| entry.kind == AgentScheduleKind::CentralBrain)
+    {
+        report.push_violation(
+            frame.tick,
+            "agentScheduleSummary",
+            "summaryCentralBrainFirst",
+            frame
+                .agent_schedule
+                .first()
+                .is_some_and(|entry| entry.kind == AgentScheduleKind::CentralBrain)
+                .to_string(),
+            summary.central_brain_first.to_string(),
+            "agent schedule summary should report whether the central brain ran first",
+        );
     }
 
     if let Some(decision) = frame.central_brain.last_decision.as_ref() {
@@ -30856,6 +30946,39 @@ fn soccer_accounting_check_agent_schedule(
         .agent_schedule
         .iter()
         .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+    if summary.ball_scheduled_index != scheduled_index {
+        report.push_violation(
+            frame.tick,
+            "agentScheduleSummary",
+            "summaryBallScheduledIndex",
+            format!("{scheduled_index:?}"),
+            format!("{:?}", summary.ball_scheduled_index),
+            "agent schedule summary should expose the authoritative ball schedule index",
+        );
+    }
+    let summary_complete = frame.agent_schedule.len() == expected_len
+        && seen.len() == expected_len
+        && duplicate_count == 0
+        && central_count == 1
+        && player_count == frame.players.len()
+        && official_count == frame.officials.len()
+        && ball_count == 1
+        && field_shuffle_count == expected_field_shuffle_len
+        && frame
+            .agent_schedule
+            .first()
+            .is_some_and(|entry| entry.kind == AgentScheduleKind::CentralBrain)
+        && scheduled_index.is_some();
+    if summary.complete != summary_complete {
+        report.push_violation(
+            frame.tick,
+            "agentScheduleSummary",
+            "summaryComplete",
+            summary_complete.to_string(),
+            summary.complete.to_string(),
+            "agent schedule summary complete flag should be derived from the runtime schedule",
+        );
+    }
     if frame.central_brain.ball_scheduled_index != scheduled_index {
         report.push_violation(
             frame.tick,
@@ -68602,6 +68725,52 @@ mod tests {
         assert!(report.violations.iter().any(|violation| {
             violation.subject == "agentSchedule" && violation.metric == "length"
         }));
+    }
+
+    #[test]
+    fn accounting_smoke_report_flags_stale_agent_schedule_summary() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                seed: 13_085,
+                ..MatchConfig::playback_trace(0.2)
+            },
+            1,
+        );
+        let scheduled_frame = trace
+            .frames
+            .iter_mut()
+            .find(|frame| frame.tick > 0)
+            .expect("post-tick scheduled frame");
+        scheduled_frame.agent_schedule_summary.total_agents = 26;
+        scheduled_frame.agent_schedule_summary.field_shuffle_agents = 25;
+        scheduled_frame
+            .agent_schedule_summary
+            .expected_field_shuffle_agents = 25;
+        scheduled_frame.agent_schedule_summary.expected_ball_count = 0;
+        scheduled_frame.agent_schedule_summary.central_brain_first = false;
+        scheduled_frame.agent_schedule_summary.ball_scheduled_index = None;
+        scheduled_frame.agent_schedule_summary.complete = false;
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        for metric in [
+            "summaryTotalAgents",
+            "summaryFieldShuffleAgents",
+            "summaryExpectedFieldShuffleAgents",
+            "summaryExpectedBallCount",
+            "summaryCentralBrainFirst",
+            "summaryBallScheduledIndex",
+            "summaryComplete",
+        ] {
+            assert!(
+                report.violations.iter().any(|violation| {
+                    violation.subject == "agentScheduleSummary" && violation.metric == metric
+                }),
+                "stale schedule summary should flag {metric}: {:?}",
+                report.violations
+            );
+        }
     }
 
     #[test]

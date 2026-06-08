@@ -3131,6 +3131,8 @@ mod tests {
             "ballDistanceBin": 1,
             "yardsToGoalBin": 4,
             "pressureBin": 3,
+            "skillPassingBin": 5,
+            "skillFirstTouchBin": 4,
             "openSpaceBin": 2
         });
         let state: SoccerQStateKey =
@@ -3149,6 +3151,8 @@ mod tests {
         assert_eq!(persisted_state_json["formationLpPairErrorBin"], json!(2));
         assert_eq!(persisted_state_json["formationLpPressureBin"], json!(4));
         assert_eq!(persisted_state_json["formationLpSpeedMatchBin"], json!(1));
+        assert_eq!(persisted_state_json["skillPassingBin"], json!(5));
+        assert_eq!(persisted_state_json["skillFirstTouchBin"], json!(4));
         let hash = state_hash(&persisted_state_json);
         assert_eq!(hash.len(), 16);
         assert!(hash.chars().all(|ch| ch.is_ascii_hexdigit()));

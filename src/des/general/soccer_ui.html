@@ -122,7 +122,14 @@
     border-bottom: 1px solid #eef1f4;
     font-size: 13px;
   }
-  .metric b { font-variant-numeric: tabular-nums; }
+  .metric b {
+    max-width: 190px;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
   .section {
     margin: 14px 0 6px;
     font-size: 12px;
@@ -159,6 +166,15 @@
     font-size: 11px;
     line-height: 1.25;
   }
+  .slot .input-status {
+    grid-column: 2;
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.25;
+  }
+  .slot .input-status.warn { color: #a66b13; }
+  .slot .input-status.bad { color: var(--away); }
   .legend {
     display: flex;
     gap: 10px;
@@ -286,11 +302,11 @@
   </header>
   <div class="main">
     <div class="stage">
-      <canvas id="pitch" width="1280" height="820"></canvas>
+      <canvas id="pitch" width="1280" height="720"></canvas>
       <div id="loadingOverlay" class="loading-overlay">
         <div class="loading-card">
           <div id="loadingTitle" class="loading-title"><span class="spinner"></span><span id="loadingTitleText">Loading match data</span></div>
-          <div class="progress"><div id="loadingBar" class="progress-fill"></div></div>
+          <div id="loadingProgress" class="progress" role="progressbar" aria-label="Match data loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Starting download"><div id="loadingBar" class="progress-fill"></div></div>
           <div id="loadingStatus" class="loading-status">Starting download</div>
           <div id="loadingBytes" class="loading-bytes">0 B</div>
           <form id="authForm" class="auth-panel">
@@ -312,6 +328,12 @@
           <option value="2">2x</option>
           <option value="4">4x</option>
         </select>
+        <select id="gridOverlayLevel" aria-label="Grid overlay">
+          <option value="off" selected>Grid off</option>
+          <option value="fine">Fine grid</option>
+          <option value="tactical">Tactical grid</option>
+          <option value="macro">Macro grid</option>
+        </select>
       </div>
       <input id="scrub" type="range" min="0" max="0" value="0">
       <div class="section">Match</div>
@@ -328,7 +350,9 @@
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
+      <div class="metric"><span>GK Physics</span><b id="gkPhysics">save/parry</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
+      <div class="metric"><span>Tactical Live</span><b id="tacticalLiveness">P0/0 S0</b></div>
       <div class="metric"><span>Dribble Beats</span><b id="dribbleBeats">0 - 0</b></div>
       <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
       <div class="metric"><span>Route 1</span><b id="routeOne">0 - 0</b></div>
@@ -345,11 +369,13 @@
       <div class="metric"><span>Seed</span><b id="seed">-</b></div>
       <div class="metric"><span>Run ID</span><b id="runId">-</b></div>
       <div class="section">Controller Slots</div>
+      <div class="metric"><span>Input Runtime</span><b id="controllerRuntime">4 slots notify</b></div>
       <div id="slots"></div>
       <div class="metric"><span>Selected</span><b id="agentSelected">Autonomous</b></div>
       <div class="metric"><span>Kinematics</span><b id="agentKinematics">-</b></div>
       <div class="metric"><span>Shot Lane</span><b id="agentShotLane">-</b></div>
       <div class="metric"><span>Tactical</span><b id="agentTactical">-</b></div>
+      <div class="metric"><span>MDP/POMDP</span><b id="agentPomdp">-</b></div>
       <div class="row">
         <select id="passTarget"></select>
         <select id="passFlight" aria-label="Pass flight">
@@ -363,6 +389,9 @@
         <button id="shoot">Shoot</button>
         <button id="carryAction">Carry</button>
         <button id="protectAction">Protect</button>
+        <button id="killerPassAction">Thread T</button>
+        <button id="clearanceAction">Clear C</button>
+        <button id="routeOneAction">Route R</button>
       </div>
       <div class="legend">
         <span><i class="swatch" style="background:var(--home)"></i>Home</span>
@@ -391,6 +420,7 @@ const FALLBACK_CONFIG = {
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
 const LIVE_INPUT_RETRY_MIN_MS = 120;
 const LIVE_INPUT_RETRY_MAX_MS = 1000;
+const LIVE_INPUT_CLIENT_QUEUE_LIMIT = 4;
 function emptyStats() {
   return {
     shotsHome: 0,
@@ -436,7 +466,14 @@ const trace = {
   config: {...FALLBACK_CONFIG},
   summary: {ticks: 0, stats: emptyStats()},
   cadence: null,
+  agentContract: null,
+  decisionModel: null,
+  controllerContract: null,
+  physicsContract: null,
+  learningContract: null,
   stepTiming: null,
+  controllerYield: null,
+  tacticalLiveness: null,
   frames: [],
   events: [],
   runId: null,
@@ -460,7 +497,9 @@ const actionIntent = document.getElementById("actionIntent");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
+const gkPhysics = document.getElementById("gkPhysics");
 const passes = document.getElementById("passes");
+const tacticalLiveness = document.getElementById("tacticalLiveness");
 const dribbleBeats = document.getElementById("dribbleBeats");
 const clearances = document.getElementById("clearances");
 const routeOne = document.getElementById("routeOne");
@@ -480,19 +519,26 @@ const scrub = document.getElementById("scrub");
 const play = document.getElementById("play");
 const runNewSimButton = document.getElementById("runNewSim");
 const speed = document.getElementById("speed");
+const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const events = document.getElementById("events");
 const slots = document.getElementById("slots");
+const controllerRuntime = document.getElementById("controllerRuntime");
 const agentSelected = document.getElementById("agentSelected");
 const agentKinematics = document.getElementById("agentKinematics");
 const agentShotLane = document.getElementById("agentShotLane");
 const agentTactical = document.getElementById("agentTactical");
+const agentPomdp = document.getElementById("agentPomdp");
 const passTarget = document.getElementById("passTarget");
 const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
 const protectActionButton = document.getElementById("protectAction");
+const killerPassActionButton = document.getElementById("killerPassAction");
+const clearanceActionButton = document.getElementById("clearanceAction");
+const routeOneActionButton = document.getElementById("routeOneAction");
 const loadingOverlay = document.getElementById("loadingOverlay");
 const loadingTitle = document.getElementById("loadingTitle");
 const loadingTitleText = document.getElementById("loadingTitleText");
+const loadingProgress = document.getElementById("loadingProgress");
 const loadingBar = document.getElementById("loadingBar");
 const loadingStatus = document.getElementById("loadingStatus");
 const loadingBytes = document.getElementById("loadingBytes");
@@ -501,13 +547,29 @@ const authToken = document.getElementById("authToken");
 const keys = new Set();
 const MOVE_KEY_CODES = new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD"]);
 const SPRINT_KEY_CODES = new Set(["ShiftLeft","ShiftRight"]);
-const HUMAN_ACTION_KEY_CODES = new Set(["Enter","Space"]);
+const HUMAN_ACTION_KEY_CODES = new Set(["Enter","Space","KeyT","KeyC","KeyR"]);
 const CONTROLLER_KEYMAPS = [
   {left: "ArrowLeft", right: "ArrowRight", up: "ArrowUp", down: "ArrowDown", sprint: "ShiftLeft", pass: "Enter", shoot: "Space"},
   {left: "KeyA", right: "KeyD", up: "KeyW", down: "KeyS", sprint: "ShiftRight", pass: "KeyF", shoot: "KeyG"},
   {left: "KeyJ", right: "KeyL", up: "KeyI", down: "KeyK", sprint: "KeyU", pass: "KeyO", shoot: "KeyP"},
   {left: "Numpad4", right: "Numpad6", up: "Numpad8", down: "Numpad5", sprint: "Numpad0", pass: "Numpad7", shoot: "Numpad9"}
 ];
+const GAMEPAD_BUTTONS = {
+  action: 0,
+  pass: 1,
+  carry: 2,
+  protect: 3,
+  clearance: 4,
+  sprint: 5,
+  routeOne: 6,
+  killerPass: 7,
+  dpadUp: 12,
+  dpadDown: 13,
+  dpadLeft: 14,
+  dpadRight: 15,
+};
+const GAMEPAD_STICK_DEADZONE = 0.18;
+const gamepadButtonLatch = new Map();
 let frameIndex = 0;
 let playing = false;
 let lastTs = 0;
@@ -525,18 +587,68 @@ let controllerAssignmentSyncSeq = 0;
 let inputFlushTimer = null;
 let inputFlushInFlight = false;
 let inputFlushRetryAttempt = 0;
+let lastInputAck = {acceptedInputs: 0, queuedHumanInputs: 0, error: "", at: 0};
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
-  if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
+  compactQueuedInputsForBrowser();
+  updateInputStatusLabels();
   scheduleInputFlush(0);
 };
+function inputHasCommand(input) {
+  return !!(input?.pass || input?.shoot || input?.action);
+}
+function mergeControllerInputFrames(previous, next) {
+  const merged = {...next};
+  if (inputHasCommand(previous) && !inputHasCommand(next)) {
+    merged.pass = previous.pass;
+    merged.shoot = previous.shoot;
+    merged.passFlight = previous.passFlight;
+    merged.action = previous.action;
+    merged.targetPlayer = previous.targetPlayer;
+  }
+  return merged;
+}
+function coalesceQueuedInputsBySlot(inputs) {
+  const latestBySlot = new Map();
+  for (const input of inputs) {
+    const slot = Number(input?.controllerSlot ?? 0);
+    const current = latestBySlot.get(slot);
+    if (!current || Number(input.seq || 0) >= Number(current.seq || 0)) {
+      latestBySlot.set(slot, current ? mergeControllerInputFrames(current, input) : input);
+    } else if (inputHasCommand(input) && !inputHasCommand(current)) {
+      latestBySlot.set(slot, mergeControllerInputFrames(input, current));
+    }
+  }
+  return Array.from(latestBySlot.values())
+    .sort((a, b) => Number(a.controllerSlot ?? 0) - Number(b.controllerSlot ?? 0))
+    .slice(0, LIVE_INPUT_CLIENT_QUEUE_LIMIT);
+}
+function compactQueuedInputsForBrowser() {
+  if (window.__humanInputQueue.length > LIVE_INPUT_CLIENT_QUEUE_LIMIT) {
+    window.__humanInputQueue = coalesceQueuedInputsBySlot(window.__humanInputQueue);
+  }
+}
+function drainQueuedInputsForDispatch() {
+  window.__humanInputQueue = coalesceQueuedInputsBySlot(window.__humanInputQueue);
+  const inputs = window.__humanInputQueue.slice();
+  window.__humanInputQueue = [];
+  return inputs;
+}
+function requeueInputFrames(inputs) {
+  window.__humanInputQueue = coalesceQueuedInputsBySlot(inputs.concat(window.__humanInputQueue));
+}
 
 function formatBytes(bytes) {
   const value = Number(bytes || 0);
   if (value < 1024) return `${value.toFixed(0)} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+function textByteLength(text) {
+  if (typeof Blob !== "undefined") return new Blob([text]).size;
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).byteLength;
+  return String(text || "").length;
 }
 function cacheBustUrl(url) {
   const absolute = new URL(url, window.location.href);
@@ -684,7 +796,7 @@ function expectedFrameCount() {
   return Math.max(ticks + 1, trace.frames.length, 0);
 }
 function cadenceDtSeconds() {
-  return Number(trace.cadence?.dtSeconds || trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
+  return Number(trace.cadence?.dtSeconds || trace.physicsContract?.dtSeconds || trace.config?.dtSeconds || FALLBACK_CONFIG.dtSeconds);
 }
 function stepTimingTelemetry() {
   return trace.stepTiming || trace.summary?.stepTiming || trace.cadence?.stepTiming || null;
@@ -711,7 +823,11 @@ function stepBudgetStatus() {
       learningOverTicks: 0,
       ticks: 0,
       maxOver: 0,
-      maxLearningOver: 0
+      maxLearningOver: 0,
+      maxStep: 0,
+      maxField: 0,
+      maxPlayerDecision: 0,
+      maxLearning: 0
     };
   }
   const budget = timingNumber(timing, "tickBudgetMs", "tick_budget_ms") || cadenceBudget;
@@ -735,7 +851,11 @@ function stepBudgetStatus() {
     learningOverTicks,
     ticks: timingNumber(timing, "ticks"),
     maxOver: timingNumber(timing, "maxBudgetOverrunMs", "max_budget_overrun_ms"),
-    maxLearningOver: timingNumber(timing, "maxLearningBudgetOverrunMs", "max_learning_budget_overrun_ms")
+    maxLearningOver: timingNumber(timing, "maxLearningBudgetOverrunMs", "max_learning_budget_overrun_ms"),
+    maxStep: timingNumber(timing, "maxStepMs", "max_step_ms"),
+    maxField: timingNumber(timing, "maxFieldLoopMs", "max_field_loop_ms"),
+    maxPlayerDecision: timingNumber(timing, "maxFieldPlayerDecisionMs", "max_field_player_decision_ms"),
+    maxLearning: timingNumber(timing, "maxLearningMs", "max_learning_ms")
   };
 }
 function stepBudgetLabel() {
@@ -748,7 +868,141 @@ function stepBudgetLabel() {
 function stepBudgetTitle() {
   const status = stepBudgetStatus();
   if (status.ticks <= 0) return `tick budget ${status.budget.toFixed(0)}ms; learning ${status.learningBudget.toFixed(0)}ms`;
-  return `${status.ticks} ticks; over ${status.overTicks}; learning over ${status.learningOverTicks}; max ${status.maxOver.toFixed(1)}ms; learning max ${status.maxLearningOver.toFixed(1)}ms`;
+  return `${status.ticks} ticks; over ${status.overTicks}; learning over ${status.learningOverTicks}; max step ${status.maxStep.toFixed(1)}ms; max field ${status.maxField.toFixed(1)}ms; max player ${status.maxPlayerDecision.toFixed(1)}ms; max learning ${status.maxLearning.toFixed(1)}ms; budget over ${status.maxOver.toFixed(1)}ms; learning over ${status.maxLearningOver.toFixed(1)}ms`;
+}
+function tacticalLivenessState() {
+  const s = trace.summary?.stats || emptyStats();
+  const meta = trace.tacticalLiveness || {};
+  const passAttempts = Number(meta.passAttempts ?? ((s.passesAttemptedHome ?? 0) + (s.passesAttemptedAway ?? 0)));
+  const completedPasses = Number(meta.completedPasses ?? ((s.passesCompletedHome ?? 0) + (s.passesCompletedAway ?? 0)));
+  const shotAttempts = Number(meta.shotAttempts ?? ((s.shotsHome ?? 0) + (s.shotsAway ?? 0)));
+  const frameLivenessKnown = Boolean(meta.frameLivenessKnown);
+  const offBallOpenSpaceSupportKnown = Boolean(meta.offBallOpenSpaceSupportKnown);
+  const offBallOpenSpaceMoves = Number(meta.offBallOpenSpaceMoves ?? 0);
+  const offBallOpenSpaceGain = Number(meta.offBallOpenSpaceGain ?? 0);
+  const ballMovementYards = Number(meta.ballMovementYards ?? 0);
+  const ballGoalwardProgressYards = Number(meta.ballGoalwardProgressYards ?? 0);
+  const ballActiveFrames = Number(meta.ballActiveFrames ?? 0);
+  const centralBrainOperationOrderSamples = Number(meta.centralBrainOperationOrderSamples ?? 0);
+  const centralBrainOperationOrderUniqueFirstOps = Number(meta.centralBrainOperationOrderUniqueFirstOps ?? 0);
+  const centralBrainOperationOrderUniqueFullOrders = Number(meta.centralBrainOperationOrderUniqueFullOrders ?? 0);
+  const playerOperationOrderSamples = Number(meta.playerOperationOrderSamples ?? 0);
+  const playerOperationOrderUniqueFirstOps = Number(meta.playerOperationOrderUniqueFirstOps ?? 0);
+  const playerOperationOrderUniqueFullOrders = Number(meta.playerOperationOrderUniqueFullOrders ?? 0);
+  const ballOperationOrderSamples = Number(meta.ballOperationOrderSamples ?? 0);
+  const ballOperationOrderUniqueFirstOps = Number(meta.ballOperationOrderUniqueFirstOps ?? 0);
+  const ballOperationOrderUniqueFullOrders = Number(meta.ballOperationOrderUniqueFullOrders ?? 0);
+  const officialOperationOrderSamples = Number(meta.officialOperationOrderSamples ?? 0);
+  const officialOperationOrderUniqueFirstOps = Number(meta.officialOperationOrderUniqueFirstOps ?? 0);
+  const officialOperationOrderUniqueFullOrders = Number(meta.officialOperationOrderUniqueFullOrders ?? 0);
+  const playerDecisionModelSamples = Number(meta.playerDecisionModelSamples ?? 0);
+  const playerMdpGridSamples = Number(meta.playerMdpGridSamples ?? 0);
+  const playerPomdpGridSamples = Number(meta.playerPomdpGridSamples ?? 0);
+  const playerActionFacingSamples = Number(meta.playerActionFacingSamples ?? 0);
+  const playerReceiveFacingSamples = Number(meta.playerReceiveFacingSamples ?? 0);
+  const agentAccountingFrames = Number(meta.agentAccountingFrames ?? 0);
+  const agentAccountingOkFrames = Number(meta.agentAccountingOkFrames ?? 0);
+  const fullRosterFrames = Number(meta.fullRosterFrames ?? 0);
+  const completeScheduleFrames = Number(meta.completeScheduleFrames ?? 0);
+  const centralBrainDecisionFrames = Number(meta.centralBrainDecisionFrames ?? 0);
+  const ballDecisionFrames = Number(meta.ballDecisionFrames ?? 0);
+  const humanControlledPlayerDecisions = Number(meta.humanControlledPlayerDecisions ?? 0);
+  const humanInputPresentDecisions = Number(meta.humanInputPresentDecisions ?? 0);
+  const humanInputConsumedDecisions = Number(meta.humanInputConsumedDecisions ?? 0);
+  const humanInputUniqueControllerSlots = Number(meta.humanInputUniqueControllerSlots ?? 0);
+  const humanInputMaxQueueAgeMs = Number(meta.humanInputMaxQueueAgeMs ?? 0);
+  const clearShotWindowFrames = Number(meta.clearShotWindowFrames ?? 0);
+  const clearShotWindowDecisiveActions = Number(meta.clearShotWindowDecisiveActions ?? 0);
+  const clearShotWindowRecycles = Number(meta.clearShotWindowRecycles ?? 0);
+  const killerPassWindowFrames = Number(meta.killerPassWindowFrames ?? 0);
+  const killerPassWindowPasses = Number(meta.killerPassWindowPasses ?? 0);
+  const killerPassWindowRecycles = Number(meta.killerPassWindowRecycles ?? 0);
+  const sustainedPassWindow = Boolean(meta.sustainedPassWindow);
+  const sustainedShotWindow = Boolean(meta.sustainedShotWindow);
+  const passOk = meta.passActivityOk == null ? (!sustainedPassWindow || passAttempts > 0) : Boolean(meta.passActivityOk);
+  const completedOk = meta.completedPassActivityOk == null ? (!sustainedPassWindow || completedPasses > 0) : Boolean(meta.completedPassActivityOk);
+  const shotOk = meta.shotActivityOk == null ? (!sustainedShotWindow || shotAttempts > 0) : Boolean(meta.shotActivityOk);
+  const openSpaceOk = meta.openSpaceSupportOk == null ? true : Boolean(meta.openSpaceSupportOk);
+  const goalwardOk = meta.goalwardProgressOk == null ? true : Boolean(meta.goalwardProgressOk);
+  const centralBrainOperationOrderOk = meta.centralBrainOperationOrderRandomizedOk == null ? true : Boolean(meta.centralBrainOperationOrderRandomizedOk);
+  const operationOrderOk = meta.playerOperationOrderRandomizedOk == null ? true : Boolean(meta.playerOperationOrderRandomizedOk);
+  const ballOperationOrderOk = meta.ballOperationOrderRandomizedOk == null ? true : Boolean(meta.ballOperationOrderRandomizedOk);
+  const officialOperationOrderOk = meta.officialOperationOrderRandomizedOk == null ? true : Boolean(meta.officialOperationOrderRandomizedOk);
+  const decisionModelOk = meta.playerDecisionModelTraceOk == null ? true : Boolean(meta.playerDecisionModelTraceOk);
+  const agentAccountingOk = meta.agentAccountingOk == null ? true : Boolean(meta.agentAccountingOk);
+  const humanInputOk = meta.humanInputConsumedOk == null ? true : Boolean(meta.humanInputConsumedOk);
+  const clearShotOk = meta.clearShotWindowOk == null ? true : Boolean(meta.clearShotWindowOk);
+  const killerPassOk = meta.killerPassWindowOk == null ? true : Boolean(meta.killerPassWindowOk);
+  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, centralBrainOperationOrderSamples, centralBrainOperationOrderUniqueFirstOps, centralBrainOperationOrderUniqueFullOrders, playerOperationOrderSamples, playerOperationOrderUniqueFirstOps, playerOperationOrderUniqueFullOrders, ballOperationOrderSamples, ballOperationOrderUniqueFirstOps, ballOperationOrderUniqueFullOrders, officialOperationOrderSamples, officialOperationOrderUniqueFirstOps, officialOperationOrderUniqueFullOrders, playerDecisionModelSamples, playerMdpGridSamples, playerPomdpGridSamples, playerActionFacingSamples, playerReceiveFacingSamples, agentAccountingFrames, agentAccountingOkFrames, fullRosterFrames, completeScheduleFrames, centralBrainDecisionFrames, ballDecisionFrames, humanControlledPlayerDecisions, humanInputPresentDecisions, humanInputConsumedDecisions, humanInputUniqueControllerSlots, humanInputMaxQueueAgeMs, clearShotWindowFrames, clearShotWindowDecisiveActions, clearShotWindowRecycles, killerPassWindowFrames, killerPassWindowPasses, killerPassWindowRecycles, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk, centralBrainOperationOrderOk, operationOrderOk, ballOperationOrderOk, officialOperationOrderOk, decisionModelOk, agentAccountingOk, humanInputOk, clearShotOk, killerPassOk};
+}
+function tacticalLivenessLabel() {
+  const live = tacticalLivenessState();
+  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk && live.centralBrainOperationOrderOk && live.operationOrderOk && live.ballOperationOrderOk && live.officialOperationOrderOk && live.decisionModelOk && live.agentAccountingOk && live.humanInputOk && live.clearShotOk && live.killerPassOk;
+  const support = live.offBallOpenSpaceSupportKnown ? live.offBallOpenSpaceMoves : "?";
+  const goalward = live.frameLivenessKnown ? live.ballGoalwardProgressYards.toFixed(0) : "?";
+  const ops = live.frameLivenessKnown ? `${live.playerOperationOrderUniqueFirstOps}/${live.playerOperationOrderSamples}` : "?";
+  const model = live.frameLivenessKnown ? `${live.playerMdpGridSamples}/${live.playerDecisionModelSamples}` : "?";
+  const agents = live.frameLivenessKnown ? `${live.agentAccountingOkFrames}/${live.agentAccountingFrames}` : "?";
+  const human = live.frameLivenessKnown ? `${live.humanInputConsumedDecisions}/${live.humanInputPresentDecisions}` : "?";
+  const clear = live.frameLivenessKnown ? `${live.clearShotWindowDecisiveActions}/${live.clearShotWindowFrames}` : "?";
+  const killer = live.frameLivenessKnown ? `${live.killerPassWindowPasses}/${live.killerPassWindowFrames}` : "?";
+  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} M${model} A${agents} R${ops} H${human} C${clear} K${killer} O${support} G${goalward}${ok ? "" : " !"}`;
+}
+function tacticalLivenessTitle() {
+  const live = tacticalLivenessState();
+  const parts = [
+    `pass attempts=${live.passAttempts}`,
+    `completed passes=${live.completedPasses}`,
+    `shots=${live.shotAttempts}`,
+    live.offBallOpenSpaceSupportKnown
+      ? `off-ball open-space moves=${live.offBallOpenSpaceMoves}; gain=${live.offBallOpenSpaceGain.toFixed(2)}`
+      : "off-ball open-space support not measured",
+    live.frameLivenessKnown
+      ? `ball goalward progress=${live.ballGoalwardProgressYards.toFixed(2)}yd; movement=${live.ballMovementYards.toFixed(2)}yd; active frames=${live.ballActiveFrames}`
+      : "ball goalward progress not measured",
+    live.frameLivenessKnown
+      ? `central brain operation-order samples=${live.centralBrainOperationOrderSamples}; first-op diversity=${live.centralBrainOperationOrderUniqueFirstOps}; full-order diversity=${live.centralBrainOperationOrderUniqueFullOrders}`
+      : "central brain operation-order diversity not measured",
+    live.frameLivenessKnown
+      ? `player operation-order samples=${live.playerOperationOrderSamples}; first-op diversity=${live.playerOperationOrderUniqueFirstOps}; full-order diversity=${live.playerOperationOrderUniqueFullOrders}`
+      : "player operation-order diversity not measured",
+    live.frameLivenessKnown
+      ? `ball operation-order samples=${live.ballOperationOrderSamples}; first-op diversity=${live.ballOperationOrderUniqueFirstOps}; full-order diversity=${live.ballOperationOrderUniqueFullOrders}`
+      : "ball operation-order diversity not measured",
+    live.frameLivenessKnown
+      ? `official operation-order samples=${live.officialOperationOrderSamples}; first-op diversity=${live.officialOperationOrderUniqueFirstOps}; full-order diversity=${live.officialOperationOrderUniqueFullOrders}`
+      : "official operation-order diversity not measured",
+    live.frameLivenessKnown
+      ? `decision-model samples=${live.playerDecisionModelSamples}; mdp grid=${live.playerMdpGridSamples}; pomdp grid=${live.playerPomdpGridSamples}; action facing=${live.playerActionFacingSamples}; receive facing=${live.playerReceiveFacingSamples}`
+      : "decision-model liveness not measured",
+    live.frameLivenessKnown
+      ? `agent accounting frames=${live.agentAccountingOkFrames}/${live.agentAccountingFrames}; full roster=${live.fullRosterFrames}; complete schedule=${live.completeScheduleFrames}; central brain decisions=${live.centralBrainDecisionFrames}; ball decisions=${live.ballDecisionFrames}`
+      : "agent accounting liveness not measured",
+    live.frameLivenessKnown
+      ? `human input decisions=${live.humanInputConsumedDecisions}/${live.humanInputPresentDecisions}; controlled decisions=${live.humanControlledPlayerDecisions}; controller slots=${live.humanInputUniqueControllerSlots}; max queue age=${live.humanInputMaxQueueAgeMs}ms`
+      : "human input liveness not measured",
+    live.frameLivenessKnown
+      ? `clear shot windows=${live.clearShotWindowFrames}; decisive=${live.clearShotWindowDecisiveActions}; recycled=${live.clearShotWindowRecycles}`
+      : "clear shot windows not measured",
+    live.frameLivenessKnown
+      ? `killer-pass windows=${live.killerPassWindowFrames}; passes=${live.killerPassWindowPasses}; recycled=${live.killerPassWindowRecycles}`
+      : "killer-pass windows not measured",
+  ];
+  if (!live.passOk) parts.push("20s+ run has no pass attempts");
+  if (!live.completedOk) parts.push("20s+ run has no completed passes");
+  if (!live.shotOk) parts.push("45s+ run has no shots");
+  if (!live.openSpaceOk) parts.push("20s+ run has no off-ball open-space support");
+  if (!live.goalwardOk) parts.push("multi-frame run has no goalward ball progress");
+  if (!live.centralBrainOperationOrderOk) parts.push("central brain internal operation order did not vary");
+  if (!live.operationOrderOk) parts.push("player internal operation order did not vary");
+  if (!live.ballOperationOrderOk) parts.push("ball internal operation order did not vary");
+  if (!live.officialOperationOrderOk) parts.push("official internal operation order did not vary");
+  if (!live.decisionModelOk) parts.push("player MDP/POMDP decision traces are incomplete");
+  if (!live.agentAccountingOk) parts.push("agent roster/schedule accounting is incomplete");
+  if (!live.humanInputOk) parts.push("human controller input was observed but not consumed");
+  if (!live.clearShotOk) parts.push("clear 20-yard shot window was recycled");
+  if (!live.killerPassOk) parts.push("threaded goal-pass window was recycled");
+  return parts.join("; ");
 }
 function totalLoadedSeconds() {
   return Math.max(0, trace.frames.length - 1) * cadenceDtSeconds();
@@ -774,6 +1028,9 @@ function setControlsEnabled(enabled) {
   document.getElementById("shoot").disabled = !enabled;
   carryActionButton.disabled = !enabled;
   protectActionButton.disabled = !enabled;
+  killerPassActionButton.disabled = !enabled;
+  clearanceActionButton.disabled = !enabled;
+  routeOneActionButton.disabled = !enabled;
   scrub.disabled = !enabled;
   passTarget.disabled = !enabled;
   passFlight.disabled = !enabled;
@@ -788,7 +1045,14 @@ function resetTraceState() {
   trace.config = {...FALLBACK_CONFIG};
   trace.summary = {ticks: 0, stats: emptyStats()};
   trace.cadence = null;
+  trace.agentContract = null;
+  trace.decisionModel = null;
+  trace.controllerContract = null;
+  trace.physicsContract = null;
+  trace.learningContract = null;
   trace.stepTiming = null;
+  trace.controllerYield = null;
+  trace.tacticalLiveness = null;
   trace.frames = [];
   trace.events = [];
   trace.runId = null;
@@ -852,6 +1116,13 @@ function updateLoadingProgress(loadedBytes = 0, totalBytes = 0, message = "Loadi
   loadingBytes.textContent = totalBytes > 0
     ? `${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)}; ${frameProgress}`
     : `${formatBytes(loadedBytes)} streamed; ${frameProgress}`;
+  loadingProgress.setAttribute("aria-valuenow", percent.toFixed(1));
+  loadingProgress.setAttribute(
+    "aria-valuetext",
+    totalBytes > 0
+      ? `${percent.toFixed(1)} percent; ${loadingBytes.textContent}; ${loadingStatus.textContent}`
+      : `Streaming; ${loadingBytes.textContent}; ${loadingStatus.textContent}`
+  );
   updatePlaybackAvailability();
 }
 function hideLoadingOverlay() {
@@ -975,22 +1246,36 @@ function agentScheduleSummaryForFrame(f) {
   const summary = f?.agentScheduleSummary;
   if (summary && Number.isFinite(Number(summary.totalAgents))) return summary;
   const schedule = agentScheduleEntriesForFrame(f);
+  const contract = trace.agentContract || trace.playback?.agentContract || null;
   const players = schedule.filter(entry => entry.kind === "player").length;
   const officials = schedule.filter(entry => entry.kind === "official").length;
   const hasBall = schedule.some(entry => entry.kind === "ball");
   const hasCentral = schedule.some(entry => entry.kind === "centralBrain");
+  const expectedPlayers = Number(contract?.expectedPlayerCount ?? players);
+  const expectedOfficials = Number(contract?.expectedOfficialCount ?? officials);
+  const expectedTotal = Number(contract?.expectedTotalAgents ?? schedule.length);
+  const expectedFieldShuffle = Number(contract?.expectedFieldShuffleAgents ?? Math.max(0, expectedTotal - 1));
+  const fieldShuffleAgents = schedule.filter(entry => entry.kind !== "centralBrain").length;
   return {
     totalAgents: schedule.length,
-    expectedTotalAgents: schedule.length,
+    expectedTotalAgents: expectedTotal,
+    fieldShuffleAgents,
+    expectedFieldShuffleAgents: expectedFieldShuffle,
     playerCount: players,
-    expectedPlayerCount: players,
+    expectedPlayerCount: expectedPlayers,
     officialCount: officials,
-    expectedOfficialCount: officials,
+    expectedOfficialCount: expectedOfficials,
     ballCount: hasBall ? 1 : 0,
+    expectedBallCount: Number(contract?.expectedBallAgents ?? 1),
     centralBrainCount: hasCentral ? 1 : 0,
     duplicateAgents: 0,
     centralBrainFirst: schedule[0]?.kind === "centralBrain",
-    complete: schedule.length > 0 && hasBall && hasCentral
+    complete: schedule.length === expectedTotal
+      && fieldShuffleAgents === expectedFieldShuffle
+      && players === expectedPlayers
+      && officials === expectedOfficials
+      && hasBall
+      && hasCentral
   };
 }
 function agentScheduleCoverageLabel(schedule) {
@@ -1007,8 +1292,11 @@ function agentScheduleSummaryLabel(f) {
   const ball = Number(s.ballCount || 0) > 0 ? "/B" : "";
   const expected = Number(s.expectedTotalAgents || 0);
   const total = Number(s.totalAgents || 0);
+  const field = Number(s.fieldShuffleAgents || 0);
+  const expectedField = Number(s.expectedFieldShuffleAgents || 0);
+  const fieldText = expectedField > 0 ? ` F${field}/${expectedField}` : "";
   const complete = s.complete ? " ok" : ` ${total}/${expected || "?"}`;
-  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${complete}`;
+  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${fieldText}${complete}`;
 }
 function agentScheduleFullLabel(f) {
   const schedule = agentScheduleEntriesForFrame(f);
@@ -1084,6 +1372,31 @@ function intentLabel(i) {
     : "";
   return `${i.playerId} ${action}${flight} U${Number(i.urgency ?? 0).toFixed(2)}${probabilityLabel}${intentTargetGridLabel(i)}`;
 }
+function liveIntentTitle(decision) {
+  if (!decision) return "";
+  const pressure = Number(decision.decisiveGoalActionPressure ?? 0);
+  const killer = Number(decision.killerPassGoalPressure ?? 0);
+  const single = Number(decision.singleThreadGoalPressure ?? 0);
+  const outlets = Number(decision.openSupportOutlets ?? 0);
+  const space = Number(decision.targetOpenSpaceScore ?? 0);
+  const teammatePressure = Number(decision.targetTeammateOccupiedSpacePressure ?? 0);
+  const parts = [
+    `action=${String(decision.action || "move")}`,
+    `player=${Number(decision.playerId ?? 0)}`,
+    `D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}`,
+    `O${outlets.toFixed(0)} S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`,
+    `openSupportOutlets=${outlets.toFixed(0)}`,
+    `targetOpenSpaceScore=${space.toFixed(2)}`,
+    `targetTeammateOccupiedSpacePressure=${teammatePressure.toFixed(2)}`,
+    `singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled}`,
+    `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled}`,
+    `shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,
+  ];
+  if (decision.actionTarget) {
+    parts.push(`target=${JSON.stringify(decision.actionTarget)}`);
+  }
+  return parts.join("; ");
+}
 function selectedPlayerDecisionProbabilityLabel(p) {
   const compactConsidered = Number(p?.consideredActions ?? 0);
   if (compactConsidered > 0) {
@@ -1148,6 +1461,79 @@ function selectedPlayerGridFacingLabel(p) {
   const receive = String(p?.receiveFacing || p?.lastDecision?.observation?.receiveFacing || "Unknown");
   const action = String(p?.actionFacing || p?.lastDecision?.observation?.actionFacing || "Unknown");
   return ` G${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0} F${receive}->${action}`;
+}
+function gridDimensionsForLevel(level) {
+  if (level === "fine") return {columns: 12, rows: 16, label: "Fine"};
+  if (level === "tactical") return {columns: 6, rows: 8, label: "Tactical"};
+  if (level === "macro") return {columns: 3, rows: 4, label: "Macro"};
+  return null;
+}
+function gridCellForLevel(grid, level) {
+  if (!grid) return null;
+  if (level === "fine") return grid.fine || null;
+  if (level === "tactical") return grid.tactical || null;
+  if (level === "macro") return grid.macroZone || grid.macro_zone || null;
+  return null;
+}
+function selectedGridAddress() {
+  const p = selectedPlayerSnapshot();
+  return p ? gridAddressForPlayer(p) : null;
+}
+function fieldRectForGridCell(cell, level) {
+  const dims = gridDimensionsForLevel(level);
+  if (!cell || !dims) return null;
+  const columns = Math.max(1, Number(cell.columns ?? dims.columns));
+  const rows = Math.max(1, Number(cell.rows ?? dims.rows));
+  return {
+    x: Number(cell.x ?? 0) / columns,
+    y: Number(cell.y ?? 0) / rows,
+    w: 1 / columns,
+    h: 1 / rows,
+    columns,
+    rows,
+    label: dims.label
+  };
+}
+function compactNumber(value, digits = 2) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number.toFixed(digits) : Number(0).toFixed(digits);
+}
+function compactYards(value) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number)) return "0y";
+  return `${Math.round(number)}y`;
+}
+function selectedPlayerPomdpLabel(p = selectedPlayerSnapshot()) {
+  const decision = p?.lastDecision;
+  const observation = decision?.observation;
+  if (!observation) return "-";
+  const ballState = observation.hasBall ? "B" : "NoB";
+  const duel = observation.looseBallFiftyFifty ? " 50:50" : "";
+  const goal = `G${compactYards(observation.yardsToGoal)}`;
+  const pressure = `P${compactNumber(observation.perceivedPressure)} U${compactNumber(observation.decisionUrgency)}`;
+  const pass = `F${Number(observation.visibleForwardPassOptions ?? 0)}/${Number(observation.visiblePassOptions ?? 0)} O${Number(observation.openSupportOutlets ?? 0)} C${compactNumber(observation.expectedPassCompletion)}`;
+  const shot = `S${observation.shotLaneOpen ? "O" : "B"} ${compactNumber(observation.shotBeatGoalkeeperProbability)}`;
+  return `${ballState}${duel} ${goal} ${pressure} ${pass} ${shot}`;
+}
+function selectedPlayerPomdpTitle(p = selectedPlayerSnapshot()) {
+  const decision = p?.lastDecision;
+  const observation = decision?.observation;
+  if (!observation) return "No selected-player decision trace";
+  const state = decision?.mdpState || {};
+  const grid = observation.playerGrid || state.playerGrid || gridAddressForPlayer(p);
+  const fine = grid?.fine || {};
+  const tactical = grid?.tactical || {};
+  const macro = grid?.macroZone || grid?.macro_zone || {};
+  const parts = [
+    `Action: ${String(decision.action || p?.lastAction || "-")}`,
+    `State: phase=${String(state.phase || "-")} possession=${String(state.possessionTeam ?? "-")} grid=${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0} facing=${String(observation.receiveFacing || state.receiveFacing || "Unknown")}->${String(observation.actionFacing || state.actionFacing || "Unknown")}`,
+    `Goal: toGoal=${compactYards(observation.yardsToGoal)} ownGoal=${compactYards(observation.yardsToOwnGoal)} angle=${compactNumber(observation.opponentGoalAngleDegrees, 1)} forwardSpace=${compactYards(observation.forwardDribbleSpaceYards)}`,
+    `Pressure: real=${compactNumber(observation.realPressure)} perceived=${compactNumber(observation.perceivedPressure)} urgency=${compactNumber(observation.decisionUrgency)} attack=${compactNumber(observation.offensiveUrgency)} defend=${compactNumber(observation.defensiveUrgency)}`,
+    `Pass: visible=${Number(observation.visiblePassOptions ?? 0)} forward=${Number(observation.visibleForwardPassOptions ?? 0)} aerial=${Number(observation.visibleAerialPassOptions ?? 0)} openSupport=${Number(observation.openSupportOutlets ?? 0)} completion=${compactNumber(observation.expectedPassCompletion)} aerialCompletion=${compactNumber(observation.expectedAerialPassCompletion)} openness=${compactNumber(observation.bestForwardPassReceiverOpenness)} lane=${compactNumber(observation.floorPassLaneScore)} stride=${compactNumber(observation.bestPassStrideFit)}`,
+    `Shot: lane=${observation.shotLaneOpen ? "open" : "blocked"} block=${compactNumber(observation.shotBlockProbability)} onFrame=${compactNumber(observation.shotOnFrameProbability)} beatGK=${compactNumber(observation.shotBeatGoalkeeperProbability)} curl=${compactNumber(observation.shotCurlProbability)}`,
+    `Loose: loose=${observation.looseBall ? "yes" : "no"} duel=${observation.looseBallFiftyFifty ? "yes" : "no"} timeToBall=${compactNumber(observation.looseBallPlayerTimeToBallSeconds)} advantage=${compactNumber(observation.looseBallTeamTimeAdvantageSeconds)}`,
+  ];
+  return parts.join("\n");
 }
 function vecLen(v) {
   if (!v) return 0;
@@ -1363,6 +1749,80 @@ function drawPitch(r) {
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
   drawGoalPosts(r);
 }
+function drawPitchGridOverlay(r) {
+  const level = gridOverlayLevel.value;
+  const dims = gridDimensionsForLevel(level);
+  if (!dims) return;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.22)";
+  ctx.lineWidth = level === "fine" ? 0.75 : 1.25;
+  ctx.setLineDash(level === "fine" ? [2, 5] : []);
+  for (let column = 1; column < dims.columns; column++) {
+    const x = r.x + r.w * column / dims.columns;
+    ctx.beginPath();
+    ctx.moveTo(x, r.y);
+    ctx.lineTo(x, r.y + r.h);
+    ctx.stroke();
+  }
+  for (let row = 1; row < dims.rows; row++) {
+    const y = r.y + r.h * row / dims.rows;
+    ctx.beginPath();
+    ctx.moveTo(r.x, y);
+    ctx.lineTo(r.x + r.w, y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  const selected = fieldRectForGridCell(gridCellForLevel(selectedGridAddress(), level), level);
+  if (selected) {
+    const x = r.x + selected.x * r.w;
+    const y = r.y + (1 - selected.y - selected.h) * r.h;
+    const w = selected.w * r.w;
+    const h = selected.h * r.h;
+    ctx.fillStyle = "rgba(246,201,68,.16)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "rgba(246,201,68,.86)";
+    ctx.lineWidth = 2.25;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = "rgba(17,24,39,.78)";
+    ctx.fillRect(x + 5, y + 5, 64, 18);
+    ctx.fillStyle = "#fff4c2";
+    ctx.font = "700 11px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${selected.label} ${Math.round(selected.x * selected.columns)},${Math.round(selected.y * selected.rows)}`, x + 10, y + 14);
+  }
+  ctx.restore();
+}
+function assistantOffsideLines(frame = currentFrame()) {
+  if (!Array.isArray(frame?.officials)) return [];
+  const seen = new Set();
+  const lines = [];
+  for (const official of frame.officials) {
+    const line = official.offsideLine || official.offside_line;
+    if (!line) continue;
+    const key = `${line.attackingTeam || line.attacking_team}:${Number(line.effectiveLineY ?? line.effective_line_y ?? 0).toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(line);
+  }
+  return lines;
+}
+function drawAssistantOffsideLines(f, r) {
+  for (const line of assistantOffsideLines(f)) {
+    const y = mapPoint({x: 0, y: Number(line.effectiveLineY ?? line.effective_line_y ?? 0)}, r).y;
+    const attackingTeam = line.attackingTeam || line.attacking_team;
+    ctx.beginPath();
+    ctx.moveTo(r.x, y);
+    ctx.lineTo(r.x + r.w, y);
+    ctx.strokeStyle = attackingTeam === "Home" ? "rgba(31,111,235,.72)" : "rgba(214,69,69,.72)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([9, 7]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
 function drawGoalPosts(r) {
   const config = trace.config || FALLBACK_CONFIG;
   const fieldWidth = Number(config.fieldWidthYards || 80);
@@ -1456,6 +1916,85 @@ function drawIntentTraces(f, r) {
     }
   }
 }
+function pendingPassPhase(frame = currentFrame()) {
+  return frame?.pendingPass || frame?.pending_pass || null;
+}
+function yardsToCanvasRadius(yards, r) {
+  const config = trace.config || FALLBACK_CONFIG;
+  return Number(yards || 0)
+    * ((r.w / Number(config.fieldWidthYards || 80)) + (r.h / Number(config.fieldLengthYards || 120)))
+    * 0.5;
+}
+function drawPendingPassPhase(f, r) {
+  const pass = pendingPassPhase(f);
+  if (!pass?.origin || !pass?.intendedTarget) return;
+  const from = mapPoint(pass.origin, r);
+  const to = mapPoint(pass.intendedTarget, r);
+  const aerial = String(pass.flight || "").toLowerCase() === "aerial";
+  const offside = pass.offside || null;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.strokeStyle = offside ? "rgba(239,68,68,.86)" : aerial ? "rgba(246,201,68,.68)" : "rgba(255,255,255,.58)";
+  ctx.lineWidth = offside ? 3 : 2;
+  ctx.setLineDash(aerial ? [8, 6] : []);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const urgency = Math.max(0, Math.min(1, Number(pass.receiverUrgency ?? 0)));
+  const receiverId = pass.nearestReceiver ?? pass.nearest_receiver;
+  const receiver = receiverId != null ? f?.players?.find(player => player.id === receiverId) : null;
+  if (receiver?.position) {
+    const pt = mapPoint(receiver.position, r);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 15 + urgency * 9, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(246,201,68,${0.28 + urgency * 0.42})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  if (offside?.position) {
+    const pt = mapPoint(offside.position, r);
+    const radius = yardsToCanvasRadius(offside.interferenceRadiusYards ?? offside.interference_radius_yards ?? 3, r);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(239,68,68,.82)";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(239,68,68,.16)";
+    ctx.fill();
+  }
+  ctx.restore();
+}
+function pendingReboundPhase(frame = currentFrame()) {
+  return frame?.pendingRebound || frame?.pending_rebound || null;
+}
+function drawPendingReboundPhase(f, r) {
+  const rebound = pendingReboundPhase(f);
+  const parry = rebound?.parryPosition || rebound?.parry_position;
+  if (!parry) return;
+  const target = mapPoint(parry, r);
+  const keeperId = rebound.keeperId ?? rebound.keeper_id;
+  const keeper = f?.players?.find(player => player.id === keeperId);
+  const pulse = 0.5 + Math.sin(Number(f?.tick || 0) * 0.75) * 0.5;
+  ctx.save();
+  if (keeper?.position) {
+    drawArrow(mapPoint(keeper.position, r), target, "rgba(246,201,68,.64)", 2.25, true);
+  }
+  ctx.beginPath();
+  ctx.arc(target.x, target.y, 21 + pulse * 5, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(246,201,68,.92)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(target.x, target.y, 7, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,.84)";
+  ctx.fill();
+  ctx.strokeStyle = "#7a4b00";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
 function gaitCueStrength(gait) {
   const key = String(gait || "stand").toLowerCase();
   if (key.includes("sprint")) return 1.0;
@@ -1546,8 +2085,12 @@ function drawBall(ball, r) {
 function render() {
   const r = pitchRect();
   drawPitch(r);
+  drawPitchGridOverlay(r);
   const f = currentFrame();
   if (!f) return;
+  drawAssistantOffsideLines(f, r);
+  drawPendingPassPhase(f, r);
+  drawPendingReboundPhase(f, r);
   drawIntentTraces(f, r);
   for (const o of f.officials) drawOfficial(o, r);
   for (const p of f.players) drawPlayer(p, r);
@@ -1569,7 +2112,9 @@ function render() {
     : "";
   officialAgents.textContent = officialAgentsLabel(f);
   officialAgents.title = officialAgentsTitle(f);
-  actionIntent.textContent = intentLabel(primaryIntent(f));
+  const intent = primaryIntent(f);
+  actionIntent.textContent = intentLabel(intent);
+  actionIntent.title = liveIntentTitle(primaryIntent(f));
   ticks.textContent = `${f.tick} / ${trace.summary.ticks}`;
   updateAgentStatePanel();
   scrub.value = frameIndex;
@@ -1579,7 +2124,11 @@ function updateMetrics() {
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
+  gkPhysics.textContent = goalkeeperPhysicsLabel();
+  gkPhysics.title = goalkeeperPhysicsTitle();
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
+  tacticalLiveness.textContent = tacticalLivenessLabel();
+  tacticalLiveness.title = tacticalLivenessTitle();
   dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
   clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
   routeOne.textContent = `${s.routeOneBallsHome ?? 0} - ${s.routeOneBallsAway ?? 0}`;
@@ -1603,9 +2152,12 @@ function updateMetrics() {
   stepBudget.title = stepBudgetTitle();
   seed.textContent = trace.config?.seed ?? "-";
   runId.textContent = runIdLabel();
+  controllerRuntime.textContent = controllerRuntimeLabel();
+  controllerRuntime.title = controllerRuntimeTitle();
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function tick(ts) {
+  queueGamepadInputs();
   if (!lastTs) lastTs = ts;
   const elapsed = ts - lastTs;
   const fps = 10 * Number(speed.value);
@@ -1636,11 +2188,97 @@ function isFormEditingTarget(target) {
 function selectedPassTarget() {
   return passTarget.value === "" ? null : Number(passTarget.value);
 }
+function maxHumanControllerSlots() {
+  const contractSlots = Number(trace.controllerContract?.maxHumanControllers);
+  return contractSlots > 0 ? contractSlots : 4;
+}
+function controllerInputRuntimeMode() {
+  return trace.controllerContract?.notificationDrivenInput ? "notify" : "poll";
+}
+function controllerRuntimeLabel() {
+  const contract = trace.controllerContract || {};
+  const yieldStats = trace.controllerYield || {};
+  const maxSlots = Number(contract.maxHumanControllers ?? maxHumanControllerSlots());
+  const configured = Number(contract.configuredHumanControllers ?? visibleHumanSlotCount());
+  const threads = contract.nativeThreadPerControllerEnabled ? "threads" : "direct";
+  const mode = contract.notificationDrivenInput ? "notify" : "poll";
+  const yieldMs = Number(contract.yieldBudgetMs ?? 0);
+  const debounceMs = Number(contract.defaultDebounceMs ?? 0);
+  const relevant = Number(yieldStats.relevantNotifiedWaits ?? 0);
+  const waits = Number(yieldStats.waitAttempts ?? 0);
+  const wake = waits > 0 ? ` R${relevant}/${waits}` : "";
+  return `${configured}/${maxSlots} ${threads} ${mode} Y${yieldMs} D${debounceMs}${wake}`;
+}
+function controllerRuntimeTitle() {
+  const contract = trace.controllerContract || {};
+  const yieldStats = trace.controllerYield || {};
+  if (!trace.controllerContract) return "Controller runtime contract not loaded";
+  const parts = [
+    `maxHumanControllers=${contract.maxHumanControllers}`,
+    `configuredHumanControllers=${contract.configuredHumanControllers}`,
+    `nativeThreadPerController=${contract.nativeThreadPerControllerEnabled}`,
+    `singleThreadedSimulationLoop=${contract.singleThreadedSimulationLoop}`,
+    `sharedInputQueueUsesRwLock=${contract.sharedInputQueueUsesRwLock}`,
+    `controllerMailboxUsesCondvar=${contract.controllerMailboxUsesCondvar}`,
+    `mainLoopUsesCondvarYield=${contract.mainLoopUsesCondvarYield}`,
+    `notificationDrivenInput=${contract.notificationDrivenInput}`,
+    `sameSlotCoalescing=${contract.sameSlotCoalescingEnabled}`,
+    `debounceMs=${contract.defaultDebounceMs}`,
+    `coalesceMs=${contract.coalesceMs}`,
+    `yieldBudgetMs=${contract.yieldBudgetMs}`,
+    `lateYieldSliceMs=${contract.lateYieldSliceMs}`,
+    `queueLimit=${contract.queueLimit}`,
+    `maxQueueAgeMs=${contract.maxQueueAgeMs}`,
+    `threadNamePrefix=${contract.threadNamePrefix}`,
+    `assignedPlayers=${yieldStats.assignedPlayers ?? 0}`,
+    `waitAttempts=${yieldStats.waitAttempts ?? 0}`,
+    `relevantNotifiedWaits=${yieldStats.relevantNotifiedWaits ?? 0}`,
+    `lastRelevantNotified=${yieldStats.lastRelevantNotified ?? false}`,
+    `lastRelevantVersion=${yieldStats.lastRelevantVersionBefore ?? 0}->${yieldStats.lastRelevantVersionAfter ?? 0}`,
+  ];
+  return parts.join("\n");
+}
+function physicsHistoryWindowSeconds() {
+  return Number(trace.physicsContract?.playerHistoryWindowSeconds || trace.physicsContract?.ballHistoryWindowSeconds || 0);
+}
+function goalkeeperPhysicsLabel() {
+  const contract = trace.physicsContract || {};
+  const saveCap = Number(contract.goalkeeperClearSightlineSaveCap ?? 0);
+  const parryMin = Number(contract.goalkeeperParryMinYards ?? 0);
+  const parryMax = Number(contract.goalkeeperParryMaxYards ?? 0);
+  const rebound = contract.goalkeeperParryReboundEnabled ? "reb" : "catch";
+  if (saveCap > 0 && parryMin > 0 && parryMax > 0) {
+    return `cap ${(saveCap * 100).toFixed(0)}% ${rebound} ${parryMin.toFixed(0)}-${parryMax.toFixed(0)}y`;
+  }
+  return "save/parry";
+}
+function goalkeeperPhysicsTitle() {
+  const contract = trace.physicsContract || {};
+  if (!trace.physicsContract) return "Goalkeeper physics contract not loaded";
+  const parts = [
+    `saveUsesDistanceAndSightline=${contract.goalkeeperSaveProbabilityUsesDistanceAndSightline}`,
+    `clearSightlineSaveCap=${contract.goalkeeperClearSightlineSaveCap}`,
+    `catchUsesDistanceSpeedSightline=${contract.goalkeeperCatchProbabilityUsesDistanceSpeedSightline}`,
+    `parryReboundEnabled=${contract.goalkeeperParryReboundEnabled}`,
+    `parryRangeYards=${contract.goalkeeperParryMinYards}-${contract.goalkeeperParryMaxYards}`,
+    `closeHardShotsCanCreateRebounds=${contract.closeHardShotsCanCreateRebounds}`,
+  ];
+  return parts.join("\n");
+}
+function learningPersistenceLabel() {
+  const contract = trace.learningContract || trace.playback?.learningContract || null;
+  if (!contract) return "learn ?";
+  const mode = contract.learningEnabled ? "learn" : "observe";
+  const backend = contract.policyPersistenceBackend || "json";
+  const retention = contract.policyPersistenceStoresAllWeightHistory ? "history" : "tip";
+  const batched = contract.policyPersistenceExternalWritesPerTimestep === false ? "batched" : "per-tick?";
+  return `${mode} ${backend} ${retention} ${batched}`;
+}
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);
   const fallback = Number(FALLBACK_CONFIG.maxHumanPlayers || 4);
   const slotCount = configured > 0 ? configured : fallback;
-  return Math.min(Math.max(slotCount, 0), 4);
+  return Math.min(Math.max(slotCount, 0), maxHumanControllerSlots());
 }
 function keyName(code) {
   return String(code || "")
@@ -1763,35 +2401,87 @@ function scheduleInputFlush(delayMs = LIVE_INPUT_FLUSH_INTERVAL_MS) {
 }
 function scheduleInputRetry() {
   inputFlushRetryAttempt = Math.min(inputFlushRetryAttempt + 1, 6);
+  updateInputStatusLabels();
   const delay = Math.min(
     LIVE_INPUT_RETRY_MAX_MS,
     LIVE_INPUT_RETRY_MIN_MS * inputFlushRetryAttempt
   );
   scheduleInputFlush(delay);
 }
+function slotQueuedInputCount(slot) {
+  return window.__humanInputQueue.filter(input => Number(input.controllerSlot) === slot).length;
+}
+function latestQueuedInputSeq(slot) {
+  return window.__humanInputQueue.reduce((max, input) => {
+    if (Number(input.controllerSlot) !== slot) return max;
+    return Math.max(max, Number(input.seq || 0));
+  }, 0);
+}
+function inputStatusLabel(slot) {
+  const queued = slotQueuedInputCount(slot);
+  const latestSeq = latestQueuedInputSeq(slot);
+  const sending = inputFlushInFlight ? " sending" : "";
+  const retry = inputFlushRetryAttempt > 0 ? ` retry${inputFlushRetryAttempt}` : "";
+  const offline = lastInputAck.error ? " offline" : "";
+  const serverQueued = Number(lastInputAck.queuedHumanInputs || 0);
+  const accepted = Number(lastInputAck.acceptedInputs || 0);
+  if (queued > 0) return `Input Q${queued}${latestSeq ? ` #${latestSeq}` : ""}${sending}${retry}${offline}`;
+  if (serverQueued > 0) return `Input server Q${serverQueued}${sending}${retry}${offline}`;
+  if (accepted > 0 && performance.now() - Number(lastInputAck.at || 0) < 2500) {
+    return `Input ok +${accepted}`;
+  }
+  return "Input ready";
+}
+function updateInputStatusLabels() {
+  for (let slot = 0; slot < visibleHumanSlotCount(); slot++) {
+    const status = document.getElementById(`slot-input-${slot}`);
+    if (!status) continue;
+    const label = inputStatusLabel(slot);
+    status.textContent = label;
+    status.classList.toggle("bad", label.includes("offline"));
+    status.classList.toggle("warn", label.includes("Q") || label.includes("retry"));
+  }
+}
 async function flushQueuedInputsToInputApi() {
   inputFlushTimer = null;
   if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
   inputFlushInFlight = true;
-  const inputs = window.__humanInputQueue.slice();
+  updateInputStatusLabels();
+  const inputs = drainQueuedInputsForDispatch();
   let accepted = false;
+  let requeued = false;
   try {
     const ack = await postSoccerJson("/api/input", inputs, "input");
+    lastInputAck = {
+      acceptedInputs: Number(ack?.acceptedInputs || 0),
+      queuedHumanInputs: Number(ack?.queuedHumanInputs || 0),
+      error: "",
+      at: performance.now()
+    };
     if (Number(ack?.acceptedInputs ?? 0) > 0 || ack?.queued) {
-      const newestSeq = inputs.reduce((max, input) => Math.max(max, Number(input.seq || 0)), 0);
-      window.__humanInputQueue = window.__humanInputQueue.filter(input => Number(input.seq || 0) > newestSeq);
       inputFlushRetryAttempt = 0;
       accepted = true;
     }
   } catch (err) {
+    requeueInputFrames(inputs);
+    requeued = true;
+    lastInputAck = {
+      ...lastInputAck,
+      error: String(err?.message || err || "input sync unavailable"),
+      at: performance.now()
+    };
     console.warn("live input sync unavailable; keeping local input queue", err);
   } finally {
     inputFlushInFlight = false;
-    if (window.__humanInputQueue.length > inputs.length) {
+    if (!accepted && !requeued && inputs.length > 0) {
+      requeueInputFrames(inputs);
+    }
+    if (accepted && window.__humanInputQueue.length > 0) {
       scheduleInputFlush(0);
     } else if (!accepted && window.__humanInputQueue.length > 0) {
       scheduleInputRetry();
     }
+    updateInputStatusLabels();
   }
 }
 function updateAgentStatePanel() {
@@ -1801,6 +2491,8 @@ function updateAgentStatePanel() {
     agentKinematics.textContent = "-";
     agentShotLane.textContent = "-";
     agentTactical.textContent = "-";
+    agentPomdp.textContent = "-";
+    agentPomdp.title = "";
     return;
   }
   agentSelected.textContent = `${p.team} ${p.shirt} ${p.name}`;
@@ -1811,6 +2503,8 @@ function updateAgentStatePanel() {
   );
   agentShotLane.textContent = selectedPlayerShotLaneLabel();
   agentTactical.textContent = selectedPlayerTacticalLabel(p);
+  agentPomdp.textContent = selectedPlayerPomdpLabel(p);
+  agentPomdp.title = selectedPlayerPomdpTitle(p);
 }
 function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
   const observation = p?.lastDecision?.observation;
@@ -1871,27 +2565,104 @@ function controllerSprintForSlot(slot) {
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   return keys.has(map.sprint);
 }
-function queueSlotInput(slot, pass = false, shoot = false, action = null) {
+function isPassLikeHumanAction(action) {
+  const normalizedAction = String(action || "").toLowerCase();
+  return ["pass", "aerial-pass", "killer-pass"].includes(normalizedAction);
+}
+function queueControllerFrame(slot, axis, sprint, pass = false, shoot = false, action = null) {
   const playerId = selectedPlayer(slot);
   if (playerId == null) return false;
+  const passLike = pass || isPassLikeHumanAction(action);
   setActiveSlot(slot);
-  const axis = controllerAxisForSlot(slot);
   window.dispatchHumanInput({
     controllerSlot: slot,
     playerId,
     seq: ++inputSeq,
     axis,
     sprint: controllerSprintForSlot(slot),
-    pass,
-    passFlight: pass ? passFlight.value : "floor",
+    pass: passLike,
+    passFlight: passLike ? passFlight.value : "floor",
     shoot,
     action,
-    targetPlayer: pass ? selectedPassTarget() : null
+    targetPlayer: passLike ? selectedPassTarget() : null
   });
   return true;
 }
+function queueSlotInput(slot, pass = false, shoot = false, action = null) {
+  return queueControllerFrame(
+    slot,
+    controllerAxisForSlot(slot),
+    controllerSprintForSlot(slot),
+    pass,
+    shoot,
+    action
+  );
+}
 function pushInput(pass = false, shoot = false, action = null) {
   return queueSlotInput(activeSlot, pass, shoot, action);
+}
+function gamepadButtonPressed(gamepad, buttonIndex) {
+  const button = gamepad?.buttons?.[buttonIndex];
+  return Boolean(button?.pressed || Number(button?.value || 0) > 0.50);
+}
+function gamepadPressedThisPulse(slot, gamepad, buttonIndex) {
+  const key = `${slot}:${Number(gamepad?.index ?? slot)}:${buttonIndex}`;
+  const pressed = gamepadButtonPressed(gamepad, buttonIndex);
+  const wasPressed = gamepadButtonLatch.get(key) === true;
+  gamepadButtonLatch.set(key, pressed);
+  return pressed && !wasPressed;
+}
+function gamepadAxisValue(value) {
+  const v = Number(value || 0);
+  if (Math.abs(v) < GAMEPAD_STICK_DEADZONE) return 0;
+  return Math.max(-1, Math.min(1, v));
+}
+function axisFromGamepad(gamepad) {
+  const axis = {
+    x: gamepadAxisValue(gamepad?.axes?.[0]),
+    y: -gamepadAxisValue(gamepad?.axes?.[1])
+  };
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadLeft)) axis.x -= 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadRight)) axis.x += 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadUp)) axis.y += 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadDown)) axis.y -= 1;
+  const length = Math.hypot(axis.x, axis.y);
+  return length > 1 ? {x: axis.x / length, y: axis.y / length} : axis;
+}
+function connectedGamepads() {
+  if (typeof navigator === "undefined" || typeof navigator.getGamepads !== "function") return [];
+  return Array.from(navigator.getGamepads()).filter(Boolean);
+}
+function gamepadForSlot(slot) {
+  const pads = connectedGamepads();
+  return pads.find(pad => Number(pad.index) === slot) || pads[slot] || null;
+}
+function gamepadActionForSlot(slot, gamepad) {
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.carry)) return "carry-forward";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.protect)) return "protect-ball";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.clearance)) return "clearance";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.routeOne)) return "route-one";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.killerPass)) return "killer-pass";
+  return null;
+}
+function queueGamepadInputs() {
+  let queued = 0;
+  for (let slot = 0; slot < visibleHumanSlotCount(); slot++) {
+    const gamepad = gamepadForSlot(slot);
+    if (!gamepad || selectedPlayer(slot) == null) continue;
+    const axis = axisFromGamepad(gamepad);
+    const sprint = gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.sprint);
+    const actionPressed = gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.action);
+    const passPressed = gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.pass);
+    const explicitAction = gamepadActionForSlot(slot, gamepad);
+    const shoot = actionPressed && (sprint || selectedPlayerCanShoot(slot));
+    const pass = passPressed || (actionPressed && !shoot);
+    if (axis.x !== 0 || axis.y !== 0 || sprint || pass || shoot || explicitAction != null) {
+      if (queueControllerFrame(slot, axis, sprint, pass, shoot, explicitAction)) queued++;
+    }
+  }
+  if (queued > 0) scheduleInputFlush(0);
+  return queued;
 }
 function rebuildPassTargets() {
   const frame = currentFrame();
@@ -1945,6 +2716,10 @@ function buildSlots() {
     const keymap = document.createElement("div");
     keymap.className = "keymap";
     keymap.textContent = controllerKeymapLabel(i);
+    const inputStatus = document.createElement("div");
+    inputStatus.className = "input-status";
+    inputStatus.id = `slot-input-${i}`;
+    inputStatus.textContent = "Input ready";
     select.addEventListener("focus", () => { setActiveSlot(i); syncStaticSlotAvailability(); });
     select.addEventListener("change", () => {
       setActiveSlot(i);
@@ -1960,11 +2735,12 @@ function buildSlots() {
       render();
       syncControllerAssignment(i, selected);
     });
-    row.append(label, select, keymap);
+    row.append(label, select, keymap, inputStatus);
     slots.appendChild(row);
   }
   refreshActiveSlotRows();
   syncStaticSlotAvailability();
+  updateInputStatusLabels();
   rebuildPassTargets();
 }
 
@@ -1985,7 +2761,14 @@ async function loadTraceMeta(signal) {
   trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
   trace.summary.stats = trace.summary.stats || emptyStats();
   trace.cadence = meta.cadence || meta.playback?.cadence || null;
+  trace.agentContract = meta.agentContract || meta.playback?.agentContract || null;
+  trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null;
+  trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null;
+  trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null;
+  trace.learningContract = meta.learningContract || meta.playback?.learningContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
+  trace.controllerYield = meta.controllerYield || meta.controller_yield || meta.playback?.controllerYield || null;
+  trace.tacticalLiveness = meta.tacticalLiveness || meta.playback?.tacticalLiveness || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;
   trace.generatedAtUnixMs = meta.generatedAtUnixMs || null;
@@ -2008,7 +2791,7 @@ async function loadTraceFrames(signal) {
   if (!response.body || !response.body.getReader) {
     updateLoadingProgress(0, totalBytes, "Downloading frames");
     const text = await response.text();
-    loadedBytes = text.length;
+    loadedBytes = textByteLength(text);
     for (const line of text.split(/\n/)) appendFrameLine(line);
     traceFramesComplete = true;
     updateLoadingProgress(loadedBytes, totalBytes || loadedBytes, "Frames loaded");
@@ -2054,16 +2837,19 @@ async function bootstrapTrace(options = {}) {
     if (err.name === "AbortError") return;
     playing = false;
     loadingBar.style.width = "100%";
+    loadingProgress.setAttribute("aria-valuenow", "100");
     if (err.name === "AuthRequiredError") {
       setLoadingTitle("Authentication required", "auth");
       loadingStatus.textContent = `Auth required: ${err.message}`;
       loadingBytes.textContent = "Enter the legacy Auth header to load the split trace";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Auth required";
       authToken.focus();
     } else {
       setLoadingTitle("Load failed", "failed");
       loadingStatus.textContent = `Load failed: ${err.message}`;
       loadingBytes.textContent = "Retry after redeploying the split trace artifacts";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Load failed";
     }
     setControlsEnabled(false);
@@ -2093,16 +2879,19 @@ async function runNewSimulation() {
     assertFreshRunLoaded(previousRunKey);
   } catch (err) {
     loadingBar.style.width = "100%";
+    loadingProgress.setAttribute("aria-valuenow", "100");
     if (err.name === "AuthRequiredError") {
       setLoadingTitle("Authentication required", "auth");
       loadingStatus.textContent = `Auth required: ${err.message}`;
       loadingBytes.textContent = "Enter the legacy Auth header to run a fresh simulation";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Auth required";
       authToken.focus();
     } else {
       setLoadingTitle("Run failed", "failed");
       loadingStatus.textContent = `Run failed: ${err.message}`;
       loadingBytes.textContent = "main_soccer did not produce a fresh split trace";
+      loadingProgress.setAttribute("aria-valuetext", loadingStatus.textContent);
       play.textContent = "Run failed";
     }
   } finally {
@@ -2119,6 +2908,7 @@ play.addEventListener("click", () => {
   play.textContent = playing ? "Pause" : "Play";
 });
 runNewSimButton.addEventListener("click", runNewSimulation);
+gridOverlayLevel.addEventListener("change", () => render());
 authForm.addEventListener("submit", e => {
   e.preventDefault();
   const token = authToken.value.trim();
@@ -2142,9 +2932,19 @@ document.getElementById("pass").addEventListener("click", () => pushInput(true, 
 document.getElementById("shoot").addEventListener("click", () => pushInput(false, true));
 carryActionButton.addEventListener("click", () => pushInput(false, false, "carry-forward"));
 protectActionButton.addEventListener("click", () => pushInput(false, false, "protect-ball"));
+killerPassActionButton.addEventListener("click", () => pushInput(true, false, "killer-pass"));
+clearanceActionButton.addEventListener("click", () => pushInput(false, false, "clearance"));
+routeOneActionButton.addEventListener("click", () => pushInput(false, false, "route-one"));
 window.addEventListener("keydown", e => {
   if (isFormEditingTarget(e.target)) return;
   keys.add(e.code);
+  if (e.code === "KeyT" || e.code === "KeyC" || e.code === "KeyR") {
+    e.preventDefault();
+    if (!e.repeat && e.code === "KeyT") pushInput(true, false, "killer-pass");
+    if (!e.repeat && e.code === "KeyC") pushInput(false, false, "clearance");
+    if (!e.repeat && e.code === "KeyR") pushInput(false, false, "route-one");
+    return;
+  }
   if (/^Digit[1-4]$/.test(e.code)) {
     const slot = Number(e.code.slice(-1)) - 1;
     if (slot < visibleHumanSlotCount()) {

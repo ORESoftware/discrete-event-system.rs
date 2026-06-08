@@ -56,15 +56,23 @@ fn routing_reference_force_python_value(value: &str) -> bool {
 }
 
 fn routing_python_reference_forced() -> bool {
-    [
+    let routing_specific = [
         "ROUTING_REFERENCE_FORCE_PYTHON",
         "ROUTING_REFERENCE_ORTOOLS_FORCE_PYTHON",
-        "ORES_EXTERNAL_REFERENCE_FORCE_PYTHON",
     ]
     .into_iter()
-    .any(|key| {
-        std::env::var(key)
-            .map(|value| routing_reference_force_python_value(&value))
+    .filter_map(|key| std::env::var(key).ok())
+    .collect::<Vec<_>>();
+    if !routing_specific.is_empty() {
+        return routing_specific
+            .iter()
+            .any(|value| routing_reference_force_python_value(value));
+    }
+    ["ORES_EXTERNAL_REFERENCE_FORCE_PYTHON"]
+        .into_iter()
+        .any(|key| {
+            std::env::var(key)
+                .map(|value| routing_reference_force_python_value(&value))
             .unwrap_or(false)
     })
 }
@@ -608,7 +616,9 @@ fn run_ortools_routing_reference(
             )
         }
     };
-    let python = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+    let python = std::env::var("ROUTING_REFERENCE_PYTHON_BIN")
+        .or_else(|_| std::env::var("PYTHON_BIN"))
+        .unwrap_or_else(|_| "python3".to_string());
     let mut command = Command::new(&python);
     command.arg("-c").arg(ORTOOLS_ROUTING_ADAPTER);
     let mut child = match command
@@ -886,8 +896,10 @@ mod tests {
     fn registered_ortools_alias_defaults_to_rust_reference_without_python() {
         let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
         let _force_python_guards = routing_force_python_off_guards();
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-routing-alias");
+        let _python_guard = EnvVarGuard::set(
+            "ROUTING_REFERENCE_PYTHON_BIN",
+            "/definitely/not-python-for-routing-alias",
+        );
         let solution = solve_cvrp_with_external_reference(
             Point { x: 0.0, y: 0.0 },
             &sample_customers(),
@@ -920,8 +932,10 @@ mod tests {
     fn routing_force_python_keeps_ortools_bridge_available() {
         let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
         let _force_python_guard = EnvVarGuard::set("ROUTING_REFERENCE_FORCE_PYTHON", "1");
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-python-for-forced-routing");
+        let _python_guard = EnvVarGuard::set(
+            "ROUTING_REFERENCE_PYTHON_BIN",
+            "/definitely/not-python-for-forced-routing",
+        );
         let solution = solve_cvrp_with_external_reference(
             Point { x: 0.0, y: 0.0 },
             &sample_customers(),
@@ -956,8 +970,10 @@ mod tests {
     fn ortools_adapter_reports_startup_without_repo_script() {
         let _lock = ROUTING_REFERENCE_ENV_LOCK.lock().expect("lock env guard");
         let _force_python_guard = EnvVarGuard::set("ROUTING_REFERENCE_FORCE_PYTHON", "1");
-        let _python_guard =
-            EnvVarGuard::set("PYTHON_BIN", "/definitely/not-a-python-for-routing-ortools");
+        let _python_guard = EnvVarGuard::set(
+            "ROUTING_REFERENCE_PYTHON_BIN",
+            "/definitely/not-a-python-for-routing-ortools",
+        );
         let solution = solve_cvrp_with_external_reference(
             Point { x: 0.0, y: 0.0 },
             &sample_customers(),

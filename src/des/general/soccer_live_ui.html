@@ -371,6 +371,7 @@
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
+      <div class="metric"><span>GK Physics</span><b id="gkPhysics">save/parry</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
       <div class="metric"><span>Dribble Beats</span><b id="dribbleBeats">0 - 0</b></div>
       <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
@@ -393,6 +394,9 @@
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Step</span><b id="matchStep">dt 0.1s 10:00</b></div>
       <div class="metric"><span>Speed</span><b id="simSpeed">20x 20t</b></div>
+      <div class="metric"><span>Contracts</span><b id="runtimeContracts">pending</b></div>
+      <div class="metric"><span>Accounting</span><b id="liveAccounting">pending</b></div>
+      <div class="metric"><span>Physics</span><b id="livePhysics">pending</b></div>
       <div class="surface-control">
         <label for="gridOverlayLevel">Grid</label>
         <select id="gridOverlayLevel" aria-label="Grid overlay">
@@ -427,8 +431,8 @@
       </div>
       <div class="surface-control">
         <label for="simTicksPerPulse">Speed</label>
-        <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="20">
-        <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="20">
+        <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="1">
+        <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="1">
       </div>
       <div class="toggle-control">
         <label for="policyAutosaveEnabled"><input id="policyAutosaveEnabled" type="checkbox">Auto Save</label>
@@ -523,6 +527,7 @@
         <button id="shoot">Shoot</button>
         <button id="carryAction">Carry</button>
         <button id="protectAction">Protect</button>
+        <button id="killerPassAction">Thread</button>
         <button id="clearanceAction">Clear</button>
         <button id="routeOneAction">Route 1</button>
       </div>
@@ -580,6 +585,7 @@ const surfaceReadout = document.getElementById("surfaceReadout");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
+const gkPhysics = document.getElementById("gkPhysics");
 const passes = document.getElementById("passes");
 const dribbleBeats = document.getElementById("dribbleBeats");
 const clearances = document.getElementById("clearances");
@@ -599,6 +605,9 @@ const replaySeedButton = document.getElementById("replaySeed");
 const ticks = document.getElementById("ticks");
 const matchStep = document.getElementById("matchStep");
 const simSpeed = document.getElementById("simSpeed");
+const runtimeContracts = document.getElementById("runtimeContracts");
+const liveAccounting = document.getElementById("liveAccounting");
+const livePhysics = document.getElementById("livePhysics");
 const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const learning = document.getElementById("learning");
 const shapeLearning = document.getElementById("shapeLearning");
@@ -664,6 +673,7 @@ const targetPick = document.getElementById("targetPick");
 const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
 const protectActionButton = document.getElementById("protectAction");
+const killerPassActionButton = document.getElementById("killerPassAction");
 const clearanceActionButton = document.getElementById("clearanceAction");
 const routeOneActionButton = document.getElementById("routeOneAction");
 const surfacePreset = document.getElementById("surfacePreset");
@@ -719,9 +729,11 @@ let hoverPlayerId = null;
 let inspectedPlayerId = null;
 let lastSemanticBallAction = null;
 const LIVE_STEP_INTERVAL_MS = 100;
+const LIVE_DEFAULT_TICKS_PER_PULSE = 1;
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
 const LIVE_INPUT_RETRY_MIN_MS = 120;
 const LIVE_INPUT_RETRY_MAX_MS = 1000;
+const LIVE_INPUT_CLIENT_QUEUE_LIMIT = 4;
 const LIVE_ROUTE_MARKER = "/soccer/live";
 const LIVE_FRESH_MATCH_ALIASES = [
   "/fresh",
@@ -739,6 +751,7 @@ const SEMANTIC_BALL_ACTIONS = new Set([
   "flank-low-cross",
   "flank-high-cross",
   "first-time-pass",
+  "killer-pass",
   "clearance",
   "route-one",
   "shoot",
@@ -767,6 +780,7 @@ const INTENT_TRACE_ACTIONS = new Set([
   "flank-low-cross",
   "flank-high-cross",
   "first-time-pass",
+  "killer-pass",
   "clearance",
   "route-one",
   "carry-forward",
@@ -781,6 +795,7 @@ const INTENT_TRACE_ACTIONS = new Set([
   "space",
   "recover"
 ]);
+const LIVE_INTENT_LIMIT = 3;
 const CONTROLLER_KEYMAPS = [
   {
     left: "ArrowLeft",
@@ -831,6 +846,7 @@ const GAMEPAD_BUTTONS = {
   clearance: 4,
   sprint: 5,
   routeOne: 6,
+  killerPass: 7,
   dpadUp: 12,
   dpadDown: 13,
   dpadLeft: 14,
@@ -850,7 +866,7 @@ function keyName(code) {
 }
 function controllerKeymapLabel(slot) {
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
-  return `Move ${keyName(map.up)}/${keyName(map.left)}/${keyName(map.down)}/${keyName(map.right)} · Sprint ${keyName(map.sprint)} · Action ${keyName(map.action)}`;
+  return `Move ${keyName(map.up)}/${keyName(map.left)}/${keyName(map.down)}/${keyName(map.right)} · Sprint ${keyName(map.sprint)} · Pass/Shoot ${keyName(map.action)} · Active: Thread T · Clear C · Route R`;
 }
 const SURFACE_PRESETS = {
   short: {ballDragPerTick: 0.010, ballAirResistance: 0.0045, ballGrassResistanceYps2: 0.32, ballStopSpeedYps: 0.28},
@@ -968,12 +984,34 @@ function agentScheduleGlyph(entry) {
   if (entry.kind === "ball") return "B";
   return String(entry.id ?? "?");
 }
-function agentScheduleLabel(schedule) {
+function agentScheduleSummaryLabel(frame) {
+  const s = frame?.agentScheduleSummary;
+  if (!s || Number(s.totalAgents || 0) <= 0) return "";
+  const central = Number(s.centralBrainCount || 0) > 0 ? "C+" : "";
+  const ball = Number(s.ballCount || 0) > 0 ? "/B" : "";
+  const field = Number(s.fieldShuffleAgents || 0);
+  const expectedField = Number(s.expectedFieldShuffleAgents || 0);
+  const fieldText = expectedField > 0 ? ` F${field}/${expectedField}` : "";
+  const expected = Number(s.expectedTotalAgents || 0);
+  const total = Number(s.totalAgents || 0);
+  const complete = s.complete ? " ok" : ` ${total}/${expected || "?"}`;
+  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${fieldText}${complete}`;
+}
+function agentScheduleFullLabel(frame) {
+  const schedule = Array.isArray(frame?.agentSchedule) ? frame.agentSchedule : [];
+  const summary = agentScheduleSummaryLabel(frame);
+  if (!schedule.length) return summary || "shuffle pending";
+  return `${summary ? `${summary} ` : ""}${schedule.map(agentScheduleGlyph).join(" ")}`;
+}
+function agentScheduleLabel(frameOrSchedule) {
+  const frame = Array.isArray(frameOrSchedule) ? null : frameOrSchedule;
+  const schedule = Array.isArray(frameOrSchedule) ? frameOrSchedule : frameOrSchedule?.agentSchedule;
+  const summary = frame ? agentScheduleSummaryLabel(frame) : "";
   if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
   const prefix = schedule.slice(0, 6).map(agentScheduleGlyph).join(" ");
   const ball = schedule.find(entry => entry.kind === "ball");
   const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
-  return `${prefix}${suffix}`;
+  return `${summary ? `${summary} ` : ""}${prefix}${suffix}`;
 }
 function sharedPositionLabel(frame = state?.frame) {
   const shared = frame?.sharedPositions;
@@ -1051,6 +1089,101 @@ function learningLabel(l) {
     ? ` N${String(l.neuralLearningBackend || "inline").slice(0, 1).toUpperCase()}${Number(l.neuralLearningTrainingSteps ?? 0)}/${Number(l.neuralLearningSamples ?? 0)}`
     : "";
   return `${mode}${log}${neural} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
+}
+function runtimeContractsLabel() {
+  const agent = state?.agentContract || {};
+  const controller = state?.controllerContract || {};
+  const rules = state?.rulesContract || {};
+  const decision = state?.decisionModel || {};
+  const learningContract = state?.learningContract || {};
+  const players = Number(agent.expectedPlayerCount ?? state?.frame?.players?.length ?? 0);
+  const officials = Number(agent.expectedOfficialCount ?? state?.frame?.officials?.length ?? 0);
+  const ballAgents = Number(agent.expectedBallAgents ?? 0);
+  const slots = Number(controller.maxHumanControllers ?? state?.config?.maxHumanPlayers ?? 0);
+  const mdp = decision.mdpStateGridEnabled && decision.pomdpObservationGridEnabled ? "MDP/POMDP" : "policy?";
+  const rulesText = rules.offsideRuleEnabled && rules.postGoalKickoffEnabled ? "rules" : "rules?";
+  const learnText = learningContract.learningEnabled === false ? "observe" : "learn";
+  return `${players}p/${officials}o/${ballAgents}b ${slots}H ${mdp} ${rulesText} ${learnText}`;
+}
+function runtimeContractsTitle() {
+  const agent = state?.agentContract || {};
+  const controller = state?.controllerContract || {};
+  const ui = state?.uiContract || {};
+  const rules = state?.rulesContract || {};
+  const decision = state?.decisionModel || {};
+  const learningContract = state?.learningContract || {};
+  if (!state?.agentContract && !state?.controllerContract && !state?.decisionModel) {
+    return "Runtime contracts not loaded";
+  }
+  const lines = [
+    `agents=${agent.expectedTotalAgents} fieldShuffle=${agent.expectedFieldShuffleAgents} players=${agent.expectedPlayerCount} officials=${agent.expectedOfficialCount} ball=${agent.expectedBallAgents}`,
+    `fisherYates=${agent.fieldEntitiesUseFisherYates} playerOpsRandom=${agent.playerOperationOrderRandomized} officialOpsRandom=${agent.officialOperationOrderRandomized} ballOpsRandom=${agent.ballOperationOrderRandomized}`,
+    `controllers=${controller.maxHumanControllers} configured=${controller.configuredHumanControllers} nativeThreads=${controller.nativeThreadPerControllerEnabled} notify=${controller.notificationDrivenInput}`,
+    `uiCanvas=${ui.birdEyeCanvas2dEnabled} runNew=${ui.runNewSimulationButtonEnabled} fourSlots=${ui.fourHumanControllerSlotsEnabled} goalposts=${ui.goalpostsRendered}`,
+    `rulesOffside=${rules.offsideRuleEnabled} ownHalfExempt=${rules.offsideOwnHalfExempt} postGoalKickoff=${rules.postGoalKickoffEnabled} assistantRefs=${rules.assistantRefsTrackOffsideLine}`,
+    `decisionMdp=${decision.mdpStateGridEnabled} pomdp=${decision.pomdpObservationGridEnabled} killerPass=${decision.killerPassProbabilityRampsTowardGoal} singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled} shotRamp=${decision.shotProbabilityRampsTowardGoal}`,
+    `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled} teammatePressure=${decision.supportTargetTeammateOccupiedPressureEnabled} intentSpace=${decision.playbackIntentTargetSpaceMetricsEnabled} shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,
+    `learning=${learningContract.learningEnabled} logging=${learningContract.learningLoggingEnabled} backend=${learningContract.policyPersistenceBackend} retention=${learningContract.policyPersistenceRetentionModel}`,
+    `persistenceWritesPerTick=${learningContract.policyPersistenceWritesPerTimestep} externalWritesPerTick=${learningContract.policyPersistenceExternalWritesPerTimestep} httpBatching=${learningContract.policyPersistenceHttpBatchingRequired} flush=${learningContract.policyPersistenceFlushPolicy}`,
+  ];
+  return lines.join("\n");
+}
+function liveAccountingLabel(report = state?.liveAccounting) {
+  if (!report) return "pending";
+  const status = report.ok === false || Number(report.violationCount ?? 0) > 0 ? "warn" : "ok";
+  const players = `${Number(report.playerCount ?? 0)}/${Number(report.expectedPlayerCount ?? 22)}p`;
+  const officials = `${Number(report.officialCount ?? 0)}/${Number(report.expectedOfficialCount ?? 3)}o`;
+  const schedule = report.scheduleComplete ? "sched" : "sched?";
+  const shared = `${Number(report.sharedLatestPlayers ?? 0)}p/${Number(report.sharedLatestOfficials ?? 0)}o${report.sharedBallLatest ? "+b" : ""}`;
+  const traces = Number(report.operationTracesChecked ?? 0);
+  const violations = Number(report.violationCount ?? 0);
+  return `${status} ${players} ${officials} ${schedule} S${shared} O${traces}${violations ? ` !${violations}` : ""}`;
+}
+function liveAccountingTitle(report = state?.liveAccounting) {
+  if (!report) return "Live frame accounting not loaded";
+  const lines = [
+    `ok=${report.ok} tick=${report.tick} violations=${report.violationCount}`,
+    `agents=${report.totalAgents}/${report.expectedTotalAgents} field=${report.fieldShuffleAgents}/${report.expectedFieldShuffleAgents} unique=${report.uniqueAgents} duplicates=${report.duplicateAgents}`,
+    `centralBrainFirst=${report.centralBrainFirst} scheduleComplete=${report.scheduleComplete} ballScheduled=${report.ballScheduled}`,
+    `sharedLatest=${report.sharedLatestPlayers}p/${report.sharedLatestOfficials}o ball=${report.sharedBallLatest}`,
+    `histories players=${report.minPlayerHistoryLen}-${report.maxPlayerHistoryLen} officials=${report.minOfficialHistoryLen}-${report.maxOfficialHistoryLen} ball=${report.ballHistoryLen}`,
+    `decisions central=${report.centralBrainDecisionPresent} ball=${report.ballDecisionPresent} holder=${report.holderDecisionPresent} traces=${report.operationTracesChecked}`,
+  ];
+  const violations = Array.isArray(report.violations) ? report.violations : [];
+  for (const violation of violations.slice(0, 5)) {
+    lines.push(`${violation.subject}.${violation.metric}: expected ${violation.expected}; actual ${violation.actual}`);
+  }
+  return lines.join("\n");
+}
+function livePhysicsLabel(report = state?.livePhysics) {
+  if (!report) return "pending";
+  const status = report.ok === false || Number(report.violationCount ?? 0) > 0 ? "warn" : "ok";
+  const pSpeed = Number(report.maxPlayerSpeedYps ?? 0);
+  const oSpeed = Number(report.maxOfficialSpeedYps ?? 0);
+  const bSpeed = Number(report.maxBallSpeedYps ?? 0);
+  const pAccel = Number(report.maxPlayerAccelYps2 ?? 0);
+  const bAccel = Number(report.maxBallAccelYps2 ?? 0);
+  const histories = `H${Number(report.minPlayerHistoryLen ?? 0)}-${Number(report.maxPlayerHistoryLen ?? 0)}/${Number(report.ballHistoryLen ?? 0)}`;
+  const violations = Number(report.violationCount ?? 0);
+  return `${status} P${pSpeed.toFixed(1)} O${oSpeed.toFixed(1)} B${bSpeed.toFixed(1)} A${pAccel.toFixed(0)}/${bAccel.toFixed(0)} ${histories}${violations ? ` !${violations}` : ""}`;
+}
+function livePhysicsTitle(report = state?.livePhysics) {
+  if (!report) return "Live frame physics not loaded";
+  const lines = [
+    `ok=${report.ok} tick=${report.tick} violations=${report.violationCount}`,
+    `counts players=${report.playerCount} officials=${report.officialCount} ball=${report.ballPresent}`,
+    `speed y/s players=${Number(report.maxPlayerSpeedYps ?? 0).toFixed(3)}/${report.playerMaxSpeedYps} officials=${Number(report.maxOfficialSpeedYps ?? 0).toFixed(3)}/${report.playerMaxSpeedYps} ball=${Number(report.maxBallSpeedYps ?? 0).toFixed(3)}/${report.ballMaxSpeedYps}`,
+    `frameSpeed y/s players=${Number(report.maxPlayerFrameSpeedYps ?? 0).toFixed(3)} officials=${Number(report.maxOfficialFrameSpeedYps ?? 0).toFixed(3)} ball=${Number(report.maxBallFrameSpeedYps ?? 0).toFixed(3)} epsilon=${report.frameEpsilonYards}`,
+    `accel y/s2 players=${Number(report.maxPlayerAccelYps2 ?? 0).toFixed(3)}/${report.playerMaxAccelYps2} officials=${Number(report.maxOfficialAccelYps2 ?? 0).toFixed(3)}/${report.playerMaxAccelYps2} ball=${Number(report.maxBallAccelYps2 ?? 0).toFixed(3)}/${report.ballMaxAccelYps2}`,
+    `jerk y/s3 players=${Number(report.maxPlayerJerkYps3 ?? 0).toFixed(3)} officials=${Number(report.maxOfficialJerkYps3 ?? 0).toFixed(3)} ball=${Number(report.maxBallJerkYps3 ?? 0).toFixed(3)}`,
+    `histories players=${report.minPlayerHistoryLen}-${report.maxPlayerHistoryLen} officials=${report.minOfficialHistoryLen}-${report.maxOfficialHistoryLen} ball=${report.ballHistoryLen}`,
+    `pitchMarginYards=${report.pitchMarginYards}`,
+  ];
+  const violations = Array.isArray(report.violations) ? report.violations : [];
+  for (const violation of violations.slice(0, 5)) {
+    lines.push(`${violation.subject}.${violation.metric}: value ${violation.value}; limit ${violation.limit}`);
+  }
+  return lines.join("\n");
 }
 function shapeLearningLabel(summary = state?.tacticalSummary) {
   if (!summary) return "L0.00 C0.00 D0.0 K0.00 B0.00 R0.00 Look0 D0.00 P0.00";
@@ -1167,7 +1300,7 @@ function intentPriority(player, action, frame = state?.frame) {
   const possession = livePossessionTeam(frame);
   const holderBonus = holder === player.id ? 32 : 0;
   if (["shoot", "first-time-shot", "first-time-header"].includes(action)) return 110 + holderBonus;
-  if (["pass", "aerial-pass", "flank-low-cross", "flank-high-cross", "first-time-pass"].includes(action)) return 104 + holderBonus;
+  if (["pass", "aerial-pass", "flank-low-cross", "flank-high-cross", "first-time-pass", "killer-pass"].includes(action)) return 104 + holderBonus;
   if (["clearance", "route-one"].includes(action)) return 98 + holderBonus;
   if (["carry-forward", "carry-out", "protect-ball", "left-cut", "right-cut", "nutmeg", "fake-left-cut-right", "fake-right-cut-left", "hold-up-flank"].includes(action)) return 92 + holderBonus;
   if (action === "space" && possession === player.team) {
@@ -1194,15 +1327,31 @@ function liveIntentCandidates(frame = state?.frame) {
           targetPoint,
           targetPlayer: intent.targetPlayer ?? null,
           urgency: clamp(Number(intent.urgency ?? 0), 0, 1),
+          yardsToGoal: Number(intent.yardsToGoal ?? NaN),
+          openSupportOutlets: Number(intent.openSupportOutlets ?? 0),
+          goalAttackWindowScore: clamp(Number(intent.goalAttackWindowScore ?? 0), 0, 1),
+          killerPassGoalPressure: clamp(Number(intent.killerPassGoalPressure ?? 0), 0, 1),
+          singleThreadGoalPressure: clamp(Number(intent.singleThreadGoalPressure ?? 0), 0, 1),
+          decisiveGoalActionPressure: clamp(Number(intent.decisiveGoalActionPressure ?? 0), 0, 1),
+          shotLaneOpen: intent.shotLaneOpen === true,
+          threadedGoalPassAvailable: intent.threadedGoalPassAvailable === true,
+          threadedGoalPassForwardYards: Number(intent.threadedGoalPassForwardYards ?? 0),
+          threadedGoalPassGoalGainYards: Number(intent.threadedGoalPassGoalGainYards ?? 0),
+          threadedGoalPassReceptionWindowScore: clamp(Number(intent.threadedGoalPassReceptionWindowScore ?? 0), 0, 1),
+          threadedGoalPassReceiverOpenness: clamp(Number(intent.threadedGoalPassReceiverOpenness ?? 0), 0, 1),
+          threadedGoalPassExpectedCompletion: clamp(Number(intent.threadedGoalPassExpectedCompletion ?? 0), 0, 1),
+          threadedGoalPassStrideFit: clamp(Number(intent.threadedGoalPassStrideFit ?? 0), 0, 1),
+          targetOpenSpaceScore: Number(intent.targetOpenSpaceScore ?? 0),
+          targetTeammateOccupiedSpacePressure: clamp(Number(intent.targetTeammateOccupiedSpacePressure ?? 0), 0, 1),
           flight: String(intent.flight || "").toLowerCase() === "aerial"
             ? "aerial"
             : String(intent.flight || "").toLowerCase() === "floor" ? "floor" : null,
-          priority: intentPriority(player, action, frame) ?? 0
+          priority: (intentPriority(player, action, frame) ?? 0) + clamp(Number(intent.decisiveGoalActionPressure ?? 0), 0, 1) * 3
         };
       })
       .filter(Boolean)
       .sort((a, b) => b.priority - a.priority || a.player.id - b.player.id)
-      .slice(0, 8);
+      .slice(0, LIVE_INTENT_LIMIT);
   }
   return frame.players
     .map(player => {
@@ -1215,20 +1364,37 @@ function liveIntentCandidates(frame = state?.frame) {
       const priority = intentPriority(player, action, frame);
       if (priority == null) return null;
       const urgency = clamp(Number(decision?.observation?.decisionUrgency ?? 0), 0, 1);
-      const flight = ["aerial-pass", "flank-high-cross", "clearance", "route-one"].includes(action) ? "aerial" : ["pass", "flank-low-cross", "first-time-pass"].includes(action) ? "floor" : null;
+      const decisiveGoalActionPressure = clamp(Number(decision?.observation?.decisiveGoalActionPressure ?? 0), 0, 1);
+      const flight = ["aerial-pass", "flank-high-cross", "clearance", "route-one"].includes(action) ? "aerial" : ["pass", "flank-low-cross", "first-time-pass", "killer-pass"].includes(action) ? "floor" : null;
       return {
         player,
         action,
         targetPoint,
         targetPlayer: target.playerId,
         urgency,
+        yardsToGoal: Number(decision?.observation?.yardsToGoal ?? NaN),
+        openSupportOutlets: Number(decision?.observation?.openSupportOutlets ?? 0),
+        goalAttackWindowScore: clamp(Number(decision?.observation?.goalAttackWindowScore ?? 0), 0, 1),
+        killerPassGoalPressure: clamp(Number(decision?.observation?.killerPassGoalPressure ?? 0), 0, 1),
+        singleThreadGoalPressure: clamp(Number(decision?.observation?.singleThreadGoalPressure ?? 0), 0, 1),
+        decisiveGoalActionPressure,
+        shotLaneOpen: decision?.observation?.shotLaneOpen === true,
+        threadedGoalPassAvailable: decision?.observation?.threadedGoalPassAvailable === true,
+        threadedGoalPassForwardYards: Number(decision?.observation?.threadedGoalPassForwardYards ?? 0),
+        threadedGoalPassGoalGainYards: Number(decision?.observation?.threadedGoalPassGoalGainYards ?? 0),
+        threadedGoalPassReceptionWindowScore: clamp(Number(decision?.observation?.threadedGoalPassReceptionWindowScore ?? 0), 0, 1),
+        threadedGoalPassReceiverOpenness: clamp(Number(decision?.observation?.threadedGoalPassReceiverOpenness ?? 0), 0, 1),
+        threadedGoalPassExpectedCompletion: clamp(Number(decision?.observation?.threadedGoalPassExpectedCompletion ?? 0), 0, 1),
+        threadedGoalPassStrideFit: clamp(Number(decision?.observation?.threadedGoalPassStrideFit ?? 0), 0, 1),
+        targetOpenSpaceScore: 0,
+        targetTeammateOccupiedSpacePressure: 0,
         flight,
-        priority: priority + urgency * 4
+        priority: priority + urgency * 4 + decisiveGoalActionPressure * 3
       };
     })
     .filter(Boolean)
     .sort((a, b) => b.priority - a.priority || a.player.id - b.player.id)
-    .slice(0, 8);
+    .slice(0, LIVE_INTENT_LIMIT);
 }
 function primaryLiveIntent(frame = state?.frame) {
   const candidates = liveIntentCandidates(frame);
@@ -1239,7 +1405,49 @@ function liveIntentLabel(intent = primaryLiveIntent()) {
   if (!intent) return "Idle";
   const action = String(intent.action || "move").replace(/-/g, " ");
   const flight = intent.flight === "aerial" ? " A" : "";
-  return `${intent.player.id} ${action}${flight} U${Number(intent.urgency ?? 0).toFixed(2)}`;
+  const goal = Number.isFinite(Number(intent.yardsToGoal)) ? ` G${Number(intent.yardsToGoal).toFixed(0)}` : "";
+  const pressure = Number(intent.decisiveGoalActionPressure ?? 0);
+  const killer = Number(intent.killerPassGoalPressure ?? 0);
+  const single = Number(intent.singleThreadGoalPressure ?? 0);
+  const outlets = Number(intent.openSupportOutlets ?? 0);
+  const space = Number(intent.targetOpenSpaceScore ?? 0);
+  const teammatePressure = Number(intent.targetTeammateOccupiedSpacePressure ?? 0);
+  const lane = intent.threadedGoalPassAvailable ? " KP" : intent.shotLaneOpen ? " lane" : "";
+  const killerQuality = intent.threadedGoalPassAvailable
+    ? ` KG${Number(intent.threadedGoalPassGoalGainYards ?? 0).toFixed(0)} KO${Number(intent.threadedGoalPassReceiverOpenness ?? 0).toFixed(2)} KC${Number(intent.threadedGoalPassExpectedCompletion ?? 0).toFixed(2)}`
+    : "";
+  const decisive = pressure > 0.01 || killer > 0.01
+    ? ` D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}`
+    : "";
+  const targetSpace = space > 0 || teammatePressure > 0.01 || outlets > 0
+    ? ` O${outlets.toFixed(0)} S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`
+    : "";
+  return `${intent.player.id} ${action}${flight} U${Number(intent.urgency ?? 0).toFixed(2)}${goal}${decisive}${killerQuality}${targetSpace}${lane}`;
+}
+function liveIntentTitle(intent = primaryLiveIntent()) {
+  if (!intent) return "No live tactical intent";
+  const parts = [
+    `player=${intent.player.id}`,
+    `action=${intent.action}`,
+    `urgency=${Number(intent.urgency ?? 0).toFixed(3)}`,
+    `yardsToGoal=${Number.isFinite(Number(intent.yardsToGoal)) ? Number(intent.yardsToGoal).toFixed(2) : "-"}`,
+    `openSupportOutlets=${Number(intent.openSupportOutlets ?? 0).toFixed(0)}`,
+    `goalAttackWindow=${Number(intent.goalAttackWindowScore ?? 0).toFixed(3)}`,
+    `decisiveGoalActionPressure=${Number(intent.decisiveGoalActionPressure ?? 0).toFixed(3)}`,
+    `killerPassGoalPressure=${Number(intent.killerPassGoalPressure ?? 0).toFixed(3)}`,
+    `singleThreadGoalPressure=${Number(intent.singleThreadGoalPressure ?? 0).toFixed(3)}`,
+    `shotLaneOpen=${!!intent.shotLaneOpen}`,
+    `threadedGoalPassAvailable=${!!intent.threadedGoalPassAvailable}`,
+    `threadedGoalPassForwardYards=${Number(intent.threadedGoalPassForwardYards ?? 0).toFixed(2)}`,
+    `threadedGoalPassGoalGainYards=${Number(intent.threadedGoalPassGoalGainYards ?? 0).toFixed(2)}`,
+    `threadedGoalPassReceptionWindowScore=${Number(intent.threadedGoalPassReceptionWindowScore ?? 0).toFixed(3)}`,
+    `threadedGoalPassReceiverOpenness=${Number(intent.threadedGoalPassReceiverOpenness ?? 0).toFixed(3)}`,
+    `threadedGoalPassExpectedCompletion=${Number(intent.threadedGoalPassExpectedCompletion ?? 0).toFixed(3)}`,
+    `threadedGoalPassStrideFit=${Number(intent.threadedGoalPassStrideFit ?? 0).toFixed(3)}`,
+    `targetOpenSpaceScore=${Number(intent.targetOpenSpaceScore ?? 0).toFixed(3)}`,
+    `targetTeammateOccupiedSpacePressure=${Number(intent.targetTeammateOccupiedSpacePressure ?? 0).toFixed(3)}`
+  ];
+  return parts.join("\n");
 }
 function controllerThreadLabel(threads = state?.controllerThreads || []) {
   if (!Array.isArray(threads) || !threads.length) return "0 native";
@@ -1273,6 +1481,9 @@ function runtimeTimingLabel(timing = state?.stepTiming) {
   const centralBrain = Number(timing.centralBrainMs ?? 0) / ticks;
   const snapshot = Number(timing.fieldSnapshotMs ?? 0) / ticks;
   const decision = Number(timing.fieldPlayerDecisionMs ?? 0) / ticks;
+  const maxField = Number(timing.maxFieldLoopMs ?? 0);
+  const maxPlayerDecision = Number(timing.maxFieldPlayerDecisionMs ?? 0);
+  const maxBall = Number(timing.maxFieldBallMs ?? 0);
   const learning = Number(timing.learningDefenseMs ?? 0)
     + Number(timing.learningTransitionsMs ?? 0)
     + Number(timing.recentLearningMs ?? 0)
@@ -1284,7 +1495,7 @@ function runtimeTimingLabel(timing = state?.stepTiming) {
   const fieldPct = Number(timing.totalMs ?? 0) > 0
     ? Number(timing.fieldLoopMs ?? 0) / Number(timing.totalMs) * 100
     : 0;
-  return `avg ${avg.toFixed(1)} max ${Number(timing.maxStepMs ?? 0).toFixed(1)} PF${preField.toFixed(1)} CB${centralBrain.toFixed(1)} snap ${snapshot.toFixed(1)} dec ${decision.toFixed(1)} F${fieldPct.toFixed(0)} L${learningPct.toFixed(0)}`;
+  return `avg ${avg.toFixed(1)} max ${Number(timing.maxStepMs ?? 0).toFixed(1)} PF${preField.toFixed(1)} CB${centralBrain.toFixed(1)} snap ${snapshot.toFixed(1)} dec ${decision.toFixed(1)} peak F${maxField.toFixed(1)} P${maxPlayerDecision.toFixed(1)} B${maxBall.toFixed(1)} F${fieldPct.toFixed(0)} L${learningPct.toFixed(0)}`;
 }
 function controllerYieldLabel(stats = state?.controllerYield) {
   if (!stats) return "idle";
@@ -1294,21 +1505,24 @@ function controllerYieldLabel(stats = state?.controllerYield) {
   }
   const waits = Number(stats.waitAttempts ?? 0);
   const notified = Number(stats.notifiedWaits ?? 0);
+  const relevantNotified = Number(stats.relevantNotifiedWaits ?? 0);
   const immediate = Number(stats.immediatePendingWaits ?? 0);
   const timedOut = Number(stats.timedOutWaits ?? 0);
   const lateWaits = Number(stats.lateWaitAttempts ?? 0);
   const lateNotified = Number(stats.lateNotifiedWaits ?? 0);
+  const lateRelevantNotified = Number(stats.lateRelevantNotifiedWaits ?? 0);
   const lateTimedOut = Number(stats.lateTimedOutWaits ?? 0);
   const queuedBefore = Number(stats.lastQueuedBefore ?? 0);
   const queuedAfter = Number(stats.lastQueuedAfter ?? 0);
   const last = stats.lastWaitLate ? "late"
     : stats.lastImmediatePending ? "ready"
+    : stats.lastRelevantNotified ? "slot"
     : stats.lastNotified ? "notify"
     : "timeout";
   const avgWait = waits > 0 ? Number(stats.totalWaitMs ?? 0) / waits : 0;
   const lastWait = Number(stats.lastWaitMs ?? 0);
   const maxWait = Number(stats.maxWaitMs ?? 0);
-  return `${assigned}p W${waits} N${notified} I${immediate} T${timedOut} L${lateWaits}/${lateNotified}/${lateTimedOut} ${last} Q${queuedBefore}->${queuedAfter} wait ${avgWait.toFixed(1)}/${lastWait.toFixed(1)}/${maxWait.toFixed(1)}ms`;
+  return `${assigned}p W${waits} N${notified} R${relevantNotified} I${immediate} T${timedOut} L${lateWaits}/${lateNotified}/${lateRelevantNotified}/${lateTimedOut} ${last} Q${queuedBefore}->${queuedAfter} wait ${avgWait.toFixed(1)}/${lastWait.toFixed(1)}/${maxWait.toFixed(1)}ms`;
 }
 function queuedHumanInputsLabel() {
   const queued = Number(state?.queuedHumanInputs ?? 0);
@@ -1404,7 +1618,11 @@ function policyStorageLabel(storage = state?.policyStorage) {
   const retention = String(contract.retentionModel || "").includes("branch-tip")
     ? "tip"
     : "history";
-  const pg = storage.postgresEnabled ? `PG ${retention}` : `no PG ${retention}`;
+  const pg = storage.postgresActiveDbWritesEnabled
+    ? `PG db ${retention}`
+    : storage.postgresExportEnabled
+      ? `PG export ${retention}`
+      : `no PG ${retention}`;
   return `${backend} ${values}/${visits} ${probabilities} ${pg}`;
 }
 function policyProbabilityLabel(summary = state?.policyProbability) {
@@ -1444,20 +1662,25 @@ function effectiveMatchDurationSeconds(config = state?.config) {
   return Number(config.durationSeconds ?? 600);
 }
 function matchStepLabel(config = state?.config) {
+  const cadence = state?.cadence || {};
   const clock = state?.matchClock;
+  const cadenceDt = Number(cadence.dtSeconds ?? NaN);
+  const cadenceDuration = Number(cadence.durationSeconds ?? NaN);
+  const cadenceTotalTicks = Math.max(0, Math.round(Number(cadence.totalTicks ?? 0)));
+  const contract = cadence.defaultTenMinuteContract ? " ok" : "";
   if (clock) {
-    const dt = Number(clock.dtSeconds ?? config?.dtSeconds ?? 0.1);
-    const total = Number(clock.totalSeconds ?? effectiveMatchDurationSeconds(config));
+    const dt = Number.isFinite(cadenceDt) && cadenceDt > 0 ? cadenceDt : Number(clock.dtSeconds ?? config?.dtSeconds ?? 0.1);
+    const total = Number.isFinite(cadenceDuration) && cadenceDuration > 0 ? cadenceDuration : Number(clock.totalSeconds ?? effectiveMatchDurationSeconds(config));
     const remaining = Number(clock.remainingSeconds ?? Math.max(0, total - Number(clock.elapsedSeconds ?? 0)));
-    const totalTicks = Math.max(0, Math.round(Number(clock.totalTicks ?? 0)));
+    const totalTicks = cadenceTotalTicks > 0 ? cadenceTotalTicks : Math.max(0, Math.round(Number(clock.totalTicks ?? 0)));
     const done = clock.done ? " FT" : "";
-    return `dt ${dt.toFixed(1)}s ${fmtClock(total)} left ${fmtClock(remaining)} ${totalTicks}t${done}`;
+    return `dt ${dt.toFixed(1)}s ${fmtClock(total)} left ${fmtClock(remaining)} ${totalTicks}t${contract}${done}`;
   }
   if (!config) return "dt 0.1s 10:00";
-  const dt = Number(config.dtSeconds ?? 0.1);
-  const duration = effectiveMatchDurationSeconds(config);
-  const totalTicks = dt > 0 ? Math.round(duration / dt) : 0;
-  return `dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t`;
+  const dt = Number.isFinite(cadenceDt) && cadenceDt > 0 ? cadenceDt : Number(config.dtSeconds ?? 0.1);
+  const duration = Number.isFinite(cadenceDuration) && cadenceDuration > 0 ? cadenceDuration : effectiveMatchDurationSeconds(config);
+  const totalTicks = cadenceTotalTicks > 0 ? cadenceTotalTicks : (dt > 0 ? Math.round(duration / dt) : 0);
+  return `dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t${contract}`;
 }
 function episodeSummaryLine(item) {
   const summary = item?.summary || {};
@@ -1662,8 +1885,14 @@ function agentPomdpLabel(d) {
   const options = Number(o.visiblePassOptions ?? 0);
   const passQ = Number(o.expectedPassCompletion ?? 0);
   const goalWindow = Number(o.goalAttackWindowScore ?? 0);
+  const decisive = Number(o.decisiveGoalActionPressure ?? 0);
+  const killer = Number(o.killerPassGoalPressure ?? 0);
+  const single = Number(o.singleThreadGoalPressure ?? 0);
+  const killerQuality = o.threadedGoalPassAvailable
+    ? ` KG${Number(o.threadedGoalPassGoalGainYards ?? 0).toFixed(0)} KO${Number(o.threadedGoalPassReceiverOpenness ?? 0).toFixed(2)} KC${Number(o.threadedGoalPassExpectedCompletion ?? 0).toFixed(2)}`
+    : "";
   const teamShape = `TC${Number(o.teamCentroidToBallYards ?? 0).toFixed(0)} W${Number(o.teamSpreadYards ?? 0).toFixed(0)} NB${Number(o.teamPlayersNearBall ?? 0)} FV${Number(o.teamForwardVelocityYps ?? 0).toFixed(1)}`;
-  return `${ball} ${scheduleText} ${controlText} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} ${teamShape} ${lane}`;
+  return `${ball} ${scheduleText} ${controlText} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} D${decisive.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}${killerQuality} ${teamShape} ${lane}`;
 }
 function agentBeliefLabel(d) {
   const b = d?.belief;
@@ -1719,6 +1948,59 @@ function ballHistoryKinematicsLabel(f, dtSeconds = state?.config?.dtSeconds) {
   const acceleration = k.acceleration || ball.acceleration || {x: 0, y: 0};
   const jerk = k.jerk || ball.jerk || {x: 0, y: 0};
   return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
+}
+function ballResistanceFrame(ball) {
+  return ball?.resistance || {};
+}
+function ballResistanceCompactLabel(ball) {
+  const r = ballResistanceFrame(ball);
+  const linear = Number(r.linearDragLossYps ?? 0);
+  const air = Number(r.airLossYps ?? 0);
+  const grass = Number(r.grassLossYps ?? 0);
+  const contact = Number(r.rollingContact ?? 0);
+  const stopped = r.stoppedByThreshold ? " stop" : "";
+  return `L${linear.toFixed(2)} Air${air.toFixed(2)} Gr${grass.toFixed(2)} C${contact.toFixed(2)}${stopped}`;
+}
+function ballResistanceTitle(ball) {
+  const r = ballResistanceFrame(ball);
+  if (!ball?.resistance) return "Ball resistance telemetry not loaded yet";
+  return [
+    `speedBeforeYps=${Number(r.speedBeforeYps ?? 0).toFixed(3)}`,
+    `speedAfterYps=${Number(r.speedAfterYps ?? 0).toFixed(3)}`,
+    `linearDragLossYps=${Number(r.linearDragLossYps ?? 0).toFixed(3)}`,
+    `airLossYps=${Number(r.airLossYps ?? 0).toFixed(3)}`,
+    `grassLossYps=${Number(r.grassLossYps ?? 0).toFixed(3)}`,
+    `totalLossYps=${Number(r.totalLossYps ?? 0).toFixed(3)}`,
+    `rollingContact=${Number(r.rollingContact ?? 0).toFixed(3)}`,
+    `stoppedByThreshold=${Boolean(r.stoppedByThreshold)}`,
+  ].join("\n");
+}
+function goalkeeperPhysicsContract() {
+  return state?.physicsContract || {};
+}
+function goalkeeperPhysicsLabel() {
+  const contract = goalkeeperPhysicsContract();
+  const saveCap = Number(contract.goalkeeperClearSightlineSaveCap ?? 0);
+  const parryMin = Number(contract.goalkeeperParryMinYards ?? 0);
+  const parryMax = Number(contract.goalkeeperParryMaxYards ?? 0);
+  const rebound = contract.goalkeeperParryReboundEnabled ? "reb" : "catch";
+  if (saveCap > 0 && parryMin > 0 && parryMax > 0) {
+    return `cap ${(saveCap * 100).toFixed(0)}% ${rebound} ${parryMin.toFixed(0)}-${parryMax.toFixed(0)}y`;
+  }
+  return "save/parry";
+}
+function goalkeeperPhysicsTitle() {
+  const contract = goalkeeperPhysicsContract();
+  if (!state?.physicsContract) return "Goalkeeper physics contract not loaded";
+  const parts = [
+    `saveUsesDistanceAndSightline=${contract.goalkeeperSaveProbabilityUsesDistanceAndSightline}`,
+    `clearSightlineSaveCap=${contract.goalkeeperClearSightlineSaveCap}`,
+    `catchUsesDistanceSpeedSightline=${contract.goalkeeperCatchProbabilityUsesDistanceSpeedSightline}`,
+    `parryReboundEnabled=${contract.goalkeeperParryReboundEnabled}`,
+    `parryRangeYards=${contract.goalkeeperParryMinYards}-${contract.goalkeeperParryMaxYards}`,
+    `closeHardShotsCanCreateRebounds=${contract.closeHardShotsCanCreateRebounds}`,
+  ];
+  return parts.join("\n");
 }
 function scoreValue(source, ...keys) {
   for (const key of keys) {
@@ -1931,10 +2213,12 @@ function decisionTelemetryItems(d) {
     {label: "Input", value: o.humanInputPresent ? `H${o.controllerSlot ?? "-"} #${o.humanInputSeq ?? "-"} ${formatInputAgeMs(o.humanInputQueueAgeMs)}` : "AI"},
     {label: "On ball", value: `${Number(o.realTimeOnBallSeconds ?? 0).toFixed(1)} / ${Number(o.perceivedTimeOnBallSeconds ?? 0).toFixed(1)}s`},
     {label: "Goal", value: `${Number(o.yardsToGoal ?? 0).toFixed(1)}y ${Number(o.opponentGoalAngleDegrees ?? 0).toFixed(0)}deg`},
+    {label: "Decide", value: `D${Number(o.decisiveGoalActionPressure ?? 0).toFixed(2)} K${Number(o.killerPassGoalPressure ?? 0).toFixed(2)} 1P${Number(o.singleThreadGoalPressure ?? 0).toFixed(2)} GA${Number(o.goalAttackWindowScore ?? 0).toFixed(2)}`, score: Number(o.decisiveGoalActionPressure ?? 0), min: 0, max: 1},
+    {label: "KPass", value: o.threadedGoalPassAvailable ? `T${o.threadedGoalPassTarget ?? "-"} F${Number(o.threadedGoalPassForwardYards ?? 0).toFixed(0)} G${Number(o.threadedGoalPassGoalGainYards ?? 0).toFixed(0)} W${Number(o.threadedGoalPassReceptionWindowScore ?? 0).toFixed(2)} O${Number(o.threadedGoalPassReceiverOpenness ?? 0).toFixed(2)} C${Number(o.threadedGoalPassExpectedCompletion ?? 0).toFixed(2)} S${Number(o.threadedGoalPassStrideFit ?? 0).toFixed(2)}` : "none", score: Number(o.threadedGoalPassGoalGainYards ?? 0), min: 0, max: 24},
     {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Dribble", value: `${Number(o.forwardDribbleSpaceYards ?? 0).toFixed(1)}y`, score: Number(o.forwardDribbleSpaceYards ?? 0), min: 0, max: 24},
     {label: "Shape", value: `TC${Number(o.teamCentroidToBallYards ?? 0).toFixed(0)} W${Number(o.teamSpreadYards ?? 0).toFixed(0)} NB${Number(o.teamPlayersNearBall ?? 0)} FV${Number(o.teamForwardVelocityYps ?? 0).toFixed(1)}`, score: Number(o.teamPlayersNearBall ?? 0), min: 0, max: 5},
-    {label: "Passes", value: `${Number(o.visiblePassOptions ?? 0)}F ${Number(o.visibleAerialPassOptions ?? 0)}A`},
+    {label: "Passes", value: `${Number(o.visiblePassOptions ?? 0)}F ${Number(o.visibleAerialPassOptions ?? 0)}A OS${Number(o.openSupportOutlets ?? 0)}`},
     {label: "PassQ", value: `C${Number(o.expectedPassCompletion ?? 0).toFixed(2)} O${Number(o.bestPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedPassCompletion ?? 0), min: 0, max: 1},
     {label: "AirQ", value: `C${Number(o.expectedAerialPassCompletion ?? 0).toFixed(2)} O${Number(o.bestAerialPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedAerialPassCompletion ?? 0), min: 0, max: 1},
     {label: "Aerial", value: `B${Number(o.aerialPassBypassScore ?? 0).toFixed(2)} R${Number(o.aerialPassInterceptionRisk ?? 0).toFixed(2)}`, score: Number(o.aerialPassBypassScore ?? 0) - Number(o.aerialPassInterceptionRisk ?? 0) + 1, min: 0, max: 2},
@@ -2612,15 +2896,16 @@ function drawDecisionIntentTraces(r) {
     const isSupport = intent.action === "space";
     const isOverlap = intent.action === "overlap-run";
     const isCross = intent.action === "flank-low-cross" || intent.action === "flank-high-cross";
+    const isKillerPass = intent.action === "killer-pass";
     const isAerial = intent.flight === "aerial";
     const color = isHolder
-      ? (isCross ? "rgba(246,201,68,.96)" : isAerial ? "rgba(246,201,68,.88)" : "rgba(255,255,255,.86)")
+      ? (isCross || isKillerPass ? "rgba(246,201,68,.96)" : isAerial ? "rgba(246,201,68,.88)" : "rgba(255,255,255,.86)")
       : isOverlap ? "rgba(246,201,68,.78)"
       : (player.team === "Home" ? "rgba(137,205,255,.58)" : "rgba(255,164,164,.58)");
     drawIntentArrow(from, to, color, isHolder ? 3.2 : isOverlap ? 2.8 : 2, isSupport || isOverlap || isAerial);
-    if (intent.targetPlayer != null || isAerial || isCross || isOverlap) {
+    if (intent.targetPlayer != null || isAerial || isCross || isKillerPass || isOverlap) {
       ctx.beginPath();
-      ctx.arc(to.x, to.y, isHolder || isCross ? 7 : isOverlap ? 6 : 5, 0, Math.PI * 2);
+      ctx.arc(to.x, to.y, isHolder || isCross || isKillerPass ? 7 : isOverlap ? 6 : 5, 0, Math.PI * 2);
       ctx.strokeStyle = color;
       ctx.lineWidth = isHolder ? 2.5 : 1.5;
       ctx.stroke();
@@ -2770,7 +3055,8 @@ function render() {
   clock.textContent = fmtClock(f.clockSeconds);
   phase.textContent = phaseLabel(f.phase);
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
-  agentOrder.textContent = agentScheduleLabel(f.agentSchedule);
+  agentOrder.textContent = agentScheduleLabel(f);
+  agentOrder.title = agentScheduleFullLabel(f);
   sharedPositions.textContent = sharedPositionLabel(f);
   homeBrain.textContent = teamBrainLabel(f.homeBrain, f.homeDirective);
   awayBrain.textContent = teamBrainLabel(f.awayBrain, f.awayDirective);
@@ -2778,12 +3064,17 @@ function render() {
   ballKinematics.textContent = ballHistoryKinematicsLabel(f);
   ballAgent.textContent = ballAgentLabel(f.ball);
   ballAction.textContent = semanticBallActionLabel();
-  actionIntent.textContent = liveIntentLabel(primaryLiveIntent(f));
-  surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
+  const primaryIntent = primaryLiveIntent(f);
+  actionIntent.textContent = liveIntentLabel(primaryIntent);
+  actionIntent.title = liveIntentTitle(primaryIntent);
+  surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)} ${ballResistanceCompactLabel(f.ball)}`;
+  surfaceReadout.title = ballResistanceTitle(f.ball);
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
+  gkPhysics.textContent = goalkeeperPhysicsLabel();
+  gkPhysics.title = goalkeeperPhysicsTitle();
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
   dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
   clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
@@ -2816,6 +3107,12 @@ function render() {
   ticks.textContent = `${state.summary.ticks} / ${totalTicks}${remainingText}`;
   matchStep.textContent = matchStepLabel();
   simSpeed.textContent = simSpeedLabel();
+  runtimeContracts.textContent = runtimeContractsLabel();
+  runtimeContracts.title = runtimeContractsTitle();
+  liveAccounting.textContent = liveAccountingLabel();
+  liveAccounting.title = liveAccountingTitle();
+  livePhysics.textContent = livePhysicsLabel();
+  livePhysics.title = livePhysicsTitle();
   learning.textContent = learningLabel(state.learning);
   shapeLearning.textContent = shapeLearningLabel(state.tacticalSummary);
   policyAutosave.textContent = policyAutosaveLabel(state.policyAutosave);
@@ -2842,8 +3139,13 @@ function render() {
   events.innerHTML = eventLog.slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function humanSlotCount() {
-  if (!state || !state.config) return 0;
-  return Math.max(0, Math.min(Number(state.config.maxHumanPlayers || 0), 4));
+  if (!state) return 0;
+  const controller = state.controllerContract || {};
+  const maxSlots = Number(controller.maxHumanControllers ?? 4);
+  const configuredSlots = Number(controller.configuredHumanControllers ?? state.config?.maxHumanPlayers ?? maxSlots);
+  const boundedMax = Number.isFinite(maxSlots) && maxSlots > 0 ? maxSlots : 4;
+  const configured = Number.isFinite(configuredSlots) ? configuredSlots : 0;
+  return Math.max(0, Math.min(configured, boundedMax, 4));
 }
 function assignmentForSlot(slot) {
   return (state?.controllerAssignments || []).find(a => a.controllerSlot === slot) || null;
@@ -2902,13 +3204,13 @@ function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
 function configuredSimTicksPerPulse() {
-  return clamp(Math.round(Number(simTicksPerPulseNumber.value || simTicksPerPulse.value || 20)), 1, 1000);
+  return clamp(Math.round(Number(simTicksPerPulseNumber.value || simTicksPerPulse.value || LIVE_DEFAULT_TICKS_PER_PULSE)), 1, 1000);
 }
 function liveControllerAssigned() {
   return Array.isArray(state?.controllerAssignments) && state.controllerAssignments.length > 0;
 }
 function effectiveSimTicksPerPulse() {
-  return configuredSimTicksPerPulse();
+  return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();
 }
 function simSpeedLabel() {
   const configured = configuredSimTicksPerPulse();
@@ -3237,7 +3539,7 @@ function queueInput(pass = false, shoot = false, slot = Number(slotPick.value ||
   if (playerId == null) return false;
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   const normalizedAction = action == null ? null : normalizeUiActionLabel(action);
-  const actionIsPass = normalizedAction === "pass" || normalizedAction === "aerial-pass";
+  const actionIsPass = ["pass", "aerial-pass", "killer-pass"].includes(normalizedAction);
   const axis = overrides.axis || axisFromKeys(map);
   const sprint = overrides.sprint ?? keys.has(map.sprint);
   queuedInputs.push({
@@ -3252,7 +3554,49 @@ function queueInput(pass = false, shoot = false, slot = Number(slotPick.value ||
     action: normalizedAction,
     targetPlayer: (pass || actionIsPass) ? (overrides.targetPlayer ?? passTargetForSlot(slot)) : null
   });
+  compactQueuedInputsForBrowser();
   return true;
+}
+function inputHasCommand(input) {
+  return !!(input?.pass || input?.shoot || input?.action);
+}
+function mergeControllerInputFrames(previous, next) {
+  const merged = {...next};
+  if (inputHasCommand(previous) && !inputHasCommand(next)) {
+    merged.pass = previous.pass;
+    merged.shoot = previous.shoot;
+    merged.passFlight = previous.passFlight;
+    merged.action = previous.action;
+    merged.targetPlayer = previous.targetPlayer;
+  }
+  return merged;
+}
+function coalesceQueuedInputsBySlot(inputs) {
+  const latestBySlot = new Map();
+  for (const input of inputs) {
+    const slot = Number(input?.controllerSlot ?? 0);
+    const current = latestBySlot.get(slot);
+    if (!current || Number(input.seq || 0) >= Number(current.seq || 0)) {
+      latestBySlot.set(slot, current ? mergeControllerInputFrames(current, input) : input);
+    } else if (inputHasCommand(input) && !inputHasCommand(current)) {
+      latestBySlot.set(slot, mergeControllerInputFrames(input, current));
+    }
+  }
+  return Array.from(latestBySlot.values())
+    .sort((a, b) => Number(a.controllerSlot ?? 0) - Number(b.controllerSlot ?? 0))
+    .slice(0, LIVE_INPUT_CLIENT_QUEUE_LIMIT);
+}
+function compactQueuedInputsForBrowser() {
+  if (queuedInputs.length > LIVE_INPUT_CLIENT_QUEUE_LIMIT) {
+    queuedInputs = coalesceQueuedInputsBySlot(queuedInputs);
+  }
+}
+function drainQueuedInputsForDispatch() {
+  queuedInputs = coalesceQueuedInputsBySlot(queuedInputs);
+  return queuedInputs.splice(0, queuedInputs.length);
+}
+function requeueInputFrames(inputs) {
+  queuedInputs = coalesceQueuedInputsBySlot(inputs.concat(queuedInputs));
 }
 function playerCanShoot(p) {
   if (!p || !state?.config) return false;
@@ -3289,6 +3633,7 @@ function queueMotionInputsForPressedControllers() {
 function gamepadActionForSlot(slot, gamepad) {
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.carry)) return "carry-forward";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.protect)) return "protect-ball";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.killerPass)) return "killer-pass";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.clearance)) return "clearance";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.routeOne)) return "route-one";
   return null;
@@ -3888,16 +4233,23 @@ async function stepOnce(options = {}) {
     }
     queueMotionInputsForPressedControllers();
     queueGamepadInputs();
-    const inputs = queuedInputs.splice(0, queuedInputs.length);
+    const inputs = drainQueuedInputsForDispatch();
     const beforeAssignments = assignmentKey(state.controllerAssignments);
     const previousPolicyHistory = state.policyHistory || null;
     const previousHistoryRecords = Number(state.policyAutosave?.historyRecords ?? 0);
     const ticksThisPulse = options.manual ? 1 : effectiveSimTicksPerPulse();
-    const response = await postJson("/api/step", {
-      ticks: ticksThisPulse,
-      recordEveryTicks: Math.max(1, ticksThisPulse),
-      inputs
-    });
+    let response;
+    try {
+      response = await postJson("/api/step", {
+        ticks: ticksThisPulse,
+        recordEveryTicks: Math.max(1, ticksThisPulse),
+        inputs
+      });
+    } catch (err) {
+      requeueInputFrames(inputs);
+      scheduleInputRetry();
+      throw err;
+    }
     applyInputAck(response, inputs.length);
     state = {
       config: state.config,
@@ -3912,6 +4264,15 @@ async function stepOnce(options = {}) {
       episodeIndex: response.episodeIndex,
       completedEpisodes: response.completedEpisodes,
       summary: response.summary,
+      agentContract: response.agentContract || state.agentContract,
+      controllerContract: response.controllerContract || state.controllerContract,
+      uiContract: response.uiContract || state.uiContract,
+      rulesContract: response.rulesContract || state.rulesContract,
+      physicsContract: response.physicsContract || state.physicsContract,
+      decisionModel: response.decisionModel || state.decisionModel,
+      learningContract: response.learningContract || state.learningContract,
+      liveAccounting: response.liveAccounting || state.liveAccounting,
+      livePhysics: response.livePhysics || state.livePhysics,
       stepTiming: response.stepTiming,
       controllerAssignments: response.controllerAssignments,
       controllerThreads: response.controllerThreads || [],
@@ -3969,7 +4330,7 @@ function scheduleInputRetry() {
 async function flushQueuedInputsToInputApi() {
   if (!state || resetting || inputFlushInFlight || !queuedInputs.length) return;
   inputFlushInFlight = true;
-  const inputs = queuedInputs.splice(0, queuedInputs.length);
+  const inputs = drainQueuedInputsForDispatch();
   let delivered = false;
   try {
     const ack = await postJson("/api/input", inputs);
@@ -3978,7 +4339,7 @@ async function flushQueuedInputsToInputApi() {
     delivered = true;
     render();
   } catch (err) {
-    queuedInputs = inputs.concat(queuedInputs);
+    requeueInputFrames(inputs);
     statusEl.textContent = err.message;
   } finally {
     inputFlushInFlight = false;
@@ -4029,6 +4390,7 @@ document.getElementById("pass").addEventListener("click", () => submitInputOnly(
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
 carryActionButton.addEventListener("click", () => submitInputOnly(false, false, "carry-forward").catch(e => statusEl.textContent = e.message));
 protectActionButton.addEventListener("click", () => submitInputOnly(false, false, "protect-ball").catch(e => statusEl.textContent = e.message));
+killerPassActionButton.addEventListener("click", () => submitInputOnly(false, false, "killer-pass").catch(e => statusEl.textContent = e.message));
 clearanceActionButton.addEventListener("click", () => submitInputOnly(false, false, "clearance").catch(e => statusEl.textContent = e.message));
 routeOneActionButton.addEventListener("click", () => submitInputOnly(false, false, "route-one").catch(e => statusEl.textContent = e.message));
 exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));
@@ -4147,9 +4509,9 @@ window.addEventListener("keydown", e => {
     return;
   }
   if (isFormEditingTarget(e.target)) return;
-  if (e.code === "KeyC" || e.code === "KeyR") {
+  if (e.code === "KeyC" || e.code === "KeyR" || e.code === "KeyT") {
     e.preventDefault();
-    const action = e.code === "KeyC" ? "clearance" : "route-one";
+    const action = e.code === "KeyC" ? "clearance" : e.code === "KeyT" ? "killer-pass" : "route-one";
     if (!e.repeat && !queueInput(false, false, activeSlot, action)) {
       statusEl.textContent = `slot ${activeSlot + 1} autonomous`;
     } else if (!e.repeat) {

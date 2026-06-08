@@ -28552,6 +28552,8 @@ pub struct SimulationTrace {
     pub events: Vec<MatchEvent>,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
+    #[serde(default)]
+    pub controller_yield: ControllerYieldStats,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45144,6 +45146,7 @@ pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> Simulatio
     }
     let summary = sim.summary();
     let step_timing = sim.step_timing_stats();
+    let controller_yield = sim.controller_yield_stats();
     let events = sim.events;
     SimulationTrace {
         config,
@@ -45151,6 +45154,7 @@ pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> Simulatio
         frames,
         events,
         step_timing,
+        controller_yield,
     }
 }
 
@@ -47872,6 +47876,7 @@ fn soccer_playback_metadata_json(
     summary: &MatchSummary,
     events: &[MatchEvent],
     step_timing: SoccerStepTimingStats,
+    controller_yield: ControllerYieldStats,
     expected_frame_count: usize,
     record_every_ticks: Option<u64>,
 ) -> serde_json::Value {
@@ -47886,6 +47891,7 @@ fn soccer_playback_metadata_json(
         "config": config,
         "summary": summary,
         "stepTiming": step_timing,
+        "controllerYield": controller_yield,
         "cadence": cadence,
         "agentContract": soccer_playback_agent_contract(),
         "decisionModel": soccer_decision_model_contract(),
@@ -47899,6 +47905,7 @@ fn soccer_playback_metadata_json(
             "recordEveryTicks": record_every_ticks.map(|ticks| ticks.max(1)),
             "expectedFrameCount": expected_frame_count,
             "cadence": cadence,
+            "controllerYield": controller_yield,
             "agentContract": soccer_playback_agent_contract(),
             "decisionModel": soccer_decision_model_contract(),
             "controllerContract": controller_contract,
@@ -47923,6 +47930,7 @@ fn write_soccer_playback_artifacts_to_dir(
         &trace.summary,
         &trace.events,
         trace.step_timing,
+        trace.controller_yield,
         trace.frames.len(),
         None,
     );
@@ -47982,6 +47990,7 @@ fn write_soccer_playback_artifacts_streaming_to_dir(
         &summary,
         &sim.events,
         sim.step_timing_stats(),
+        sim.controller_yield_stats(),
         expected_frame_count,
         Some(record_every_ticks),
     );
@@ -88512,6 +88521,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .body
             .contains("tacticalSummary: response.tacticalSummary"));
         assert!(html.body.contains("stepTiming: response.stepTiming"));
+        assert!(html.body.contains("function controllerYieldLabel"));
+        assert!(html.body.contains("relevantNotifiedWaits"));
+        assert!(html.body.contains("lateRelevantNotifiedWaits"));
+        assert!(html.body.contains("lastRelevantNotified"));
+        assert!(html.body.contains("R${relevantNotified}"));
         assert!(html
             .body
             .contains("controllerLatencyBudget: response.controllerLatencyBudget"));
@@ -93779,6 +93793,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains(
             "trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null"
         ));
+        assert!(html.contains("trace.controllerYield = meta.controllerYield"));
         assert!(html.contains(
             "trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null"
         ));
@@ -93881,6 +93896,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("mainLoopUsesCondvarYield"));
         assert!(html.contains("notificationDrivenInput"));
         assert!(html.contains("sameSlotCoalescingEnabled"));
+        assert!(html.contains("relevantNotifiedWaits"));
+        assert!(html.contains("lastRelevantNotified"));
+        assert!(html.contains("lastRelevantVersion"));
+        assert!(html.contains("R${relevant}/${waits}"));
         assert!(html.contains("controllerRuntime.textContent = controllerRuntimeLabel()"));
         assert!(html.contains("controllerRuntime.title = controllerRuntimeTitle()"));
         assert!(html.contains("function syncControllerAssignment"));
@@ -94466,6 +94485,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["summary"]["ticks"], trace.summary.ticks);
         assert_eq!(meta["stepTiming"]["ticks"], trace.step_timing.ticks);
         assert_eq!(meta["stepTiming"]["totalMs"], trace.step_timing.total_ms);
+        assert_eq!(
+            meta["controllerYield"]["waitAttempts"],
+            trace.controller_yield.wait_attempts
+        );
+        assert_eq!(meta["controllerYield"], meta["playback"]["controllerYield"]);
         assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
         assert_eq!(meta["agentContract"]["expectedTotalAgents"], 27);
         assert_eq!(meta["agentContract"]["expectedFieldShuffleAgents"], 26);
@@ -94571,6 +94595,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .expect("meta json");
         assert_eq!(meta["summary"]["ticks"], config.total_ticks());
         assert_eq!(meta["stepTiming"]["ticks"], config.total_ticks());
+        assert_eq!(meta["controllerYield"], meta["playback"]["controllerYield"]);
+        assert_eq!(meta["controllerYield"]["assignedPlayers"], 0);
         assert_eq!(meta["agentContract"]["expectedTotalAgents"], 27);
         assert_eq!(meta["agentContract"]["expectedFieldShuffleAgents"], 26);
         assert_eq!(meta["agentContract"]["expectedPlayerCount"], 22);

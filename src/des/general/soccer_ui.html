@@ -467,6 +467,7 @@ const trace = {
   physicsContract: null,
   learningContract: null,
   stepTiming: null,
+  controllerYield: null,
   frames: [],
   events: [],
   runId: null,
@@ -1879,16 +1880,21 @@ function controllerInputRuntimeMode() {
 }
 function controllerRuntimeLabel() {
   const contract = trace.controllerContract || {};
+  const yieldStats = trace.controllerYield || {};
   const maxSlots = Number(contract.maxHumanControllers ?? maxHumanControllerSlots());
   const configured = Number(contract.configuredHumanControllers ?? visibleHumanSlotCount());
   const threads = contract.nativeThreadPerControllerEnabled ? "threads" : "direct";
   const mode = contract.notificationDrivenInput ? "notify" : "poll";
   const yieldMs = Number(contract.yieldBudgetMs ?? 0);
   const debounceMs = Number(contract.defaultDebounceMs ?? 0);
-  return `${configured}/${maxSlots} ${threads} ${mode} Y${yieldMs} D${debounceMs}`;
+  const relevant = Number(yieldStats.relevantNotifiedWaits ?? 0);
+  const waits = Number(yieldStats.waitAttempts ?? 0);
+  const wake = waits > 0 ? ` R${relevant}/${waits}` : "";
+  return `${configured}/${maxSlots} ${threads} ${mode} Y${yieldMs} D${debounceMs}${wake}`;
 }
 function controllerRuntimeTitle() {
   const contract = trace.controllerContract || {};
+  const yieldStats = trace.controllerYield || {};
   if (!trace.controllerContract) return "Controller runtime contract not loaded";
   const parts = [
     `maxHumanControllers=${contract.maxHumanControllers}`,
@@ -1907,6 +1913,11 @@ function controllerRuntimeTitle() {
     `queueLimit=${contract.queueLimit}`,
     `maxQueueAgeMs=${contract.maxQueueAgeMs}`,
     `threadNamePrefix=${contract.threadNamePrefix}`,
+    `assignedPlayers=${yieldStats.assignedPlayers ?? 0}`,
+    `waitAttempts=${yieldStats.waitAttempts ?? 0}`,
+    `relevantNotifiedWaits=${yieldStats.relevantNotifiedWaits ?? 0}`,
+    `lastRelevantNotified=${yieldStats.lastRelevantNotified ?? false}`,
+    `lastRelevantVersion=${yieldStats.lastRelevantVersionBefore ?? 0}->${yieldStats.lastRelevantVersionAfter ?? 0}`,
   ];
   return parts.join("\n");
 }
@@ -2337,6 +2348,7 @@ async function loadTraceMeta(signal) {
   trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null;
   trace.learningContract = meta.learningContract || meta.playback?.learningContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
+  trace.controllerYield = meta.controllerYield || meta.controller_yield || meta.playback?.controllerYield || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;
   trace.generatedAtUnixMs = meta.generatedAtUnixMs || null;

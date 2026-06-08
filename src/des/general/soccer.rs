@@ -28410,6 +28410,8 @@ pub struct AgentScheduleEntry {
 pub struct AgentScheduleSummary {
     pub total_agents: usize,
     pub expected_total_agents: usize,
+    pub field_shuffle_agents: usize,
+    pub expected_field_shuffle_agents: usize,
     pub unique_agents: usize,
     pub duplicate_agents: usize,
     pub central_brain_count: usize,
@@ -28418,6 +28420,7 @@ pub struct AgentScheduleSummary {
     pub official_count: usize,
     pub expected_official_count: usize,
     pub ball_count: usize,
+    pub expected_ball_count: usize,
     pub central_brain_first: bool,
     #[serde(default)]
     pub ball_scheduled_index: Option<usize>,
@@ -28453,6 +28456,12 @@ fn agent_schedule_summary_for(
         }
     }
     let expected_total_agents = 1 + expected_player_count + expected_official_count + 1;
+    let expected_field_shuffle_agents = expected_player_count + expected_official_count + 1;
+    let expected_ball_count = 1;
+    let field_shuffle_agents = schedule
+        .iter()
+        .filter(|entry| entry.kind != AgentScheduleKind::CentralBrain)
+        .count();
     let central_brain_first = schedule
         .first()
         .is_some_and(|entry| entry.kind == AgentScheduleKind::CentralBrain);
@@ -28465,13 +28474,16 @@ fn agent_schedule_summary_for(
         && central_brain_count == 1
         && player_count == expected_player_count
         && official_count == expected_official_count
-        && ball_count == 1
+        && ball_count == expected_ball_count
+        && field_shuffle_agents == expected_field_shuffle_agents
         && central_brain_first
         && ball_scheduled_index.is_some();
 
     AgentScheduleSummary {
         total_agents: schedule.len(),
         expected_total_agents,
+        field_shuffle_agents,
+        expected_field_shuffle_agents,
         unique_agents: seen.len(),
         duplicate_agents,
         central_brain_count,
@@ -28480,6 +28492,7 @@ fn agent_schedule_summary_for(
         official_count,
         expected_official_count,
         ball_count,
+        expected_ball_count,
         central_brain_first,
         ball_scheduled_index,
         complete,
@@ -68603,8 +68616,14 @@ mod tests {
         let initial = trace.frames.first().expect("initial frame");
         assert_eq!(initial.agent_schedule_summary.expected_player_count, 22);
         assert_eq!(initial.agent_schedule_summary.expected_official_count, 3);
+        assert_eq!(initial.agent_schedule_summary.expected_ball_count, 1);
         assert_eq!(initial.agent_schedule_summary.expected_total_agents, 27);
+        assert_eq!(
+            initial.agent_schedule_summary.expected_field_shuffle_agents,
+            26
+        );
         assert_eq!(initial.agent_schedule_summary.total_agents, 0);
+        assert_eq!(initial.agent_schedule_summary.field_shuffle_agents, 0);
         assert!(!initial.agent_schedule_summary.complete);
 
         let scheduled = trace
@@ -68615,8 +68634,11 @@ mod tests {
         let summary = &scheduled.agent_schedule_summary;
         assert_eq!(summary.expected_player_count, 22);
         assert_eq!(summary.expected_official_count, 3);
+        assert_eq!(summary.expected_ball_count, 1);
         assert_eq!(summary.expected_total_agents, 27);
+        assert_eq!(summary.expected_field_shuffle_agents, 26);
         assert_eq!(summary.total_agents, 27);
+        assert_eq!(summary.field_shuffle_agents, 26);
         assert_eq!(summary.unique_agents, 27);
         assert_eq!(summary.duplicate_agents, 0);
         assert_eq!(summary.central_brain_count, 1);
@@ -68630,6 +68652,7 @@ mod tests {
         let playback = SoccerPlaybackFrame::from(scheduled);
         assert!(playback.agent_schedule_summary.complete);
         assert_eq!(playback.agent_schedule_summary.total_agents, 27);
+        assert_eq!(playback.agent_schedule_summary.field_shuffle_agents, 26);
     }
 
     #[test]
@@ -89186,6 +89209,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(state.summary.simulated_seconds, 0.0);
         assert!(!state.match_clock.done);
         assert_eq!(state.frame.agent_schedule_summary.expected_total_agents, 27);
+        assert_eq!(
+            state
+                .frame
+                .agent_schedule_summary
+                .expected_field_shuffle_agents,
+            26
+        );
+        assert_eq!(state.frame.agent_schedule_summary.expected_ball_count, 1);
         assert_eq!(state.frame.players.len(), 22);
         assert_eq!(state.frame.officials.len(), 3);
     }
@@ -91331,6 +91362,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             Some(27)
         );
         assert_eq!(
+            value["frame"]["agentScheduleSummary"]["fieldShuffleAgents"].as_u64(),
+            Some(26)
+        );
+        assert_eq!(
+            value["frame"]["agentScheduleSummary"]["expectedFieldShuffleAgents"].as_u64(),
+            Some(26)
+        );
+        assert_eq!(
             value["frame"]["agentScheduleSummary"]["playerCount"].as_u64(),
             Some(22)
         );
@@ -91340,6 +91379,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(
             value["frame"]["agentScheduleSummary"]["ballCount"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            value["frame"]["agentScheduleSummary"]["expectedBallCount"].as_u64(),
             Some(1)
         );
         assert_eq!(
@@ -96115,6 +96158,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             27
         );
         assert_eq!(
+            first_frame["agentScheduleSummary"]["expectedFieldShuffleAgents"],
+            26
+        );
+        assert_eq!(
             first_frame["agentScheduleSummary"]["expectedPlayerCount"],
             22
         );
@@ -96122,6 +96169,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             first_frame["agentScheduleSummary"]["expectedOfficialCount"],
             3
         );
+        assert_eq!(first_frame["agentScheduleSummary"]["expectedBallCount"], 1);
         let frames = jsonl
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("playback json"))
@@ -96243,6 +96291,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             Some(27)
         );
         assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["fieldShuffleAgents"].as_u64(),
+            Some(26)
+        );
+        assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["expectedFieldShuffleAgents"].as_u64(),
+            Some(26)
+        );
+        assert_eq!(
             scheduled_frame["agentScheduleSummary"]["playerCount"].as_u64(),
             Some(22)
         );
@@ -96252,6 +96308,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(
             scheduled_frame["agentScheduleSummary"]["ballCount"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            scheduled_frame["agentScheduleSummary"]["expectedBallCount"].as_u64(),
             Some(1)
         );
         assert_eq!(

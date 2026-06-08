@@ -47911,6 +47911,7 @@ pub fn soccer_tracking_dataset_from_jsonl(
         }
         let value = serde_json::from_str::<serde_json::Value>(line)
             .map_err(|err| format!("tracking jsonl line {line_no} is not valid JSON: {err}"))?;
+        let value = soccer_tracking_jsonl_unwrap_envelope(value, line_no)?;
         if value.get("frames").is_some_and(|frames| frames.is_array())
             && value.get("config").is_some()
         {
@@ -47971,6 +47972,58 @@ pub fn soccer_tracking_dataset_from_jsonl(
     }
     dataset.validate()?;
     Ok(dataset)
+}
+
+fn soccer_tracking_jsonl_unwrap_envelope(
+    value: serde_json::Value,
+    line_no: usize,
+) -> Result<serde_json::Value, String> {
+    let Some(kind) = soccer_tracking_jsonl_record_kind(&value) else {
+        return Ok(value);
+    };
+    if !matches!(
+        kind.as_str(),
+        "frame"
+            | "trackingframe"
+            | "soccertrackingframe"
+            | "meta"
+            | "metadata"
+            | "trackingmeta"
+            | "soccertrackingmeta"
+            | "dataset"
+            | "trackingdataset"
+            | "soccertrackingdataset"
+    ) {
+        return Ok(value);
+    }
+    if kind == "soccertrackingmeta" && value.get("config").is_some() {
+        return Ok(value);
+    }
+    for alias in ["frame", "data", "payload", "record"] {
+        if let Some(payload) = value.get(alias) {
+            if payload.is_object() {
+                return Ok(payload.clone());
+            }
+            return Err(format!(
+                "tracking jsonl line {line_no} {alias} envelope must be a JSON object"
+            ));
+        }
+    }
+    Err(format!(
+        "tracking jsonl line {line_no} {kind} envelope is missing frame/data/payload/record"
+    ))
+}
+
+fn soccer_tracking_jsonl_record_kind(value: &serde_json::Value) -> Option<String> {
+    ["kind", "type", "event", "recordType"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(|raw| raw.as_str()))
+        .map(|raw| {
+            raw.chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .flat_map(|ch| ch.to_lowercase())
+                .collect()
+        })
 }
 
 fn soccer_tracking_dataset_from_json_value(
@@ -79552,6 +79605,59 @@ mod tests {
         assert_eq!(fallback.source, "frame-only-upload.jsonl");
         assert_eq!(fallback.config.seed, tracking.config.seed);
         assert_eq!(fallback.frames.len(), 2);
+    }
+
+    #[test]
+    fn tracking_dataset_jsonl_accepts_http_stream_envelopes() {
+        let tracking = sample_tracking_pass_dataset();
+        let meta = serde_json::json!({
+            "type": "metadata",
+            "payload": {
+                "source": "unit-envelope-stream.ndjson",
+                "config": tracking.config,
+            }
+        });
+        let first_frame = serde_json::json!({
+            "type": "frame",
+            "data": tracking.frames[0],
+        });
+        let second_frame = serde_json::json!({
+            "kind": "soccer-tracking-frame",
+            "payload": tracking.frames[1],
+        });
+        let jsonl = format!("{meta}\n{first_frame}\n{second_frame}\n");
+
+        let parsed =
+            soccer_tracking_dataset_from_jsonl(&jsonl, MatchConfig::default(), "fallback-envelope")
+                .expect("parse envelope tracking jsonl");
+        assert_eq!(parsed.source, "unit-envelope-stream.ndjson");
+        assert_eq!(parsed.config.seed, tracking.config.seed);
+        assert_eq!(parsed.frames.len(), 2);
+        assert_eq!(parsed.frames[1].ball_action.as_deref(), Some("pass"));
+
+        let dataset = parsed.to_learning_dataset().expect("envelope jsonl learns");
+        assert_eq!(dataset.transitions.len(), 3);
+        let policy = train_soccer_q_policy_from_tracking(&parsed, SoccerQPolicyOptions::default())
+            .expect("policy from envelope jsonl");
+        assert!(
+            policy
+                .entries()
+                .iter()
+                .any(|entry| normalize_soccer_action_label(&entry.action) == "pass"),
+            "enveloped tracking stream should train pass actions"
+        );
+
+        let malformed = r#"{"type":"frame","data":1}"#;
+        let err = soccer_tracking_dataset_from_jsonl(
+            malformed,
+            MatchConfig::default(),
+            "malformed-envelope",
+        )
+        .expect_err("scalar envelope payload should fail clearly");
+        assert!(
+            err.contains("data envelope must be a JSON object"),
+            "unexpected envelope error: {err}"
+        );
     }
 
     #[test]

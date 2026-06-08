@@ -6872,8 +6872,8 @@ impl PlayerAgent {
             * (1.0
                 + killer_pass_range_fit * 1.05
                 + killer_pass_goal_pressure * 1.42
-                + single_thread_goal_pressure * 1.10
-                + goal_entry_pressure * 0.62
+                + single_thread_goal_pressure * 1.34
+                + goal_entry_pressure * 0.78
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
             * (1.0 + decisive_goal_pressure * 0.72)
@@ -7051,9 +7051,9 @@ impl PlayerAgent {
                 (0.10
                     + decisive_goal_pressure * 0.42
                     + threaded_lane_fit * 0.16
-                    + close_threaded_goal_fit * 0.10
+                    + close_threaded_goal_fit * 0.14
                     + goal_entry_pressure * 0.16
-                    + single_thread_goal_pressure * 0.14)
+                    + single_thread_goal_pressure * 0.18)
                     .clamp(0.0, 0.84),
             );
             ensure_min_legal_option_probability(&mut options, "killer-pass", killer_floor);
@@ -7062,7 +7062,7 @@ impl PlayerAgent {
             let recycle_multiplier = (1.0
                 - decisive_goal_pressure * 0.74
                 - if killer_pass_legal {
-                    single_thread_goal_pressure * 0.20
+                    single_thread_goal_pressure * 0.28
                 } else {
                     0.0
                 }
@@ -32384,6 +32384,9 @@ pub struct SoccerDecisionModelContract {
     pub killer_pass_max_yards_to_goal: f64,
     pub single_threaded_killer_pass_enabled: bool,
     pub single_pass_goal_thread_pressure_enabled: bool,
+    pub goal_entry_boosts_killer_pass_score: bool,
+    pub single_thread_goal_pressure_boosts_decisive_action: bool,
+    pub single_thread_goal_pressure_damps_recycling: bool,
     pub threaded_goal_pass_can_override_forced_shot: bool,
     pub decisive_goal_action_pressure_enabled: bool,
     pub decisive_goal_action_probability_ramps_toward_goal: bool,
@@ -33003,6 +33006,9 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         killer_pass_max_yards_to_goal: KILLER_PASS_MAX_YARDS_TO_GOAL,
         single_threaded_killer_pass_enabled: true,
         single_pass_goal_thread_pressure_enabled: true,
+        goal_entry_boosts_killer_pass_score: true,
+        single_thread_goal_pressure_boosts_decisive_action: true,
+        single_thread_goal_pressure_damps_recycling: true,
         threaded_goal_pass_can_override_forced_shot: true,
         decisive_goal_action_pressure_enabled: true,
         decisive_goal_action_probability_ramps_toward_goal: true,
@@ -52432,8 +52438,8 @@ fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) 
         + receiver_lane_fit * 0.36
         + blocked_shot_invitation * 0.12
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.04
-        + close_goal_fit * 0.10
-        + goal_entry_fit * 0.10)
+        + close_goal_fit * 0.13
+        + goal_entry_fit * 0.13)
         .clamp(0.0, 1.0)
 }
 
@@ -52548,7 +52554,7 @@ fn near_goal_decisive_action_pressure_score(
         + shot_lane_fit.max(threaded_lane_fit) * 0.24
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.13
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.07
-        + single_thread_fit * 0.08
+        + single_thread_fit * 0.12
         + close_goal_fit * 0.09
         + goal_entry_fit * 0.09)
         * role_fit)
@@ -97503,6 +97509,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(model["singleThreadedKillerPassEnabled"], true);
         assert_eq!(model["singlePassGoalThreadPressureEnabled"], true);
+        assert_eq!(model["goalEntryBoostsKillerPassScore"], true);
+        assert_eq!(model["singleThreadGoalPressureBoostsDecisiveAction"], true);
+        assert_eq!(model["singleThreadGoalPressureDampsRecycling"], true);
         assert_eq!(model["threadedGoalPassCanOverrideForcedShot"], true);
         assert_eq!(model["decisiveGoalActionPressureEnabled"], true);
         assert_eq!(model["decisiveGoalActionProbabilityRampsTowardGoal"], true);

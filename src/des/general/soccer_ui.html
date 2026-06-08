@@ -1697,6 +1697,56 @@ function drawIntentTraces(f, r) {
     }
   }
 }
+function pendingPassPhase(frame = currentFrame()) {
+  return frame?.pendingPass || frame?.pending_pass || null;
+}
+function yardsToCanvasRadius(yards, r) {
+  const config = trace.config || FALLBACK_CONFIG;
+  return Number(yards || 0)
+    * ((r.w / Number(config.fieldWidthYards || 80)) + (r.h / Number(config.fieldLengthYards || 120)))
+    * 0.5;
+}
+function drawPendingPassPhase(f, r) {
+  const pass = pendingPassPhase(f);
+  if (!pass?.origin || !pass?.intendedTarget) return;
+  const from = mapPoint(pass.origin, r);
+  const to = mapPoint(pass.intendedTarget, r);
+  const aerial = String(pass.flight || "").toLowerCase() === "aerial";
+  const offside = pass.offside || null;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.strokeStyle = offside ? "rgba(239,68,68,.86)" : aerial ? "rgba(246,201,68,.68)" : "rgba(255,255,255,.58)";
+  ctx.lineWidth = offside ? 3 : 2;
+  ctx.setLineDash(aerial ? [8, 6] : []);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const urgency = Math.max(0, Math.min(1, Number(pass.receiverUrgency ?? 0)));
+  const receiverId = pass.nearestReceiver ?? pass.nearest_receiver;
+  const receiver = receiverId != null ? f?.players?.find(player => player.id === receiverId) : null;
+  if (receiver?.position) {
+    const pt = mapPoint(receiver.position, r);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 15 + urgency * 9, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(246,201,68,${0.28 + urgency * 0.42})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  if (offside?.position) {
+    const pt = mapPoint(offside.position, r);
+    const radius = yardsToCanvasRadius(offside.interferenceRadiusYards ?? offside.interference_radius_yards ?? 3, r);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(239,68,68,.82)";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(239,68,68,.16)";
+    ctx.fill();
+  }
+  ctx.restore();
+}
 function pendingReboundPhase(frame = currentFrame()) {
   return frame?.pendingRebound || frame?.pending_rebound || null;
 }
@@ -1819,6 +1869,7 @@ function render() {
   drawPitchGridOverlay(r);
   const f = currentFrame();
   if (!f) return;
+  drawPendingPassPhase(f, r);
   drawPendingReboundPhase(f, r);
   drawIntentTraces(f, r);
   for (const o of f.officials) drawOfficial(o, r);

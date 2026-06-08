@@ -95052,6 +95052,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("pendingRebound"));
         assert!(html.contains("parryPosition || rebound?.parry_position"));
         assert!(html.contains("drawPendingReboundPhase(f, r)"));
+        assert!(html.contains("function pendingPassPhase"));
+        assert!(html.contains("function drawPendingPassPhase"));
+        assert!(html.contains("pendingPass"));
+        assert!(html.contains("pass.receiverUrgency"));
+        assert!(html.contains("offside.interferenceRadiusYards"));
+        assert!(html.contains("drawPendingPassPhase(f, r)"));
         assert!(html.contains("${central}${Number(s.playerCount || 0)}p/"));
         assert!(html.contains("${hasCentral ? \"C+\" : \"\"}${players}p/${officials}o"));
         assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));

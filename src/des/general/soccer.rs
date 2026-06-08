@@ -522,9 +522,14 @@ fn default_live_http_worker_threads() -> usize {
 }
 
 const MAX_LIVE_HTTP_WORKER_THREADS: usize = 32;
+const LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER: usize = 64;
 
 fn live_http_worker_threads(worker_threads: usize) -> usize {
     worker_threads.clamp(1, MAX_LIVE_HTTP_WORKER_THREADS)
+}
+
+fn live_http_worker_queue_capacity(worker_threads: usize) -> usize {
+    live_http_worker_threads(worker_threads) * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
 }
 
 fn default_soccer_moment_embedder_version() -> String {
@@ -37025,6 +37030,8 @@ pub struct SoccerInputAck {
 pub struct SoccerLiveHttpStatus {
     pub worker_model: String,
     pub worker_threads: usize,
+    pub worker_queue_capacity: usize,
+    pub bounded_worker_queue: bool,
     pub reuses_workers: bool,
     pub spawns_per_request: bool,
     pub batches_step_ticks: bool,
@@ -37036,6 +37043,8 @@ impl SoccerLiveHttpStatus {
         SoccerLiveHttpStatus {
             worker_model: "worker-pool".to_string(),
             worker_threads,
+            worker_queue_capacity: live_http_worker_queue_capacity(worker_threads),
+            bounded_worker_queue: true,
             reuses_workers: true,
             spawns_per_request: false,
             batches_step_ticks: true,
@@ -47083,7 +47092,8 @@ impl SoccerLiveServer {
         let listener = TcpListener::bind((self.config.host.as_str(), self.config.port))?;
         println!("# Live soccer UI: {}", self.local_url());
         let worker_count = live_http_worker_threads(self.config.http_worker_threads);
-        let (stream_tx, stream_rx) = mpsc::channel::<TcpStream>();
+        let queue_capacity = live_http_worker_queue_capacity(worker_count);
+        let (stream_tx, stream_rx) = mpsc::sync_channel::<TcpStream>(queue_capacity);
         let stream_rx = Arc::new(Mutex::new(stream_rx));
         for worker_id in 0..worker_count {
             let session = Arc::clone(&self.session);
@@ -96459,6 +96469,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&state.body).expect("bridge mounted state json");
         assert_eq!(state_value["config"]["seed"], 71);
         assert_eq!(state_value["liveHttp"]["workerThreads"], 3);
+        assert_eq!(
+            state_value["liveHttp"]["workerQueueCapacity"],
+            3 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert_eq!(state_value["liveHttp"]["boundedWorkerQueue"], true);
         assert_eq!(state_value["liveHttp"]["reusesWorkers"], true);
         assert_eq!(state_value["liveHttp"]["spawnsPerRequest"], false);
 
@@ -96472,6 +96487,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&step.body).expect("bridge mounted step json");
         assert_eq!(step_value["summary"]["ticks"], 1);
         assert_eq!(step_value["liveHttp"]["workerThreads"], 3);
+        assert_eq!(
+            step_value["liveHttp"]["workerQueueCapacity"],
+            3 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert_eq!(step_value["liveHttp"]["boundedWorkerQueue"], true);
 
         let bad = bridge.handle_request("GET /oops", "/des-rs/api/state", "");
         assert_eq!(bad.status, 400);
@@ -96482,6 +96502,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     fn live_http_worker_pool_count_is_sanitized_and_bounded() {
         assert_eq!(live_http_worker_threads(0), 1);
         assert_eq!(live_http_worker_threads(1), 1);
+        assert_eq!(
+            live_http_worker_queue_capacity(0),
+            LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert_eq!(
+            live_http_worker_queue_capacity(3),
+            3 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
         assert_eq!(
             live_http_worker_threads(MAX_LIVE_HTTP_WORKER_THREADS + 100),
             MAX_LIVE_HTTP_WORKER_THREADS
@@ -96502,6 +96530,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let zero_state = zero_worker_server.session.lock().unwrap().state_response();
         assert_eq!(zero_state.live_http.worker_model, "worker-pool");
         assert_eq!(zero_state.live_http.worker_threads, 1);
+        assert_eq!(
+            zero_state.live_http.worker_queue_capacity,
+            LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert!(zero_state.live_http.bounded_worker_queue);
         assert!(zero_state.live_http.reuses_workers);
         assert!(!zero_state.live_http.spawns_per_request);
 
@@ -96522,6 +96555,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             oversized_state.live_http.worker_threads,
             MAX_LIVE_HTTP_WORKER_THREADS
         );
+        assert_eq!(
+            oversized_state.live_http.worker_queue_capacity,
+            MAX_LIVE_HTTP_WORKER_THREADS * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert!(oversized_state.live_http.bounded_worker_queue);
         assert!(oversized_state.live_http.reuses_workers);
         assert!(!oversized_state.live_http.spawns_per_request);
     }
@@ -98947,6 +98985,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(state.policy_probability.away_states > 0);
         assert_eq!(state.live_http.worker_model, "worker-pool");
         assert_eq!(state.live_http.worker_threads, 2);
+        assert_eq!(
+            state.live_http.worker_queue_capacity,
+            2 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert!(state.live_http.bounded_worker_queue);
         assert!(state.live_http.reuses_workers);
         assert!(!state.live_http.spawns_per_request);
         assert!(state.live_http.batches_step_ticks);
@@ -106768,6 +106811,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function scheduleInputRetry"));
         assert!(html.contains("function flushQueuedInputsToInputApi"));
         assert!(html.contains("postJson(\"/api/input\", inputs)"));
+        assert!(html.contains("workerQueueCapacity"));
+        assert!(html.contains("boundedWorkerQueue"));
+        assert!(html.contains("Qunbounded"));
         assert!(html.contains("function coalesceQueuedInputsBySlot"));
         assert!(html.contains("function compactQueuedInputsForBrowser"));
         assert!(html.contains("function drainQueuedInputsForDispatch"));

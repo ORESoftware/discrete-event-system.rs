@@ -1476,9 +1476,11 @@ function liveHttpLabel(http = state?.liveHttp) {
   const workers = Number(http.workerThreads ?? 0);
   const model = String(http.workerModel || "worker-pool").replace(/-/g, " ");
   const reuse = http.reusesWorkers === false ? "new" : "reuse";
+  const queue = Number(http.workerQueueCapacity ?? 0);
+  const queueText = http.boundedWorkerQueue ? ` Q${queue}` : " Qunbounded";
   const stepBatch = http.batchesStepTicks === false ? "" : " batch";
   const spawn = http.spawnsPerRequest ? " spawn/request" : "";
-  return `${model} ${workers} ${reuse}${stepBatch}${spawn}`;
+  return `${model} ${workers} ${reuse}${queueText}${stepBatch}${spawn}`;
 }
 function runtimeTimingLabel(timing = state?.stepTiming) {
   if (!timing || Number(timing.ticks ?? 0) <= 0) return "0ms";

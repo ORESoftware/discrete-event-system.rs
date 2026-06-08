@@ -7235,7 +7235,7 @@ impl PlayerAgent {
                 special_score(
                     target,
                     0.42 + ball_gain.min(8.0) * 0.030
-                        + shape_support_urgency * 0.32
+                        + shape_support_urgency * 0.90
                         + holder_pressure_urgency * 0.58,
                 ),
                 true,
@@ -84717,6 +84717,33 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             velocity.len() > 8.0,
             "default surface should not make hard ground balls die instantly: {velocity:?}"
+        );
+    }
+
+    #[test]
+    fn default_surface_settles_slow_rolling_ball_in_finite_time() {
+        let mut rolling = Vec2::new(5.0, 0.0);
+        let mut frictionless = rolling;
+        for _ in 0..50 {
+            rolling = ball_velocity_after_resistance(
+                rolling,
+                0.1,
+                DEFAULT_BALL_DRAG_PER_TICK,
+                DEFAULT_BALL_AIR_RESISTANCE,
+                DEFAULT_BALL_GRASS_RESISTANCE_YPS2,
+                0.0,
+            );
+            frictionless = ball_velocity_after_resistance(frictionless, 0.1, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        assert!(
+            rolling.len() <= 1e-9,
+            "default grass/air/drag should settle a slow rolling ball within five seconds: {rolling:?}"
+        );
+        assert_eq!(
+            frictionless.len(),
+            5.0,
+            "the settling behavior should come from configured resistance, not integration drift"
         );
     }
 

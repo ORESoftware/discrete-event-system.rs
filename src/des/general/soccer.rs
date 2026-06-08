@@ -28779,8 +28779,26 @@ pub struct SoccerTrackingFrame {
     pub score_home: Option<u32>,
     #[serde(default)]
     pub score_away: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub officials: Vec<SoccerTrackingOfficialSample>,
     #[serde(default)]
     pub players: Vec<SoccerTrackingPlayerSample>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerTrackingOfficialSample {
+    pub id: usize,
+    pub kind: OfficialKind,
+    #[serde(default, alias = "confidence", alias = "detectionConfidence")]
+    pub tracking_confidence: Option<f64>,
+    pub position: Vec2,
+    #[serde(default)]
+    pub velocity: Option<Vec2>,
+    #[serde(default, alias = "officialAcceleration", alias = "accelerationVector")]
+    pub motion_acceleration: Option<Vec2>,
+    #[serde(default, alias = "officialJerk", alias = "jerkVector")]
+    pub motion_jerk: Option<Vec2>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29325,6 +29343,15 @@ impl SoccerTrackingDataset {
                 frame.ball_confidence,
                 &format!("tracking frame {idx} ballConfidence"),
             )?;
+            for official in &frame.officials {
+                validate_optional_tracking_confidence(
+                    official.tracking_confidence,
+                    &format!(
+                        "tracking frame {idx} official {} trackingConfidence",
+                        official.id
+                    ),
+                )?;
+            }
             for player in &frame.players {
                 validate_optional_tracking_confidence(
                     player.tracking_confidence,
@@ -43940,6 +43967,19 @@ fn tracking_frame_from_match(sim: &SoccerMatch) -> SoccerTrackingFrame {
         last_touch_team: sim.ball.last_touch_team,
         score_home: Some(sim.score_home),
         score_away: Some(sim.score_away),
+        officials: sim
+            .officials
+            .iter()
+            .map(|official| SoccerTrackingOfficialSample {
+                id: official.id,
+                kind: official.kind,
+                tracking_confidence: Some(1.0),
+                position: official.position,
+                velocity: Some(official.velocity),
+                motion_acceleration: Some(official.acceleration),
+                motion_jerk: Some(official.jerk),
+            })
+            .collect(),
         players: sim
             .players
             .iter()
@@ -47312,6 +47352,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                 last_touch_team: Some(Team::Home),
                 score_home: Some(0),
                 score_away: Some(0),
+                officials: Vec::new(),
                 players: vec![
                     SoccerTrackingPlayerSample {
                         id: 0,
@@ -47385,6 +47426,7 @@ pub fn soccer_tracking_template_dataset(config: &MatchConfig) -> SoccerTrackingD
                 last_touch_team: Some(Team::Home),
                 score_home: Some(0),
                 score_away: Some(0),
+                officials: Vec::new(),
                 players: vec![
                     SoccerTrackingPlayerSample {
                         id: 0,
@@ -47911,6 +47953,7 @@ pub fn soccer_tracking_dataset_from_csv(
             last_touch_team: builder.last_touch_team,
             score_home: builder.score_home,
             score_away: builder.score_away,
+            officials: Vec::new(),
             players: builder.players,
         })
         .collect::<Vec<_>>();
@@ -67990,6 +68033,23 @@ mod tests {
         assert_eq!(tracking.frames[0].tick, 0);
         assert_eq!(tracking.frames[2].tick, 2);
         assert_eq!(tracking.frames[2].players.len(), 22);
+        assert_eq!(
+            tracking.frames[2].officials.len(),
+            SOCCER_MATCH_OFFICIAL_COUNT
+        );
+        assert_eq!(
+            tracking.frames[2].officials[0].position,
+            response.frame.officials[0].position
+        );
+        assert!(tracking.frames[2].officials.iter().all(|official| {
+            official.velocity.unwrap_or_default().len().is_finite()
+                && official
+                    .motion_acceleration
+                    .unwrap_or_default()
+                    .len()
+                    .is_finite()
+                && official.motion_jerk.unwrap_or_default().len().is_finite()
+        }));
         assert!(
             tracking.frames[2].ball_action.is_none()
                 || tracking.frames[2]
@@ -76976,7 +77036,18 @@ mod tests {
 
     #[test]
     fn tracking_dataset_jsonl_stream_round_trips_and_trains_policy() {
-        let tracking = sample_tracking_pass_dataset();
+        let mut tracking = sample_tracking_pass_dataset();
+        for frame in &mut tracking.frames {
+            frame.officials = vec![SoccerTrackingOfficialSample {
+                id: 22,
+                kind: OfficialKind::CenterReferee,
+                tracking_confidence: Some(0.93),
+                position: Vec2::new(40.0, 60.0 + frame.tick as f64),
+                velocity: Some(Vec2::new(0.0, 1.0)),
+                motion_acceleration: Some(Vec2::zero()),
+                motion_jerk: Some(Vec2::zero()),
+            }];
+        }
         let jsonl = soccer_tracking_dataset_to_jsonl(&tracking).expect("tracking jsonl");
         let parsed = soccer_tracking_dataset_from_jsonl(
             &jsonl,
@@ -76992,6 +77063,19 @@ mod tests {
         assert_eq!(parsed.source, tracking.source);
         assert_eq!(parsed.config.seed, tracking.config.seed);
         assert_eq!(parsed.frames.len(), tracking.frames.len());
+        assert_eq!(parsed.frames[0].officials.len(), 1);
+        assert_eq!(
+            parsed.frames[0].officials[0].kind,
+            OfficialKind::CenterReferee
+        );
+        assert_eq!(
+            parsed.frames[1].officials[0].position,
+            Vec2::new(40.0, 61.0)
+        );
+        assert_eq!(
+            parsed.frames[1].officials[0].tracking_confidence,
+            Some(0.93)
+        );
         assert_eq!(parsed.frames[1].ball_action.as_deref(), Some("pass"));
         parsed.validate().expect("jsonl tracking validates");
         let dataset = parsed.to_learning_dataset().expect("jsonl learns");
@@ -96845,6 +96929,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                     last_touch_team: Some(Team::Home),
                     score_home: Some(0),
                     score_away: Some(0),
+                    officials: Vec::new(),
                     players: vec![
                         SoccerTrackingPlayerSample {
                             id: 0,
@@ -96918,6 +97003,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                     last_touch_team: Some(Team::Home),
                     score_home: Some(0),
                     score_away: Some(0),
+                    officials: Vec::new(),
                     players: vec![
                         SoccerTrackingPlayerSample {
                             id: 0,

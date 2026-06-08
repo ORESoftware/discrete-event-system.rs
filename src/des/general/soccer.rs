@@ -8068,15 +8068,16 @@ impl PlayerAgent {
                 },
                 "aerial-pass".to_string(),
             )),
-            "clearance" | "route-one" if observation.has_ball => self.action_from_learned_plan(
-                &SoccerLearnedPlan {
-                    action: action.to_string(),
-                    target_player: None,
-                    target_point: None,
-                },
-                snapshot,
-                observation,
-            ),
+            "killer-pass" | "clearance" | "route-one" if observation.has_ball => self
+                .action_from_learned_plan(
+                    &SoccerLearnedPlan {
+                        action: action.to_string(),
+                        target_player: input.target_player,
+                        target_point: None,
+                    },
+                    snapshot,
+                    observation,
+                ),
             _ if observation.has_ball => dribble_move_kind_for_action_label(action).map(|kind| {
                 let kind = goal_approach_dribble_kind(kind, observation, self.role);
                 let touch = snapshot.deterministic_dribble_touch_decision_for(self.id, kind);
@@ -69831,6 +69832,93 @@ mod tests {
     }
 
     #[test]
+    fn human_input_action_can_thread_killer_pass_to_goal_runner() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 1,
+            seed: 79_421,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blockers = [13, 14, 15];
+        park_players_except(&mut sim, &[attacker, runner, keeper, 13, 14, 15]);
+        sim.clear_controller_assignments();
+        sim.assign_controller_slot(0, Some(attacker))
+            .expect("assign threaded passer");
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 86.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 3.6);
+        sim.players[attacker].skills.passing_completion_rate = 9.0;
+        sim.players[attacker].skills.vision = 9.2;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(56.0, 105.0);
+        sim.players[runner].velocity = Vec2::new(0.4, 2.2);
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        for (idx, blocker) in blockers.iter().copied().enumerate() {
+            sim.players[blocker].position = Vec2::new(38.0 + idx as f64 * 2.0, 103.0);
+            sim.players[blocker].skills.defending = 9.8;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+        assert_eq!(
+            snapshot.killer_pass_target_for(attacker, &pass_targets),
+            Some(runner),
+            "runner should be the threaded pass target"
+        );
+
+        let input = HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(attacker),
+            seq: 1,
+            axis: Vec2::zero(),
+            sprint: false,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: Some("threaded-pass".to_string()),
+            target_player: None,
+        };
+        let mut player = sim.players[attacker].clone();
+        let intent = player.run_time_step(
+            &snapshot,
+            Some(&input),
+            None,
+            &mut SeededRandom::new(79_421),
+        );
+
+        let SoccerAction::Pass {
+            target_player: Some(target),
+            flight: PassFlight::Floor,
+            power,
+        } = intent.action
+        else {
+            panic!("threaded human input should create a floor killer pass, got {intent:?}");
+        };
+        assert_eq!(target, runner);
+        assert!(power >= 0.66);
+        let decision = player
+            .last_decision
+            .as_ref()
+            .expect("human killer decision");
+        assert_eq!(decision.action, "killer-pass");
+        assert_eq!(decision.operation_order, vec!["human-input".to_string()]);
+        assert_eq!(
+            decision
+                .action_target
+                .as_ref()
+                .and_then(|target| target.player_id),
+            Some(runner)
+        );
+    }
+
+    #[test]
     fn human_input_action_can_hoof_defensive_clearance() {
         let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
             duration_seconds: 1.0,
@@ -100162,6 +100250,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("drawGaitCue"));
         assert!(html.contains("movementGait"));
         assert!(html.contains("HUMAN_ACTION_KEY_CODES"));
+        assert!(html.contains("id=\"killerPassAction\""));
+        assert!(html.contains(
+            "const killerPassActionButton = document.getElementById(\"killerPassAction\")"
+        ));
+        assert!(html.contains("killerPassActionButton.addEventListener"));
+        assert!(html.contains("\"killer-pass\""));
+        assert!(html.contains("e.code === \"KeyT\""));
         assert!(html.contains("const CONTROLLER_KEYMAPS = ["));
         assert!(html.contains("left: \"ArrowLeft\""));
         assert!(html.contains("pass: \"Enter\""));
@@ -100180,6 +100275,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function gamepadForSlot(slot)"));
         assert!(html.contains("function gamepadPressedThisPulse(slot, gamepad, buttonIndex)"));
         assert!(html.contains("function queueGamepadInputs()"));
+        assert!(html.contains("killerPass: 7"));
+        assert!(html.contains("GAMEPAD_BUTTONS.killerPass"));
+        assert!(html.contains("return \"killer-pass\""));
+        assert!(html
+            .contains("[\"pass\", \"aerial-pass\", \"killer-pass\"].includes(normalizedAction)"));
         assert!(html.contains("gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.action)"));
         assert!(html.contains("queueGamepadInputs();"));
         assert!(
@@ -101404,6 +101504,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("keymap.textContent = controllerKeymapLabel(slot)"));
         assert!(html.contains("controllerSlot: slot"));
         assert!(html.contains("id=\"inspectMode\""));
+        assert!(html.contains("id=\"killerPassAction\""));
+        assert!(html.contains(
+            "const killerPassActionButton = document.getElementById(\"killerPassAction\")"
+        ));
+        assert!(html.contains("killerPassActionButton.addEventListener"));
+        assert!(html.contains("e.code === \"KeyT\""));
         assert!(html.contains("setInspectMode(!inspectModeEnabled())"));
         assert!(html.contains("humanSlotCount() <= 0"));
         assert!(html.contains("const actionSlot = CONTROLLER_KEYMAPS.findIndex"));
@@ -101412,6 +101518,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("navigator.getGamepads"));
         assert!(html.contains("function gamepadForSlot(slot)"));
         assert!(html.contains("function queueGamepadInputs()"));
+        assert!(html.contains("killerPass: 7"));
+        assert!(html.contains("GAMEPAD_BUTTONS.killerPass"));
+        assert!(html.contains("return \"killer-pass\""));
+        assert!(html
+            .contains("[\"pass\", \"aerial-pass\", \"killer-pass\"].includes(normalizedAction)"));
         assert!(html.contains("gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.action)"));
         assert!(html.contains("queueGamepadInputs();"));
         assert!(html.contains("const LIVE_INPUT_FLUSH_INTERVAL_MS = 33"));

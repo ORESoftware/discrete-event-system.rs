@@ -527,6 +527,7 @@
         <button id="shoot">Shoot</button>
         <button id="carryAction">Carry</button>
         <button id="protectAction">Protect</button>
+        <button id="killerPassAction">Thread</button>
         <button id="clearanceAction">Clear</button>
         <button id="routeOneAction">Route 1</button>
       </div>
@@ -672,6 +673,7 @@ const targetPick = document.getElementById("targetPick");
 const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
 const protectActionButton = document.getElementById("protectAction");
+const killerPassActionButton = document.getElementById("killerPassAction");
 const clearanceActionButton = document.getElementById("clearanceAction");
 const routeOneActionButton = document.getElementById("routeOneAction");
 const surfacePreset = document.getElementById("surfacePreset");
@@ -844,6 +846,7 @@ const GAMEPAD_BUTTONS = {
   clearance: 4,
   sprint: 5,
   routeOne: 6,
+  killerPass: 7,
   dpadUp: 12,
   dpadDown: 13,
   dpadLeft: 14,
@@ -3517,7 +3520,7 @@ function queueInput(pass = false, shoot = false, slot = Number(slotPick.value ||
   if (playerId == null) return false;
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   const normalizedAction = action == null ? null : normalizeUiActionLabel(action);
-  const actionIsPass = normalizedAction === "pass" || normalizedAction === "aerial-pass";
+  const actionIsPass = ["pass", "aerial-pass", "killer-pass"].includes(normalizedAction);
   const axis = overrides.axis || axisFromKeys(map);
   const sprint = overrides.sprint ?? keys.has(map.sprint);
   queuedInputs.push({
@@ -3611,6 +3614,7 @@ function queueMotionInputsForPressedControllers() {
 function gamepadActionForSlot(slot, gamepad) {
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.carry)) return "carry-forward";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.protect)) return "protect-ball";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.killerPass)) return "killer-pass";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.clearance)) return "clearance";
   if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.routeOne)) return "route-one";
   return null;
@@ -4367,6 +4371,7 @@ document.getElementById("pass").addEventListener("click", () => submitInputOnly(
 document.getElementById("shoot").addEventListener("click", () => submitInputOnly(false, true).catch(e => statusEl.textContent = e.message));
 carryActionButton.addEventListener("click", () => submitInputOnly(false, false, "carry-forward").catch(e => statusEl.textContent = e.message));
 protectActionButton.addEventListener("click", () => submitInputOnly(false, false, "protect-ball").catch(e => statusEl.textContent = e.message));
+killerPassActionButton.addEventListener("click", () => submitInputOnly(false, false, "killer-pass").catch(e => statusEl.textContent = e.message));
 clearanceActionButton.addEventListener("click", () => submitInputOnly(false, false, "clearance").catch(e => statusEl.textContent = e.message));
 routeOneActionButton.addEventListener("click", () => submitInputOnly(false, false, "route-one").catch(e => statusEl.textContent = e.message));
 exportPolicyButton.addEventListener("click", () => exportTeamPolicy().catch(e => statusEl.textContent = e.message));
@@ -4485,9 +4490,9 @@ window.addEventListener("keydown", e => {
     return;
   }
   if (isFormEditingTarget(e.target)) return;
-  if (e.code === "KeyC" || e.code === "KeyR") {
+  if (e.code === "KeyC" || e.code === "KeyR" || e.code === "KeyT") {
     e.preventDefault();
-    const action = e.code === "KeyC" ? "clearance" : "route-one";
+    const action = e.code === "KeyC" ? "clearance" : e.code === "KeyT" ? "killer-pass" : "route-one";
     if (!e.repeat && !queueInput(false, false, activeSlot, action)) {
       statusEl.textContent = `slot ${activeSlot + 1} autonomous`;
     } else if (!e.repeat) {

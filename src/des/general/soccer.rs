@@ -31948,6 +31948,11 @@ struct SoccerFrameLivenessMetrics {
     player_pomdp_grid_samples: usize,
     player_action_facing_samples: usize,
     player_receive_facing_samples: usize,
+    player_gait_samples: usize,
+    player_unique_gaits: usize,
+    player_high_intensity_gait_samples: usize,
+    player_backward_gait_samples: usize,
+    player_lateral_gait_samples: usize,
     agent_accounting_frames: usize,
     agent_accounting_ok_frames: usize,
     full_roster_frames: usize,
@@ -31984,6 +31989,7 @@ struct SoccerFrameLivenessAccumulator {
     official_operation_order_first_ops: HashSet<String>,
     official_operation_order_full_orders: HashSet<String>,
     human_input_controller_slots: HashSet<usize>,
+    player_gaits: HashSet<MovementGait>,
     metrics: SoccerFrameLivenessMetrics,
 }
 
@@ -32012,6 +32018,7 @@ impl SoccerFrameLivenessAccumulator {
         let holder = frame.ball.holder;
         let count_goal_window_outcomes_from_players = frame.intents.is_empty();
         for player in &frame.players {
+            self.observe_player_gait_liveness(player.movement_gait);
             self.observe_player_decision_liveness(
                 player,
                 holder == Some(player.id),
@@ -32046,6 +32053,26 @@ impl SoccerFrameLivenessAccumulator {
         }
         if !frame.intents.is_empty() {
             self.observe_intent_possession_liveness(&frame.intents);
+        }
+    }
+
+    fn observe_player_gait_liveness(&mut self, gait: MovementGait) {
+        self.metrics.player_gait_samples = self.metrics.player_gait_samples.saturating_add(1);
+        self.player_gaits.insert(gait);
+        self.metrics.player_unique_gaits = self.player_gaits.len();
+        if matches!(gait, MovementGait::Run | MovementGait::Sprint) {
+            self.metrics.player_high_intensity_gait_samples = self
+                .metrics
+                .player_high_intensity_gait_samples
+                .saturating_add(1);
+        }
+        if gait.is_backward() {
+            self.metrics.player_backward_gait_samples =
+                self.metrics.player_backward_gait_samples.saturating_add(1);
+        }
+        if matches!(gait, MovementGait::SideStep) {
+            self.metrics.player_lateral_gait_samples =
+                self.metrics.player_lateral_gait_samples.saturating_add(1);
         }
     }
 
@@ -51258,6 +51285,11 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
             && frame_liveness.player_pomdp_grid_samples
                 >= frame_liveness.player_decision_model_samples
             && frame_liveness.player_action_facing_samples > 0);
+    let movement_gait_variety_ok = !frame_liveness_known
+        || frame_liveness.player_gait_samples < 200
+        || (frame_liveness.player_unique_gaits >= 5
+            && frame_liveness.player_high_intensity_gait_samples > 0
+            && frame_liveness.player_backward_gait_samples > 0);
     let agent_accounting_ok = !frame_liveness_known
         || frame_liveness.agent_accounting_frames == 0
         || (frame_liveness.agent_accounting_ok_frames == frame_liveness.agent_accounting_frames
@@ -51304,6 +51336,11 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "playerPomdpGridSamples": frame_liveness.player_pomdp_grid_samples,
         "playerActionFacingSamples": frame_liveness.player_action_facing_samples,
         "playerReceiveFacingSamples": frame_liveness.player_receive_facing_samples,
+        "playerGaitSamples": frame_liveness.player_gait_samples,
+        "playerUniqueGaits": frame_liveness.player_unique_gaits,
+        "playerHighIntensityGaitSamples": frame_liveness.player_high_intensity_gait_samples,
+        "playerBackwardGaitSamples": frame_liveness.player_backward_gait_samples,
+        "playerLateralGaitSamples": frame_liveness.player_lateral_gait_samples,
     });
     soccer_merge_json_object(
         &mut liveness,
@@ -51346,6 +51383,7 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "ballOperationOrderRandomizedOk": ball_operation_order_randomized_ok,
         "officialOperationOrderRandomizedOk": official_operation_order_randomized_ok,
         "playerDecisionModelTraceOk": player_decision_model_trace_ok,
+        "movementGaitVarietyOk": movement_gait_variety_ok,
         "agentAccountingOk": agent_accounting_ok,
         "humanInputConsumedOk": human_input_consumed_ok,
         "clearShotWindowOk": clear_shot_window_ok,
@@ -68699,6 +68737,11 @@ mod tests {
                 player_pomdp_grid_samples: 12,
                 player_action_facing_samples: 11,
                 player_receive_facing_samples: 2,
+                player_gait_samples: 240,
+                player_unique_gaits: 6,
+                player_high_intensity_gait_samples: 17,
+                player_backward_gait_samples: 21,
+                player_lateral_gait_samples: 8,
                 agent_accounting_frames: 9,
                 agent_accounting_ok_frames: 9,
                 full_roster_frames: 9,
@@ -68743,6 +68786,11 @@ mod tests {
         assert_eq!(support["playerPomdpGridSamples"], 12);
         assert_eq!(support["playerActionFacingSamples"], 11);
         assert_eq!(support["playerReceiveFacingSamples"], 2);
+        assert_eq!(support["playerGaitSamples"], 240);
+        assert_eq!(support["playerUniqueGaits"], 6);
+        assert_eq!(support["playerHighIntensityGaitSamples"], 17);
+        assert_eq!(support["playerBackwardGaitSamples"], 21);
+        assert_eq!(support["playerLateralGaitSamples"], 8);
         assert_eq!(support["agentAccountingFrames"], 9);
         assert_eq!(support["agentAccountingOkFrames"], 9);
         assert_eq!(support["fullRosterFrames"], 9);
@@ -68769,6 +68817,7 @@ mod tests {
         assert_eq!(support["ballOperationOrderRandomizedOk"], true);
         assert_eq!(support["officialOperationOrderRandomizedOk"], true);
         assert_eq!(support["playerDecisionModelTraceOk"], true);
+        assert_eq!(support["movementGaitVarietyOk"], true);
         assert_eq!(support["agentAccountingOk"], true);
         assert_eq!(support["humanInputConsumedOk"], true);
         assert_eq!(support["clearShotWindowOk"], true);
@@ -103889,6 +103938,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("playerDecisionModelSamples"));
         assert!(html.contains("playerMdpGridSamples"));
         assert!(html.contains("playerDecisionModelTraceOk"));
+        assert!(html.contains("playerGaitSamples"));
+        assert!(html.contains("playerUniqueGaits"));
+        assert!(html.contains("playerHighIntensityGaitSamples"));
+        assert!(html.contains("playerBackwardGaitSamples"));
+        assert!(html.contains("movementGaitVarietyOk"));
+        assert!(html.contains("movement gaits unique="));
+        assert!(html.contains("V${gait}"));
         assert!(html.contains("agentAccountingFrames"));
         assert!(html.contains("agentAccountingOkFrames"));
         assert!(html.contains("agentAccountingOk"));
@@ -105144,6 +105200,26 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             Some(frame_liveness.player_receive_facing_samples as u64)
         );
         assert_eq!(
+            meta["tacticalLiveness"]["playerGaitSamples"].as_u64(),
+            Some(frame_liveness.player_gait_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerUniqueGaits"].as_u64(),
+            Some(frame_liveness.player_unique_gaits as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerHighIntensityGaitSamples"].as_u64(),
+            Some(frame_liveness.player_high_intensity_gait_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerBackwardGaitSamples"].as_u64(),
+            Some(frame_liveness.player_backward_gait_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerLateralGaitSamples"].as_u64(),
+            Some(frame_liveness.player_lateral_gait_samples as u64)
+        );
+        assert_eq!(
             meta["tacticalLiveness"]["agentAccountingFrames"].as_u64(),
             Some(frame_liveness.agent_accounting_frames as u64)
         );
@@ -105248,6 +105324,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                     && frame_liveness.player_pomdp_grid_samples
                         >= frame_liveness.player_decision_model_samples
                     && frame_liveness.player_action_facing_samples > 0)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["movementGaitVarietyOk"],
+            frame_liveness.player_gait_samples < 200
+                || (frame_liveness.player_unique_gaits >= 5
+                    && frame_liveness.player_high_intensity_gait_samples > 0
+                    && frame_liveness.player_backward_gait_samples > 0)
         );
         assert_eq!(
             meta["tacticalLiveness"]["agentAccountingOk"],
@@ -105898,6 +105981,35 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(meta["tacticalLiveness"]["openSpaceSupportOk"], true);
         assert_eq!(meta["tacticalLiveness"]["goalwardProgressOk"], true);
+        assert!(
+            meta["tacticalLiveness"]["playerGaitSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 22 * 6_001,
+            "default 10-minute trace should sample every player's discrete gait each frame"
+        );
+        assert!(
+            meta["tacticalLiveness"]["playerUniqueGaits"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 5,
+            "default 10-minute trace should use multiple soccer gait bands"
+        );
+        assert!(
+            meta["tacticalLiveness"]["playerHighIntensityGaitSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should include run/sprint gait samples"
+        );
+        assert!(
+            meta["tacticalLiveness"]["playerBackwardGaitSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should include backward defensive movement"
+        );
+        assert_eq!(meta["tacticalLiveness"]["movementGaitVarietyOk"], true);
         assert_eq!(meta["tacticalLiveness"]["agentAccountingFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["agentAccountingOkFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["fullRosterFrames"], 6001);

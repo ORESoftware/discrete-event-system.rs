@@ -361,7 +361,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 119;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 125;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -422,9 +422,15 @@ const SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE: usize = 115;
 const SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE: usize = 116;
 const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE: usize = 117;
 const SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE: usize = 118;
+const SOCCER_NEURAL_FEATURE_BALL_SURFACE_DRAG: usize = 119;
+const SOCCER_NEURAL_FEATURE_BALL_SURFACE_AIR_RESISTANCE: usize = 120;
+const SOCCER_NEURAL_FEATURE_BALL_SURFACE_GRASS_RESISTANCE: usize = 121;
+const SOCCER_NEURAL_FEATURE_BALL_SURFACE_STOP_SPEED: usize = 122;
+const SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_TOTAL_LOSS: usize = 123;
+const SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_ROLLING_CONTACT: usize = 124;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112, 113, 115, 117, 118,
+    110, 111, 112, 113, 115, 117, 118, 119,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1570,6 +1576,18 @@ pub struct SoccerPomdpObservation {
     pub ball_altitude_yards: f64,
     #[serde(default)]
     pub ball_airborne: bool,
+    #[serde(default)]
+    pub ball_surface_drag_per_tick: f64,
+    #[serde(default)]
+    pub ball_surface_air_resistance: f64,
+    #[serde(default)]
+    pub ball_surface_grass_resistance_yps2: f64,
+    #[serde(default)]
+    pub ball_surface_stop_speed_yps: f64,
+    #[serde(default)]
+    pub ball_resistance_total_loss_yps: f64,
+    #[serde(default)]
+    pub ball_resistance_rolling_contact: f64,
     #[serde(default)]
     pub loose_ball: bool,
     #[serde(default)]
@@ -3050,6 +3068,18 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub ball_airborne: bool,
     #[serde(default)]
+    pub ball_surface_drag_bin: u8,
+    #[serde(default)]
+    pub ball_surface_air_resistance_bin: u8,
+    #[serde(default)]
+    pub ball_surface_grass_resistance_bin: u8,
+    #[serde(default)]
+    pub ball_surface_stop_speed_bin: u8,
+    #[serde(default)]
+    pub ball_resistance_total_loss_bin: u8,
+    #[serde(default)]
+    pub ball_resistance_rolling_contact_bin: u8,
+    #[serde(default)]
     pub loose_ball: bool,
     #[serde(default)]
     pub loose_ball_fifty_fifty: bool,
@@ -3376,6 +3406,30 @@ impl SoccerQStateKey {
                 &[BALL_ROLLING_ALTITUDE_YARDS, 0.5, 2.0, 6.0, 12.0],
             ),
             ball_airborne: observation.ball_airborne,
+            ball_surface_drag_bin: distance_bucket(
+                observation.ball_surface_drag_per_tick,
+                &[0.008, 0.020, 0.040, 0.070],
+            ),
+            ball_surface_air_resistance_bin: distance_bucket(
+                observation.ball_surface_air_resistance,
+                &[0.002, 0.006, 0.012, 0.024],
+            ),
+            ball_surface_grass_resistance_bin: distance_bucket(
+                observation.ball_surface_grass_resistance_yps2,
+                &[0.30, 0.80, 1.40, 2.20],
+            ),
+            ball_surface_stop_speed_bin: distance_bucket(
+                observation.ball_surface_stop_speed_yps,
+                &[0.20, 0.55, 0.90, 1.40],
+            ),
+            ball_resistance_total_loss_bin: distance_bucket(
+                observation.ball_resistance_total_loss_yps,
+                &[0.10, 0.35, 0.80, 1.40],
+            ),
+            ball_resistance_rolling_contact_bin: distance_bucket(
+                observation.ball_resistance_rolling_contact,
+                &[0.20, 0.50, 0.80, 0.98],
+            ),
             loose_ball: observation.loose_ball,
             loose_ball_fifty_fifty: observation.loose_ball_fifty_fifty,
             loose_ball_team_time_advantage_bin: loose_ball_time_advantage_bucket(
@@ -3770,6 +3824,12 @@ impl SoccerQStateKey {
             && self.ball_lateral_speed_bin == other.ball_lateral_speed_bin
             && self.ball_altitude_bin == other.ball_altitude_bin
             && self.ball_airborne == other.ball_airborne
+            && self.ball_surface_drag_bin == other.ball_surface_drag_bin
+            && self.ball_surface_air_resistance_bin == other.ball_surface_air_resistance_bin
+            && self.ball_surface_grass_resistance_bin == other.ball_surface_grass_resistance_bin
+            && self.ball_surface_stop_speed_bin == other.ball_surface_stop_speed_bin
+            && self.ball_resistance_total_loss_bin == other.ball_resistance_total_loss_bin
+            && self.ball_resistance_rolling_contact_bin == other.ball_resistance_rolling_contact_bin
             && self.loose_ball == other.loose_ball
             && self.loose_ball_fifty_fifty == other.loose_ball_fifty_fifty
             && self.loose_ball_team_time_advantage_bin == other.loose_ball_team_time_advantage_bin
@@ -17832,6 +17892,14 @@ pub struct WorldSnapshot {
     pub field_length: f64,
     pub field_width: f64,
     pub goal_width: f64,
+    #[serde(default = "default_ball_drag_per_tick")]
+    pub ball_drag_per_tick: f64,
+    #[serde(default = "default_ball_air_resistance")]
+    pub ball_air_resistance: f64,
+    #[serde(default = "default_ball_grass_resistance_yps2")]
+    pub ball_grass_resistance_yps2: f64,
+    #[serde(default = "default_ball_stop_speed_yps")]
+    pub ball_stop_speed_yps: f64,
     pub ball: BallState,
     #[serde(default)]
     pub ball_history: Vec<BallPositionSample>,
@@ -18344,6 +18412,10 @@ impl WorldSnapshot {
             field_length: m.config.field_length_yards,
             field_width: m.config.field_width_yards,
             goal_width: m.config.goal_width_yards,
+            ball_drag_per_tick: m.config.ball_drag_per_tick,
+            ball_air_resistance: m.config.ball_air_resistance,
+            ball_grass_resistance_yps2: m.config.ball_grass_resistance_yps2,
+            ball_stop_speed_yps: m.config.ball_stop_speed_yps,
             ball,
             ball_history: if options.include_ball_history {
                 m.ball.position_history.iter().cloned().collect()
@@ -19511,6 +19583,12 @@ impl WorldSnapshot {
                 ball_lateral_speed_yps: 0.0,
                 ball_altitude_yards: 0.0,
                 ball_airborne: false,
+                ball_surface_drag_per_tick: default_ball_drag_per_tick(),
+                ball_surface_air_resistance: default_ball_air_resistance(),
+                ball_surface_grass_resistance_yps2: default_ball_grass_resistance_yps2(),
+                ball_surface_stop_speed_yps: default_ball_stop_speed_yps(),
+                ball_resistance_total_loss_yps: 0.0,
+                ball_resistance_rolling_contact: 0.0,
                 loose_ball: false,
                 loose_ball_fifty_fifty: false,
                 loose_ball_team_time_advantage_seconds: 0.0,
@@ -20243,6 +20321,12 @@ impl WorldSnapshot {
             ball_lateral_speed_yps: self.ball.velocity.x.abs(),
             ball_altitude_yards: self.ball.altitude_yards.max(0.0),
             ball_airborne: self.ball.altitude_yards > BALL_ROLLING_ALTITUDE_YARDS,
+            ball_surface_drag_per_tick: self.ball_drag_per_tick,
+            ball_surface_air_resistance: self.ball_air_resistance,
+            ball_surface_grass_resistance_yps2: self.ball_grass_resistance_yps2,
+            ball_surface_stop_speed_yps: self.ball_stop_speed_yps,
+            ball_resistance_total_loss_yps: self.ball.resistance.total_loss_yps,
+            ball_resistance_rolling_contact: self.ball.resistance.rolling_contact,
             loose_ball: loose_ball_race.loose_ball,
             loose_ball_fifty_fifty: loose_ball_race.fifty_fifty,
             loose_ball_team_time_advantage_seconds: loose_ball_race.team_time_advantage_seconds,
@@ -33561,6 +33645,9 @@ pub struct SoccerDecisionModelContract {
     pub player_physical_trait_fields: Vec<String>,
     pub player_skills_in_pomdp_observation: bool,
     pub player_skills_binned_in_mdp_state: bool,
+    pub surface_physics_in_pomdp_observation: bool,
+    pub surface_physics_binned_in_mdp_state: bool,
+    pub surface_physics_in_neural_features: bool,
     pub role_biased_skill_generation_enabled: bool,
     pub receive_facing_enabled: bool,
     pub action_facing_enabled: bool,
@@ -34278,6 +34365,9 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         player_physical_trait_fields: soccer_player_physical_trait_contract_fields(),
         player_skills_in_pomdp_observation: true,
         player_skills_binned_in_mdp_state: true,
+        surface_physics_in_pomdp_observation: true,
+        surface_physics_binned_in_mdp_state: true,
+        surface_physics_in_neural_features: true,
         role_biased_skill_generation_enabled: true,
         receive_facing_enabled: true,
         action_facing_enabled: true,
@@ -37350,6 +37440,12 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.decisive_goal_action_pressure_bin, 5.0),
         soccer_neural_bool(state.threaded_goal_pass_available),
         soccer_neural_bin(state.single_thread_goal_pressure_bin, 5.0),
+        soccer_neural_bin(state.ball_surface_drag_bin, 5.0),
+        soccer_neural_bin(state.ball_surface_air_resistance_bin, 5.0),
+        soccer_neural_bin(state.ball_surface_grass_resistance_bin, 5.0),
+        soccer_neural_bin(state.ball_surface_stop_speed_bin, 5.0),
+        soccer_neural_bin(state.ball_resistance_total_loss_bin, 5.0),
+        soccer_neural_bin(state.ball_resistance_rolling_contact_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -51694,6 +51790,10 @@ fn tracking_frame_to_world_snapshot(
         field_length: config.field_length_yards,
         field_width: config.field_width_yards,
         goal_width: config.goal_width_yards,
+        ball_drag_per_tick: config.ball_drag_per_tick,
+        ball_air_resistance: config.ball_air_resistance,
+        ball_grass_resistance_yps2: config.ball_grass_resistance_yps2,
+        ball_stop_speed_yps: config.ball_stop_speed_yps,
         ball: BallState {
             position: frame.ball_position,
             velocity: frame.ball_velocity.unwrap_or_default(),
@@ -91489,6 +91589,136 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn ball_surface_physics_reaches_pomdp_table_and_neural_learners() {
+        fn surface_learning_slice(
+            config: MatchConfig,
+            resistance: BallResistanceFrame,
+        ) -> (
+            SoccerPomdpObservation,
+            SoccerQStateKey,
+            [f64; SOCCER_NEURAL_FEATURE_DIM],
+        ) {
+            let mut sim = SoccerMatch::default_11v11(config);
+            let holder = sim
+                .players
+                .iter()
+                .find(|player| player.team == Team::Home && player.role == PlayerRole::Midfielder)
+                .map(|player| player.id)
+                .expect("home midfielder");
+            park_players_except(&mut sim, &[holder]);
+            sim.players[holder].position = Vec2::new(40.0, 54.0);
+            sim.players[holder].home_position = sim.players[holder].position;
+            sim.ball.holder = Some(holder);
+            sim.ball.position = sim.players[holder].position;
+            sim.ball.velocity = Vec2::new(8.0, 18.0);
+            sim.ball.resistance = resistance;
+            sim.ball.last_touch_team = Some(Team::Home);
+            sim.shared_positions.sync_from_players_and_ball(
+                &sim.players,
+                &sim.officials,
+                &sim.ball,
+                sim.tick,
+                sim.clock_seconds,
+            );
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(holder);
+            let q_key = SoccerQStateKey::from_parts(
+                &snapshot.mdp_state_for_player(holder),
+                &observation,
+                Team::Home,
+                sim.players[holder].role,
+            );
+            let decision = test_decision_trace(&snapshot, holder, "carry-forward");
+            let transition = SoccerLearningTransition {
+                tick: snapshot.tick,
+                player_id: holder,
+                team: Team::Home,
+                role: sim.players[holder].role,
+                state: decision.mdp_state,
+                observation: observation.clone(),
+                belief: decision.belief,
+                action: "carry-forward".to_string(),
+                action_target: decision.action_target,
+                decision_context: SoccerDecisionContext::default(),
+                tactical_trace: SoccerTacticalLearningTrace::default(),
+                reward: 0.0,
+                next_state: snapshot.mdp_state_for_player(holder),
+                next_observation: observation.clone(),
+                done: false,
+            };
+            let features = soccer_neural_transition_features(&transition);
+            (observation, q_key, features)
+        }
+
+        let (fast_observation, fast_key, fast_features) = surface_learning_slice(
+            MatchConfig {
+                seed: 24_901,
+                ball_drag_per_tick: 0.006,
+                ball_air_resistance: 0.0015,
+                ball_grass_resistance_yps2: 0.20,
+                ball_stop_speed_yps: 0.16,
+                ..Default::default()
+            },
+            BallResistanceFrame {
+                total_loss_yps: 0.08,
+                rolling_contact: 0.15,
+                ..Default::default()
+            },
+        );
+        let (heavy_observation, heavy_key, heavy_features) = surface_learning_slice(
+            MatchConfig {
+                seed: 24_901,
+                ball_drag_per_tick: 0.074,
+                ball_air_resistance: 0.020,
+                ball_grass_resistance_yps2: 2.30,
+                ball_stop_speed_yps: 1.55,
+                ..Default::default()
+            },
+            BallResistanceFrame {
+                total_loss_yps: 1.65,
+                rolling_contact: 0.95,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            heavy_observation.ball_surface_drag_per_tick
+                > fast_observation.ball_surface_drag_per_tick
+        );
+        assert!(
+            heavy_observation.ball_surface_grass_resistance_yps2
+                > fast_observation.ball_surface_grass_resistance_yps2
+        );
+        assert!(
+            heavy_observation.ball_resistance_total_loss_yps
+                > fast_observation.ball_resistance_total_loss_yps
+        );
+        assert!(heavy_key.ball_surface_drag_bin > fast_key.ball_surface_drag_bin);
+        assert!(
+            heavy_key.ball_surface_grass_resistance_bin
+                > fast_key.ball_surface_grass_resistance_bin
+        );
+        assert!(heavy_key.ball_resistance_total_loss_bin > fast_key.ball_resistance_total_loss_bin);
+        assert!(
+            heavy_features[SOCCER_NEURAL_FEATURE_BALL_SURFACE_DRAG]
+                > fast_features[SOCCER_NEURAL_FEATURE_BALL_SURFACE_DRAG]
+        );
+        assert!(
+            heavy_features[SOCCER_NEURAL_FEATURE_BALL_SURFACE_GRASS_RESISTANCE]
+                > fast_features[SOCCER_NEURAL_FEATURE_BALL_SURFACE_GRASS_RESISTANCE]
+        );
+        assert!(
+            heavy_features[SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_TOTAL_LOSS]
+                > fast_features[SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_TOTAL_LOSS]
+        );
+        assert!(
+            heavy_features[SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_ROLLING_CONTACT]
+                > fast_features[SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_ROLLING_CONTACT]
+        );
+    }
+
+    #[test]
     fn pressured_defender_in_own_half_gets_clearance_probability_floor() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             seed: 2265,
@@ -99458,6 +99688,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(model["playerSkillsInPomdpObservation"], true);
         assert_eq!(model["playerSkillsBinnedInMdpState"], true);
+        assert_eq!(model["surfacePhysicsInPomdpObservation"], true);
+        assert_eq!(model["surfacePhysicsBinnedInMdpState"], true);
+        assert_eq!(model["surfacePhysicsInNeuralFeatures"], true);
         assert_eq!(model["roleBiasedSkillGenerationEnabled"], true);
         assert_eq!(model["receiveFacingEnabled"], true);
         assert_eq!(model["actionFacingEnabled"], true);

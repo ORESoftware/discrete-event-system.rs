@@ -88562,11 +88562,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(value["controllerYield"]["lastWaitLate"], false);
         assert_eq!(value["controllerYield"]["lastQueuedAfter"], 4);
         assert_eq!(value["controllerLatencyBudget"]["tickBudgetMs"], 100.0);
-        assert!(
-            value["controllerLatencyBudget"]["consumedInputs"]
-                .as_u64()
-                .unwrap()
-                >= 1
+        assert_eq!(
+            value["controllerLatencyBudget"]["consumedInputs"], 4,
+            "all four controller frames should be consumed by the single-threaded tick"
         );
         assert!(
             value["controllerLatencyBudget"]["estimatedControlLatencyMs"]
@@ -88641,7 +88639,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             assert!(slot_budget["acceptedFrames"].as_u64().unwrap() >= 1);
             assert!(slot_budget["pushedFrames"].as_u64().unwrap() >= 1);
             assert!(slot_budget["debouncedFrames"].as_u64().unwrap() >= 1);
-            assert!(slot_budget["consumedInputs"].as_u64().unwrap() >= 1);
+            assert_eq!(
+                slot_budget["consumedInputs"], 1,
+                "assigned slot {slot} should consume exactly one coalesced frame in the tick"
+            );
             assert!(
                 slot_budget["estimatedControlLatencyMs"].as_f64().unwrap()
                     <= value["controllerLatencyBudget"]["tickBudgetMs"]

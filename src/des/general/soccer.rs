@@ -6493,19 +6493,19 @@ impl PlayerAgent {
             * shot_block_penalty
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
             * (1.0 + goal_attack * 1.20)
-            * (1.0 + goal_proximity_shot_pressure * 1.05)
+            * (1.0 + goal_proximity_shot_pressure * 1.35)
             * (1.0 + goal_entry_pressure * 0.74)
             * (1.0 + striker_shot_bonus * 1.35)
-            * (1.0 + decisive_goal_pressure * 0.95)
+            * (1.0 + decisive_goal_pressure * 1.10)
             * 0.042)
             .clamp(
                 0.004,
                 0.12 + offensive_urgency * 0.30
                     + striker_shot_bonus * 0.18
                     + goal_attack * 0.22
-                    + goal_proximity_shot_pressure * 0.30
+                    + goal_proximity_shot_pressure * 0.36
                     + goal_entry_pressure * 0.20
-                    + decisive_goal_pressure * 0.26,
+                    + decisive_goal_pressure * 0.30,
             )
             .max(close_shot_attempt)
             .max(goal_proximity_shot_pressure_floor(
@@ -6870,8 +6870,8 @@ impl PlayerAgent {
                 + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.24)
             * (1.0
                 + killer_pass_range_fit * 1.05
-                + killer_pass_goal_pressure * 1.22
-                + single_thread_goal_pressure * 0.92
+                + killer_pass_goal_pressure * 1.42
+                + single_thread_goal_pressure * 1.10
                 + goal_entry_pressure * 0.62
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
@@ -51999,6 +51999,10 @@ fn goal_proximity_shot_pressure_score(
     let distance_fit = ((window_yards - observation.yards_to_goal) / window_yards)
         .clamp(0.0, 1.0)
         .powf(0.72);
+    let close_goal_fit = ((GOAL_URGENCY_MAX_YARDS - observation.yards_to_goal)
+        / (GOAL_URGENCY_MAX_YARDS - GOAL_URGENCY_KEEPER_CROWD_YARDS).max(1.0))
+    .clamp(0.0, 1.0)
+    .powf(0.58);
     let quality_fit = (observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.42
         + observation.shot_beat_goalkeeper_probability.clamp(0.0, 1.0) * 0.24
         + lane_fit * 0.22
@@ -52014,7 +52018,8 @@ fn goal_proximity_shot_pressure_score(
         + quality_fit * 0.24
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.18
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.10
-        + shooting_skill.clamp(0.0, 1.0) * 0.06)
+        + shooting_skill.clamp(0.0, 1.0) * 0.06
+        + close_goal_fit * 0.12)
         .mul_add(role_fit, 0.0)
         .clamp(0.0, 1.0)
 }
@@ -52247,6 +52252,10 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
         return 0.0;
     }
     let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
+    let close_goal_fit = ((GOAL_URGENCY_MAX_YARDS - observation.yards_to_goal)
+        / (GOAL_URGENCY_MAX_YARDS - GOAL_URGENCY_KEEPER_CROWD_YARDS).max(1.0))
+    .clamp(0.0, 1.0)
+    .powf(0.60);
     let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
     let receiver_lane_fit = (observation
         .best_forward_pass_receiver_openness
@@ -52255,12 +52264,13 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
         + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.28)
         .clamp(0.0, 1.0);
-    (range_fit.powf(0.55) * 0.38
-        + final_third_fit * 0.26
+    (range_fit.powf(0.55) * 0.34
+        + final_third_fit * 0.22
         + receiver_lane_fit * 0.22
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.10
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.04
-        + goal_entry_fit * 0.08)
+        + close_goal_fit * 0.10
+        + goal_entry_fit * 0.09)
         .clamp(0.0, 1.0)
 }
 
@@ -52273,6 +52283,10 @@ fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) 
     }
     let range_fit = killer_pass_goal_range_fit(observation).powf(0.48);
     let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
+    let close_goal_fit = ((GOAL_URGENCY_MAX_YARDS - observation.yards_to_goal)
+        / (GOAL_URGENCY_MAX_YARDS - GOAL_URGENCY_KEEPER_CROWD_YARDS).max(1.0))
+    .clamp(0.0, 1.0)
+    .powf(0.58);
     let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
     let receiver_lane_fit = (observation
         .best_forward_pass_receiver_openness
@@ -52286,12 +52300,13 @@ fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) 
     } else {
         0.78
     };
-    (range_fit * 0.26
-        + final_third_fit * 0.22
+    (range_fit * 0.23
+        + final_third_fit * 0.19
         + receiver_lane_fit * 0.36
         + blocked_shot_invitation * 0.12
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.04
-        + goal_entry_fit * 0.08)
+        + close_goal_fit * 0.10
+        + goal_entry_fit * 0.10)
         .clamp(0.0, 1.0)
 }
 
@@ -52302,16 +52317,20 @@ fn killer_pass_goal_pressure_floor(observation: &SoccerPomdpObservation) -> f64 
     }
     let danger_zone_fit = ((36.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
     let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
+    let close_goal_fit = ((GOAL_URGENCY_MAX_YARDS - observation.yards_to_goal)
+        / (GOAL_URGENCY_MAX_YARDS - GOAL_URGENCY_KEEPER_CROWD_YARDS).max(1.0))
+    .clamp(0.0, 1.0);
     (0.08
         + pressure * 0.30
         + danger_zone_fit * 0.10
         + goal_entry_fit * 0.08
+        + close_goal_fit * 0.08
         + observation
             .best_forward_pass_receiver_openness
             .clamp(0.0, 1.0)
             * 0.08
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.06)
-        .clamp(0.12, 0.64)
+        .clamp(0.12, 0.72)
 }
 
 fn threaded_goal_pass_can_override_forced_shot(
@@ -52366,6 +52385,10 @@ fn near_goal_decisive_action_pressure_score(
         / KILLER_PASS_MAX_YARDS_TO_GOAL)
         .clamp(0.0, 1.0)
         .powf(0.62);
+    let close_goal_fit = ((GOAL_URGENCY_MAX_YARDS - observation.yards_to_goal)
+        / (GOAL_URGENCY_MAX_YARDS - GOAL_URGENCY_KEEPER_CROWD_YARDS).max(1.0))
+    .clamp(0.0, 1.0)
+    .powf(0.58);
     let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
     let shot_lane_fit = if observation.shot_lane_open {
         ((1.0 - observation.shot_block_probability.clamp(0.0, 1.0)) * 0.38
@@ -52394,11 +52417,12 @@ fn near_goal_decisive_action_pressure_score(
     let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
 
     ((range_fit * 0.34
-        + final_third_fit * 0.22
+        + final_third_fit * 0.19
         + shot_lane_fit.max(threaded_lane_fit) * 0.24
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.13
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.07
         + single_thread_fit * 0.08
+        + close_goal_fit * 0.09
         + goal_entry_fit * 0.09)
         * role_fit)
         .clamp(0.0, 1.0)

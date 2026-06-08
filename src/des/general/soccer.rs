@@ -84716,6 +84716,29 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn live_session_defaults_to_ten_minutes_at_tenth_second_ticks() {
+        let session = SoccerRealtimeSession::new(MatchConfig::default());
+        let state = session.state_response();
+
+        assert_eq!(state.config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(state.config.duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(state.match_clock.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(state.match_clock.total_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(state.match_clock.total_ticks, 6_000);
+        assert_eq!(state.match_clock.remaining_ticks, 6_000);
+        assert_eq!(
+            state.match_clock.remaining_seconds,
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(state.summary.ticks, 0);
+        assert_eq!(state.summary.simulated_seconds, 0.0);
+        assert!(!state.match_clock.done);
+        assert_eq!(state.frame.agent_schedule_summary.expected_total_agents, 27);
+        assert_eq!(state.frame.players.len(), 22);
+        assert_eq!(state.frame.officials.len(), 3);
+    }
+
+    #[test]
     fn live_http_routes_state_and_step_json() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,

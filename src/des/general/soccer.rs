@@ -32331,6 +32331,18 @@ pub struct SoccerLearningRuntimeContract {
     pub tracking_csv_import_enabled: bool,
     pub tracking_jsonl_import_enabled: bool,
     pub tracking_coordinate_calibration_enabled: bool,
+    pub tracking_bird_eye_2d_training_enabled: bool,
+    pub tracking_source_frame_ids_enabled: bool,
+    pub tracking_confidence_weighting_enabled: bool,
+    pub tracking_player_kinematics_inference_enabled: bool,
+    pub tracking_ball_kinematics_inference_enabled: bool,
+    pub tracking_facing_bucket_import_enabled: bool,
+    pub tracking_action_target_grid_enabled: bool,
+    pub tracking_action_target_facing_enabled: bool,
+    pub tracking_import_trains_mdp_policy: bool,
+    pub tracking_import_trains_pomdp_beliefs: bool,
+    pub tracking_import_trains_neural_replay: bool,
+    pub tracking_physics_smoke_gate_enabled: bool,
     pub moment_replay_training_enabled: bool,
     pub moment_vector_search_enabled: bool,
     pub moment_embedder_version: String,
@@ -32437,6 +32449,18 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
         tracking_csv_import_enabled: true,
         tracking_jsonl_import_enabled: true,
         tracking_coordinate_calibration_enabled: true,
+        tracking_bird_eye_2d_training_enabled: true,
+        tracking_source_frame_ids_enabled: true,
+        tracking_confidence_weighting_enabled: true,
+        tracking_player_kinematics_inference_enabled: true,
+        tracking_ball_kinematics_inference_enabled: true,
+        tracking_facing_bucket_import_enabled: true,
+        tracking_action_target_grid_enabled: true,
+        tracking_action_target_facing_enabled: true,
+        tracking_import_trains_mdp_policy: true,
+        tracking_import_trains_pomdp_beliefs: true,
+        tracking_import_trains_neural_replay: true,
+        tracking_physics_smoke_gate_enabled: true,
         moment_replay_training_enabled: true,
         moment_vector_search_enabled: true,
         moment_embedder_version: SOCCER_MOMENT_EMBEDDER_VERSION.to_string(),
@@ -95193,6 +95217,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["trackingCsvImportEnabled"], true);
         assert_eq!(contract["trackingJsonlImportEnabled"], true);
         assert_eq!(contract["trackingCoordinateCalibrationEnabled"], true);
+        assert_eq!(contract["trackingBirdEye2dTrainingEnabled"], true);
+        assert_eq!(contract["trackingSourceFrameIdsEnabled"], true);
+        assert_eq!(contract["trackingConfidenceWeightingEnabled"], true);
+        assert_eq!(contract["trackingPlayerKinematicsInferenceEnabled"], true);
+        assert_eq!(contract["trackingBallKinematicsInferenceEnabled"], true);
+        assert_eq!(contract["trackingFacingBucketImportEnabled"], true);
+        assert_eq!(contract["trackingActionTargetGridEnabled"], true);
+        assert_eq!(contract["trackingActionTargetFacingEnabled"], true);
+        assert_eq!(contract["trackingImportTrainsMdpPolicy"], true);
+        assert_eq!(contract["trackingImportTrainsPomdpBeliefs"], true);
+        assert_eq!(contract["trackingImportTrainsNeuralReplay"], true);
+        assert_eq!(contract["trackingPhysicsSmokeGateEnabled"], true);
         assert_eq!(contract["momentReplayTrainingEnabled"], true);
         assert_eq!(contract["momentVectorSearchEnabled"], true);
         assert_eq!(

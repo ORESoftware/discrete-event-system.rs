@@ -2269,7 +2269,8 @@ function learningPersistenceLabel() {
   const mode = contract.learningEnabled ? "learn" : "observe";
   const backend = contract.policyPersistenceBackend || "json";
   const retention = contract.policyPersistenceStoresAllWeightHistory ? "history" : "tip";
-  return `${mode} ${backend} ${retention}`;
+  const batched = contract.policyPersistenceExternalWritesPerTimestep === false ? "batched" : "per-tick?";
+  return `${mode} ${backend} ${retention} ${batched}`;
 }
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);

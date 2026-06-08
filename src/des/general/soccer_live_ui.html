@@ -1124,6 +1124,7 @@ function runtimeContractsTitle() {
     `decisionMdp=${decision.mdpStateGridEnabled} pomdp=${decision.pomdpObservationGridEnabled} killerPass=${decision.killerPassProbabilityRampsTowardGoal} singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled} shotRamp=${decision.shotProbabilityRampsTowardGoal}`,
     `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled} teammatePressure=${decision.supportTargetTeammateOccupiedPressureEnabled} intentSpace=${decision.playbackIntentTargetSpaceMetricsEnabled} shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,
     `learning=${learningContract.learningEnabled} logging=${learningContract.learningLoggingEnabled} backend=${learningContract.policyPersistenceBackend} retention=${learningContract.policyPersistenceRetentionModel}`,
+    `persistenceWritesPerTick=${learningContract.policyPersistenceWritesPerTimestep} externalWritesPerTick=${learningContract.policyPersistenceExternalWritesPerTimestep} httpBatching=${learningContract.policyPersistenceHttpBatchingRequired} flush=${learningContract.policyPersistenceFlushPolicy}`,
   ];
   return lines.join("\n");
 }

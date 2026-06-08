@@ -362,7 +362,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 131;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 132;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -435,9 +435,10 @@ const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_WINDOW: usize = 127;
 const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_OPENNESS: usize = 128;
 const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_COMPLETION: usize = 129;
 const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_STRIDE: usize = 130;
+const SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS: usize = 131;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112, 113, 115, 117, 118, 119, 125,
+    110, 111, 112, 113, 115, 117, 118, 119, 125, 131,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1508,6 +1509,8 @@ pub struct SoccerPomdpObservation {
     pub visible_pass_options: usize,
     #[serde(default)]
     pub visible_aerial_pass_options: usize,
+    #[serde(default)]
+    pub open_support_outlets: usize,
     #[serde(default)]
     pub teammates_ahead: usize,
     #[serde(default)]
@@ -3199,6 +3202,8 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub visible_aerial_pass_options_bin: u8,
     #[serde(default)]
+    pub open_support_outlets_bin: u8,
+    #[serde(default)]
     pub teammates_ahead_bin: u8,
     #[serde(default)]
     pub visible_forward_pass_options_bin: u8,
@@ -3598,6 +3603,7 @@ impl SoccerQStateKey {
             ),
             visible_pass_options_bin: observation.visible_pass_options.min(3) as u8,
             visible_aerial_pass_options_bin: observation.visible_aerial_pass_options.min(3) as u8,
+            open_support_outlets_bin: observation.open_support_outlets.min(3) as u8,
             teammates_ahead_bin: observation.teammates_ahead.min(4) as u8,
             visible_forward_pass_options_bin: observation.visible_forward_pass_options.min(3) as u8,
             threaded_goal_pass_available: observation.threaded_goal_pass_available,
@@ -3950,6 +3956,7 @@ impl SoccerQStateKey {
             && self.immediate_dispossession_risk_bin == other.immediate_dispossession_risk_bin
             && self.visible_pass_options_bin == other.visible_pass_options_bin
             && self.visible_aerial_pass_options_bin == other.visible_aerial_pass_options_bin
+            && self.open_support_outlets_bin == other.open_support_outlets_bin
             && self.teammates_ahead_bin == other.teammates_ahead_bin
             && self.visible_forward_pass_options_bin == other.visible_forward_pass_options_bin
             && self.threaded_goal_pass_available == other.threaded_goal_pass_available
@@ -19694,6 +19701,7 @@ impl WorldSnapshot {
                 visible_opponents: 0,
                 visible_pass_options: 0,
                 visible_aerial_pass_options: 0,
+                open_support_outlets: 0,
                 teammates_ahead: 0,
                 visible_forward_pass_options: 0,
                 threaded_goal_pass_available: false,
@@ -19984,6 +19992,23 @@ impl WorldSnapshot {
         } else {
             Vec::new()
         };
+        let open_support_outlets = self
+            .ball
+            .holder
+            .and_then(|holder_id| {
+                let holder = self.players.iter().find(|player| player.id == holder_id)?;
+                (holder.team == me.team).then(|| {
+                    let holder_position = self.player_snapshot_position(holder);
+                    open_support_outlet_count(
+                        self,
+                        me.team,
+                        holder.id,
+                        holder_position,
+                        OPEN_SUPPORT_OUTLET_RADIUS_YARDS,
+                    )
+                })
+            })
+            .unwrap_or(0);
         let forward_support_context =
             self.forward_support_context_for(player_id, &visible_pass_targets);
         let threaded_goal_pass_assessment = if has_ball {
@@ -20433,6 +20458,7 @@ impl WorldSnapshot {
             visible_opponents,
             visible_pass_options: visible_pass_targets.len(),
             visible_aerial_pass_options: visible_aerial_pass_targets.len(),
+            open_support_outlets,
             teammates_ahead: forward_support_context.teammates_ahead,
             visible_forward_pass_options: forward_support_context.visible_forward_pass_options,
             threaded_goal_pass_available,
@@ -28256,6 +28282,34 @@ fn attacking_shape_support_urgency(snapshot: &WorldSnapshot, team: Team) -> f64 
         .clamp(0.0, 1.0)
 }
 
+const OPEN_SUPPORT_OUTLET_RADIUS_YARDS: f64 = 24.0;
+
+fn open_support_outlet_count(
+    snapshot: &WorldSnapshot,
+    team: Team,
+    holder_id: usize,
+    holder_position: Vec2,
+    max_distance_yards: f64,
+) -> usize {
+    snapshot
+        .players
+        .iter()
+        .filter(|player| player.team == team && player.id != holder_id)
+        .filter(|player| {
+            let position = snapshot.player_snapshot_position(player);
+            position.distance(holder_position) <= max_distance_yards
+                && snapshot.clear_line(holder_position, position, team.other(), 1.8)
+                && pass_receiver_openness_for_snapshots_with_teammates(
+                    &snapshot.players,
+                    team,
+                    position,
+                    Some(player.id),
+                ) >= 0.44
+        })
+        .take(3)
+        .count()
+}
+
 fn holder_pressure_support_urgency(snapshot: &WorldSnapshot, team: Team) -> f64 {
     let Some(holder_id) = snapshot.ball.holder else {
         return 0.0;
@@ -28287,9 +28341,15 @@ fn holder_pressure_support_urgency(snapshot: &WorldSnapshot, team: Team) -> f64 
     }
     let pressure = pressure_from_nearest_distance(nearest.min(36.0));
     let crowding = (close_opponents as f64 / 3.0).clamp(0.0, 1.0);
-    let team_shape = team_shape_observation_from_snapshot(snapshot, team, snapshot.ball.position);
-    let outlet_shortage = ((3.0 - team_shape.players_near_ball as f64) / 3.0).clamp(0.0, 1.0);
-    (pressure * 0.52 + crowding * 0.32 + outlet_shortage * 0.16).clamp(0.0, 1.0)
+    let open_outlets = open_support_outlet_count(
+        snapshot,
+        team,
+        holder.id,
+        holder_position,
+        OPEN_SUPPORT_OUTLET_RADIUS_YARDS,
+    );
+    let open_outlet_shortage = ((3.0 - open_outlets as f64) / 3.0).clamp(0.0, 1.0);
+    (pressure * 0.50 + crowding * 0.28 + open_outlet_shortage * 0.22).clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34656,6 +34716,16 @@ pub struct SoccerLearningRuntimeContract {
     pub policy_persistence_backend: String,
     pub policy_persistence_retention_model: String,
     pub policy_persistence_stores_all_weight_history: bool,
+    pub policy_persistence_external_writes_per_timestep: bool,
+    pub policy_persistence_writes_per_timestep: bool,
+    pub policy_persistence_http_batching_required: bool,
+    pub policy_persistence_flush_policy: String,
+    pub policy_persistence_autosave_min_interval_ticks: u64,
+    pub policy_persistence_autosave_default_interval_ticks: u64,
+    pub policy_persistence_autosave_min_interval_seconds: f64,
+    pub policy_persistence_autosave_default_interval_seconds: f64,
+    pub policy_persistence_redis_enabled: bool,
+    pub policy_persistence_postgres_branch_tip_exports_batched: bool,
     pub postgres_contract: SoccerPolicyPostgresStorageContract,
     pub reward_contract: SoccerLearningRewardContract,
 }
@@ -34778,6 +34848,20 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
         policy_persistence_retention_model: SOCCER_POLICY_POSTGRES_RETENTION_MODEL.to_string(),
         policy_persistence_stores_all_weight_history:
             SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY,
+        policy_persistence_external_writes_per_timestep: false,
+        policy_persistence_writes_per_timestep: false,
+        policy_persistence_http_batching_required: true,
+        policy_persistence_flush_policy: "autosave-or-episode-boundary-branch-tip-export"
+            .to_string(),
+        policy_persistence_autosave_min_interval_ticks: MIN_POLICY_AUTOSAVE_INTERVAL_TICKS,
+        policy_persistence_autosave_default_interval_ticks: DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS,
+        policy_persistence_autosave_min_interval_seconds: MIN_POLICY_AUTOSAVE_INTERVAL_TICKS as f64
+            * config.dt_seconds,
+        policy_persistence_autosave_default_interval_seconds: DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS
+            as f64
+            * config.dt_seconds,
+        policy_persistence_redis_enabled: false,
+        policy_persistence_postgres_branch_tip_exports_batched: true,
         postgres_contract: SoccerPolicyPostgresStorageContract::default(),
         reward_contract: soccer_learning_reward_contract(),
     }
@@ -38239,6 +38323,7 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.threaded_goal_pass_receiver_openness_bin, 5.0),
         soccer_neural_bin(state.threaded_goal_pass_expected_completion_bin, 5.0),
         soccer_neural_bin(state.threaded_goal_pass_stride_fit_bin, 5.0),
+        soccer_neural_bin(state.open_support_outlets_bin, 3.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -78238,6 +78323,64 @@ mod tests {
     }
 
     #[test]
+    fn neural_learning_pads_previous_snapshot_open_support_outlet_input() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15092,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+        previous_snapshot.layers[0].weights[0][previous_dim - 1] = 0.246_135;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous open-support-outlet neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][previous_dim - 1],
+            0.246_135
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS], 0.0,
+            "new open-support-outlet input should start neutral for 131-input snapshots"
+        );
+    }
+
+    #[test]
     fn neural_learning_trains_on_threaded_backend() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.4,
@@ -87327,6 +87470,134 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn marked_nearby_teammates_do_not_reduce_holder_support_urgency() {
+        let setup = |marked_outlets: bool| {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+            let holder = 6;
+            let outlets = [7, 8, 9];
+            let pressure = [12, 13, 14];
+            let markers = [15, 16, 17];
+
+            park_players_except(
+                &mut sim,
+                &[
+                    holder,
+                    outlets[0],
+                    outlets[1],
+                    outlets[2],
+                    pressure[0],
+                    pressure[1],
+                    pressure[2],
+                    markers[0],
+                    markers[1],
+                    markers[2],
+                ],
+            );
+            sim.ball.holder = Some(holder);
+            sim.ball.position = Vec2::new(40.0, 58.0);
+            sim.ball.last_touch_team = Some(Team::Home);
+            sim.players[holder].position = sim.ball.position;
+            sim.players[outlets[0]].position = Vec2::new(31.0, 64.0);
+            sim.players[outlets[1]].position = Vec2::new(40.0, 69.0);
+            sim.players[outlets[2]].position = Vec2::new(49.0, 64.0);
+            sim.players[pressure[0]].position = Vec2::new(43.0, 58.0);
+            sim.players[pressure[1]].position = Vec2::new(41.5, 55.5);
+            sim.players[pressure[2]].position = Vec2::new(43.0, 60.0);
+
+            for (marker, outlet) in markers.into_iter().zip(outlets) {
+                sim.players[marker].position = if marked_outlets {
+                    sim.players[outlet].position + Vec2::new(0.7, 0.4)
+                } else {
+                    Vec2::new(74.0, 104.0 + marker as f64 * 0.4)
+                };
+            }
+
+            WorldSnapshot::from_match(&sim)
+        };
+
+        let open_snapshot = setup(false);
+        let marked_snapshot = setup(true);
+        let open_urgency = holder_pressure_support_urgency(&open_snapshot, Team::Home);
+        let marked_urgency = holder_pressure_support_urgency(&marked_snapshot, Team::Home);
+        let holder = 6;
+        let open_observation = open_snapshot.observation_for(holder);
+        let marked_observation = marked_snapshot.observation_for(holder);
+        let open_key = SoccerQStateKey::from_parts(
+            &open_snapshot.mdp_state_for_player(holder),
+            &open_observation,
+            Team::Home,
+            open_snapshot.players[holder].role,
+        );
+        let marked_key = SoccerQStateKey::from_parts(
+            &marked_snapshot.mdp_state_for_player(holder),
+            &marked_observation,
+            Team::Home,
+            marked_snapshot.players[holder].role,
+        );
+        let open_decision = test_decision_trace(&open_snapshot, holder, "carry-forward");
+        let marked_decision = test_decision_trace(&marked_snapshot, holder, "carry-forward");
+        let transition_for = |snapshot: &WorldSnapshot,
+                              observation: SoccerPomdpObservation,
+                              decision: AgentDecisionTrace| {
+            SoccerLearningTransition {
+                tick: snapshot.tick,
+                player_id: holder,
+                team: Team::Home,
+                role: snapshot.players[holder].role,
+                state: decision.mdp_state,
+                observation: observation.clone(),
+                belief: decision.belief,
+                action: decision.action,
+                action_target: decision.action_target,
+                decision_context: SoccerDecisionContext::default(),
+                tactical_trace: SoccerTacticalLearningTrace::default(),
+                reward: 0.0,
+                next_state: snapshot.mdp_state_for_player(holder),
+                next_observation: observation,
+                done: false,
+            }
+        };
+        let open_features = soccer_neural_transition_features(&transition_for(
+            &open_snapshot,
+            open_observation.clone(),
+            open_decision,
+        ));
+        let marked_features = soccer_neural_transition_features(&transition_for(
+            &marked_snapshot,
+            marked_observation.clone(),
+            marked_decision,
+        ));
+
+        assert!(
+            marked_urgency > open_urgency + 0.14,
+            "marked nearby teammates should not count as relief outlets: open={open_urgency:.3} marked={marked_urgency:.3}"
+        );
+        assert!(
+            marked_urgency >= PRESSURED_SUPPORT_SPRINT_URGENCY,
+            "crowded holder with no open outlets should trigger urgent support movement: {marked_urgency:.3}"
+        );
+        assert!(
+            open_observation.open_support_outlets > marked_observation.open_support_outlets,
+            "POMDP observation should count only usable support outlets: open={} marked={}",
+            open_observation.open_support_outlets,
+            marked_observation.open_support_outlets
+        );
+        assert!(
+            open_key.open_support_outlets_bin > marked_key.open_support_outlets_bin,
+            "Q-state should preserve open support outlet scarcity: open={} marked={}",
+            open_key.open_support_outlets_bin,
+            marked_key.open_support_outlets_bin
+        );
+        assert!(
+            open_features[SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS]
+                > marked_features[SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS],
+            "neural feature should preserve open support outlet scarcity: open={} marked={}",
+            open_features[SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS],
+            marked_features[SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS]
+        );
+    }
+
+    #[test]
     fn transition_reward_reinforces_check_to_ball_under_holder_pressure() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 6;
@@ -94857,6 +95128,38 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             step_value["learningContract"]["policyPersistenceBackend"],
             SOCCER_POLICY_POSTGRES_BACKEND
         );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceWritesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceExternalWritesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceHttpBatchingRequired"],
+            true
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceFlushPolicy"],
+            "autosave-or-episode-boundary-branch-tip-export"
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceAutosaveMinIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceAutosaveDefaultIntervalTicks"],
+            DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceRedisEnabled"],
+            false
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistencePostgresBranchTipExportsBatched"],
+            true
+        );
         assert_eq!(step_value["liveAccounting"]["ok"], true);
         assert_eq!(step_value["liveAccounting"]["playerCount"], 22);
         assert_eq!(step_value["liveAccounting"]["officialCount"], 3);
@@ -95531,6 +95834,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(state_value["momentStorage"]["enabled"], true);
         assert_eq!(state_value["momentStorage"]["storedRecords"], 0);
         assert_eq!(state_value["policyAutosave"]["enabled"], false);
+        assert_eq!(
+            state_value["policyAutosave"]["intervalTicks"],
+            DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            state_value["policyAutosave"]["minIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(state_value["policyAutosave"]["batchesPolicyWrites"], true);
+        assert_eq!(state_value["policyAutosave"]["writesPerTimestep"], false);
+        assert_eq!(
+            state_value["policyAutosave"]["episodeBoundaryCheckpointEnabled"],
+            true
+        );
         assert_eq!(state_value["policyStorage"]["backend"], "json-disk");
         assert_eq!(
             state_value["policyStorage"]["runtimePath"],
@@ -95546,7 +95863,36 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             state_value["policyStorage"]["actionProbabilitiesDerived"],
             true
         );
+        assert_eq!(
+            state_value["policyStorage"]["externalWritesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["autosaveBatchesPolicyWrites"],
+            true
+        );
+        assert_eq!(
+            state_value["policyStorage"]["autosaveMinIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            state_value["policyStorage"]["autosaveIntervalTicks"],
+            DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            state_value["policyStorage"]["episodeBoundaryCheckpointEnabled"],
+            true
+        );
+        assert_eq!(state_value["policyStorage"]["redisEnabled"], false);
         assert_eq!(state_value["policyStorage"]["postgresEnabled"], true);
+        assert_eq!(
+            state_value["policyStorage"]["postgresWritesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresBranchTipExportsBatched"],
+            true
+        );
         assert_eq!(
             state_value["policyStorage"]["postgresTable"],
             SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
@@ -95566,6 +95912,22 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             state_value["policyStorage"]["postgresContract"]["storesAllWeightHistory"],
             false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["batchedBranchTipExport"],
+            true
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["writesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["redisEnabled"],
+            false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresContract"]["autosaveMinIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
         );
         assert_eq!(
             state_value["policyStorage"]["postgresContract"]["branchTipTable"],
@@ -96809,6 +97171,34 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             autosave_value["storage"]["autosaveMinIntervalTicks"],
             MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
         );
+        assert_eq!(
+            autosave_value["storage"]["autosaveIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            autosave_value["storage"]["autosaveBatchesPolicyWrites"],
+            true
+        );
+        assert_eq!(
+            autosave_value["storage"]["episodeBoundaryCheckpointEnabled"],
+            true
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresContract"]["batchedBranchTipExport"],
+            true
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresContract"]["writesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresContract"]["redisEnabled"],
+            false
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresContract"]["autosaveMinIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
         assert_eq!(autosave_value["autosave"]["historyRecords"], 0);
         assert!(!policy_path.exists());
         assert!(!history_path.exists());
@@ -97286,7 +97676,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             saved.away_policy_target_entries
         );
         assert!(state.policy_autosave.enabled);
-        assert_eq!(state.policy_autosave.interval_ticks, 3);
+        assert_eq!(
+            state.policy_autosave.interval_ticks,
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            state.policy_autosave.min_interval_ticks,
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert!(state.policy_autosave.batches_policy_writes);
+        assert!(!state.policy_autosave.writes_per_timestep);
+        assert!(state.policy_autosave.episode_boundary_checkpoint_enabled);
         assert_eq!(
             state.policy_autosave.path,
             policy_path.display().to_string()
@@ -97303,7 +97703,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(state.policy_storage.stores_visits);
         assert!(state.policy_storage.stores_action_probabilities);
         assert!(state.policy_storage.action_probabilities_derived);
+        assert!(!state.policy_storage.external_writes_per_timestep);
+        assert!(state.policy_storage.autosave_batches_policy_writes);
+        assert_eq!(
+            state.policy_storage.autosave_min_interval_ticks,
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            state.policy_storage.autosave_interval_ticks,
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert!(state.policy_storage.episode_boundary_checkpoint_enabled);
+        assert!(!state.policy_storage.redis_enabled);
         assert!(state.policy_storage.postgres_enabled);
+        assert!(!state.policy_storage.postgres_writes_per_timestep);
+        assert!(state.policy_storage.postgres_branch_tip_exports_batched);
         assert_eq!(
             state.policy_storage.postgres_table.as_deref(),
             Some(SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE)
@@ -97321,6 +97735,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .policy_storage
                 .postgres_contract
                 .stores_all_weight_history
+        );
+        assert!(
+            state
+                .policy_storage
+                .postgres_contract
+                .batched_branch_tip_export
+        );
+        assert!(!state.policy_storage.postgres_contract.writes_per_timestep);
+        assert!(!state.policy_storage.postgres_contract.redis_enabled);
+        assert_eq!(
+            state
+                .policy_storage
+                .postgres_contract
+                .autosave_min_interval_ticks,
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
         );
         assert_eq!(
             state.policy_storage.postgres_contract.tables.policy_entries,
@@ -102202,6 +102631,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function learningPersistenceLabel()"));
         assert!(html.contains("policyPersistenceBackend"));
         assert!(html.contains("policyPersistenceStoresAllWeightHistory"));
+        assert!(html.contains("policyPersistenceExternalWritesPerTimestep"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains(
             "trace.tacticalLiveness = meta.tacticalLiveness || meta.playback?.tacticalLiveness || null"
@@ -103127,6 +103557,37 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             contract["policyPersistenceStoresAllWeightHistory"],
             SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY
+        );
+        assert_eq!(contract["policyPersistenceWritesPerTimestep"], false);
+        assert_eq!(
+            contract["policyPersistenceExternalWritesPerTimestep"],
+            false
+        );
+        assert_eq!(contract["policyPersistenceHttpBatchingRequired"], true);
+        assert_eq!(
+            contract["policyPersistenceFlushPolicy"],
+            "autosave-or-episode-boundary-branch-tip-export"
+        );
+        assert_eq!(
+            contract["policyPersistenceAutosaveMinIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            contract["policyPersistenceAutosaveDefaultIntervalTicks"],
+            DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            contract["policyPersistenceAutosaveMinIntervalSeconds"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS as f64 * config.dt_seconds
+        );
+        assert_eq!(
+            contract["policyPersistenceAutosaveDefaultIntervalSeconds"],
+            DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS as f64 * config.dt_seconds
+        );
+        assert_eq!(contract["policyPersistenceRedisEnabled"], false);
+        assert_eq!(
+            contract["policyPersistencePostgresBranchTipExportsBatched"],
+            true
         );
         assert_eq!(
             contract["postgresContract"]["backend"],
@@ -104194,7 +104655,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function effectiveMatchDurationSeconds"));
         assert!(html.contains("config.halfDurationSeconds"));
         assert!(html.contains("config.halves"));
-        assert!(html.contains("const duration = effectiveMatchDurationSeconds(config)"));
+        assert!(html.contains(
+            "const duration = Number.isFinite(cadenceDuration) && cadenceDuration > 0 ? cadenceDuration : effectiveMatchDurationSeconds(config)"
+        ));
         assert!(
             html.contains("effectiveMatchDurationSeconds(state.config) / state.config.dtSeconds")
         );
@@ -104218,6 +104681,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("brain.playersNearBall"));
         assert!(html.contains("teamBrainLabel(f.homeBrain, f.homeDirective)"));
         assert!(html.contains("teamBrainLabel(f.awayBrain, f.awayDirective)"));
+        assert!(html.contains("policyPersistenceWritesPerTimestep"));
+        assert!(html.contains("policyPersistenceExternalWritesPerTimestep"));
+        assert!(html.contains("policyPersistenceHttpBatchingRequired"));
+        assert!(html.contains("policyPersistenceFlushPolicy"));
     }
 
     #[test]

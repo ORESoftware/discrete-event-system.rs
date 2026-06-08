@@ -1167,6 +1167,7 @@ function livePhysicsTitle(report = state?.livePhysics) {
     `ok=${report.ok} tick=${report.tick} violations=${report.violationCount}`,
     `counts players=${report.playerCount} officials=${report.officialCount} ball=${report.ballPresent}`,
     `speed y/s players=${Number(report.maxPlayerSpeedYps ?? 0).toFixed(3)}/${report.playerMaxSpeedYps} officials=${Number(report.maxOfficialSpeedYps ?? 0).toFixed(3)}/${report.playerMaxSpeedYps} ball=${Number(report.maxBallSpeedYps ?? 0).toFixed(3)}/${report.ballMaxSpeedYps}`,
+    `frameSpeed y/s players=${Number(report.maxPlayerFrameSpeedYps ?? 0).toFixed(3)} officials=${Number(report.maxOfficialFrameSpeedYps ?? 0).toFixed(3)} ball=${Number(report.maxBallFrameSpeedYps ?? 0).toFixed(3)} epsilon=${report.frameEpsilonYards}`,
     `accel y/s2 players=${Number(report.maxPlayerAccelYps2 ?? 0).toFixed(3)}/${report.playerMaxAccelYps2} officials=${Number(report.maxOfficialAccelYps2 ?? 0).toFixed(3)}/${report.playerMaxAccelYps2} ball=${Number(report.maxBallAccelYps2 ?? 0).toFixed(3)}/${report.ballMaxAccelYps2}`,
     `jerk y/s3 players=${Number(report.maxPlayerJerkYps3 ?? 0).toFixed(3)} officials=${Number(report.maxOfficialJerkYps3 ?? 0).toFixed(3)} ball=${Number(report.maxBallJerkYps3 ?? 0).toFixed(3)}`,
     `histories players=${report.minPlayerHistoryLen}-${report.maxPlayerHistoryLen} officials=${report.minOfficialHistoryLen}-${report.maxOfficialHistoryLen} ball=${report.ballHistoryLen}`,

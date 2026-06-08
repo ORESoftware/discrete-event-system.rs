@@ -29995,6 +29995,9 @@ pub struct SoccerLiveFramePhysicsReport {
     pub max_player_speed_yps: f64,
     pub max_official_speed_yps: f64,
     pub max_ball_speed_yps: f64,
+    pub max_player_frame_speed_yps: f64,
+    pub max_official_frame_speed_yps: f64,
+    pub max_ball_frame_speed_yps: f64,
     pub max_player_accel_yps2: f64,
     pub max_official_accel_yps2: f64,
     pub max_ball_accel_yps2: f64,
@@ -30006,6 +30009,7 @@ pub struct SoccerLiveFramePhysicsReport {
     pub player_max_accel_yps2: f64,
     pub ball_max_accel_yps2: f64,
     pub pitch_margin_yards: f64,
+    pub frame_epsilon_yards: f64,
     pub min_player_history_len: usize,
     pub max_player_history_len: usize,
     pub min_official_history_len: usize,
@@ -30469,6 +30473,7 @@ pub fn soccer_live_frame_physics_report(
         player_max_accel_yps2: limits.player_max_accel_yps2,
         ball_max_accel_yps2: limits.ball_max_accel_yps2,
         pitch_margin_yards: limits.pitch_margin_yards,
+        frame_epsilon_yards: limits.frame_epsilon_yards,
         min_player_history_len: frame
             .players
             .iter()
@@ -30535,6 +30540,17 @@ pub fn soccer_live_frame_physics_report(
     ) {
         report.max_ball_jerk_yps3 = report.max_ball_jerk_yps3.max(value);
     }
+    if let Some(value) = live_check_ball_history_frame_speed(
+        &mut report,
+        frame.tick,
+        "ball",
+        &frame.ball_history,
+        config.dt_seconds,
+        limits.ball_max_speed_yps,
+        limits.frame_epsilon_yards,
+    ) {
+        report.max_ball_frame_speed_yps = report.max_ball_frame_speed_yps.max(value);
+    }
 
     for player in &frame.players {
         let subject = format!("player:{}", player.id);
@@ -30570,6 +30586,17 @@ pub fn soccer_live_frame_physics_report(
             live_check_motion_vector(&mut report, frame.tick, &subject, "jerk", player.jerk, None)
         {
             report.max_player_jerk_yps3 = report.max_player_jerk_yps3.max(value);
+        }
+        if let Some(value) = live_check_vec2_history_frame_speed(
+            &mut report,
+            frame.tick,
+            &subject,
+            &player.position_history,
+            config.dt_seconds,
+            limits.player_max_speed_yps,
+            limits.frame_epsilon_yards,
+        ) {
+            report.max_player_frame_speed_yps = report.max_player_frame_speed_yps.max(value);
         }
     }
 
@@ -30612,6 +30639,17 @@ pub fn soccer_live_frame_physics_report(
             None,
         ) {
             report.max_official_jerk_yps3 = report.max_official_jerk_yps3.max(value);
+        }
+        if let Some(value) = live_check_vec2_history_frame_speed(
+            &mut report,
+            frame.tick,
+            &subject,
+            &official.position_history,
+            config.dt_seconds,
+            limits.player_max_speed_yps,
+            limits.frame_epsilon_yards,
+        ) {
+            report.max_official_frame_speed_yps = report.max_official_frame_speed_yps.max(value);
         }
     }
 
@@ -30718,6 +30756,107 @@ fn live_check_motion_vector(
                 format!("{metric} exceeded live physics limit"),
             );
         }
+    }
+    Some(value)
+}
+
+fn live_check_vec2_history_frame_speed(
+    report: &mut SoccerLiveFramePhysicsReport,
+    tick: u64,
+    subject: &str,
+    history: &[Vec2],
+    dt_seconds: f64,
+    speed_limit: f64,
+    epsilon_yards: f64,
+) -> Option<f64> {
+    if history.len() < 2 {
+        return None;
+    }
+    let dt = sane_dt_seconds(dt_seconds, DEFAULT_DT_SECONDS).max(1e-9);
+    let previous = history[history.len() - 2];
+    let current = history[history.len() - 1];
+    live_check_frame_speed_between(
+        report,
+        tick,
+        subject,
+        previous,
+        current,
+        dt,
+        speed_limit,
+        epsilon_yards,
+    )
+}
+
+fn live_check_ball_history_frame_speed(
+    report: &mut SoccerLiveFramePhysicsReport,
+    tick: u64,
+    subject: &str,
+    history: &[BallPositionSample],
+    fallback_dt_seconds: f64,
+    speed_limit: f64,
+    epsilon_yards: f64,
+) -> Option<f64> {
+    if history.len() < 2 {
+        return None;
+    }
+    let previous = &history[history.len() - 2];
+    let current = &history[history.len() - 1];
+    let dt = ball_sample_delta_seconds(previous, current, fallback_dt_seconds)?;
+    live_check_frame_speed_between(
+        report,
+        tick,
+        subject,
+        previous.position,
+        current.position,
+        dt.max(1e-9),
+        speed_limit,
+        epsilon_yards,
+    )
+}
+
+fn live_check_frame_speed_between(
+    report: &mut SoccerLiveFramePhysicsReport,
+    tick: u64,
+    subject: &str,
+    previous: Vec2,
+    current: Vec2,
+    dt_seconds: f64,
+    speed_limit: f64,
+    epsilon_yards: f64,
+) -> Option<f64> {
+    if !vec2_is_finite(previous) || !vec2_is_finite(current) {
+        report.push_violation(
+            tick,
+            subject,
+            "framePositionFinite",
+            0.0,
+            0.0,
+            "history positions must be finite for frame-speed checks",
+        );
+        return None;
+    }
+    if !dt_seconds.is_finite() || dt_seconds <= 0.0 {
+        report.push_violation(
+            tick,
+            subject,
+            "frameDt",
+            dt_seconds,
+            0.0,
+            "history frame-speed check requires positive dt",
+        );
+        return None;
+    }
+    let value = current.distance(previous) / dt_seconds;
+    let tolerated_speed = speed_limit + epsilon_yards.max(0.0) / dt_seconds;
+    if value > tolerated_speed {
+        report.push_violation(
+            tick,
+            subject,
+            "frameDisplacementSpeed",
+            value,
+            tolerated_speed,
+            "history-derived frame speed exceeded live physics limit",
+        );
     }
     Some(value)
 }
@@ -65368,6 +65507,9 @@ mod tests {
         assert!(step.live_physics.max_player_speed_yps.is_finite());
         assert!(step.live_physics.max_official_speed_yps.is_finite());
         assert!(step.live_physics.max_ball_speed_yps.is_finite());
+        assert!(step.live_physics.max_player_frame_speed_yps.is_finite());
+        assert!(step.live_physics.max_official_frame_speed_yps.is_finite());
+        assert!(step.live_physics.max_ball_frame_speed_yps.is_finite());
         assert_eq!(
             step.live_physics.player_max_speed_yps,
             SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS
@@ -65375,6 +65517,10 @@ mod tests {
         assert_eq!(
             step.live_physics.ball_max_speed_yps,
             SOCCER_PHYSICS_BALL_MAX_SPEED_YPS
+        );
+        assert_eq!(
+            step.live_physics.frame_epsilon_yards,
+            SOCCER_PHYSICS_FRAME_EPSILON_YARDS
         );
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
@@ -70569,6 +70715,31 @@ mod tests {
         assert!(!report.ok());
         assert!(report.violations.iter().any(|violation| {
             violation.metric == "frameDisplacementSpeed" || violation.metric == "pitchBounds"
+        }));
+    }
+
+    #[test]
+    fn live_physics_report_flags_impossible_history_jump() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 13_061,
+            ..Default::default()
+        });
+        sim.run_time_step();
+        sim.run_time_step();
+        let mut frame = sim.to_frame();
+        let history = &mut frame.players[0].position_history;
+        let last = history.len() - 1;
+        history[last] = history[last - 1] + Vec2::new(200.0, 0.0);
+
+        let report = soccer_live_frame_physics_report(&frame, &sim.config);
+
+        assert!(!report.ok);
+        assert!(
+            report.max_player_frame_speed_yps > SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS,
+            "history-derived speed should expose the impossible jump: {report:?}"
+        );
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "player:0" && violation.metric == "frameDisplacementSpeed"
         }));
     }
 
@@ -91611,6 +91782,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             step_value["livePhysics"]["ballMaxSpeedYps"],
             SOCCER_PHYSICS_BALL_MAX_SPEED_YPS
+        );
+        assert_eq!(
+            step_value["livePhysics"]["frameEpsilonYards"],
+            SOCCER_PHYSICS_FRAME_EPSILON_YARDS
         );
     }
 

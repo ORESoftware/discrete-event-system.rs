@@ -83184,7 +83184,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         };
         let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,vx,vy,home_x,home_y,ball_x,ball_y,ball_vx,ball_vy,ball_holder,last_touch_team,score_home,score_away
 0,0.0,0,"Home, passer",Home,Midfielder,8,40.0,70.0,0.0,0.0,40.0,65.0,40.0,70.0,0.0,0.0,0,Home,0,0
-0,0.0,1,Home runner,Home,Forward,9,44.0,82.0,0.0,0.0,44.0,80.0,40.0,70.0,0.0,0.0,0,Home,0,0
+0,0.0,1,Home runner,Home,Forward,9,48.0,78.0,-1.0,4.0,44.0,80.0,40.0,70.0,0.0,0.0,0,Home,0,0
 0,0.0,2,Away defender,Away,Defender,4,58.0,78.0,0.0,0.0,58.0,78.0,40.0,70.0,0.0,0.0,0,Home,0,0
 1,0.1,0,"Home, passer",Home,Midfielder,8,40.2,70.4,2.0,4.0,40.0,65.0,44.0,82.0,8.0,16.0,1,Home,0,0
 1,0.1,1,Home runner,Home,Forward,9,44.0,82.0,0.0,0.0,44.0,80.0,44.0,82.0,8.0,16.0,1,Home,0,0
@@ -83213,12 +83213,31 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .iter()
             .find(|transition| transition.player_id == 0)
             .expect("passer transition");
+        let runner = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 1)
+            .expect("off-ball runner transition");
+        let defender = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 2)
+            .expect("defender transition");
         assert_eq!(passer.action, "pass");
+        assert_eq!(runner.action, "run-in-behind");
+        assert_eq!(defender.action, "defend");
         let policy =
             train_soccer_q_policy_from_tracking(&tracking, SoccerQPolicyOptions::default())
                 .expect("policy from csv");
-        let state = SoccerQStateKey::from_transition(passer);
-        assert!(policy.q_value(&state, "pass").is_some());
+        for transition in [&passer, &runner, &defender] {
+            let state = SoccerQStateKey::from_transition(transition);
+            assert!(
+                policy.q_value(&state, &transition.action).is_some(),
+                "CSV tracking should train {} for visible player {}",
+                transition.action,
+                transition.player_id
+            );
+        }
     }
 
     #[test]

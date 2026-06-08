@@ -1096,6 +1096,7 @@ function runtimeContractsLabel() {
   const rules = state?.rulesContract || {};
   const decision = state?.decisionModel || {};
   const learningContract = state?.learningContract || {};
+  const ui = state?.uiContract || {};
   const players = Number(agent.expectedPlayerCount ?? state?.frame?.players?.length ?? 0);
   const officials = Number(agent.expectedOfficialCount ?? state?.frame?.officials?.length ?? 0);
   const ballAgents = Number(agent.expectedBallAgents ?? 0);
@@ -1103,8 +1104,8 @@ function runtimeContractsLabel() {
   const mdp = decision.mdpStateGridEnabled && decision.pomdpObservationGridEnabled ? "MDP/POMDP" : "policy?";
   const rulesText = rules.offsideRuleEnabled && rules.postGoalKickoffEnabled ? "rules" : "rules?";
   const learnText = learningContract.learningEnabled === false ? "observe" : "learn";
-  const livePosts = ui.liveStepPostEnabled || ui.liveInputPostEnabled ? "live-post" : "live-no-post";
-  const playbackPosts = ui.playbackStepPostEnabled || ui.playbackInputPostEnabled ? "pb-post" : "pb-get";
+  const livePosts = ui?.liveStepPostEnabled || ui?.liveInputPostEnabled ? "live-post" : "live-no-post";
+  const playbackPosts = ui?.playbackStepPostEnabled || ui?.playbackInputPostEnabled ? "pb-post" : "pb-get";
   const stepPersistence = learningContract.policyPersistenceLiveHttpStepPersistenceInMemoryOnly ? "sim-only" : "step-pg?";
   const httpText = learningContract.policyPersistenceLiveHttpStepWritesToPostgres ? "step-pg" : `${livePosts}/${playbackPosts}/${stepPersistence}`;
   return `${players}p/${officials}o/${ballAgents}b ${slots}H ${mdp} ${rulesText} ${learnText} ${httpText}`;
@@ -3763,8 +3764,25 @@ function livePathWithMount(path, pathname = window.location.pathname) {
   if (raw === "/") return `${prefix}/`;
   return `${prefix}${raw}`;
 }
+function soccerPlaybackAssetMode(pathname = window.location.pathname) {
+  const path = normalizedPathname(pathname).toLowerCase();
+  return pathname.includes("/out/") && !path.includes("/soccer/live");
+}
+function soccerLivePostApiEnabled(resource = "api") {
+  const ui = state?.uiContract || {};
+  const current = window.location;
+  if (soccerPlaybackAssetMode(current.pathname) || ui.liveSimulationPostApiEnabled === false) {
+    return false;
+  }
+  if (resource === "step") return ui.liveStepPostEnabled !== false;
+  if (resource === "input" || resource === "assign") return ui.liveInputPostEnabled !== false;
+  return true;
+}
 function liveApiPath(path) {
   return livePathWithMount(path);
+}
+function soccerApiUrl(path) {
+  return liveApiPath(path);
 }
 function liveRoutePath(path, pathname = window.location.pathname) {
   return livePathWithMount(path, pathname);
@@ -3772,14 +3790,20 @@ function liveRoutePath(path, pathname = window.location.pathname) {
 async function fetchLive(path, options) {
   return fetch(liveApiPath(path), options);
 }
-async function postJson(path, body) {
-  const res = await fetchLive(path, {
+async function postSoccerJson(path, body, resource = "api") {
+  if (!soccerLivePostApiEnabled(resource)) {
+    throw new Error("playback mode uses GET-only assets");
+  }
+  const res = await fetch(soccerApiUrl(path), {
     method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify(body)
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+async function postJson(path, body) {
+  return postSoccerJson(path, body, "api");
 }
 function plural(value, singular, pluralLabel = `${singular}s`) {
   return Number(value) === 1 ? singular : pluralLabel;
@@ -3814,7 +3838,9 @@ async function refreshPolicyHistory(path, options = {}) {
   return response;
 }
 async function assignSlot(slot, playerId) {
-  const response = await postJson("/api/assign", {controllerSlot: slot, playerId});
+  const payload = {controllerSlot: slot, playerId};
+  if (!soccerLivePostApiEnabled("assign")) return;
+  const response = await postSoccerJson("/api/assign", payload, "assign");
   if (response.config) state.config = response.config;
   if (response.learning) state.learning = response.learning;
   state.controllerAssignments = response.controllerAssignments;
@@ -4294,11 +4320,11 @@ async function stepOnce(options = {}) {
     const ticksThisPulse = options.manual ? 1 : effectiveSimTicksPerPulse();
     let response;
     try {
-      response = await postJson("/api/step", {
+      response = await postSoccerJson("/api/step", {
         ticks: ticksThisPulse,
         recordEveryTicks: Math.max(1, ticksThisPulse),
         inputs
-      });
+      }, "step");
     } catch (err) {
       requeueInputFrames(inputs);
       scheduleInputRetry();
@@ -4383,11 +4409,12 @@ function scheduleInputRetry() {
 }
 async function flushQueuedInputsToInputApi() {
   if (!state || resetting || inputFlushInFlight || !queuedInputs.length) return;
+  if (!soccerLivePostApiEnabled("input")) return "Playback local";
   inputFlushInFlight = true;
   const inputs = drainQueuedInputsForDispatch();
   let delivered = false;
   try {
-    const ack = await postJson("/api/input", inputs);
+    const ack = await postSoccerJson("/api/input", inputs, "input");
     applyInputAck(ack, inputs.length);
     inputFlushRetryAttempt = 0;
     delivered = true;

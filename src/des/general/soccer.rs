@@ -107236,7 +107236,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function scheduleInputFlush"));
         assert!(html.contains("function scheduleInputRetry"));
         assert!(html.contains("function flushQueuedInputsToInputApi"));
-        assert!(html.contains("postJson(\"/api/input\", inputs)"));
+        assert!(html.contains("postSoccerJson(\"/api/input\", inputs, \"input\")"));
         assert!(html.contains("workerQueueCapacity"));
         assert!(html.contains("boundedWorkerQueue"));
         assert!(html.contains("Qunbounded"));

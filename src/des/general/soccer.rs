@@ -360,7 +360,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 117;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 118;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -419,9 +419,10 @@ const SOCCER_NEURAL_FEATURE_PASSING_SKILL: usize = 113;
 const SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL: usize = 114;
 const SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE: usize = 115;
 const SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE: usize = 116;
+const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE: usize = 117;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112, 113, 115,
+    110, 111, 112, 113, 115, 117,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -3081,6 +3082,8 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub visible_forward_pass_options_bin: u8,
     #[serde(default)]
+    pub threaded_goal_pass_available: bool,
+    #[serde(default)]
     pub best_forward_pass_receiver_openness_bin: u8,
     #[serde(default)]
     pub nearest_forward_teammate_distance_bin: u8,
@@ -3438,6 +3441,7 @@ impl SoccerQStateKey {
             visible_aerial_pass_options_bin: observation.visible_aerial_pass_options.min(3) as u8,
             teammates_ahead_bin: observation.teammates_ahead.min(4) as u8,
             visible_forward_pass_options_bin: observation.visible_forward_pass_options.min(3) as u8,
+            threaded_goal_pass_available: observation.threaded_goal_pass_available,
             best_forward_pass_receiver_openness_bin: distance_bucket(
                 observation.best_forward_pass_receiver_openness,
                 &[0.20, 0.40, 0.62, 0.82],
@@ -3755,6 +3759,7 @@ impl SoccerQStateKey {
             && self.visible_aerial_pass_options_bin == other.visible_aerial_pass_options_bin
             && self.teammates_ahead_bin == other.teammates_ahead_bin
             && self.visible_forward_pass_options_bin == other.visible_forward_pass_options_bin
+            && self.threaded_goal_pass_available == other.threaded_goal_pass_available
             && self.best_forward_pass_receiver_openness_bin
                 == other.best_forward_pass_receiver_openness_bin
             && self.nearest_forward_teammate_distance_bin
@@ -3860,6 +3865,7 @@ impl SoccerQStateKey {
             && self.flank_cross_arrival_available == other.flank_cross_arrival_available
             && self.defensive_cross_arrival_threat_available
                 == other.defensive_cross_arrival_threat_available
+            && self.threaded_goal_pass_available == other.threaded_goal_pass_available
             && self.first_touch_kind == other.first_touch_kind
             && self.receiving_pending_pass == other.receiving_pending_pass
             && facing_bucket_matches(self.receive_facing, other.receive_facing)
@@ -35422,6 +35428,7 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.skill_first_touch_bin, 5.0),
         soccer_neural_bin(state.killer_pass_goal_pressure_bin, 5.0),
         soccer_neural_bin(state.decisive_goal_action_pressure_bin, 5.0),
+        soccer_neural_bool(state.threaded_goal_pass_available),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -55959,6 +55966,30 @@ mod tests {
             snapshot.dt_seconds,
             snapshot.field_width,
         );
+        let q_key = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(passer),
+            &observation,
+            Team::Home,
+            sim.players[passer].role,
+        );
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: passer,
+            team: Team::Home,
+            role: sim.players[passer].role,
+            state: snapshot.mdp_state_for_player(passer),
+            observation: observation.clone(),
+            belief: belief_from_observation(&observation),
+            action: "pass".to_string(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(passer),
+            next_observation: observation.clone(),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
         let killer = options
             .iter()
             .find(|option| option.label == "killer-pass")
@@ -55970,6 +56001,11 @@ mod tests {
         assert!(
             !observation.threaded_goal_pass_available && observation.killer_pass_goal_pressure == 0.0,
             "observation should not expose killer-pass pressure without a true threaded goal receiver: {observation:?}"
+        );
+        assert!(
+            !q_key.threaded_goal_pass_available
+                && features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE] == 0.0,
+            "Q-state and neural features should keep ordinary forward outlets separate from true killer routes"
         );
         assert!(
             !killer.legal && killer.probability == 0.0,
@@ -56246,13 +56282,18 @@ mod tests {
             observation.killer_pass_goal_pressure
         );
         assert!(
+            observation.threaded_goal_pass_available,
+            "test setup should expose an actual threaded goal-pass receiver"
+        );
+        assert!(
             observation.decisive_goal_action_pressure > 0.60,
             "test setup should expose high decisive goal action pressure: {}",
             observation.decisive_goal_action_pressure
         );
         assert!(
             q_key.killer_pass_goal_pressure_bin >= 3
-                && q_key.decisive_goal_action_pressure_bin >= 3,
+                && q_key.decisive_goal_action_pressure_bin >= 3
+                && q_key.threaded_goal_pass_available,
             "Q-state should bucket final-third decisive pressure: {q_key:?}"
         );
         assert!(
@@ -56262,6 +56303,10 @@ mod tests {
         assert!(
             features[SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE] > 0.60,
             "neural learner should see decisive goal action pressure"
+        );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE], 1.0,
+            "neural learner should see that a real threaded goal receiver exists"
         );
     }
 

@@ -60978,6 +60978,71 @@ mod tests {
     }
 
     #[test]
+    fn controller_input_router_debounces_assigned_slot_burst_without_queue_growth() {
+        let q = SharedHumanInputs::new();
+        let assignments = SharedControllerAssignments::new(4);
+        assignments.assign_slot(0, Some(0));
+        let controllers = spawn_human_controller_threads(q.clone(), 4, Duration::from_millis(40))
+            .expect("spawn controller threads");
+        let router = HumanControllerInputRouter::new(q.clone(), assignments, &controllers);
+
+        for seq in 1..=12 {
+            assert!(
+                router.push_human_input(HumanInputFrame {
+                    controller_slot: 0,
+                    player_id: Some(0),
+                    seq,
+                    axis: Vec2::new(seq as f64 / 12.0, 0.0),
+                    sprint: seq == 12,
+                    pass: false,
+                    pass_flight: PassFlight::Floor,
+                    shoot: false,
+                    action: None,
+                    target_player: None,
+                }),
+                "assigned controller input {seq} should enter the native controller mailbox"
+            );
+        }
+
+        assert_eq!(
+            router.queued_len(),
+            1,
+            "router should expose one pending debounced mailbox frame for the slot"
+        );
+        let pending_stats = controllers[0].stats();
+        assert_eq!(pending_stats.accepted_frames, 12);
+        assert!(
+            pending_stats.overwritten_frames >= 10,
+            "same-slot burst should overwrite pending native input instead of growing the shared queue: {pending_stats:?}"
+        );
+
+        assert!(q.wait_for_pending_input(Duration::from_millis(300)));
+        let input = q
+            .drain_latest_for_slot(0)
+            .expect("debounced slot input should reach the shared queue");
+        assert_eq!(input.controller_slot, 0);
+        assert_eq!(input.player_id, Some(0));
+        assert_eq!(input.seq, 12);
+        assert!(input.sprint);
+        assert_eq!(
+            q.queued_len(),
+            0,
+            "main loop should consume one coalesced frame, not a burst"
+        );
+
+        let pushed_stats = controllers[0].stats();
+        assert_eq!(pushed_stats.pushed_frames, 1);
+        assert_eq!(pushed_stats.debounced_frames, 1);
+        for controller in controllers.iter().skip(1) {
+            assert_eq!(controller.stats().accepted_frames, 0);
+        }
+
+        for controller in controllers {
+            controller.stop().expect("controller stops");
+        }
+    }
+
+    #[test]
     fn controller_mailbox_overwrites_pending_input_without_queue_growth() {
         let q = SharedHumanInputs::new();
         let controller = HumanControllerThread::spawn(q.clone(), 0, Duration::from_millis(50))

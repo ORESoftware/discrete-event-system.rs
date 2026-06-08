@@ -25615,6 +25615,31 @@ fn soccer_transition_reward_with_tactics(
                         receiver_openness,
                         pass_into_stride_fit_for_context(&action_context, player.team),
                     );
+                    if flight == PassFlight::Floor && !is_cross {
+                        let target_forward_yards = (target.y - origin.y) * player.team.attack_dir();
+                        let target_yards_to_goal =
+                            (player.team.goal_y(before.field_length) - target.y).abs();
+                        let target_goal_channel = (1.0
+                            - target_yards_to_goal / TEAMMATE_MUST_SHOOT_YARDS)
+                            .clamp(0.0, 1.0);
+                        let receiver_finish_tool = (ability01(receiver_player.skills.first_touch)
+                            * 0.34
+                            + ability01(receiver_player.skills.shooting) * 0.32
+                            + ability01(receiver_player.skills.top_speed) * 0.18
+                            + ability01(receiver_player.skills.dribbling) * 0.16)
+                            .clamp(0.0, 1.0);
+                        let stride_fit =
+                            pass_into_stride_fit_for_context(&action_context, player.team);
+                        if target_forward_yards >= KILLER_PASS_MIN_FORWARD_YARDS
+                            && target_goal_channel > 0.0
+                        {
+                            reward += target_goal_channel
+                                * (2.40
+                                    + receiver_openness.clamp(0.0, 1.0) * 0.34
+                                    + stride_fit.clamp(0.0, 1.0) * 0.30
+                                    + receiver_finish_tool * 0.28);
+                        }
+                    }
                 }
             }
             assert!(
@@ -58270,6 +58295,78 @@ mod tests {
             threaded_floor > aerial_same_target + 2.0,
             "floor-threaded killer pass should learn above same-target aerial delivery: threaded={threaded_floor} aerial={aerial_same_target}"
         );
+    }
+
+    #[test]
+    fn transition_reward_ramps_threaded_killer_pass_as_goal_gets_closer() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14234,
+            ..Default::default()
+        });
+        let passer = 6;
+        let receiver = 9;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.first_touch = 8.7;
+        sim.players[receiver].skills.shooting = 8.9;
+        sim.players[receiver].skills.top_speed = 9.1;
+
+        let mut previous_reward = 0.0;
+        for (idx, origin_y) in [80.0, 90.0, 100.0].into_iter().enumerate() {
+            let origin = Vec2::new(40.0, origin_y);
+            let receiver_start = Vec2::new(42.0, origin_y + 6.0);
+            let target = Vec2::new(40.0, origin_y + 14.0);
+            sim.players[passer].position = origin;
+            sim.players[passer].home_position = origin;
+            sim.players[receiver].position = receiver_start;
+            sim.players[receiver].velocity = Vec2::new(0.2, 4.6);
+            sim.ball.holder = Some(passer);
+            sim.ball.position = origin;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+            let before = WorldSnapshot::from_match(&sim);
+            let mut after = before.clone();
+            after.ball.holder = Some(receiver);
+            after.ball.position = target;
+            after.ball.velocity = Vec2::zero();
+            after.set_player_position(receiver, target);
+            let mut decision = test_decision_trace(&before, passer, "killer-pass");
+            decision.action_target = Some(AgentActionTargetTrace {
+                point: Some(target),
+                player_id: Some(receiver),
+                grid: Some(pitch_grid_address(
+                    target,
+                    before.field_width,
+                    before.field_length,
+                )),
+                facing: facing_bucket_from_vector(target - origin),
+                dribble_touch: None,
+            });
+            decision.observation.expected_pass_completion = 0.88;
+            decision.observation.best_pass_receiver_openness = 0.90;
+            decision.observation.best_pass_stride_fit = 0.82;
+            decision.observation.floor_pass_lane_score = 0.88;
+
+            let reward = soccer_transition_reward(
+                &sim.players[passer],
+                &decision,
+                &before,
+                &after,
+                0,
+                0,
+                0,
+                0,
+                true,
+            );
+
+            if idx > 0 {
+                assert!(
+                    reward > previous_reward + 0.35,
+                    "full transition reward should ramp with threaded killer-pass goal proximity: y={origin_y} reward={reward} previous={previous_reward}"
+                );
+            }
+            previous_reward = reward;
+        }
     }
 
     #[test]

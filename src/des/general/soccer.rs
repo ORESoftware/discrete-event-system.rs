@@ -86822,12 +86822,39 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .as_array()
             .expect("controller latency budget slots");
         assert_eq!(budget_slots.len(), 4);
+        assert_eq!(
+            value["frame"]["agentScheduleSummary"]["complete"], true,
+            "live JSON should expose a complete runtime loop contract"
+        );
+        assert_eq!(
+            value["frame"]["agentScheduleSummary"]["totalAgents"].as_u64(),
+            Some(27)
+        );
+        assert_eq!(
+            value["frame"]["agentScheduleSummary"]["playerCount"].as_u64(),
+            Some(22)
+        );
+        assert_eq!(
+            value["frame"]["agentScheduleSummary"]["officialCount"].as_u64(),
+            Some(3)
+        );
+        assert_eq!(
+            value["frame"]["agentScheduleSummary"]["ballCount"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            value["frame"]["centralBrain"]["controlledHumanPlayers"].as_u64(),
+            Some(4)
+        );
         assert!(value["controllerYield"]["lastWaitMs"].as_f64().unwrap() >= 0.0);
         assert!(value["controllerYield"]["totalWaitMs"].as_f64().unwrap() >= 0.0);
         assert!(
             value["controllerYield"]["maxWaitMs"].as_f64().unwrap()
                 >= value["controllerYield"]["lastWaitMs"].as_f64().unwrap()
         );
+        let frame_players = value["frame"]["players"]
+            .as_array()
+            .expect("live frame players");
 
         for slot in 0..4 {
             let thread_stats = value["controllerThreads"]
@@ -86869,6 +86896,29 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .iter()
                 .any(|assignment| assignment["controllerSlot"] == slot
                     && assignment["playerId"] == slot));
+            let player = frame_players
+                .iter()
+                .find(|player| player["id"] == slot)
+                .expect("human-controlled frame player");
+            assert_eq!(player["controllerSlot"].as_u64(), Some(slot as u64));
+            assert!(player["scheduledIndex"].as_u64().is_some());
+            assert!(!player["positionHistory"]
+                .as_array()
+                .expect("controlled player history")
+                .is_empty());
+            assert_eq!(player["lastDecision"]["action"], "human-move");
+            assert_eq!(
+                player["lastDecision"]["observation"]["humanInputPresent"],
+                true
+            );
+            assert_eq!(
+                player["lastDecision"]["observation"]["controllerSlot"].as_u64(),
+                Some(slot as u64)
+            );
+            assert_eq!(
+                player["lastDecision"]["observation"]["humanInputSeq"].as_u64(),
+                Some(1)
+            );
         }
 
         let session = session.lock().unwrap();

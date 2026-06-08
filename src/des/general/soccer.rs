@@ -32093,6 +32093,14 @@ pub struct SoccerDecisionModelContract {
     pub blocked_shot_lane_makes_shoot_illegal: bool,
     pub clean_shot_must_shoot_yards: f64,
     pub clean_shot_uses_through_line_gate: bool,
+    pub goal_proximity_shot_pressure_enabled: bool,
+    pub shot_probability_ramps_toward_goal: bool,
+    pub killer_pass_goal_pressure_enabled: bool,
+    pub killer_pass_probability_ramps_toward_goal: bool,
+    pub killer_pass_max_yards_to_goal: f64,
+    pub single_threaded_killer_pass_enabled: bool,
+    pub threaded_goal_pass_can_override_forced_shot: bool,
+    pub near_goal_recycling_dampening_enabled: bool,
     pub forward_progress_bias_enabled: bool,
     pub receive_facing_enabled: bool,
     pub action_facing_enabled: bool,
@@ -32163,6 +32171,12 @@ pub struct SoccerPhysicsRuntimeContract {
     pub player_history_window_seconds: f64,
     pub ball_history_window_seconds: f64,
     pub history_tracks_velocity_acceleration_jerk: bool,
+    pub shared_position_board_uses_rw_lock: bool,
+    pub shared_position_latest_tracks_players_officials_ball: bool,
+    pub shared_position_history_tracks_players_officials_ball: bool,
+    pub shared_position_history_limit: usize,
+    pub shared_position_lightweight_decision_snapshots_enabled: bool,
+    pub shared_position_poison_recovery_enabled: bool,
     pub ball_altitude_enabled: bool,
     pub ball_curl_enabled: bool,
     pub ball_drag_per_tick: f64,
@@ -32396,6 +32410,12 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         player_history_window_seconds: PLAYER_POSITION_HISTORY_LIMIT as f64 * dt_seconds,
         ball_history_window_seconds: BALL_POSITION_HISTORY_LIMIT as f64 * dt_seconds,
         history_tracks_velocity_acceleration_jerk: true,
+        shared_position_board_uses_rw_lock: true,
+        shared_position_latest_tracks_players_officials_ball: true,
+        shared_position_history_tracks_players_officials_ball: true,
+        shared_position_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        shared_position_lightweight_decision_snapshots_enabled: true,
+        shared_position_poison_recovery_enabled: true,
         ball_altitude_enabled: true,
         ball_curl_enabled: true,
         ball_drag_per_tick: config.ball_drag_per_tick,
@@ -32457,6 +32477,14 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         blocked_shot_lane_makes_shoot_illegal: true,
         clean_shot_must_shoot_yards: CLEAN_SHOT_MUST_SHOOT_YARDS,
         clean_shot_uses_through_line_gate: true,
+        goal_proximity_shot_pressure_enabled: true,
+        shot_probability_ramps_toward_goal: true,
+        killer_pass_goal_pressure_enabled: true,
+        killer_pass_probability_ramps_toward_goal: true,
+        killer_pass_max_yards_to_goal: KILLER_PASS_MAX_YARDS_TO_GOAL,
+        single_threaded_killer_pass_enabled: true,
+        threaded_goal_pass_can_override_forced_shot: true,
+        near_goal_recycling_dampening_enabled: true,
         forward_progress_bias_enabled: true,
         receive_facing_enabled: true,
         action_facing_enabled: true,
@@ -94575,6 +94603,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             CLEAN_SHOT_MUST_SHOOT_YARDS
         );
         assert_eq!(model["cleanShotUsesThroughLineGate"], true);
+        assert_eq!(model["goalProximityShotPressureEnabled"], true);
+        assert_eq!(model["shotProbabilityRampsTowardGoal"], true);
+        assert_eq!(model["killerPassGoalPressureEnabled"], true);
+        assert_eq!(model["killerPassProbabilityRampsTowardGoal"], true);
+        assert_eq!(
+            model["killerPassMaxYardsToGoal"],
+            KILLER_PASS_MAX_YARDS_TO_GOAL
+        );
+        assert_eq!(model["singleThreadedKillerPassEnabled"], true);
+        assert_eq!(model["threadedGoalPassCanOverrideForcedShot"], true);
+        assert_eq!(model["nearGoalRecyclingDampeningEnabled"], true);
         assert_eq!(model["forwardProgressBiasEnabled"], true);
         assert_eq!(model["receiveFacingEnabled"], true);
         assert_eq!(model["actionFacingEnabled"], true);
@@ -94694,6 +94733,24 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             BALL_POSITION_HISTORY_LIMIT as f64 * config.dt_seconds
         );
         assert_eq!(contract["historyTracksVelocityAccelerationJerk"], true);
+        assert_eq!(contract["sharedPositionBoardUsesRwLock"], true);
+        assert_eq!(
+            contract["sharedPositionLatestTracksPlayersOfficialsBall"],
+            true
+        );
+        assert_eq!(
+            contract["sharedPositionHistoryTracksPlayersOfficialsBall"],
+            true
+        );
+        assert_eq!(
+            contract["sharedPositionHistoryLimit"],
+            PLAYER_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            contract["sharedPositionLightweightDecisionSnapshotsEnabled"],
+            true
+        );
+        assert_eq!(contract["sharedPositionPoisonRecoveryEnabled"], true);
         assert_eq!(contract["ballAltitudeEnabled"], true);
         assert_eq!(contract["ballCurlEnabled"], true);
         assert_eq!(contract["ballDragPerTick"], config.ball_drag_per_tick);

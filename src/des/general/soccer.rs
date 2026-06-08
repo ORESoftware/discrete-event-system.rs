@@ -59169,6 +59169,102 @@ mod tests {
     }
 
     #[test]
+    fn runtime_decisions_choose_more_shot_or_killer_pass_as_goal_gets_closer() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_911,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blocker = 13;
+        let line_defender = 14;
+        park_players_except(
+            &mut sim,
+            &[attacker, runner, keeper, blocker, line_defender],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].skills.shooting = 8.0;
+        sim.players[attacker].skills.passing_completion_rate = 9.1;
+        sim.players[attacker].skills.passing = 8.9;
+        sim.players[attacker].skills.vision = 9.4;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.64;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.86;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.players[blocker].skills.defending = 8.8;
+        sim.players[line_defender].skills.defending = 8.8;
+
+        let sample_decisive_rate = |sim: &mut SoccerMatch, y: f64| {
+            sim.players[attacker].position = Vec2::new(39.0, y);
+            sim.players[attacker].velocity = Vec2::new(0.2, 4.0);
+            sim.players[runner].position = Vec2::new(47.0, (y + 13.5).min(108.0));
+            sim.players[runner].velocity = Vec2::new(0.4, 5.4);
+            sim.players[blocker].position = Vec2::new(67.0, (y + 8.0).min(108.0));
+            sim.players[line_defender].position = Vec2::new(20.0, (y + 20.0).min(116.0));
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+
+            let snapshot = WorldSnapshot::from_match(sim);
+            let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+            assert_eq!(
+                snapshot.killer_pass_target_for(attacker, &pass_targets),
+                Some(runner),
+                "runner should be the single threaded receiver toward goal at y={y}: {pass_targets:?}"
+            );
+
+            let trials = 160;
+            let mut decisive = 0;
+            let mut killer = 0;
+            let mut shoot = 0;
+            for seed in 0..trials {
+                let mut player = sim.players[attacker].clone();
+                let mut rng = mulberry32(22_911 + seed + (y * 10.0) as u32);
+                let _intent = player.run_time_step(&snapshot, None, None, &mut rng);
+                let action = player
+                    .last_decision
+                    .as_ref()
+                    .map(|decision| decision.action.as_str())
+                    .unwrap_or("");
+                if matches!(action, "shoot" | "killer-pass") {
+                    decisive += 1;
+                }
+                if action == "killer-pass" {
+                    killer += 1;
+                } else if action == "shoot" {
+                    shoot += 1;
+                }
+            }
+            (decisive, shoot, killer, trials)
+        };
+
+        let (far_decisive, far_shoot, far_killer, trials) = sample_decisive_rate(&mut sim, 70.0);
+        let (mid_decisive, mid_shoot, mid_killer, _) = sample_decisive_rate(&mut sim, 86.0);
+        let (close_decisive, close_shoot, close_killer, _) = sample_decisive_rate(&mut sim, 98.0);
+
+        assert!(
+            far_decisive < mid_decisive && mid_decisive < close_decisive,
+            "actual runtime choices should become more decisive as goal gets closer: far={far_decisive} (shoot={far_shoot}, killer={far_killer}) mid={mid_decisive} (shoot={mid_shoot}, killer={mid_killer}) close={close_decisive} (shoot={close_shoot}, killer={close_killer})/{trials}"
+        );
+        assert!(
+            close_decisive >= 120 && close_shoot + close_killer == close_decisive,
+            "close final-third runtime should heavily choose shot/killer-pass family: close={close_decisive} shoot={close_shoot} killer={close_killer}/{trials}"
+        );
+        assert!(
+            close_killer > 0,
+            "close final-third runtime should preserve the single threaded pass option, not only shoot: close_shoot={close_shoot} close_killer={close_killer}/{trials}"
+        );
+    }
+
+    #[test]
     fn final_third_decisive_pressure_is_visible_to_table_and_neural_learners() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

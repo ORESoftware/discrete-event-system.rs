@@ -20688,6 +20688,9 @@ impl WorldSnapshot {
             .iter()
             .filter(|p| p.team == me.team && p.id != me.id)
             .filter_map(|p| {
+                if p.role == PlayerRole::Goalkeeper {
+                    return None;
+                }
                 let position = self.player_snapshot_position(p);
                 let initial_is_cross = pass_would_be_cross(
                     me_position,
@@ -20808,6 +20811,8 @@ impl WorldSnapshot {
                     position,
                     PassFlight::Aerial,
                 );
+                let reception_teammate_penalty =
+                    self.teammate_occupied_space_penalty_at(me.team, pass_point, Some(p.id), 0.0);
                 let keeper_distribution_bonus = if me.role == PlayerRole::Goalkeeper {
                     goalkeeper_distribution_score(
                         me.team,
@@ -20845,7 +20850,8 @@ impl WorldSnapshot {
                     + pass_quality.stride_fit * 0.46
                     + keeper_distribution_bonus
                     - blind_backward_penalty
-                    - lateral_penalty;
+                    - lateral_penalty
+                    - reception_teammate_penalty;
                 (p.id, score)
             })
             .collect::<Vec<_>>();
@@ -82444,6 +82450,72 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             snapshot.ranked_visible_pass_targets(passer, 1),
             vec![clean_outlet],
             "pass ranking should avoid teammate-occupied future reception space"
+        );
+    }
+
+    #[test]
+    fn aerial_pass_ranking_avoids_teammate_occupied_landing_space() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let runner = 9;
+        let clean_outlet = 7;
+        let occupying_teammate = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 48.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        park_players_except(
+            &mut sim,
+            &[passer, runner, clean_outlet, occupying_teammate],
+        );
+        sim.players[passer].position = sim.ball.position;
+        sim.players[passer].skills.passing = 8.8;
+        sim.players[passer].skills.passing_completion_rate = 8.8;
+        sim.players[passer].skills.strength = 8.4;
+        sim.players[passer].skills.flair_passing = 7.8;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(45.0, 66.0);
+        sim.players[runner].velocity = Vec2::new(0.8, 3.4);
+        sim.players[runner].skills.height = 8.8;
+        sim.players[runner].skills.strength = 8.4;
+        sim.players[runner].skills.first_touch = 8.4;
+        sim.players[clean_outlet].role = PlayerRole::Midfielder;
+        sim.players[clean_outlet].position = Vec2::new(31.0, 72.0);
+        sim.players[clean_outlet].velocity = Vec2::zero();
+        sim.players[clean_outlet].skills.height = 8.1;
+        sim.players[clean_outlet].skills.strength = 8.0;
+        sim.players[clean_outlet].skills.first_touch = 8.5;
+        sim.players[occupying_teammate].role = PlayerRole::Goalkeeper;
+        sim.players[occupying_teammate].skills.height = 2.0;
+        sim.players[occupying_teammate].skills.strength = 2.0;
+        sim.players[occupying_teammate].skills.first_touch = 2.0;
+
+        let clean_snapshot = WorldSnapshot::from_match(&sim);
+        let passer_snapshot = clean_snapshot
+            .players
+            .iter()
+            .find(|player| player.id == passer)
+            .expect("passer");
+        let speed =
+            pass_speed_yps_from_power(0.68, PassFlight::Aerial, false, &passer_snapshot.skills);
+        let anticipated = clean_snapshot
+            .anticipated_pass_reception_point(passer, runner, PassFlight::Aerial, speed)
+            .expect("runner aerial reception");
+        let landing = clean_snapshot
+            .projected_in_behind_pass_point(passer, runner)
+            .unwrap_or(anticipated);
+        sim.players[occupying_teammate].position = landing;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let occupied_pressure =
+            snapshot.teammate_occupied_space_pressure_at(Team::Home, landing, Some(runner));
+        assert!(
+            occupied_pressure > 0.90,
+            "test setup should put a teammate inside the aerial landing pocket: pressure={occupied_pressure}, landing={landing:?}"
+        );
+        assert_eq!(
+            snapshot.ranked_visible_aerial_pass_targets(passer, 1),
+            vec![clean_outlet],
+            "aerial pass ranking should avoid teammate-occupied landing space"
         );
     }
 

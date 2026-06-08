@@ -52945,6 +52945,9 @@ fn goal_entry_decisive_pressure_score(observation: &SoccerPomdpObservation) -> f
 }
 
 fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 {
+    if !observation.threaded_goal_pass_available || observation.visible_forward_pass_options == 0 {
+        return 0.0;
+    }
     let range_fit = killer_pass_goal_range_fit(observation);
     if range_fit <= 0.0 {
         return 0.0;
@@ -52963,11 +52966,11 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.28)
         .clamp(0.0, 1.0);
     (range_fit.powf(0.55) * 0.34
-        + final_third_fit * 0.22
-        + receiver_lane_fit * 0.22
+        + final_third_fit * 0.24
+        + receiver_lane_fit * 0.27
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.10
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.04
-        + close_goal_fit * 0.10
+        + close_goal_fit * 0.12
         + goal_entry_fit * 0.09)
         .clamp(0.0, 1.0)
 }
@@ -53097,13 +53100,19 @@ fn near_goal_decisive_action_pressure_score(
     } else {
         0.0
     };
-    let threaded_lane_fit = (observation
-        .best_forward_pass_receiver_openness
-        .clamp(0.0, 1.0)
-        * 0.36
-        + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
-        + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
-        .clamp(0.0, 1.0);
+    let threaded_lane_fit = if observation.threaded_goal_pass_available
+        && observation.visible_forward_pass_options > 0
+    {
+        (observation
+            .best_forward_pass_receiver_openness
+            .clamp(0.0, 1.0)
+            * 0.36
+            + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let single_thread_fit = single_pass_goal_thread_pressure_score(observation);
     let role_fit = match role {
         PlayerRole::Forward => 1.12,
@@ -57392,6 +57401,8 @@ mod tests {
         observation.shot_lane_open = false;
         observation.yards_to_goal = 47.0;
         observation.goal_attack_window_score = 0.03;
+        observation.threaded_goal_pass_available = true;
+        observation.visible_forward_pass_options = observation.visible_forward_pass_options.max(1);
         observation.best_forward_pass_receiver_openness = 0.70;
         observation.best_pass_stride_fit = 0.74;
         observation.floor_pass_lane_score = 0.68;

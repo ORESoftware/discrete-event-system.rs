@@ -32897,6 +32897,12 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
     }
 }
 
+impl Default for SoccerPhysicsRuntimeContract {
+    fn default() -> Self {
+        soccer_physics_runtime_contract(&MatchConfig::default())
+    }
+}
+
 fn soccer_controller_runtime_contract(config: &MatchConfig) -> SoccerControllerRuntimeContract {
     SoccerControllerRuntimeContract {
         max_human_controllers: SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
@@ -33309,6 +33315,8 @@ pub struct SoccerStepResponse {
     #[serde(default)]
     pub cadence: SoccerSimulationCadence,
     #[serde(default)]
+    pub physics_contract: SoccerPhysicsRuntimeContract,
+    #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
     #[serde(default)]
@@ -33353,6 +33361,8 @@ pub struct SoccerLiveStateResponse {
     pub match_clock: SoccerMatchClock,
     #[serde(default)]
     pub cadence: SoccerSimulationCadence,
+    #[serde(default)]
+    pub physics_contract: SoccerPhysicsRuntimeContract,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
@@ -43325,6 +43335,7 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
             cadence,
+            physics_contract: soccer_physics_runtime_contract(&self.sim.config),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -43388,6 +43399,7 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
             cadence,
+            physics_contract: soccer_physics_runtime_contract(&self.sim.config),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -43980,6 +43992,7 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
             cadence: soccer_full_match_cadence(&self.sim.config),
+            physics_contract: soccer_physics_runtime_contract(&self.sim.config),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -64385,6 +64398,16 @@ mod tests {
         assert!(initial.cadence.ten_hz_timestep_contract);
         assert!(initial.cadence.ten_minute_duration_contract);
         assert!(initial.cadence.default_ten_minute_contract);
+        assert_eq!(
+            initial.physics_contract.goalkeeper_clear_sightline_save_cap,
+            GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP
+        );
+        assert!(
+            initial
+                .physics_contract
+                .goalkeeper_save_probability_uses_distance_and_sightline
+        );
+        assert!(initial.physics_contract.goalkeeper_parry_rebound_enabled);
         assert!(!initial.done);
 
         let step = session.step(SoccerStepRequest {
@@ -64420,6 +64443,14 @@ mod tests {
         assert!(step.cadence.ten_hz_timestep_contract);
         assert!(step.cadence.ten_minute_duration_contract);
         assert!(step.cadence.default_ten_minute_contract);
+        assert_eq!(
+            step.physics_contract.goalkeeper_parry_min_yards,
+            GOALKEEPER_PARRY_MIN_YARDS
+        );
+        assert_eq!(
+            step.physics_contract.goalkeeper_parry_max_yards,
+            GOALKEEPER_PARRY_MAX_YARDS
+        );
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
         assert_eq!(step.frame.central_brain.tracked_officials, 3);
@@ -90566,6 +90597,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&state.body).expect("mounted state json");
         assert_eq!(state_value["config"]["seed"], 67);
         assert_eq!(state_value["summary"]["ticks"], 0);
+        assert_eq!(
+            state_value["physicsContract"]["goalkeeperClearSightlineSaveCap"],
+            GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP
+        );
+        assert_eq!(
+            state_value["physicsContract"]["goalkeeperParryReboundEnabled"],
+            true
+        );
 
         let body = r#"{"ticks":1,"recordEveryTicks":1}"#;
         let step = handle_live_soccer_request(
@@ -90581,6 +90620,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let step_value: serde_json::Value =
             serde_json::from_str(&step.body).expect("mounted step json");
         assert_eq!(step_value["summary"]["ticks"], 1);
+        assert_eq!(
+            step_value["physicsContract"]["goalkeeperParryMinYards"],
+            GOALKEEPER_PARRY_MIN_YARDS
+        );
+        assert_eq!(
+            step_value["physicsContract"]["closeHardShotsCanCreateRebounds"],
+            true
+        );
     }
 
     #[test]
@@ -98567,6 +98614,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ballHistorySamplesForFrame"));
         assert!(html.contains("ballHistoryKinematicsLabel"));
         assert!(html.contains("f.ballHistory"));
+        assert!(html.contains("id=\"gkPhysics\""));
+        assert!(html.contains("function goalkeeperPhysicsLabel()"));
+        assert!(html.contains("function goalkeeperPhysicsTitle()"));
+        assert!(html.contains("goalkeeperClearSightlineSaveCap"));
+        assert!(html.contains("goalkeeperParryReboundEnabled"));
+        assert!(html.contains("closeHardShotsCanCreateRebounds"));
+        assert!(html.contains("physicsContract: response.physicsContract || state.physicsContract"));
         assert!(html.contains("function sharedPositionLabel"));
         assert!(html.contains("latest.length}/${players.length}"));
         assert!(html.contains("id=\"sharedPositions\""));

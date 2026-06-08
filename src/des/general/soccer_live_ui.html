@@ -371,6 +371,7 @@
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
+      <div class="metric"><span>GK Physics</span><b id="gkPhysics">save/parry</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
       <div class="metric"><span>Dribble Beats</span><b id="dribbleBeats">0 - 0</b></div>
       <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
@@ -580,6 +581,7 @@ const surfaceReadout = document.getElementById("surfaceReadout");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
+const gkPhysics = document.getElementById("gkPhysics");
 const passes = document.getElementById("passes");
 const dribbleBeats = document.getElementById("dribbleBeats");
 const clearances = document.getElementById("clearances");
@@ -1752,6 +1754,33 @@ function ballHistoryKinematicsLabel(f, dtSeconds = state?.config?.dtSeconds) {
   const jerk = k.jerk || ball.jerk || {x: 0, y: 0};
   return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
 }
+function goalkeeperPhysicsContract() {
+  return state?.physicsContract || {};
+}
+function goalkeeperPhysicsLabel() {
+  const contract = goalkeeperPhysicsContract();
+  const saveCap = Number(contract.goalkeeperClearSightlineSaveCap ?? 0);
+  const parryMin = Number(contract.goalkeeperParryMinYards ?? 0);
+  const parryMax = Number(contract.goalkeeperParryMaxYards ?? 0);
+  const rebound = contract.goalkeeperParryReboundEnabled ? "reb" : "catch";
+  if (saveCap > 0 && parryMin > 0 && parryMax > 0) {
+    return `cap ${(saveCap * 100).toFixed(0)}% ${rebound} ${parryMin.toFixed(0)}-${parryMax.toFixed(0)}y`;
+  }
+  return "save/parry";
+}
+function goalkeeperPhysicsTitle() {
+  const contract = goalkeeperPhysicsContract();
+  if (!state?.physicsContract) return "Goalkeeper physics contract not loaded";
+  const parts = [
+    `saveUsesDistanceAndSightline=${contract.goalkeeperSaveProbabilityUsesDistanceAndSightline}`,
+    `clearSightlineSaveCap=${contract.goalkeeperClearSightlineSaveCap}`,
+    `catchUsesDistanceSpeedSightline=${contract.goalkeeperCatchProbabilityUsesDistanceSpeedSightline}`,
+    `parryReboundEnabled=${contract.goalkeeperParryReboundEnabled}`,
+    `parryRangeYards=${contract.goalkeeperParryMinYards}-${contract.goalkeeperParryMaxYards}`,
+    `closeHardShotsCanCreateRebounds=${contract.closeHardShotsCanCreateRebounds}`,
+  ];
+  return parts.join("\n");
+}
 function scoreValue(source, ...keys) {
   for (const key of keys) {
     const value = Number(source?.[key]);
@@ -2818,6 +2847,8 @@ function render() {
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
+  gkPhysics.textContent = goalkeeperPhysicsLabel();
+  gkPhysics.title = goalkeeperPhysicsTitle();
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
   dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
   clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
@@ -3995,6 +4026,7 @@ async function stepOnce(options = {}) {
       episodeIndex: response.episodeIndex,
       completedEpisodes: response.completedEpisodes,
       summary: response.summary,
+      physicsContract: response.physicsContract || state.physicsContract,
       stepTiming: response.stepTiming,
       controllerAssignments: response.controllerAssignments,
       controllerThreads: response.controllerThreads || [],

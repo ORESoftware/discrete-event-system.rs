@@ -866,7 +866,7 @@ function keyName(code) {
 }
 function controllerKeymapLabel(slot) {
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
-  return `Move ${keyName(map.up)}/${keyName(map.left)}/${keyName(map.down)}/${keyName(map.right)} · Sprint ${keyName(map.sprint)} · Action ${keyName(map.action)}`;
+  return `Move ${keyName(map.up)}/${keyName(map.left)}/${keyName(map.down)}/${keyName(map.right)} · Sprint ${keyName(map.sprint)} · Action ${keyName(map.action)} · Thread T · Clear C · Route R`;
 }
 const SURFACE_PRESETS = {
   short: {ballDragPerTick: 0.010, ballAirResistance: 0.0045, ballGrassResistanceYps2: 0.32, ballStopSpeedYps: 0.28},

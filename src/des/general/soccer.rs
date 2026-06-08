@@ -100295,6 +100295,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("const slot = controllerSlotForKey(e.code)"));
         assert!(html.contains("if (isFormEditingTarget(e.target)) return;"));
         assert!(html.contains("if (/^Digit[1-4]$/.test(e.code))"));
+        assert!(html.contains("Thread T"));
+        assert!(html.contains("Clear C"));
+        assert!(html.contains("Route R"));
         assert!(html.contains("selectedPlayerCanShoot"));
         assert!(html.contains("pushActionInput"));
         assert!(html.contains("\"Enter\""));
@@ -101502,6 +101505,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("const assignedByPlayer = new Map"));
         assert!(html.contains("playerOpt.disabled = assignedElsewhere"));
         assert!(html.contains("keymap.textContent = controllerKeymapLabel(slot)"));
+        assert!(html.contains("Thread T"));
+        assert!(html.contains("Clear C"));
+        assert!(html.contains("Route R"));
         assert!(html.contains("controllerSlot: slot"));
         assert!(html.contains("id=\"inspectMode\""));
         assert!(html.contains("id=\"killerPassAction\""));

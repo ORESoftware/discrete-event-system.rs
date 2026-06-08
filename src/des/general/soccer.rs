@@ -28655,6 +28655,18 @@ pub struct SimulationTrace {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SimulationRunSummary {
+    pub config: MatchConfig,
+    pub summary: MatchSummary,
+    pub events: Vec<MatchEvent>,
+    #[serde(default)]
+    pub step_timing: SoccerStepTimingStats,
+    #[serde(default)]
+    pub controller_yield: ControllerYieldStats,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerLearningDataset {
     pub config: MatchConfig,
     pub summary: MatchSummary,
@@ -45720,6 +45732,27 @@ pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> Simulatio
     }
 }
 
+pub fn run_simulation_summary(config: MatchConfig) -> SimulationRunSummary {
+    let config = config.sanitized_for_runtime();
+    let mut sim = SoccerMatch::default_11v11(config.clone());
+    sim.clear_controller_assignments();
+    let total_ticks = config.total_ticks();
+    for _ in 0..total_ticks {
+        sim.run_time_step();
+    }
+    let summary = sim.summary();
+    let step_timing = sim.step_timing_stats();
+    let controller_yield = sim.controller_yield_stats();
+    let events = sim.events;
+    SimulationRunSummary {
+        config,
+        summary,
+        events,
+        step_timing,
+        controller_yield,
+    }
+}
+
 pub fn run_learning_episode(config: MatchConfig) -> SoccerLearningDataset {
     let config = config.sanitized_for_runtime();
     let mut sim = SoccerMatch::default_11v11(config.clone());
@@ -56401,37 +56434,55 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "full 6000-tick debug smoke is slow; run explicitly for duration/performance checks"]
-    fn simulation_runner_reaches_full_ten_minute_default_duration_with_sparse_frames() {
-        let trace = run_simulation(
-            MatchConfig {
-                learning_enabled: false,
-                learning_logging_enabled: false,
-                neural_learning: SoccerNeuralLearningConfig {
-                    enabled: false,
-                    ..SoccerNeuralLearningConfig::default()
-                },
-                max_human_players: 0,
-                ..MatchConfig::default()
+    fn simulation_summary_runner_advances_without_trace_frames() {
+        let summary = run_simulation_summary(MatchConfig {
+            duration_seconds: 2.0,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            full_game_learning_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
             },
-            1_000,
-        );
+            max_human_players: 0,
+            seed: 22_905,
+            ..MatchConfig::default()
+        });
 
-        assert_eq!(trace.config.dt_seconds, 0.1);
-        assert_eq!(trace.config.effective_duration_seconds(), 600.0);
-        assert_eq!(trace.config.total_ticks(), 6_000);
-        assert_eq!(trace.summary.ticks, 6_000);
-        assert!((trace.summary.simulated_seconds - 600.0).abs() < 1e-6);
-        assert_eq!(
-            trace
-                .frames
-                .iter()
-                .map(|frame| frame.tick)
-                .collect::<Vec<_>>(),
-            vec![0, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000]
+        assert_eq!(summary.config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(summary.config.total_ticks(), 20);
+        assert_eq!(summary.summary.ticks, 20);
+        assert!((summary.summary.simulated_seconds - 2.0).abs() < 1e-9);
+        assert_eq!(summary.step_timing.ticks, 20);
+        assert_eq!(summary.controller_yield.skipped_no_assignment, 20);
+        assert!(
+            summary.step_timing.total_ms.is_finite() && summary.step_timing.total_ms > 0.0,
+            "summary runner should retain timing telemetry without retaining frame history"
         );
-        assert!(soccer_simulation_physics_smoke_report(&trace).full_time_reached);
-        assert!(soccer_simulation_accounting_smoke_report(&trace).full_time_reached);
+    }
+
+    #[test]
+    #[ignore = "full 6000-tick debug smoke is slow; run explicitly for duration/performance checks"]
+    fn simulation_summary_runner_reaches_full_ten_minute_default_duration_without_frames() {
+        let summary = run_simulation_summary(MatchConfig {
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            full_game_learning_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            max_human_players: 0,
+            ..MatchConfig::default()
+        });
+
+        assert_eq!(summary.config.dt_seconds, 0.1);
+        assert_eq!(summary.config.effective_duration_seconds(), 600.0);
+        assert_eq!(summary.config.total_ticks(), 6_000);
+        assert_eq!(summary.summary.ticks, 6_000);
+        assert!((summary.summary.simulated_seconds - 600.0).abs() < 1e-6);
+        assert_eq!(summary.step_timing.ticks, 6_000);
+        assert_eq!(summary.controller_yield.skipped_no_assignment, 6_000);
     }
 
     #[test]

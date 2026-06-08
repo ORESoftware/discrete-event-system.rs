@@ -32624,6 +32624,9 @@ pub struct SoccerLearningRuntimeContract {
     pub tracking_source_frame_ids_enabled: bool,
     pub tracking_confidence_weighting_enabled: bool,
     pub tracking_player_kinematics_inference_enabled: bool,
+    pub tracking_official_samples_enabled: bool,
+    pub tracking_expected_official_count: usize,
+    pub tracking_official_kinematics_enabled: bool,
     pub tracking_ball_kinematics_inference_enabled: bool,
     pub tracking_facing_bucket_import_enabled: bool,
     pub tracking_action_target_grid_enabled: bool,
@@ -32742,6 +32745,9 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
         tracking_source_frame_ids_enabled: true,
         tracking_confidence_weighting_enabled: true,
         tracking_player_kinematics_inference_enabled: true,
+        tracking_official_samples_enabled: true,
+        tracking_expected_official_count: SOCCER_MATCH_OFFICIAL_COUNT,
+        tracking_official_kinematics_enabled: true,
         tracking_ball_kinematics_inference_enabled: true,
         tracking_facing_bucket_import_enabled: true,
         tracking_action_target_grid_enabled: true,
@@ -97902,6 +97908,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["trackingSourceFrameIdsEnabled"], true);
         assert_eq!(contract["trackingConfidenceWeightingEnabled"], true);
         assert_eq!(contract["trackingPlayerKinematicsInferenceEnabled"], true);
+        assert_eq!(contract["trackingOfficialSamplesEnabled"], true);
+        assert_eq!(
+            contract["trackingExpectedOfficialCount"],
+            SOCCER_MATCH_OFFICIAL_COUNT
+        );
+        assert_eq!(contract["trackingOfficialKinematicsEnabled"], true);
         assert_eq!(contract["trackingBallKinematicsInferenceEnabled"], true);
         assert_eq!(contract["trackingFacingBucketImportEnabled"], true);
         assert_eq!(contract["trackingActionTargetGridEnabled"], true);

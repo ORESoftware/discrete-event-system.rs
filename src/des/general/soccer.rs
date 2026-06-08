@@ -68436,6 +68436,30 @@ mod tests {
                 ball_decision.operation_order
             );
         }
+        for player in &frame.players {
+            let scheduled_index = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id)
+                .expect("every player should be scheduled as an agent");
+            let decision = player
+                .last_decision
+                .as_ref()
+                .expect("every scheduled player should expose a run_time_step decision trace");
+            assert_eq!(decision.scheduled_index, Some(scheduled_index));
+            assert_eq!(decision.observation.player_id, player.id);
+            assert_eq!(decision.observation.scheduled_index, Some(scheduled_index));
+            assert!(
+                !decision.operation_order.is_empty(),
+                "player {} should expose randomized/internal run_time_step operations",
+                player.id
+            );
+            assert!(
+                !decision.action_options.is_empty(),
+                "player {} should expose MDP/POMDP action options",
+                player.id
+            );
+        }
         assert_eq!(frame.central_brain.tracked_players.len(), 22);
         assert_eq!(frame.central_brain.tracked_officials, 3);
         assert_eq!(frame.shared_positions.latest.len(), 22);

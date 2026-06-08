@@ -32059,8 +32059,15 @@ pub struct SoccerPlaybackAgentContract {
     pub expected_central_brains: usize,
     pub central_brain_agent_id: usize,
     pub ball_agent_id: usize,
+    pub central_brain_run_time_step_enabled: bool,
+    pub player_run_time_step_enabled: bool,
+    pub official_run_time_step_enabled: bool,
+    pub ball_run_time_step_enabled: bool,
     pub central_brain_runs_before_field_shuffle: bool,
     pub field_entities_use_fisher_yates: bool,
+    pub player_operation_order_randomized: bool,
+    pub official_operation_order_randomized: bool,
+    pub ball_operation_order_randomized: bool,
     pub per_frame_schedule_summary_required: bool,
     pub slim_frames_omit_full_agent_schedule: bool,
 }
@@ -32253,8 +32260,15 @@ fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
         expected_central_brains: 1,
         central_brain_agent_id: CENTRAL_BRAIN_AGENT_ID,
         ball_agent_id: BALL_AGENT_ID,
+        central_brain_run_time_step_enabled: true,
+        player_run_time_step_enabled: true,
+        official_run_time_step_enabled: true,
+        ball_run_time_step_enabled: true,
         central_brain_runs_before_field_shuffle: true,
         field_entities_use_fisher_yates: true,
+        player_operation_order_randomized: true,
+        official_operation_order_randomized: true,
+        ball_operation_order_randomized: true,
         per_frame_schedule_summary_required: true,
         slim_frames_omit_full_agent_schedule: true,
     }
@@ -94938,10 +94952,26 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(meta["agentContract"]["ballAgentId"], BALL_AGENT_ID);
         assert_eq!(
+            meta["agentContract"]["centralBrainRunTimeStepEnabled"],
+            true
+        );
+        assert_eq!(meta["agentContract"]["playerRunTimeStepEnabled"], true);
+        assert_eq!(meta["agentContract"]["officialRunTimeStepEnabled"], true);
+        assert_eq!(meta["agentContract"]["ballRunTimeStepEnabled"], true);
+        assert_eq!(
             meta["agentContract"]["centralBrainRunsBeforeFieldShuffle"],
             true
         );
         assert_eq!(meta["agentContract"]["fieldEntitiesUseFisherYates"], true);
+        assert_eq!(
+            meta["agentContract"]["playerOperationOrderRandomized"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["officialOperationOrderRandomized"],
+            true
+        );
+        assert_eq!(meta["agentContract"]["ballOperationOrderRandomized"], true);
         assert_eq!(
             meta["agentContract"]["perFrameScheduleSummaryRequired"],
             true

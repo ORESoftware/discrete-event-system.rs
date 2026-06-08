@@ -105,6 +105,7 @@ const SHOT_BAILOUT_ON_FRAME_PROBABILITY: f64 = 0.20;
 const STRIKER_SHOT_WINDOW_YARDS: f64 = 30.0;
 const TEAMMATE_MUST_SHOOT_YARDS: f64 = 25.0;
 const STRIKER_MUST_SHOOT_YARDS: f64 = TEAMMATE_MUST_SHOOT_YARDS;
+const ATTACKING_GOAL_PRESSURE_SHOT_YARDS: f64 = TEAMMATE_MUST_SHOOT_YARDS + 2.0;
 const CLEAN_SHOT_MUST_SHOOT_YARDS: f64 = 20.0;
 const CLEAN_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.34;
 const CLEAN_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.32;
@@ -113,6 +114,9 @@ const SPECULATIVE_LONG_SHOT_MAX_YARDS: f64 = 45.0;
 const SPECULATIVE_LONG_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.30;
 const SPECULATIVE_LONG_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.14;
 const SPECULATIVE_LONG_SHOT_SKILL_GATE: f64 = 0.78;
+const KILLER_PASS_MAX_YARDS_TO_GOAL: f64 = 52.0;
+const KILLER_PASS_MIN_FORWARD_YARDS: f64 = 4.0;
+const KILLER_PASS_MIN_RECEIVER_GOAL_GAIN_YARDS: f64 = 5.0;
 const ATTACKING_DRIBBLE_GOAL_DRIVE_YARDS: f64 = 34.0;
 const ATTACKING_DRIBBLE_SHOOTING_POCKET_YARDS: f64 = 12.0;
 const STRIKER_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.72;
@@ -255,7 +259,8 @@ const PRESSURED_SUPPORT_SPRINT_URGENCY: f64 = 0.34;
 const DEFENSIVE_GOAL_LINE_BUFFER_YARDS: f64 = 6.0;
 const DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS: f64 = 4.0;
 const DEFENSIVE_MAX_BEHIND_BALL_YARDS: f64 = 30.0;
-const DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 1.35;
+const DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.65;
+const DEFENSIVE_IMMEDIATE_STEAL_CLEAN_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.05;
 const DEFENSIVE_GOAL_SIDE_CUSHION_YARDS: f64 = 2.75;
 const MIDFIELDER_DEEP_RETREAT_LINE_YARDS: f64 = 10.0;
 const MIDFIELDER_STANDARD_RETREAT_LINE_YARDS: f64 = 15.0;
@@ -5735,6 +5740,8 @@ fn normalize_soccer_action_label(action: &str) -> &str {
         "move" => "space",
         "pass1" | "pass2" | "pass3" => "pass",
         "aerial-pass1" | "aerial-pass2" | "aerial-pass3" => "aerial-pass",
+        "killer" | "killer_pass" | "killerpass" | "through-pass" | "through_pass"
+        | "threaded-pass" | "threaded_pass" => "killer-pass",
         "low-cross"
         | "low_cross"
         | "lowcross"
@@ -5818,7 +5825,7 @@ const FLANK_OVERLAP_MIN_OPTION_SHARE: f64 = 1.0 / 3.0;
 
 fn pass_like_action_flight(action: &str) -> Option<PassFlight> {
     match normalize_soccer_action_label(action) {
-        "pass" | "first-time-pass" | "flank-low-cross" => Some(PassFlight::Floor),
+        "pass" | "first-time-pass" | "flank-low-cross" | "killer-pass" => Some(PassFlight::Floor),
         "aerial-pass" | "flank-high-cross" => Some(PassFlight::Aerial),
         _ => None,
     }
@@ -6387,6 +6394,11 @@ impl PlayerAgent {
                 0.12 + offensive_urgency * 0.30 + striker_shot_bonus * 0.18 + goal_attack * 0.22,
             )
             .max(close_shot_attempt)
+            .max(attacking_goal_pressure_shot_attempt_probability(
+                observation,
+                self.role,
+                shooting,
+            ))
             .max(speculative_long_shot_attempt_probability(
                 observation,
                 self.role,
@@ -6712,6 +6724,41 @@ impl PlayerAgent {
             high_cross_score,
             aerial_pass_target_count > 0 && flank_cross_legal_context,
         ));
+        let killer_pass_range_fit = if observation.yards_to_goal <= KILLER_PASS_MAX_YARDS_TO_GOAL {
+            ((KILLER_PASS_MAX_YARDS_TO_GOAL - observation.yards_to_goal)
+                / KILLER_PASS_MAX_YARDS_TO_GOAL)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let killer_pass_legal = pass_target_count > 0
+            && observation.visible_forward_pass_options > 0
+            && !goal_attack_shot_required
+            && observation.yards_to_goal <= KILLER_PASS_MAX_YARDS_TO_GOAL
+            && observation.floor_pass_lane_score >= 0.20;
+        let killer_pass_score = (self.preferences.pass_bias
+            * directive.pass_priority
+            * (0.48 + passing * 0.44 + ability01(self.skills.vision) * 0.20)
+            * (0.72
+                + observation.expected_pass_completion.clamp(0.0, 1.0) * 0.28
+                + observation
+                    .best_forward_pass_receiver_openness
+                    .clamp(0.0, 1.0)
+                    * 0.22
+                + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.24
+                + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.24)
+            * (1.0 + killer_pass_range_fit * 1.15 + goal_attack * 0.58)
+            * (1.0 + offensive_urgency * 0.42)
+            * near_goal_pass_multiplier.max(0.72)
+            * floor_pass_patience_multiplier
+            * hold_release_multiplier
+            * pressured_release_multiplier(observation))
+        .clamp(0.01, 1.18);
+        options.push(AgentActionOptionTrace::new(
+            "killer-pass",
+            killer_pass_score,
+            killer_pass_legal,
+        ));
         for rank in 0..pass_target_count.min(3) {
             let rank_weight = match rank {
                 0 => 1.00,
@@ -6838,6 +6885,17 @@ impl PlayerAgent {
             let danger_clearance_floor =
                 (0.30 + hold_pressure * 0.22 + release_pressure * 0.10).clamp(0.34, 0.72);
             ensure_min_legal_option_probability(&mut options, "clearance", danger_clearance_floor);
+        }
+        if killer_pass_legal && killer_pass_range_fit >= 0.28 {
+            let killer_floor = (0.10
+                + killer_pass_range_fit * 0.16
+                + observation
+                    .best_forward_pass_receiver_openness
+                    .clamp(0.0, 1.0)
+                    * 0.08
+                + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.06)
+                .clamp(0.14, 0.36);
+            ensure_min_legal_option_probability(&mut options, "killer-pass", killer_floor);
         }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
@@ -7132,22 +7190,56 @@ impl PlayerAgent {
         directive: &TeamTacticalDirective,
         dt_seconds: f64,
     ) -> Vec<AgentActionOptionTrace> {
-        let mut tackle_legal = snapshot.ball.holder.is_some_and(|holder| {
-            snapshot
-                .players
-                .iter()
-                .find(|p| p.id == holder)
-                .is_some_and(|p| {
-                    p.team == self.team.other() && self.position.distance(p.position) < 3.1
-                })
+        let holder_context = snapshot.ball.holder.and_then(|holder| {
+            let holder_player = snapshot.players.iter().find(|p| p.id == holder)?;
+            (holder_player.team == self.team.other()).then(|| {
+                let holder_position = snapshot.player_snapshot_position(holder_player);
+                let distance = self.position.distance(holder_position);
+                let my_depth = snapshot.depth_from_own_goal_y(self.team, self.position.y);
+                let holder_depth = snapshot.depth_from_own_goal_y(self.team, holder_position.y);
+                let goal_side_or_level = my_depth <= holder_depth + 0.85;
+                let defender_steal_skill = ability01(self.skills.defending) * 0.50
+                    + ability01(self.skills.aggression) * 0.16
+                    + ability01(self.skills.acceleration) * 0.16
+                    + ability01(self.skills.strength) * 0.18;
+                let holder_security = ability01(holder_player.skills.dribbling) * 0.44
+                    + ability01(holder_player.skills.first_touch) * 0.26
+                    + ability01(holder_player.skills.strength) * 0.18
+                    + ability01(holder_player.skills.acceleration) * 0.12;
+                (
+                    distance,
+                    goal_side_or_level,
+                    defender_steal_skill,
+                    holder_security,
+                )
+            })
         });
+        let mut tackle_legal = holder_context
+            .map(
+                |(distance, goal_side_or_level, defender_steal_skill, holder_security)| {
+                    goal_side_or_level
+                        && distance <= 1.85
+                        && (distance <= 1.35 || defender_steal_skill + 0.16 >= holder_security)
+                },
+            )
+            .unwrap_or(false);
         if self.role == PlayerRole::Goalkeeper {
             tackle_legal = tackle_legal && snapshot.goalkeeper_direct_intervention_is_safe(self.id);
         }
         let defending = ability01(self.skills.defending);
         let aggression = ability01(self.skills.aggression);
-        let tackle_score =
-            ((defending * 0.6 + aggression * 0.4) * directive.press_intensity).clamp(0.02, 0.92);
+        let tackle_contact_fit = holder_context
+            .map(|(distance, _, defender_steal_skill, holder_security)| {
+                let closeness = (1.0 - (distance - 1.0) / 1.75).clamp(0.0, 1.0);
+                let skill_edge = (defender_steal_skill - holder_security + 0.26).clamp(0.0, 0.72);
+                (closeness * 0.72 + skill_edge * 0.28).clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0);
+        let tackle_score = ((defending * 0.6 + aggression * 0.4)
+            * directive.press_intensity
+            * tackle_contact_fit
+            * 0.38)
+            .clamp(0.005, 0.22);
         let defensive_mindedness = self.preferences.defensive_mindedness.clamp(0.0, 1.0);
         let offensive_mindedness = self.preferences.offensive_mindedness.clamp(0.0, 1.0);
         let press = directive.press_intensity.clamp(0.0, 1.0);
@@ -7194,8 +7286,44 @@ impl PlayerAgent {
             .iter()
             .find(|player| player.id == holder && player.team == self.team.other())?;
         let holder_position = snapshot.player_snapshot_position(holder_player);
-        (self.position.distance(holder_position) <= DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS)
-            .then_some(holder)
+        let distance = self.position.distance(holder_position);
+        if distance > DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS {
+            return None;
+        }
+
+        let my_depth = snapshot.depth_from_own_goal_y(self.team, self.position.y);
+        let holder_depth = snapshot.depth_from_own_goal_y(self.team, holder_position.y);
+        let goal_side_or_level = my_depth <= holder_depth + 0.65;
+        if !goal_side_or_level {
+            return None;
+        }
+
+        let defender_steal_skill = ability01(self.skills.defending) * 0.46
+            + ability01(self.skills.aggression) * 0.18
+            + ability01(self.skills.acceleration) * 0.16
+            + ability01(self.skills.strength) * 0.20;
+        let holder_security = ability01(holder_player.skills.dribbling) * 0.42
+            + ability01(holder_player.skills.first_touch) * 0.28
+            + ability01(holder_player.skills.strength) * 0.18
+            + ability01(holder_player.skills.acceleration) * 0.12;
+        let clean_contact = distance <= DEFENSIVE_IMMEDIATE_STEAL_CLEAN_RADIUS_YARDS
+            && defender_steal_skill + 0.10 >= holder_security;
+
+        let exposed_dribble = holder_player
+            .last_decision
+            .as_ref()
+            .map(|decision| {
+                let action = normalize_soccer_action_label(&decision.action);
+                is_dribble_action_label(action)
+                    && (decision.observation.immediate_dispossession_risk >= 0.58
+                        || decision.observation.perceived_pressure >= 0.56
+                        || decision.observation.excessive_hold_pressure >= 0.36)
+            })
+            .unwrap_or(false)
+            && distance <= DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS
+            && defender_steal_skill + 0.18 >= holder_security;
+
+        (clean_contact || exposed_dribble).then_some(holder)
     }
 
     fn loose_ball_action_options(
@@ -7904,6 +8032,11 @@ impl PlayerAgent {
                     self.role,
                     shooting_skill,
                 ))
+                .max(attacking_goal_pressure_shot_attempt_probability(
+                    &observation,
+                    self.role,
+                    shooting_skill,
+                ))
                 .max(striker_shot_bonus);
             if rng.next_float() < time_window_probability(finish_chance, snapshot.dt_seconds) {
                 let action = SoccerAction::Shoot {
@@ -8028,6 +8161,11 @@ impl PlayerAgent {
                         - self.skills.decision_noise * 0.10)
                         .clamp(0.008, 0.08 + striker_shot_bonus * 0.30)
                         .max(close_clear_shot_attempt_probability(
+                            &observation,
+                            self.role,
+                            shooting_skill,
+                        ))
+                        .max(attacking_goal_pressure_shot_attempt_probability(
                             &observation,
                             self.role,
                             shooting_skill,
@@ -8167,6 +8305,10 @@ impl PlayerAgent {
                 (
                     "flank-high-cross".to_string(),
                     action_option_score(&action_options, "flank-high-cross"),
+                ),
+                (
+                    "killer-pass".to_string(),
+                    action_option_score(&action_options, "killer-pass"),
                 ),
             ];
             for rank in 0..pass_targets.len() {
@@ -8443,6 +8585,29 @@ impl PlayerAgent {
                                         flight: PassFlight::Aerial,
                                     },
                                     "flank-high-cross".to_string(),
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    "killer-pass" => {
+                        order_names.push("killer-pass".to_string());
+                        let killer_chance = action_option_score(&action_options, "killer-pass");
+                        if let Some(target) =
+                            snapshot.killer_pass_target_for(self.id, &pass_targets)
+                        {
+                            if rng.next_float()
+                                < time_window_probability(killer_chance, snapshot.dt_seconds)
+                            {
+                                chosen = Some((
+                                    SoccerAction::Pass {
+                                        target_player: Some(target),
+                                        power: 0.66
+                                            + 0.24
+                                                * passing_skill.max(ability01(self.skills.vision)),
+                                        flight: PassFlight::Floor,
+                                    },
+                                    "killer-pass".to_string(),
                                 ));
                                 break;
                             }
@@ -9093,6 +9258,31 @@ impl PlayerAgent {
                             flight: PassFlight::Floor,
                         },
                         "pass".to_string(),
+                    )
+                })
+            }
+            "killer-pass" if observation.has_ball => {
+                let visible_targets = snapshot.ranked_visible_pass_targets(self.id, 11);
+                let target = plan
+                    .target_player
+                    .filter(|target| visible_targets.contains(target))
+                    .filter(|target| {
+                        snapshot
+                            .killer_pass_target_for(self.id, &[*target])
+                            .is_some()
+                    })
+                    .or_else(|| snapshot.killer_pass_target_for(self.id, &visible_targets));
+                target.map(|target| {
+                    (
+                        SoccerAction::Pass {
+                            target_player: Some(target),
+                            power: 0.66
+                                + 0.24
+                                    * ability01(self.skills.passing_completion_rate)
+                                        .max(ability01(self.skills.vision)),
+                            flight: PassFlight::Floor,
+                        },
+                        "killer-pass".to_string(),
                     )
                 })
             }
@@ -19848,6 +20038,106 @@ impl WorldSnapshot {
         self.ranked_aerial_pass_targets_filtered(player_id, limit, true)
     }
 
+    pub fn killer_pass_target_for(
+        &self,
+        player_id: usize,
+        visible_targets: &[usize],
+    ) -> Option<usize> {
+        let me = self.players.iter().find(|p| p.id == player_id)?;
+        if self.ball.holder != Some(player_id) || me.role == PlayerRole::Goalkeeper {
+            return None;
+        }
+        let me_position = self.player_snapshot_position(me);
+        let goal_y = me.team.goal_y(self.field_length);
+        let yards_to_goal = (goal_y - me_position.y).abs();
+        if yards_to_goal > KILLER_PASS_MAX_YARDS_TO_GOAL {
+            return None;
+        }
+
+        let attack_dir = me.team.attack_dir();
+        let nominal_speed = pass_speed_yps_from_power(0.82, PassFlight::Floor, false, &me.skills);
+        let candidates = if visible_targets.is_empty() {
+            self.ranked_visible_pass_targets(player_id, 5)
+        } else {
+            visible_targets.to_vec()
+        };
+        candidates
+            .into_iter()
+            .filter_map(|target_id| {
+                let target = self.players.iter().find(|p| p.id == target_id)?;
+                if target.role == PlayerRole::Goalkeeper
+                    || target.team != me.team
+                    || self
+                        .pending_offside_for_pass(player_id, target_id)
+                        .is_some()
+                {
+                    return None;
+                }
+                let target_position = self.player_snapshot_position(target);
+                let reception = self
+                    .anticipated_pass_reception_point(
+                        player_id,
+                        target_id,
+                        PassFlight::Floor,
+                        nominal_speed,
+                    )
+                    .unwrap_or(target_position);
+                let forward = (reception.y - me_position.y) * attack_dir;
+                if forward < KILLER_PASS_MIN_FORWARD_YARDS {
+                    return None;
+                }
+                let receiver_yards_to_goal = (goal_y - reception.y).abs();
+                let goal_gain = yards_to_goal - receiver_yards_to_goal;
+                if goal_gain < KILLER_PASS_MIN_RECEIVER_GOAL_GAIN_YARDS {
+                    return None;
+                }
+                let lane_fit = if self.clear_line(me_position, reception, me.team.other(), 1.8) {
+                    1.0
+                } else {
+                    0.18
+                };
+                let quality = pass_target_quality_for_snapshot(
+                    self,
+                    me,
+                    me_position,
+                    target,
+                    target_position,
+                    PassFlight::Floor,
+                );
+                if quality.expected_completion < 0.24 || lane_fit < 0.30 {
+                    return None;
+                }
+                let window = self.shooting_window_score_at(target, reception);
+                let range_fit = ((KILLER_PASS_MAX_YARDS_TO_GOAL - yards_to_goal)
+                    / KILLER_PASS_MAX_YARDS_TO_GOAL)
+                    .clamp(0.0, 1.0);
+                let role_bonus = match target.role {
+                    PlayerRole::Forward => 1.4,
+                    PlayerRole::Midfielder => 0.85,
+                    PlayerRole::Defender => 0.20,
+                    PlayerRole::Goalkeeper => -3.0,
+                };
+                let runner_bonus = if self.player_is_recent_forward_runner(target) {
+                    1.2
+                } else {
+                    0.0
+                };
+                let score = goal_gain * 0.12
+                    + forward.min(24.0) * 0.055
+                    + window * 4.8
+                    + quality.receiver_openness * 1.7
+                    + quality.expected_completion * 1.5
+                    + quality.stride_fit * 1.25
+                    + lane_fit * 1.3
+                    + range_fit * 1.2
+                    + role_bonus
+                    + runner_bonus;
+                Some((target_id, score))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(target_id, _)| target_id)
+    }
+
     fn ranked_pass_targets_filtered(
         &self,
         player_id: usize,
@@ -24456,6 +24746,7 @@ fn soccer_goal_credit_action_is_relevant(action: &str) -> bool {
             | "first-time-shot"
             | "first-time-header"
             | "pass"
+            | "killer-pass"
             | "aerial-pass"
             | "flank-low-cross"
             | "flank-high-cross"
@@ -24570,7 +24861,8 @@ fn soccer_goal_credit_transition_score(
                 - pressure * 0.18
                 + dense_signal
         }
-        "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass" => {
+        "pass" | "killer-pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross"
+        | "first-time-pass" => {
             let completion = if matches!(action, "aerial-pass" | "flank-high-cross") {
                 obs.expected_aerial_pass_completion
                     .max(obs.expected_pass_completion * 0.82)
@@ -24987,6 +25279,7 @@ fn dense_soccer_transition_reward(
                 | "hold-up-flank"
                 | "set-play-run"
                 | "pass"
+                | "killer-pass"
                 | "aerial-pass"
                 | "flank-low-cross"
                 | "flank-high-cross"
@@ -50016,9 +50309,50 @@ fn shot_decision_is_qualified_for_role(
     role: PlayerRole,
 ) -> bool {
     shot_decision_is_qualified(observation)
+        || attacking_goal_pressure_shot_is_qualified(observation, role)
         || clean_twenty_yard_shot_is_qualified(observation, role)
         || teammate_near_goal_shot_is_qualified(observation, role)
         || striker_shot_window_is_qualified(observation, role)
+}
+
+fn attacking_goal_pressure_shot_is_qualified(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> bool {
+    if role == PlayerRole::Goalkeeper || !observation.shot_lane_open {
+        return false;
+    }
+    observation.yards_to_goal <= ATTACKING_GOAL_PRESSURE_SHOT_YARDS
+        && observation.shot_block_probability.clamp(0.0, 1.0) <= SHOT_BLOCK_DECISION_MAX_PROBABILITY
+        && observation.shot_on_frame_probability >= STRIKER_SHOT_MIN_ON_FRAME_PROBABILITY
+        && observation.shot_beat_goalkeeper_probability >= STRIKER_SHOT_MIN_KEEPER_BEAT_PROBABILITY
+        && observation.opponent_goal_angle_degrees >= 8.0
+}
+
+fn attacking_goal_pressure_shot_attempt_probability(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+    shooting_skill: f64,
+) -> f64 {
+    if !attacking_goal_pressure_shot_is_qualified(observation, role) {
+        return 0.0;
+    }
+    let range_fit = ((ATTACKING_GOAL_PRESSURE_SHOT_YARDS - observation.yards_to_goal)
+        / (ATTACKING_GOAL_PRESSURE_SHOT_YARDS - TEAMMATE_MUST_SHOOT_YARDS).max(1e-6))
+    .clamp(0.0, 1.0);
+    let role_bonus = match role {
+        PlayerRole::Forward => 0.18,
+        PlayerRole::Midfielder => 0.11,
+        PlayerRole::Defender => 0.04,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+    (0.10
+        + role_bonus
+        + shooting_skill.clamp(0.0, 1.0) * 0.10
+        + range_fit * 0.18
+        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.12
+        + observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.08)
+        .clamp(0.0, 0.58)
 }
 
 fn speculative_long_shot_is_qualified(
@@ -52573,6 +52907,16 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
             observation.has_ball && shot_decision_is_qualified_for_role(&observation, player.role)
         }
         "pass" => observation.has_ball && snapshot.best_visible_pass_target(player_id).is_some(),
+        "killer-pass" => {
+            observation.has_ball
+                && !goal_attack_shot_is_required(&observation, player.role)
+                && snapshot
+                    .killer_pass_target_for(
+                        player_id,
+                        &snapshot.ranked_visible_pass_targets(player_id, 5),
+                    )
+                    .is_some()
+        }
         "aerial-pass" => {
             observation.has_ball && snapshot.best_aerial_pass_target(player_id).is_some()
         }
@@ -52646,8 +52990,16 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
                 .iter()
                 .find(|p| p.id == holder)
                 .is_some_and(|holder_player| {
-                    holder_player.team == player.team.other()
-                        && player.position.distance(holder_player.position) < 3.2
+                    if holder_player.team != player.team.other() {
+                        return false;
+                    }
+                    let player_position = snapshot.player_snapshot_position(player);
+                    let holder_position = snapshot.player_snapshot_position(holder_player);
+                    let my_depth = snapshot.depth_from_own_goal_y(player.team, player_position.y);
+                    let holder_depth =
+                        snapshot.depth_from_own_goal_y(player.team, holder_position.y);
+                    my_depth <= holder_depth + 0.85
+                        && player_position.distance(holder_position) <= 1.85
                 })
         }),
         "check-to-ball" => {
@@ -53940,6 +54292,125 @@ mod tests {
             max_ball_displacement >= 8.0,
             "ball should materially move from kickoff during autonomous play: displacement={max_ball_displacement:.2}"
         );
+    }
+
+    #[test]
+    fn autonomous_match_generates_shot_attempts_without_human_input() {
+        let trace = run_simulation(
+            MatchConfig {
+                duration_seconds: 45.0,
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..SoccerNeuralLearningConfig::default()
+                },
+                max_human_players: 0,
+                seed: 22_902,
+                ..MatchConfig::default()
+            },
+            5,
+        );
+        let stats = &trace.summary.stats;
+        let shots = stats.shots_home.saturating_add(stats.shots_away);
+        let shot_events = trace
+            .events
+            .iter()
+            .filter(|event| event.kind == "shot")
+            .count();
+        let min_holder_yards_to_goal = trace
+            .frames
+            .iter()
+            .filter_map(|frame| {
+                let holder = frame.ball.holder?;
+                let player = frame.players.iter().find(|player| player.id == holder)?;
+                Some(
+                    (player.team.goal_y(trace.config.field_length_yards) - frame.ball.position.y)
+                        .abs(),
+                )
+            })
+            .fold(f64::INFINITY, f64::min);
+        let mut action_counts = std::collections::BTreeMap::<String, usize>::new();
+        for frame in &trace.frames {
+            for player in &frame.players {
+                if frame.ball.holder == Some(player.id) {
+                    if let Some(decision) = &player.last_decision {
+                        *action_counts.entry(decision.action.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(trace.summary.ticks, 450);
+        assert!(
+            shots >= 1,
+            "autonomous play should produce at least one shot attempt in an attacking spell; min_holder_yards_to_goal={min_holder_yards_to_goal:.2}; holder_actions={action_counts:?}; stats={stats:?}"
+        );
+        assert_eq!(
+            shot_events as u32, shots,
+            "shot events and shot stats should stay in sync"
+        );
+    }
+
+    #[test]
+    fn final_third_pressure_exposes_killer_pass_option() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_903,
+            ..Default::default()
+        });
+        let passer = 8;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].role = PlayerRole::Midfielder;
+        sim.players[passer].position = Vec2::new(40.0, 76.0);
+        sim.players[passer].velocity = Vec2::new(0.0, 2.0);
+        sim.players[passer].action_facing = FacingBucket::South;
+        sim.players[passer].skills.passing_completion_rate = 9.0;
+        sim.players[passer].skills.passing = 8.8;
+        sim.players[passer].skills.vision = 9.2;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].position = Vec2::new(42.0, 87.0);
+        sim.players[receiver].velocity = Vec2::new(0.0, 5.0);
+        sim.players[receiver].skills.shooting = 8.6;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let visible_targets = snapshot.ranked_visible_pass_targets(passer, 3);
+        assert!(
+            visible_targets.contains(&receiver),
+            "receiver should be visible as a forward passing option: {visible_targets:?}"
+        );
+        assert_eq!(
+            snapshot.killer_pass_target_for(passer, &visible_targets),
+            Some(receiver)
+        );
+
+        let observation = snapshot.observation_for(passer);
+        let options = sim.players[passer].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            visible_targets.len(),
+            snapshot.ranked_visible_aerial_pass_targets(passer, 3).len(),
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let killer = options
+            .iter()
+            .find(|option| option.label == "killer-pass")
+            .expect("killer-pass option");
+        assert!(
+            killer.legal && killer.score > 0.0 && killer.tick_probability > 0.0,
+            "killer pass should be legal and learnable in a final-third threaded lane: {killer:?}"
+        );
+        assert!(learned_action_label_is_legal(
+            "through-pass",
+            &snapshot,
+            passer
+        ));
     }
 
     #[test]
@@ -77391,7 +77862,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         after.ball.holder = None;
         after.ball.velocity = (stride_target - sim.players[passer].position).normalized() * 18.0;
 
-        let transition_for_target = |target: Vec2| {
+        let transition_for_target = |target: Vec2, action: &str| {
             let mut observation = before.observation_for(passer);
             observation.expected_pass_completion = 0.86;
             observation.best_pass_receiver_openness = 0.90;
@@ -77422,12 +77893,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                     pass_lane_open: 1.0,
                     shot_quality: 0.0,
                 },
-                action: "pass".to_string(),
+                action: action.to_string(),
                 action_target: Some(action_target.clone()),
                 decision_context: soccer_decision_context_for(
                     passer,
                     Team::Home,
-                    "pass",
+                    action,
                     Some(&action_target),
                     &before,
                     &after,
@@ -77441,13 +77912,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         };
 
         let stride_score =
-            soccer_goal_credit_transition_score(&transition_for_target(stride_target), 0);
+            soccer_goal_credit_transition_score(&transition_for_target(stride_target, "pass"), 0);
         let feet_score =
-            soccer_goal_credit_transition_score(&transition_for_target(receiver_feet), 0);
+            soccer_goal_credit_transition_score(&transition_for_target(receiver_feet, "pass"), 0);
+        let killer_score = soccer_goal_credit_transition_score(
+            &transition_for_target(stride_target, "killer-pass"),
+            0,
+        );
 
         assert!(
             stride_score > feet_score + 0.18,
             "pass goal-credit should reward anticipation: stride={stride_score}, feet={feet_score}"
+        );
+        assert!(
+            killer_score >= stride_score - 1e-9,
+            "killer pass should receive goal-credit as a threaded pass into stride: killer={killer_score}, pass={stride_score}"
         );
     }
 

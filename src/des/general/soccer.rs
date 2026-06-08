@@ -60297,6 +60297,13 @@ mod tests {
         );
 
         let snapshot = WorldSnapshot::from_match(&sim);
+        let shared_player_ids = snapshot
+            .shared_positions
+            .latest
+            .iter()
+            .map(|sample| sample.player_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(shared_player_ids, (0..22).collect::<HashSet<_>>());
         assert_eq!(
             snapshot
                 .shared_positions
@@ -60326,6 +60333,27 @@ mod tests {
                 .len(),
             PLAYER_POSITION_HISTORY_LIMIT
         );
+        for official in &sim.officials {
+            let latest = snapshot
+                .shared_positions
+                .official_latest_for(official.id)
+                .expect("snapshot official latest");
+            assert_eq!(latest.tick, sim.tick);
+            assert_eq!(latest.position, official.position);
+            assert_eq!(latest.velocity, official.velocity);
+            assert!(latest.acceleration.len().is_finite());
+            assert!(latest.jerk.len().is_finite());
+            let history = snapshot
+                .shared_positions
+                .official_history_for(official.id)
+                .expect("snapshot official history");
+            assert_eq!(history.len(), PLAYER_POSITION_HISTORY_LIMIT);
+            assert_eq!(
+                history.last().map(|sample| sample.position),
+                Some(official.position)
+            );
+            assert_eq!(history.last().map(|sample| sample.tick), Some(sim.tick));
+        }
         assert_eq!(
             snapshot
                 .player_position_history(0)
@@ -60350,6 +60378,28 @@ mod tests {
             .len()
             .is_finite());
         for player in &sim.players {
+            let shared_latest = snapshot
+                .shared_positions
+                .latest_for(player.id)
+                .expect("snapshot shared player latest");
+            assert_eq!(shared_latest.tick, sim.tick);
+            assert_eq!(shared_latest.position, player.position);
+            assert_eq!(shared_latest.velocity, player.velocity);
+            assert!(shared_latest.acceleration.len().is_finite());
+            assert!(shared_latest.jerk.len().is_finite());
+            let shared_history = snapshot
+                .shared_positions
+                .history_for(player.id)
+                .expect("snapshot shared player history");
+            assert_eq!(shared_history.len(), PLAYER_POSITION_HISTORY_LIMIT);
+            assert_eq!(
+                shared_history.last().map(|sample| sample.position),
+                Some(player.position)
+            );
+            assert_eq!(
+                shared_history.last().map(|sample| sample.tick),
+                Some(sim.tick)
+            );
             let history = snapshot
                 .player_position_history(player.id)
                 .expect("snapshot history");

@@ -550,6 +550,11 @@ function formatBytes(bytes) {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
+function textByteLength(text) {
+  if (typeof Blob !== "undefined") return new Blob([text]).size;
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).byteLength;
+  return String(text || "").length;
+}
 function cacheBustUrl(url) {
   const absolute = new URL(url, window.location.href);
   absolute.searchParams.set("v", String(Date.now()));
@@ -2080,7 +2085,7 @@ async function loadTraceFrames(signal) {
   if (!response.body || !response.body.getReader) {
     updateLoadingProgress(0, totalBytes, "Downloading frames");
     const text = await response.text();
-    loadedBytes = text.length;
+    loadedBytes = textByteLength(text);
     for (const line of text.split(/\n/)) appendFrameLine(line);
     traceFramesComplete = true;
     updateLoadingProgress(loadedBytes, totalBytes || loadedBytes, "Frames loaded");

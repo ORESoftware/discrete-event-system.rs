@@ -88985,6 +88985,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("generatedAtUnixMs"));
         assert!(html.contains("runId.textContent = runIdLabel()"));
         assert!(html.contains("response.body.getReader"));
+        assert!(html.contains("function textByteLength"));
+        assert!(html.contains("new Blob([text]).size"));
+        assert!(html.contains("new TextEncoder().encode(text).byteLength"));
+        assert!(html.contains("loadedBytes = textByteLength(text);"));
         assert!(html.contains("JSON.parse(raw)"));
         assert!(html.contains("expectedFrameCount"));
         assert!(html.contains("Math.max(ticks + 1, trace.frames.length, 0)"));

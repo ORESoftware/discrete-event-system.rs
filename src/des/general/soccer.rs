@@ -105215,6 +105215,50 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 61);
         assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 60);
         assert_eq!(meta["tacticalLiveness"]["ballDecisionFrames"], 60);
+        assert!(
+            meta["tacticalLiveness"]["playerOperationOrderSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should sample player operation orders"
+        );
+        assert!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should sample central brain operation orders"
+        );
+        assert!(
+            meta["tacticalLiveness"]["ballOperationOrderSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should sample ball-agent operation orders"
+        );
+        assert!(
+            meta["tacticalLiveness"]["officialOperationOrderSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should sample official operation orders"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerOperationOrderRandomizedOk"],
+            true
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderRandomizedOk"],
+            true
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["ballOperationOrderRandomizedOk"],
+            true
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["officialOperationOrderRandomizedOk"],
+            true
+        );
         assert_eq!(meta["tacticalLiveness"]["agentAccountingOk"], true);
         assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
         assert_eq!(meta["agentContract"]["expectedTotalAgents"], 27);

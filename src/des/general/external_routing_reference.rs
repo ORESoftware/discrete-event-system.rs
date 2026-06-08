@@ -73,8 +73,8 @@ fn routing_python_reference_forced() -> bool {
         .any(|key| {
             std::env::var(key)
                 .map(|value| routing_reference_force_python_value(&value))
-            .unwrap_or(false)
-    })
+                .unwrap_or(false)
+        })
 }
 
 fn should_use_rust_routing_reference(opts: &ExternalRoutingReferenceOptions) -> bool {

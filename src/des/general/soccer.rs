@@ -522,9 +522,14 @@ fn default_live_http_worker_threads() -> usize {
 }
 
 const MAX_LIVE_HTTP_WORKER_THREADS: usize = 32;
+const LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER: usize = 64;
 
 fn live_http_worker_threads(worker_threads: usize) -> usize {
     worker_threads.clamp(1, MAX_LIVE_HTTP_WORKER_THREADS)
+}
+
+fn live_http_worker_queue_capacity(worker_threads: usize) -> usize {
+    live_http_worker_threads(worker_threads) * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
 }
 
 fn default_soccer_moment_embedder_version() -> String {
@@ -10629,8 +10634,35 @@ pub struct HumanInputDrainResult {
     pub queue_age_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HumanControllerSlotMask(u8);
+
+impl HumanControllerSlotMask {
+    fn from_slots(controller_slots: &[usize]) -> Self {
+        let mut mask = 0u8;
+        for &slot in controller_slots {
+            if slot < SOCCER_MAX_HUMAN_CONTROLLER_SLOTS {
+                mask |= 1u8 << slot;
+            }
+        }
+        HumanControllerSlotMask(mask)
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn contains(self, controller_slot: usize) -> bool {
+        controller_slot < SOCCER_MAX_HUMAN_CONTROLLER_SLOTS
+            && (self.0 & (1u8 << controller_slot)) != 0
+    }
+}
+
 impl SharedHumanInputStore {
     fn push(&mut self, input: HumanInputFrame, enqueued_unix_ms: u64) -> bool {
+        if input.controller_slot >= SOCCER_MAX_HUMAN_CONTROLLER_SLOTS {
+            return false;
+        }
         if self
             .latest_seq_by_slot
             .get(&input.controller_slot)
@@ -10749,14 +10781,15 @@ impl SharedHumanInputStore {
         controller_slots: Option<&[usize]>,
         consumed_unix_ms: u64,
     ) -> u64 {
-        if controller_slots.is_some_and(|slots| slots.is_empty()) {
+        let slot_mask = controller_slots.map(HumanControllerSlotMask::from_slots);
+        if slot_mask.is_some_and(HumanControllerSlotMask::is_empty) {
             return 0;
         }
         let mut expired = 0u64;
         let mut retained = VecDeque::with_capacity(self.pending.len());
         while let Some(queued) = self.pending.pop_front() {
-            let slot_matches = controller_slots
-                .map(|slots| slots.contains(&queued.input.controller_slot))
+            let slot_matches = slot_mask
+                .map(|mask| mask.contains(queued.input.controller_slot))
                 .unwrap_or(true);
             let queue_age_ms = consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms);
             if slot_matches && queue_age_ms > HUMAN_INPUT_MAX_QUEUE_AGE_MS {
@@ -10774,12 +10807,13 @@ impl SharedHumanInputStore {
     }
 
     fn pending_len_for_slots(&self, controller_slots: &[usize]) -> usize {
-        if controller_slots.is_empty() {
+        let slot_mask = HumanControllerSlotMask::from_slots(controller_slots);
+        if slot_mask.is_empty() {
             return 0;
         }
         self.pending
             .iter()
-            .filter(|queued| controller_slots.contains(&queued.input.controller_slot))
+            .filter(|queued| slot_mask.contains(queued.input.controller_slot))
             .count()
     }
 
@@ -18063,6 +18097,8 @@ pub struct PlayerSnapshot {
     #[serde(default)]
     pub skills: SkillProfile,
     #[serde(default)]
+    pub skill_bands: String,
+    #[serde(default)]
     pub fatigue: f64,
     pub home_position: Vec2,
     pub controller_slot: Option<usize>,
@@ -18608,6 +18644,7 @@ impl WorldSnapshot {
                 action_facing: p.action_facing,
                 incoming_ball: p.incoming_ball.clone(),
                 skills: p.skills.clone(),
+                skill_bands: soccer_playback_skill_bands(&p.skills),
                 fatigue: p.fatigue,
                 home_position: p.home_position,
                 controller_slot: p.controller_slot,
@@ -28163,12 +28200,44 @@ fn soccer_playback_offside_line_frame(
 pub struct SoccerPlaybackCentralBrainFrame {
     pub possession_team: Option<Team>,
     pub ball_holder: Option<usize>,
+    #[serde(default)]
+    pub ball_kinematics: [f64; 9],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ball_scheduled_index: Option<usize>,
     pub tracked_players: Vec<usize>,
     pub tracked_officials: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_shape: Option<CentralBrainTeamShapeTrace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub away_shape: Option<CentralBrainTeamShapeTrace>,
+}
+
+fn soccer_playback_compact_f64(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * 10.0).round() / 10.0
+    } else {
+        0.0
+    }
+}
+
+fn soccer_playback_ball_kinematics(
+    position: Vec2,
+    velocity: Vec2,
+    acceleration: Vec2,
+    jerk: Vec2,
+    altitude_yards: f64,
+) -> [f64; 9] {
+    [
+        soccer_playback_compact_f64(position.x),
+        soccer_playback_compact_f64(position.y),
+        soccer_playback_compact_f64(velocity.x),
+        soccer_playback_compact_f64(velocity.y),
+        soccer_playback_compact_f64(acceleration.x),
+        soccer_playback_compact_f64(acceleration.y),
+        soccer_playback_compact_f64(jerk.x),
+        soccer_playback_compact_f64(jerk.y),
+        soccer_playback_compact_f64(altitude_yards),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29077,6 +29146,14 @@ impl SoccerPlaybackFrame {
             central_brain: SoccerPlaybackCentralBrainFrame {
                 possession_team,
                 ball_holder: sim.ball.holder,
+                ball_kinematics: soccer_playback_ball_kinematics(
+                    sim.ball.position,
+                    sim.ball.velocity,
+                    sim.ball.acceleration,
+                    sim.ball.jerk,
+                    sim.ball.altitude_yards,
+                ),
+                ball_scheduled_index: schedule_lookup.ball(),
                 tracked_players: sim.players.iter().map(|player| player.id).collect(),
                 tracked_officials: sim.officials.len(),
                 home_shape: sim
@@ -29245,6 +29322,14 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
             central_brain: SoccerPlaybackCentralBrainFrame {
                 possession_team: frame.central_brain.possession_team,
                 ball_holder: frame.central_brain.ball_holder,
+                ball_kinematics: soccer_playback_ball_kinematics(
+                    frame.central_brain.ball_position,
+                    frame.central_brain.ball_velocity,
+                    frame.central_brain.ball_acceleration,
+                    frame.central_brain.ball_jerk,
+                    frame.central_brain.ball_altitude_yards,
+                ),
+                ball_scheduled_index: frame.central_brain.ball_scheduled_index,
                 tracked_players: frame
                     .central_brain
                     .tracked_players
@@ -31991,6 +32076,7 @@ struct SoccerFrameLivenessMetrics {
     complete_schedule_frames: usize,
     central_brain_decision_frames: usize,
     ball_decision_frames: usize,
+    official_decision_frames: usize,
     human_controlled_player_decisions: usize,
     human_input_present_decisions: usize,
     human_input_consumed_decisions: usize,
@@ -32147,6 +32233,8 @@ impl SoccerFrameLivenessAccumulator {
             let Some(decision) = official.last_decision.as_ref() else {
                 continue;
             };
+            self.metrics.official_decision_frames =
+                self.metrics.official_decision_frames.saturating_add(1);
             if decision.operation_order.len() > 1 {
                 self.metrics.official_operation_order_samples = self
                     .metrics
@@ -35027,12 +35115,14 @@ pub struct SoccerLearningRuntimeContract {
     pub policy_persistence_live_autosave_backend: String,
     pub policy_persistence_live_autosave_writes_to_postgres: bool,
     pub policy_persistence_live_http_step_writes_to_postgres: bool,
+    pub policy_persistence_live_http_step_persistence_in_memory_only: bool,
     pub policy_persistence_playback_external_writes_enabled: bool,
     pub policy_persistence_playback_http_posts_enabled: bool,
     pub policy_persistence_explicit_postgres_export_endpoint_enabled: bool,
     pub policy_persistence_explicit_postgres_export_batched: bool,
     pub policy_persistence_postgres_completed_game_batches: bool,
     pub policy_persistence_postgres_policy_version_batches: bool,
+    pub policy_persistence_postgres_batch_triggers: Vec<String>,
     pub postgres_contract: SoccerPolicyPostgresStorageContract,
     pub reward_contract: SoccerLearningRewardContract,
 }
@@ -35172,12 +35262,21 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
         policy_persistence_live_autosave_backend: "json-disk".to_string(),
         policy_persistence_live_autosave_writes_to_postgres: false,
         policy_persistence_live_http_step_writes_to_postgres: false,
+        policy_persistence_live_http_step_persistence_in_memory_only: true,
         policy_persistence_playback_external_writes_enabled: false,
         policy_persistence_playback_http_posts_enabled: false,
         policy_persistence_explicit_postgres_export_endpoint_enabled: true,
         policy_persistence_explicit_postgres_export_batched: true,
         policy_persistence_postgres_completed_game_batches: true,
         policy_persistence_postgres_policy_version_batches: true,
+        policy_persistence_postgres_batch_triggers: [
+            "completed-game",
+            "manual-branch-tip-export",
+            "policy-version-batch",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         postgres_contract: SoccerPolicyPostgresStorageContract::default(),
         reward_contract: soccer_learning_reward_contract(),
     }
@@ -37001,6 +37100,8 @@ pub struct SoccerLearningSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct SoccerInputAck {
     pub accepted_inputs: usize,
+    #[serde(default)]
+    pub rejected_inputs: usize,
     pub queued: bool,
     #[serde(default)]
     pub queued_human_inputs: usize,
@@ -37011,6 +37112,8 @@ pub struct SoccerInputAck {
 pub struct SoccerLiveHttpStatus {
     pub worker_model: String,
     pub worker_threads: usize,
+    pub worker_queue_capacity: usize,
+    pub bounded_worker_queue: bool,
     pub reuses_workers: bool,
     pub spawns_per_request: bool,
     pub batches_step_ticks: bool,
@@ -37022,6 +37125,8 @@ impl SoccerLiveHttpStatus {
         SoccerLiveHttpStatus {
             worker_model: "worker-pool".to_string(),
             worker_threads,
+            worker_queue_capacity: live_http_worker_queue_capacity(worker_threads),
+            bounded_worker_queue: true,
             reuses_workers: true,
             spawns_per_request: false,
             batches_step_ticks: true,
@@ -47069,7 +47174,8 @@ impl SoccerLiveServer {
         let listener = TcpListener::bind((self.config.host.as_str(), self.config.port))?;
         println!("# Live soccer UI: {}", self.local_url());
         let worker_count = live_http_worker_threads(self.config.http_worker_threads);
-        let (stream_tx, stream_rx) = mpsc::channel::<TcpStream>();
+        let queue_capacity = live_http_worker_queue_capacity(worker_count);
+        let (stream_tx, stream_rx) = mpsc::sync_channel::<TcpStream>(queue_capacity);
         let stream_rx = Arc::new(Mutex::new(stream_rx));
         for worker_id in 0..worker_count {
             let session = Arc::clone(&self.session);
@@ -48243,6 +48349,7 @@ fn handle_live_soccer_request_inner(
         }
         ("POST", "/api/input") => match parse_human_input_payload(req.body) {
             Ok(inputs) => {
+                let requested_inputs = inputs.len();
                 let (count, queued_human_inputs) = match input_dispatch {
                     LiveInputDispatch::Router(router) => {
                         let count = router.push_human_inputs(inputs);
@@ -48266,6 +48373,7 @@ fn handle_live_soccer_request_inner(
                 };
                 LiveHttpResponse::json(&SoccerInputAck {
                     accepted_inputs: count,
+                    rejected_inputs: requested_inputs.saturating_sub(count),
                     queued: count > 0,
                     queued_human_inputs,
                 })
@@ -51394,6 +51502,7 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "completeScheduleFrames": frame_liveness.complete_schedule_frames,
         "centralBrainDecisionFrames": frame_liveness.central_brain_decision_frames,
         "ballDecisionFrames": frame_liveness.ball_decision_frames,
+        "officialDecisionFrames": frame_liveness.official_decision_frames,
         "humanControlledPlayerDecisions": frame_liveness.human_controlled_player_decisions,
         "humanInputPresentDecisions": frame_liveness.human_input_present_decisions,
         "humanInputConsumedDecisions": frame_liveness.human_input_consumed_decisions,
@@ -53261,6 +53370,7 @@ fn tracking_frame_to_world_snapshot(
                 incoming_ball: None,
                 vision_range_yards: vision_range_yards(skills.vision),
                 field_of_view_degrees: field_of_view_degrees(skills.vision),
+                skill_bands: soccer_playback_skill_bands(&skills),
                 skills,
                 fatigue: 0.0,
                 home_position: home_positions
@@ -68407,6 +68517,30 @@ mod tests {
                 ball_decision.operation_order
             );
         }
+        for player in &frame.players {
+            let scheduled_index = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id)
+                .expect("every player should be scheduled as an agent");
+            let decision = player
+                .last_decision
+                .as_ref()
+                .expect("every scheduled player should expose a run_time_step decision trace");
+            assert_eq!(decision.scheduled_index, Some(scheduled_index));
+            assert_eq!(decision.observation.player_id, player.id);
+            assert_eq!(decision.observation.scheduled_index, Some(scheduled_index));
+            assert!(
+                !decision.operation_order.is_empty(),
+                "player {} should expose randomized/internal run_time_step operations",
+                player.id
+            );
+            assert!(
+                !decision.action_options.is_empty(),
+                "player {} should expose MDP/POMDP action options",
+                player.id
+            );
+        }
         assert_eq!(frame.central_brain.tracked_players.len(), 22);
         assert_eq!(frame.central_brain.tracked_officials, 3);
         assert_eq!(frame.shared_positions.latest.len(), 22);
@@ -68676,6 +68810,10 @@ mod tests {
             Some(frame_liveness.ball_decision_frames as u64)
         );
         assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["officialDecisionFrames"].as_u64(),
+            Some(frame_liveness.official_decision_frames as u64)
+        );
+        assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["humanControlledPlayerDecisions"].as_u64(),
             Some(frame_liveness.human_controlled_player_decisions as u64)
         );
@@ -68791,6 +68929,7 @@ mod tests {
                 complete_schedule_frames: 9,
                 central_brain_decision_frames: 8,
                 ball_decision_frames: 8,
+                official_decision_frames: 24,
                 human_controlled_player_decisions: 5,
                 human_input_present_decisions: 4,
                 human_input_consumed_decisions: 4,
@@ -68840,6 +68979,7 @@ mod tests {
         assert_eq!(support["completeScheduleFrames"], 9);
         assert_eq!(support["centralBrainDecisionFrames"], 8);
         assert_eq!(support["ballDecisionFrames"], 8);
+        assert_eq!(support["officialDecisionFrames"], 24);
         assert_eq!(support["humanControlledPlayerDecisions"], 5);
         assert_eq!(support["humanInputPresentDecisions"], 4);
         assert_eq!(support["humanInputConsumedDecisions"], 4);
@@ -69113,6 +69253,44 @@ mod tests {
         assert_eq!(slot_one.seq, 1);
         let slot_zero = q.drain_latest_for_slot(0).expect("slot 0 input");
         assert_eq!(slot_zero.seq, HUMAN_INPUT_QUEUE_LIMIT as u64 + 10);
+    }
+
+    #[test]
+    fn human_input_queue_rejects_controller_slots_beyond_four() {
+        let q = SharedHumanInputs::new();
+        let version = q.notification_version();
+
+        assert!(!q.push(test_human_input(
+            SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
+            Some(0),
+            1
+        )));
+        assert!(
+            !q.push_with_enqueue_unix_ms(test_human_input(99, Some(0), 2), soccer_unix_millis())
+        );
+
+        assert_eq!(q.queued_len(), 0);
+        assert_eq!(
+            q.queued_len_for_slots(&[SOCCER_MAX_HUMAN_CONTROLLER_SLOTS, 99]),
+            0
+        );
+        assert_eq!(q.last_seq_for_slot(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS), None);
+        assert_eq!(
+            q.notification_version(),
+            version,
+            "invalid controller slots should not notify/yield the main loop"
+        );
+    }
+
+    #[test]
+    fn human_input_assigned_slot_filter_uses_fixed_four_slot_contract() {
+        let q = SharedHumanInputs::new();
+        assert!(q.push(test_human_input(0, Some(0), 1)));
+        assert!(q.push(test_human_input(3, Some(3), 1)));
+
+        assert_eq!(q.queued_len_for_slots(&[3, 0, 3, 99]), 2);
+        assert_eq!(q.queued_len_for_slots(&[1, 2, 99]), 0);
+        assert_eq!(q.queued_len_for_slots(&[99]), 0);
     }
 
     #[test]
@@ -69676,6 +69854,49 @@ mod tests {
     }
 
     #[test]
+    fn four_assigned_human_players_check_controller_slots_when_silent() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 4,
+            seed: 22_802,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        let controlled_players = [0usize, 1, 2, 3];
+        for (slot, player_id) in controlled_players.iter().copied().enumerate() {
+            sim.assign_controller_slot(slot, Some(player_id))
+                .expect("assign silent controller slot");
+        }
+
+        sim.run_time_step();
+
+        let yield_stats = sim.controller_yield_stats();
+        assert_eq!(yield_stats.assigned_players, controlled_players.len());
+        assert_eq!(
+            yield_stats.last_queued_after, 0,
+            "silent controller slots should not leave queued input after the scheduler yield"
+        );
+        assert_eq!(sim.human_inputs.queued_len(), 0);
+        for (slot, player_id) in controlled_players.iter().copied().enumerate() {
+            let player = &sim.players[player_id];
+            assert_eq!(player.controller_slot, Some(slot));
+            let decision = player
+                .last_decision
+                .as_ref()
+                .expect("silent human-controlled player should still run its agent loop");
+            assert_ne!(
+                decision.operation_order.first().map(String::as_str),
+                Some("human-input"),
+                "quiet controller slot {slot} should not emit a fake human-input action"
+            );
+            assert_eq!(decision.observation.controller_slot, Some(slot));
+            assert!(decision.observation.human_controlled);
+            assert!(!decision.observation.human_input_present);
+            assert_eq!(decision.observation.human_input_seq, None);
+        }
+    }
+
+    #[test]
     fn controller_input_router_debounces_assigned_slot_burst_without_queue_growth() {
         let q = SharedHumanInputs::new();
         let assignments = SharedControllerAssignments::new(4);
@@ -70170,28 +70391,31 @@ mod tests {
     }
 
     #[test]
-    fn human_input_queue_limit_evictions_are_counted_in_slot_telemetry() {
+    fn human_input_queue_stays_bounded_by_four_coalesced_controller_slots() {
         let q = SharedHumanInputs::new();
 
-        for seq in 1..=HUMAN_INPUT_QUEUE_LIMIT as u64 {
-            assert!(q.push(test_human_input(seq as usize, Some(0), seq)));
+        for seq in 1..=(HUMAN_INPUT_QUEUE_LIMIT as u64 + 16) {
+            let slot = (seq as usize - 1) % SOCCER_MAX_HUMAN_CONTROLLER_SLOTS;
+            assert!(q.push(test_human_input(slot, Some(slot), seq)));
         }
-        assert_eq!(q.queued_len(), HUMAN_INPUT_QUEUE_LIMIT);
+        assert_eq!(q.queued_len(), SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
         assert_eq!(q.expired_len(), 0);
-
-        assert!(q.push(test_human_input(
-            HUMAN_INPUT_QUEUE_LIMIT + 1,
-            Some(0),
-            HUMAN_INPUT_QUEUE_LIMIT as u64 + 1,
-        )));
-
-        assert_eq!(q.queued_len(), HUMAN_INPUT_QUEUE_LIMIT);
         assert_eq!(
-            q.expired_len_for_slot(1),
-            1,
-            "evicting an old controller frame should be visible in per-slot telemetry"
+            q.queued_len(),
+            SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
+            "per-slot coalescing should keep the soft-real-time queue below the emergency cap"
         );
-        assert_eq!(q.expired_len(), 1);
+
+        let latest = q.drain_latest_by_slot();
+        assert_eq!(latest.len(), SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
+        for slot in 0..SOCCER_MAX_HUMAN_CONTROLLER_SLOTS {
+            let input = latest.get(&slot).expect("coalesced slot input");
+            assert_eq!(input.controller_slot, slot);
+            assert!(
+                input.seq > HUMAN_INPUT_QUEUE_LIMIT as u64,
+                "slot {slot} should keep its latest high-watermark frame"
+            );
+        }
     }
 
     #[test]
@@ -70688,6 +70912,103 @@ mod tests {
         assert!(decision.observation.human_controlled);
         assert!(decision.observation.human_input_present);
         assert_eq!(decision.observation.human_input_seq, Some(1));
+    }
+
+    #[test]
+    fn batched_live_step_consumes_controller_thread_input_between_ticks() {
+        let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+            duration_seconds: 0.4,
+            max_human_players: 1,
+            seed: 22_809,
+            ..Default::default()
+        });
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("assign slot 0");
+        let input_queue = session.input_queue();
+        assert!(input_queue.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 1,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let writer_queue = input_queue.clone();
+        let writer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(120);
+            while Instant::now() < deadline {
+                if writer_queue.queued_len_for_slots(&[0]) == 0 {
+                    return writer_queue.push(HumanInputFrame {
+                        controller_slot: 0,
+                        player_id: Some(0),
+                        seq: 2,
+                        axis: Vec2::new(0.0, 1.0),
+                        sprint: true,
+                        pass: false,
+                        pass_flight: PassFlight::Floor,
+                        shoot: false,
+                        action: None,
+                        target_player: None,
+                    });
+                }
+                std::thread::yield_now();
+            }
+            false
+        });
+
+        let response = session.step(SoccerStepRequest {
+            inputs: Vec::new(),
+            ticks: 2,
+            record_every_ticks: Some(1),
+        });
+
+        assert!(
+            writer.join().expect("between-tick controller writer joins"),
+            "controller thread should enqueue fresh input after the first batched tick drains"
+        );
+        assert_eq!(
+            response.accepted_inputs, 0,
+            "second controller frame should arrive from the shared thread queue, not the HTTP request body"
+        );
+        assert_eq!(response.frames.len(), 2);
+        let first_decision = response.frames[0]
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .and_then(|player| player.last_decision.as_ref())
+            .expect("first batched frame human decision");
+        let second_decision = response.frames[1]
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .and_then(|player| player.last_decision.as_ref())
+            .expect("second batched frame human decision");
+        assert_eq!(
+            first_decision.operation_order,
+            vec!["human-input".to_string()]
+        );
+        assert_eq!(first_decision.observation.human_input_seq, Some(1));
+        assert_eq!(
+            second_decision.operation_order,
+            vec!["human-input".to_string()]
+        );
+        assert_eq!(second_decision.observation.human_input_seq, Some(2));
+        assert_eq!(input_queue.queued_len_for_slots(&[0]), 0);
+        assert!(
+            response.controller_yield.wait_attempts >= 2,
+            "batched live stepping should yield once per simulated tick: {:?}",
+            response.controller_yield
+        );
+        assert_eq!(response.controller_latency_budget.consumed_inputs, 1);
     }
 
     #[test]
@@ -95855,6 +96176,29 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .any(|player| !player.position_history.is_empty()),
             "live HTTP frames still expose per-player 50-position motion history"
         );
+        let mut unique_skill_bands = HashSet::new();
+        for player in &frame.players {
+            assert_eq!(
+                player.skill_bands.len(),
+                8,
+                "live HTTP player {} should expose compact skill bands",
+                player.id
+            );
+            assert!(
+                player
+                    .skill_bands
+                    .chars()
+                    .all(|ch| ch.to_digit(36).is_some_and(|band| (1..=10).contains(&band))),
+                "live HTTP compact skill bands should stay base36 1..=10 values: {}",
+                player.skill_bands
+            );
+            unique_skill_bands.insert(player.skill_bands.clone());
+        }
+        assert!(
+            unique_skill_bands.len() >= 8,
+            "live HTTP frame should preserve differentiated player skill bands, got {} unique bands",
+            unique_skill_bands.len()
+        );
         assert!(
             !frame.intents.is_empty(),
             "live HTTP frames should expose compact intent traces for the UI"
@@ -96108,6 +96452,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             false
         );
         assert_eq!(
+            step_value["learningContract"]["policyPersistenceLiveHttpStepPersistenceInMemoryOnly"],
+            true
+        );
+        assert_eq!(
             step_value["learningContract"]["policyPersistencePlaybackExternalWritesEnabled"],
             false
         );
@@ -96123,6 +96471,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             step_value["learningContract"]["policyPersistenceExplicitPostgresExportBatched"],
             true
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistencePostgresBatchTriggers"],
+            serde_json::json!([
+                "completed-game",
+                "manual-branch-tip-export",
+                "policy-version-batch"
+            ])
         );
         assert_eq!(
             step_value["uiContract"]["playbackLoadUsesGetAssetsOnly"],
@@ -96312,6 +96668,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&state.body).expect("bridge mounted state json");
         assert_eq!(state_value["config"]["seed"], 71);
         assert_eq!(state_value["liveHttp"]["workerThreads"], 3);
+        assert_eq!(
+            state_value["liveHttp"]["workerQueueCapacity"],
+            3 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert_eq!(state_value["liveHttp"]["boundedWorkerQueue"], true);
         assert_eq!(state_value["liveHttp"]["reusesWorkers"], true);
         assert_eq!(state_value["liveHttp"]["spawnsPerRequest"], false);
 
@@ -96325,6 +96686,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&step.body).expect("bridge mounted step json");
         assert_eq!(step_value["summary"]["ticks"], 1);
         assert_eq!(step_value["liveHttp"]["workerThreads"], 3);
+        assert_eq!(
+            step_value["liveHttp"]["workerQueueCapacity"],
+            3 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert_eq!(step_value["liveHttp"]["boundedWorkerQueue"], true);
 
         let bad = bridge.handle_request("GET /oops", "/des-rs/api/state", "");
         assert_eq!(bad.status, 400);
@@ -96335,6 +96701,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     fn live_http_worker_pool_count_is_sanitized_and_bounded() {
         assert_eq!(live_http_worker_threads(0), 1);
         assert_eq!(live_http_worker_threads(1), 1);
+        assert_eq!(
+            live_http_worker_queue_capacity(0),
+            LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert_eq!(
+            live_http_worker_queue_capacity(3),
+            3 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
         assert_eq!(
             live_http_worker_threads(MAX_LIVE_HTTP_WORKER_THREADS + 100),
             MAX_LIVE_HTTP_WORKER_THREADS
@@ -96355,6 +96729,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let zero_state = zero_worker_server.session.lock().unwrap().state_response();
         assert_eq!(zero_state.live_http.worker_model, "worker-pool");
         assert_eq!(zero_state.live_http.worker_threads, 1);
+        assert_eq!(
+            zero_state.live_http.worker_queue_capacity,
+            LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert!(zero_state.live_http.bounded_worker_queue);
         assert!(zero_state.live_http.reuses_workers);
         assert!(!zero_state.live_http.spawns_per_request);
 
@@ -96375,6 +96754,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             oversized_state.live_http.worker_threads,
             MAX_LIVE_HTTP_WORKER_THREADS
         );
+        assert_eq!(
+            oversized_state.live_http.worker_queue_capacity,
+            MAX_LIVE_HTTP_WORKER_THREADS * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert!(oversized_state.live_http.bounded_worker_queue);
         assert!(oversized_state.live_http.reuses_workers);
         assert!(!oversized_state.live_http.spawns_per_request);
     }
@@ -96484,6 +96868,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .players
             .iter()
             .all(|player| player.scheduled_index.is_some()));
+        let mut player_operation_orders = HashSet::new();
         for player in &frame.players {
             let decision = player.last_decision.as_ref().expect(
                 "every scheduled player agent should expose a run_time_step decision trace",
@@ -96500,7 +96885,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 "player {} should expose its internal operation order",
                 player.id
             );
+            player_operation_orders.insert(decision.operation_order.join(">"));
         }
+        assert!(
+            player_operation_orders.len() > 1,
+            "player run_time_step operation order should vary across agents according to state/preferences: {player_operation_orders:?}"
+        );
         assert!(frame
             .officials
             .iter()
@@ -96645,6 +97035,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("id=\"shotBlocks\""));
         assert!(html.body.contains("function applyInputAck"));
         assert!(html.body.contains("input rejected"));
+        assert!(html.body.contains("ack.rejectedInputs"));
         assert!(html.body.contains("input accepted"));
         assert!(html
             .body
@@ -98800,6 +99191,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(state.policy_probability.away_states > 0);
         assert_eq!(state.live_http.worker_model, "worker-pool");
         assert_eq!(state.live_http.worker_threads, 2);
+        assert_eq!(
+            state.live_http.worker_queue_capacity,
+            2 * LIVE_HTTP_CONNECTION_QUEUE_PER_WORKER
+        );
+        assert!(state.live_http.bounded_worker_queue);
         assert!(state.live_http.reuses_workers);
         assert!(!state.live_http.spawns_per_request);
         assert!(state.live_http.batches_step_ticks);
@@ -100001,6 +100397,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(ack.status, 200);
         let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(ack_value["acceptedInputs"], 0);
+        assert_eq!(ack_value["rejectedInputs"], 1);
         assert_eq!(ack_value["queued"], false);
         assert_eq!(ack_value["queuedHumanInputs"], 0);
         assert_eq!(input_queue.queued_len(), 0);
@@ -100026,6 +100423,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(ack.status, 200);
         let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(ack_value["acceptedInputs"], 0);
+        assert_eq!(ack_value["rejectedInputs"], 1);
         assert_eq!(ack_value["queued"], false);
         assert_eq!(ack_value["queuedHumanInputs"], 0);
         assert_eq!(input_queue.queued_len(), 0);
@@ -100047,6 +100445,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(ack.status, 200);
         let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(ack_value["acceptedInputs"], 1);
+        assert_eq!(ack_value["rejectedInputs"], 0);
         assert_eq!(ack_value["queued"], true);
         assert_eq!(
             session.lock().unwrap().controller_thread_stats()[0].accepted_frames,
@@ -103979,7 +104378,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ui?.liveStepPostEnabled"));
         assert!(html.contains("ui?.liveInputPostEnabled"));
         assert!(html.contains("playback ${playbackPosts}"));
-        assert!(html.contains("live ${livePosts}"));
+        assert!(html.contains("live-only ${livePosts}"));
+        assert!(html.contains("function soccerPlaybackAssetMode"));
+        assert!(html.contains("pathname.includes(\"/out/\")"));
+        assert!(html.contains("!pathname.includes(\"/soccer/live\")"));
+        assert!(html.contains("function soccerLivePostApiEnabled()"));
+        assert!(html.contains("!soccerPlaybackAssetMode(current.pathname)"));
+        assert!(html.contains("throw new Error(\"playback mode uses GET-only assets\")"));
+        assert!(html.contains("if (!soccerLivePostApiEnabled()) return;"));
+        assert!(html.contains("if (!soccerLivePostApiEnabled()) return \"Playback local\";"));
         assert!(html.contains("uiContract: null"));
         assert!(html
             .contains("trace.uiContract = meta.uiContract || meta.playback?.uiContract || null"));
@@ -104080,9 +104487,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("Playback ready"));
         assert!(html.contains("ballAltitudeYards"));
         assert!(html.contains("altitudeYards"));
-        assert!(html.contains("b.ballAcceleration"));
-        assert!(html.contains("b.ballJerk"));
+        assert!(html.contains("function centralBrainBallKinematics"));
+        assert!(html.contains("b?.ballKinematics"));
+        assert!(html.contains("centralBrainBallVec(b, \"ballAcceleration\", 4)"));
+        assert!(html.contains("centralBrainBallVec(b, \"ballJerk\", 6)"));
         assert!(html.contains("b.ballAltitudeYards"));
+        assert!(html.contains("b.ballScheduledIndex"));
+        assert!(html.contains("b.ballLastAction"));
         assert!(html
             .contains("B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)}"));
         assert!(html.contains("brain.teamCentroid"));
@@ -104995,6 +105406,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             false
         );
         assert_eq!(
+            contract["policyPersistenceLiveHttpStepPersistenceInMemoryOnly"],
+            true
+        );
+        assert_eq!(
             contract["policyPersistencePlaybackExternalWritesEnabled"],
             false
         );
@@ -105014,6 +105429,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             contract["policyPersistencePostgresPolicyVersionBatches"],
             true
+        );
+        assert_eq!(
+            contract["policyPersistencePostgresBatchTriggers"],
+            serde_json::json!([
+                "completed-game",
+                "manual-branch-tip-export",
+                "policy-version-batch"
+            ])
         );
         assert_eq!(
             contract["postgresContract"]["backend"],
@@ -105322,6 +105745,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             Some(frame_liveness.ball_decision_frames as u64)
         );
         assert_eq!(
+            meta["tacticalLiveness"]["officialDecisionFrames"].as_u64(),
+            Some(frame_liveness.official_decision_frames as u64)
+        );
+        assert_eq!(
             meta["tacticalLiveness"]["humanControlledPlayerDecisions"].as_u64(),
             Some(frame_liveness.human_controlled_player_decisions as u64)
         );
@@ -105562,7 +105989,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let first_frame: serde_json::Value =
             serde_json::from_str(frame_lines.lines().next().expect("first frame line"))
                 .expect("frame json");
-        assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
+        let players = first_frame["players"].as_array().expect("playback players");
+        assert_eq!(players.len(), 22);
         assert_eq!(first_frame["officials"].as_array().unwrap().len(), 3);
 
         let blocking_file = out_dir.join("not-a-directory");
@@ -105707,6 +106135,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .as_u64()
             .is_some());
         assert!(meta["tacticalLiveness"]["ballDecisionFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["officialDecisionFrames"]
             .as_u64()
             .is_some());
         assert!(meta["tacticalLiveness"]["humanControlledPlayerDecisions"]
@@ -106053,12 +106484,22 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 > 0.10,
             "default 10-minute trace should move the ball goalward"
         );
-        assert!(
-            meta["tacticalLiveness"]["playerDecisionModelSamples"]
-                .as_u64()
-                .unwrap_or(0)
-                > 0,
-            "default 10-minute trace should export player MDP/POMDP decisions"
+        let expected_player_decisions =
+            SOCCER_MATCH_PLAYER_COUNT as u64 * config.total_ticks();
+        assert_eq!(
+            meta["tacticalLiveness"]["playerDecisionModelSamples"].as_u64(),
+            Some(expected_player_decisions),
+            "default 10-minute trace should export one player MDP/POMDP decision per player per tick"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerMdpGridSamples"].as_u64(),
+            Some(expected_player_decisions),
+            "every default 10-minute player decision should resolve an MDP pitch grid"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerPomdpGridSamples"].as_u64(),
+            Some(expected_player_decisions),
+            "every default 10-minute player decision should resolve a POMDP observation grid"
         );
         assert!(
             meta["tacticalLiveness"]["ballDecisionFrames"]
@@ -106113,6 +106554,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 6000);
         assert_eq!(meta["tacticalLiveness"]["ballDecisionFrames"], 6000);
+        assert_eq!(
+            meta["tacticalLiveness"]["officialDecisionFrames"],
+            SOCCER_MATCH_OFFICIAL_COUNT as u64 * config.total_ticks()
+        );
         assert!(
             meta["tacticalLiveness"]["playerOperationOrderSamples"]
                 .as_u64()
@@ -106230,7 +106675,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(lines.last().expect("last frame")).expect("last frame json");
         assert_eq!(first_frame["tick"], 0);
         assert_eq!(last_frame["tick"], 6_000);
-        assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
+        let players = first_frame["players"].as_array().expect("playback players");
+        assert_eq!(players.len(), 22);
         assert_eq!(last_frame["players"].as_array().unwrap().len(), 22);
         assert_eq!(last_frame["officials"].as_array().unwrap().len(), 3);
         assert_eq!(first_frame["agentScheduleSummary"]["totalAgents"], 0);
@@ -106386,6 +106832,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("weightPounds"));
         assert!(html.contains("label: \"Weight\""));
         assert!(html.contains("Wt${weight.toFixed(0)}"));
+        assert!(html.contains("function compactSkillBandLabel"));
+        assert!(html.contains("p?.skillBands"));
+        assert!(html.contains("typeof skillBands === \"string\""));
+        assert!(html.contains("return compact || \"-\""));
         assert!(html.contains("\"flank-low-cross\""));
         assert!(html.contains("\"flank-high-cross\""));
         assert!(html.contains("\"killer-pass\""));
@@ -106466,6 +106916,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("policyPersistenceHttpBatchingRequired"));
         assert!(html.contains("policyPersistenceFlushPolicy"));
         assert!(html.contains("policyPersistenceLiveHttpStepWritesToPostgres"));
+        assert!(html.contains("policyPersistenceLiveHttpStepPersistenceInMemoryOnly"));
+        assert!(html.contains("policyPersistencePostgresBatchTriggers"));
+        assert!(html.contains("sim-only"));
         assert!(html.contains("policyPersistencePlaybackHttpPostsEnabled"));
         assert!(html.contains("policyPersistenceExplicitPostgresExportEndpointEnabled"));
         assert!(html.contains("policyPersistenceExplicitPostgresExportBatched"));
@@ -106595,6 +107048,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function scheduleInputRetry"));
         assert!(html.contains("function flushQueuedInputsToInputApi"));
         assert!(html.contains("postJson(\"/api/input\", inputs)"));
+        assert!(html.contains("workerQueueCapacity"));
+        assert!(html.contains("boundedWorkerQueue"));
+        assert!(html.contains("Qunbounded"));
         assert!(html.contains("function coalesceQueuedInputsBySlot"));
         assert!(html.contains("function compactQueuedInputsForBrowser"));
         assert!(html.contains("function drainQueuedInputsForDispatch"));
@@ -106668,7 +107124,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let first_frame: serde_json::Value =
             serde_json::from_str(first_line).expect("playback frame json");
 
-        assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
+        let players = first_frame["players"].as_array().expect("playback players");
+        assert_eq!(players.len(), 22);
         assert_eq!(first_frame["officials"].as_array().unwrap().len(), 3);
         assert_eq!(
             first_frame["centralBrain"]["trackedPlayers"]
@@ -106677,10 +107134,46 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .len(),
             22
         );
+        let brain_ball = first_frame["centralBrain"]["ballKinematics"]
+            .as_array()
+            .expect("compact central-brain ball kinematics");
+        assert_eq!(brain_ball.len(), 9);
+        let compact_json = |value: &serde_json::Value| {
+            serde_json::json!(soccer_playback_compact_f64(
+                value.as_f64().expect("numeric ball field")
+            ))
+        };
+        assert_eq!(
+            brain_ball[0],
+            compact_json(&first_frame["ball"]["position"]["x"])
+        );
+        assert_eq!(
+            brain_ball[1],
+            compact_json(&first_frame["ball"]["position"]["y"])
+        );
+        assert_eq!(
+            brain_ball[2],
+            compact_json(&first_frame["ball"]["velocity"]["x"])
+        );
+        assert_eq!(
+            brain_ball[3],
+            compact_json(&first_frame["ball"]["velocity"]["y"])
+        );
+        assert_eq!(
+            brain_ball[4],
+            compact_json(&first_frame["ball"]["acceleration"]["x"])
+        );
+        assert_eq!(
+            brain_ball[5],
+            compact_json(&first_frame["ball"]["acceleration"]["y"])
+        );
+        assert_eq!(brain_ball[6], compact_json(&first_frame["ball"]["jerk"]["x"]));
+        assert_eq!(brain_ball[7], compact_json(&first_frame["ball"]["jerk"]["y"]));
+        assert_eq!(brain_ball[8], compact_json(&first_frame["ball"]["altitudeYards"]));
         assert!(first_frame["players"][0].get("position").is_some());
         assert!(first_frame["players"][0].get("shirt").is_some());
         assert!(first_frame["players"][0].get("movementGait").is_some());
-        let skill_bands = first_frame["players"][0]["skillBands"]
+        let skill_bands = players[0]["skillBands"]
             .as_str()
             .expect("compact playback skill bands");
         assert_eq!(skill_bands.len(), 8);
@@ -106688,6 +107181,26 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let shooting = u8::from_str_radix(&skill_bands[3..4], 36).expect("shooting skill band");
         assert!(speed > 0 && speed <= 10);
         assert!(shooting > 0 && shooting <= 10);
+        let mut unique_skill_bands = HashSet::new();
+        for player in players {
+            let bands = player["skillBands"]
+                .as_str()
+                .expect("each playback player should expose compact skill bands");
+            assert_eq!(bands.len(), 8);
+            assert!(
+                bands
+                    .chars()
+                    .all(|ch| { ch.to_digit(36).is_some_and(|band| (1..=10).contains(&band)) }),
+                "skill bands should be compact 1..=10 base36 values: {bands}"
+            );
+            unique_skill_bands.insert(bands.to_string());
+        }
+        assert!(
+            unique_skill_bands.len() >= 8,
+            "slim playback should preserve differentiated player skills, got {} unique bands: {:?}",
+            unique_skill_bands.len(),
+            unique_skill_bands
+        );
         assert!(first_frame["ball"].get("velocity").is_some());
         assert!(first_frame["ball"].get("altitudeYards").is_some());
         assert!(first_frame["homeDirective"]
@@ -106736,6 +107249,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .iter()
             .find(|frame| frame["tick"].as_u64().unwrap_or(0) > 0)
             .expect("scheduled playback frame");
+        assert!(
+            scheduled_frame["centralBrain"]["ballScheduledIndex"]
+                .as_u64()
+                .is_some(),
+            "scheduled central brain playback should keep the ball agent schedule index"
+        );
         assert!(scheduled_frame["centralBrain"]["homeShape"]
             .get("centroidToBallYards")
             .is_some());

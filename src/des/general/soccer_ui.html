@@ -591,6 +591,11 @@ let inputFlushRetryAttempt = 0;
 let lastInputAck = {acceptedInputs: 0, queuedHumanInputs: 0, error: "", at: 0};
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
+  if (!soccerLivePostApiEnabled()) {
+    window.__humanInputQueue = [];
+    updateInputStatusLabels();
+    return;
+  }
   window.__humanInputQueue.push(frame);
   compactQueuedInputsForBrowser();
   updateInputStatusLabels();
@@ -715,7 +720,18 @@ function soccerApiUrl(path) {
   }
   return new URL(`${prefix}${normalizedPath}`, current.href).toString();
 }
+function soccerPlaybackAssetMode(pathname = window.location.pathname) {
+  return pathname.includes("/out/") || !pathname.includes("/soccer/live");
+}
+function soccerLivePostApiEnabled() {
+  const current = new URL(window.location.href);
+  const ui = trace.uiContract || trace.playback?.uiContract || {};
+  return !soccerPlaybackAssetMode(current.pathname) && ui.liveSimulationPostApiEnabled !== false;
+}
 async function postSoccerJson(path, payload, resource = "api") {
+  if (!soccerLivePostApiEnabled()) {
+    throw new Error("playback mode uses GET-only assets");
+  }
   const options = fetchOptions("application/json");
   options.method = "POST";
   options.headers = {...options.headers, "Content-Type": "application/json"};
@@ -1214,6 +1230,14 @@ function centralBrainShapeLabel(b) {
   };
   return `${shapeText("H", b?.homeShape)}${shapeText("A", b?.awayShape)}`;
 }
+function centralBrainBallKinematics(b) {
+  return Array.isArray(b?.ballKinematics) ? b.ballKinematics : null;
+}
+function centralBrainBallVec(b, key, offset) {
+  if (b?.[key]) return b[key];
+  const compact = centralBrainBallKinematics(b);
+  return {x: Number(compact?.[offset] ?? 0), y: Number(compact?.[offset + 1] ?? 0)};
+}
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
@@ -1223,11 +1247,14 @@ function centralBrainLabel(b) {
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   const center = b.centerOfPlay;
   const centerText = center ? ` C${Number(center.x ?? 0).toFixed(0)},${Number(center.y ?? 0).toFixed(0)}` : "";
-  const ballSpeed = vecLen(b.ballVelocity || {x: 0, y: 0});
-  const ballAccel = vecLen(b.ballAcceleration || {x: 0, y: 0});
-  const ballJerk = vecLen(b.ballJerk || {x: 0, y: 0});
-  const ballZ = Number(b.ballAltitudeYards ?? 0);
-  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}`;
+  const compactBall = centralBrainBallKinematics(b);
+  const ballSpeed = vecLen(centralBrainBallVec(b, "ballVelocity", 2));
+  const ballAccel = vecLen(centralBrainBallVec(b, "ballAcceleration", 4));
+  const ballJerk = vecLen(centralBrainBallVec(b, "ballJerk", 6));
+  const ballZ = Number(b.ballAltitudeYards ?? compactBall?.[8] ?? 0);
+  const ballSchedule = playbackScheduleSlotLabel(b.ballScheduledIndex);
+  const ballAction = b.ballLastAction ? ` ${b.ballLastAction}` : "";
+  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}${ballSchedule}${ballAction}`;
   const controllerText = centralBrainControllerAssignmentLabel(b);
   const shapeText = centralBrainShapeLabel(b);
   return `${players}p ${officials}o${schedule} ${possession}${holder}${controllerText}${centerText}${shapeText}${ballText}`;
@@ -2305,7 +2332,7 @@ function learningPersistenceLabel() {
   const batched = contract.policyPersistenceExternalWritesPerTimestep === false ? "batched" : "per-tick?";
   const playbackPosts = contract.policyPersistencePlaybackHttpPostsEnabled || ui?.playbackStepPostEnabled || ui?.playbackInputPostEnabled ? "POST" : "GET";
   const livePosts = ui?.liveStepPostEnabled || ui?.liveInputPostEnabled ? "POST" : "off";
-  return `${mode} ${backend} ${retention} ${batched} playback ${playbackPosts} live ${livePosts}`;
+  return `${mode} ${backend} ${retention} ${batched} playback ${playbackPosts} live-only ${livePosts}`;
 }
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);
@@ -2412,6 +2439,7 @@ function applyControllerAssignments(assignments) {
 async function syncControllerAssignment(slot, playerId) {
   const requestId = ++controllerAssignmentSyncSeq;
   const payload = {controllerSlot: slot, playerId: playerId == null ? null : playerId};
+  if (!soccerLivePostApiEnabled()) return;
   try {
     const data = await postSoccerJson("/api/assign", payload, "assign");
     if (requestId !== controllerAssignmentSyncSeq) return;
@@ -2426,6 +2454,11 @@ async function syncControllerAssignment(slot, playerId) {
   }
 }
 function scheduleInputFlush(delayMs = LIVE_INPUT_FLUSH_INTERVAL_MS) {
+  if (!soccerLivePostApiEnabled()) {
+    window.__humanInputQueue = [];
+    updateInputStatusLabels();
+    return;
+  }
   if (inputFlushTimer != null || inputFlushInFlight) return;
   inputFlushTimer = window.setTimeout(
     flushQueuedInputsToInputApi,
@@ -2451,6 +2484,7 @@ function latestQueuedInputSeq(slot) {
   }, 0);
 }
 function inputStatusLabel(slot) {
+  if (!soccerLivePostApiEnabled()) return "Playback local";
   const queued = slotQueuedInputCount(slot);
   const latestSeq = latestQueuedInputSeq(slot);
   const sending = inputFlushInFlight ? " sending" : "";
@@ -2477,6 +2511,11 @@ function updateInputStatusLabels() {
 }
 async function flushQueuedInputsToInputApi() {
   inputFlushTimer = null;
+  if (!soccerLivePostApiEnabled()) {
+    window.__humanInputQueue = [];
+    updateInputStatusLabels();
+    return;
+  }
   if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
   inputFlushInFlight = true;
   updateInputStatusLabels();

@@ -5351,7 +5351,10 @@ fn compact_music_descriptor_value(value: &str, max_chars: usize) -> String {
     if compact.chars().count() <= max_chars {
         return compact;
     }
-    let mut out = compact.chars().take(max_chars.saturating_sub(3)).collect::<String>();
+    let mut out = compact
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
     out.push_str("...");
     out
 }

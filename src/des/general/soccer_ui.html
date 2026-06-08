@@ -450,6 +450,7 @@ const trace = {
   decisionModel: null,
   controllerContract: null,
   physicsContract: null,
+  learningContract: null,
   stepTiming: null,
   frames: [],
   events: [],
@@ -865,6 +866,7 @@ function resetTraceState() {
   trace.decisionModel = null;
   trace.controllerContract = null;
   trace.physicsContract = null;
+  trace.learningContract = null;
   trace.stepTiming = null;
   trace.frames = [];
   trace.events = [];
@@ -1738,6 +1740,14 @@ function controllerInputRuntimeMode() {
 function physicsHistoryWindowSeconds() {
   return Number(trace.physicsContract?.playerHistoryWindowSeconds || trace.physicsContract?.ballHistoryWindowSeconds || 0);
 }
+function learningPersistenceLabel() {
+  const contract = trace.learningContract || trace.playback?.learningContract || null;
+  if (!contract) return "learn ?";
+  const mode = contract.learningEnabled ? "learn" : "observe";
+  const backend = contract.policyPersistenceBackend || "json";
+  const retention = contract.policyPersistenceStoresAllWeightHistory ? "history" : "tip";
+  return `${mode} ${backend} ${retention}`;
+}
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);
   const fallback = Number(FALLBACK_CONFIG.maxHumanPlayers || 4);
@@ -2148,6 +2158,7 @@ async function loadTraceMeta(signal) {
   trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null;
   trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null;
   trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null;
+  trace.learningContract = meta.learningContract || meta.playback?.learningContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;

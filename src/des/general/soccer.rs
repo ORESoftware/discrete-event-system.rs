@@ -31771,6 +31771,73 @@ pub struct SoccerPhysicsRuntimeContract {
     pub player_mass_strength_physics_enabled: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerLearningRewardContract {
+    pub goal_points: f64,
+    pub goal_chain_pattern: Vec<f64>,
+    pub shot_on_target_points: f64,
+    pub shot_on_target_pattern: Vec<f64>,
+    pub possession_progress_milestone_yards: f64,
+    pub possession_progress_points: f64,
+    pub possession_progress_reward_weights: Vec<f64>,
+    pub possession_stall_pass_threshold: usize,
+    pub possession_stall_min_gain_yards: f64,
+    pub possession_stall_penalty_points: f64,
+    pub completed_forward_pass_base_reward_own_half: f64,
+    pub completed_forward_pass_base_reward_opponent_half: f64,
+    pub completed_forward_pass_progress_reward_per_yard: f64,
+    pub completed_forward_pass_progress_reward_max_yards: f64,
+    pub dense_forward_pass_progress_reward_per_yard: f64,
+    pub dense_forward_carry_progress_reward_per_yard: f64,
+    pub near_goal_no_shot_penalty_points: f64,
+    pub excessive_hold_penalty_points: f64,
+    pub defensive_dispossession_reward_points: f64,
+    pub failed_dispossession_penalty_points: f64,
+    pub beaten_by_dribble_penalty_points: f64,
+    pub shot_block_defender_reward_points: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerLearningRuntimeContract {
+    pub learning_enabled: bool,
+    pub learning_logging_enabled: bool,
+    pub learning_interval_ticks: usize,
+    pub policy_train_max_transitions_per_tick: usize,
+    pub full_game_learning_enabled: bool,
+    pub formation_lp_enabled: bool,
+    pub mdp_enabled: bool,
+    pub pomdp_enabled: bool,
+    pub q_policy_enabled: bool,
+    pub team_q_policies_enabled: bool,
+    pub adversarial_policy_training_enabled: bool,
+    pub adversarial_embedding_exploitation_enabled: bool,
+    pub neural_learning_enabled: bool,
+    pub neural_learning_backend: String,
+    pub neural_learning_train_every_ticks: usize,
+    pub neural_learning_batch_size: usize,
+    pub neural_learning_max_batches_per_tick: usize,
+    pub neural_learning_replay_capacity: usize,
+    pub tracking_dataset_training_enabled: bool,
+    pub tracking_csv_import_enabled: bool,
+    pub tracking_jsonl_import_enabled: bool,
+    pub tracking_coordinate_calibration_enabled: bool,
+    pub moment_replay_training_enabled: bool,
+    pub moment_vector_search_enabled: bool,
+    pub moment_embedder_version: String,
+    pub live_moment_windows_path: String,
+    pub live_policy_path: String,
+    pub tracked_policy_path: String,
+    pub policy_history_path: String,
+    pub json_policy_snapshots_enabled: bool,
+    pub policy_persistence_backend: String,
+    pub policy_persistence_retention_model: String,
+    pub policy_persistence_stores_all_weight_history: bool,
+    pub postgres_contract: SoccerPolicyPostgresStorageContract,
+    pub reward_contract: SoccerLearningRewardContract,
+}
+
 fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
     SoccerPlaybackAgentContract {
         expected_total_agents: 1 + SOCCER_MATCH_PLAYER_COUNT + SOCCER_MATCH_OFFICIAL_COUNT + 1,
@@ -31789,6 +31856,78 @@ fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
         field_entities_use_fisher_yates: true,
         per_frame_schedule_summary_required: true,
         slim_frames_omit_full_agent_schedule: true,
+    }
+}
+
+fn soccer_learning_reward_contract() -> SoccerLearningRewardContract {
+    SoccerLearningRewardContract {
+        goal_points: GOAL_REWARD_POINTS,
+        goal_chain_pattern: GOAL_CHAIN_REWARD_PATTERN.to_vec(),
+        shot_on_target_points: SHOT_ON_TARGET_REWARD_POINTS,
+        shot_on_target_pattern: SHOT_ON_TARGET_REWARD_PATTERN.to_vec(),
+        possession_progress_milestone_yards: POSSESSION_PROGRESS_MILESTONE_YARDS,
+        possession_progress_points: POSSESSION_PROGRESS_REWARD_POINTS,
+        possession_progress_reward_weights: POSSESSION_PROGRESS_REWARD_WEIGHTS.to_vec(),
+        possession_stall_pass_threshold: POSSESSION_STALL_PASS_THRESHOLD,
+        possession_stall_min_gain_yards: POSSESSION_STALL_MIN_GAIN_YARDS,
+        possession_stall_penalty_points: POSSESSION_STALL_PENALTY_POINTS,
+        completed_forward_pass_base_reward_own_half: COMPLETED_FORWARD_PASS_BASE_REWARD_OWN_HALF,
+        completed_forward_pass_base_reward_opponent_half:
+            COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF,
+        completed_forward_pass_progress_reward_per_yard:
+            COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD,
+        completed_forward_pass_progress_reward_max_yards:
+            COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS,
+        dense_forward_pass_progress_reward_per_yard: DENSE_FORWARD_PASS_PROGRESS_REWARD_PER_YARD,
+        dense_forward_carry_progress_reward_per_yard: DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD,
+        near_goal_no_shot_penalty_points: NEAR_GOAL_NO_SHOT_PENALTY_POINTS,
+        excessive_hold_penalty_points: EXCESSIVE_HOLD_PENALTY_POINTS,
+        defensive_dispossession_reward_points: DEFENSIVE_DISPOSSESSION_REWARD_POINTS,
+        failed_dispossession_penalty_points: FAILED_DISPOSSESSION_PENALTY_POINTS,
+        beaten_by_dribble_penalty_points: BEATEN_BY_DRIBBLE_PENALTY_POINTS,
+        shot_block_defender_reward_points: SHOT_BLOCK_DEFENDER_REWARD_POINTS,
+    }
+}
+
+fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRuntimeContract {
+    SoccerLearningRuntimeContract {
+        learning_enabled: config.learning_enabled,
+        learning_logging_enabled: config.learning_logging_enabled,
+        learning_interval_ticks: config.learning_interval_ticks.max(1),
+        policy_train_max_transitions_per_tick: config.policy_train_max_transitions_per_tick.max(1),
+        full_game_learning_enabled: config.full_game_learning_enabled,
+        formation_lp_enabled: config.formation_lp_enabled,
+        mdp_enabled: true,
+        pomdp_enabled: true,
+        q_policy_enabled: true,
+        team_q_policies_enabled: true,
+        adversarial_policy_training_enabled: true,
+        adversarial_embedding_exploitation_enabled: config
+            .adversarial_embedding_exploitation_enabled,
+        neural_learning_enabled: config.neural_learning.enabled,
+        neural_learning_backend: config.neural_learning.backend.as_str().to_string(),
+        neural_learning_train_every_ticks: config.neural_learning.sanitized_train_every_ticks(),
+        neural_learning_batch_size: config.neural_learning.sanitized_batch_size(),
+        neural_learning_max_batches_per_tick: config.neural_learning.max_batches_per_tick.max(1),
+        neural_learning_replay_capacity: config.neural_learning.replay_capacity,
+        tracking_dataset_training_enabled: true,
+        tracking_csv_import_enabled: true,
+        tracking_jsonl_import_enabled: true,
+        tracking_coordinate_calibration_enabled: true,
+        moment_replay_training_enabled: true,
+        moment_vector_search_enabled: true,
+        moment_embedder_version: SOCCER_MOMENT_EMBEDDER_VERSION.to_string(),
+        live_moment_windows_path: DEFAULT_LIVE_MOMENT_WINDOWS_PATH.to_string(),
+        live_policy_path: DEFAULT_LIVE_TEAM_POLICY_PATH.to_string(),
+        tracked_policy_path: DEFAULT_TRACKED_TEAM_POLICY_PATH.to_string(),
+        policy_history_path: DEFAULT_LIVE_TEAM_POLICY_HISTORY_PATH.to_string(),
+        json_policy_snapshots_enabled: true,
+        policy_persistence_backend: SOCCER_POLICY_POSTGRES_BACKEND.to_string(),
+        policy_persistence_retention_model: SOCCER_POLICY_POSTGRES_RETENTION_MODEL.to_string(),
+        policy_persistence_stores_all_weight_history:
+            SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY,
+        postgres_contract: SoccerPolicyPostgresStorageContract::default(),
+        reward_contract: soccer_learning_reward_contract(),
     }
 }
 
@@ -47371,6 +47510,7 @@ fn soccer_playback_metadata_json(
     let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
     let controller_contract = soccer_controller_runtime_contract(config);
     let physics_contract = soccer_physics_runtime_contract(config);
+    let learning_contract = soccer_learning_runtime_contract(config);
     serde_json::json!({
         "runId": soccer_artifact_run_id(config.seed, generated_at_unix_ms),
         "generatedAtUnixMs": generated_at_unix_ms,
@@ -47382,6 +47522,7 @@ fn soccer_playback_metadata_json(
         "decisionModel": soccer_decision_model_contract(),
         "controllerContract": controller_contract,
         "physicsContract": physics_contract,
+        "learningContract": learning_contract,
         "playback": {
             "dtSeconds": config.dt_seconds,
             "durationSeconds": config.effective_duration_seconds(),
@@ -47393,6 +47534,7 @@ fn soccer_playback_metadata_json(
             "decisionModel": soccer_decision_model_contract(),
             "controllerContract": controller_contract,
             "physicsContract": physics_contract,
+            "learningContract": learning_contract,
         },
         "events": events,
     })
@@ -92312,6 +92454,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains(
             "trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null"
         ));
+        assert!(html.contains(
+            "trace.learningContract = meta.learningContract || meta.playback?.learningContract || null"
+        ));
         assert!(html.contains("expectedTotalAgents"));
         assert!(html.contains("expectedPlayerCount"));
         assert!(html.contains("decisionModel"));
@@ -92322,6 +92467,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("playerHistoryWindowSeconds"));
         assert!(html.contains("ballHistoryWindowSeconds"));
         assert!(html.contains("function physicsHistoryWindowSeconds()"));
+        assert!(html.contains("learningContract"));
+        assert!(html.contains("function learningPersistenceLabel()"));
+        assert!(html.contains("policyPersistenceBackend"));
+        assert!(html.contains("policyPersistenceStoresAllWeightHistory"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
@@ -92748,6 +92897,168 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .any(|gait| gait["gait"] == "backRun" || gait["gait"] == "backSprint"));
     }
 
+    fn assert_soccer_learning_contract_json(meta: &serde_json::Value, config: &MatchConfig) {
+        assert_eq!(
+            meta["learningContract"],
+            meta["playback"]["learningContract"]
+        );
+        let contract = &meta["learningContract"];
+        assert_eq!(contract["learningEnabled"], config.learning_enabled);
+        assert_eq!(
+            contract["learningLoggingEnabled"],
+            config.learning_logging_enabled
+        );
+        assert_eq!(
+            contract["learningIntervalTicks"],
+            config.learning_interval_ticks.max(1)
+        );
+        assert_eq!(
+            contract["policyTrainMaxTransitionsPerTick"],
+            config.policy_train_max_transitions_per_tick.max(1)
+        );
+        assert_eq!(
+            contract["fullGameLearningEnabled"],
+            config.full_game_learning_enabled
+        );
+        assert_eq!(contract["formationLpEnabled"], config.formation_lp_enabled);
+        assert_eq!(contract["mdpEnabled"], true);
+        assert_eq!(contract["pomdpEnabled"], true);
+        assert_eq!(contract["qPolicyEnabled"], true);
+        assert_eq!(contract["teamQPoliciesEnabled"], true);
+        assert_eq!(contract["adversarialPolicyTrainingEnabled"], true);
+        assert_eq!(
+            contract["adversarialEmbeddingExploitationEnabled"],
+            config.adversarial_embedding_exploitation_enabled
+        );
+        assert_eq!(
+            contract["neuralLearningEnabled"],
+            config.neural_learning.enabled
+        );
+        assert_eq!(
+            contract["neuralLearningBackend"],
+            config.neural_learning.backend.as_str()
+        );
+        assert_eq!(
+            contract["neuralLearningTrainEveryTicks"],
+            config.neural_learning.sanitized_train_every_ticks()
+        );
+        assert_eq!(
+            contract["neuralLearningBatchSize"],
+            config.neural_learning.sanitized_batch_size()
+        );
+        assert_eq!(contract["trackingDatasetTrainingEnabled"], true);
+        assert_eq!(contract["trackingCsvImportEnabled"], true);
+        assert_eq!(contract["trackingJsonlImportEnabled"], true);
+        assert_eq!(contract["trackingCoordinateCalibrationEnabled"], true);
+        assert_eq!(contract["momentReplayTrainingEnabled"], true);
+        assert_eq!(contract["momentVectorSearchEnabled"], true);
+        assert_eq!(
+            contract["momentEmbedderVersion"],
+            SOCCER_MOMENT_EMBEDDER_VERSION
+        );
+        assert_eq!(
+            contract["liveMomentWindowsPath"],
+            DEFAULT_LIVE_MOMENT_WINDOWS_PATH
+        );
+        assert_eq!(contract["livePolicyPath"], DEFAULT_LIVE_TEAM_POLICY_PATH);
+        assert_eq!(
+            contract["trackedPolicyPath"],
+            DEFAULT_TRACKED_TEAM_POLICY_PATH
+        );
+        assert_eq!(
+            contract["policyHistoryPath"],
+            DEFAULT_LIVE_TEAM_POLICY_HISTORY_PATH
+        );
+        assert_eq!(contract["jsonPolicySnapshotsEnabled"], true);
+        assert_eq!(
+            contract["policyPersistenceBackend"],
+            SOCCER_POLICY_POSTGRES_BACKEND
+        );
+        assert_eq!(
+            contract["policyPersistenceRetentionModel"],
+            SOCCER_POLICY_POSTGRES_RETENTION_MODEL
+        );
+        assert_eq!(
+            contract["policyPersistenceStoresAllWeightHistory"],
+            SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY
+        );
+        assert_eq!(
+            contract["postgresContract"]["backend"],
+            SOCCER_POLICY_POSTGRES_BACKEND
+        );
+        assert_eq!(
+            contract["postgresContract"]["schemaSource"],
+            SOCCER_POLICY_POSTGRES_SCHEMA_SOURCE
+        );
+        assert_eq!(
+            contract["postgresContract"]["storesAllWeightHistory"],
+            SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY
+        );
+        assert_eq!(
+            contract["postgresContract"]["tables"]["policyVersions"],
+            SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
+        );
+        assert_eq!(
+            contract["postgresContract"]["tables"]["runDeltas"],
+            SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE
+        );
+        let rewards = &contract["rewardContract"];
+        assert_eq!(rewards["goalPoints"], GOAL_REWARD_POINTS);
+        assert_eq!(
+            rewards["goalChainPattern"],
+            serde_json::json!(GOAL_CHAIN_REWARD_PATTERN)
+        );
+        assert_eq!(rewards["shotOnTargetPoints"], SHOT_ON_TARGET_REWARD_POINTS);
+        assert_eq!(
+            rewards["shotOnTargetPattern"],
+            serde_json::json!(SHOT_ON_TARGET_REWARD_PATTERN)
+        );
+        assert_eq!(
+            rewards["possessionProgressMilestoneYards"],
+            POSSESSION_PROGRESS_MILESTONE_YARDS
+        );
+        assert_eq!(
+            rewards["possessionProgressPoints"],
+            POSSESSION_PROGRESS_REWARD_POINTS
+        );
+        assert_eq!(
+            rewards["possessionStallPassThreshold"],
+            POSSESSION_STALL_PASS_THRESHOLD
+        );
+        assert_eq!(
+            rewards["possessionStallMinGainYards"],
+            POSSESSION_STALL_MIN_GAIN_YARDS
+        );
+        assert_eq!(
+            rewards["completedForwardPassProgressRewardPerYard"],
+            COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD
+        );
+        assert_eq!(
+            rewards["denseForwardCarryProgressRewardPerYard"],
+            DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD
+        );
+        assert_eq!(
+            rewards["nearGoalNoShotPenaltyPoints"],
+            NEAR_GOAL_NO_SHOT_PENALTY_POINTS
+        );
+        assert_eq!(
+            rewards["excessiveHoldPenaltyPoints"],
+            EXCESSIVE_HOLD_PENALTY_POINTS
+        );
+        assert_eq!(
+            rewards["defensiveDispossessionRewardPoints"],
+            DEFENSIVE_DISPOSSESSION_REWARD_POINTS
+        );
+        assert_eq!(
+            rewards["failedDispossessionPenaltyPoints"],
+            FAILED_DISPOSSESSION_PENALTY_POINTS
+        );
+        assert_eq!(
+            rewards["shotBlockDefenderRewardPoints"],
+            SHOT_BLOCK_DEFENDER_REWARD_POINTS
+        );
+    }
+
     #[test]
     fn soccer_playback_artifact_writer_persists_split_assets() {
         let trace = run_simulation(
@@ -92817,6 +93128,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &trace.config);
         assert_soccer_physics_contract_json(&meta, &trace.config);
+        assert_soccer_learning_contract_json(&meta, &trace.config);
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(meta["playback"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(
@@ -92899,6 +93211,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &config);
         assert_soccer_physics_contract_json(&meta, &config);
+        assert_soccer_learning_contract_json(&meta, &config);
         assert_eq!(
             meta["stepTiming"]["tickBudgetMs"],
             config.dt_seconds * 1000.0

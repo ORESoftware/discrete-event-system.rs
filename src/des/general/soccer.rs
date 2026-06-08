@@ -34489,6 +34489,12 @@ pub struct SoccerDecisionModelContract {
     pub player_skills_in_pomdp_observation: bool,
     pub player_skills_binned_in_mdp_state: bool,
     pub player_skills_in_neural_features: bool,
+    pub action_selection_probabilities_enabled: bool,
+    pub tick_probability_scaling_enabled: bool,
+    pub decision_noise_enabled: bool,
+    pub weighted_operation_order_sampling_enabled: bool,
+    pub skill_weighted_duel_resolution_enabled: bool,
+    pub higher_skill_not_deterministic_enabled: bool,
     pub surface_physics_in_pomdp_observation: bool,
     pub surface_physics_binned_in_mdp_state: bool,
     pub surface_physics_in_neural_features: bool,
@@ -35247,6 +35253,12 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         player_skills_in_pomdp_observation: true,
         player_skills_binned_in_mdp_state: true,
         player_skills_in_neural_features: true,
+        action_selection_probabilities_enabled: true,
+        tick_probability_scaling_enabled: true,
+        decision_noise_enabled: true,
+        weighted_operation_order_sampling_enabled: true,
+        skill_weighted_duel_resolution_enabled: true,
+        higher_skill_not_deterministic_enabled: true,
         surface_physics_in_pomdp_observation: true,
         surface_physics_binned_in_mdp_state: true,
         surface_physics_in_neural_features: true,
@@ -91230,6 +91242,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
 
     #[test]
     fn tackle_resolution_is_probabilistic_between_dribbling_and_defense() {
+        let contract = soccer_decision_model_contract();
+        assert!(contract.skill_weighted_duel_resolution_enabled);
+        assert!(contract.higher_skill_not_deterministic_enabled);
+        assert!(contract.action_selection_probabilities_enabled);
         let mut tackle_wins = 0;
         let mut dribble_survives = 0;
         for seed in 0..220 {
@@ -103710,6 +103726,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(model["playerSkillsInPomdpObservation"], true);
         assert_eq!(model["playerSkillsBinnedInMdpState"], true);
         assert_eq!(model["playerSkillsInNeuralFeatures"], true);
+        assert_eq!(model["actionSelectionProbabilitiesEnabled"], true);
+        assert_eq!(model["tickProbabilityScalingEnabled"], true);
+        assert_eq!(model["decisionNoiseEnabled"], true);
+        assert_eq!(model["weightedOperationOrderSamplingEnabled"], true);
+        assert_eq!(model["skillWeightedDuelResolutionEnabled"], true);
+        assert_eq!(model["higherSkillNotDeterministicEnabled"], true);
         assert_eq!(model["surfacePhysicsInPomdpObservation"], true);
         assert_eq!(model["surfacePhysicsBinnedInMdpState"], true);
         assert_eq!(model["surfacePhysicsInNeuralFeatures"], true);

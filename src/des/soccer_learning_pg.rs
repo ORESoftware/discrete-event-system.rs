@@ -1891,6 +1891,10 @@ struct SoccerPolicyTargetEntryInsert {
     visits: i32,
 }
 
+fn policy_entry_insert_chunk_is_full(row_count: usize) -> bool {
+    row_count >= SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE
+}
+
 fn insert_policy_entries_for_team(
     tx: &mut postgres::Transaction<'_>,
     policy_version_id: &str,
@@ -1899,7 +1903,7 @@ fn insert_policy_entries_for_team(
     source_run_id: Option<&str>,
 ) -> Result<(), String> {
     let team_label = soccer_team_label(team);
-    let mut action_rows = Vec::new();
+    let mut action_rows = Vec::with_capacity(SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE);
     for entry in policy.entries() {
         let state_json = serde_json::to_value(&entry.state)
             .map_err(|err| format!("serialize soccer action state key: {err}"))?;
@@ -1910,16 +1914,28 @@ fn insert_policy_entries_for_team(
             value_micros: soccer_learning_to_micros(entry.value),
             visits: checked_i32(entry.visits),
         });
+        if policy_entry_insert_chunk_is_full(action_rows.len()) {
+            insert_policy_action_entry_rows(
+                tx,
+                policy_version_id,
+                &team_label,
+                source_run_id,
+                &action_rows,
+            )?;
+            action_rows.clear();
+        }
     }
-    insert_policy_action_entry_rows(
-        tx,
-        policy_version_id,
-        &team_label,
-        source_run_id,
-        &action_rows,
-    )?;
+    if !action_rows.is_empty() {
+        insert_policy_action_entry_rows(
+            tx,
+            policy_version_id,
+            &team_label,
+            source_run_id,
+            &action_rows,
+        )?;
+    }
 
-    let mut target_rows = Vec::new();
+    let mut target_rows = Vec::with_capacity(SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE);
     for entry in policy.target_entries() {
         let state_json = serde_json::to_value(&entry.state)
             .map_err(|err| format!("serialize soccer target state key: {err}"))?;
@@ -1934,14 +1950,27 @@ fn insert_policy_entries_for_team(
             value_micros: soccer_learning_to_micros(entry.value),
             visits: checked_i32(entry.visits),
         });
+        if policy_entry_insert_chunk_is_full(target_rows.len()) {
+            insert_policy_target_entry_rows(
+                tx,
+                policy_version_id,
+                &team_label,
+                source_run_id,
+                &target_rows,
+            )?;
+            target_rows.clear();
+        }
     }
-    insert_policy_target_entry_rows(
-        tx,
-        policy_version_id,
-        &team_label,
-        source_run_id,
-        &target_rows,
-    )
+    if !target_rows.is_empty() {
+        insert_policy_target_entry_rows(
+            tx,
+            policy_version_id,
+            &team_label,
+            source_run_id,
+            &target_rows,
+        )?;
+    }
+    Ok(())
 }
 
 fn insert_policy_action_entry_rows(
@@ -3232,5 +3261,19 @@ mod tests {
             SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE * SOCCER_POLICY_TARGET_ENTRY_PARAMETER_COUNT
                 <= POSTGRES_MAX_QUERY_PARAMETERS
         );
+    }
+
+    #[test]
+    fn policy_entry_insert_chunks_flush_at_bounded_capacity() {
+        assert!(!policy_entry_insert_chunk_is_full(0));
+        assert!(!policy_entry_insert_chunk_is_full(
+            SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE - 1
+        ));
+        assert!(policy_entry_insert_chunk_is_full(
+            SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE
+        ));
+        assert!(policy_entry_insert_chunk_is_full(
+            SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE + 1
+        ));
     }
 }

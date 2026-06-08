@@ -205,9 +205,9 @@ spec:
             - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
               value: "200"
             - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
-              value: "2"
+              value: "1"
             - name: SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES
-              value: "2"
+              value: "1"
             - name: SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS
               value: "5"
             - name: SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE

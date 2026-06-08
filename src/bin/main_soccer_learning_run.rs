@@ -3485,6 +3485,14 @@ mod tests {
             Some("1")
         );
         assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_ASYNC_BATCH_QUEUE"),
+            Some("1")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES"),
+            Some("1")
+        );
+        assert_eq!(
             continuous_manifest_env_value("SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE"),
             Some("true")
         );

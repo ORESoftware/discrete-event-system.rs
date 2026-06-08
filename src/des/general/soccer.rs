@@ -67347,46 +67347,77 @@ mod tests {
         let start = sim.players[controlled].position;
         let start_ball_distance = start.distance(sim.ball.position);
         let snapshot = WorldSnapshot::from_match(&sim);
-        let input = HumanInputFrame {
-            controller_slot: 0,
-            player_id: Some(controlled),
-            seq: 1,
-            axis: Vec2::zero(),
-            sprint: true,
-            pass: true,
-            pass_flight: PassFlight::Floor,
-            shoot: false,
-            action: None,
-            target_player: Some(9),
-        };
+        for (seq, pass, shoot, command_label) in
+            [(1, true, false, "pass"), (2, false, true, "shoot")]
+        {
+            let input = HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(controlled),
+                seq,
+                axis: Vec2::zero(),
+                sprint: true,
+                pass,
+                pass_flight: PassFlight::Floor,
+                shoot,
+                action: None,
+                target_player: Some(9),
+            };
 
-        let mut player = sim.players[controlled].clone();
-        let intent = player.run_time_step(&snapshot, Some(&input), None, &mut mulberry32(29_020));
-        let decision = player
-            .last_decision
-            .as_ref()
-            .expect("controlled player decision");
-        assert_eq!(
-            decision.operation_order.first().map(String::as_str),
-            Some("human-input")
-        );
-        assert_eq!(decision.action, "human-move");
-        let SoccerAction::MoveTo(target) = intent.action else {
-            panic!("off-ball ball command should be sanitized to movement, got {intent:?}");
-        };
-        assert!(
-            target.distance(snapshot.ball.position) < start_ball_distance,
-            "off-ball ball command with no axis should move selected player toward the ball"
-        );
-        assert!(
-            sim.pending_pass.is_none(),
-            "off-ball pass input must not create a pending pass"
-        );
-        assert_eq!(
-            sim.ball.holder,
-            Some(holder),
-            "off-ball pass input must not release or steal possession"
-        );
+            let mut player = sim.players[controlled].clone();
+            let intent = player.run_time_step(
+                &snapshot,
+                Some(&input),
+                None,
+                &mut mulberry32(29_020 + seq as u32),
+            );
+            let decision = player
+                .last_decision
+                .as_ref()
+                .expect("controlled player decision");
+            assert_eq!(
+                decision.operation_order.first().map(String::as_str),
+                Some("human-input")
+            );
+            assert_eq!(decision.action, "human-move");
+            let SoccerAction::MoveTo(target) = intent.action else {
+                panic!(
+                    "off-ball {command_label} command should be sanitized to movement, got {intent:?}"
+                );
+            };
+            assert!(
+                target.distance(snapshot.ball.position) < start_ball_distance,
+                "off-ball {command_label} command with no axis should move selected player toward the ball"
+            );
+            let action_target = decision
+                .action_target
+                .as_ref()
+                .expect("off-ball human movement target trace");
+            assert_eq!(action_target.player_id, None);
+            let traced_point = action_target.point.expect("traced movement target point");
+            assert!(
+                traced_point.distance(target) < 1e-9,
+                "trace should record sanitized movement target for off-ball {command_label}"
+            );
+            assert_eq!(
+                action_target.grid.expect("movement target grid").fine.id,
+                pitch_grid_address(
+                    target,
+                    sim.config.field_width_yards,
+                    sim.config.field_length_yards
+                )
+                .fine
+                .id
+            );
+            assert!(
+                sim.pending_pass.is_none(),
+                "off-ball {command_label} input must not create a pending pass"
+            );
+            assert_eq!(
+                sim.ball.holder,
+                Some(holder),
+                "off-ball {command_label} input must not release or steal possession"
+            );
+        }
     }
 
     #[test]

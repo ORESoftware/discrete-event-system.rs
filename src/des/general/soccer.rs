@@ -66,6 +66,7 @@ const GOALKEEPER_PARRY_MAX_YARDS: f64 = 5.0;
 const BALL_AGENT_ID: usize = 25;
 const CENTRAL_BRAIN_AGENT_ID: usize = 26;
 const PLAYER_POSITION_HISTORY_LIMIT: usize = 50;
+const OFFICIAL_POSITION_HISTORY_LIMIT: usize = 50;
 const BALL_POSITION_HISTORY_LIMIT: usize = 50;
 const CONTROLLER_INPUT_YIELD_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
 const CONTROLLER_INPUT_COALESCE_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
@@ -12974,7 +12975,7 @@ impl OfficialAgent {
 
     fn record_position_history(&mut self) {
         self.position_history.push_back(self.position);
-        while self.position_history.len() > PLAYER_POSITION_HISTORY_LIMIT {
+        while self.position_history.len() > OFFICIAL_POSITION_HISTORY_LIMIT {
             self.position_history.pop_front();
         }
     }
@@ -30418,6 +30419,8 @@ fn soccer_accounting_check_frame_histories(
     const POSITION_EPSILON_YARDS: f64 = 1e-6;
     let expected_player_history =
         soccer_accounting_expected_history_len(frame.tick, PLAYER_POSITION_HISTORY_LIMIT);
+    let expected_official_history =
+        soccer_accounting_expected_history_len(frame.tick, OFFICIAL_POSITION_HISTORY_LIMIT);
     let expected_ball_history =
         soccer_accounting_expected_history_len(frame.tick, BALL_POSITION_HISTORY_LIMIT);
 
@@ -30475,8 +30478,8 @@ fn soccer_accounting_check_frame_histories(
     }
 
     for official in &frame.officials {
-        if official.position_history.len() > PLAYER_POSITION_HISTORY_LIMIT
-            || official.position_history.len() < expected_player_history
+        if official.position_history.len() > OFFICIAL_POSITION_HISTORY_LIMIT
+            || official.position_history.len() < expected_official_history
         {
             report.push_violation(
                 frame.tick,
@@ -30484,7 +30487,7 @@ fn soccer_accounting_check_frame_histories(
                 "officialPositionHistory",
                 format!(
                     "{}..={}",
-                    expected_player_history, PLAYER_POSITION_HISTORY_LIMIT
+                    expected_official_history, OFFICIAL_POSITION_HISTORY_LIMIT
                 ),
                 format!(
                     "official {} len {}",
@@ -30514,8 +30517,8 @@ fn soccer_accounting_check_frame_histories(
             .official_history_for(official.id)
             .map(|history| history.len())
             .unwrap_or(0);
-        if shared_history_len > PLAYER_POSITION_HISTORY_LIMIT
-            || shared_history_len < expected_player_history
+        if shared_history_len > OFFICIAL_POSITION_HISTORY_LIMIT
+            || shared_history_len < expected_official_history
         {
             report.push_violation(
                 frame.tick,
@@ -30523,7 +30526,7 @@ fn soccer_accounting_check_frame_histories(
                 "officialHistory",
                 format!(
                     "official {} len {}..={}",
-                    official.id, expected_player_history, PLAYER_POSITION_HISTORY_LIMIT
+                    official.id, expected_official_history, OFFICIAL_POSITION_HISTORY_LIMIT
                 ),
                 shared_history_len.to_string(),
                 "shared position data should retain each official's rolling 50-sample history",
@@ -32491,8 +32494,10 @@ pub struct SoccerPhysicsRuntimeContract {
     pub dt_seconds: f64,
     pub tick_millis: f64,
     pub player_position_history_limit: usize,
+    pub official_position_history_limit: usize,
     pub ball_position_history_limit: usize,
     pub player_history_window_seconds: f64,
+    pub official_history_window_seconds: f64,
     pub ball_history_window_seconds: f64,
     pub history_tracks_velocity_acceleration_jerk: bool,
     pub shared_position_board_uses_rw_lock: bool,
@@ -32782,8 +32787,10 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         dt_seconds,
         tick_millis: dt_seconds * 1_000.0,
         player_position_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        official_position_history_limit: OFFICIAL_POSITION_HISTORY_LIMIT,
         ball_position_history_limit: BALL_POSITION_HISTORY_LIMIT,
         player_history_window_seconds: PLAYER_POSITION_HISTORY_LIMIT as f64 * dt_seconds,
+        official_history_window_seconds: OFFICIAL_POSITION_HISTORY_LIMIT as f64 * dt_seconds,
         ball_history_window_seconds: BALL_POSITION_HISTORY_LIMIT as f64 * dt_seconds,
         history_tracks_velocity_acceleration_jerk: true,
         shared_position_board_uses_rw_lock: true,
@@ -32791,7 +32798,7 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         shared_position_history_tracks_players_officials_ball: true,
         shared_position_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
         shared_position_player_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
-        shared_position_official_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        shared_position_official_history_limit: OFFICIAL_POSITION_HISTORY_LIMIT,
         shared_position_ball_history_limit: BALL_POSITION_HISTORY_LIMIT,
         shared_position_expected_player_count: SOCCER_MATCH_PLAYER_COUNT,
         shared_position_expected_official_count: SOCCER_MATCH_OFFICIAL_COUNT,
@@ -62969,7 +62976,7 @@ mod tests {
         assert_eq!(ball_history_len, BALL_POSITION_HISTORY_LIMIT);
         assert_eq!(ball_latest_position, sim.ball.position);
         assert_eq!(official_latest_len, 3);
-        assert_eq!(official_history_len, PLAYER_POSITION_HISTORY_LIMIT);
+        assert_eq!(official_history_len, OFFICIAL_POSITION_HISTORY_LIMIT);
         assert_eq!(center_ref_position, sim.officials[0].position);
         assert_eq!(
             sim.shared_positions
@@ -62994,7 +63001,7 @@ mod tests {
                 .official_history_for(22)
                 .expect("shared center ref history")
                 .len(),
-            PLAYER_POSITION_HISTORY_LIMIT
+            OFFICIAL_POSITION_HISTORY_LIMIT
         );
 
         let snapshot = WorldSnapshot::from_match(&sim);
@@ -63032,7 +63039,7 @@ mod tests {
                 .official_history_for(22)
                 .expect("snapshot center ref history")
                 .len(),
-            PLAYER_POSITION_HISTORY_LIMIT
+            OFFICIAL_POSITION_HISTORY_LIMIT
         );
         for official in &sim.officials {
             let latest = snapshot
@@ -63048,7 +63055,7 @@ mod tests {
                 .shared_positions
                 .official_history_for(official.id)
                 .expect("snapshot official history");
-            assert_eq!(history.len(), PLAYER_POSITION_HISTORY_LIMIT);
+            assert_eq!(history.len(), OFFICIAL_POSITION_HISTORY_LIMIT);
             assert_eq!(
                 history.last().map(|sample| sample.position),
                 Some(official.position)
@@ -63366,7 +63373,7 @@ mod tests {
         for official in &sim.officials {
             assert_eq!(
                 official.position_history.len(),
-                PLAYER_POSITION_HISTORY_LIMIT
+                OFFICIAL_POSITION_HISTORY_LIMIT
             );
             assert_eq!(
                 official.position_history.back().copied(),
@@ -63393,7 +63400,7 @@ mod tests {
                 && official.jerk.len().is_finite()
         }));
         assert!(frame.officials.iter().all(|official| {
-            official.position_history.len() == PLAYER_POSITION_HISTORY_LIMIT
+            official.position_history.len() == OFFICIAL_POSITION_HISTORY_LIMIT
                 && official.position_history.last().copied() == Some(official.position)
         }));
     }
@@ -97618,12 +97625,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             PLAYER_POSITION_HISTORY_LIMIT
         );
         assert_eq!(
+            contract["officialPositionHistoryLimit"],
+            OFFICIAL_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
             contract["ballPositionHistoryLimit"],
             BALL_POSITION_HISTORY_LIMIT
         );
         assert_eq!(
             contract["playerHistoryWindowSeconds"],
             PLAYER_POSITION_HISTORY_LIMIT as f64 * config.dt_seconds
+        );
+        assert_eq!(
+            contract["officialHistoryWindowSeconds"],
+            OFFICIAL_POSITION_HISTORY_LIMIT as f64 * config.dt_seconds
         );
         assert_eq!(
             contract["ballHistoryWindowSeconds"],
@@ -97649,7 +97664,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(
             contract["sharedPositionOfficialHistoryLimit"],
-            PLAYER_POSITION_HISTORY_LIMIT
+            OFFICIAL_POSITION_HISTORY_LIMIT
         );
         assert_eq!(
             contract["sharedPositionBallHistoryLimit"],

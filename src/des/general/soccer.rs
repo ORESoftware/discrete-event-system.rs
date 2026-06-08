@@ -60199,6 +60199,76 @@ mod tests {
         assert!(decision.away_shape.forward_velocity_yps > 0.0);
     }
 
+    #[test]
+    fn central_brain_team_shape_uses_shared_position_board() {
+        let sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1704,
+            ..Default::default()
+        });
+        let mut snapshot = WorldSnapshot::from_match(&sim);
+        snapshot.ball.position = Vec2::new(40.0, 60.0);
+        snapshot.ball.holder = Some(8);
+        for player in snapshot
+            .players
+            .iter_mut()
+            .filter(|player| player.team == Team::Home)
+        {
+            player.position = Vec2::new(8.0 + player.id as f64 * 0.5, 8.0);
+        }
+        assert!(
+            snapshot
+                .players
+                .iter()
+                .filter(|player| player.team == Team::Home)
+                .any(|player| player.position.distance(snapshot.ball.position)
+                    > TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS),
+            "test must keep stale player snapshots away from the ball"
+        );
+
+        for sample in &mut snapshot.shared_positions.latest {
+            if snapshot
+                .players
+                .iter()
+                .find(|player| player.id == sample.player_id)
+                .is_some_and(|player| player.team == Team::Home)
+            {
+                let offset = sample.player_id as f64 - 5.0;
+                sample.position = snapshot.ball.position + Vec2::new(offset * 0.12, offset * 0.08);
+                sample.velocity = Vec2::new(0.2, Team::Home.attack_dir() * 2.4);
+            }
+        }
+
+        let expected_home =
+            team_shape_observation_from_snapshot(&snapshot, Team::Home, snapshot.ball.position);
+        assert_eq!(
+            expected_home.players_near_ball, 11,
+            "shared board should place every home player near the ball"
+        );
+        assert!(
+            expected_home.centroid_to_ball_yards < 1.0,
+            "shared-board centroid should sit on the ball: {expected_home:?}"
+        );
+
+        let mut brain = CentralBrain::default();
+        brain.run_time_step(&snapshot, &mut mulberry32(1704));
+        let decision = brain.last_decision.expect("central brain decision");
+
+        assert_eq!(decision.tracked_players, 22);
+        assert_eq!(decision.tracked_officials, 3);
+        assert_eq!(decision.home_shape.players_near_ball, 11);
+        assert!(
+            (decision.home_shape.centroid_to_ball_yards - expected_home.centroid_to_ball_yards)
+                .abs()
+                < 1e-9
+        );
+        assert!((decision.home_shape.spread_yards - expected_home.spread_yards).abs() < 1e-9);
+        assert!(
+            (decision.home_shape.forward_velocity_yps - expected_home.forward_velocity_yps).abs()
+                < 1e-9
+        );
+    }
+
     fn home_numbers_up_overload_match() -> SoccerMatch {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 6;

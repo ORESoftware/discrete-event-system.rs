@@ -95872,6 +95872,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
 
         assert!(html.contains("soccer-sim.meta.json"));
         assert!(html.contains("soccer-sim.frames.jsonl"));
+        assert!(html.contains("<canvas id=\"pitch\" width=\"1280\" height=\"720\"></canvas>"));
+        assert!(!html.contains("<canvas id=\"pitch\" width=\"1280\" height=\"820\"></canvas>"));
         assert!(html.contains("Loading match data"));
         assert!(html.contains("id=\"loadingTitleText\""));
         assert!(html.contains("id=\"loadingProgress\""));

@@ -34769,8 +34769,12 @@ pub struct SoccerUiRuntimeContract {
     pub streaming_load_progress_enabled: bool,
     pub playback_load_uses_get_assets_only: bool,
     pub playback_load_posts_to_http_api: bool,
+    pub playback_step_post_enabled: bool,
+    pub playback_input_post_enabled: bool,
     pub playback_external_persistence_enabled: bool,
     pub live_simulation_post_api_enabled: bool,
+    pub live_step_post_enabled: bool,
+    pub live_input_post_enabled: bool,
     pub live_step_post_batches_ticks: bool,
     pub live_input_post_batches_controller_frames: bool,
     pub run_new_simulation_button_enabled: bool,
@@ -35354,8 +35358,12 @@ fn soccer_ui_runtime_contract() -> SoccerUiRuntimeContract {
         streaming_load_progress_enabled: true,
         playback_load_uses_get_assets_only: true,
         playback_load_posts_to_http_api: false,
+        playback_step_post_enabled: false,
+        playback_input_post_enabled: false,
         playback_external_persistence_enabled: false,
         live_simulation_post_api_enabled: true,
+        live_step_post_enabled: true,
+        live_input_post_enabled: true,
         live_step_post_batches_ticks: true,
         live_input_post_batches_controller_frames: true,
         run_new_simulation_button_enabled: true,
@@ -104523,8 +104531,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["streamingLoadProgressEnabled"], true);
         assert_eq!(contract["playbackLoadUsesGetAssetsOnly"], true);
         assert_eq!(contract["playbackLoadPostsToHttpApi"], false);
+        assert_eq!(contract["playbackStepPostEnabled"], false);
+        assert_eq!(contract["playbackInputPostEnabled"], false);
         assert_eq!(contract["playbackExternalPersistenceEnabled"], false);
         assert_eq!(contract["liveSimulationPostApiEnabled"], true);
+        assert_eq!(contract["liveStepPostEnabled"], true);
+        assert_eq!(contract["liveInputPostEnabled"], true);
         assert_eq!(contract["liveStepPostBatchesTicks"], true);
         assert_eq!(contract["liveInputPostBatchesControllerFrames"], true);
         assert_eq!(contract["runNewSimulationButtonEnabled"], true);

@@ -6459,17 +6459,17 @@ impl PlayerAgent {
             * shot_block_penalty
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
             * (1.0 + goal_attack * 1.20)
-            * (1.0 + goal_proximity_shot_pressure * 0.74)
+            * (1.0 + goal_proximity_shot_pressure * 1.05)
             * (1.0 + striker_shot_bonus * 1.35)
-            * (1.0 + decisive_goal_pressure * 0.72)
+            * (1.0 + decisive_goal_pressure * 0.95)
             * 0.042)
             .clamp(
                 0.004,
                 0.12 + offensive_urgency * 0.30
                     + striker_shot_bonus * 0.18
                     + goal_attack * 0.22
-                    + goal_proximity_shot_pressure * 0.24
-                    + decisive_goal_pressure * 0.20,
+                    + goal_proximity_shot_pressure * 0.30
+                    + decisive_goal_pressure * 0.26,
             )
             .max(close_shot_attempt)
             .max(goal_proximity_shot_pressure_floor(
@@ -6826,16 +6826,16 @@ impl PlayerAgent {
                 + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.24
                 + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.24)
             * (1.0
-                + killer_pass_range_fit * 0.82
-                + killer_pass_goal_pressure * 0.96
+                + killer_pass_range_fit * 1.05
+                + killer_pass_goal_pressure * 1.22
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
-            * (1.0 + decisive_goal_pressure * 0.54)
+            * (1.0 + decisive_goal_pressure * 0.72)
             * near_goal_pass_multiplier.max(0.72)
             * floor_pass_patience_multiplier
             * hold_release_multiplier
             * pressured_release_multiplier(observation))
-        .clamp(0.01, 1.32);
+        .clamp(0.01, 1.48);
         options.push(AgentActionOptionTrace::new(
             "killer-pass",
             killer_pass_score,
@@ -7006,8 +7006,8 @@ impl PlayerAgent {
             );
             ensure_min_legal_option_probability(&mut options, "killer-pass", killer_floor);
         }
-        if decisive_goal_pressure >= 0.18 && (shot_legal || killer_pass_legal) {
-            let recycle_multiplier = (1.0 - decisive_goal_pressure * 0.68).clamp(0.32, 1.0);
+        if decisive_goal_pressure >= 0.12 && (shot_legal || killer_pass_legal) {
+            let recycle_multiplier = (1.0 - decisive_goal_pressure * 0.74).clamp(0.25, 1.0);
             for label in [
                 "pass1",
                 "pass2",
@@ -55785,6 +55785,94 @@ mod tests {
     }
 
     #[test]
+    fn approaching_goal_monotonically_lifts_shot_or_killer_pass_probability() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_908,
+            ..Default::default()
+        });
+        let passer = 8;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].role = PlayerRole::Midfielder;
+        sim.players[passer].position = Vec2::new(40.0, 82.0);
+        sim.players[passer].velocity = Vec2::new(0.0, 2.0);
+        sim.players[passer].action_facing = FacingBucket::South;
+        sim.players[passer].skills.passing_completion_rate = 8.8;
+        sim.players[passer].skills.passing = 8.8;
+        sim.players[passer].skills.vision = 9.2;
+        sim.players[passer].skills.shooting = 8.2;
+        sim.players[passer].preferences.pass_bias = 1.0;
+        sim.players[passer].preferences.dribble_bias = 1.0;
+        sim.players[passer].preferences.shoot_bias = 0.68;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].position = Vec2::new(43.0, 98.0);
+        sim.players[receiver].velocity = Vec2::new(0.0, 5.0);
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let visible_targets = snapshot.ranked_visible_pass_targets(passer, 3);
+        let mut observation = snapshot.observation_for(passer);
+        observation.shot_lane_open = true;
+        observation.shot_block_probability = 0.24;
+        observation.shot_on_frame_probability = 0.58;
+        observation.shot_beat_goalkeeper_probability = 0.32;
+        observation.opponent_goal_angle_degrees = 24.0;
+        observation.forward_dribble_space_yards = 8.0;
+        observation.offensive_urgency = 0.40;
+        observation.decision_urgency = 0.34;
+        observation.visible_forward_pass_options = observation.visible_forward_pass_options.max(1);
+        observation.best_forward_pass_receiver_openness =
+            observation.best_forward_pass_receiver_openness.max(0.74);
+        observation.best_pass_stride_fit = observation.best_pass_stride_fit.max(0.78);
+        observation.floor_pass_lane_score = observation.floor_pass_lane_score.max(0.72);
+        observation.expected_pass_completion = observation.expected_pass_completion.max(0.76);
+
+        let decisive_probability_at = |yards_to_goal: f64, goal_attack: f64| {
+            let mut observation = observation.clone();
+            observation.yards_to_goal = yards_to_goal;
+            observation.goal_attack_window_score = goal_attack;
+            let options = sim.players[passer].possession_action_options(
+                &observation,
+                &snapshot.tactical_directive(Team::Home),
+                visible_targets.len(),
+                snapshot.ranked_visible_aerial_pass_targets(passer, 3).len(),
+                false,
+                snapshot.dt_seconds,
+                snapshot.field_width,
+            );
+            let shoot = options
+                .iter()
+                .find(|option| option.label == "shoot")
+                .expect("shoot option");
+            let killer = options
+                .iter()
+                .find(|option| option.label == "killer-pass")
+                .expect("killer-pass option");
+            let pass1 = options
+                .iter()
+                .find(|option| option.label == "pass1")
+                .expect("pass1 option");
+            (shoot.probability + killer.probability, pass1.probability)
+        };
+
+        let (far_decisive, far_recycle) = decisive_probability_at(42.0, 0.10);
+        let (mid_decisive, mid_recycle) = decisive_probability_at(34.0, 0.34);
+        let (close_decisive, close_recycle) = decisive_probability_at(24.0, 0.66);
+
+        assert!(
+            far_decisive < mid_decisive && mid_decisive < close_decisive,
+            "shot-or-killer probability should rise as the ball nears goal: far={far_decisive} mid={mid_decisive} close={close_decisive}"
+        );
+        assert!(
+            close_decisive >= 0.64 && close_recycle < mid_recycle && mid_recycle < far_recycle,
+            "close goal pressure should favor decisive play over recycling: decisive far/mid/close={far_decisive}/{mid_decisive}/{close_decisive}; recycle far/mid/close={far_recycle}/{mid_recycle}/{close_recycle}"
+        );
+    }
+
+    #[test]
     fn blocked_final_third_attacker_falls_back_to_killer_pass() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -93145,6 +93233,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("setLoadingTitle(\"Load failed\", \"failed\")"));
         assert!(html.contains("id=\"runNewSim\""));
         assert!(html.contains("Run New Sim"));
+        assert!(html.contains("id=\"gridOverlayLevel\""));
+        assert!(html.contains("<option value=\"fine\">Fine grid</option>"));
+        assert!(html.contains("<option value=\"tactical\">Tactical grid</option>"));
+        assert!(html.contains("<option value=\"macro\">Macro grid</option>"));
         assert!(html.contains("../simulations/main_soccer/run?exact=1&fresh=1"));
         assert!(html.contains("cacheBustUrl"));
         assert!(html.contains("runNewSimulation"));
@@ -93386,10 +93478,24 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function pitchGridAddressFromPosition"));
         assert!(html.contains("function gridAddressForPlayer"));
         assert!(html.contains("function selectedPlayerGridFacingLabel"));
+        assert!(html.contains("function gridDimensionsForLevel"));
+        assert!(html.contains("function gridCellForLevel"));
+        assert!(html.contains("function selectedGridAddress"));
+        assert!(html.contains("function fieldRectForGridCell"));
+        assert!(html.contains("if (level === \"fine\") return {columns: 12, rows: 16"));
+        assert!(html.contains("if (level === \"tactical\") return {columns: 6, rows: 8"));
+        assert!(html.contains("if (level === \"macro\") return {columns: 3, rows: 4"));
         assert!(html.contains("p?.playerGrid"));
         assert!(html.contains("G${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0}"));
         assert!(html.contains("F${receive}->${action}"));
         assert!(html.contains("function drawPitch(r)"));
+        assert!(html.contains("function drawPitchGridOverlay"));
+        assert!(html.contains("drawPitchGridOverlay(r)"));
+        assert!(html.contains("gridOverlayLevel.addEventListener(\"change\", () => render())"));
+        assert!(html.contains(
+            "fieldRectForGridCell(gridCellForLevel(selectedGridAddress(), level), level)"
+        ));
+        assert!(html.contains("rgba(246,201,68,.16)"));
         assert!(html.contains("function drawPlayer(p, r)"));
         assert!(html.contains("function drawOfficial(o, r)"));
         assert!(html.contains("function drawBall(ball, r)"));

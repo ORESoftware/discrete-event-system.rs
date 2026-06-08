@@ -328,6 +328,12 @@
           <option value="2">2x</option>
           <option value="4">4x</option>
         </select>
+        <select id="gridOverlayLevel" aria-label="Grid overlay">
+          <option value="off" selected>Grid off</option>
+          <option value="fine">Fine grid</option>
+          <option value="tactical">Tactical grid</option>
+          <option value="macro">Macro grid</option>
+        </select>
       </div>
       <input id="scrub" type="range" min="0" max="0" value="0">
       <div class="section">Match</div>
@@ -504,6 +510,7 @@ const scrub = document.getElementById("scrub");
 const play = document.getElementById("play");
 const runNewSimButton = document.getElementById("runNewSim");
 const speed = document.getElementById("speed");
+const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const events = document.getElementById("events");
 const slots = document.getElementById("slots");
 const controllerRuntime = document.getElementById("controllerRuntime");
@@ -1254,6 +1261,38 @@ function selectedPlayerGridFacingLabel(p) {
   const action = String(p?.actionFacing || p?.lastDecision?.observation?.actionFacing || "Unknown");
   return ` G${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0} F${receive}->${action}`;
 }
+function gridDimensionsForLevel(level) {
+  if (level === "fine") return {columns: 12, rows: 16, label: "Fine"};
+  if (level === "tactical") return {columns: 6, rows: 8, label: "Tactical"};
+  if (level === "macro") return {columns: 3, rows: 4, label: "Macro"};
+  return null;
+}
+function gridCellForLevel(grid, level) {
+  if (!grid) return null;
+  if (level === "fine") return grid.fine || null;
+  if (level === "tactical") return grid.tactical || null;
+  if (level === "macro") return grid.macroZone || grid.macro_zone || null;
+  return null;
+}
+function selectedGridAddress() {
+  const p = selectedPlayerSnapshot();
+  return p ? gridAddressForPlayer(p) : null;
+}
+function fieldRectForGridCell(cell, level) {
+  const dims = gridDimensionsForLevel(level);
+  if (!cell || !dims) return null;
+  const columns = Math.max(1, Number(cell.columns ?? dims.columns));
+  const rows = Math.max(1, Number(cell.rows ?? dims.rows));
+  return {
+    x: Number(cell.x ?? 0) / columns,
+    y: Number(cell.y ?? 0) / rows,
+    w: 1 / columns,
+    h: 1 / rows,
+    columns,
+    rows,
+    label: dims.label
+  };
+}
 function compactNumber(value, digits = 2) {
   const number = Number(value ?? 0);
   return Number.isFinite(number) ? number.toFixed(digits) : Number(0).toFixed(digits);
@@ -1509,6 +1548,52 @@ function drawPitch(r) {
   ctx.strokeRect(r.x + (r.w - boxW) / 2, r.y + r.h - boxH, boxW, boxH);
   drawGoalPosts(r);
 }
+function drawPitchGridOverlay(r) {
+  const level = gridOverlayLevel.value;
+  const dims = gridDimensionsForLevel(level);
+  if (!dims) return;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.22)";
+  ctx.lineWidth = level === "fine" ? 0.75 : 1.25;
+  ctx.setLineDash(level === "fine" ? [2, 5] : []);
+  for (let column = 1; column < dims.columns; column++) {
+    const x = r.x + r.w * column / dims.columns;
+    ctx.beginPath();
+    ctx.moveTo(x, r.y);
+    ctx.lineTo(x, r.y + r.h);
+    ctx.stroke();
+  }
+  for (let row = 1; row < dims.rows; row++) {
+    const y = r.y + r.h * row / dims.rows;
+    ctx.beginPath();
+    ctx.moveTo(r.x, y);
+    ctx.lineTo(r.x + r.w, y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  const selected = fieldRectForGridCell(gridCellForLevel(selectedGridAddress(), level), level);
+  if (selected) {
+    const x = r.x + selected.x * r.w;
+    const y = r.y + (1 - selected.y - selected.h) * r.h;
+    const w = selected.w * r.w;
+    const h = selected.h * r.h;
+    ctx.fillStyle = "rgba(246,201,68,.16)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "rgba(246,201,68,.86)";
+    ctx.lineWidth = 2.25;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = "rgba(17,24,39,.78)";
+    ctx.fillRect(x + 5, y + 5, 64, 18);
+    ctx.fillStyle = "#fff4c2";
+    ctx.font = "700 11px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${selected.label} ${Math.round(selected.x * selected.columns)},${Math.round(selected.y * selected.rows)}`, x + 10, y + 14);
+  }
+  ctx.restore();
+}
 function drawGoalPosts(r) {
   const config = trace.config || FALLBACK_CONFIG;
   const fieldWidth = Number(config.fieldWidthYards || 80);
@@ -1692,6 +1777,7 @@ function drawBall(ball, r) {
 function render() {
   const r = pitchRect();
   drawPitch(r);
+  drawPitchGridOverlay(r);
   const f = currentFrame();
   if (!f) return;
   drawIntentTraces(f, r);
@@ -2390,6 +2476,7 @@ play.addEventListener("click", () => {
   play.textContent = playing ? "Pause" : "Play";
 });
 runNewSimButton.addEventListener("click", runNewSimulation);
+gridOverlayLevel.addEventListener("change", () => render());
 authForm.addEventListener("submit", e => {
   e.preventDefault();
   const token = authToken.value.trim();

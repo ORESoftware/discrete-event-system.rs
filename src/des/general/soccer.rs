@@ -10397,6 +10397,14 @@ impl HumanInputNotifierState {
         self.version_by_slot.insert(controller_slot, self.version);
     }
 
+    fn max_slot_version(&self, controller_slots: &[usize]) -> u64 {
+        controller_slots
+            .iter()
+            .filter_map(|slot| self.version_by_slot.get(slot).copied())
+            .max()
+            .unwrap_or(0)
+    }
+
     fn slots_changed_since(&self, controller_slots: &[usize], version: u64) -> bool {
         controller_slots.iter().any(|slot| {
             self.version_by_slot
@@ -10410,6 +10418,9 @@ impl HumanInputNotifierState {
 pub struct HumanInputWaitResult {
     pub version_before: u64,
     pub version_after: u64,
+    pub relevant_version_before: u64,
+    pub relevant_version_after: u64,
+    pub relevant_notified: bool,
     pub queued_before: usize,
     pub queued_after: usize,
     pub immediate_pending: bool,
@@ -10518,14 +10529,15 @@ impl SharedHumanInputs {
 
     fn push_with_enqueue_unix_ms(&self, input: HumanInputFrame, enqueued_unix_ms: u64) -> bool {
         let controller_slot = input.controller_slot;
-        let accepted =
-            soccer_rwlock_write(&self.inner, "human_input_queue").push(input, enqueued_unix_ms);
+        let mut store = soccer_rwlock_write(&self.inner, "human_input_queue");
+        let accepted = store.push(input, enqueued_unix_ms);
         if accepted {
             let (lock, condvar) = &*self.notifier;
             let mut notifier = soccer_mutex_lock(lock, "human_input_notifier");
             notifier.record_slot_change(controller_slot);
             condvar.notify_all();
         }
+        drop(store);
         accepted
     }
 
@@ -10569,6 +10581,11 @@ impl SharedHumanInputs {
     pub fn notification_version(&self) -> u64 {
         let (lock, _) = &*self.notifier;
         soccer_mutex_lock(lock, "human_input_notifier").version
+    }
+
+    pub fn relevant_notification_version(&self, controller_slots: &[usize]) -> u64 {
+        let (lock, _) = &*self.notifier;
+        soccer_mutex_lock(lock, "human_input_notifier").max_slot_version(controller_slots)
     }
 
     pub fn wait_for_change_since(&self, version: u64, timeout: Duration) -> u64 {
@@ -10617,6 +10634,9 @@ impl SharedHumanInputs {
             return HumanInputWaitResult {
                 version_before: version,
                 version_after: version,
+                relevant_version_before: version,
+                relevant_version_after: version,
+                relevant_notified: false,
                 queued_before,
                 queued_after: queued_before,
                 immediate_pending: true,
@@ -10629,6 +10649,9 @@ impl SharedHumanInputs {
         HumanInputWaitResult {
             version_before: version,
             version_after: next_version,
+            relevant_version_before: version,
+            relevant_version_after: next_version,
+            relevant_notified: next_version > version,
             queued_before,
             queued_after,
             immediate_pending: false,
@@ -10642,10 +10665,14 @@ impl SharedHumanInputs {
         timeout: Duration,
     ) -> HumanInputWaitResult {
         let version = self.notification_version();
+        let relevant_version = self.relevant_notification_version(controller_slots);
         if controller_slots.is_empty() {
             return HumanInputWaitResult {
                 version_before: version,
                 version_after: version,
+                relevant_version_before: 0,
+                relevant_version_after: 0,
+                relevant_notified: false,
                 queued_before: 0,
                 queued_after: 0,
                 immediate_pending: false,
@@ -10659,6 +10686,9 @@ impl SharedHumanInputs {
             return HumanInputWaitResult {
                 version_before: version,
                 version_after: version,
+                relevant_version_before: relevant_version,
+                relevant_version_after: relevant_version,
+                relevant_notified: false,
                 queued_before,
                 queued_after: queued_before,
                 immediate_pending: true,
@@ -10705,19 +10735,26 @@ impl SharedHumanInputs {
                     coalesced_queued = next_coalesced_queued;
                 }
                 let final_version = self.notification_version().max(coalesced_version);
+                let relevant_version_after = self.relevant_notification_version(controller_slots);
                 return HumanInputWaitResult {
                     version_before: version,
                     version_after: final_version,
+                    relevant_version_before: relevant_version,
+                    relevant_version_after,
+                    relevant_notified: relevant_version_after > relevant_version,
                     queued_before,
                     queued_after: coalesced_queued,
                     immediate_pending: queued_before > 0,
-                    notified: final_version > version,
+                    notified: coalesced_queued > 0 && relevant_version_after > relevant_version,
                 };
             }
             if next_version <= observed_version {
                 return HumanInputWaitResult {
                     version_before: version,
                     version_after: next_version,
+                    relevant_version_before: relevant_version,
+                    relevant_version_after: self.relevant_notification_version(controller_slots),
+                    relevant_notified: false,
                     queued_before,
                     queued_after,
                     immediate_pending: queued_before > 0,
@@ -10730,13 +10767,17 @@ impl SharedHumanInputs {
         let version_after = self.notification_version();
         self.prune_expired_for_slots(controller_slots);
         let queued_after = self.queued_len_for_slots(controller_slots);
+        let relevant_version_after = self.relevant_notification_version(controller_slots);
         HumanInputWaitResult {
             version_before: version,
             version_after,
+            relevant_version_before: relevant_version,
+            relevant_version_after,
+            relevant_notified: relevant_version_after > relevant_version,
             queued_before,
             queued_after,
             immediate_pending: queued_before > 0,
-            notified: queued_after > 0 && version_after > version,
+            notified: queued_after > 0 && relevant_version_after > relevant_version,
         }
     }
 
@@ -10789,20 +10830,25 @@ pub struct ControllerYieldStats {
     pub assigned_players: usize,
     pub wait_attempts: u64,
     pub notified_waits: u64,
+    pub relevant_notified_waits: u64,
     pub timed_out_waits: u64,
     pub immediate_pending_waits: u64,
     pub late_wait_attempts: u64,
     pub late_notified_waits: u64,
+    pub late_relevant_notified_waits: u64,
     pub late_timed_out_waits: u64,
     pub late_immediate_pending_waits: u64,
     pub skipped_no_assignment: u64,
     pub last_wait_late: bool,
     pub last_notified: bool,
+    pub last_relevant_notified: bool,
     pub last_immediate_pending: bool,
     pub last_queued_before: usize,
     pub last_queued_after: usize,
     pub last_version_before: u64,
     pub last_version_after: u64,
+    pub last_relevant_version_before: u64,
+    pub last_relevant_version_after: u64,
     pub total_wait_ms: f64,
     pub last_wait_ms: f64,
     pub max_wait_ms: f64,
@@ -10857,11 +10903,14 @@ impl ControllerYieldStats {
         self.skipped_no_assignment = self.skipped_no_assignment.saturating_add(1);
         self.last_wait_late = false;
         self.last_notified = false;
+        self.last_relevant_notified = false;
         self.last_immediate_pending = false;
         self.last_queued_before = queued;
         self.last_queued_after = queued;
         self.last_version_before = version;
         self.last_version_after = version;
+        self.last_relevant_version_before = version;
+        self.last_relevant_version_after = version;
         self.last_wait_ms = 0.0;
     }
 
@@ -10895,6 +10944,9 @@ impl ControllerYieldStats {
         } else {
             self.timed_out_waits = self.timed_out_waits.saturating_add(1);
         }
+        if result.relevant_notified {
+            self.relevant_notified_waits = self.relevant_notified_waits.saturating_add(1);
+        }
         if late {
             self.late_wait_attempts = self.late_wait_attempts.saturating_add(1);
             if result.immediate_pending {
@@ -10905,14 +10957,21 @@ impl ControllerYieldStats {
             } else {
                 self.late_timed_out_waits = self.late_timed_out_waits.saturating_add(1);
             }
+            if result.relevant_notified {
+                self.late_relevant_notified_waits =
+                    self.late_relevant_notified_waits.saturating_add(1);
+            }
         }
         self.last_wait_late = late;
         self.last_notified = result.notified || result.queued_after > result.queued_before;
+        self.last_relevant_notified = result.relevant_notified;
         self.last_immediate_pending = result.immediate_pending;
         self.last_queued_before = result.queued_before;
         self.last_queued_after = result.queued_after;
         self.last_version_before = result.version_before;
         self.last_version_after = result.version_after;
+        self.last_relevant_version_before = result.relevant_version_before;
+        self.last_relevant_version_after = result.relevant_version_after;
         self.total_wait_ms += wait_ms;
         self.last_wait_ms = wait_ms;
         self.max_wait_ms = self.max_wait_ms.max(wait_ms);
@@ -63552,6 +63611,8 @@ mod tests {
         let wait_result = waiter.join().expect("waiter joins");
         assert!(!wait_result.immediate_pending);
         assert!(wait_result.notified);
+        assert!(wait_result.relevant_notified);
+        assert!(wait_result.relevant_version_after > wait_result.relevant_version_before);
         assert_eq!(wait_result.queued_before, 0);
         assert_eq!(wait_result.queued_after, 1);
 
@@ -63561,6 +63622,45 @@ mod tests {
             .drain_latest_for_slot(1)
             .expect("unassigned slot remains queued");
         assert_eq!(unassigned.seq, 2);
+    }
+
+    #[test]
+    fn shared_human_inputs_slot_wait_reports_unrelated_notifications_separately() {
+        let q = SharedHumanInputs::new();
+        let version = q.notification_version();
+        let relevant_version = q.relevant_notification_version(&[0]);
+        let waiter_queue = q.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_queue.wait_for_pending_input_for_slots_result(&[0], Duration::from_millis(35))
+        });
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 1,
+            player_id: Some(1),
+            seq: 1,
+            axis: Vec2::new(0.0, 1.0),
+            sprint: false,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let wait_result = waiter.join().expect("waiter joins");
+        assert_eq!(wait_result.version_before, version);
+        assert!(
+            wait_result.version_after > version,
+            "global notifier version should still expose unrelated slot churn: {wait_result:?}"
+        );
+        assert_eq!(wait_result.relevant_version_before, relevant_version);
+        assert_eq!(wait_result.relevant_version_after, relevant_version);
+        assert!(!wait_result.relevant_notified);
+        assert!(!wait_result.notified);
+        assert!(!wait_result.pending());
+        assert_eq!(wait_result.queued_after, 0);
+        assert_eq!(q.queued_len_for_slots(&[0]), 0);
+        assert_eq!(q.queued_len_for_slots(&[1]), 1);
     }
 
     #[test]
@@ -63590,6 +63690,7 @@ mod tests {
         let (wait_result, elapsed) = waiter.join().expect("waiter joins");
         assert!(!wait_result.immediate_pending);
         assert!(wait_result.notified);
+        assert!(wait_result.relevant_notified);
         assert_eq!(wait_result.queued_before, 0);
         assert_eq!(wait_result.queued_after, 1);
         assert!(

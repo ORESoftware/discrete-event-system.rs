@@ -20605,6 +20605,8 @@ impl WorldSnapshot {
                     position,
                     PassFlight::Floor,
                 );
+                let reception_teammate_penalty =
+                    self.teammate_occupied_space_penalty_at(me.team, pass_point, Some(p.id), 0.0);
                 let finishing_window_bonus = self.shooting_window_score_at(p, pass_point)
                     * (5.4 + directive.risk_tolerance * 2.4);
                 let keeper_distribution_bonus = if me.role == PlayerRole::Goalkeeper {
@@ -20644,8 +20646,10 @@ impl WorldSnapshot {
                     + (p.velocity.y * me.team.attack_dir()).max(0.0).min(5.5) * 0.12
                     + finishing_window_bonus
                     + keeper_distribution_bonus;
-                let score =
-                    score + low_cross_policy_bonus - blind_backward_penalty - lateral_penalty;
+                let score = score + low_cross_policy_bonus
+                    - blind_backward_penalty
+                    - lateral_penalty
+                    - reception_teammate_penalty;
                 (p.id, score)
             })
             .collect::<Vec<_>>();
@@ -82339,6 +82343,99 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             snapshot.ranked_visible_pass_targets(passer, 1),
             vec![runner],
             "runner into future space should remain the top visible floor-pass target"
+        );
+    }
+
+    #[test]
+    fn pass_target_ranking_avoids_teammate_occupied_future_reception_space() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let runner = 9;
+        let clean_outlet = 7;
+        let occupying_teammate = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 48.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        park_players_except(
+            &mut sim,
+            &[passer, runner, clean_outlet, occupying_teammate],
+        );
+        sim.players[passer].position = sim.ball.position;
+        sim.players[passer].skills.passing = 8.8;
+        sim.players[passer].skills.passing_completion_rate = 8.8;
+        sim.players[runner].position = Vec2::new(45.0, 66.0);
+        sim.players[runner].velocity = Vec2::new(0.8, 3.4);
+        sim.players[clean_outlet].position = Vec2::new(34.0, 67.0);
+        sim.players[clean_outlet].velocity = Vec2::zero();
+
+        let clean_snapshot = WorldSnapshot::from_match(&sim);
+        let passer_snapshot = clean_snapshot
+            .players
+            .iter()
+            .find(|player| player.id == passer)
+            .expect("passer");
+        let speed =
+            pass_speed_yps_from_power(0.68, PassFlight::Floor, false, &passer_snapshot.skills);
+        let runner_reception = clean_snapshot
+            .anticipated_pass_reception_point(passer, runner, PassFlight::Floor, speed)
+            .expect("runner reception");
+        sim.players[occupying_teammate].position = runner_reception;
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let passer_snapshot = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == passer)
+            .expect("passer");
+        let runner_snapshot = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == runner)
+            .expect("runner");
+        let clean_outlet_snapshot = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == clean_outlet)
+            .expect("clean outlet");
+        let passer_position = snapshot.player_position(passer).expect("passer position");
+        let runner_position = snapshot.player_position(runner).expect("runner position");
+        let clean_outlet_position = snapshot
+            .player_position(clean_outlet)
+            .expect("clean outlet position");
+        let occupied_pressure = snapshot.teammate_occupied_space_pressure_at(
+            Team::Home,
+            runner_reception,
+            Some(runner),
+        );
+        let runner_quality = pass_target_quality_for_snapshot(
+            &snapshot,
+            passer_snapshot,
+            passer_position,
+            runner_snapshot,
+            runner_position,
+            PassFlight::Floor,
+        );
+        let clean_quality = pass_target_quality_for_snapshot(
+            &snapshot,
+            passer_snapshot,
+            passer_position,
+            clean_outlet_snapshot,
+            clean_outlet_position,
+            PassFlight::Floor,
+        );
+
+        assert!(
+            occupied_pressure > 0.90,
+            "test setup should put a teammate inside the runner's anticipated reception pocket: pressure={occupied_pressure}, reception={runner_reception:?}"
+        );
+        assert!(
+            clean_quality.expected_completion > runner_quality.expected_completion + 0.10,
+            "clean outlet should outrank a runner whose future reception point is teammate-occupied: runner={runner_quality:?} clean={clean_quality:?}"
+        );
+        assert_eq!(
+            snapshot.ranked_visible_pass_targets(passer, 1),
+            vec![clean_outlet],
+            "pass ranking should avoid teammate-occupied future reception space"
         );
     }
 

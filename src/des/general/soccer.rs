@@ -67008,6 +67008,101 @@ mod tests {
     }
 
     #[test]
+    fn shared_position_board_replaces_same_tick_history_samples() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 211,
+            ..MatchConfig::playback_trace(0.4)
+        });
+        let shared = sim.shared_positions.clone();
+        let tick = 7;
+        let clock_seconds = tick as f64 * sim.config.dt_seconds;
+
+        shared.sync_from_players_and_ball(
+            &sim.players,
+            &sim.officials,
+            &sim.ball,
+            tick,
+            clock_seconds,
+        );
+        let first = shared.snapshot();
+        let player_history_len = first.history_for(0).expect("player history").len();
+        let official_history_len = first
+            .official_history_for(22)
+            .expect("official history")
+            .len();
+        let ball_history_len = first.ball_history().len();
+
+        sim.players[0].position += Vec2::new(1.25, 0.5);
+        sim.players[0].velocity = Vec2::new(2.0, 1.0);
+        sim.officials[0].position += Vec2::new(-0.75, 0.25);
+        sim.officials[0].velocity = Vec2::new(-0.5, 0.25);
+        sim.ball.position += Vec2::new(0.5, 1.5);
+        sim.ball.velocity = Vec2::new(3.0, 4.0);
+
+        shared.sync_from_players_and_ball(
+            &sim.players,
+            &sim.officials,
+            &sim.ball,
+            tick,
+            clock_seconds,
+        );
+        let replaced = shared.snapshot();
+        let player_history = replaced.history_for(0).expect("player history");
+        let official_history = replaced
+            .official_history_for(22)
+            .expect("official history");
+        let ball_history = replaced.ball_history();
+        assert_eq!(
+            player_history.len(),
+            player_history_len,
+            "same-tick player sync should replace history instead of duplicating samples"
+        );
+        assert_eq!(
+            official_history.len(),
+            official_history_len,
+            "same-tick official sync should replace history instead of duplicating samples"
+        );
+        assert_eq!(
+            ball_history.len(),
+            ball_history_len,
+            "same-tick ball sync should replace history instead of duplicating samples"
+        );
+        assert_eq!(
+            player_history.last().map(|sample| sample.position),
+            Some(sim.players[0].position)
+        );
+        assert_eq!(
+            official_history.last().map(|sample| sample.position),
+            Some(sim.officials[0].position)
+        );
+        assert_eq!(
+            ball_history.last().map(|sample| sample.position),
+            Some(sim.ball.position)
+        );
+
+        shared.sync_from_players_and_ball(
+            &sim.players,
+            &sim.officials,
+            &sim.ball,
+            tick + 1,
+            clock_seconds + sim.config.dt_seconds,
+        );
+        let appended = shared.snapshot();
+        assert_eq!(
+            appended.history_for(0).expect("player history").len(),
+            player_history_len + 1
+        );
+        assert_eq!(
+            appended
+                .official_history_for(22)
+                .expect("official history")
+                .len(),
+            official_history_len + 1
+        );
+        assert_eq!(appended.ball_history().len(), ball_history_len + 1);
+    }
+
+    #[test]
     fn shared_position_board_reads_stay_coherent_during_main_loop_syncs() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             seed: 212,

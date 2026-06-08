@@ -64929,6 +64929,88 @@ mod tests {
     }
 
     #[test]
+    fn four_native_controller_threads_drive_four_selected_players_in_one_tick() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 4,
+            seed: 22_801,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        let controlled_players = [1usize, 2, 3, 4];
+        let start_positions = controlled_players
+            .iter()
+            .map(|player_id| sim.players[*player_id].position)
+            .collect::<Vec<_>>();
+        for (slot, player_id) in controlled_players.iter().copied().enumerate() {
+            sim.assign_controller_slot(slot, Some(player_id))
+                .expect("assign native controller slot");
+        }
+
+        let input_queue = sim.human_inputs.clone();
+        let controllers =
+            spawn_human_controller_threads(input_queue.clone(), 4, Duration::from_millis(1))
+                .expect("spawn four native controller threads");
+        for (slot, player_id) in controlled_players.iter().copied().enumerate() {
+            controllers[slot]
+                .send_input(HumanInputFrame {
+                    controller_slot: 99,
+                    player_id: Some(player_id),
+                    seq: 100 + slot as u64,
+                    axis: Vec2::new(1.0, 0.0),
+                    sprint: slot % 2 == 0,
+                    pass: false,
+                    pass_flight: PassFlight::Floor,
+                    shoot: false,
+                    action: None,
+                    target_player: None,
+                })
+                .expect("send controller-thread input");
+        }
+
+        let wait = input_queue
+            .wait_for_pending_input_for_slots_result(&[0, 1, 2, 3], Duration::from_millis(300));
+        assert!(
+            wait.pending() && wait.queued_after == 4,
+            "all four native controller slots should write to the shared queue before the main tick: {wait:?}"
+        );
+
+        sim.run_time_step();
+
+        let yield_stats = sim.controller_yield_stats();
+        assert_eq!(yield_stats.assigned_players, 4);
+        assert_eq!(yield_stats.wait_attempts, 1);
+        assert_eq!(yield_stats.immediate_pending_waits, 1);
+        assert_eq!(yield_stats.timed_out_waits, 0);
+        assert_eq!(input_queue.queued_len(), 0);
+        for (slot, player_id) in controlled_players.iter().copied().enumerate() {
+            let decision = sim.players[player_id]
+                .last_decision
+                .as_ref()
+                .expect("controlled player decision");
+            assert_eq!(
+                decision.operation_order,
+                vec!["human-input".to_string()],
+                "player {player_id} should consume its own controller-thread input"
+            );
+            assert_eq!(decision.observation.controller_slot, Some(slot));
+            assert!(decision.observation.human_controlled);
+            assert!(decision.observation.human_input_present);
+            assert_eq!(
+                decision.observation.human_input_seq,
+                Some(100 + slot as u64)
+            );
+            assert!(
+                sim.players[player_id].position.x > start_positions[slot].x,
+                "selected player {player_id} should move right from human controller input"
+            );
+        }
+        for controller in controllers {
+            controller.stop().expect("controller stops");
+        }
+    }
+
+    #[test]
     fn controller_input_router_debounces_assigned_slot_burst_without_queue_growth() {
         let q = SharedHumanInputs::new();
         let assignments = SharedControllerAssignments::new(4);

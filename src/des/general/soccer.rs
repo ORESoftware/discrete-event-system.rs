@@ -56778,6 +56778,24 @@ mod tests {
         assert_eq!(frame.ball.scheduled_index, Some(ball_slot));
         assert_eq!(decision.scheduled_index, Some(ball_slot));
         assert_eq!(decision.action, "roll");
+        assert_eq!(decision.tick, 0);
+        assert!(
+            [
+                "sync-holder",
+                "apply-curl",
+                "apply-resistance",
+                "advance-position",
+                "resolve-shot",
+                "resolve-boundary",
+                "resolve-control",
+            ]
+            .iter()
+            .all(|operation| decision
+                .operation_order
+                .iter()
+                .any(|seen| seen == operation)),
+            "scheduled ball agent should expose its full run_time_step loop: {decision:?}"
+        );
         assert!(sim.ball.position.x > origin.x);
         assert!(sim.ball.position.y > origin.y);
         assert!(
@@ -56797,11 +56815,19 @@ mod tests {
             Some((1, sim.ball.position))
         );
         assert_eq!(
-            sim.shared_positions
-                .ball_history()
-                .last()
-                .map(|sample| sample.position),
-            Some(sim.ball.position)
+            sim.ball
+                .position_history
+                .back()
+                .map(|sample| sample.clock_seconds),
+            Some(sim.config.dt_seconds)
+        );
+        assert_eq!(
+            sim.shared_positions.ball_history().last().map(|sample| (
+                sample.tick,
+                sample.clock_seconds,
+                sample.position
+            )),
+            Some((1, sim.config.dt_seconds, sim.ball.position))
         );
     }
 

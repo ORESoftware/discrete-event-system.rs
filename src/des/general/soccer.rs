@@ -32130,6 +32130,11 @@ pub struct SoccerMovementGaitContract {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerPhysicsRuntimeContract {
+    pub spatial_dimensions: usize,
+    pub view_mode: String,
+    pub coordinate_plane: String,
+    pub z_dimension_visualized: bool,
+    pub html_canvas_2d_rendering: bool,
     pub space_units: String,
     pub time_units: String,
     pub speed_units: String,
@@ -32351,6 +32356,11 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
     .collect();
     let dt_seconds = config.dt_seconds.max(0.0);
     SoccerPhysicsRuntimeContract {
+        spatial_dimensions: 2,
+        view_mode: "birdEye2D".to_string(),
+        coordinate_plane: "xyPitchYards".to_string(),
+        z_dimension_visualized: false,
+        html_canvas_2d_rendering: true,
         space_units: "yards".to_string(),
         time_units: "seconds".to_string(),
         speed_units: "yardsPerSecond".to_string(),
@@ -94608,6 +94618,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     fn assert_soccer_physics_contract_json(meta: &serde_json::Value, config: &MatchConfig) {
         assert_eq!(meta["physicsContract"], meta["playback"]["physicsContract"]);
         let contract = &meta["physicsContract"];
+        assert_eq!(contract["spatialDimensions"], 2);
+        assert_eq!(contract["viewMode"], "birdEye2D");
+        assert_eq!(contract["coordinatePlane"], "xyPitchYards");
+        assert_eq!(contract["zDimensionVisualized"], false);
+        assert_eq!(contract["htmlCanvas2dRendering"], true);
         assert_eq!(contract["spaceUnits"], "yards");
         assert_eq!(contract["timeUnits"], "seconds");
         assert_eq!(contract["speedUnits"], "yardsPerSecond");

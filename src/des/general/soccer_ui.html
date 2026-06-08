@@ -447,6 +447,7 @@ const trace = {
   summary: {ticks: 0, stats: emptyStats()},
   cadence: null,
   agentContract: null,
+  decisionModel: null,
   stepTiming: null,
   frames: [],
   events: [],
@@ -859,6 +860,7 @@ function resetTraceState() {
   trace.summary = {ticks: 0, stats: emptyStats()};
   trace.cadence = null;
   trace.agentContract = null;
+  trace.decisionModel = null;
   trace.stepTiming = null;
   trace.frames = [];
   trace.events = [];
@@ -2129,6 +2131,7 @@ async function loadTraceMeta(signal) {
   trace.summary.stats = trace.summary.stats || emptyStats();
   trace.cadence = meta.cadence || meta.playback?.cadence || null;
   trace.agentContract = meta.agentContract || meta.playback?.agentContract || null;
+  trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;

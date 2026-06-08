@@ -31658,6 +31658,36 @@ pub struct SoccerPlaybackAgentContract {
     pub slim_frames_omit_full_agent_schedule: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPitchGridContract {
+    pub level: PitchGridLevel,
+    pub columns: usize,
+    pub rows: usize,
+    pub cells: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_level: Option<PitchGridLevel>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerDecisionModelContract {
+    pub mdp_state_grid_enabled: bool,
+    pub pomdp_observation_grid_enabled: bool,
+    pub action_target_grid_enabled: bool,
+    pub receive_facing_enabled: bool,
+    pub action_facing_enabled: bool,
+    pub facing_bucket_count: usize,
+    pub facing_buckets: Vec<FacingBucket>,
+    pub spatial_backoff_levels: Vec<PitchGridLevel>,
+    pub grids: Vec<SoccerPitchGridContract>,
+    pub grid_parent_links_enabled: bool,
+    pub policy_target_grid_enabled: bool,
+    pub neural_feature_grid_enabled: bool,
+    pub playback_player_grid_enabled: bool,
+    pub playback_intent_target_grid_enabled: bool,
+}
+
 fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
     SoccerPlaybackAgentContract {
         expected_total_agents: 1 + SOCCER_MATCH_PLAYER_COUNT + SOCCER_MATCH_OFFICIAL_COUNT + 1,
@@ -31676,6 +31706,54 @@ fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
         field_entities_use_fisher_yates: true,
         per_frame_schedule_summary_required: true,
         slim_frames_omit_full_agent_schedule: true,
+    }
+}
+
+fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
+    SoccerDecisionModelContract {
+        mdp_state_grid_enabled: true,
+        pomdp_observation_grid_enabled: true,
+        action_target_grid_enabled: true,
+        receive_facing_enabled: true,
+        action_facing_enabled: true,
+        facing_bucket_count: SOCCER_FACING_INDEX_VALUES.len(),
+        facing_buckets: SOCCER_FACING_INDEX_VALUES.to_vec(),
+        spatial_backoff_levels: PITCH_GRID_BACKOFF_LEVELS.to_vec(),
+        grids: vec![
+            SoccerPitchGridContract {
+                level: PitchGridLevel::Fine,
+                columns: PITCH_FINE_GRID_COLUMNS,
+                rows: PITCH_FINE_GRID_ROWS,
+                cells: PITCH_FINE_GRID_COLUMNS * PITCH_FINE_GRID_ROWS,
+                parent_level: Some(PitchGridLevel::Tactical),
+            },
+            SoccerPitchGridContract {
+                level: PitchGridLevel::Tactical,
+                columns: PITCH_TACTICAL_GRID_COLUMNS,
+                rows: PITCH_TACTICAL_GRID_ROWS,
+                cells: PITCH_TACTICAL_GRID_COLUMNS * PITCH_TACTICAL_GRID_ROWS,
+                parent_level: Some(PitchGridLevel::Macro),
+            },
+            SoccerPitchGridContract {
+                level: PitchGridLevel::Macro,
+                columns: PITCH_MACRO_GRID_COLUMNS,
+                rows: PITCH_MACRO_GRID_ROWS,
+                cells: PITCH_MACRO_GRID_COLUMNS * PITCH_MACRO_GRID_ROWS,
+                parent_level: Some(PitchGridLevel::WholePitch),
+            },
+            SoccerPitchGridContract {
+                level: PitchGridLevel::WholePitch,
+                columns: 1,
+                rows: 1,
+                cells: 1,
+                parent_level: None,
+            },
+        ],
+        grid_parent_links_enabled: true,
+        policy_target_grid_enabled: true,
+        neural_feature_grid_enabled: true,
+        playback_player_grid_enabled: true,
+        playback_intent_target_grid_enabled: true,
     }
 }
 
@@ -47134,6 +47212,7 @@ fn soccer_playback_metadata_json(
         "stepTiming": step_timing,
         "cadence": cadence,
         "agentContract": soccer_playback_agent_contract(),
+        "decisionModel": soccer_decision_model_contract(),
         "playback": {
             "dtSeconds": config.dt_seconds,
             "durationSeconds": config.effective_duration_seconds(),
@@ -47142,6 +47221,7 @@ fn soccer_playback_metadata_json(
             "expectedFrameCount": expected_frame_count,
             "cadence": cadence,
             "agentContract": soccer_playback_agent_contract(),
+            "decisionModel": soccer_decision_model_contract(),
         },
         "events": events,
     })
@@ -92052,8 +92132,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains(
             "trace.agentContract = meta.agentContract || meta.playback?.agentContract || null"
         ));
+        assert!(html.contains(
+            "trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null"
+        ));
         assert!(html.contains("expectedTotalAgents"));
         assert!(html.contains("expectedPlayerCount"));
+        assert!(html.contains("decisionModel"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
@@ -92302,6 +92386,55 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
     }
 
+    fn assert_soccer_decision_model_contract_json(meta: &serde_json::Value) {
+        assert_eq!(meta["decisionModel"], meta["playback"]["decisionModel"]);
+        let model = &meta["decisionModel"];
+        assert_eq!(model["mdpStateGridEnabled"], true);
+        assert_eq!(model["pomdpObservationGridEnabled"], true);
+        assert_eq!(model["actionTargetGridEnabled"], true);
+        assert_eq!(model["receiveFacingEnabled"], true);
+        assert_eq!(model["actionFacingEnabled"], true);
+        assert_eq!(model["facingBucketCount"], SOCCER_FACING_INDEX_VALUES.len());
+        assert_eq!(
+            model["facingBuckets"]
+                .as_array()
+                .expect("facing buckets")
+                .len(),
+            SOCCER_FACING_INDEX_VALUES.len()
+        );
+        assert_eq!(
+            model["spatialBackoffLevels"],
+            serde_json::json!(["Fine", "Tactical", "Macro", "WholePitch"])
+        );
+        assert_eq!(model["gridParentLinksEnabled"], true);
+        assert_eq!(model["policyTargetGridEnabled"], true);
+        assert_eq!(model["neuralFeatureGridEnabled"], true);
+        assert_eq!(model["playbackPlayerGridEnabled"], true);
+        assert_eq!(model["playbackIntentTargetGridEnabled"], true);
+        let grids = model["grids"].as_array().expect("grid contracts");
+        assert_eq!(grids.len(), 4);
+        assert_eq!(grids[0]["level"], "Fine");
+        assert_eq!(grids[0]["columns"], PITCH_FINE_GRID_COLUMNS);
+        assert_eq!(grids[0]["rows"], PITCH_FINE_GRID_ROWS);
+        assert_eq!(
+            grids[0]["cells"],
+            PITCH_FINE_GRID_COLUMNS * PITCH_FINE_GRID_ROWS
+        );
+        assert_eq!(grids[0]["parentLevel"], "Tactical");
+        assert_eq!(grids[1]["level"], "Tactical");
+        assert_eq!(grids[1]["columns"], PITCH_TACTICAL_GRID_COLUMNS);
+        assert_eq!(grids[1]["rows"], PITCH_TACTICAL_GRID_ROWS);
+        assert_eq!(grids[1]["parentLevel"], "Macro");
+        assert_eq!(grids[2]["level"], "Macro");
+        assert_eq!(grids[2]["columns"], PITCH_MACRO_GRID_COLUMNS);
+        assert_eq!(grids[2]["rows"], PITCH_MACRO_GRID_ROWS);
+        assert_eq!(grids[2]["parentLevel"], "WholePitch");
+        assert_eq!(grids[3]["level"], "WholePitch");
+        assert_eq!(grids[3]["columns"], 1);
+        assert_eq!(grids[3]["rows"], 1);
+        assert!(grids[3].get("parentLevel").is_none());
+    }
+
     #[test]
     fn soccer_playback_artifact_writer_persists_split_assets() {
         let trace = run_simulation(
@@ -92368,6 +92501,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             meta["agentContract"]["slimFramesOmitFullAgentSchedule"],
             true
         );
+        assert_soccer_decision_model_contract_json(&meta);
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(meta["playback"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(
@@ -92447,6 +92581,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["agentContract"]["expectedBallAgents"], 1);
         assert_eq!(meta["agentContract"]["expectedCentralBrains"], 1);
         assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
+        assert_soccer_decision_model_contract_json(&meta);
         assert_eq!(
             meta["stepTiming"]["tickBudgetMs"],
             config.dt_seconds * 1000.0
@@ -92837,6 +92972,16 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .all(|player| player["playerGrid"]["m"]
                 .as_array()
                 .is_some_and(|cell| cell.len() == 4)));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["receiveFacing"].as_str().is_some()));
+        assert!(scheduled_frame["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|player| player["actionFacing"].as_str().is_some()));
         assert!(scheduled_frame["players"]
             .as_array()
             .unwrap()

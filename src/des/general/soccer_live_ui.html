@@ -1105,7 +1105,8 @@ function runtimeContractsLabel() {
   const learnText = learningContract.learningEnabled === false ? "observe" : "learn";
   const livePosts = ui.liveStepPostEnabled || ui.liveInputPostEnabled ? "live-post" : "live-no-post";
   const playbackPosts = ui.playbackStepPostEnabled || ui.playbackInputPostEnabled ? "pb-post" : "pb-get";
-  const httpText = learningContract.policyPersistenceLiveHttpStepWritesToPostgres ? "step-pg" : `${livePosts}/${playbackPosts}`;
+  const stepPersistence = learningContract.policyPersistenceLiveHttpStepPersistenceInMemoryOnly ? "sim-only" : "step-pg?";
+  const httpText = learningContract.policyPersistenceLiveHttpStepWritesToPostgres ? "step-pg" : `${livePosts}/${playbackPosts}/${stepPersistence}`;
   return `${players}p/${officials}o/${ballAgents}b ${slots}H ${mdp} ${rulesText} ${learnText} ${httpText}`;
 }
 function runtimeContractsTitle() {
@@ -1129,7 +1130,8 @@ function runtimeContractsTitle() {
     `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled} teammatePressure=${decision.supportTargetTeammateOccupiedPressureEnabled} intentSpace=${decision.playbackIntentTargetSpaceMetricsEnabled} shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,
     `learning=${learningContract.learningEnabled} logging=${learningContract.learningLoggingEnabled} backend=${learningContract.policyPersistenceBackend} retention=${learningContract.policyPersistenceRetentionModel}`,
     `persistenceWritesPerTick=${learningContract.policyPersistenceWritesPerTimestep} externalWritesPerTick=${learningContract.policyPersistenceExternalWritesPerTimestep} httpBatching=${learningContract.policyPersistenceHttpBatchingRequired} flush=${learningContract.policyPersistenceFlushPolicy}`,
-    `liveHttpStepWritesToPostgres=${learningContract.policyPersistenceLiveHttpStepWritesToPostgres} playbackHttpPosts=${learningContract.policyPersistencePlaybackHttpPostsEnabled} explicitPostgresExport=${learningContract.policyPersistenceExplicitPostgresExportEndpointEnabled} explicitExportBatched=${learningContract.policyPersistenceExplicitPostgresExportBatched}`,
+    `liveHttpStepWritesToPostgres=${learningContract.policyPersistenceLiveHttpStepWritesToPostgres} liveHttpStepInMemoryOnly=${learningContract.policyPersistenceLiveHttpStepPersistenceInMemoryOnly} playbackHttpPosts=${learningContract.policyPersistencePlaybackHttpPostsEnabled}`,
+    `explicitPostgresExport=${learningContract.policyPersistenceExplicitPostgresExportEndpointEnabled} explicitExportBatched=${learningContract.policyPersistenceExplicitPostgresExportBatched} postgresBatchTriggers=${(learningContract.policyPersistencePostgresBatchTriggers || []).join(",")}`,
   ];
   return lines.join("\n");
 }

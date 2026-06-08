@@ -35030,12 +35030,14 @@ pub struct SoccerLearningRuntimeContract {
     pub policy_persistence_live_autosave_backend: String,
     pub policy_persistence_live_autosave_writes_to_postgres: bool,
     pub policy_persistence_live_http_step_writes_to_postgres: bool,
+    pub policy_persistence_live_http_step_persistence_in_memory_only: bool,
     pub policy_persistence_playback_external_writes_enabled: bool,
     pub policy_persistence_playback_http_posts_enabled: bool,
     pub policy_persistence_explicit_postgres_export_endpoint_enabled: bool,
     pub policy_persistence_explicit_postgres_export_batched: bool,
     pub policy_persistence_postgres_completed_game_batches: bool,
     pub policy_persistence_postgres_policy_version_batches: bool,
+    pub policy_persistence_postgres_batch_triggers: Vec<String>,
     pub postgres_contract: SoccerPolicyPostgresStorageContract,
     pub reward_contract: SoccerLearningRewardContract,
 }
@@ -35175,12 +35177,21 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
         policy_persistence_live_autosave_backend: "json-disk".to_string(),
         policy_persistence_live_autosave_writes_to_postgres: false,
         policy_persistence_live_http_step_writes_to_postgres: false,
+        policy_persistence_live_http_step_persistence_in_memory_only: true,
         policy_persistence_playback_external_writes_enabled: false,
         policy_persistence_playback_http_posts_enabled: false,
         policy_persistence_explicit_postgres_export_endpoint_enabled: true,
         policy_persistence_explicit_postgres_export_batched: true,
         policy_persistence_postgres_completed_game_batches: true,
         policy_persistence_postgres_policy_version_batches: true,
+        policy_persistence_postgres_batch_triggers: [
+            "completed-game",
+            "manual-branch-tip-export",
+            "policy-version-batch",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         postgres_contract: SoccerPolicyPostgresStorageContract::default(),
         reward_contract: soccer_learning_reward_contract(),
     }
@@ -96232,6 +96243,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             false
         );
         assert_eq!(
+            step_value["learningContract"]["policyPersistenceLiveHttpStepPersistenceInMemoryOnly"],
+            true
+        );
+        assert_eq!(
             step_value["learningContract"]["policyPersistencePlaybackExternalWritesEnabled"],
             false
         );
@@ -96247,6 +96262,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             step_value["learningContract"]["policyPersistenceExplicitPostgresExportBatched"],
             true
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistencePostgresBatchTriggers"],
+            serde_json::json!([
+                "completed-game",
+                "manual-branch-tip-export",
+                "policy-version-batch"
+            ])
         );
         assert_eq!(
             step_value["uiContract"]["playbackLoadUsesGetAssetsOnly"],
@@ -105124,6 +105147,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             false
         );
         assert_eq!(
+            contract["policyPersistenceLiveHttpStepPersistenceInMemoryOnly"],
+            true
+        );
+        assert_eq!(
             contract["policyPersistencePlaybackExternalWritesEnabled"],
             false
         );
@@ -105143,6 +105170,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             contract["policyPersistencePostgresPolicyVersionBatches"],
             true
+        );
+        assert_eq!(
+            contract["policyPersistencePostgresBatchTriggers"],
+            serde_json::json!([
+                "completed-game",
+                "manual-branch-tip-export",
+                "policy-version-batch"
+            ])
         );
         assert_eq!(
             contract["postgresContract"]["backend"],
@@ -106601,6 +106636,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("policyPersistenceHttpBatchingRequired"));
         assert!(html.contains("policyPersistenceFlushPolicy"));
         assert!(html.contains("policyPersistenceLiveHttpStepWritesToPostgres"));
+        assert!(html.contains("policyPersistenceLiveHttpStepPersistenceInMemoryOnly"));
+        assert!(html.contains("policyPersistencePostgresBatchTriggers"));
+        assert!(html.contains("sim-only"));
         assert!(html.contains("policyPersistencePlaybackHttpPostsEnabled"));
         assert!(html.contains("policyPersistenceExplicitPostgresExportEndpointEnabled"));
         assert!(html.contains("policyPersistenceExplicitPostgresExportBatched"));

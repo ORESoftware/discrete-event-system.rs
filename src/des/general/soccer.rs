@@ -18063,6 +18063,8 @@ pub struct PlayerSnapshot {
     #[serde(default)]
     pub skills: SkillProfile,
     #[serde(default)]
+    pub skill_bands: String,
+    #[serde(default)]
     pub fatigue: f64,
     pub home_position: Vec2,
     pub controller_slot: Option<usize>,
@@ -18608,6 +18610,7 @@ impl WorldSnapshot {
                 action_facing: p.action_facing,
                 incoming_ball: p.incoming_ball.clone(),
                 skills: p.skills.clone(),
+                skill_bands: soccer_playback_skill_bands(&p.skills),
                 fatigue: p.fatigue,
                 home_position: p.home_position,
                 controller_slot: p.controller_slot,
@@ -53261,6 +53264,7 @@ fn tracking_frame_to_world_snapshot(
                 incoming_ball: None,
                 vision_range_yards: vision_range_yards(skills.vision),
                 field_of_view_degrees: field_of_view_degrees(skills.vision),
+                skill_bands: soccer_playback_skill_bands(&skills),
                 skills,
                 fatigue: 0.0,
                 home_position: home_positions
@@ -95951,6 +95955,29 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .iter()
                 .any(|player| !player.position_history.is_empty()),
             "live HTTP frames still expose per-player 50-position motion history"
+        );
+        let mut unique_skill_bands = HashSet::new();
+        for player in &frame.players {
+            assert_eq!(
+                player.skill_bands.len(),
+                8,
+                "live HTTP player {} should expose compact skill bands",
+                player.id
+            );
+            assert!(
+                player
+                    .skill_bands
+                    .chars()
+                    .all(|ch| ch.to_digit(36).is_some_and(|band| (1..=10).contains(&band))),
+                "live HTTP compact skill bands should stay base36 1..=10 values: {}",
+                player.skill_bands
+            );
+            unique_skill_bands.insert(player.skill_bands.clone());
+        }
+        assert!(
+            unique_skill_bands.len() >= 8,
+            "live HTTP frame should preserve differentiated player skill bands, got {} unique bands",
+            unique_skill_bands.len()
         );
         assert!(
             !frame.intents.is_empty(),

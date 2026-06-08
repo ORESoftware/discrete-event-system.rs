@@ -1103,7 +1103,9 @@ function runtimeContractsLabel() {
   const mdp = decision.mdpStateGridEnabled && decision.pomdpObservationGridEnabled ? "MDP/POMDP" : "policy?";
   const rulesText = rules.offsideRuleEnabled && rules.postGoalKickoffEnabled ? "rules" : "rules?";
   const learnText = learningContract.learningEnabled === false ? "observe" : "learn";
-  const httpText = learningContract.policyPersistenceLiveHttpStepWritesToPostgres ? "step-pg" : "step-batch";
+  const livePosts = ui.liveStepPostEnabled || ui.liveInputPostEnabled ? "live-post" : "live-no-post";
+  const playbackPosts = ui.playbackStepPostEnabled || ui.playbackInputPostEnabled ? "pb-post" : "pb-get";
+  const httpText = learningContract.policyPersistenceLiveHttpStepWritesToPostgres ? "step-pg" : `${livePosts}/${playbackPosts}`;
   return `${players}p/${officials}o/${ballAgents}b ${slots}H ${mdp} ${rulesText} ${learnText} ${httpText}`;
 }
 function runtimeContractsTitle() {
@@ -1121,6 +1123,7 @@ function runtimeContractsTitle() {
     `fisherYates=${agent.fieldEntitiesUseFisherYates} playerOpsRandom=${agent.playerOperationOrderRandomized} officialOpsRandom=${agent.officialOperationOrderRandomized} ballOpsRandom=${agent.ballOperationOrderRandomized}`,
     `controllers=${controller.maxHumanControllers} configured=${controller.configuredHumanControllers} nativeThreads=${controller.nativeThreadPerControllerEnabled} notify=${controller.notificationDrivenInput}`,
     `uiCanvas=${ui.birdEyeCanvas2dEnabled} runNew=${ui.runNewSimulationButtonEnabled} fourSlots=${ui.fourHumanControllerSlotsEnabled} goalposts=${ui.goalpostsRendered}`,
+    `uiHttp liveStepPost=${ui.liveStepPostEnabled} liveInputPost=${ui.liveInputPostEnabled} playbackStepPost=${ui.playbackStepPostEnabled} playbackInputPost=${ui.playbackInputPostEnabled} stepBatch=${ui.liveStepPostBatchesTicks} inputBatch=${ui.liveInputPostBatchesControllerFrames}`,
     `rulesOffside=${rules.offsideRuleEnabled} ownHalfExempt=${rules.offsideOwnHalfExempt} postGoalKickoff=${rules.postGoalKickoffEnabled} assistantRefs=${rules.assistantRefsTrackOffsideLine}`,
     `decisionMdp=${decision.mdpStateGridEnabled} pomdp=${decision.pomdpObservationGridEnabled} killerPass=${decision.killerPassProbabilityRampsTowardGoal} singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled} shotRamp=${decision.shotProbabilityRampsTowardGoal}`,
     `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled} teammatePressure=${decision.supportTargetTeammateOccupiedPressureEnabled} intentSpace=${decision.playbackIntentTargetSpaceMetricsEnabled} shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,

@@ -102403,7 +102403,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("scheduleInputFlush(0);"));
         assert!(html.contains("id=\"matchStep\""));
         assert!(html.contains("function matchStepLabel"));
-        assert!(html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t"));
+        assert!(html.contains("const cadence = state?.cadence || {}"));
+        assert!(html.contains("cadence.defaultTenMinuteContract ? \" ok\" : \"\""));
+        assert!(html.contains("const totalTicks = cadenceTotalTicks > 0"));
+        assert!(html.contains(
+            "dt ${dt.toFixed(1)}s ${fmtClock(total)} left ${fmtClock(remaining)} ${totalTicks}t${contract}${done}"
+        ));
+        assert!(
+            html.contains("dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t${contract}")
+        );
         assert!(
             html.contains("return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();")
         );

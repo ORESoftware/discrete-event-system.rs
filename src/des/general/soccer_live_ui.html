@@ -1653,20 +1653,25 @@ function effectiveMatchDurationSeconds(config = state?.config) {
   return Number(config.durationSeconds ?? 600);
 }
 function matchStepLabel(config = state?.config) {
+  const cadence = state?.cadence || {};
   const clock = state?.matchClock;
+  const cadenceDt = Number(cadence.dtSeconds ?? NaN);
+  const cadenceDuration = Number(cadence.durationSeconds ?? NaN);
+  const cadenceTotalTicks = Math.max(0, Math.round(Number(cadence.totalTicks ?? 0)));
+  const contract = cadence.defaultTenMinuteContract ? " ok" : "";
   if (clock) {
-    const dt = Number(clock.dtSeconds ?? config?.dtSeconds ?? 0.1);
-    const total = Number(clock.totalSeconds ?? effectiveMatchDurationSeconds(config));
+    const dt = Number.isFinite(cadenceDt) && cadenceDt > 0 ? cadenceDt : Number(clock.dtSeconds ?? config?.dtSeconds ?? 0.1);
+    const total = Number.isFinite(cadenceDuration) && cadenceDuration > 0 ? cadenceDuration : Number(clock.totalSeconds ?? effectiveMatchDurationSeconds(config));
     const remaining = Number(clock.remainingSeconds ?? Math.max(0, total - Number(clock.elapsedSeconds ?? 0)));
-    const totalTicks = Math.max(0, Math.round(Number(clock.totalTicks ?? 0)));
+    const totalTicks = cadenceTotalTicks > 0 ? cadenceTotalTicks : Math.max(0, Math.round(Number(clock.totalTicks ?? 0)));
     const done = clock.done ? " FT" : "";
-    return `dt ${dt.toFixed(1)}s ${fmtClock(total)} left ${fmtClock(remaining)} ${totalTicks}t${done}`;
+    return `dt ${dt.toFixed(1)}s ${fmtClock(total)} left ${fmtClock(remaining)} ${totalTicks}t${contract}${done}`;
   }
   if (!config) return "dt 0.1s 10:00";
-  const dt = Number(config.dtSeconds ?? 0.1);
-  const duration = effectiveMatchDurationSeconds(config);
-  const totalTicks = dt > 0 ? Math.round(duration / dt) : 0;
-  return `dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t`;
+  const dt = Number.isFinite(cadenceDt) && cadenceDt > 0 ? cadenceDt : Number(config.dtSeconds ?? 0.1);
+  const duration = Number.isFinite(cadenceDuration) && cadenceDuration > 0 ? cadenceDuration : effectiveMatchDurationSeconds(config);
+  const totalTicks = cadenceTotalTicks > 0 ? cadenceTotalTicks : (dt > 0 ? Math.round(duration / dt) : 0);
+  return `dt ${dt.toFixed(1)}s ${fmtClock(duration)} ${totalTicks}t${contract}`;
 }
 function episodeSummaryLine(item) {
   const summary = item?.summary || {};

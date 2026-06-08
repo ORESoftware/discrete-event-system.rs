@@ -6746,9 +6746,10 @@ impl PlayerAgent {
         let floor_pass_quality = pass_quality_for_patience(observation, PassFlight::Floor);
         let aerial_pass_quality = pass_quality_for_patience(observation, PassFlight::Aerial);
         let pressured_release_signal = pressure_release_signal(observation);
+        let open_support_fit = open_support_outlet_fit(observation);
         let pressured_good_outlet = (pressured_release_signal
-            * floor_pass_quality.max(aerial_pass_quality * 0.86))
-        .clamp(0.0, 1.0);
+            * (floor_pass_quality.max(aerial_pass_quality * 0.86) + open_support_fit * 0.18))
+            .clamp(0.0, 1.0);
         let hold_penalty_multiplier = dribble_hold_score_multiplier(observation, dribbling);
         let hold_release_multiplier = release_after_hold_multiplier(observation, dribbling);
         let poor_floor_pass = (1.0 - floor_pass_quality).clamp(0.0, 1.0);
@@ -6783,6 +6784,7 @@ impl PlayerAgent {
             * shot_creation_carry
             * striker_carry_boost
             * (1.0 + offensive_urgency * 0.30 + pressure_urgency * 0.20)
+            * (1.0 - pressured_release_signal * open_support_fit * 0.18).clamp(0.70, 1.0)
             * (1.0 - pressured_good_outlet * 0.30).clamp(0.62, 1.0))
         .clamp(0.02, 1.36);
         let dribble_score = (pre_fatigue_dribble_score
@@ -7237,9 +7239,10 @@ impl PlayerAgent {
             let release_floor = (0.20
                 + hold_pressure * 0.28
                 + release_pressure * 0.18
+                + open_support_fit * 0.18
                 + observation.best_pass_receiver_openness.clamp(0.0, 1.0) * 0.12
                 + observation.expected_pass_completion.clamp(0.0, 1.0) * 0.10)
-                .clamp(0.28, 0.68);
+                .clamp(0.28, 0.68 + open_support_fit * 0.16);
             ensure_min_legal_option_probability(&mut options, "pass1", release_floor);
         }
         if clearance_legal && hold_pressure >= 0.16 && release_pressure >= 0.42 {
@@ -58428,6 +58431,10 @@ fn floor_pass_quality_for_observation(observation: &SoccerPomdpObservation) -> f
         .clamp(0.0, 1.0)
 }
 
+fn open_support_outlet_fit(observation: &SoccerPomdpObservation) -> f64 {
+    (observation.open_support_outlets as f64 / 3.0).clamp(0.0, 1.0)
+}
+
 fn pressure_release_signal(observation: &SoccerPomdpObservation) -> f64 {
     ((observation
         .perceived_pressure
@@ -58441,10 +58448,15 @@ fn pressure_release_signal(observation: &SoccerPomdpObservation) -> f64 {
 fn pressured_release_multiplier(observation: &SoccerPomdpObservation) -> f64 {
     let quality = floor_pass_quality_for_observation(observation);
     let open_receiver = observation.best_pass_receiver_openness.clamp(0.0, 1.0);
+    let open_support = open_support_outlet_fit(observation);
     let forward_option = (observation.visible_forward_pass_options as f64 / 2.0).clamp(0.0, 1.0);
     (1.0 + pressure_release_signal(observation)
-        * (0.36 + quality * 0.62 + open_receiver * 0.24 + forward_option * 0.16))
-        .clamp(1.0, 2.20)
+        * (0.36
+            + quality * 0.62
+            + open_receiver * 0.24
+            + open_support * 0.24
+            + forward_option * 0.16))
+        .clamp(1.0, 2.34)
 }
 
 fn ability_score(value: f64) -> f64 {
@@ -94059,6 +94071,89 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             pass1.probability > dribble.probability
                 && pass1.probability > carry_forward.probability,
             "release to an open outlet should outrank stale carrying: pass={pass1:?} dribble={dribble:?} carry={carry_forward:?}"
+        );
+    }
+
+    #[test]
+    fn open_support_outlets_raise_pressured_release_over_stale_carry() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 22_684,
+            ..Default::default()
+        });
+        let holder = 7;
+        let outlet = 8;
+        let pressure = 14;
+        park_players_except(&mut sim, &[holder, outlet, pressure]);
+        sim.players[holder].position = Vec2::new(38.0, 42.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].skills.dribbling = 7.7;
+        sim.players[holder].skills.passing_completion_rate = 7.8;
+        sim.players[holder].preferences.dribble_bias = 1.22;
+        sim.players[holder].preferences.pass_bias = 0.68;
+        sim.players[outlet].position = Vec2::new(45.0, 50.0);
+        sim.players[outlet].home_position = sim.players[outlet].position;
+        sim.players[pressure].position = Vec2::new(35.0, 40.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let pass_targets = snapshot.ranked_visible_pass_targets(holder, 3);
+        assert!(pass_targets.contains(&outlet));
+        let mut open_observation = snapshot.observation_for(holder);
+        open_observation.actual_time_on_ball_seconds = 3.4;
+        open_observation.perceived_pressure = 0.84;
+        open_observation.pressure_urgency = 0.88;
+        open_observation.immediate_dispossession_risk = 0.72;
+        open_observation.expected_pass_completion = 0.58;
+        open_observation.best_pass_receiver_openness = 0.62;
+        open_observation.open_support_outlets = 2;
+        let mut closed_observation = open_observation.clone();
+        closed_observation.open_support_outlets = 0;
+
+        let directive = snapshot.tactical_directive(Team::Home);
+        let aerial_targets = snapshot.ranked_visible_aerial_pass_targets(holder, 3).len();
+        let open_options = sim.players[holder].possession_action_options(
+            &open_observation,
+            &directive,
+            pass_targets.len(),
+            aerial_targets,
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let closed_options = sim.players[holder].possession_action_options(
+            &closed_observation,
+            &directive,
+            pass_targets.len(),
+            aerial_targets,
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let option_probability = |options: &[AgentActionOptionTrace], label: &str| {
+            options
+                .iter()
+                .find(|option| option.label == label && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0)
+        };
+        let open_pass = option_probability(&open_options, "pass1");
+        let closed_pass = option_probability(&closed_options, "pass1");
+        let open_carry = option_probability(&open_options, "carry-forward");
+        let closed_carry = option_probability(&closed_options, "carry-forward");
+
+        assert!(
+            open_pass > closed_pass + 0.08,
+            "open support outlets should materially raise pressure release: open={open_pass} closed={closed_pass}"
+        );
+        assert!(
+            open_carry < closed_carry,
+            "open support outlets should reduce stale carry preference: open={open_carry} closed={closed_carry}"
+        );
+        assert!(
+            open_pass > open_carry,
+            "with open outlets under pressure, pass should outrank stale carry: pass={open_pass} carry={open_carry}"
         );
     }
 

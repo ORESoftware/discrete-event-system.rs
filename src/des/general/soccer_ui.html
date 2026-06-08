@@ -720,10 +720,13 @@ function soccerApiUrl(path) {
   }
   return new URL(`${prefix}${normalizedPath}`, current.href).toString();
 }
+function soccerPlaybackAssetMode(pathname = window.location.pathname) {
+  return pathname.includes("/out/") || !pathname.includes("/soccer/live");
+}
 function soccerLivePostApiEnabled() {
   const current = new URL(window.location.href);
   const ui = trace.uiContract || trace.playback?.uiContract || {};
-  return current.pathname.includes("/soccer/live") && ui.liveSimulationPostApiEnabled !== false;
+  return !soccerPlaybackAssetMode(current.pathname) && ui.liveSimulationPostApiEnabled !== false;
 }
 async function postSoccerJson(path, payload, resource = "api") {
   if (!soccerLivePostApiEnabled()) {

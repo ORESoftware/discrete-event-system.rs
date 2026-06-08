@@ -104250,8 +104250,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ui?.liveInputPostEnabled"));
         assert!(html.contains("playback ${playbackPosts}"));
         assert!(html.contains("live-only ${livePosts}"));
+        assert!(html.contains("function soccerPlaybackAssetMode"));
+        assert!(html.contains("pathname.includes(\"/out/\")"));
+        assert!(html.contains("!pathname.includes(\"/soccer/live\")"));
         assert!(html.contains("function soccerLivePostApiEnabled()"));
-        assert!(html.contains("current.pathname.includes(\"/soccer/live\")"));
+        assert!(html.contains("!soccerPlaybackAssetMode(current.pathname)"));
         assert!(html.contains("throw new Error(\"playback mode uses GET-only assets\")"));
         assert!(html.contains("if (!soccerLivePostApiEnabled()) return;"));
         assert!(html.contains("if (!soccerLivePostApiEnabled()) return \"Playback local\";"));

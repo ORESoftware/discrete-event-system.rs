@@ -79944,6 +79944,55 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn support_runs_treat_opponent_occupied_space_as_not_open() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let winger = 8;
+        let occupying_opponent = 14;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(40.0, 56.0);
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[winger].position = Vec2::new(63.0, 57.0);
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(35.0, 88.0 + (away - 11) as f64 * 0.5);
+        }
+
+        let open_snapshot = WorldSnapshot::from_match(&sim);
+        let open_target = open_snapshot.positional_open_space_for(
+            winger,
+            sim.players[winger].home_position,
+            false,
+        );
+
+        sim.players[occupying_opponent].position = open_target;
+        let occupied_snapshot = WorldSnapshot::from_match(&sim);
+        let opponent_distance =
+            occupied_snapshot.nearest_opponent_distance_at(Team::Home, open_target);
+        let adjusted_target = occupied_snapshot.positional_open_space_for(
+            winger,
+            sim.players[winger].home_position,
+            false,
+        );
+        let adjusted_opponent_distance =
+            occupied_snapshot.nearest_opponent_distance_at(Team::Home, adjusted_target);
+
+        assert!(
+            opponent_distance <= PLAYER_BODY_RADIUS_YARDS,
+            "opponent at the run target should make that space occupied: {opponent_distance}"
+        );
+        assert!(
+            adjusted_target.distance(open_target) > 2.0,
+            "support target should move away from opponent-occupied space: open={open_target:?} adjusted={adjusted_target:?}"
+        );
+        assert!(
+            adjusted_opponent_distance > PLAYER_BODY_RADIUS_YARDS * 3.0,
+            "adjusted support target should restore separation from the opponent: target={adjusted_target:?} distance={adjusted_opponent_distance}"
+        );
+    }
+
+    #[test]
     fn learned_support_target_points_are_shape_guarded() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let holder = 7;

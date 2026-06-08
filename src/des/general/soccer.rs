@@ -32114,6 +32114,10 @@ pub struct SoccerControllerRuntimeContract {
     pub configured_human_controllers: usize,
     pub native_thread_per_controller_enabled: bool,
     pub single_threaded_simulation_loop: bool,
+    pub unassigned_players_autonomous: bool,
+    pub assigned_player_autonomous_without_fresh_input: bool,
+    pub assigned_player_checks_controller_input_each_timestep: bool,
+    pub off_ball_human_ball_actions_sanitized: bool,
     pub shared_input_queue_uses_rw_lock: bool,
     pub controller_mailbox_uses_condvar: bool,
     pub main_loop_uses_condvar_yield: bool,
@@ -32422,6 +32426,10 @@ fn soccer_controller_runtime_contract(config: &MatchConfig) -> SoccerControllerR
         configured_human_controllers: config.human_slots(),
         native_thread_per_controller_enabled: true,
         single_threaded_simulation_loop: true,
+        unassigned_players_autonomous: true,
+        assigned_player_autonomous_without_fresh_input: true,
+        assigned_player_checks_controller_input_each_timestep: true,
+        off_ball_human_ball_actions_sanitized: true,
         shared_input_queue_uses_rw_lock: true,
         controller_mailbox_uses_condvar: true,
         main_loop_uses_condvar_yield: true,
@@ -94624,6 +94632,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["configuredHumanControllers"], config.human_slots());
         assert_eq!(contract["nativeThreadPerControllerEnabled"], true);
         assert_eq!(contract["singleThreadedSimulationLoop"], true);
+        assert_eq!(contract["unassignedPlayersAutonomous"], true);
+        assert_eq!(contract["assignedPlayerAutonomousWithoutFreshInput"], true);
+        assert_eq!(
+            contract["assignedPlayerChecksControllerInputEachTimestep"],
+            true
+        );
+        assert_eq!(contract["offBallHumanBallActionsSanitized"], true);
         assert_eq!(contract["sharedInputQueueUsesRwLock"], true);
         assert_eq!(contract["controllerMailboxUsesCondvar"], true);
         assert_eq!(contract["mainLoopUsesCondvarYield"], true);

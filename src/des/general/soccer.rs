@@ -97977,6 +97977,61 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn live_soccer_page_exposes_ball_surface_tuning_controls() {
+        let html = soccer_live_page_html();
+
+        assert!(html.contains("id=\"surfaceReadout\""));
+        assert!(html.contains("id=\"surfacePreset\""));
+        assert!(html.contains("value=\"short\""));
+        assert!(html.contains("value=\"standard\""));
+        assert!(html.contains("value=\"long\""));
+        assert!(html.contains("value=\"wet\""));
+        assert!(html.contains("value=\"heavy\""));
+        assert!(
+            html.contains("id=\"dragRange\" type=\"range\" min=\"0\" max=\"0.08\" step=\"0.001\"")
+        );
+        assert!(html
+            .contains("id=\"dragNumber\" type=\"number\" min=\"0\" max=\"0.95\" step=\"0.001\""));
+        assert!(
+            html.contains("id=\"airRange\" type=\"range\" min=\"0\" max=\"0.04\" step=\"0.001\"")
+        );
+        assert!(
+            html.contains("id=\"airNumber\" type=\"number\" min=\"0\" max=\"0.10\" step=\"0.001\"")
+        );
+        assert!(
+            html.contains("id=\"grassRange\" type=\"range\" min=\"0\" max=\"2.0\" step=\"0.01\"")
+        );
+        assert!(
+            html.contains("id=\"grassNumber\" type=\"number\" min=\"0\" max=\"5.0\" step=\"0.01\"")
+        );
+        assert!(
+            html.contains("id=\"stopRange\" type=\"range\" min=\"0\" max=\"1.5\" step=\"0.01\"")
+        );
+        assert!(
+            html.contains("id=\"stopNumber\" type=\"number\" min=\"0\" max=\"20\" step=\"0.01\"")
+        );
+        assert!(html.contains("function surfaceValues()"));
+        assert!(html.contains(
+            "ballDragPerTick: clamp(Number(dragNumber.value || dragRange.value || 0), 0, 0.95)"
+        ));
+        assert!(html.contains(
+            "ballAirResistance: clamp(Number(airNumber.value || airRange.value || 0), 0, 0.10)"
+        ));
+        assert!(html.contains("ballGrassResistanceYps2: clamp(Number(grassNumber.value || grassRange.value || 0), 0, 5.0)"));
+        assert!(html.contains(
+            "ballStopSpeedYps: clamp(Number(stopNumber.value || stopRange.value || 0), 0, 20)"
+        ));
+        assert!(html.contains("function syncSurfaceControls()"));
+        assert!(html.contains("state.config.ballDragPerTick"));
+        assert!(html.contains("state.config.ballAirResistance"));
+        assert!(html.contains("state.config.ballGrassResistanceYps2"));
+        assert!(html.contains("state.config.ballStopSpeedYps"));
+        assert!(html.contains("function updateSurface(values)"));
+        assert!(html.contains("postJson(\"/api/surface\", values)"));
+        assert!(html.contains("[dragRange, dragNumber, airRange, airNumber, grassRange, grassNumber, stopRange, stopNumber].forEach"));
+    }
+
+    #[test]
     fn live_soccer_page_exposes_four_human_controller_slots_and_keymaps() {
         let html = soccer_live_page_html();
 

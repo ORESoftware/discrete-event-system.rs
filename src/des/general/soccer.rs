@@ -91359,6 +91359,176 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
     }
 
+    #[test]
+    fn decisive_goal_actions_ramp_as_ball_gets_closer_to_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_236,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, runner, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].skills.shooting = 7.9;
+        sim.players[attacker].skills.passing_completion_rate = 8.8;
+        sim.players[attacker].skills.vision = 9.0;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.72;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.88;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].skills.shooting = 8.7;
+        sim.players[runner].skills.top_speed = 9.0;
+        sim.players[runner].velocity = Vec2::new(0.8, 5.6);
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+
+        let mut previous_decisive = 0.0;
+        let mut previous_recycle = f64::INFINITY;
+        for (idx, y) in [74.0, 88.0, 101.0].into_iter().enumerate() {
+            sim.players[attacker].position = Vec2::new(40.0, y);
+            sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+            sim.players[runner].position = Vec2::new(47.0, (y + 18.0).min(112.0));
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(attacker);
+            let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+            let aerial_targets = snapshot.ranked_visible_aerial_pass_targets(attacker, 3);
+            let options = sim.players[attacker].possession_action_options(
+                &observation,
+                &snapshot.tactical_directive(Team::Home),
+                pass_targets.len(),
+                aerial_targets.len(),
+                false,
+                sim.config.dt_seconds,
+                snapshot.field_width,
+            );
+            let option_probability = |label: &str| {
+                options
+                    .iter()
+                    .find(|option| option.label == label && option.legal)
+                    .map(|option| option.probability)
+                    .unwrap_or(0.0)
+            };
+            let decisive = option_probability("shoot") + option_probability("killer-pass");
+            let recycle = option_probability("pass1")
+                + option_probability("pass2")
+                + option_probability("aerial-pass1")
+                + option_probability("dribble")
+                + option_probability("carry-forward");
+
+            if idx > 0 {
+                assert!(
+                    decisive > previous_decisive + 0.04,
+                    "decisive shoot/killer-pass pressure should ramp toward goal: y={y} decisive={decisive} previous={previous_decisive} options={options:?}"
+                );
+                assert!(
+                    recycle < previous_recycle,
+                    "generic recycle/carry pressure should be damped as the ball nears goal: y={y} recycle={recycle} previous={previous_recycle} options={options:?}"
+                );
+            }
+            previous_decisive = decisive;
+            previous_recycle = recycle;
+        }
+    }
+
+    #[test]
+    fn blocked_final_third_holder_prefers_killer_pass_to_runner() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_237,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blockers = [13, 14, 15];
+        park_players_except(&mut sim, &[attacker, runner, keeper, 13, 14, 15]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 86.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 3.6);
+        sim.players[attacker].skills.shooting = 7.2;
+        sim.players[attacker].skills.passing_completion_rate = 9.0;
+        sim.players[attacker].skills.vision = 9.2;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.82;
+        sim.players[attacker].preferences.shoot_bias = 0.52;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(58.0, 106.0);
+        sim.players[runner].velocity = Vec2::new(1.2, 6.4);
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.2;
+        for (idx, blocker) in blockers.iter().copied().enumerate() {
+            sim.players[blocker].position = Vec2::new(38.0 + idx as f64 * 2.0, 103.0);
+            sim.players[blocker].skills.defending = 9.8;
+            sim.players[blocker].skills.defensive_tracking = 9.8;
+            sim.players[blocker].skills.aggression = 9.0;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+        assert!(
+            pass_targets.contains(&runner),
+            "runner should be a visible forward pass target: {pass_targets:?}"
+        );
+        assert!(
+            snapshot.killer_pass_target_for(attacker, &pass_targets) == Some(runner),
+            "runner should be the threaded killer-pass target"
+        );
+        assert!(
+            killer_pass_forced_by_goal_pressure(&observation, sim.players[attacker].role),
+            "blocked final-third shot with a forward runner should force the killer-pass search"
+        );
+
+        let options = sim.players[attacker].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            pass_targets.len(),
+            snapshot
+                .ranked_visible_aerial_pass_targets(attacker, 3)
+                .len(),
+            false,
+            sim.config.dt_seconds,
+            snapshot.field_width,
+        );
+        let option_probability = |label: &str| {
+            options
+                .iter()
+                .find(|option| option.label == label && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0)
+        };
+        let killer = option_probability("killer-pass");
+        let ordinary_pass = option_probability("pass1");
+        let carry = option_probability("dribble") + option_probability("carry-forward");
+        assert!(
+            killer >= 0.34,
+            "killer-pass should have a real final-third probability floor: killer={killer} options={options:?}"
+        );
+        assert!(
+            killer > ordinary_pass * 1.75,
+            "killer-pass should outrank ordinary recycling toward the runner: killer={killer} pass1={ordinary_pass} options={options:?}"
+        );
+        assert!(
+            killer > carry,
+            "blocked final-third holder should look for the threaded pass before another hold: killer={killer} carry={carry} options={options:?}"
+        );
+    }
+
     fn sample_position_only_kinematics_tracking_dataset() -> SoccerTrackingDataset {
         let config = MatchConfig {
             duration_seconds: 0.4,

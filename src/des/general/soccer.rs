@@ -89491,6 +89491,115 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn core_soccer_tick_executes_full_single_thread_runtime_contract() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 22_650,
+            ..Default::default()
+        });
+
+        sim.run_time_step();
+
+        let frame = sim.to_frame();
+        assert_eq!(sim.tick, 1);
+        assert_eq!(sim.clock_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(frame.tick, sim.tick);
+        assert_eq!(frame.clock_seconds, sim.clock_seconds);
+        assert_eq!(frame.players.len(), SOCCER_MATCH_PLAYER_COUNT);
+        assert_eq!(
+            frame
+                .players
+                .iter()
+                .filter(|player| player.team == Team::Home)
+                .count(),
+            SOCCER_MATCH_TEAM_PLAYER_COUNT
+        );
+        assert_eq!(
+            frame
+                .players
+                .iter()
+                .filter(|player| player.team == Team::Away)
+                .count(),
+            SOCCER_MATCH_TEAM_PLAYER_COUNT
+        );
+        assert_eq!(frame.officials.len(), SOCCER_MATCH_OFFICIAL_COUNT);
+        assert_eq!(
+            frame
+                .officials
+                .iter()
+                .filter(|official| official.kind == OfficialKind::CenterReferee)
+                .count(),
+            1
+        );
+        assert_eq!(
+            frame
+                .officials
+                .iter()
+                .filter(|official| matches!(
+                    official.kind,
+                    OfficialKind::AssistantRefereeNear | OfficialKind::AssistantRefereeFar
+                ))
+                .count(),
+            SOCCER_MATCH_ASSISTANT_REFEREE_COUNT
+        );
+
+        let summary = &frame.agent_schedule_summary;
+        assert!(
+            summary.complete,
+            "runtime schedule should be complete: {summary:?}"
+        );
+        assert_eq!(summary.total_agents, 27);
+        assert_eq!(summary.field_shuffle_agents, 26);
+        assert_eq!(summary.player_count, SOCCER_MATCH_PLAYER_COUNT);
+        assert_eq!(summary.official_count, SOCCER_MATCH_OFFICIAL_COUNT);
+        assert_eq!(summary.ball_count, 1);
+        assert!(summary.central_brain_first);
+        assert_eq!(
+            frame
+                .agent_schedule
+                .first()
+                .map(|entry| (&entry.kind, entry.id)),
+            Some((&AgentScheduleKind::CentralBrain, CENTRAL_BRAIN_AGENT_ID))
+        );
+        assert!(frame
+            .players
+            .iter()
+            .all(|player| player.scheduled_index.is_some()));
+        assert!(frame
+            .officials
+            .iter()
+            .all(|official| official.scheduled_index.is_some()));
+        assert!(frame.ball.scheduled_index.is_some());
+        assert!(frame.ball.last_decision.is_some());
+
+        assert_eq!(frame.central_brain.scheduled_index, Some(0));
+        assert_eq!(
+            frame.central_brain.tracked_players.len(),
+            SOCCER_MATCH_PLAYER_COUNT
+        );
+        assert_eq!(
+            frame.central_brain.tracked_official_awareness.len(),
+            SOCCER_MATCH_OFFICIAL_COUNT
+        );
+        assert_eq!(frame.central_brain.ball_position, frame.ball.position);
+        assert_eq!(frame.central_brain.ball_velocity, frame.ball.velocity);
+        assert_eq!(
+            frame.central_brain.ball_acceleration,
+            frame.ball.acceleration
+        );
+        assert_eq!(frame.central_brain.ball_jerk, frame.ball.jerk);
+        assert_eq!(
+            frame.home_brain.tracked_team_players,
+            SOCCER_MATCH_TEAM_PLAYER_COUNT
+        );
+        assert_eq!(
+            frame.away_brain.tracked_team_players,
+            SOCCER_MATCH_TEAM_PLAYER_COUNT
+        );
+        assert!(frame.home_brain.directive.risk_tolerance.is_finite());
+        assert!(frame.away_brain.directive.risk_tolerance.is_finite());
+    }
+
+    #[test]
     fn live_http_routes_state_and_step_json() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,

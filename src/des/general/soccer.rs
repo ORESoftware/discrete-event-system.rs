@@ -62509,12 +62509,16 @@ mod tests {
             ..Default::default()
         });
         let player_id = 5;
-        sim.players[player_id].position = Vec2::new(40.0, 90.0);
+        park_players_except(&mut sim, &[player_id, 6, 7, 8]);
+        sim.players[player_id].role = PlayerRole::Midfielder;
+        sim.players[player_id].position = Vec2::new(40.0, 78.0);
         sim.players[player_id].velocity = Vec2::new(0.0, 5.0);
+        sim.players[player_id].skills.shooting = 9.4;
+        sim.players[player_id].skills.passing_completion_rate = 9.2;
         sim.players[player_id].skills.decision_noise = 1.0;
-        sim.players[6].position = Vec2::new(46.0, 102.0);
-        sim.players[7].position = Vec2::new(34.0, 100.0);
-        sim.players[8].position = Vec2::new(52.0, 99.0);
+        sim.players[6].position = Vec2::new(47.0, 80.0);
+        sim.players[7].position = Vec2::new(33.0, 77.0);
+        sim.players[8].position = Vec2::new(52.0, 75.0);
         for away in 11..22 {
             sim.players[away].position = Vec2::new(8.0, 110.0);
         }
@@ -62525,6 +62529,10 @@ mod tests {
 
         let snapshot = WorldSnapshot::from_match(&sim);
         assert!(snapshot.observation_for(player_id).shot_lane_open);
+        assert!(
+            snapshot.observation_for(player_id).yards_to_goal > GOAL_URGENCY_MAX_YARDS,
+            "preference weighting should be tested outside the decisive near-goal branch"
+        );
         assert!(!snapshot
             .ranked_visible_pass_targets(player_id, 3)
             .is_empty());
@@ -90202,10 +90210,43 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .players
             .iter()
             .all(|player| player.scheduled_index.is_some()));
+        for player in &frame.players {
+            let decision = player.last_decision.as_ref().expect(
+                "every scheduled player agent should expose a run_time_step decision trace",
+            );
+            assert_eq!(
+                decision.scheduled_index, player.scheduled_index,
+                "player {} decision trace should agree with the shuffled schedule slot",
+                player.id
+            );
+            assert_eq!(decision.observation.scheduled_index, player.scheduled_index);
+            assert_eq!(decision.mdp_state.tick, frame.tick.saturating_sub(1));
+            assert!(
+                !decision.operation_order.is_empty(),
+                "player {} should expose its internal operation order",
+                player.id
+            );
+        }
         assert!(frame
             .officials
             .iter()
             .all(|official| official.scheduled_index.is_some()));
+        for official in &frame.officials {
+            let decision = official.last_decision.as_ref().expect(
+                "every scheduled official agent should expose a run_time_step decision trace",
+            );
+            assert_eq!(
+                decision.scheduled_index, official.scheduled_index,
+                "official {} decision trace should agree with the shuffled schedule slot",
+                official.id
+            );
+            assert_eq!(decision.tick, frame.tick.saturating_sub(1));
+            assert!(
+                !decision.operation_order.is_empty(),
+                "official {} should expose its internal operation order",
+                official.id
+            );
+        }
         assert!(frame.ball.scheduled_index.is_some());
         assert!(frame.ball.last_decision.is_some());
 

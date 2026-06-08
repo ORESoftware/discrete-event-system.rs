@@ -105147,6 +105147,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "default 10-minute trace should include live ball circulation"
         );
         assert!(
+            meta["tacticalLiveness"]["completedPasses"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should include completed passes between players"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["completedPassActivityOk"],
+            true
+        );
+        assert!(
             meta["tacticalLiveness"]["ballActiveFrames"]
                 .as_u64()
                 .unwrap_or(0)

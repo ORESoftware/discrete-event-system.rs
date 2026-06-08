@@ -7375,11 +7375,7 @@ impl PlayerAgent {
                 + offensive_urgency * 0.06
                 + goal_attack * 0.05)
                 .clamp(0.0, 0.54);
-            ensure_min_legal_option_probability(
-                &mut options,
-                "carry-forward",
-                progression_floor,
-            );
+            ensure_min_legal_option_probability(&mut options, "carry-forward", progression_floor);
         }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
@@ -28461,6 +28457,14 @@ pub struct SoccerPlaybackIntentFrame {
     #[serde(default)]
     pub shot_lane_open: bool,
     #[serde(default)]
+    pub shot_block_probability: f64,
+    #[serde(default)]
+    pub shot_on_frame_probability: f64,
+    #[serde(default)]
+    pub shot_beat_goalkeeper_probability: f64,
+    #[serde(default)]
+    pub forward_dribble_space_yards: f64,
+    #[serde(default)]
     pub threaded_goal_pass_available: bool,
     #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
     pub threaded_goal_pass_forward_yards: f64,
@@ -28705,6 +28709,10 @@ where
                 .clamp(0.0, 1.0),
             decisive_goal_action_pressure,
             shot_lane_open: decision.observation.shot_lane_open,
+            shot_block_probability: decision.observation.shot_block_probability,
+            shot_on_frame_probability: decision.observation.shot_on_frame_probability,
+            shot_beat_goalkeeper_probability: decision.observation.shot_beat_goalkeeper_probability,
+            forward_dribble_space_yards: decision.observation.forward_dribble_space_yards,
             threaded_goal_pass_available: decision.observation.threaded_goal_pass_available,
             threaded_goal_pass_forward_yards: if emit_threaded_goal_pass_quality {
                 decision.observation.threaded_goal_pass_forward_yards
@@ -31957,8 +31965,13 @@ impl SoccerFrameLivenessAccumulator {
 
         let possession_team = soccer_accounting_frame_ball_team(frame);
         let holder = frame.ball.holder;
+        let count_goal_window_outcomes_from_players = frame.intents.is_empty();
         for player in &frame.players {
-            self.observe_player_decision_liveness(player, holder == Some(player.id));
+            self.observe_player_decision_liveness(
+                player,
+                holder == Some(player.id),
+                count_goal_window_outcomes_from_players,
+            );
             let previous = self.previous_players.insert(player.id, player.position);
             let Some(prev) = previous else {
                 continue;
@@ -31985,6 +31998,9 @@ impl SoccerFrameLivenessAccumulator {
                     self.metrics.off_ball_open_space_moves.saturating_add(1);
                 self.metrics.off_ball_open_space_gain += gain;
             }
+        }
+        if !frame.intents.is_empty() {
+            self.observe_intent_possession_liveness(&frame.intents);
         }
     }
 
@@ -32073,7 +32089,12 @@ impl SoccerFrameLivenessAccumulator {
         }
     }
 
-    fn observe_player_decision_liveness(&mut self, player: &PlayerSnapshot, is_holder: bool) {
+    fn observe_player_decision_liveness(
+        &mut self,
+        player: &PlayerSnapshot,
+        is_holder: bool,
+        count_goal_window_outcomes: bool,
+    ) {
         let Some(decision) = player.last_decision.as_ref() else {
             return;
         };
@@ -32128,10 +32149,8 @@ impl SoccerFrameLivenessAccumulator {
             return;
         }
         if decision.observation.yards_to_goal <= 40.0 {
-            self.metrics.final_third_possession_frames = self
-                .metrics
-                .final_third_possession_frames
-                .saturating_add(1);
+            self.metrics.final_third_possession_frames =
+                self.metrics.final_third_possession_frames.saturating_add(1);
         }
         if decision.observation.yards_to_goal <= CLEAN_SHOT_MUST_SHOOT_YARDS {
             self.metrics.inside_twenty_possession_frames = self
@@ -32151,6 +32170,9 @@ impl SoccerFrameLivenessAccumulator {
         }
         let decisive_goal_action =
             soccer_frame_liveness_action_is_shot(action) || action == "killer-pass";
+        if !count_goal_window_outcomes {
+            return;
+        }
         if clean_twenty_yard_shot_is_qualified(&decision.observation, player.role) {
             self.metrics.clear_shot_window_frames =
                 self.metrics.clear_shot_window_frames.saturating_add(1);
@@ -32193,6 +32215,48 @@ impl SoccerFrameLivenessAccumulator {
         }
     }
 
+    fn observe_intent_possession_liveness(&mut self, intents: &[SoccerPlaybackIntentFrame]) {
+        for intent in intents {
+            let decisive_goal_action = soccer_frame_liveness_action_is_shot(&intent.action)
+                || intent.action == "killer-pass";
+            if soccer_frame_liveness_intent_clean_twenty_yard_shot_is_qualified(intent) {
+                self.metrics.clear_shot_window_frames =
+                    self.metrics.clear_shot_window_frames.saturating_add(1);
+                if soccer_frame_liveness_action_is_shot(&intent.action) {
+                    self.metrics.clear_shot_window_shots =
+                        self.metrics.clear_shot_window_shots.saturating_add(1);
+                }
+                if decisive_goal_action {
+                    self.metrics.clear_shot_window_decisive_actions = self
+                        .metrics
+                        .clear_shot_window_decisive_actions
+                        .saturating_add(1);
+                } else {
+                    self.metrics.clear_shot_window_recycles =
+                        self.metrics.clear_shot_window_recycles.saturating_add(1);
+                }
+            }
+
+            let killer_pressure = intent
+                .killer_pass_goal_pressure
+                .max(intent.single_thread_goal_pressure);
+            if intent.threaded_goal_pass_available
+                && intent.yards_to_goal <= KILLER_PASS_MAX_YARDS_TO_GOAL
+                && killer_pressure >= 0.32
+            {
+                self.metrics.killer_pass_window_frames =
+                    self.metrics.killer_pass_window_frames.saturating_add(1);
+                if intent.action == "killer-pass" {
+                    self.metrics.killer_pass_window_passes =
+                        self.metrics.killer_pass_window_passes.saturating_add(1);
+                } else if !soccer_frame_liveness_action_is_shot(&intent.action) {
+                    self.metrics.killer_pass_window_recycles =
+                        self.metrics.killer_pass_window_recycles.saturating_add(1);
+                }
+            }
+        }
+    }
+
     fn observe_player_decision_model_liveness(&mut self, decision: &AgentDecisionTrace) {
         self.metrics.player_decision_model_samples =
             self.metrics.player_decision_model_samples.saturating_add(1);
@@ -32225,6 +32289,20 @@ impl SoccerFrameLivenessAccumulator {
 
 fn soccer_frame_liveness_action_is_shot(action: &str) -> bool {
     matches!(action, "shoot" | "first-time-shot" | "first-time-header")
+}
+
+fn soccer_frame_liveness_intent_clean_twenty_yard_shot_is_qualified(
+    intent: &SoccerPlaybackIntentFrame,
+) -> bool {
+    if intent.role == PlayerRole::Goalkeeper || !intent.shot_lane_open {
+        return false;
+    }
+    intent.yards_to_goal <= CLEAN_SHOT_MUST_SHOOT_YARDS
+        && intent.shot_block_probability.clamp(0.0, 1.0) <= CLEAN_SHOT_MAX_BLOCK_PROBABILITY
+        && intent.shot_on_frame_probability >= CLEAN_SHOT_MIN_ON_FRAME_PROBABILITY
+        && intent.shot_beat_goalkeeper_probability >= CLEAN_SHOT_MIN_KEEPER_BEAT_PROBABILITY
+        && (intent.forward_dribble_space_yards >= 1.5
+            || intent.shot_block_probability <= CLEAN_SHOT_MAX_BLOCK_PROBABILITY * 0.52)
 }
 
 fn soccer_frame_liveness_grid_address_is_resolved(grid: &PitchGridAddress) -> bool {
@@ -36328,8 +36406,8 @@ impl Default for SoccerPolicyPostgresStorageContract {
             completed_game_batches_enabled: true,
             policy_version_batches_enabled: true,
             live_autosave_writes_to_postgres: false,
-            batch_cadence:
-                "completed-game-batches-and-branch-tip-policy-version-exports".to_string(),
+            batch_cadence: "completed-game-batches-and-branch-tip-policy-version-exports"
+                .to_string(),
             writes_per_timestep: false,
             redis_enabled: false,
             autosave_min_interval_ticks: MIN_POLICY_AUTOSAVE_INTERVAL_TICKS,
@@ -55359,6 +55437,7 @@ fn threaded_goal_pass_can_override_forced_shot(
         || !observation.threaded_goal_pass_available
         || observation.visible_forward_pass_options == 0
         || observation.yards_to_goal > KILLER_PASS_MAX_YARDS_TO_GOAL
+        || clean_twenty_yard_shot_is_qualified(observation, role)
     {
         return false;
     }
@@ -103092,6 +103171,63 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "near-goal override should stay decisive, got {:?}",
             intent.action
         );
+
+        let mut clean_observation = snapshot.observation_for(attacker);
+        clean_observation.yards_to_goal = CLEAN_SHOT_MUST_SHOOT_YARDS - 1.0;
+        clean_observation.shot_lane_open = true;
+        clean_observation.shot_block_probability = 0.12;
+        clean_observation.shot_on_frame_probability = 0.58;
+        clean_observation.shot_beat_goalkeeper_probability = 0.28;
+        clean_observation.opponent_goal_angle_degrees = 28.0;
+        clean_observation.forward_dribble_space_yards = 2.4;
+        clean_observation.threaded_goal_pass_available = true;
+        clean_observation.visible_forward_pass_options =
+            clean_observation.visible_forward_pass_options.max(1);
+        clean_observation.best_forward_pass_receiver_openness = 0.94;
+        clean_observation.best_pass_stride_fit = 0.90;
+        clean_observation.floor_pass_lane_score = 0.92;
+        clean_observation.expected_pass_completion = 0.84;
+        clean_observation.goal_attack_window_score = 0.76;
+        clean_observation.offensive_urgency = 0.72;
+        clean_observation.decision_urgency = 0.68;
+
+        assert!(clean_twenty_yard_shot_is_qualified(
+            &clean_observation,
+            sim.players[attacker].role
+        ));
+        assert!(goal_attack_shot_is_required(
+            &clean_observation,
+            sim.players[attacker].role
+        ));
+        assert!(
+            !threaded_goal_pass_can_override_forced_shot(
+                &clean_observation,
+                sim.players[attacker].role
+            ),
+            "a clean inside-20 through-line shot must not be recycled into a threaded pass"
+        );
+        let mut clean_player = sim.players[attacker].clone();
+        let clean_intent = clean_player.run_time_step_with_context(
+            &snapshot,
+            snapshot.mdp_state_for_player(attacker),
+            clean_observation,
+            None,
+            None,
+            &mut mulberry32(22_241),
+        );
+        let clean_decision = clean_player.last_decision.expect("clean decision trace");
+        assert!(
+            matches!(clean_intent.action, SoccerAction::Shoot { .. }),
+            "clean inside-20 through-line should force a shot, got {:?}",
+            clean_intent.action
+        );
+        assert!(
+            clean_decision
+                .operation_order
+                .iter()
+                .any(|operation| operation == "must-shoot"),
+            "clean inside-20 decision should record the hard must-shoot gate: {clean_decision:?}"
+        );
     }
 
     fn sample_position_only_kinematics_tracking_dataset() -> SoccerTrackingDataset {
@@ -105396,10 +105532,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 > 0,
             "default 10-minute trace should include completed passes between players"
         );
-        assert_eq!(
-            meta["tacticalLiveness"]["completedPassActivityOk"],
-            true
-        );
+        assert_eq!(meta["tacticalLiveness"]["completedPassActivityOk"], true);
         assert!(
             meta["tacticalLiveness"]["shotAttempts"]
                 .as_u64()
@@ -105532,7 +105665,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["agentContract"]["expectedAssistantReferees"], 2);
         assert_eq!(meta["agentContract"]["expectedBallAgents"], 1);
         assert_eq!(meta["agentContract"]["expectedCentralBrains"], 1);
-        assert_eq!(meta["agentContract"]["centralBrainRunTimeStepEnabled"], true);
+        assert_eq!(
+            meta["agentContract"]["centralBrainRunTimeStepEnabled"],
+            true
+        );
         assert_eq!(meta["agentContract"]["playerRunTimeStepEnabled"], true);
         assert_eq!(meta["agentContract"]["officialRunTimeStepEnabled"], true);
         assert_eq!(meta["agentContract"]["ballRunTimeStepEnabled"], true);
@@ -105541,10 +105677,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             true
         );
         assert_eq!(meta["agentContract"]["fieldEntitiesUseFisherYates"], true);
-        assert_eq!(
-            meta["agentContract"]["centralBrainTracksAllPlayers"],
-            true
-        );
+        assert_eq!(meta["agentContract"]["centralBrainTracksAllPlayers"], true);
         assert_eq!(
             meta["agentContract"]["centralBrainTracksAllOfficials"],
             true
@@ -105557,14 +105690,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             meta["agentContract"]["centralBrainTracksControllerAssignments"],
             true
         );
-        assert_eq!(meta["controllerContract"], meta["playback"]["controllerContract"]);
+        assert_eq!(
+            meta["controllerContract"],
+            meta["playback"]["controllerContract"]
+        );
         assert_eq!(meta["controllerContract"]["maxHumanControllers"], 4);
         assert_eq!(meta["controllerContract"]["configuredHumanControllers"], 0);
         assert_eq!(
             meta["controllerContract"]["singleThreadedSimulationLoop"],
             true
         );
-        assert_eq!(meta["controllerContract"]["sharedInputQueueUsesRwLock"], true);
+        assert_eq!(
+            meta["controllerContract"]["sharedInputQueueUsesRwLock"],
+            true
+        );
         assert_eq!(
             meta["controllerContract"]["nativeThreadPerControllerEnabled"],
             true

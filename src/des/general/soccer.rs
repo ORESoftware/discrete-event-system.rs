@@ -72727,13 +72727,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             seed: 103,
             ..Default::default()
         };
-        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_holder,last_touch_team,top_speed,acceleration,strength,weight_pounds,shooting,dribbling,passing_completion_rate,crossing_left,crossing_right,defensive_ability,ability_in_goal,vision
-0,0.0,0,Home passer,Home,Midfielder,8,40.0,70.0,40.0,70.0,0,Home,9.6,8.8,7.4,166.0,8.6,8.2,9.1,4.2,8.9,3.1,2.0,9.4
-0,0.0,1,Home runner,Home,Forward,9,44.0,82.0,40.0,70.0,0,Home,8.0,8.0,7.8,174.0,9.2,8.0,7.0,7.0,7.0,4.0,2.0,7.0
-0,0.0,2,Away defender,Away,Defender,4,58.0,78.0,40.0,70.0,0,Home,7.0,7.0,8.5,188.0,4.4,5.0,6.0,5.0,5.0,8.5,2.0,6.0
-1,0.1,0,Home passer,Home,Midfielder,8,40.2,70.4,44.0,82.0,1,Home,9.6,8.8,7.4,166.0,8.6,8.2,9.1,4.2,8.9,3.1,2.0,9.4
-1,0.1,1,Home runner,Home,Forward,9,44.0,82.0,44.0,82.0,1,Home,8.0,8.0,7.8,174.0,9.2,8.0,7.0,7.0,7.0,4.0,2.0,7.0
-1,0.1,2,Away defender,Away,Defender,4,56.5,78.5,44.0,82.0,1,Home,7.0,7.0,8.5,188.0,4.4,5.0,6.0,5.0,5.0,8.5,2.0,6.0
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_holder,last_touch_team,top_speed,acceleration,strength,weight_pounds,shooting,dribbling,passing,passing_completion_rate,first_touch,crossing_left,crossing_right,defensive_ability,ability_in_goal,vision
+0,0.0,0,Home passer,Home,Midfielder,8,40.0,70.0,40.0,70.0,0,Home,9.6,8.8,7.4,166.0,8.6,8.2,9.3,9.1,8.4,4.2,8.9,3.1,2.0,9.4
+0,0.0,1,Home runner,Home,Forward,9,44.0,82.0,40.0,70.0,0,Home,8.0,8.0,7.8,174.0,9.2,8.0,7.2,7.0,7.8,7.0,7.0,4.0,2.0,7.0
+0,0.0,2,Away defender,Away,Defender,4,58.0,78.0,40.0,70.0,0,Home,7.0,7.0,8.5,188.0,4.4,5.0,6.4,6.0,6.2,5.0,5.0,8.5,2.0,6.0
+1,0.1,0,Home passer,Home,Midfielder,8,40.2,70.4,44.0,82.0,1,Home,9.6,8.8,7.4,166.0,8.6,8.2,9.3,9.1,8.4,4.2,8.9,3.1,2.0,9.4
+1,0.1,1,Home runner,Home,Forward,9,44.0,82.0,44.0,82.0,1,Home,8.0,8.0,7.8,174.0,9.2,8.0,7.2,7.0,7.8,7.0,7.0,4.0,2.0,7.0
+1,0.1,2,Away defender,Away,Defender,4,56.5,78.5,44.0,82.0,1,Home,7.0,7.0,8.5,188.0,4.4,5.0,6.4,6.0,6.2,5.0,5.0,8.5,2.0,6.0
 "#;
 
         let tracking =
@@ -72747,7 +72747,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(imported.strength, 7.4);
         assert_eq!(imported.weight_pounds, 166.0);
         assert_eq!(imported.shooting, 8.6);
+        assert_eq!(imported.passing, 9.3);
         assert_eq!(imported.passing_completion_rate, 9.1);
+        assert_eq!(imported.first_touch, 8.4);
         assert_eq!(imported.crossing_right, 8.9);
         assert_eq!(imported.defending, 3.1);
         assert_eq!(imported.goalkeeping, 2.0);
@@ -72762,6 +72764,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(passer.observation.skill_top_speed, 9.6);
         assert_eq!(passer.observation.skill_weight_pounds, 166.0);
         assert_eq!(passer.observation.skill_shooting, 8.6);
+        assert_eq!(passer.observation.skill_passing, 9.3);
+        assert_eq!(passer.observation.skill_first_touch, 8.4);
         assert_eq!(passer.observation.skill_crossing_left, 4.2);
         assert_eq!(passer.observation.skill_crossing_right, 8.9);
         assert_eq!(passer.observation.skill_defending, 3.1);
@@ -72769,6 +72773,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(state.skill_top_speed_bin, skill_bucket(9.6));
         assert_eq!(state.skill_weight_bin, player_weight_bucket(166.0));
         assert_eq!(state.skill_shooting_bin, skill_bucket(8.6));
+        assert_eq!(state.skill_passing_bin, skill_bucket(9.3));
+        assert_eq!(state.skill_first_touch_bin, skill_bucket(8.4));
         assert_eq!(state.skill_crossing_left_bin, skill_bucket(4.2));
         assert_eq!(state.skill_crossing_right_bin, skill_bucket(8.9));
         assert_eq!(state.skill_defending_bin, skill_bucket(3.1));

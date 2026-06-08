@@ -34740,6 +34740,12 @@ pub struct SoccerUiRuntimeContract {
     pub split_frames_jsonl_enabled: bool,
     pub newline_delimited_frames_enabled: bool,
     pub streaming_load_progress_enabled: bool,
+    pub playback_load_uses_get_assets_only: bool,
+    pub playback_load_posts_to_http_api: bool,
+    pub playback_external_persistence_enabled: bool,
+    pub live_simulation_post_api_enabled: bool,
+    pub live_step_post_batches_ticks: bool,
+    pub live_input_post_batches_controller_frames: bool,
     pub run_new_simulation_button_enabled: bool,
     pub four_human_controller_slots_enabled: bool,
     pub max_human_controller_slots: usize,
@@ -34954,6 +34960,11 @@ pub struct SoccerLearningRuntimeContract {
     pub policy_persistence_postgres_branch_tip_exports_batched: bool,
     pub policy_persistence_live_autosave_backend: String,
     pub policy_persistence_live_autosave_writes_to_postgres: bool,
+    pub policy_persistence_live_http_step_writes_to_postgres: bool,
+    pub policy_persistence_playback_external_writes_enabled: bool,
+    pub policy_persistence_playback_http_posts_enabled: bool,
+    pub policy_persistence_explicit_postgres_export_endpoint_enabled: bool,
+    pub policy_persistence_explicit_postgres_export_batched: bool,
     pub policy_persistence_postgres_completed_game_batches: bool,
     pub policy_persistence_postgres_policy_version_batches: bool,
     pub postgres_contract: SoccerPolicyPostgresStorageContract,
@@ -35094,6 +35105,11 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
         policy_persistence_postgres_branch_tip_exports_batched: true,
         policy_persistence_live_autosave_backend: "json-disk".to_string(),
         policy_persistence_live_autosave_writes_to_postgres: false,
+        policy_persistence_live_http_step_writes_to_postgres: false,
+        policy_persistence_playback_external_writes_enabled: false,
+        policy_persistence_playback_http_posts_enabled: false,
+        policy_persistence_explicit_postgres_export_endpoint_enabled: true,
+        policy_persistence_explicit_postgres_export_batched: true,
         policy_persistence_postgres_completed_game_batches: true,
         policy_persistence_postgres_policy_version_batches: true,
         postgres_contract: SoccerPolicyPostgresStorageContract::default(),
@@ -35309,6 +35325,12 @@ fn soccer_ui_runtime_contract() -> SoccerUiRuntimeContract {
         split_frames_jsonl_enabled: true,
         newline_delimited_frames_enabled: true,
         streaming_load_progress_enabled: true,
+        playback_load_uses_get_assets_only: true,
+        playback_load_posts_to_http_api: false,
+        playback_external_persistence_enabled: false,
+        live_simulation_post_api_enabled: true,
+        live_step_post_batches_ticks: true,
+        live_input_post_batches_controller_frames: true,
         run_new_simulation_button_enabled: true,
         four_human_controller_slots_enabled: true,
         max_human_controller_slots: SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
@@ -95974,6 +95996,48 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             step_value["learningContract"]["policyPersistencePostgresBranchTipExportsBatched"],
             true
         );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceLiveHttpStepWritesToPostgres"],
+            false
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistencePlaybackExternalWritesEnabled"],
+            false
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistencePlaybackHttpPostsEnabled"],
+            false
+        );
+        assert_eq!(
+            step_value["learningContract"]
+                ["policyPersistenceExplicitPostgresExportEndpointEnabled"],
+            true
+        );
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceExplicitPostgresExportBatched"],
+            true
+        );
+        assert_eq!(
+            step_value["uiContract"]["playbackLoadUsesGetAssetsOnly"],
+            true
+        );
+        assert_eq!(
+            step_value["uiContract"]["playbackLoadPostsToHttpApi"],
+            false
+        );
+        assert_eq!(
+            step_value["uiContract"]["playbackExternalPersistenceEnabled"],
+            false
+        );
+        assert_eq!(
+            step_value["uiContract"]["liveSimulationPostApiEnabled"],
+            true
+        );
+        assert_eq!(step_value["uiContract"]["liveStepPostBatchesTicks"], true);
+        assert_eq!(
+            step_value["uiContract"]["liveInputPostBatchesControllerFrames"],
+            true
+        );
         assert_eq!(step_value["liveAccounting"]["ok"], true);
         assert_eq!(step_value["liveAccounting"]["playerCount"], 22);
         assert_eq!(step_value["liveAccounting"]["officialCount"], 3);
@@ -103798,6 +103862,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("policyPersistenceBackend"));
         assert!(html.contains("policyPersistenceStoresAllWeightHistory"));
         assert!(html.contains("policyPersistenceExternalWritesPerTimestep"));
+        assert!(html.contains("policyPersistencePlaybackHttpPostsEnabled"));
+        assert!(html.contains("playback ${playbackPosts}"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains(
             "trace.tacticalLiveness = meta.tacticalLiveness || meta.playback?.tacticalLiveness || null"
@@ -104399,6 +104465,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["splitFramesJsonlEnabled"], true);
         assert_eq!(contract["newlineDelimitedFramesEnabled"], true);
         assert_eq!(contract["streamingLoadProgressEnabled"], true);
+        assert_eq!(contract["playbackLoadUsesGetAssetsOnly"], true);
+        assert_eq!(contract["playbackLoadPostsToHttpApi"], false);
+        assert_eq!(contract["playbackExternalPersistenceEnabled"], false);
+        assert_eq!(contract["liveSimulationPostApiEnabled"], true);
+        assert_eq!(contract["liveStepPostBatchesTicks"], true);
+        assert_eq!(contract["liveInputPostBatchesControllerFrames"], true);
         assert_eq!(contract["runNewSimulationButtonEnabled"], true);
         assert_eq!(contract["fourHumanControllerSlotsEnabled"], true);
         assert_eq!(
@@ -104783,6 +104855,23 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             contract["policyPersistenceLiveAutosaveWritesToPostgres"],
             false
+        );
+        assert_eq!(
+            contract["policyPersistenceLiveHttpStepWritesToPostgres"],
+            false
+        );
+        assert_eq!(
+            contract["policyPersistencePlaybackExternalWritesEnabled"],
+            false
+        );
+        assert_eq!(contract["policyPersistencePlaybackHttpPostsEnabled"], false);
+        assert_eq!(
+            contract["policyPersistenceExplicitPostgresExportEndpointEnabled"],
+            true
+        );
+        assert_eq!(
+            contract["policyPersistenceExplicitPostgresExportBatched"],
+            true
         );
         assert_eq!(
             contract["policyPersistencePostgresCompletedGameBatches"],
@@ -106165,6 +106254,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("policyPersistenceExternalWritesPerTimestep"));
         assert!(html.contains("policyPersistenceHttpBatchingRequired"));
         assert!(html.contains("policyPersistenceFlushPolicy"));
+        assert!(html.contains("policyPersistenceLiveHttpStepWritesToPostgres"));
+        assert!(html.contains("policyPersistencePlaybackHttpPostsEnabled"));
+        assert!(html.contains("policyPersistenceExplicitPostgresExportEndpointEnabled"));
+        assert!(html.contains("policyPersistenceExplicitPostgresExportBatched"));
     }
 
     #[test]

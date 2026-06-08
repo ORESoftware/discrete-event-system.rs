@@ -20480,6 +20480,13 @@ impl WorldSnapshot {
                 if quality.expected_completion < 0.24 || lane_fit < 0.30 {
                     return None;
                 }
+                let reception_teammate_pressure =
+                    self.teammate_occupied_space_pressure_at(me.team, reception, Some(target.id));
+                if reception_teammate_pressure > 0.90 {
+                    return None;
+                }
+                let reception_teammate_penalty =
+                    TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY * reception_teammate_pressure;
                 let window = self.shooting_window_score_at(target, reception);
                 let range_fit = ((KILLER_PASS_MAX_YARDS_TO_GOAL - yards_to_goal)
                     / KILLER_PASS_MAX_YARDS_TO_GOAL)
@@ -20504,7 +20511,8 @@ impl WorldSnapshot {
                     + lane_fit * 1.3
                     + range_fit * 1.2
                     + role_bonus
-                    + runner_bonus;
+                    + runner_bonus
+                    - reception_teammate_penalty * 0.72;
                 Some((target_id, score))
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -95819,6 +95827,69 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn killer_pass_selector_rejects_teammate_occupied_reception_pocket() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_244,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let occupying_teammate = 7;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, runner, occupying_teammate, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 92.0);
+        sim.players[attacker].skills.passing_completion_rate = 9.2;
+        sim.players[attacker].skills.vision = 9.4;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(47.0, 100.0);
+        sim.players[runner].velocity = Vec2::new(0.6, 4.8);
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.first_touch = 8.6;
+        sim.players[runner].skills.top_speed = 8.9;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let clean_snapshot = WorldSnapshot::from_match(&sim);
+        assert_eq!(
+            clean_snapshot.killer_pass_target_for(attacker, &[runner]),
+            Some(runner),
+            "clean runner should be a valid threaded goal-pass target"
+        );
+        let attacker_snapshot = clean_snapshot
+            .players
+            .iter()
+            .find(|player| player.id == attacker)
+            .expect("attacker");
+        let nominal_speed =
+            pass_speed_yps_from_power(0.82, PassFlight::Floor, false, &attacker_snapshot.skills);
+        let reception = clean_snapshot
+            .anticipated_pass_reception_point(attacker, runner, PassFlight::Floor, nominal_speed)
+            .expect("anticipated reception");
+
+        sim.players[occupying_teammate].position = reception;
+        let occupied_snapshot = WorldSnapshot::from_match(&sim);
+        let teammate_pressure = occupied_snapshot.teammate_occupied_space_pressure_at(
+            Team::Home,
+            reception,
+            Some(runner),
+        );
+        assert!(
+            teammate_pressure > 0.90,
+            "test setup should put teammate in the killer-pass reception pocket: pressure={teammate_pressure}, reception={reception:?}"
+        );
+        assert_eq!(
+            occupied_snapshot.killer_pass_target_for(attacker, &[runner]),
+            None,
+            "killer-pass selector should not force a threaded ball into teammate-occupied space"
+        );
+    }
+
+    #[test]
     fn blocked_final_third_holder_prefers_killer_pass_to_runner() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -95830,6 +95901,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let keeper = 11;
         let blockers = [13, 14, 15];
         park_players_except(&mut sim, &[attacker, runner, keeper, 13, 14, 15]);
+        for player in sim
+            .players
+            .iter_mut()
+            .filter(|player| player.team == Team::Home)
+            .filter(|player| player.id != attacker && player.id != runner)
+        {
+            player.position = Vec2::new(6.0 + player.id as f64 * 0.8, 22.0);
+            player.velocity = Vec2::zero();
+        }
         sim.players[attacker].role = PlayerRole::Midfielder;
         sim.players[attacker].position = Vec2::new(40.0, 86.0);
         sim.players[attacker].velocity = Vec2::new(0.0, 3.6);
@@ -95841,8 +95921,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         sim.players[attacker].preferences.dribble_bias = 0.82;
         sim.players[attacker].preferences.shoot_bias = 0.52;
         sim.players[runner].role = PlayerRole::Forward;
-        sim.players[runner].position = Vec2::new(58.0, 106.0);
-        sim.players[runner].velocity = Vec2::new(1.2, 6.4);
+        sim.players[runner].position = Vec2::new(56.0, 105.0);
+        sim.players[runner].velocity = Vec2::new(0.4, 2.2);
         sim.players[runner].skills.shooting = 8.8;
         sim.players[runner].skills.top_speed = 9.1;
         sim.players[keeper].position = Vec2::new(40.0, 116.5);
@@ -95870,8 +95950,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "runner should be the threaded killer-pass target"
         );
         assert!(
-            killer_pass_forced_by_goal_pressure(&observation, sim.players[attacker].role),
-            "blocked final-third shot with a forward runner should force the killer-pass search"
+            observation.threaded_goal_pass_available
+                && single_pass_goal_thread_pressure_score(&observation) >= 0.32,
+            "blocked final-third shot with a forward runner should expose meaningful killer-pass pressure: {observation:?}"
         );
 
         let options = sim.players[attacker].possession_action_options(

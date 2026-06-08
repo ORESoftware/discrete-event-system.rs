@@ -591,6 +591,11 @@ let inputFlushRetryAttempt = 0;
 let lastInputAck = {acceptedInputs: 0, queuedHumanInputs: 0, error: "", at: 0};
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
+  if (!soccerLivePostApiEnabled()) {
+    window.__humanInputQueue = [];
+    updateInputStatusLabels();
+    return;
+  }
   window.__humanInputQueue.push(frame);
   compactQueuedInputsForBrowser();
   updateInputStatusLabels();
@@ -715,7 +720,15 @@ function soccerApiUrl(path) {
   }
   return new URL(`${prefix}${normalizedPath}`, current.href).toString();
 }
+function soccerLivePostApiEnabled() {
+  const current = new URL(window.location.href);
+  const ui = trace.uiContract || trace.playback?.uiContract || {};
+  return current.pathname.includes("/soccer/live") && ui.liveSimulationPostApiEnabled !== false;
+}
 async function postSoccerJson(path, payload, resource = "api") {
+  if (!soccerLivePostApiEnabled()) {
+    throw new Error("playback mode uses GET-only assets");
+  }
   const options = fetchOptions("application/json");
   options.method = "POST";
   options.headers = {...options.headers, "Content-Type": "application/json"};
@@ -1430,6 +1443,19 @@ function selectedPlayerDecisionProbabilityLabel(p) {
   const actionProbability = Number(selected?.probability ?? 0);
   const tickProbability = Number(selected?.tickProbability ?? actionProbability);
   return ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)} C${legal.length}`;
+}
+function selectedPlayerSkillBandLabel(p) {
+  const skills = p?.skillBands || {};
+  const compactBand = index => parseInt(String(skills || "").charAt(index) || "0", 36) || 0;
+  const band = (name, index) => Number(typeof skills === "string" ? compactBand(index) : Array.isArray(skills) ? skills[index] : skills[name] ?? 0);
+  const speed = band("speed", 0);
+  const acceleration = band("acceleration", 1);
+  const shooting = band("shooting", 3);
+  const passing = band("passing", 4);
+  const dribbling = band("dribbling", 5);
+  const defending = band("defending", 6);
+  if (![speed, acceleration, shooting, passing, dribbling, defending].some(v => v > 0)) return "";
+  return `Sk Sp${speed}/Ac${acceleration}/Sh${shooting}/Pa${passing}/Dr${dribbling}/Df${defending}`;
 }
 function pitchGridAddressFromPosition(position) {
   const config = trace.config || FALLBACK_CONFIG;
@@ -2399,6 +2425,7 @@ function applyControllerAssignments(assignments) {
 async function syncControllerAssignment(slot, playerId) {
   const requestId = ++controllerAssignmentSyncSeq;
   const payload = {controllerSlot: slot, playerId: playerId == null ? null : playerId};
+  if (!soccerLivePostApiEnabled()) return;
   try {
     const data = await postSoccerJson("/api/assign", payload, "assign");
     if (requestId !== controllerAssignmentSyncSeq) return;
@@ -2413,6 +2440,11 @@ async function syncControllerAssignment(slot, playerId) {
   }
 }
 function scheduleInputFlush(delayMs = LIVE_INPUT_FLUSH_INTERVAL_MS) {
+  if (!soccerLivePostApiEnabled()) {
+    window.__humanInputQueue = [];
+    updateInputStatusLabels();
+    return;
+  }
   if (inputFlushTimer != null || inputFlushInFlight) return;
   inputFlushTimer = window.setTimeout(
     flushQueuedInputsToInputApi,
@@ -2438,6 +2470,7 @@ function latestQueuedInputSeq(slot) {
   }, 0);
 }
 function inputStatusLabel(slot) {
+  if (!soccerLivePostApiEnabled()) return "Playback local";
   const queued = slotQueuedInputCount(slot);
   const latestSeq = latestQueuedInputSeq(slot);
   const sending = inputFlushInFlight ? " sending" : "";
@@ -2464,6 +2497,11 @@ function updateInputStatusLabels() {
 }
 async function flushQueuedInputsToInputApi() {
   inputFlushTimer = null;
+  if (!soccerLivePostApiEnabled()) {
+    window.__humanInputQueue = [];
+    updateInputStatusLabels();
+    return;
+  }
   if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
   inputFlushInFlight = true;
   updateInputStatusLabels();
@@ -2533,7 +2571,8 @@ function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
   const ops = operationOrderLabel(p?.lastDecision?.operationOrder || p?.operationOrder, 2);
   const probability = selectedPlayerDecisionProbabilityLabel(p);
   const gridFacing = selectedPlayerGridFacingLabel(p);
-  const agentTrace = action ? `${action}${schedule}${probability} ${gridFacing}${ops ? ` ${ops}` : ""}` : gridFacing;
+  const skillBands = selectedPlayerSkillBandLabel(p);
+  const agentTrace = action ? `${action}${schedule}${probability} ${gridFacing}${skillBands ? ` ${skillBands}` : ""}${ops ? ` ${ops}` : ""}` : `${gridFacing}${skillBands ? ` ${skillBands}` : ""}`;
   if (!observation) return agentTrace || "-";
   const keeperLine = Number(observation.goalkeeperBallGoalLineAlignmentScore ?? 0);
   const breakThreat = Number(observation.defensiveLineBreakThreat ?? 0);

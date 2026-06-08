@@ -105173,6 +105173,27 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "default 10-minute trace should include active ball-agent frames"
         );
         assert!(
+            meta["tacticalLiveness"]["offBallOpenSpaceMoves"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should include teammates moving into open space"
+        );
+        assert!(
+            meta["tacticalLiveness"]["offBallOpenSpaceGain"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.25,
+            "default 10-minute trace should measure positive open-space gain"
+        );
+        assert!(
+            meta["tacticalLiveness"]["ballGoalwardProgressYards"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.10,
+            "default 10-minute trace should move the ball goalward"
+        );
+        assert!(
             meta["tacticalLiveness"]["playerDecisionModelSamples"]
                 .as_u64()
                 .unwrap_or(0)

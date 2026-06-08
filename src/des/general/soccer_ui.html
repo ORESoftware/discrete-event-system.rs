@@ -876,17 +876,22 @@ function tacticalLivenessState() {
   const passAttempts = Number(meta.passAttempts ?? ((s.passesAttemptedHome ?? 0) + (s.passesAttemptedAway ?? 0)));
   const completedPasses = Number(meta.completedPasses ?? ((s.passesCompletedHome ?? 0) + (s.passesCompletedAway ?? 0)));
   const shotAttempts = Number(meta.shotAttempts ?? ((s.shotsHome ?? 0) + (s.shotsAway ?? 0)));
+  const offBallOpenSpaceSupportKnown = Boolean(meta.offBallOpenSpaceSupportKnown);
+  const offBallOpenSpaceMoves = Number(meta.offBallOpenSpaceMoves ?? 0);
+  const offBallOpenSpaceGain = Number(meta.offBallOpenSpaceGain ?? 0);
   const sustainedPassWindow = Boolean(meta.sustainedPassWindow);
   const sustainedShotWindow = Boolean(meta.sustainedShotWindow);
   const passOk = meta.passActivityOk == null ? (!sustainedPassWindow || passAttempts > 0) : Boolean(meta.passActivityOk);
   const completedOk = meta.completedPassActivityOk == null ? (!sustainedPassWindow || completedPasses > 0) : Boolean(meta.completedPassActivityOk);
   const shotOk = meta.shotActivityOk == null ? (!sustainedShotWindow || shotAttempts > 0) : Boolean(meta.shotActivityOk);
-  return {passAttempts, completedPasses, shotAttempts, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk};
+  const openSpaceOk = meta.openSpaceSupportOk == null ? true : Boolean(meta.openSpaceSupportOk);
+  return {passAttempts, completedPasses, shotAttempts, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk};
 }
 function tacticalLivenessLabel() {
   const live = tacticalLivenessState();
-  const ok = live.passOk && live.completedOk && live.shotOk;
-  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts}${ok ? "" : " !"}`;
+  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk;
+  const support = live.offBallOpenSpaceSupportKnown ? live.offBallOpenSpaceMoves : "?";
+  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} O${support}${ok ? "" : " !"}`;
 }
 function tacticalLivenessTitle() {
   const live = tacticalLivenessState();
@@ -894,10 +899,14 @@ function tacticalLivenessTitle() {
     `pass attempts=${live.passAttempts}`,
     `completed passes=${live.completedPasses}`,
     `shots=${live.shotAttempts}`,
+    live.offBallOpenSpaceSupportKnown
+      ? `off-ball open-space moves=${live.offBallOpenSpaceMoves}; gain=${live.offBallOpenSpaceGain.toFixed(2)}`
+      : "off-ball open-space support not measured",
   ];
   if (!live.passOk) parts.push("20s+ run has no pass attempts");
   if (!live.completedOk) parts.push("20s+ run has no completed passes");
   if (!live.shotOk) parts.push("45s+ run has no shots");
+  if (!live.openSpaceOk) parts.push("20s+ run has no off-ball open-space support");
   return parts.join("; ");
 }
 function totalLoadedSeconds() {

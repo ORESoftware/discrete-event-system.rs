@@ -2912,6 +2912,23 @@ fn annotate_human_control_observation(
     }
 }
 
+fn human_input_matches_player(
+    input: &HumanInputFrame,
+    player_id: usize,
+    controller_slot: Option<usize>,
+) -> bool {
+    if input
+        .player_id
+        .is_some_and(|input_player| input_player != player_id)
+    {
+        return false;
+    }
+    match controller_slot {
+        Some(slot) => input.controller_slot == slot,
+        None => input.player_id == Some(player_id),
+    }
+}
+
 fn record_running_mean(mean: &mut f64, count: usize, value: f64) {
     if count == 0 {
         return;
@@ -7793,6 +7810,8 @@ impl PlayerAgent {
         learned_plan: Option<&SoccerLearnedPlan>,
         rng: &mut SeededRandom,
     ) -> PlayerIntent {
+        let human_input = human_input
+            .filter(|input| human_input_matches_player(input, self.id, self.controller_slot));
         annotate_human_control_observation(&mut observation, self.controller_slot, human_input);
         let belief = belief_from_observation(&observation);
         let directive = snapshot.tactical_directive(self.team);
@@ -65269,6 +65288,100 @@ mod tests {
                 expected_kind.label()
             );
         }
+    }
+
+    #[test]
+    fn player_loop_rejects_mismatched_human_controller_input() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 1,
+            seed: 79,
+            ..Default::default()
+        });
+        let holder = 8;
+        park_players_except(&mut sim, &[holder]);
+        sim.players[holder].controller_slot = Some(0);
+        sim.players[holder].position = Vec2::new(40.0, 70.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].skills.dribbling = 8.0;
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let matching_input = HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(holder),
+            seq: 1,
+            axis: Vec2::zero(),
+            sprint: false,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: Some("carry_forward".to_string()),
+            target_player: None,
+        };
+        let mut matching_player = sim.players[holder].clone();
+        let matching_intent = matching_player.run_time_step(
+            &snapshot,
+            Some(&matching_input),
+            None,
+            &mut mulberry32(29_010),
+        );
+        assert!(
+            matches!(
+                matching_intent.action,
+                SoccerAction::DribbleMove {
+                    kind: DribbleMoveKind::CarryForward,
+                    ..
+                }
+            ),
+            "matching controller input should drive the selected player, got {matching_intent:?}"
+        );
+        let matching_decision = matching_player
+            .last_decision
+            .as_ref()
+            .expect("matching human decision");
+        assert_eq!(matching_decision.operation_order, vec!["human-input"]);
+        assert!(matching_decision.observation.human_input_present);
+        assert_eq!(matching_decision.observation.human_input_seq, Some(1));
+
+        let mut wrong_player_input = matching_input.clone();
+        wrong_player_input.player_id = Some(holder + 1);
+        wrong_player_input.seq = 2;
+        let mut wrong_player = sim.players[holder].clone();
+        let _ = wrong_player.run_time_step(
+            &snapshot,
+            Some(&wrong_player_input),
+            None,
+            &mut mulberry32(29_011),
+        );
+        let wrong_player_decision = wrong_player
+            .last_decision
+            .as_ref()
+            .expect("autonomous decision after wrong player input");
+        assert_ne!(wrong_player_decision.operation_order, vec!["human-input"]);
+        assert!(!wrong_player_decision.observation.human_input_present);
+        assert_eq!(wrong_player_decision.observation.human_input_seq, None);
+
+        let mut wrong_slot_input = matching_input.clone();
+        wrong_slot_input.controller_slot = 1;
+        wrong_slot_input.seq = 3;
+        let mut wrong_slot_player = sim.players[holder].clone();
+        let _ = wrong_slot_player.run_time_step(
+            &snapshot,
+            Some(&wrong_slot_input),
+            None,
+            &mut mulberry32(29_012),
+        );
+        let wrong_slot_decision = wrong_slot_player
+            .last_decision
+            .as_ref()
+            .expect("autonomous decision after wrong slot input");
+        assert_ne!(wrong_slot_decision.operation_order, vec!["human-input"]);
+        assert!(!wrong_slot_decision.observation.human_input_present);
+        assert_eq!(wrong_slot_decision.observation.human_input_seq, None);
     }
 
     #[test]

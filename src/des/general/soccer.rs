@@ -29949,6 +29949,64 @@ pub struct SoccerAccountingSmokeReport {
     pub violations: Vec<SoccerAccountingSmokeViolation>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerLiveFrameAccountingReport {
+    pub tick: u64,
+    pub ok: bool,
+    pub expected_player_count: usize,
+    pub player_count: usize,
+    pub expected_official_count: usize,
+    pub official_count: usize,
+    pub expected_ball_count: usize,
+    pub ball_scheduled: bool,
+    pub expected_total_agents: usize,
+    pub total_agents: usize,
+    pub expected_field_shuffle_agents: usize,
+    pub field_shuffle_agents: usize,
+    pub unique_agents: usize,
+    pub duplicate_agents: usize,
+    pub central_brain_first: bool,
+    pub schedule_complete: bool,
+    pub shared_latest_players: usize,
+    pub shared_latest_officials: usize,
+    pub shared_ball_latest: bool,
+    pub min_player_history_len: usize,
+    pub max_player_history_len: usize,
+    pub min_official_history_len: usize,
+    pub max_official_history_len: usize,
+    pub ball_history_len: usize,
+    pub central_brain_decision_present: bool,
+    pub ball_decision_present: bool,
+    pub holder_decision_present: bool,
+    pub operation_traces_checked: usize,
+    pub violation_count: usize,
+    pub violations: Vec<SoccerAccountingSmokeViolation>,
+}
+
+impl SoccerLiveFrameAccountingReport {
+    fn push_violation(
+        &mut self,
+        tick: u64,
+        subject: impl Into<String>,
+        metric: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.violations.push(SoccerAccountingSmokeViolation {
+            tick,
+            subject: subject.into(),
+            metric: metric.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+            message: message.into(),
+        });
+        self.violation_count = self.violations.len();
+        self.ok = self.violations.is_empty();
+    }
+}
+
 impl SoccerAccountingSmokeReport {
     pub fn ok(&self) -> bool {
         self.violations.is_empty()
@@ -29973,6 +30031,372 @@ impl SoccerAccountingSmokeReport {
         });
         self.violation_count = self.violations.len();
     }
+}
+
+pub fn soccer_live_frame_accounting_report(frame: &MatchFrame) -> SoccerLiveFrameAccountingReport {
+    let expected_player_count = SOCCER_MATCH_PLAYER_COUNT;
+    let expected_official_count = SOCCER_MATCH_OFFICIAL_COUNT;
+    let expected_ball_count = 1;
+    let expected_total_agents =
+        1 + expected_player_count + expected_official_count + expected_ball_count;
+    let expected_field_shuffle_agents =
+        expected_player_count + expected_official_count + expected_ball_count;
+    let mut seen_agents = HashSet::new();
+    for entry in &frame.agent_schedule {
+        seen_agents.insert(format!("{:?}:{}", entry.kind, entry.id));
+    }
+    let total_agents = frame.agent_schedule.len();
+    let unique_agents = seen_agents.len();
+    let duplicate_agents = total_agents.saturating_sub(unique_agents);
+    let field_shuffle_agents = frame
+        .agent_schedule
+        .iter()
+        .filter(|entry| entry.kind != AgentScheduleKind::CentralBrain)
+        .count();
+    let ball_scheduled = frame
+        .agent_schedule
+        .iter()
+        .any(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+    let central_brain_first = frame.agent_schedule.first().is_some_and(|entry| {
+        entry.kind == AgentScheduleKind::CentralBrain && entry.id == CENTRAL_BRAIN_AGENT_ID
+    });
+    let schedule_complete = frame.tick == 0 && frame.agent_schedule.is_empty()
+        || (total_agents == expected_total_agents
+            && unique_agents == expected_total_agents
+            && duplicate_agents == 0
+            && field_shuffle_agents == expected_field_shuffle_agents
+            && central_brain_first
+            && ball_scheduled);
+    let min_player_history_len = frame
+        .players
+        .iter()
+        .map(|player| player.position_history.len())
+        .min()
+        .unwrap_or(0);
+    let max_player_history_len = frame
+        .players
+        .iter()
+        .map(|player| player.position_history.len())
+        .max()
+        .unwrap_or(0);
+    let min_official_history_len = frame
+        .officials
+        .iter()
+        .map(|official| official.position_history.len())
+        .min()
+        .unwrap_or(0);
+    let max_official_history_len = frame
+        .officials
+        .iter()
+        .map(|official| official.position_history.len())
+        .max()
+        .unwrap_or(0);
+    let central_brain_decision_present = frame.central_brain.last_decision.is_some();
+    let ball_decision_present = frame.ball.last_decision.is_some();
+    let holder_decision_present = frame
+        .ball
+        .holder
+        .and_then(|holder| frame.players.iter().find(|player| player.id == holder))
+        .is_some_and(|holder| holder.last_decision.is_some());
+    let mut report = SoccerLiveFrameAccountingReport {
+        tick: frame.tick,
+        ok: true,
+        expected_player_count,
+        player_count: frame.players.len(),
+        expected_official_count,
+        official_count: frame.officials.len(),
+        expected_ball_count,
+        ball_scheduled,
+        expected_total_agents,
+        total_agents,
+        expected_field_shuffle_agents,
+        field_shuffle_agents,
+        unique_agents,
+        duplicate_agents,
+        central_brain_first,
+        schedule_complete,
+        shared_latest_players: frame.shared_positions.latest.len(),
+        shared_latest_officials: frame.shared_positions.official_latest.len(),
+        shared_ball_latest: frame.shared_positions.ball_latest.is_some(),
+        min_player_history_len,
+        max_player_history_len,
+        min_official_history_len,
+        max_official_history_len,
+        ball_history_len: frame.ball_history.len(),
+        central_brain_decision_present,
+        ball_decision_present,
+        holder_decision_present,
+        operation_traces_checked: 0,
+        violation_count: 0,
+        violations: Vec::new(),
+    };
+
+    let home_count = frame
+        .players
+        .iter()
+        .filter(|player| player.team == Team::Home)
+        .count();
+    let away_count = frame
+        .players
+        .iter()
+        .filter(|player| player.team == Team::Away)
+        .count();
+    let home_gk = frame
+        .players
+        .iter()
+        .filter(|player| player.team == Team::Home && player.role == PlayerRole::Goalkeeper)
+        .count();
+    let away_gk = frame
+        .players
+        .iter()
+        .filter(|player| player.team == Team::Away && player.role == PlayerRole::Goalkeeper)
+        .count();
+    if frame.players.len() != expected_player_count || home_count != 11 || away_count != 11 {
+        report.push_violation(
+            frame.tick,
+            "players",
+            "rosterSize",
+            "22 players: 11 home, 11 away",
+            format!(
+                "total {}, home {home_count}, away {away_count}",
+                frame.players.len()
+            ),
+            "live frame should expose the full 11v11 player roster",
+        );
+    }
+    if home_gk != 1 || away_gk != 1 {
+        report.push_violation(
+            frame.tick,
+            "players",
+            "goalkeepers",
+            "one goalkeeper per team",
+            format!("home {home_gk}, away {away_gk}"),
+            "live frame should expose exactly one goalkeeper per team",
+        );
+    }
+
+    let center_refs = frame
+        .officials
+        .iter()
+        .filter(|official| official.kind == OfficialKind::CenterReferee)
+        .count();
+    let assistant_refs = frame
+        .officials
+        .iter()
+        .filter(|official| {
+            matches!(
+                official.kind,
+                OfficialKind::AssistantRefereeNear | OfficialKind::AssistantRefereeFar
+            )
+        })
+        .count();
+    if frame.officials.len() != expected_official_count || center_refs != 1 || assistant_refs != 2 {
+        report.push_violation(
+            frame.tick,
+            "officials",
+            "rosterSize",
+            "1 center referee and 2 assistant referees",
+            format!(
+                "total {}, center {center_refs}, assistants {assistant_refs}",
+                frame.officials.len()
+            ),
+            "live frame should expose all three referee agents",
+        );
+    }
+
+    if frame.tick > 0 && !schedule_complete {
+        report.push_violation(
+            frame.tick,
+            "agentSchedule",
+            "complete",
+            format!("{expected_total_agents} agents with central brain first and ball scheduled"),
+            format!(
+                "total {total_agents}, unique {unique_agents}, duplicates {duplicate_agents}, field {field_shuffle_agents}, centralFirst {central_brain_first}, ball {ball_scheduled}"
+            ),
+            "live frame should expose the central brain plus shuffled players, officials, and ball agent",
+        );
+    }
+    if frame.tick > 0 && frame.agent_schedule_summary.complete != schedule_complete {
+        report.push_violation(
+            frame.tick,
+            "agentScheduleSummary",
+            "complete",
+            schedule_complete.to_string(),
+            frame.agent_schedule_summary.complete.to_string(),
+            "live schedule summary should agree with the authoritative agent schedule",
+        );
+    }
+
+    if report.shared_latest_players != frame.players.len()
+        || report.shared_latest_officials != frame.officials.len()
+        || !report.shared_ball_latest
+    {
+        report.push_violation(
+            frame.tick,
+            "sharedPositions",
+            "latestCoverage",
+            format!(
+                "{} player latest, {} official latest, ball latest",
+                frame.players.len(),
+                frame.officials.len()
+            ),
+            format!(
+                "{} player latest, {} official latest, ball {}",
+                report.shared_latest_players,
+                report.shared_latest_officials,
+                report.shared_ball_latest
+            ),
+            "live shared data should track latest x/y positions for players, officials, and ball",
+        );
+    }
+    if min_player_history_len == 0
+        || max_player_history_len > PLAYER_POSITION_HISTORY_LIMIT
+        || min_official_history_len == 0
+        || max_official_history_len > OFFICIAL_POSITION_HISTORY_LIMIT
+        || report.ball_history_len == 0
+        || report.ball_history_len > BALL_POSITION_HISTORY_LIMIT
+    {
+        report.push_violation(
+            frame.tick,
+            "history",
+            "rollingPositionHistory",
+            format!(
+                "players 1..={PLAYER_POSITION_HISTORY_LIMIT}, officials 1..={OFFICIAL_POSITION_HISTORY_LIMIT}, ball 1..={BALL_POSITION_HISTORY_LIMIT}"
+            ),
+            format!(
+                "players {min_player_history_len}..{max_player_history_len}, officials {min_official_history_len}..{max_official_history_len}, ball {}",
+                report.ball_history_len
+            ),
+            "live frame should retain rolling kinematic history for field agents and ball",
+        );
+    }
+
+    if frame.tick > 0 && !central_brain_decision_present {
+        report.push_violation(
+            frame.tick,
+            "centralBrain",
+            "decisionTrace",
+            "present",
+            "missing",
+            "central brain should expose its run_time_step trace after a tick executes",
+        );
+    }
+    if frame.tick > 0 && !ball_decision_present {
+        report.push_violation(
+            frame.tick,
+            "ball",
+            "decisionTrace",
+            "present",
+            "missing",
+            "ball should expose its own run_time_step trace after a tick executes",
+        );
+    }
+    if frame.tick > 0 && frame.ball.holder.is_some() && !holder_decision_present {
+        report.push_violation(
+            frame.tick,
+            "holder",
+            "decisionTrace",
+            "present",
+            "missing",
+            "live compact frame should retain the ball holder's player decision trace",
+        );
+    }
+
+    if let Some(decision) = frame.central_brain.last_decision.as_ref() {
+        report.operation_traces_checked += 1;
+        if decision.operation_order.is_empty() || decision.scheduled_index != Some(0) {
+            report.push_violation(
+                frame.tick,
+                "centralBrain",
+                "operationOrder",
+                "non-empty order at schedule index 0",
+                format!(
+                    "index {:?}, order {}",
+                    decision.scheduled_index,
+                    decision.operation_order.join(">")
+                ),
+                "central brain trace should expose its internal operation order",
+            );
+        }
+    }
+    if let Some(decision) = frame.ball.last_decision.as_ref() {
+        report.operation_traces_checked += 1;
+        if decision.operation_order.is_empty()
+            || decision.scheduled_index != frame.ball.scheduled_index
+        {
+            report.push_violation(
+                frame.tick,
+                "ball",
+                "operationOrder",
+                format!(
+                    "non-empty order at schedule index {:?}",
+                    frame.ball.scheduled_index
+                ),
+                format!(
+                    "index {:?}, order {}",
+                    decision.scheduled_index,
+                    decision.operation_order.join(">")
+                ),
+                "ball trace should expose its internal operation order",
+            );
+        }
+    }
+    for player in frame
+        .players
+        .iter()
+        .filter(|player| player.last_decision.is_some())
+    {
+        if let Some(decision) = player.last_decision.as_ref() {
+            report.operation_traces_checked += 1;
+            if decision.operation_order.is_empty()
+                || decision.scheduled_index != player.scheduled_index
+            {
+                report.push_violation(
+                    frame.tick,
+                    "player",
+                    "operationOrder",
+                    format!(
+                        "player {} non-empty order at {:?}",
+                        player.id, player.scheduled_index
+                    ),
+                    format!(
+                        "index {:?}, order {}",
+                        decision.scheduled_index,
+                        decision.operation_order.join(">")
+                    ),
+                    "visible player trace should expose its internal operation order",
+                );
+            }
+        }
+    }
+    for official in &frame.officials {
+        if let Some(decision) = official.last_decision.as_ref() {
+            report.operation_traces_checked += 1;
+            if decision.operation_order.is_empty()
+                || decision.scheduled_index != official.scheduled_index
+            {
+                report.push_violation(
+                    frame.tick,
+                    "official",
+                    "operationOrder",
+                    format!(
+                        "official {} non-empty order at {:?}",
+                        official.id, official.scheduled_index
+                    ),
+                    format!(
+                        "index {:?}, order {}",
+                        decision.scheduled_index,
+                        decision.operation_order.join(">")
+                    ),
+                    "official trace should expose its internal operation order",
+                );
+            }
+        }
+    }
+
+    report.violation_count = report.violations.len();
+    report.ok = report.violations.is_empty();
+    report
 }
 
 pub fn soccer_simulation_accounting_smoke_report(
@@ -33365,6 +33789,8 @@ pub struct SoccerStepResponse {
     #[serde(default)]
     pub learning_contract: SoccerLearningRuntimeContract,
     #[serde(default)]
+    pub live_accounting: SoccerLiveFrameAccountingReport,
+    #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
     #[serde(default)]
@@ -33423,6 +33849,8 @@ pub struct SoccerLiveStateResponse {
     pub decision_model: SoccerDecisionModelContract,
     #[serde(default)]
     pub learning_contract: SoccerLearningRuntimeContract,
+    #[serde(default)]
+    pub live_accounting: SoccerLiveFrameAccountingReport,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
@@ -43368,6 +43796,7 @@ impl SoccerRealtimeSession {
         self.emitted_learning_cursor = self.sim.learning_transitions.len();
 
         let frame = self.sim.to_frame();
+        let live_accounting = soccer_live_frame_accounting_report(&frame);
         let controller_threads = self.controller_thread_stats();
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
@@ -43402,6 +43831,7 @@ impl SoccerRealtimeSession {
             physics_contract: soccer_physics_runtime_contract(&self.sim.config),
             decision_model: soccer_decision_model_contract(),
             learning_contract: soccer_learning_runtime_contract(&self.sim.config),
+            live_accounting,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -43438,6 +43868,7 @@ impl SoccerRealtimeSession {
         self.emitted_learning_cursor = self.sim.learning_transitions.len();
 
         let frame = self.sim.to_live_http_frame();
+        let live_accounting = soccer_live_frame_accounting_report(&frame);
         let controller_threads = self.controller_thread_stats();
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
@@ -43472,6 +43903,7 @@ impl SoccerRealtimeSession {
             physics_contract: soccer_physics_runtime_contract(&self.sim.config),
             decision_model: soccer_decision_model_contract(),
             learning_contract: soccer_learning_runtime_contract(&self.sim.config),
+            live_accounting,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -44045,6 +44477,7 @@ impl SoccerRealtimeSession {
 
     pub fn state_response(&self) -> SoccerLiveStateResponse {
         let frame = self.sim.to_live_http_frame();
+        let live_accounting = soccer_live_frame_accounting_report(&frame);
         let controller_threads = self.controller_thread_stats();
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
@@ -44071,6 +44504,7 @@ impl SoccerRealtimeSession {
             physics_contract: soccer_physics_runtime_contract(&self.sim.config),
             decision_model: soccer_decision_model_contract(),
             learning_contract: soccer_learning_runtime_contract(&self.sim.config),
+            live_accounting,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -64550,6 +64984,19 @@ mod tests {
             step.learning_contract.policy_persistence_backend,
             SOCCER_POLICY_POSTGRES_BACKEND
         );
+        assert!(
+            step.live_accounting.ok,
+            "{:?}",
+            step.live_accounting.violations
+        );
+        assert_eq!(step.live_accounting.player_count, 22);
+        assert_eq!(step.live_accounting.official_count, 3);
+        assert_eq!(step.live_accounting.expected_ball_count, 1);
+        assert!(step.live_accounting.ball_scheduled);
+        assert!(step.live_accounting.schedule_complete);
+        assert!(step.live_accounting.central_brain_decision_present);
+        assert!(step.live_accounting.ball_decision_present);
+        assert!(step.live_accounting.operation_traces_checked >= 5);
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
         assert_eq!(step.frame.central_brain.tracked_officials, 3);
@@ -90757,6 +91204,23 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             step_value["learningContract"]["policyPersistenceBackend"],
             SOCCER_POLICY_POSTGRES_BACKEND
         );
+        assert_eq!(step_value["liveAccounting"]["ok"], true);
+        assert_eq!(step_value["liveAccounting"]["playerCount"], 22);
+        assert_eq!(step_value["liveAccounting"]["officialCount"], 3);
+        assert_eq!(step_value["liveAccounting"]["expectedBallCount"], 1);
+        assert_eq!(step_value["liveAccounting"]["ballScheduled"], true);
+        assert_eq!(step_value["liveAccounting"]["scheduleComplete"], true);
+        assert_eq!(
+            step_value["liveAccounting"]["centralBrainDecisionPresent"],
+            true
+        );
+        assert_eq!(step_value["liveAccounting"]["ballDecisionPresent"], true);
+        assert!(
+            step_value["liveAccounting"]["operationTracesChecked"]
+                .as_u64()
+                .unwrap()
+                >= 5
+        );
     }
 
     #[test]
@@ -98759,6 +99223,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("runtimeContracts.textContent = runtimeContractsLabel()"));
         assert!(html.contains("mdpStateGridEnabled"));
         assert!(html.contains("pomdpObservationGridEnabled"));
+        assert!(html.contains("id=\"liveAccounting\""));
+        assert!(html.contains("function liveAccountingLabel("));
+        assert!(html.contains("function liveAccountingTitle("));
+        assert!(html.contains("liveAccounting.textContent = liveAccountingLabel()"));
+        assert!(html.contains("liveAccounting: response.liveAccounting || state.liveAccounting"));
         assert!(html.contains("id=\"gkPhysics\""));
         assert!(html.contains("function goalkeeperPhysicsLabel()"));
         assert!(html.contains("function goalkeeperPhysicsTitle()"));

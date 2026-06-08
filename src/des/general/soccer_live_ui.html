@@ -395,6 +395,7 @@
       <div class="metric"><span>Step</span><b id="matchStep">dt 0.1s 10:00</b></div>
       <div class="metric"><span>Speed</span><b id="simSpeed">20x 20t</b></div>
       <div class="metric"><span>Contracts</span><b id="runtimeContracts">pending</b></div>
+      <div class="metric"><span>Accounting</span><b id="liveAccounting">pending</b></div>
       <div class="surface-control">
         <label for="gridOverlayLevel">Grid</label>
         <select id="gridOverlayLevel" aria-label="Grid overlay">
@@ -603,6 +604,7 @@ const ticks = document.getElementById("ticks");
 const matchStep = document.getElementById("matchStep");
 const simSpeed = document.getElementById("simSpeed");
 const runtimeContracts = document.getElementById("runtimeContracts");
+const liveAccounting = document.getElementById("liveAccounting");
 const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const learning = document.getElementById("learning");
 const shapeLearning = document.getElementById("shapeLearning");
@@ -1116,6 +1118,33 @@ function runtimeContractsTitle() {
     `decisionMdp=${decision.mdpStateGridEnabled} pomdp=${decision.pomdpObservationGridEnabled} killerPass=${decision.killerPassProbabilityRampsTowardGoal} shotRamp=${decision.shotProbabilityRampsTowardGoal}`,
     `learning=${learningContract.learningEnabled} logging=${learningContract.learningLoggingEnabled} backend=${learningContract.policyPersistenceBackend} retention=${learningContract.policyPersistenceRetentionModel}`,
   ];
+  return lines.join("\n");
+}
+function liveAccountingLabel(report = state?.liveAccounting) {
+  if (!report) return "pending";
+  const status = report.ok === false || Number(report.violationCount ?? 0) > 0 ? "warn" : "ok";
+  const players = `${Number(report.playerCount ?? 0)}/${Number(report.expectedPlayerCount ?? 22)}p`;
+  const officials = `${Number(report.officialCount ?? 0)}/${Number(report.expectedOfficialCount ?? 3)}o`;
+  const schedule = report.scheduleComplete ? "sched" : "sched?";
+  const shared = `${Number(report.sharedLatestPlayers ?? 0)}p/${Number(report.sharedLatestOfficials ?? 0)}o${report.sharedBallLatest ? "+b" : ""}`;
+  const traces = Number(report.operationTracesChecked ?? 0);
+  const violations = Number(report.violationCount ?? 0);
+  return `${status} ${players} ${officials} ${schedule} S${shared} O${traces}${violations ? ` !${violations}` : ""}`;
+}
+function liveAccountingTitle(report = state?.liveAccounting) {
+  if (!report) return "Live frame accounting not loaded";
+  const lines = [
+    `ok=${report.ok} tick=${report.tick} violations=${report.violationCount}`,
+    `agents=${report.totalAgents}/${report.expectedTotalAgents} field=${report.fieldShuffleAgents}/${report.expectedFieldShuffleAgents} unique=${report.uniqueAgents} duplicates=${report.duplicateAgents}`,
+    `centralBrainFirst=${report.centralBrainFirst} scheduleComplete=${report.scheduleComplete} ballScheduled=${report.ballScheduled}`,
+    `sharedLatest=${report.sharedLatestPlayers}p/${report.sharedLatestOfficials}o ball=${report.sharedBallLatest}`,
+    `histories players=${report.minPlayerHistoryLen}-${report.maxPlayerHistoryLen} officials=${report.minOfficialHistoryLen}-${report.maxOfficialHistoryLen} ball=${report.ballHistoryLen}`,
+    `decisions central=${report.centralBrainDecisionPresent} ball=${report.ballDecisionPresent} holder=${report.holderDecisionPresent} traces=${report.operationTracesChecked}`,
+  ];
+  const violations = Array.isArray(report.violations) ? report.violations : [];
+  for (const violation of violations.slice(0, 5)) {
+    lines.push(`${violation.subject}.${violation.metric}: expected ${violation.expected}; actual ${violation.actual}`);
+  }
   return lines.join("\n");
 }
 function shapeLearningLabel(summary = state?.tacticalSummary) {
@@ -2921,6 +2950,8 @@ function render() {
   simSpeed.textContent = simSpeedLabel();
   runtimeContracts.textContent = runtimeContractsLabel();
   runtimeContracts.title = runtimeContractsTitle();
+  liveAccounting.textContent = liveAccountingLabel();
+  liveAccounting.title = liveAccountingTitle();
   learning.textContent = learningLabel(state.learning);
   shapeLearning.textContent = shapeLearningLabel(state.tacticalSummary);
   policyAutosave.textContent = policyAutosaveLabel(state.policyAutosave);
@@ -4073,6 +4104,7 @@ async function stepOnce(options = {}) {
       physicsContract: response.physicsContract || state.physicsContract,
       decisionModel: response.decisionModel || state.decisionModel,
       learningContract: response.learningContract || state.learningContract,
+      liveAccounting: response.liveAccounting || state.liveAccounting,
       stepTiming: response.stepTiming,
       controllerAssignments: response.controllerAssignments,
       controllerThreads: response.controllerThreads || [],

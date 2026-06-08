@@ -9697,6 +9697,29 @@ pub struct HumanInputFrame {
     pub target_player: Option<usize>,
 }
 
+fn human_input_has_explicit_command(input: &HumanInputFrame) -> bool {
+    input.pass || input.shoot || input.action.is_some()
+}
+
+fn merge_human_controller_input_frames(
+    command_source: &HumanInputFrame,
+    latest_motion: &HumanInputFrame,
+) -> HumanInputFrame {
+    if !human_input_has_explicit_command(command_source)
+        || human_input_has_explicit_command(latest_motion)
+    {
+        return latest_motion.clone();
+    }
+
+    let mut merged = latest_motion.clone();
+    merged.pass = command_source.pass;
+    merged.pass_flight = command_source.pass_flight;
+    merged.shoot = command_source.shoot;
+    merged.action = command_source.action.clone();
+    merged.target_player = command_source.target_player;
+    merged
+}
+
 const HUMAN_INPUT_QUEUE_LIMIT: usize = 256;
 const HUMAN_INPUT_MAX_QUEUE_AGE_MS: u64 = 250;
 
@@ -10834,7 +10857,11 @@ impl HumanControllerInputRouter {
                 .entry(input.controller_slot)
                 .and_modify(|current| {
                     if input.seq > current.seq {
-                        *current = input.clone();
+                        *current = merge_human_controller_input_frames(current, &input);
+                    } else if human_input_has_explicit_command(&input)
+                        && !human_input_has_explicit_command(current)
+                    {
+                        *current = merge_human_controller_input_frames(&input, current);
                     }
                 })
                 .or_insert(input);
@@ -61078,6 +61105,55 @@ mod tests {
         for controller in controllers {
             controller.stop().expect("controller stops");
         }
+    }
+
+    #[test]
+    fn controller_input_router_preserves_command_when_latest_same_slot_frame_is_motion() {
+        let q = SharedHumanInputs::new();
+        let assignments = SharedControllerAssignments::new(4);
+        assignments.assign_slot(0, Some(0));
+        let router = HumanControllerInputRouter::without_controller_threads(q.clone(), assignments);
+
+        let accepted = router.push_human_inputs(vec![
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 41,
+                axis: Vec2::new(0.0, 0.0),
+                sprint: false,
+                pass: true,
+                pass_flight: PassFlight::Aerial,
+                shoot: false,
+                action: Some("aerial-pass".to_string()),
+                target_player: Some(7),
+            },
+            HumanInputFrame {
+                controller_slot: 0,
+                player_id: Some(0),
+                seq: 42,
+                axis: Vec2::new(1.0, 0.0),
+                sprint: true,
+                pass: false,
+                pass_flight: PassFlight::Floor,
+                shoot: false,
+                action: None,
+                target_player: None,
+            },
+        ]);
+
+        assert_eq!(accepted, 1);
+        assert_eq!(q.queued_len(), 1);
+        let input = q
+            .drain_latest_for_slot(0)
+            .expect("coalesced same-slot input");
+        assert_eq!(input.seq, 42);
+        assert_eq!(input.axis, Vec2::new(1.0, 0.0));
+        assert!(input.sprint);
+        assert!(input.pass);
+        assert_eq!(input.pass_flight, PassFlight::Aerial);
+        assert_eq!(input.action.as_deref(), Some("aerial-pass"));
+        assert_eq!(input.target_player, Some(7));
+        assert!(!input.shoot);
     }
 
     #[test]

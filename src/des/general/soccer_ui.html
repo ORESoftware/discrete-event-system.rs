@@ -350,6 +350,7 @@
       <div class="metric"><span>Shots</span><b id="shots">0 - 0</b></div>
       <div class="metric"><span>On Target</span><b id="onTarget">0 - 0</b></div>
       <div class="metric"><span>Saves</span><b id="saves">0 - 0</b></div>
+      <div class="metric"><span>GK Physics</span><b id="gkPhysics">save/parry</b></div>
       <div class="metric"><span>Passes</span><b id="passes">0 / 0</b></div>
       <div class="metric"><span>Dribble Beats</span><b id="dribbleBeats">0 - 0</b></div>
       <div class="metric"><span>Clearances</span><b id="clearances">0 - 0</b></div>
@@ -491,6 +492,7 @@ const actionIntent = document.getElementById("actionIntent");
 const shots = document.getElementById("shots");
 const onTarget = document.getElementById("onTarget");
 const saves = document.getElementById("saves");
+const gkPhysics = document.getElementById("gkPhysics");
 const passes = document.getElementById("passes");
 const dribbleBeats = document.getElementById("dribbleBeats");
 const clearances = document.getElementById("clearances");
@@ -1946,6 +1948,8 @@ function updateMetrics() {
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;
   saves.textContent = `${s.savesHome ?? 0} - ${s.savesAway ?? 0}`;
+  gkPhysics.textContent = goalkeeperPhysicsLabel();
+  gkPhysics.title = goalkeeperPhysicsTitle();
   passes.textContent = `${s.passesCompletedHome + s.passesCompletedAway} / ${s.passesAttemptedHome + s.passesAttemptedAway}`;
   dribbleBeats.textContent = `${s.dribbleBeatsHome ?? 0} - ${s.dribbleBeatsAway ?? 0}`;
   clearances.textContent = `${s.clearancesHome ?? 0} - ${s.clearancesAway ?? 0}`;
@@ -2058,6 +2062,30 @@ function controllerRuntimeTitle() {
 }
 function physicsHistoryWindowSeconds() {
   return Number(trace.physicsContract?.playerHistoryWindowSeconds || trace.physicsContract?.ballHistoryWindowSeconds || 0);
+}
+function goalkeeperPhysicsLabel() {
+  const contract = trace.physicsContract || {};
+  const saveCap = Number(contract.goalkeeperClearSightlineSaveCap ?? 0);
+  const parryMin = Number(contract.goalkeeperParryMinYards ?? 0);
+  const parryMax = Number(contract.goalkeeperParryMaxYards ?? 0);
+  const rebound = contract.goalkeeperParryReboundEnabled ? "reb" : "catch";
+  if (saveCap > 0 && parryMin > 0 && parryMax > 0) {
+    return `cap ${(saveCap * 100).toFixed(0)}% ${rebound} ${parryMin.toFixed(0)}-${parryMax.toFixed(0)}y`;
+  }
+  return "save/parry";
+}
+function goalkeeperPhysicsTitle() {
+  const contract = trace.physicsContract || {};
+  if (!trace.physicsContract) return "Goalkeeper physics contract not loaded";
+  const parts = [
+    `saveUsesDistanceAndSightline=${contract.goalkeeperSaveProbabilityUsesDistanceAndSightline}`,
+    `clearSightlineSaveCap=${contract.goalkeeperClearSightlineSaveCap}`,
+    `catchUsesDistanceSpeedSightline=${contract.goalkeeperCatchProbabilityUsesDistanceSpeedSightline}`,
+    `parryReboundEnabled=${contract.goalkeeperParryReboundEnabled}`,
+    `parryRangeYards=${contract.goalkeeperParryMinYards}-${contract.goalkeeperParryMaxYards}`,
+    `closeHardShotsCanCreateRebounds=${contract.closeHardShotsCanCreateRebounds}`,
+  ];
+  return parts.join("\n");
 }
 function learningPersistenceLabel() {
   const contract = trace.learningContract || trace.playback?.learningContract || null;

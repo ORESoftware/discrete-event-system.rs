@@ -97303,6 +97303,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("playerHistoryWindowSeconds"));
         assert!(html.contains("ballHistoryWindowSeconds"));
         assert!(html.contains("function physicsHistoryWindowSeconds()"));
+        assert!(html.contains("id=\"gkPhysics\""));
+        assert!(html.contains("function goalkeeperPhysicsLabel()"));
+        assert!(html.contains("function goalkeeperPhysicsTitle()"));
+        assert!(html.contains("goalkeeperClearSightlineSaveCap"));
+        assert!(html.contains("goalkeeperParryReboundEnabled"));
+        assert!(html.contains("closeHardShotsCanCreateRebounds"));
         assert!(html.contains("learningContract"));
         assert!(html.contains("function learningPersistenceLabel()"));
         assert!(html.contains("policyPersistenceBackend"));

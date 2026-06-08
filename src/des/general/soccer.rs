@@ -7793,6 +7793,22 @@ impl PlayerAgent {
         )
     }
 
+    fn sanitized_off_ball_human_move_target(
+        &self,
+        snapshot: &WorldSnapshot,
+        input: &HumanInputFrame,
+    ) -> Vec2 {
+        let axis = input.axis.normalized();
+        let dir = if axis.len() > 1e-6 {
+            axis
+        } else {
+            (snapshot.ball.position - self.position).normalized()
+        };
+        let step_yards = if input.sprint { 7.0 } else { 4.5 };
+        (self.position + dir * step_yards)
+            .clamp_to_pitch(snapshot.field_width, snapshot.field_length)
+    }
+
     fn explicit_human_action(
         &self,
         input: &HumanInputFrame,
@@ -7931,10 +7947,9 @@ impl PlayerAgent {
                 if has_ball {
                     self.human_shoot_or_carry_action(snapshot, &observation)
                 } else {
-                    let dir = input.axis.normalized();
                     (
                         SoccerAction::MoveTo(
-                            self.position + dir * if input.sprint { 7.0 } else { 4.5 },
+                            self.sanitized_off_ball_human_move_target(snapshot, input),
                         ),
                         "human-move".to_string(),
                     )
@@ -7956,10 +7971,9 @@ impl PlayerAgent {
                         .to_string(),
                     )
                 } else {
-                    let dir = input.axis.normalized();
                     (
                         SoccerAction::MoveTo(
-                            self.position + dir * if input.sprint { 7.0 } else { 4.5 },
+                            self.sanitized_off_ball_human_move_target(snapshot, input),
                         ),
                         "human-move".to_string(),
                     )
@@ -67303,6 +67317,75 @@ mod tests {
         assert!(
             sim.players[controlled].position.x > 32.0,
             "human axis should still move the selected off-ball player"
+        );
+    }
+
+    #[test]
+    fn assigned_off_ball_human_ball_action_without_axis_moves_toward_ball() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 1,
+            seed: 776,
+            ..Default::default()
+        });
+        let controlled = 0;
+        let holder = 5;
+        sim.active_set_play = None;
+        sim.assign_controller_slot(0, Some(controlled))
+            .expect("assign controller slot");
+        park_players_except(&mut sim, &[controlled, holder]);
+        sim.players[controlled].position = Vec2::new(32.0, 36.0);
+        sim.players[controlled].velocity = Vec2::zero();
+        sim.players[holder].position = Vec2::new(40.0, 58.0);
+        sim.players[holder].velocity = Vec2::zero();
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(sim.players[holder].team);
+        sim.pending_pass = None;
+        sim.pending_shot = None;
+        let start = sim.players[controlled].position;
+        let start_ball_distance = start.distance(sim.ball.position);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let input = HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(controlled),
+            seq: 1,
+            axis: Vec2::zero(),
+            sprint: true,
+            pass: true,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: Some(9),
+        };
+
+        let mut player = sim.players[controlled].clone();
+        let intent = player.run_time_step(&snapshot, Some(&input), None, &mut mulberry32(29_020));
+        let decision = player
+            .last_decision
+            .as_ref()
+            .expect("controlled player decision");
+        assert_eq!(
+            decision.operation_order.first().map(String::as_str),
+            Some("human-input")
+        );
+        assert_eq!(decision.action, "human-move");
+        let SoccerAction::MoveTo(target) = intent.action else {
+            panic!("off-ball ball command should be sanitized to movement, got {intent:?}");
+        };
+        assert!(
+            target.distance(snapshot.ball.position) < start_ball_distance,
+            "off-ball ball command with no axis should move selected player toward the ball"
+        );
+        assert!(
+            sim.pending_pass.is_none(),
+            "off-ball pass input must not create a pending pass"
+        );
+        assert_eq!(
+            sim.ball.holder,
+            Some(holder),
+            "off-ball pass input must not release or steal possession"
         );
     }
 

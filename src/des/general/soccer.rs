@@ -8437,6 +8437,38 @@ impl PlayerAgent {
                 snapshot.dt_seconds,
                 snapshot.field_width,
             );
+            if let Some(target) = snapshot.killer_pass_target_for(self.id, &pass_targets) {
+                let preempt_chance = final_third_killer_pass_preemption_probability(
+                    &observation,
+                    self.role,
+                    &action_options,
+                );
+                if preempt_chance > 0.0 && rng.next_float() < preempt_chance {
+                    let action = SoccerAction::Pass {
+                        target_player: Some(target),
+                        power: 0.68 + 0.24 * passing_skill.max(ability01(self.skills.vision)),
+                        flight: PassFlight::Floor,
+                    };
+                    self.last_decision = Some(self.decision_trace(
+                        snapshot,
+                        mdp_state,
+                        observation,
+                        belief,
+                        vec![
+                            "decisive-goal-pressure".to_string(),
+                            "killer-pass".to_string(),
+                        ],
+                        action_options,
+                        &action,
+                        "killer-pass",
+                    ));
+                    return PlayerIntent {
+                        player_id: self.id,
+                        action,
+                        sprint: false,
+                    };
+                }
+            }
             let mut weighted_ops = vec![
                 (
                     "shoot".to_string(),
@@ -51701,6 +51733,57 @@ fn killer_pass_forced_by_goal_pressure(
         && killer_pass_goal_pressure_score(observation) >= 0.46
 }
 
+fn final_third_killer_pass_preemption_probability(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+    options: &[AgentActionOptionTrace],
+) -> f64 {
+    if !killer_pass_forced_by_goal_pressure(observation, role)
+        || (goal_attack_shot_is_required(observation, role)
+            && !threaded_goal_pass_can_override_forced_shot(observation, role))
+    {
+        return 0.0;
+    }
+    let Some(killer_option) = options
+        .iter()
+        .find(|option| option.legal && option.label == "killer-pass")
+    else {
+        return 0.0;
+    };
+    let range_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
+    let lane_fit = (observation
+        .best_forward_pass_receiver_openness
+        .clamp(0.0, 1.0)
+        * 0.34
+        + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+        + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
+        .clamp(0.0, 1.0);
+    let shot_block_fit =
+        ((observation.shot_block_probability.clamp(0.0, 1.0) - 0.34) / 0.46).clamp(0.0, 1.0);
+    let shot_quality_gap = if observation.shot_lane_open {
+        (0.62
+            - (observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.44
+                + observation.shot_beat_goalkeeper_probability.clamp(0.0, 1.0) * 0.34
+                + (1.0 - observation.shot_block_probability.clamp(0.0, 1.0)) * 0.22))
+            .clamp(0.0, 0.62)
+            / 0.62
+    } else {
+        1.0
+    };
+    (0.10
+        + range_fit * 0.24
+        + lane_fit * 0.16
+        + shot_block_fit * 0.14
+        + shot_quality_gap * 0.12
+        + killer_option.probability.clamp(0.0, 1.0) * 0.34
+        + observation
+            .decisive_goal_action_pressure
+            .max(near_goal_decisive_action_pressure_score(observation, role))
+            .clamp(0.0, 1.0)
+            * 0.12)
+        .clamp(0.0, 0.78)
+}
+
 fn near_goal_pass_release_multiplier(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
@@ -92934,6 +93017,125 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             killer > carry,
             "blocked final-third holder should look for the threaded pass before another hold: killer={killer} carry={carry} options={options:?}"
+        );
+    }
+
+    #[test]
+    fn blocked_goal_pressure_preempts_recycling_with_single_killer_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_241,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blockers = [13, 14, 15, 16];
+        park_players_except(
+            &mut sim,
+            &[
+                attacker,
+                runner,
+                keeper,
+                blockers[0],
+                blockers[1],
+                blockers[2],
+                blockers[3],
+            ],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 92.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 3.4);
+        sim.players[attacker].skills.passing_completion_rate = 9.2;
+        sim.players[attacker].skills.passing = 9.0;
+        sim.players[attacker].skills.vision = 9.5;
+        sim.players[attacker].skills.shooting = 7.4;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.92;
+        sim.players[attacker].preferences.shoot_bias = 0.36;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(57.0, 108.0);
+        sim.players[runner].velocity = Vec2::new(1.0, 5.8);
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        for (idx, blocker) in blockers.iter().copied().enumerate() {
+            sim.players[blocker].position = match idx {
+                0 => Vec2::new(40.0, 104.0),
+                1 => Vec2::new(33.0, 112.0),
+                2 => Vec2::new(47.0, 112.0),
+                _ => Vec2::new(40.0, 114.0),
+            };
+            sim.players[blocker].skills.defending = 9.7;
+            sim.players[blocker].skills.defensive_tracking = 9.6;
+            sim.players[blocker].skills.aggression = 8.8;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+        let observation = snapshot.observation_for(attacker);
+        let options = sim.players[attacker].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            pass_targets.len(),
+            snapshot
+                .ranked_visible_aerial_pass_targets(attacker, 3)
+                .len(),
+            false,
+            sim.config.dt_seconds,
+            snapshot.field_width,
+        );
+        assert_eq!(
+            snapshot.killer_pass_target_for(attacker, &pass_targets),
+            Some(runner),
+            "runner should be the single threaded receiver toward goal: {pass_targets:?}"
+        );
+        assert!(
+            final_third_killer_pass_preemption_probability(
+                &observation,
+                sim.players[attacker].role,
+                &options,
+            ) >= 0.54,
+            "blocked final-third lane should have a strong preemption chance: observation={observation:?} options={options:?}"
+        );
+
+        let mut killer_count = 0;
+        let mut recycled_count = 0;
+        let trials = 120;
+        for seed in 0..trials {
+            let mut player = sim.players[attacker].clone();
+            let intent =
+                player.run_time_step(&snapshot, None, None, &mut mulberry32(22_241 + seed));
+            let decision = player.last_decision.expect("decision trace");
+            match (decision.action.as_str(), intent.action) {
+                (
+                    "killer-pass",
+                    SoccerAction::Pass {
+                        target_player: Some(target),
+                        flight: PassFlight::Floor,
+                        ..
+                    },
+                ) if target == runner => killer_count += 1,
+                ("pass1" | "pass2" | "pass3" | "dribble" | "carry-forward", _) => {
+                    recycled_count += 1
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            killer_count >= 78,
+            "blocked goal pressure should actively choose the killer pass, got {killer_count}/{trials}"
+        );
+        assert!(
+            recycled_count <= 24,
+            "ordinary pass/carry recycling should be rare in this blocked goal-pressure state, got {recycled_count}/{trials}"
         );
     }
 

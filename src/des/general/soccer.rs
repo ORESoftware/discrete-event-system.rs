@@ -360,7 +360,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 115;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 117;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -417,9 +417,11 @@ const SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE: usize = 111;
 const SOCCER_NEURAL_FEATURE_SHOOTING_SKILL: usize = 112;
 const SOCCER_NEURAL_FEATURE_PASSING_SKILL: usize = 113;
 const SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL: usize = 114;
+const SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE: usize = 115;
+const SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE: usize = 116;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112, 113,
+    110, 111, 112, 113, 115,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1688,6 +1690,10 @@ pub struct SoccerPomdpObservation {
     pub decision_urgency: f64,
     #[serde(default)]
     pub goal_attack_window_score: f64,
+    #[serde(default)]
+    pub killer_pass_goal_pressure: f64,
+    #[serde(default)]
+    pub decisive_goal_action_pressure: f64,
     #[serde(default)]
     pub real_time_on_ball_seconds: f64,
     #[serde(default)]
@@ -3164,6 +3170,10 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub goal_attack_window_bin: u8,
     #[serde(default)]
+    pub killer_pass_goal_pressure_bin: u8,
+    #[serde(default)]
+    pub decisive_goal_action_pressure_bin: u8,
+    #[serde(default)]
     pub first_touch_kind: IncomingBallKind,
     #[serde(default)]
     pub incoming_ball_speed_bin: u8,
@@ -3595,6 +3605,14 @@ impl SoccerQStateKey {
                 observation.goal_attack_window_score,
                 &[0.12, 0.28, 0.48, 0.70],
             ),
+            killer_pass_goal_pressure_bin: distance_bucket(
+                observation.killer_pass_goal_pressure,
+                &[0.12, 0.28, 0.48, 0.70],
+            ),
+            decisive_goal_action_pressure_bin: distance_bucket(
+                observation.decisive_goal_action_pressure,
+                &[0.12, 0.28, 0.48, 0.70],
+            ),
             first_touch_kind: if observation.first_touch_available {
                 observation.incoming_ball_kind
             } else {
@@ -3788,6 +3806,8 @@ impl SoccerQStateKey {
             && self.defensive_urgency_bin == other.defensive_urgency_bin
             && self.decision_urgency_bin == other.decision_urgency_bin
             && self.goal_attack_window_bin == other.goal_attack_window_bin
+            && self.killer_pass_goal_pressure_bin == other.killer_pass_goal_pressure_bin
+            && self.decisive_goal_action_pressure_bin == other.decisive_goal_action_pressure_bin
             && self.first_touch_kind == other.first_touch_kind
             && self.incoming_ball_speed_bin == other.incoming_ball_speed_bin
             && self.receiving_pending_pass == other.receiving_pending_pass
@@ -6449,8 +6469,13 @@ impl PlayerAgent {
         let striker_shot_bonus = striker_legal_shot_attempt_bonus(observation, self.role);
         let goal_proximity_shot_pressure =
             goal_proximity_shot_pressure_score(observation, self.role, shooting);
-        let decisive_goal_pressure =
-            near_goal_decisive_action_pressure_score(observation, self.role);
+        let decisive_goal_pressure = observation
+            .decisive_goal_action_pressure
+            .max(near_goal_decisive_action_pressure_score(
+                observation,
+                self.role,
+            ))
+            .clamp(0.0, 1.0);
         let shot_score = (self.preferences.shoot_bias
             * (0.52 + shooting * 0.62)
             * (1.0 + directive.risk_tolerance * 0.35)
@@ -6808,7 +6833,10 @@ impl PlayerAgent {
             aerial_pass_target_count > 0 && flank_cross_legal_context,
         ));
         let killer_pass_range_fit = killer_pass_goal_range_fit(observation);
-        let killer_pass_goal_pressure = killer_pass_goal_pressure_score(observation);
+        let killer_pass_goal_pressure = observation
+            .killer_pass_goal_pressure
+            .max(killer_pass_goal_pressure_score(observation))
+            .clamp(0.0, 1.0);
         let killer_pass_legal = pass_target_count > 0
             && observation.visible_forward_pass_options > 0
             && (!goal_attack_shot_required || threaded_goal_pass_overrides_shot)
@@ -19275,6 +19303,8 @@ impl WorldSnapshot {
                 defensive_urgency: 0.0,
                 decision_urgency: 0.0,
                 goal_attack_window_score: 0.0,
+                killer_pass_goal_pressure: 0.0,
+                decisive_goal_action_pressure: 0.0,
                 real_time_on_ball_seconds: 0.0,
                 perceived_time_on_ball_seconds: 0.0,
                 actual_time_on_ball_seconds: 0.0,
@@ -19880,7 +19910,7 @@ impl WorldSnapshot {
             .map(|guidance| finite_metric(guidance.speed_match_weight))
             .unwrap_or(0.0);
         let urgency_elapsed = phase_started.elapsed();
-        let observation = SoccerPomdpObservation {
+        let mut observation = SoccerPomdpObservation {
             player_id,
             player_grid,
             receive_facing: me.receive_facing,
@@ -20009,6 +20039,8 @@ impl WorldSnapshot {
             defensive_urgency,
             decision_urgency,
             goal_attack_window_score,
+            killer_pass_goal_pressure: 0.0,
+            decisive_goal_action_pressure: 0.0,
             real_time_on_ball_seconds,
             perceived_time_on_ball_seconds,
             actual_time_on_ball_seconds,
@@ -20051,6 +20083,9 @@ impl WorldSnapshot {
             skill_defensive_tracking: me.skills.defensive_tracking,
             open_space_score: self.space_score_at(me_position, me.team),
         };
+        observation.killer_pass_goal_pressure = killer_pass_goal_pressure_score(&observation);
+        observation.decisive_goal_action_pressure =
+            near_goal_decisive_action_pressure_score(&observation, me.role);
         let total_elapsed = observation_started.elapsed();
         if total_elapsed > Duration::from_millis(25) {
             eprintln!(
@@ -35272,6 +35307,8 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.skill_shooting_bin, 5.0),
         soccer_neural_bin(state.skill_passing_bin, 5.0),
         soccer_neural_bin(state.skill_first_touch_bin, 5.0),
+        soccer_neural_bin(state.killer_pass_goal_pressure_bin, 5.0),
+        soccer_neural_bin(state.decisive_goal_action_pressure_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -55873,6 +55910,102 @@ mod tests {
     }
 
     #[test]
+    fn final_third_decisive_pressure_is_visible_to_table_and_neural_learners() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_909,
+            ..Default::default()
+        });
+        let passer = 8;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].role = PlayerRole::Midfielder;
+        sim.players[passer].position = Vec2::new(40.0, 86.0);
+        sim.players[passer].velocity = Vec2::new(0.0, 2.0);
+        sim.players[passer].action_facing = FacingBucket::South;
+        sim.players[passer].skills.passing_completion_rate = 8.8;
+        sim.players[passer].skills.passing = 8.8;
+        sim.players[passer].skills.vision = 9.2;
+        sim.players[passer].skills.shooting = 8.4;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].position = Vec2::new(43.0, 100.0);
+        sim.players[receiver].velocity = Vec2::new(0.0, 5.4);
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(passer);
+        observation.yards_to_goal = 20.0;
+        observation.shot_lane_open = true;
+        observation.shot_block_probability = 0.14;
+        observation.shot_on_frame_probability = 0.70;
+        observation.shot_beat_goalkeeper_probability = 0.42;
+        observation.opponent_goal_angle_degrees = 34.0;
+        observation.forward_dribble_space_yards = 11.0;
+        observation.goal_attack_window_score = 0.85;
+        observation.offensive_urgency = 0.68;
+        observation.visible_forward_pass_options = observation.visible_forward_pass_options.max(1);
+        observation.best_forward_pass_receiver_openness =
+            observation.best_forward_pass_receiver_openness.max(0.78);
+        observation.best_pass_stride_fit = observation.best_pass_stride_fit.max(0.80);
+        observation.floor_pass_lane_score = observation.floor_pass_lane_score.max(0.76);
+        observation.killer_pass_goal_pressure = killer_pass_goal_pressure_score(&observation);
+        observation.decisive_goal_action_pressure =
+            near_goal_decisive_action_pressure_score(&observation, sim.players[passer].role);
+
+        let q_key = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(passer),
+            &observation,
+            Team::Home,
+            sim.players[passer].role,
+        );
+        let decision = test_decision_trace(&snapshot, passer, "killer-pass");
+        let transition = SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id: passer,
+            team: Team::Home,
+            role: sim.players[passer].role,
+            state: decision.mdp_state,
+            observation: observation.clone(),
+            belief: decision.belief,
+            action: "killer-pass".to_string(),
+            action_target: decision.action_target,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: snapshot.mdp_state_for_player(passer),
+            next_observation: observation.clone(),
+            done: false,
+        };
+        let features = soccer_neural_transition_features(&transition);
+
+        assert!(
+            observation.killer_pass_goal_pressure > 0.60,
+            "test setup should expose high killer-pass goal pressure: {}",
+            observation.killer_pass_goal_pressure
+        );
+        assert!(
+            observation.decisive_goal_action_pressure > 0.60,
+            "test setup should expose high decisive goal action pressure: {}",
+            observation.decisive_goal_action_pressure
+        );
+        assert!(
+            q_key.killer_pass_goal_pressure_bin >= 3
+                && q_key.decisive_goal_action_pressure_bin >= 3,
+            "Q-state should bucket final-third decisive pressure: {q_key:?}"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE] > 0.60,
+            "neural learner should see killer-pass pressure"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE] > 0.60,
+            "neural learner should see decisive goal action pressure"
+        );
+    }
+
+    #[test]
     fn blocked_final_third_attacker_falls_back_to_killer_pass() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -72021,6 +72154,71 @@ mod tests {
         assert_eq!(
             resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL], 0.0,
             "new first-touch input weight should start neutral for 113-input snapshots"
+        );
+    }
+
+    #[test]
+    fn neural_learning_pads_previous_snapshot_final_third_pressure_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15090,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+        previous_snapshot.layers[0].weights[0][previous_dim - 1] = 0.864_20;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous final-third-pressure neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][previous_dim - 1],
+            0.864_20
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE],
+            0.0,
+            "new killer-pass pressure input weight should start neutral for 115-input snapshots"
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0]
+                [SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE],
+            0.0,
+            "new decisive goal action pressure input weight should start neutral for 115-input snapshots"
         );
     }
 

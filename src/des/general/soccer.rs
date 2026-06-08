@@ -90590,6 +90590,30 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             &clear_observation,
             sim.players[attacker].role
         ));
+        let directive = clear_snapshot.tactical_directive(Team::Home);
+        let clear_options = sim.players[attacker].possession_action_options(
+            &clear_observation,
+            &directive,
+            0,
+            0,
+            false,
+            sim.config.dt_seconds,
+            clear_snapshot.field_width,
+        );
+        let clear_shoot = clear_options
+            .iter()
+            .find(|option| option.label == "shoot")
+            .expect("clear shoot option");
+        assert!(clear_shoot.legal);
+        assert!(
+            clear_shoot.probability >= 0.90,
+            "inside-20 clear through-line should make shooting the dominant legal action: {clear_shoot:?}"
+        );
+        assert!(learned_action_label_is_legal(
+            "shoot",
+            &clear_snapshot,
+            attacker
+        ));
         for seed in 0..80 {
             let mut player = sim.players[attacker].clone();
             let intent =
@@ -90619,6 +90643,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(!goal_attack_shot_is_required(
             &blocked_observation,
             sim.players[attacker].role
+        ));
+        assert!(!learned_action_label_is_legal(
+            "shoot",
+            &blocked_snapshot,
+            attacker
         ));
         let directive = blocked_snapshot.tactical_directive(Team::Home);
         let options = sim.players[attacker].possession_action_options(

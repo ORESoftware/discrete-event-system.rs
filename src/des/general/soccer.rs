@@ -66425,6 +66425,8 @@ mod tests {
             seed: 13_084,
             ..Default::default()
         });
+        let expected_player_ids = (0..22).collect::<HashSet<_>>();
+        let expected_official_ids = [22, 23, 24].into_iter().collect::<HashSet<_>>();
         let mut field_orders = HashSet::new();
         let mut ball_indexes = HashSet::new();
 
@@ -66445,6 +66447,45 @@ mod tests {
             assert_eq!(summary.ball_count, 1);
             assert!(summary.central_brain_first);
             ball_indexes.insert(summary.ball_scheduled_index.expect("ball scheduled"));
+            let field_segment = sim.last_agent_schedule.iter().skip(1).collect::<Vec<_>>();
+            assert_eq!(
+                field_segment.len(),
+                26,
+                "shuffled field schedule should include 22 players, 3 officials, and the ball"
+            );
+            assert!(
+                field_segment
+                    .iter()
+                    .all(|entry| entry.kind != AgentScheduleKind::CentralBrain),
+                "central brain should not be inside the Fisher-Yates field segment"
+            );
+            assert_eq!(
+                field_segment
+                    .iter()
+                    .filter(|entry| entry.kind == AgentScheduleKind::Player)
+                    .map(|entry| entry.id)
+                    .collect::<HashSet<_>>(),
+                expected_player_ids,
+                "every player should appear exactly once in the shuffled field segment"
+            );
+            assert_eq!(
+                field_segment
+                    .iter()
+                    .filter(|entry| entry.kind == AgentScheduleKind::Official)
+                    .map(|entry| entry.id)
+                    .collect::<HashSet<_>>(),
+                expected_official_ids,
+                "center ref and both assistants should appear exactly once in the shuffled field segment"
+            );
+            assert_eq!(
+                field_segment
+                    .iter()
+                    .filter(|entry| entry.kind == AgentScheduleKind::Ball)
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>(),
+                vec![BALL_AGENT_ID],
+                "ball agent should appear exactly once in the shuffled field segment"
+            );
             field_orders.insert(
                 sim.last_agent_schedule
                     .iter()

@@ -344,7 +344,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 113;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 115;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -399,9 +399,11 @@ const SOCCER_NEURAL_FEATURE_KEEPER_LINE_ALIGNMENT: usize = 109;
 const SOCCER_NEURAL_FEATURE_DEFENSIVE_LINE_BREAK_THREAT: usize = 110;
 const SOCCER_NEURAL_FEATURE_EXCESSIVE_HOLD_PRESSURE: usize = 111;
 const SOCCER_NEURAL_FEATURE_SHOOTING_SKILL: usize = 112;
+const SOCCER_NEURAL_FEATURE_PASSING_SKILL: usize = 113;
+const SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL: usize = 114;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112,
+    110, 111, 112, 113,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1734,6 +1736,10 @@ pub struct SoccerPomdpObservation {
     pub skill_left_foot_shot_power: f64,
     #[serde(default)]
     pub skill_passing_completion_rate: f64,
+    #[serde(default)]
+    pub skill_passing: f64,
+    #[serde(default)]
+    pub skill_first_touch: f64,
     #[serde(default)]
     pub skill_flair_passing: f64,
     #[serde(default)]
@@ -3147,6 +3153,10 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub skill_passing_completion_bin: u8,
     #[serde(default)]
+    pub skill_passing_bin: u8,
+    #[serde(default)]
+    pub skill_first_touch_bin: u8,
+    #[serde(default)]
     pub skill_flair_passing_bin: u8,
     #[serde(default)]
     pub skill_vision_bin: u8,
@@ -3577,6 +3587,8 @@ impl SoccerQStateKey {
             skill_right_foot_shot_bin: skill_bucket(observation.skill_right_foot_shot_power),
             skill_left_foot_shot_bin: skill_bucket(observation.skill_left_foot_shot_power),
             skill_passing_completion_bin: skill_bucket(observation.skill_passing_completion_rate),
+            skill_passing_bin: skill_bucket(observation.skill_passing),
+            skill_first_touch_bin: skill_bucket(observation.skill_first_touch),
             skill_flair_passing_bin: skill_bucket(observation.skill_flair_passing),
             skill_vision_bin: skill_bucket(observation.skill_vision),
             skill_crossing_bin: skill_bucket(
@@ -3749,6 +3761,8 @@ impl SoccerQStateKey {
             && self.skill_right_foot_shot_bin == other.skill_right_foot_shot_bin
             && self.skill_left_foot_shot_bin == other.skill_left_foot_shot_bin
             && self.skill_passing_completion_bin == other.skill_passing_completion_bin
+            && self.skill_passing_bin == other.skill_passing_bin
+            && self.skill_first_touch_bin == other.skill_first_touch_bin
             && self.skill_flair_passing_bin == other.skill_flair_passing_bin
             && self.skill_vision_bin == other.skill_vision_bin
             && self.skill_crossing_bin == other.skill_crossing_bin
@@ -18860,6 +18874,8 @@ impl WorldSnapshot {
                 skill_right_foot_shot_power: 0.0,
                 skill_left_foot_shot_power: 0.0,
                 skill_passing_completion_rate: 0.0,
+                skill_passing: 0.0,
+                skill_first_touch: 0.0,
                 skill_flair_passing: 0.0,
                 skill_vision: 0.0,
                 skill_crossing_left: 0.0,
@@ -19592,6 +19608,8 @@ impl WorldSnapshot {
             skill_right_foot_shot_power: me.skills.right_foot_shot_power,
             skill_left_foot_shot_power: me.skills.left_foot_shot_power,
             skill_passing_completion_rate: me.skills.passing_completion_rate,
+            skill_passing: me.skills.passing,
+            skill_first_touch: me.skills.first_touch,
             skill_flair_passing: me.skills.flair_passing,
             skill_vision: me.skills.vision,
             skill_crossing_left: me.skills.crossing_left,
@@ -34130,6 +34148,8 @@ fn soccer_neural_transition_features(
         soccer_neural_unit(transition.observation.defensive_line_break_threat),
         soccer_neural_unit(transition.observation.excessive_hold_pressure),
         soccer_neural_bin(state.skill_shooting_bin, 5.0),
+        soccer_neural_bin(state.skill_passing_bin, 5.0),
+        soccer_neural_bin(state.skill_first_touch_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -53864,17 +53884,22 @@ mod tests {
                 ("acceleration", skills.acceleration),
                 ("strength", skills.strength),
                 ("height", skills.height),
+                ("shooting", skills.shooting),
                 ("dribbling", skills.dribbling),
                 ("aggression", skills.aggression),
                 ("defensive ability", skills.defending),
                 ("right shot", skills.right_foot_shot_power),
                 ("left shot", skills.left_foot_shot_power),
+                ("passing", skills.passing),
                 ("passing completion", skills.passing_completion_rate),
+                ("first touch", skills.first_touch),
                 ("flair passing", skills.flair_passing),
                 ("left crossing", skills.crossing_left),
                 ("right crossing", skills.crossing_right),
                 ("goalkeeping", skills.goalkeeping),
                 ("defensive tracking", skills.defensive_tracking),
+                ("stamina", skills.stamina),
+                ("vision", skills.vision),
             ] {
                 assert!(
                     (1.0..=10.0).contains(&score),
@@ -53943,6 +53968,19 @@ mod tests {
         assert_eq!(
             state.skill_passing_completion_bin,
             skill_bucket(player.skills.passing_completion_rate)
+        );
+        assert_eq!(
+            observation.skill_passing, player.skills.passing,
+            "POMDP observation should carry raw passing ability"
+        );
+        assert_eq!(state.skill_passing_bin, skill_bucket(player.skills.passing));
+        assert_eq!(
+            observation.skill_first_touch, player.skills.first_touch,
+            "POMDP observation should carry first-touch ability"
+        );
+        assert_eq!(
+            state.skill_first_touch_bin,
+            skill_bucket(player.skills.first_touch)
         );
         assert_eq!(
             state.skill_flair_passing_bin,
@@ -69015,6 +69053,68 @@ mod tests {
     }
 
     #[test]
+    fn neural_learning_pads_previous_snapshot_passing_and_first_touch_skill_inputs() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15089,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_PASSING_SKILL;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+        previous_snapshot.layers[0].weights[0][previous_dim - 1] = 0.975_31;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous passing-skill neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0].len(),
+            SOCCER_NEURAL_FEATURE_DIM
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][previous_dim - 1],
+            0.975_31
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_PASSING_SKILL], 0.0,
+            "new passing-skill input weight should start neutral for 113-input snapshots"
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL], 0.0,
+            "new first-touch input weight should start neutral for 113-input snapshots"
+        );
+    }
+
+    #[test]
     fn neural_learning_trains_on_threaded_backend() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.4,
@@ -71517,7 +71617,9 @@ mod tests {
         skills.top_speed = 9.4;
         skills.acceleration = 8.9;
         skills.shooting = 8.6;
+        skills.passing = 8.8;
         skills.passing_completion_rate = 9.2;
+        skills.first_touch = 7.7;
         skills.crossing_left = 4.1;
         skills.crossing_right = 8.7;
         skills.defending = 3.3;
@@ -71543,7 +71645,9 @@ mod tests {
         assert_eq!(passer.observation.skill_top_speed, 9.4);
         assert_eq!(passer.observation.skill_acceleration, 8.9);
         assert_eq!(passer.observation.skill_shooting, 8.6);
+        assert_eq!(passer.observation.skill_passing, 8.8);
         assert_eq!(passer.observation.skill_passing_completion_rate, 9.2);
+        assert_eq!(passer.observation.skill_first_touch, 7.7);
         assert_eq!(passer.observation.skill_crossing_left, 4.1);
         assert_eq!(passer.observation.skill_crossing_right, 8.7);
         assert_eq!(passer.observation.skill_defending, 3.3);
@@ -71555,6 +71659,11 @@ mod tests {
         assert_eq!(
             state.skill_passing_completion_bin,
             skill_bucket(skills.passing_completion_rate)
+        );
+        assert_eq!(state.skill_passing_bin, skill_bucket(skills.passing));
+        assert_eq!(
+            state.skill_first_touch_bin,
+            skill_bucket(skills.first_touch)
         );
         assert_eq!(
             state.skill_crossing_left_bin,
@@ -71575,6 +71684,14 @@ mod tests {
         assert_eq!(
             features[SOCCER_NEURAL_FEATURE_SHOOTING_SKILL],
             soccer_neural_bin(state.skill_shooting_bin, 5.0)
+        );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_PASSING_SKILL],
+            soccer_neural_bin(state.skill_passing_bin, 5.0)
+        );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL],
+            soccer_neural_bin(state.skill_first_touch_bin, 5.0)
         );
 
         let mut lower_vision = passer.clone();
@@ -71603,6 +71720,20 @@ mod tests {
             features[SOCCER_NEURAL_FEATURE_SHOOTING_SKILL]
                 > lower_shooting_features[SOCCER_NEURAL_FEATURE_SHOOTING_SKILL],
             "neural learner should receive the same shooting distinction as the Q state"
+        );
+
+        let mut lower_first_touch = passer.clone();
+        lower_first_touch.observation.skill_first_touch = 1.9;
+        let lower_first_touch_state = SoccerQStateKey::from_transition(&lower_first_touch);
+        let lower_first_touch_features = soccer_neural_transition_features(&lower_first_touch);
+        assert!(
+            state.skill_first_touch_bin > lower_first_touch_state.skill_first_touch_bin,
+            "high-first-touch and low-first-touch imported players should learn from different Q buckets"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL]
+                > lower_first_touch_features[SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL],
+            "neural learner should receive the same first-touch distinction as the Q state"
         );
     }
 

@@ -335,6 +335,10 @@ const SOCCER_MOMENT_FEATURES_PER_FRAME: usize =
     (SOCCER_MOMENT_ROLE_ALIGNED_PLAYERS + 1) * SOCCER_MOMENT_FEATURES_PER_ENTITY;
 const SOCCER_FORMATION_LP_PLAYER_CAPACITY: usize = 11;
 const SOCCER_FORMATION_LP_WORLD_PLAYER_CAPACITY: usize = 22;
+const SOCCER_MATCH_PLAYER_COUNT: usize = 22;
+const SOCCER_MATCH_TEAM_PLAYER_COUNT: usize = 11;
+const SOCCER_MATCH_OFFICIAL_COUNT: usize = 3;
+const SOCCER_MATCH_ASSISTANT_REFEREE_COUNT: usize = 2;
 const SOCCER_FORMATION_LP_CONTEXT_FEATURES: usize = 64;
 const SOCCER_FORMATION_LP_PRESS_DISTANCE_YARDS: f64 = 2.8;
 const SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER: usize = 12_000;
@@ -31633,6 +31637,48 @@ pub struct SoccerSimulationCadence {
     pub default_ten_minute_contract: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPlaybackAgentContract {
+    pub expected_total_agents: usize,
+    pub expected_field_shuffle_agents: usize,
+    pub expected_player_count: usize,
+    pub expected_home_players: usize,
+    pub expected_away_players: usize,
+    pub expected_official_count: usize,
+    pub expected_center_referees: usize,
+    pub expected_assistant_referees: usize,
+    pub expected_ball_agents: usize,
+    pub expected_central_brains: usize,
+    pub central_brain_agent_id: usize,
+    pub ball_agent_id: usize,
+    pub central_brain_runs_before_field_shuffle: bool,
+    pub field_entities_use_fisher_yates: bool,
+    pub per_frame_schedule_summary_required: bool,
+    pub slim_frames_omit_full_agent_schedule: bool,
+}
+
+fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
+    SoccerPlaybackAgentContract {
+        expected_total_agents: 1 + SOCCER_MATCH_PLAYER_COUNT + SOCCER_MATCH_OFFICIAL_COUNT + 1,
+        expected_field_shuffle_agents: SOCCER_MATCH_PLAYER_COUNT + SOCCER_MATCH_OFFICIAL_COUNT + 1,
+        expected_player_count: SOCCER_MATCH_PLAYER_COUNT,
+        expected_home_players: SOCCER_MATCH_TEAM_PLAYER_COUNT,
+        expected_away_players: SOCCER_MATCH_TEAM_PLAYER_COUNT,
+        expected_official_count: SOCCER_MATCH_OFFICIAL_COUNT,
+        expected_center_referees: 1,
+        expected_assistant_referees: SOCCER_MATCH_ASSISTANT_REFEREE_COUNT,
+        expected_ball_agents: 1,
+        expected_central_brains: 1,
+        central_brain_agent_id: CENTRAL_BRAIN_AGENT_ID,
+        ball_agent_id: BALL_AGENT_ID,
+        central_brain_runs_before_field_shuffle: true,
+        field_entities_use_fisher_yates: true,
+        per_frame_schedule_summary_required: true,
+        slim_frames_omit_full_agent_schedule: true,
+    }
+}
+
 fn soccer_simulation_cadence(
     config: &MatchConfig,
     record_every_ticks: Option<u64>,
@@ -47087,6 +47133,7 @@ fn soccer_playback_metadata_json(
         "summary": summary,
         "stepTiming": step_timing,
         "cadence": cadence,
+        "agentContract": soccer_playback_agent_contract(),
         "playback": {
             "dtSeconds": config.dt_seconds,
             "durationSeconds": config.effective_duration_seconds(),
@@ -47094,6 +47141,7 @@ fn soccer_playback_metadata_json(
             "recordEveryTicks": record_every_ticks.map(|ticks| ticks.max(1)),
             "expectedFrameCount": expected_frame_count,
             "cadence": cadence,
+            "agentContract": soccer_playback_agent_contract(),
         },
         "events": events,
     })
@@ -92001,6 +92049,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("stepBudget.textContent = stepBudgetLabel()"));
         assert!(html.contains("stepBudget.title = stepBudgetTitle()"));
         assert!(html.contains("trace.cadence = meta.cadence || meta.playback?.cadence || null"));
+        assert!(html.contains(
+            "trace.agentContract = meta.agentContract || meta.playback?.agentContract || null"
+        ));
+        assert!(html.contains("expectedTotalAgents"));
+        assert!(html.contains("expectedPlayerCount"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
@@ -92286,6 +92339,35 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["summary"]["ticks"], trace.summary.ticks);
         assert_eq!(meta["stepTiming"]["ticks"], trace.step_timing.ticks);
         assert_eq!(meta["stepTiming"]["totalMs"], trace.step_timing.total_ms);
+        assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
+        assert_eq!(meta["agentContract"]["expectedTotalAgents"], 27);
+        assert_eq!(meta["agentContract"]["expectedFieldShuffleAgents"], 26);
+        assert_eq!(meta["agentContract"]["expectedPlayerCount"], 22);
+        assert_eq!(meta["agentContract"]["expectedHomePlayers"], 11);
+        assert_eq!(meta["agentContract"]["expectedAwayPlayers"], 11);
+        assert_eq!(meta["agentContract"]["expectedOfficialCount"], 3);
+        assert_eq!(meta["agentContract"]["expectedCenterReferees"], 1);
+        assert_eq!(meta["agentContract"]["expectedAssistantReferees"], 2);
+        assert_eq!(meta["agentContract"]["expectedBallAgents"], 1);
+        assert_eq!(meta["agentContract"]["expectedCentralBrains"], 1);
+        assert_eq!(
+            meta["agentContract"]["centralBrainAgentId"],
+            CENTRAL_BRAIN_AGENT_ID
+        );
+        assert_eq!(meta["agentContract"]["ballAgentId"], BALL_AGENT_ID);
+        assert_eq!(
+            meta["agentContract"]["centralBrainRunsBeforeFieldShuffle"],
+            true
+        );
+        assert_eq!(meta["agentContract"]["fieldEntitiesUseFisherYates"], true);
+        assert_eq!(
+            meta["agentContract"]["perFrameScheduleSummaryRequired"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["slimFramesOmitFullAgentSchedule"],
+            true
+        );
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(meta["playback"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(
@@ -92358,6 +92440,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .expect("meta json");
         assert_eq!(meta["summary"]["ticks"], config.total_ticks());
         assert_eq!(meta["stepTiming"]["ticks"], config.total_ticks());
+        assert_eq!(meta["agentContract"]["expectedTotalAgents"], 27);
+        assert_eq!(meta["agentContract"]["expectedFieldShuffleAgents"], 26);
+        assert_eq!(meta["agentContract"]["expectedPlayerCount"], 22);
+        assert_eq!(meta["agentContract"]["expectedOfficialCount"], 3);
+        assert_eq!(meta["agentContract"]["expectedBallAgents"], 1);
+        assert_eq!(meta["agentContract"]["expectedCentralBrains"], 1);
+        assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
         assert_eq!(
             meta["stepTiming"]["tickBudgetMs"],
             config.dt_seconds * 1000.0
@@ -92684,6 +92773,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(!first_frame.get("sharedPositions").is_some());
         assert!(!first_frame.get("agentSchedule").is_some());
         assert!(first_frame.get("agentScheduleSummary").is_some());
+        assert_eq!(
+            first_frame["agentScheduleSummary"]["expectedTotalAgents"],
+            27
+        );
+        assert_eq!(
+            first_frame["agentScheduleSummary"]["expectedPlayerCount"],
+            22
+        );
+        assert_eq!(
+            first_frame["agentScheduleSummary"]["expectedOfficialCount"],
+            3
+        );
         let frames = jsonl
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("playback json"))

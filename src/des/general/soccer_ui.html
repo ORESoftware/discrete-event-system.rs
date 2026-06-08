@@ -446,6 +446,7 @@ const trace = {
   config: {...FALLBACK_CONFIG},
   summary: {ticks: 0, stats: emptyStats()},
   cadence: null,
+  agentContract: null,
   stepTiming: null,
   frames: [],
   events: [],
@@ -857,6 +858,7 @@ function resetTraceState() {
   trace.config = {...FALLBACK_CONFIG};
   trace.summary = {ticks: 0, stats: emptyStats()};
   trace.cadence = null;
+  trace.agentContract = null;
   trace.stepTiming = null;
   trace.frames = [];
   trace.events = [];
@@ -1051,22 +1053,30 @@ function agentScheduleSummaryForFrame(f) {
   const summary = f?.agentScheduleSummary;
   if (summary && Number.isFinite(Number(summary.totalAgents))) return summary;
   const schedule = agentScheduleEntriesForFrame(f);
+  const contract = trace.agentContract || trace.playback?.agentContract || null;
   const players = schedule.filter(entry => entry.kind === "player").length;
   const officials = schedule.filter(entry => entry.kind === "official").length;
   const hasBall = schedule.some(entry => entry.kind === "ball");
   const hasCentral = schedule.some(entry => entry.kind === "centralBrain");
+  const expectedPlayers = Number(contract?.expectedPlayerCount ?? players);
+  const expectedOfficials = Number(contract?.expectedOfficialCount ?? officials);
+  const expectedTotal = Number(contract?.expectedTotalAgents ?? schedule.length);
   return {
     totalAgents: schedule.length,
-    expectedTotalAgents: schedule.length,
+    expectedTotalAgents: expectedTotal,
     playerCount: players,
-    expectedPlayerCount: players,
+    expectedPlayerCount: expectedPlayers,
     officialCount: officials,
-    expectedOfficialCount: officials,
+    expectedOfficialCount: expectedOfficials,
     ballCount: hasBall ? 1 : 0,
     centralBrainCount: hasCentral ? 1 : 0,
     duplicateAgents: 0,
     centralBrainFirst: schedule[0]?.kind === "centralBrain",
-    complete: schedule.length > 0 && hasBall && hasCentral
+    complete: schedule.length === expectedTotal
+      && players === expectedPlayers
+      && officials === expectedOfficials
+      && hasBall
+      && hasCentral
   };
 }
 function agentScheduleCoverageLabel(schedule) {
@@ -2118,6 +2128,7 @@ async function loadTraceMeta(signal) {
   trace.summary = meta.summary || trace.summary || {ticks: 0, stats: emptyStats()};
   trace.summary.stats = trace.summary.stats || emptyStats();
   trace.cadence = meta.cadence || meta.playback?.cadence || null;
+  trace.agentContract = meta.agentContract || meta.playback?.agentContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;

@@ -87376,6 +87376,101 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn live_http_step_preserves_pass_command_when_newer_same_slot_frame_is_motion() {
+        let session = Arc::new(Mutex::new(
+            SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+                duration_seconds: 1.0,
+                max_human_players: 1,
+                seed: 187,
+                ..Default::default()
+            }),
+        ));
+        let input_queue = session.lock().unwrap().input_queue();
+        {
+            let mut session = session.lock().unwrap();
+            let sim = session.match_mut();
+            sim.clear_controller_assignments();
+            sim.assign_controller_slot(0, Some(5))
+                .expect("assign human passer");
+            park_players_except(sim, &[5, 8]);
+            sim.players[5].position = Vec2::new(32.0, 62.0);
+            sim.players[8].position = Vec2::new(38.0, 82.0);
+            sim.ball.holder = Some(5);
+            sim.ball.position = sim.players[5].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+        }
+
+        let inputs = serde_json::json!([
+            {
+                "controllerSlot": 0,
+                "playerId": 5,
+                "seq": 11,
+                "axis": {"x": 0.0, "y": 0.0},
+                "sprint": false,
+                "pass": true,
+                "passFlight": "aerial",
+                "shoot": false,
+                "action": "aerial-pass",
+                "targetPlayer": 8
+            },
+            {
+                "controllerSlot": 0,
+                "playerId": 5,
+                "seq": 12,
+                "axis": {"x": 1.0, "y": 0.0},
+                "sprint": true,
+                "pass": false,
+                "passFlight": "floor",
+                "shoot": false,
+                "targetPlayer": null
+            }
+        ]);
+        let step_body = serde_json::json!({
+            "ticks": 1,
+            "recordEveryTicks": 1,
+            "inputs": inputs
+        })
+        .to_string();
+        let step = handle_live_soccer_request(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                step_body.len(),
+                step_body
+            ),
+            &session,
+            &input_queue,
+        );
+
+        assert_eq!(step.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&step.body).expect("step json");
+        assert_eq!(value["acceptedInputs"], 1);
+        assert_eq!(value["queuedHumanInputs"], 0);
+        let player = value["frame"]["players"]
+            .as_array()
+            .expect("frame players")
+            .iter()
+            .find(|player| player["id"] == 5)
+            .expect("controlled passer");
+        assert_eq!(player["lastDecision"]["action"], "aerial-pass");
+        assert_eq!(
+            player["lastDecision"]["observation"]["humanInputSeq"].as_u64(),
+            Some(12)
+        );
+        assert_eq!(
+            player["lastDecision"]["actionTarget"]["playerId"].as_u64(),
+            Some(8)
+        );
+        let session = session.lock().unwrap();
+        let sim = session.match_ref();
+        assert_eq!(sim.stats.passes_attempted_home, 1);
+        let pending = sim.pending_pass.as_ref().expect("pending aerial pass");
+        assert_eq!(pending.from, 5);
+        assert_eq!(pending.target, Some(8));
+        assert_eq!(pending.flight, PassFlight::Aerial);
+    }
+
+    #[test]
     fn live_http_surface_route_updates_ball_physics_config() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
             duration_seconds: 1.0,

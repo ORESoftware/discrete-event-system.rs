@@ -97157,6 +97157,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             value["frame"]["centralBrain"]["controlledHumanPlayers"].as_u64(),
             Some(4)
         );
+        let first_step_schedule = value["frame"]["agentSchedule"]
+            .as_array()
+            .expect("first live step agent schedule")
+            .clone();
+        assert_eq!(first_step_schedule.len(), 27);
         assert!(value["controllerYield"]["lastWaitMs"].as_f64().unwrap() >= 0.0);
         assert!(value["controllerYield"]["totalWaitMs"].as_f64().unwrap() >= 0.0);
         assert!(
@@ -97235,9 +97240,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             );
         }
 
-        let session = session.lock().unwrap();
+        let session_guard = session.lock().unwrap();
         for player_id in 0..4 {
-            let player = &session.match_ref().players[player_id];
+            let player = &session_guard.match_ref().players[player_id];
             assert!(
                 player.position.x > start_x[player_id],
                 "player {player_id} should move right from HTTP controller input"
@@ -97248,6 +97253,85 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .expect("human-controlled player decision");
             assert_eq!(decision.operation_order, vec!["human-input".to_string()]);
             assert_eq!(decision.action, "human-move");
+        }
+        drop(session_guard);
+
+        let second_inputs = (0..4)
+            .map(|slot| {
+                serde_json::json!({
+                    "controllerSlot": slot,
+                    "playerId": slot,
+                    "seq": 2,
+                    "axis": {"x": 0.0, "y": 1.0},
+                    "sprint": true,
+                    "pass": false,
+                    "shoot": false,
+                    "targetPlayer": null
+                })
+            })
+            .collect::<Vec<_>>();
+        let second_step_body = serde_json::json!({
+            "ticks": 1,
+            "recordEveryTicks": 1,
+            "inputs": second_inputs
+        })
+        .to_string();
+        let second_step = handle_live_soccer_request(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                second_step_body.len(),
+                second_step_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(second_step.status, 200);
+        let second_value: serde_json::Value =
+            serde_json::from_str(&second_step.body).expect("second step json");
+        assert_eq!(second_value["acceptedInputs"], 4);
+        assert_eq!(second_value["queuedHumanInputs"], 0);
+        assert_eq!(second_value["controllerLatencyBudget"]["consumedInputs"], 4);
+        assert_eq!(
+            second_value["frame"]["agentScheduleSummary"]["complete"],
+            true
+        );
+        assert_eq!(
+            second_value["frame"]["agentScheduleSummary"]["totalAgents"].as_u64(),
+            Some(27)
+        );
+        let second_step_schedule = second_value["frame"]["agentSchedule"]
+            .as_array()
+            .expect("second live step agent schedule");
+        assert_eq!(second_step_schedule.len(), 27);
+        assert_ne!(
+            *second_step_schedule, first_step_schedule,
+            "two live ticks should reshuffle the 26 field entities while preserving the central brain"
+        );
+        assert_eq!(
+            first_step_schedule
+                .first()
+                .and_then(|entry| entry["kind"].as_str()),
+            Some("centralBrain")
+        );
+        assert_eq!(
+            second_step_schedule
+                .first()
+                .and_then(|entry| entry["kind"].as_str()),
+            Some("centralBrain")
+        );
+        let second_frame_players = second_value["frame"]["players"]
+            .as_array()
+            .expect("second live frame players");
+        for slot in 0..4 {
+            let player = second_frame_players
+                .iter()
+                .find(|player| player["id"] == slot)
+                .expect("second-step human-controlled player");
+            assert_eq!(player["lastDecision"]["action"], "human-move");
+            assert_eq!(
+                player["lastDecision"]["observation"]["humanInputSeq"].as_u64(),
+                Some(2)
+            );
         }
     }
 

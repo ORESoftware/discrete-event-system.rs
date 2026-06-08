@@ -84833,6 +84833,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("e.shiftKey || e.altKey || e.metaKey"));
         assert!(html.body.contains("id=\"run\""));
         assert!(html.body.contains("Run</button>"));
+        assert!(html.body.contains(
+            "id=\"simTicksPerPulse\" type=\"range\" min=\"1\" max=\"100\" step=\"1\" value=\"1\""
+        ));
+        assert!(html.body.contains(
+            "id=\"simTicksPerPulseNumber\" type=\"number\" min=\"1\" max=\"1000\" step=\"1\" value=\"1\""
+        ));
+        assert!(html
+            .body
+            .contains("const LIVE_DEFAULT_TICKS_PER_PULSE = 1;"));
+        assert!(html
+            .body
+            .contains("simTicksPerPulse.value || LIVE_DEFAULT_TICKS_PER_PULSE"));
+        assert!(html
+            .body
+            .contains("return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();"));
         assert!(html
             .body
             .contains("<a id=\"freshMatchLink\" class=\"control-link\" href=\"/fresh\">Fresh</a>"));
@@ -89465,11 +89480,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("controllerAssignments"));
         assert!(html.contains("S${Number(a.controllerSlot ?? 0) + 1}#${Number(a.playerId ?? 0)}"));
         assert!(html.contains("centralBrainControllerAssignmentLabel(b)"));
-        assert!(html.contains("function centralBrainShapeLabel"));
-        assert!(html.contains("b?.homeShape"));
-        assert!(html.contains("b?.awayShape"));
-        assert!(html.contains("shape.centroidToBallYards"));
-        assert!(html.contains("shape.forwardVelocityYps"));
+        assert!(html.contains("function teamBrainLabel"));
+        assert!(html.contains("const centroid = brain.teamCentroid"));
+        assert!(html.contains("brain.teamSpreadYards"));
+        assert!(html.contains("brain.playersNearBall"));
+        assert!(html.contains("teamBrainLabel(f.homeBrain, f.homeDirective)"));
+        assert!(html.contains("teamBrainLabel(f.awayBrain, f.awayDirective)"));
     }
 
     #[test]

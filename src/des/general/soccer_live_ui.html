@@ -427,8 +427,8 @@
       </div>
       <div class="surface-control">
         <label for="simTicksPerPulse">Speed</label>
-        <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="20">
-        <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="20">
+        <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="1">
+        <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="1">
       </div>
       <div class="toggle-control">
         <label for="policyAutosaveEnabled"><input id="policyAutosaveEnabled" type="checkbox">Auto Save</label>
@@ -719,6 +719,7 @@ let hoverPlayerId = null;
 let inspectedPlayerId = null;
 let lastSemanticBallAction = null;
 const LIVE_STEP_INTERVAL_MS = 100;
+const LIVE_DEFAULT_TICKS_PER_PULSE = 1;
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
 const LIVE_INPUT_RETRY_MIN_MS = 120;
 const LIVE_INPUT_RETRY_MAX_MS = 1000;
@@ -2902,13 +2903,13 @@ function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
 function configuredSimTicksPerPulse() {
-  return clamp(Math.round(Number(simTicksPerPulseNumber.value || simTicksPerPulse.value || 20)), 1, 1000);
+  return clamp(Math.round(Number(simTicksPerPulseNumber.value || simTicksPerPulse.value || LIVE_DEFAULT_TICKS_PER_PULSE)), 1, 1000);
 }
 function liveControllerAssigned() {
   return Array.isArray(state?.controllerAssignments) && state.controllerAssignments.length > 0;
 }
 function effectiveSimTicksPerPulse() {
-  return configuredSimTicksPerPulse();
+  return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();
 }
 function simSpeedLabel() {
   const configured = configuredSimTicksPerPulse();

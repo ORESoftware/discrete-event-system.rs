@@ -3802,6 +3802,8 @@ impl SoccerQStateKey {
                 == other.defensive_cross_arrival_threat_available
             && self.first_touch_kind == other.first_touch_kind
             && self.receiving_pending_pass == other.receiving_pending_pass
+            && facing_bucket_matches(self.receive_facing, other.receive_facing)
+            && facing_bucket_matches(self.action_facing, other.action_facing)
     }
 
     fn matches_relaxed_spatial_level(&self, other: &Self, level: PitchGridLevel) -> bool {
@@ -3842,6 +3844,8 @@ struct SoccerQRelaxedSpatialIndexKey {
     visible_ball: bool,
     first_touch_kind: IncomingBallKind,
     receiving_pending_pass: bool,
+    receive_facing: FacingBucket,
+    action_facing: FacingBucket,
     cell_id: usize,
 }
 
@@ -4192,6 +4196,8 @@ impl SoccerQPolicy {
             visible_ball: state.visible_ball,
             first_touch_kind: state.first_touch_kind,
             receiving_pending_pass: state.receiving_pending_pass,
+            receive_facing: state.receive_facing,
+            action_facing: state.action_facing,
             cell_id: Self::relaxed_cell_id_for_state(state, level),
         }
     }
@@ -4256,6 +4262,22 @@ impl SoccerQPolicy {
         } else {
             Self::spatial_query_keys(state, level)
         }
+    }
+
+    fn relaxed_spatial_query_keys(
+        state: &SoccerQStateKey,
+        level: PitchGridLevel,
+    ) -> Vec<SoccerQRelaxedSpatialIndexKey> {
+        let mut keys = Vec::new();
+        for receive_facing in Self::facing_query_values(state.receive_facing) {
+            for action_facing in Self::facing_query_values(state.action_facing) {
+                let mut key = Self::relaxed_spatial_index_key_for_state(state, level);
+                key.receive_facing = *receive_facing;
+                key.action_facing = *action_facing;
+                keys.push(key);
+            }
+        }
+        keys
     }
 
     fn index_action_key(&mut self, key: &SoccerQActionKey) {
@@ -4822,23 +4844,25 @@ impl SoccerQPolicy {
         PITCH_GRID_BACKOFF_LEVELS.iter().find_map(|level| {
             let mut best: Option<(&SoccerQTargetKey, f64, u32)> = None;
             if relaxed {
-                let index_key = SoccerQTargetRelaxedSpatialIndexKey {
-                    source: Self::relaxed_spatial_index_key_for_state(state, *level),
-                    action: action.to_string(),
-                };
-                let Some(keys) = self.target_relaxed_spatial_index.get(&index_key) else {
-                    return None;
-                };
-                for key_id in keys {
-                    let Some(key) = self.target_index_keys.get(*key_id) else {
+                for source in Self::relaxed_spatial_query_keys(state, *level) {
+                    let index_key = SoccerQTargetRelaxedSpatialIndexKey {
+                        source,
+                        action: action.to_string(),
+                    };
+                    let Some(keys) = self.target_relaxed_spatial_index.get(&index_key) else {
                         continue;
                     };
-                    if key.action != action
-                        || !key.state.matches_relaxed_spatial_level(state, *level)
-                    {
-                        continue;
+                    for key_id in keys {
+                        let Some(key) = self.target_index_keys.get(*key_id) else {
+                            continue;
+                        };
+                        if key.action != action
+                            || !key.state.matches_relaxed_spatial_level(state, *level)
+                        {
+                            continue;
+                        }
+                        update_best_target_grid_candidate(self, &mut best, key);
                     }
-                    update_best_target_grid_candidate(self, &mut best, key);
                 }
             } else {
                 for source in Self::spatial_query_keys(state, *level) {
@@ -5033,39 +5057,41 @@ impl SoccerQPolicy {
     {
         let mut best: Option<(String, f64, u32)> = None;
         if relaxed {
-            let index_key = Self::relaxed_spatial_index_key_for_state(state, level);
-            let Some(keys) = self.action_relaxed_spatial_index.get(&index_key) else {
-                return None;
-            };
-            for key_id in keys {
-                let Some(key) = self.action_index_keys.get(*key_id) else {
+            for index_key in Self::relaxed_spatial_query_keys(state, level) {
+                let Some(keys) = self.action_relaxed_spatial_index.get(&index_key) else {
                     continue;
                 };
-                if !key.state.matches_relaxed_spatial_level(state, level) || !is_legal(&key.action)
-                {
-                    continue;
-                }
-                let Some(value) = self
-                    .q_values
-                    .get(key)
-                    .copied()
-                    .and_then(soccer_q_sanitized_value)
-                else {
-                    continue;
-                };
-                let visits = self.visits.get(key).copied().unwrap_or(0);
-                let replace = best
-                    .as_ref()
-                    .map(|(_, best_value, best_visits)| {
-                        value
-                            .partial_cmp(best_value)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| visits.cmp(best_visits))
-                            .is_gt()
-                    })
-                    .unwrap_or(true);
-                if replace {
-                    best = Some((key.action.clone(), value, visits));
+                for key_id in keys {
+                    let Some(key) = self.action_index_keys.get(*key_id) else {
+                        continue;
+                    };
+                    if !key.state.matches_relaxed_spatial_level(state, level)
+                        || !is_legal(&key.action)
+                    {
+                        continue;
+                    }
+                    let Some(value) = self
+                        .q_values
+                        .get(key)
+                        .copied()
+                        .and_then(soccer_q_sanitized_value)
+                    else {
+                        continue;
+                    };
+                    let visits = self.visits.get(key).copied().unwrap_or(0);
+                    let replace = best
+                        .as_ref()
+                        .map(|(_, best_value, best_visits)| {
+                            value
+                                .partial_cmp(best_value)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| visits.cmp(best_visits))
+                                .is_gt()
+                        })
+                        .unwrap_or(true);
+                    if replace {
+                        best = Some((key.action.clone(), value, visits));
+                    }
                 }
             }
             return best.map(|(action, _, _)| action);
@@ -5278,55 +5304,57 @@ impl SoccerQPolicy {
         for source_level in PITCH_GRID_BACKOFF_LEVELS {
             let mut best: Option<(f64, u32)> = None;
             if relaxed {
-                let index_key = SoccerQTargetRelaxedSpatialIndexKey {
-                    source: Self::relaxed_spatial_index_key_for_state(state, source_level),
-                    action: action.to_string(),
-                };
-                let Some(keys) = self.target_relaxed_spatial_index.get(&index_key) else {
-                    continue;
-                };
-                for key_id in keys {
-                    let Some(key) = self.target_index_keys.get(*key_id) else {
+                for source in Self::relaxed_spatial_query_keys(state, source_level) {
+                    let index_key = SoccerQTargetRelaxedSpatialIndexKey {
+                        source,
+                        action: action.to_string(),
+                    };
+                    let Some(keys) = self.target_relaxed_spatial_index.get(&index_key) else {
                         continue;
                     };
-                    if key.action != action
-                        || !key.state.matches_relaxed_spatial_level(state, source_level)
-                    {
-                        continue;
-                    }
-                    let Some(value) = self
-                        .target_values
-                        .get(key)
-                        .copied()
-                        .and_then(soccer_q_sanitized_value)
-                    else {
-                        continue;
-                    };
-                    let weight = if key.target_matches_grid(grid, PitchGridLevel::Fine) {
-                        1.0
-                    } else if key.target_matches_grid(grid, PitchGridLevel::Tactical) {
-                        0.75
-                    } else if key.target_matches_grid(grid, PitchGridLevel::Macro) {
-                        0.45
-                    } else if key.target_matches_grid(grid, PitchGridLevel::WholePitch) {
-                        0.15
-                    } else {
-                        continue;
-                    };
-                    let visits = self.target_visits.get(key).copied().unwrap_or(0);
-                    let weighted_value = (value * weight).clamp(-5.0, 5.0);
-                    let replace = best
-                        .as_ref()
-                        .map(|(best_value, best_visits)| {
-                            weighted_value
-                                .partial_cmp(best_value)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                                .then_with(|| visits.cmp(best_visits))
-                                .is_gt()
-                        })
-                        .unwrap_or(true);
-                    if replace {
-                        best = Some((weighted_value, visits));
+                    for key_id in keys {
+                        let Some(key) = self.target_index_keys.get(*key_id) else {
+                            continue;
+                        };
+                        if key.action != action
+                            || !key.state.matches_relaxed_spatial_level(state, source_level)
+                        {
+                            continue;
+                        }
+                        let Some(value) = self
+                            .target_values
+                            .get(key)
+                            .copied()
+                            .and_then(soccer_q_sanitized_value)
+                        else {
+                            continue;
+                        };
+                        let weight = if key.target_matches_grid(grid, PitchGridLevel::Fine) {
+                            1.0
+                        } else if key.target_matches_grid(grid, PitchGridLevel::Tactical) {
+                            0.75
+                        } else if key.target_matches_grid(grid, PitchGridLevel::Macro) {
+                            0.45
+                        } else if key.target_matches_grid(grid, PitchGridLevel::WholePitch) {
+                            0.15
+                        } else {
+                            continue;
+                        };
+                        let visits = self.target_visits.get(key).copied().unwrap_or(0);
+                        let weighted_value = (value * weight).clamp(-5.0, 5.0);
+                        let replace = best
+                            .as_ref()
+                            .map(|(best_value, best_visits)| {
+                                weighted_value
+                                    .partial_cmp(best_value)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| visits.cmp(best_visits))
+                                    .is_gt()
+                            })
+                            .unwrap_or(true);
+                        if replace {
+                            best = Some((weighted_value, visits));
+                        }
                     }
                 }
                 if let Some((value, _)) = best {
@@ -6379,6 +6407,8 @@ impl PlayerAgent {
         let close_shot_attempt =
             close_clear_shot_attempt_probability(observation, self.role, shooting);
         let striker_shot_bonus = striker_legal_shot_attempt_bonus(observation, self.role);
+        let goal_proximity_shot_pressure =
+            goal_proximity_shot_pressure_score(observation, self.role, shooting);
         let shot_score = (self.preferences.shoot_bias
             * (0.52 + shooting * 0.62)
             * (1.0 + directive.risk_tolerance * 0.35)
@@ -6387,13 +6417,22 @@ impl PlayerAgent {
             * shot_block_penalty
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
             * (1.0 + goal_attack * 1.20)
+            * (1.0 + goal_proximity_shot_pressure * 0.74)
             * (1.0 + striker_shot_bonus * 1.35)
             * 0.042)
             .clamp(
                 0.004,
-                0.12 + offensive_urgency * 0.30 + striker_shot_bonus * 0.18 + goal_attack * 0.22,
+                0.12 + offensive_urgency * 0.30
+                    + striker_shot_bonus * 0.18
+                    + goal_attack * 0.22
+                    + goal_proximity_shot_pressure * 0.20,
             )
             .max(close_shot_attempt)
+            .max(goal_proximity_shot_pressure_floor(
+                observation,
+                self.role,
+                shooting,
+            ))
             .max(attacking_goal_pressure_shot_attempt_probability(
                 observation,
                 self.role,
@@ -6884,7 +6923,9 @@ impl PlayerAgent {
                 (0.30 + hold_pressure * 0.22 + release_pressure * 0.10).clamp(0.34, 0.72);
             ensure_min_legal_option_probability(&mut options, "clearance", danger_clearance_floor);
         }
-        let shot_floor = near_goal_shot_pressure_floor(observation, self.role, shooting);
+        let shot_floor = near_goal_shot_pressure_floor(observation, self.role, shooting).max(
+            goal_proximity_shot_pressure_floor(observation, self.role, shooting),
+        );
         if shot_floor > 0.0 {
             ensure_min_legal_option_probability(&mut options, "shoot", shot_floor);
         }
@@ -50443,6 +50484,77 @@ fn speculative_long_shot_attempt_probability(
         .clamp(0.0, 0.18)
 }
 
+fn goal_proximity_shot_pressure_score(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+    shooting_skill: f64,
+) -> f64 {
+    if role == PlayerRole::Goalkeeper || !observation.shot_lane_open {
+        return 0.0;
+    }
+    let window_yards = match role {
+        PlayerRole::Forward => SPECULATIVE_LONG_SHOT_MAX_YARDS,
+        PlayerRole::Midfielder => SPECULATIVE_LONG_SHOT_MAX_YARDS - 5.0,
+        PlayerRole::Defender => TEAMMATE_MUST_SHOOT_YARDS + 5.0,
+        PlayerRole::Goalkeeper => return 0.0,
+    };
+    if observation.yards_to_goal > window_yards {
+        return 0.0;
+    }
+    let block_risk = observation.shot_block_probability.clamp(0.0, 1.0);
+    let lane_fit =
+        (1.0 - block_risk / STRIKER_SHOT_MAX_BLOCK_PROBABILITY.max(1e-6)).clamp(0.0, 1.0);
+    let distance_fit = ((window_yards - observation.yards_to_goal) / window_yards)
+        .clamp(0.0, 1.0)
+        .powf(0.72);
+    let quality_fit = (observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.42
+        + observation.shot_beat_goalkeeper_probability.clamp(0.0, 1.0) * 0.24
+        + lane_fit * 0.22
+        + (observation.opponent_goal_angle_degrees / 42.0).clamp(0.0, 1.0) * 0.12)
+        .clamp(0.0, 1.0);
+    let role_fit = match role {
+        PlayerRole::Forward => 1.12,
+        PlayerRole::Midfielder => 0.92,
+        PlayerRole::Defender => 0.54,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+    (distance_fit * 0.42
+        + quality_fit * 0.24
+        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.18
+        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.10
+        + shooting_skill.clamp(0.0, 1.0) * 0.06)
+        .mul_add(role_fit, 0.0)
+        .clamp(0.0, 1.0)
+}
+
+fn goal_proximity_shot_pressure_floor(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+    shooting_skill: f64,
+) -> f64 {
+    if role == PlayerRole::Goalkeeper
+        || !(shot_decision_is_qualified_for_role(observation, role)
+            || speculative_long_shot_is_qualified(observation, role, shooting_skill))
+    {
+        return 0.0;
+    }
+    let pressure = goal_proximity_shot_pressure_score(observation, role, shooting_skill);
+    if pressure <= 0.0 {
+        return 0.0;
+    }
+    let role_floor = match role {
+        PlayerRole::Forward => 0.06,
+        PlayerRole::Midfielder => 0.04,
+        PlayerRole::Defender => 0.015,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+    (role_floor
+        + pressure * 0.34
+        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.08
+        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.04)
+        .clamp(0.0, 0.56)
+}
+
 fn clean_twenty_yard_shot_is_qualified(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
@@ -54574,6 +54686,26 @@ mod tests {
         observation.goal_attack_window_score = 0.28;
         observation.yards_to_goal = 29.0;
 
+        observation.yards_to_goal = 42.0;
+        observation.goal_attack_window_score = 0.08;
+        let long_range_shot_floor =
+            goal_proximity_shot_pressure_floor(&observation, PlayerRole::Forward, ability01(8.2));
+        observation.yards_to_goal = 34.0;
+        observation.goal_attack_window_score = 0.22;
+        let mid_range_shot_floor =
+            goal_proximity_shot_pressure_floor(&observation, PlayerRole::Forward, ability01(8.2));
+        observation.yards_to_goal = 28.0;
+        observation.goal_attack_window_score = 0.44;
+        let close_range_shot_floor =
+            goal_proximity_shot_pressure_floor(&observation, PlayerRole::Forward, ability01(8.2));
+        assert!(
+            long_range_shot_floor < mid_range_shot_floor
+                && mid_range_shot_floor < close_range_shot_floor,
+            "shot pressure should rise monotonically as range closes: long={long_range_shot_floor} mid={mid_range_shot_floor} close={close_range_shot_floor}"
+        );
+
+        observation.yards_to_goal = 29.0;
+        observation.goal_attack_window_score = 0.28;
         let farther_shot =
             near_goal_shot_pressure_floor(&observation, PlayerRole::Forward, ability01(8.2));
         observation.yards_to_goal = 24.0;
@@ -68072,6 +68204,72 @@ mod tests {
                 .expect("relaxed indexed target preference")
                 > 4.0,
             "relaxed indexed preference should preserve strong learned target value"
+        );
+    }
+
+    #[test]
+    fn q_policy_relaxed_target_backoff_respects_facing_context() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14213,
+            ..Default::default()
+        });
+        let passer = 5;
+        let receiver = 8;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = Vec2::new(30.0, 62.0);
+        sim.players[passer].position = sim.ball.position;
+        sim.players[passer].receive_facing = FacingBucket::South;
+        sim.players[passer].action_facing = FacingBucket::South;
+        sim.players[receiver].position = Vec2::new(52.0, 78.0);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let state = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(passer),
+            &snapshot.observation_for(passer),
+            Team::Home,
+            sim.players[passer].role,
+        );
+        let target_grid = pitch_grid_address(
+            sim.players[receiver].position,
+            snapshot.field_width,
+            snapshot.field_length,
+        );
+        let mut policy = SoccerQPolicy::default();
+        assert!(policy.set_target_value(state.clone(), "killer-pass", target_grid, 4.5));
+
+        let mut noisy_same_facing = state.clone();
+        noisy_same_facing.pressure_bin = noisy_same_facing.pressure_bin.saturating_add(1);
+        noisy_same_facing.decision_urgency_bin =
+            noisy_same_facing.decision_urgency_bin.saturating_add(1);
+        assert!(state.matches_relaxed_spatial_level(&noisy_same_facing, PitchGridLevel::Fine));
+        assert!(
+            policy
+                .target_preference_for_grid(&noisy_same_facing, "killer-pass", &target_grid)
+                .expect("same-facing relaxed target preference")
+                > 4.0
+        );
+
+        let mut opposite_facing = noisy_same_facing.clone();
+        opposite_facing.receive_facing = FacingBucket::North;
+        opposite_facing.action_facing = FacingBucket::North;
+        assert!(!state.matches_relaxed_spatial_level(&opposite_facing, PitchGridLevel::Fine));
+        assert_eq!(
+            policy.target_preference_for_grid(&opposite_facing, "killer-pass", &target_grid),
+            None,
+            "same grid/action target should not leak across opposite-facing POMDP contexts"
+        );
+
+        let mut generic_facing = state.clone();
+        generic_facing.receive_facing = FacingBucket::Unknown;
+        generic_facing.action_facing = FacingBucket::Unknown;
+        assert!(policy.set_target_value(generic_facing, "killer-pass", target_grid, 3.25));
+        assert!(
+            policy
+                .target_preference_for_grid(&opposite_facing, "killer-pass", &target_grid)
+                .expect("unknown-facing target fallback")
+                > 3.0,
+            "unknown-facing samples remain available as coarse fallback data"
         );
     }
 

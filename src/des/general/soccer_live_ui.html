@@ -1907,6 +1907,32 @@ function ballHistoryKinematicsLabel(f, dtSeconds = state?.config?.dtSeconds) {
   const jerk = k.jerk || ball.jerk || {x: 0, y: 0};
   return `H${k.samples} V${vecLen(velocity).toFixed(1)} A${vecLen(acceleration).toFixed(1)} J${vecLen(jerk).toFixed(1)}`;
 }
+function ballResistanceFrame(ball) {
+  return ball?.resistance || {};
+}
+function ballResistanceCompactLabel(ball) {
+  const r = ballResistanceFrame(ball);
+  const linear = Number(r.linearDragLossYps ?? 0);
+  const air = Number(r.airLossYps ?? 0);
+  const grass = Number(r.grassLossYps ?? 0);
+  const contact = Number(r.rollingContact ?? 0);
+  const stopped = r.stoppedByThreshold ? " stop" : "";
+  return `L${linear.toFixed(2)} Air${air.toFixed(2)} Gr${grass.toFixed(2)} C${contact.toFixed(2)}${stopped}`;
+}
+function ballResistanceTitle(ball) {
+  const r = ballResistanceFrame(ball);
+  if (!ball?.resistance) return "Ball resistance telemetry not loaded yet";
+  return [
+    `speedBeforeYps=${Number(r.speedBeforeYps ?? 0).toFixed(3)}`,
+    `speedAfterYps=${Number(r.speedAfterYps ?? 0).toFixed(3)}`,
+    `linearDragLossYps=${Number(r.linearDragLossYps ?? 0).toFixed(3)}`,
+    `airLossYps=${Number(r.airLossYps ?? 0).toFixed(3)}`,
+    `grassLossYps=${Number(r.grassLossYps ?? 0).toFixed(3)}`,
+    `totalLossYps=${Number(r.totalLossYps ?? 0).toFixed(3)}`,
+    `rollingContact=${Number(r.rollingContact ?? 0).toFixed(3)}`,
+    `stoppedByThreshold=${Boolean(r.stoppedByThreshold)}`,
+  ].join("\n");
+}
 function goalkeeperPhysicsContract() {
   return state?.physicsContract || {};
 }
@@ -2998,7 +3024,8 @@ function render() {
   const primaryIntent = primaryLiveIntent(f);
   actionIntent.textContent = liveIntentLabel(primaryIntent);
   actionIntent.title = liveIntentTitle(primaryIntent);
-  surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)}`;
+  surfaceReadout.textContent = `D${Number(state.config.ballDragPerTick ?? 0).toFixed(3)} A${Number(state.config.ballAirResistance ?? 0).toFixed(3)} G${Number(state.config.ballGrassResistanceYps2 ?? 0).toFixed(2)} S${Number(state.config.ballStopSpeedYps ?? 0).toFixed(2)} ${ballResistanceCompactLabel(f.ball)}`;
+  surfaceReadout.title = ballResistanceTitle(f.ball);
   const s = state.summary.stats;
   shots.textContent = `${s.shotsHome} - ${s.shotsAway}`;
   onTarget.textContent = `${s.shotsOnTargetHome ?? 0} - ${s.shotsOnTargetAway ?? 0}`;

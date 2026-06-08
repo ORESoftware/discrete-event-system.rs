@@ -6552,11 +6552,11 @@ impl PlayerAgent {
             * (0.34 + shot_quality_weight)
             * shot_block_penalty
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
-            * (1.0 + goal_attack * 1.20)
-            * (1.0 + goal_proximity_shot_pressure * 1.35)
+            * (1.0 + goal_attack * 1.36)
+            * (1.0 + goal_proximity_shot_pressure * 1.55)
             * (1.0 + goal_entry_pressure * 0.74)
             * (1.0 + striker_shot_bonus * 1.35)
-            * (1.0 + decisive_goal_pressure * 1.10)
+            * (1.0 + decisive_goal_pressure * 1.18)
             * 0.042)
             .clamp(
                 0.004,
@@ -6937,7 +6937,7 @@ impl PlayerAgent {
             * (1.0
                 + killer_pass_range_fit * 1.05
                 + killer_pass_goal_pressure * 1.42
-                + single_thread_goal_pressure * 1.34
+                + single_thread_goal_pressure * 1.50
                 + approaching_threaded_goal_fit * 0.38
                 + goal_entry_pressure * 0.78
                 + goal_attack * 0.42)
@@ -7127,9 +7127,9 @@ impl PlayerAgent {
         }
         if decisive_goal_pressure >= 0.12 && (shot_legal || killer_pass_legal) {
             let recycle_multiplier = (1.0
-                - decisive_goal_pressure * 0.74
+                - decisive_goal_pressure * 0.82
                 - if killer_pass_legal {
-                    single_thread_goal_pressure * 0.28
+                    single_thread_goal_pressure * 0.34
                 } else {
                     0.0
                 }
@@ -7158,7 +7158,7 @@ impl PlayerAgent {
         }
         if decisive_goal_pressure >= 0.08 && (shot_legal || killer_pass_legal) {
             let decisive_family_floor = (0.08
-                + decisive_goal_pressure * 0.50
+                + decisive_goal_pressure * 0.56
                 + goal_entry_pressure * 0.18
                 + goal_attack * 0.10
                 + offensive_urgency * 0.06
@@ -12188,12 +12188,27 @@ pub struct BallState {
     pub decision_altitude_yards: f64,
     #[serde(default)]
     pub decision_curl_yps2: f64,
+    #[serde(default)]
+    pub resistance: BallResistanceFrame,
     pub holder: Option<usize>,
     pub last_touch_team: Option<Team>,
     #[serde(default)]
     pub scheduled_index: Option<usize>,
     #[serde(default)]
     pub last_decision: Option<BallDecisionTrace>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BallResistanceFrame {
+    pub speed_before_yps: f64,
+    pub speed_after_yps: f64,
+    pub linear_drag_loss_yps: f64,
+    pub air_loss_yps: f64,
+    pub grass_loss_yps: f64,
+    pub total_loss_yps: f64,
+    pub rolling_contact: f64,
+    pub stopped_by_threshold: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -12210,6 +12225,8 @@ pub struct BallPositionSample {
     pub curl_acceleration: Vec2,
     #[serde(default)]
     pub altitude_yards: f64,
+    #[serde(default)]
+    pub resistance: BallResistanceFrame,
     pub holder: Option<usize>,
     #[serde(default)]
     pub last_touch_team: Option<Team>,
@@ -12248,6 +12265,8 @@ pub struct BallAgent {
     pub jerk: Vec2,
     pub curl_acceleration: Vec2,
     pub altitude_yards: f64,
+    #[serde(default)]
+    pub resistance: BallResistanceFrame,
     pub position_history: VecDeque<BallPositionSample>,
     pub holder: Option<usize>,
     pub last_touch_team: Option<Team>,
@@ -12277,11 +12296,13 @@ impl BallAgent {
                 jerk: state.jerk,
                 curl_acceleration: state.curl_acceleration,
                 altitude_yards: state.altitude_yards,
+                resistance: state.resistance,
                 holder: state.holder,
                 last_touch_team: state.last_touch_team,
             }]),
             holder: state.holder,
             last_touch_team: state.last_touch_team,
+            resistance: state.resistance,
             last_decision: None,
             untargeted_long_ball_launcher: None,
             untargeted_long_ball_flight: None,
@@ -12306,6 +12327,7 @@ impl BallAgent {
             decision_curl_yps2: decision
                 .map(|decision| decision.curl_acceleration.len())
                 .unwrap_or_else(|| self.curl_acceleration.len()),
+            resistance: self.resistance,
             holder: self.holder,
             last_touch_team: self.last_touch_team,
             scheduled_index: None,
@@ -12341,6 +12363,7 @@ impl BallAgent {
             jerk: self.jerk,
             curl_acceleration: self.curl_acceleration,
             altitude_yards: self.altitude_yards,
+            resistance: self.resistance,
             holder: self.holder,
             last_touch_team: self.last_touch_team,
         });
@@ -12432,6 +12455,7 @@ impl BallAgent {
                 self.jerk = player.jerk;
                 self.curl_acceleration = Vec2::zero();
                 self.altitude_yards = 0.0;
+                self.resistance = BallResistanceFrame::default();
                 self.last_touch_team = Some(player.team);
                 let action = self
                     .last_decision
@@ -12459,14 +12483,17 @@ impl BallAgent {
             })
             .unwrap_or(self.altitude_yards)
             .max(self.altitude_yards);
-        self.velocity = ball_velocity_after_resistance(
+        let resistance_step = ball_resistance_after(
             self.velocity,
             context.dt_seconds,
             context.ball_drag_per_tick,
             context.ball_air_resistance,
             context.ball_grass_resistance_yps2,
             resistance_altitude_yards,
+            context.ball_stop_speed_yps,
         );
+        self.velocity = resistance_step.velocity;
+        self.resistance = resistance_step.frame;
         self.curl_acceleration = decayed_ball_curl(self.curl_acceleration, context.dt_seconds);
         self.position += (previous_velocity + self.velocity) * 0.5 * context.dt_seconds;
         let loose_long_ball_altitude = if self
@@ -12487,10 +12514,11 @@ impl BallAgent {
             .as_ref()
             .map(|pass| pass_ball_altitude_yards(pass, self.position))
             .unwrap_or(loose_long_ball_altitude);
-        if self.velocity.len() < context.ball_stop_speed_yps {
+        if self.resistance.stopped_by_threshold {
             self.velocity = Vec2::zero();
             self.curl_acceleration = Vec2::zero();
             self.altitude_yards = 0.0;
+            self.resistance.speed_after_yps = 0.0;
             self.untargeted_long_ball_launcher = None;
             self.untargeted_long_ball_flight = None;
         }
@@ -13027,6 +13055,7 @@ fn ball_position_sample_from_agent(
         jerk: ball.jerk,
         curl_acceleration: ball.curl_acceleration,
         altitude_yards: ball.altitude_yards,
+        resistance: ball.resistance,
         holder: ball.holder,
         last_touch_team: ball.last_touch_team,
     }
@@ -27532,6 +27561,8 @@ pub struct SoccerPlaybackBallFrame {
     #[serde(default)]
     pub altitude_yards: f64,
     #[serde(default)]
+    pub resistance: BallResistanceFrame,
+    #[serde(default)]
     pub holder: Option<usize>,
     #[serde(default)]
     pub last_touch_team: Option<Team>,
@@ -28384,6 +28415,7 @@ impl SoccerPlaybackFrame {
                     .map(|decision| decision.operation_order.clone())
                     .unwrap_or_default(),
                 altitude_yards: sim.ball.altitude_yards,
+                resistance: sim.ball.resistance,
                 holder: sim.ball.holder,
                 last_touch_team: sim.ball.last_touch_team,
             },
@@ -28556,6 +28588,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                     .map(|decision| decision.operation_order.clone())
                     .unwrap_or_default(),
                 altitude_yards: frame.ball.altitude_yards,
+                resistance: frame.ball.resistance,
                 holder: frame.ball.holder,
                 last_touch_team: frame.ball.last_touch_team,
             },
@@ -33683,6 +33716,9 @@ pub struct SoccerPhysicsRuntimeContract {
     pub grass_resistance_enabled: bool,
     pub nonlinear_ground_resistance_enabled: bool,
     pub altitude_reduces_grass_contact: bool,
+    pub ball_resistance_breakdown_telemetry_enabled: bool,
+    pub ball_resistance_breakdown_fields: Vec<String>,
+    pub ball_stop_threshold_telemetry_enabled: bool,
     pub goalkeeper_save_probability_uses_distance_and_sightline: bool,
     pub goalkeeper_clear_sightline_save_cap: f64,
     pub goalkeeper_catch_probability_uses_distance_speed_sightline: bool,
@@ -33924,6 +33960,22 @@ fn soccer_shared_position_sample_fields() -> Vec<String> {
     .collect()
 }
 
+fn soccer_ball_resistance_breakdown_fields() -> Vec<String> {
+    [
+        "speedBeforeYps",
+        "speedAfterYps",
+        "linearDragLossYps",
+        "airLossYps",
+        "grassLossYps",
+        "totalLossYps",
+        "rollingContact",
+        "stoppedByThreshold",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntimeContract {
     let movement_gaits = [
         MovementGait::Stand,
@@ -33989,6 +34041,9 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         grass_resistance_enabled: true,
         nonlinear_ground_resistance_enabled: true,
         altitude_reduces_grass_contact: true,
+        ball_resistance_breakdown_telemetry_enabled: true,
+        ball_resistance_breakdown_fields: soccer_ball_resistance_breakdown_fields(),
+        ball_stop_threshold_telemetry_enabled: true,
         goalkeeper_save_probability_uses_distance_and_sightline: true,
         goalkeeper_clear_sightline_save_cap: GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP,
         goalkeeper_catch_probability_uses_distance_speed_sightline: true,
@@ -37559,6 +37614,7 @@ impl SoccerMatch {
                     decision_speed_yps: 0.0,
                     decision_altitude_yards: 0.0,
                     decision_curl_yps2: 0.0,
+                    resistance: BallResistanceFrame::default(),
                     holder: kickoff,
                     last_touch_team: Some(Team::Home),
                     scheduled_index: None,
@@ -51648,6 +51704,7 @@ fn tracking_frame_to_world_snapshot(
             decision_speed_yps: frame.ball_velocity.unwrap_or_default().len(),
             decision_altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
             decision_curl_yps2: frame.ball_curl_acceleration.unwrap_or_default().len(),
+            resistance: BallResistanceFrame::default(),
             holder: frame.ball_holder,
             last_touch_team,
             scheduled_index: None,
@@ -51685,6 +51742,7 @@ fn tracking_frame_to_world_snapshot(
             jerk: frame.ball_jerk.unwrap_or_default(),
             curl_acceleration: frame.ball_curl_acceleration.unwrap_or_default(),
             altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
+            resistance: BallResistanceFrame::default(),
             holder: frame.ball_holder,
             last_touch_team,
         }],
@@ -52020,6 +52078,7 @@ fn tracking_ball_position_history_at(
             jerk: frame.ball_jerk.unwrap_or_default(),
             curl_acceleration: frame.ball_curl_acceleration.unwrap_or_default(),
             altitude_yards: frame.ball_altitude_yards.unwrap_or(0.0).max(0.0),
+            resistance: BallResistanceFrame::default(),
             holder: frame.ball_holder,
             last_touch_team: frame.last_touch_team,
         })
@@ -53421,7 +53480,7 @@ fn goal_proximity_shot_pressure_score(
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.18
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.10
         + shooting_skill.clamp(0.0, 1.0) * 0.06
-        + close_goal_fit * 0.12)
+        + close_goal_fit * 0.18)
         .mul_add(role_fit, 0.0)
         .clamp(0.0, 1.0)
 }
@@ -53670,12 +53729,12 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.28)
         .clamp(0.0, 1.0);
     (range_fit.powf(0.55) * 0.34
-        + final_third_fit * 0.24
+        + final_third_fit * 0.25
         + receiver_lane_fit * 0.27
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.10
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.04
-        + close_goal_fit * 0.12
-        + goal_entry_fit * 0.09)
+        + close_goal_fit * 0.16
+        + goal_entry_fit * 0.12)
         .clamp(0.0, 1.0)
 }
 
@@ -53706,12 +53765,12 @@ fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) 
         0.78
     };
     (range_fit * 0.23
-        + final_third_fit * 0.19
+        + final_third_fit * 0.20
         + receiver_lane_fit * 0.36
         + blocked_shot_invitation * 0.12
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.04
-        + close_goal_fit * 0.13
-        + goal_entry_fit * 0.13)
+        + close_goal_fit * 0.17
+        + goal_entry_fit * 0.16)
         .clamp(0.0, 1.0)
 }
 
@@ -56452,17 +56511,37 @@ fn classify_movement_gait(team: Team, to_target: Vec2, sprint: bool) -> Movement
     }
 }
 
-fn ball_velocity_after_resistance(
+#[derive(Clone, Copy, Debug)]
+struct BallResistanceStep {
+    velocity: Vec2,
+    frame: BallResistanceFrame,
+}
+
+fn ball_resistance_after(
     velocity: Vec2,
     dt_seconds: f64,
     linear_drag_per_tick: f64,
     air_resistance: f64,
     grass_resistance_yps2: f64,
     altitude_yards: f64,
-) -> Vec2 {
+    stop_speed_yps: f64,
+) -> BallResistanceStep {
     let speed = velocity.len();
     if speed <= 0.0 || dt_seconds <= 0.0 {
-        return velocity;
+        return BallResistanceStep {
+            velocity,
+            frame: BallResistanceFrame {
+                speed_before_yps: speed,
+                speed_after_yps: speed,
+                rolling_contact: if altitude_yards <= BALL_ROLLING_ALTITUDE_YARDS {
+                    1.0
+                } else {
+                    0.0
+                },
+                stopped_by_threshold: speed > 0.0 && speed < stop_speed_yps.max(0.0),
+                ..BallResistanceFrame::default()
+            },
+        };
     }
     let linear_drag = linear_drag_per_tick.clamp(0.0, 0.95);
     let reference_dt = DEFAULT_DT_SECONDS.max(1e-6);
@@ -56480,8 +56559,49 @@ fn ball_velocity_after_resistance(
     let grass_deceleration = grass_resistance_yps2.clamp(0.0, 5.0)
         * (1.0 + low_speed_grass_bonus + high_speed_turf_shear + skidding_grass_bonus)
         * rolling_contact;
-    let speed_loss = linear_speed_loss + (air_deceleration + grass_deceleration) * dt_seconds;
-    velocity.normalized() * (speed - speed_loss).max(0.0)
+    let air_loss = air_deceleration * dt_seconds;
+    let grass_loss = grass_deceleration * dt_seconds;
+    let speed_loss = linear_speed_loss + air_loss + grass_loss;
+    let speed_after = (speed - speed_loss).max(0.0);
+    let stopped_by_threshold = speed_after > 0.0 && speed_after < stop_speed_yps.max(0.0);
+    let final_speed = if stopped_by_threshold {
+        0.0
+    } else {
+        speed_after
+    };
+    BallResistanceStep {
+        velocity: velocity.normalized() * final_speed,
+        frame: BallResistanceFrame {
+            speed_before_yps: speed,
+            speed_after_yps: final_speed,
+            linear_drag_loss_yps: linear_speed_loss.min(speed),
+            air_loss_yps: air_loss.min(speed),
+            grass_loss_yps: grass_loss.min(speed),
+            total_loss_yps: (speed - final_speed).max(0.0),
+            rolling_contact,
+            stopped_by_threshold,
+        },
+    }
+}
+
+fn ball_velocity_after_resistance(
+    velocity: Vec2,
+    dt_seconds: f64,
+    linear_drag_per_tick: f64,
+    air_resistance: f64,
+    grass_resistance_yps2: f64,
+    altitude_yards: f64,
+) -> Vec2 {
+    ball_resistance_after(
+        velocity,
+        dt_seconds,
+        linear_drag_per_tick,
+        air_resistance,
+        grass_resistance_yps2,
+        altitude_yards,
+        0.0,
+    )
+    .velocity
 }
 
 fn zone(v: f64, max: f64, buckets: usize) -> usize {
@@ -61185,6 +61305,7 @@ mod tests {
                 jerk: Vec2::zero(),
                 curl_acceleration: Vec2::zero(),
                 altitude_yards: 0.0,
+                resistance: BallResistanceFrame::default(),
                 holder: None,
                 last_touch_team: None,
             });
@@ -63592,6 +63713,7 @@ mod tests {
             jerk: Vec2::new(f64::NAN, f64::INFINITY),
             curl_acceleration: Vec2::new(f64::NAN, f64::INFINITY),
             altitude_yards: f64::NAN,
+            resistance: BallResistanceFrame::default(),
             holder: snapshot.ball.holder,
             last_touch_team: Some(Team::Home),
         }];
@@ -87382,6 +87504,45 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn ball_resistance_breakdown_reports_drag_air_grass_contact_and_stop() {
+        let ground = ball_resistance_after(Vec2::new(18.0, 0.0), 0.1, 0.028, 0.012, 0.9, 0.0, 0.55);
+
+        assert!(ground.frame.speed_before_yps > ground.frame.speed_after_yps);
+        assert!(ground.frame.linear_drag_loss_yps > 0.0);
+        assert!(ground.frame.air_loss_yps > 0.0);
+        assert!(ground.frame.grass_loss_yps > 0.0);
+        assert_eq!(ground.frame.rolling_contact, 1.0);
+        assert!(!ground.frame.stopped_by_threshold);
+        assert!((ground.velocity.len() - ground.frame.speed_after_yps).abs() < 1e-9);
+        assert!(
+            (ground.frame.total_loss_yps
+                - (ground.frame.linear_drag_loss_yps
+                    + ground.frame.air_loss_yps
+                    + ground.frame.grass_loss_yps))
+                .abs()
+                < 1e-9
+        );
+
+        let airborne = ball_resistance_after(
+            Vec2::new(18.0, 0.0),
+            0.1,
+            0.028,
+            0.012,
+            0.9,
+            BALL_ROLLING_ALTITUDE_YARDS + 0.30,
+            0.55,
+        );
+        assert_eq!(airborne.frame.rolling_contact, 0.0);
+        assert_eq!(airborne.frame.grass_loss_yps, 0.0);
+        assert!(airborne.frame.air_loss_yps > 0.0);
+
+        let stopped = ball_resistance_after(Vec2::new(0.56, 0.0), 0.1, 0.028, 0.0, 0.9, 0.0, 0.55);
+        assert!(stopped.frame.stopped_by_threshold);
+        assert_eq!(stopped.frame.speed_after_yps, 0.0);
+        assert_eq!(stopped.velocity, Vec2::zero());
+    }
+
+    #[test]
     fn fast_rolling_ball_feels_nonlinear_turf_shear() {
         let medium_velocity = Vec2::new(12.0, 0.0);
         let fast_velocity = Vec2::new(34.0, 0.0);
@@ -91447,6 +91608,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             jerk: Vec2::zero(),
             curl_acceleration: Vec2::zero(),
             altitude_yards: 0.0,
+            resistance: BallResistanceFrame::default(),
             holder: Some(defender),
             last_touch_team: Some(Team::Home),
         });
@@ -91528,6 +91690,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             jerk: Vec2::zero(),
             curl_acceleration: Vec2::zero(),
             altitude_yards: 0.0,
+            resistance: BallResistanceFrame::default(),
             holder: Some(defender),
             last_touch_team: Some(Team::Home),
         });
@@ -99565,6 +99728,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["grassResistanceEnabled"], true);
         assert_eq!(contract["nonlinearGroundResistanceEnabled"], true);
         assert_eq!(contract["altitudeReducesGrassContact"], true);
+        assert_eq!(contract["ballResistanceBreakdownTelemetryEnabled"], true);
+        assert_eq!(
+            contract["ballResistanceBreakdownFields"],
+            serde_json::json!(soccer_ball_resistance_breakdown_fields())
+        );
+        assert_eq!(contract["ballStopThresholdTelemetryEnabled"], true);
         assert_eq!(
             contract["goalkeeperSaveProbabilityUsesDistanceAndSightline"],
             true
@@ -100180,6 +100349,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ballHistorySamplesForFrame"));
         assert!(html.contains("ballHistoryKinematicsLabel"));
         assert!(html.contains("f.ballHistory"));
+        assert!(html.contains("function ballResistanceCompactLabel"));
+        assert!(html.contains("function ballResistanceTitle"));
+        assert!(html.contains("linearDragLossYps"));
+        assert!(html.contains("airLossYps"));
+        assert!(html.contains("grassLossYps"));
+        assert!(html.contains("stoppedByThreshold"));
         assert!(html.contains("id=\"runtimeContracts\""));
         assert!(html.contains("function runtimeContractsLabel()"));
         assert!(html.contains("function runtimeContractsTitle()"));
@@ -100352,6 +100527,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("state.config.ballAirResistance"));
         assert!(html.contains("state.config.ballGrassResistanceYps2"));
         assert!(html.contains("state.config.ballStopSpeedYps"));
+        assert!(html.contains("ballResistanceCompactLabel(f.ball)"));
+        assert!(html.contains("surfaceReadout.title = ballResistanceTitle(f.ball)"));
         assert!(html.contains("function updateSurface(values)"));
         assert!(html.contains("postJson(\"/api/surface\", values)"));
         assert!(html.contains("[dragRange, dragNumber, airRange, airNumber, grassRange, grassNumber, stopRange, stopNumber].forEach"));

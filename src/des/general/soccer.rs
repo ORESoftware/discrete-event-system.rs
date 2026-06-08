@@ -32333,6 +32333,9 @@ pub struct SoccerControllerRuntimeContract {
     pub main_loop_uses_condvar_yield: bool,
     pub notification_driven_input: bool,
     pub assignment_filter_enabled: bool,
+    pub slot_level_input_allowed_for_assigned_player: bool,
+    pub wrong_player_input_rejected: bool,
+    pub player_loop_filters_mismatched_controller_input: bool,
     pub same_slot_coalescing_enabled: bool,
     pub fallback_direct_queue_without_threads: bool,
     pub latency_budget_telemetry_enabled: bool,
@@ -32769,6 +32772,9 @@ fn soccer_controller_runtime_contract(config: &MatchConfig) -> SoccerControllerR
         main_loop_uses_condvar_yield: true,
         notification_driven_input: true,
         assignment_filter_enabled: true,
+        slot_level_input_allowed_for_assigned_player: true,
+        wrong_player_input_rejected: true,
+        player_loop_filters_mismatched_controller_input: true,
         same_slot_coalescing_enabled: true,
         fallback_direct_queue_without_threads: true,
         latency_budget_telemetry_enabled: true,
@@ -95458,6 +95464,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["mainLoopUsesCondvarYield"], true);
         assert_eq!(contract["notificationDrivenInput"], true);
         assert_eq!(contract["assignmentFilterEnabled"], true);
+        assert_eq!(contract["slotLevelInputAllowedForAssignedPlayer"], true);
+        assert_eq!(contract["wrongPlayerInputRejected"], true);
+        assert_eq!(contract["playerLoopFiltersMismatchedControllerInput"], true);
         assert_eq!(contract["sameSlotCoalescingEnabled"], true);
         assert_eq!(contract["fallbackDirectQueueWithoutThreads"], true);
         assert_eq!(contract["latencyBudgetTelemetryEnabled"], true);

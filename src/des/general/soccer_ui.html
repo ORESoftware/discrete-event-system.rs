@@ -886,6 +886,11 @@ function tacticalLivenessState() {
   const playerOperationOrderSamples = Number(meta.playerOperationOrderSamples ?? 0);
   const playerOperationOrderUniqueFirstOps = Number(meta.playerOperationOrderUniqueFirstOps ?? 0);
   const playerOperationOrderUniqueFullOrders = Number(meta.playerOperationOrderUniqueFullOrders ?? 0);
+  const humanControlledPlayerDecisions = Number(meta.humanControlledPlayerDecisions ?? 0);
+  const humanInputPresentDecisions = Number(meta.humanInputPresentDecisions ?? 0);
+  const humanInputConsumedDecisions = Number(meta.humanInputConsumedDecisions ?? 0);
+  const humanInputUniqueControllerSlots = Number(meta.humanInputUniqueControllerSlots ?? 0);
+  const humanInputMaxQueueAgeMs = Number(meta.humanInputMaxQueueAgeMs ?? 0);
   const clearShotWindowFrames = Number(meta.clearShotWindowFrames ?? 0);
   const clearShotWindowDecisiveActions = Number(meta.clearShotWindowDecisiveActions ?? 0);
   const clearShotWindowRecycles = Number(meta.clearShotWindowRecycles ?? 0);
@@ -900,19 +905,21 @@ function tacticalLivenessState() {
   const openSpaceOk = meta.openSpaceSupportOk == null ? true : Boolean(meta.openSpaceSupportOk);
   const goalwardOk = meta.goalwardProgressOk == null ? true : Boolean(meta.goalwardProgressOk);
   const operationOrderOk = meta.playerOperationOrderRandomizedOk == null ? true : Boolean(meta.playerOperationOrderRandomizedOk);
+  const humanInputOk = meta.humanInputConsumedOk == null ? true : Boolean(meta.humanInputConsumedOk);
   const clearShotOk = meta.clearShotWindowOk == null ? true : Boolean(meta.clearShotWindowOk);
   const killerPassOk = meta.killerPassWindowOk == null ? true : Boolean(meta.killerPassWindowOk);
-  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, playerOperationOrderSamples, playerOperationOrderUniqueFirstOps, playerOperationOrderUniqueFullOrders, clearShotWindowFrames, clearShotWindowDecisiveActions, clearShotWindowRecycles, killerPassWindowFrames, killerPassWindowPasses, killerPassWindowRecycles, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk, operationOrderOk, clearShotOk, killerPassOk};
+  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, playerOperationOrderSamples, playerOperationOrderUniqueFirstOps, playerOperationOrderUniqueFullOrders, humanControlledPlayerDecisions, humanInputPresentDecisions, humanInputConsumedDecisions, humanInputUniqueControllerSlots, humanInputMaxQueueAgeMs, clearShotWindowFrames, clearShotWindowDecisiveActions, clearShotWindowRecycles, killerPassWindowFrames, killerPassWindowPasses, killerPassWindowRecycles, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk, operationOrderOk, humanInputOk, clearShotOk, killerPassOk};
 }
 function tacticalLivenessLabel() {
   const live = tacticalLivenessState();
-  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk && live.operationOrderOk && live.clearShotOk && live.killerPassOk;
+  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk && live.operationOrderOk && live.humanInputOk && live.clearShotOk && live.killerPassOk;
   const support = live.offBallOpenSpaceSupportKnown ? live.offBallOpenSpaceMoves : "?";
   const goalward = live.frameLivenessKnown ? live.ballGoalwardProgressYards.toFixed(0) : "?";
   const ops = live.frameLivenessKnown ? `${live.playerOperationOrderUniqueFirstOps}/${live.playerOperationOrderSamples}` : "?";
+  const human = live.frameLivenessKnown ? `${live.humanInputConsumedDecisions}/${live.humanInputPresentDecisions}` : "?";
   const clear = live.frameLivenessKnown ? `${live.clearShotWindowDecisiveActions}/${live.clearShotWindowFrames}` : "?";
   const killer = live.frameLivenessKnown ? `${live.killerPassWindowPasses}/${live.killerPassWindowFrames}` : "?";
-  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} R${ops} C${clear} K${killer} O${support} G${goalward}${ok ? "" : " !"}`;
+  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} R${ops} H${human} C${clear} K${killer} O${support} G${goalward}${ok ? "" : " !"}`;
 }
 function tacticalLivenessTitle() {
   const live = tacticalLivenessState();
@@ -930,6 +937,9 @@ function tacticalLivenessTitle() {
       ? `player operation-order samples=${live.playerOperationOrderSamples}; first-op diversity=${live.playerOperationOrderUniqueFirstOps}; full-order diversity=${live.playerOperationOrderUniqueFullOrders}`
       : "player operation-order diversity not measured",
     live.frameLivenessKnown
+      ? `human input decisions=${live.humanInputConsumedDecisions}/${live.humanInputPresentDecisions}; controlled decisions=${live.humanControlledPlayerDecisions}; controller slots=${live.humanInputUniqueControllerSlots}; max queue age=${live.humanInputMaxQueueAgeMs}ms`
+      : "human input liveness not measured",
+    live.frameLivenessKnown
       ? `clear shot windows=${live.clearShotWindowFrames}; decisive=${live.clearShotWindowDecisiveActions}; recycled=${live.clearShotWindowRecycles}`
       : "clear shot windows not measured",
     live.frameLivenessKnown
@@ -942,6 +952,7 @@ function tacticalLivenessTitle() {
   if (!live.openSpaceOk) parts.push("20s+ run has no off-ball open-space support");
   if (!live.goalwardOk) parts.push("multi-frame run has no goalward ball progress");
   if (!live.operationOrderOk) parts.push("player internal operation order did not vary");
+  if (!live.humanInputOk) parts.push("human controller input was observed but not consumed");
   if (!live.clearShotOk) parts.push("clear 20-yard shot window was recycled");
   if (!live.killerPassOk) parts.push("threaded goal-pass window was recycled");
   return parts.join("; ");

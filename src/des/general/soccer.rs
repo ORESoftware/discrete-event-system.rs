@@ -104383,7 +104383,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("pathname.includes(\"/out/\")"));
         assert!(html.contains("!pathname.includes(\"/soccer/live\")"));
         assert!(html.contains("function soccerLivePostApiEnabled(resource = \"api\")"));
-        assert!(html.contains("!soccerPlaybackAssetMode(current.pathname)"));
+        assert!(html.contains(
+            "soccerPlaybackAssetMode(current.pathname) || ui.liveSimulationPostApiEnabled === false"
+        ));
         assert!(html.contains("ui.liveSimulationPostApiEnabled === false"));
         assert!(html.contains("if (resource === \"step\") return ui.liveStepPostEnabled !== false"));
         assert!(html.contains(

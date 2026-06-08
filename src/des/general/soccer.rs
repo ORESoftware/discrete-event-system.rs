@@ -28176,6 +28176,8 @@ pub struct SimulationTrace {
     pub summary: MatchSummary,
     pub frames: Vec<MatchFrame>,
     pub events: Vec<MatchEvent>,
+    #[serde(default)]
+    pub step_timing: SoccerStepTimingStats,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44309,11 +44311,15 @@ pub fn run_simulation(config: MatchConfig, record_every_ticks: u64) -> Simulatio
             frames.push(sim.to_frame());
         }
     }
+    let summary = sim.summary();
+    let step_timing = sim.step_timing_stats();
+    let events = sim.events;
     SimulationTrace {
         config,
-        summary: sim.summary(),
+        summary,
         frames,
-        events: sim.events,
+        events,
+        step_timing,
     }
 }
 
@@ -47034,6 +47040,7 @@ fn soccer_playback_metadata_json(
     config: &MatchConfig,
     summary: &MatchSummary,
     events: &[MatchEvent],
+    step_timing: SoccerStepTimingStats,
     expected_frame_count: usize,
     record_every_ticks: Option<u64>,
 ) -> serde_json::Value {
@@ -47044,6 +47051,7 @@ fn soccer_playback_metadata_json(
         "generatedAtUnixMs": generated_at_unix_ms,
         "config": config,
         "summary": summary,
+        "stepTiming": step_timing,
         "cadence": cadence,
         "playback": {
             "dtSeconds": config.dt_seconds,
@@ -47070,6 +47078,7 @@ fn write_soccer_playback_artifacts_to_dir(
         &trace.config,
         &trace.summary,
         &trace.events,
+        trace.step_timing,
         trace.frames.len(),
         None,
     );
@@ -47128,6 +47137,7 @@ fn write_soccer_playback_artifacts_streaming_to_dir(
         &config,
         &summary,
         &sim.events,
+        sim.step_timing_stats(),
         expected_frame_count,
         Some(record_every_ticks),
     );
@@ -92048,6 +92058,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&fs::read_to_string(&paths.meta_path).expect("meta asset"))
                 .expect("meta json");
         assert_eq!(meta["summary"]["ticks"], trace.summary.ticks);
+        assert_eq!(meta["stepTiming"]["ticks"], trace.step_timing.ticks);
+        assert_eq!(meta["stepTiming"]["totalMs"], trace.step_timing.total_ms);
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(meta["playback"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(
@@ -92119,6 +92131,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&fs::read_to_string(&paths.meta_path).expect("meta asset"))
                 .expect("meta json");
         assert_eq!(meta["summary"]["ticks"], config.total_ticks());
+        assert_eq!(meta["stepTiming"]["ticks"], config.total_ticks());
+        assert_eq!(
+            meta["stepTiming"]["tickBudgetMs"],
+            config.dt_seconds * 1000.0
+        );
+        assert!(meta["stepTiming"]["totalMs"].as_f64().unwrap() > 0.0);
+        assert!(meta["stepTiming"]["fieldLoopMs"].as_f64().unwrap() > 0.0);
         assert_eq!(meta["config"]["dtSeconds"], config.dt_seconds);
         assert_eq!(meta["playback"]["dtSeconds"], config.dt_seconds);
         assert_eq!(

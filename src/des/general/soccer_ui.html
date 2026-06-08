@@ -400,6 +400,7 @@ const FALLBACK_CONFIG = {
 const LIVE_INPUT_FLUSH_INTERVAL_MS = 33;
 const LIVE_INPUT_RETRY_MIN_MS = 120;
 const LIVE_INPUT_RETRY_MAX_MS = 1000;
+const LIVE_INPUT_CLIENT_QUEUE_LIMIT = 4;
 function emptyStats() {
   return {
     shotsHome: 0,
@@ -539,10 +540,53 @@ let lastInputAck = {acceptedInputs: 0, queuedHumanInputs: 0, error: "", at: 0};
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
   window.__humanInputQueue.push(frame);
-  if (window.__humanInputQueue.length > 64) window.__humanInputQueue.shift();
+  compactQueuedInputsForBrowser();
   updateInputStatusLabels();
   scheduleInputFlush(0);
 };
+function inputHasCommand(input) {
+  return !!(input?.pass || input?.shoot || input?.action);
+}
+function mergeControllerInputFrames(previous, next) {
+  const merged = {...next};
+  if (inputHasCommand(previous) && !inputHasCommand(next)) {
+    merged.pass = previous.pass;
+    merged.shoot = previous.shoot;
+    merged.passFlight = previous.passFlight;
+    merged.action = previous.action;
+    merged.targetPlayer = previous.targetPlayer;
+  }
+  return merged;
+}
+function coalesceQueuedInputsBySlot(inputs) {
+  const latestBySlot = new Map();
+  for (const input of inputs) {
+    const slot = Number(input?.controllerSlot ?? 0);
+    const current = latestBySlot.get(slot);
+    if (!current || Number(input.seq || 0) >= Number(current.seq || 0)) {
+      latestBySlot.set(slot, current ? mergeControllerInputFrames(current, input) : input);
+    } else if (inputHasCommand(input) && !inputHasCommand(current)) {
+      latestBySlot.set(slot, mergeControllerInputFrames(input, current));
+    }
+  }
+  return Array.from(latestBySlot.values())
+    .sort((a, b) => Number(a.controllerSlot ?? 0) - Number(b.controllerSlot ?? 0))
+    .slice(0, LIVE_INPUT_CLIENT_QUEUE_LIMIT);
+}
+function compactQueuedInputsForBrowser() {
+  if (window.__humanInputQueue.length > LIVE_INPUT_CLIENT_QUEUE_LIMIT) {
+    window.__humanInputQueue = coalesceQueuedInputsBySlot(window.__humanInputQueue);
+  }
+}
+function drainQueuedInputsForDispatch() {
+  window.__humanInputQueue = coalesceQueuedInputsBySlot(window.__humanInputQueue);
+  const inputs = window.__humanInputQueue.slice();
+  window.__humanInputQueue = [];
+  return inputs;
+}
+function requeueInputFrames(inputs) {
+  window.__humanInputQueue = coalesceQueuedInputsBySlot(inputs.concat(window.__humanInputQueue));
+}
 
 function formatBytes(bytes) {
   const value = Number(bytes || 0);
@@ -1833,8 +1877,9 @@ async function flushQueuedInputsToInputApi() {
   if (inputFlushInFlight || window.__humanInputQueue.length === 0) return;
   inputFlushInFlight = true;
   updateInputStatusLabels();
-  const inputs = window.__humanInputQueue.slice();
+  const inputs = drainQueuedInputsForDispatch();
   let accepted = false;
+  let requeued = false;
   try {
     const ack = await postSoccerJson("/api/input", inputs, "input");
     lastInputAck = {
@@ -1844,12 +1889,12 @@ async function flushQueuedInputsToInputApi() {
       at: performance.now()
     };
     if (Number(ack?.acceptedInputs ?? 0) > 0 || ack?.queued) {
-      const newestSeq = inputs.reduce((max, input) => Math.max(max, Number(input.seq || 0)), 0);
-      window.__humanInputQueue = window.__humanInputQueue.filter(input => Number(input.seq || 0) > newestSeq);
       inputFlushRetryAttempt = 0;
       accepted = true;
     }
   } catch (err) {
+    requeueInputFrames(inputs);
+    requeued = true;
     lastInputAck = {
       ...lastInputAck,
       error: String(err?.message || err || "input sync unavailable"),
@@ -1858,7 +1903,10 @@ async function flushQueuedInputsToInputApi() {
     console.warn("live input sync unavailable; keeping local input queue", err);
   } finally {
     inputFlushInFlight = false;
-    if (window.__humanInputQueue.length > inputs.length) {
+    if (!accepted && !requeued && inputs.length > 0) {
+      requeueInputFrames(inputs);
+    }
+    if (accepted && window.__humanInputQueue.length > 0) {
       scheduleInputFlush(0);
     } else if (!accepted && window.__humanInputQueue.length > 0) {
       scheduleInputRetry();

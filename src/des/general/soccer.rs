@@ -106348,12 +106348,22 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 > 0.10,
             "default 10-minute trace should move the ball goalward"
         );
-        assert!(
-            meta["tacticalLiveness"]["playerDecisionModelSamples"]
-                .as_u64()
-                .unwrap_or(0)
-                > 0,
-            "default 10-minute trace should export player MDP/POMDP decisions"
+        let expected_player_decisions =
+            SOCCER_MATCH_PLAYER_COUNT as u64 * config.total_ticks();
+        assert_eq!(
+            meta["tacticalLiveness"]["playerDecisionModelSamples"].as_u64(),
+            Some(expected_player_decisions),
+            "default 10-minute trace should export one player MDP/POMDP decision per player per tick"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerMdpGridSamples"].as_u64(),
+            Some(expected_player_decisions),
+            "every default 10-minute player decision should resolve an MDP pitch grid"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerPomdpGridSamples"].as_u64(),
+            Some(expected_player_decisions),
+            "every default 10-minute player decision should resolve a POMDP observation grid"
         );
         assert!(
             meta["tacticalLiveness"]["ballDecisionFrames"]

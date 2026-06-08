@@ -54227,6 +54227,9 @@ fn near_goal_decisive_action_pressure_score(
         0.0
     };
     let single_thread_fit = single_pass_goal_thread_pressure_score(observation);
+    let shooting_skill = ability01(observation.skill_shooting);
+    let shot_pressure_fit = goal_proximity_shot_pressure_score(observation, role, shooting_skill);
+    let killer_pressure_fit = killer_pass_goal_pressure_score(observation).max(single_thread_fit);
     let role_fit = match role {
         PlayerRole::Forward => 1.12,
         PlayerRole::Midfielder => 0.98,
@@ -54242,6 +54245,8 @@ fn near_goal_decisive_action_pressure_score(
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.13
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.07
         + single_thread_fit * 0.12
+        + shot_pressure_fit * 0.13
+        + killer_pressure_fit * 0.11
         + close_goal_fit * 0.09
         + goal_entry_fit * 0.09)
         * role_fit)
@@ -98243,10 +98248,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             let thread_pressure = single_pass_goal_thread_pressure_score(&observation);
 
             if idx > 0 {
-                assert!(
-                    decisive > previous_decisive + 0.04,
-                    "shot/killer-pass family should strengthen as the ball nears goal: y={y} decisive={decisive} previous={previous_decisive} options={options:?}"
-                );
+                if previous_decisive < 0.95 {
+                    assert!(
+                        decisive > previous_decisive + 0.04,
+                        "shot/killer-pass family should strengthen as the ball nears goal before saturation: y={y} decisive={decisive} previous={previous_decisive} options={options:?}"
+                    );
+                } else {
+                    assert!(
+                        decisive >= 0.95,
+                        "shot/killer-pass family should stay saturated near goal: y={y} decisive={decisive} previous={previous_decisive} options={options:?}"
+                    );
+                }
                 assert!(
                     thread_pressure > previous_thread_pressure + 0.03,
                     "single threaded goal-pass pressure should ramp with goal proximity: y={y} pressure={thread_pressure} previous={previous_thread_pressure} observation={observation:?}"
@@ -98270,6 +98282,120 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
 
             previous_decisive = decisive;
             previous_thread_pressure = thread_pressure;
+        }
+    }
+
+    #[test]
+    fn goal_proximity_lifts_shot_and_single_threaded_pass_together() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_247,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blocker = 13;
+        let line_defender = 14;
+        park_players_except(
+            &mut sim,
+            &[attacker, runner, keeper, blocker, line_defender],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].skills.shooting = 8.0;
+        sim.players[attacker].skills.passing_completion_rate = 9.1;
+        sim.players[attacker].skills.vision = 9.4;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.56;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.82;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.0;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.players[blocker].skills.defending = 8.8;
+        sim.players[line_defender].skills.defending = 8.8;
+
+        let mut previous_shot_score = 0.0;
+        let mut previous_killer_score = 0.0;
+        let mut previous_decisive_probability = 0.0;
+        let mut previous_recycle_probability = f64::INFINITY;
+        for (idx, y) in [82.0, 88.0, 94.0].into_iter().enumerate() {
+            sim.players[attacker].position = Vec2::new(39.0, y);
+            sim.players[attacker].velocity = Vec2::new(0.2, 3.8);
+            sim.players[runner].position = Vec2::new(47.0, (y + 12.0).min(108.0));
+            sim.players[runner].velocity = Vec2::new(0.4, 5.2);
+            sim.players[blocker].position = Vec2::new(68.0, (y + 8.0).min(108.0));
+            sim.players[line_defender].position = Vec2::new(20.0, (y + 20.0).min(116.0));
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(attacker);
+            let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+            assert_eq!(
+                snapshot.killer_pass_target_for(attacker, &pass_targets),
+                Some(runner),
+                "runner should be the single threaded receiver toward goal at y={y}: {pass_targets:?}"
+            );
+
+            let options = sim.players[attacker].possession_action_options(
+                &observation,
+                &snapshot.tactical_directive(Team::Home),
+                pass_targets.len(),
+                snapshot
+                    .ranked_visible_aerial_pass_targets(attacker, 3)
+                    .len(),
+                false,
+                sim.config.dt_seconds,
+                snapshot.field_width,
+            );
+            let option_probability = |label: &str| {
+                options
+                    .iter()
+                    .find(|option| option.label == label && option.legal)
+                    .map(|option| option.probability)
+                    .unwrap_or(0.0)
+            };
+            let shot_score = action_option_score(&options, "shoot");
+            let killer_score = action_option_score(&options, "killer-pass");
+            let decisive_probability =
+                option_probability("shoot") + option_probability("killer-pass");
+            let recycle_probability = option_probability("pass1")
+                + option_probability("pass2")
+                + option_probability("aerial-pass1")
+                + option_probability("dribble")
+                + option_probability("carry-forward");
+
+            if idx > 0 {
+                assert!(
+                    shot_score > previous_shot_score,
+                    "shot score should rise as the same attacker gets closer to goal: y={y} shot={shot_score} previous={previous_shot_score} options={options:?}"
+                );
+                assert!(
+                    killer_score > previous_killer_score,
+                    "single threaded killer-pass score should rise with goal proximity: y={y} killer={killer_score} previous={previous_killer_score} options={options:?}"
+                );
+                assert!(
+                    decisive_probability > previous_decisive_probability + 0.035,
+                    "combined shot/killer-pass probability should ramp toward goal: y={y} decisive={decisive_probability} previous={previous_decisive_probability} options={options:?}"
+                );
+                assert!(
+                    recycle_probability < previous_recycle_probability,
+                    "generic recycling should be damped as the ball gets closer to goal: y={y} recycle={recycle_probability} previous={previous_recycle_probability} options={options:?}"
+                );
+            }
+            assert!(
+                decisive_probability > recycle_probability,
+                "closer-to-goal policy should favor shooting or the single threaded pass over recycling: y={y} decisive={decisive_probability} recycle={recycle_probability} options={options:?}"
+            );
+            previous_shot_score = shot_score;
+            previous_killer_score = killer_score;
+            previous_decisive_probability = decisive_probability;
+            previous_recycle_probability = recycle_probability;
         }
     }
 
@@ -98924,10 +99050,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .unwrap_or(0.0);
             let thread_pressure = single_pass_goal_thread_pressure_score(&observation);
             if idx > 0 {
-                assert!(
-                    killer > previous_killer + 0.04,
-                    "killer-pass probability should ramp as blocked holder nears goal: y={y} killer={killer} previous={previous_killer} options={options:?}"
-                );
+                if previous_killer < 0.94 {
+                    assert!(
+                        killer > previous_killer + 0.04,
+                        "killer-pass probability should ramp as blocked holder nears goal before saturation: y={y} killer={killer} previous={previous_killer} options={options:?}"
+                    );
+                } else {
+                    assert!(
+                        killer >= 0.94,
+                        "killer-pass probability should stay saturated once blocked holder is near goal: y={y} killer={killer} previous={previous_killer} options={options:?}"
+                    );
+                }
                 assert!(
                     thread_pressure > previous_thread_pressure + 0.03,
                     "single threaded goal-pass pressure should ramp independently: y={y} pressure={thread_pressure} previous={previous_thread_pressure} observation={observation:?}"
@@ -99044,10 +99177,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .unwrap_or(0.0);
             let thread_pressure = single_pass_goal_thread_pressure_score(&observation);
             if idx > 0 {
-                assert!(
-                    killer > previous_killer + 0.04,
-                    "away killer-pass probability should ramp as holder nears home goal: y={y} killer={killer} previous={previous_killer} options={options:?}"
-                );
+                if previous_killer < 0.94 {
+                    assert!(
+                        killer > previous_killer + 0.04,
+                        "away killer-pass probability should ramp as holder nears home goal before saturation: y={y} killer={killer} previous={previous_killer} options={options:?}"
+                    );
+                } else {
+                    assert!(
+                        killer >= 0.94,
+                        "away killer-pass probability should stay saturated once holder is near home goal: y={y} killer={killer} previous={previous_killer} options={options:?}"
+                    );
+                }
                 assert!(
                     thread_pressure > previous_thread_pressure + 0.03,
                     "away single threaded goal-pass pressure should ramp toward home goal: y={y} pressure={thread_pressure} previous={previous_thread_pressure} observation={observation:?}"

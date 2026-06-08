@@ -483,9 +483,14 @@ const GOAL_URGENCY_KEEPER_CROWD_YARDS: f64 = 6.0;
 const SUPPORT_MIN_UPFIELD_PER_LATERAL_YARD: f64 = 0.10;
 const WIDE_OUTLET_TOUCHLINE_BUFFER_YARDS: f64 = 4.5;
 const WIDE_OUTLET_MIN_FORWARD_YARDS: f64 = 2.0;
+const SOCCER_PLAYBACK_INTENT_LIMIT: usize = 3;
 
 fn default_ball_drag_per_tick() -> f64 {
     DEFAULT_BALL_DRAG_PER_TICK
+}
+
+fn serde_f64_is_effectively_zero(value: &f64) -> bool {
+    !value.is_finite() || value.abs() <= 1e-9
 }
 
 fn default_match_halves() -> u8 {
@@ -1506,17 +1511,17 @@ pub struct SoccerPomdpObservation {
     pub threaded_goal_pass_available: bool,
     #[serde(default)]
     pub threaded_goal_pass_target: Option<usize>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
     pub threaded_goal_pass_forward_yards: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
     pub threaded_goal_pass_goal_gain_yards: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
     pub threaded_goal_pass_reception_window_score: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
     pub threaded_goal_pass_receiver_openness: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
     pub threaded_goal_pass_expected_completion: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
     pub threaded_goal_pass_stride_fit: f64,
     #[serde(default)]
     pub best_forward_pass_receiver_openness: f64,
@@ -28245,6 +28250,18 @@ pub struct SoccerPlaybackIntentFrame {
     pub shot_lane_open: bool,
     #[serde(default)]
     pub threaded_goal_pass_available: bool,
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
+    pub threaded_goal_pass_forward_yards: f64,
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
+    pub threaded_goal_pass_goal_gain_yards: f64,
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
+    pub threaded_goal_pass_reception_window_score: f64,
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
+    pub threaded_goal_pass_receiver_openness: f64,
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
+    pub threaded_goal_pass_expected_completion: f64,
+    #[serde(default, skip_serializing_if = "serde_f64_is_effectively_zero")]
+    pub threaded_goal_pass_stride_fit: f64,
     #[serde(default)]
     pub target_open_space_score: f64,
     #[serde(default)]
@@ -28440,6 +28457,7 @@ where
         .clamp(0.0, 1.0);
     let (target_open_space_score, target_teammate_occupied_space_pressure) =
         target_space_metrics(target_point);
+    let emit_threaded_goal_pass_quality = action == "killer-pass";
     Some((
         priority + urgency * 4.0 + decisive_goal_action_pressure * 3.0,
         player_id,
@@ -28475,6 +28493,38 @@ where
             decisive_goal_action_pressure,
             shot_lane_open: decision.observation.shot_lane_open,
             threaded_goal_pass_available: decision.observation.threaded_goal_pass_available,
+            threaded_goal_pass_forward_yards: if emit_threaded_goal_pass_quality {
+                decision.observation.threaded_goal_pass_forward_yards
+            } else {
+                0.0
+            },
+            threaded_goal_pass_goal_gain_yards: if emit_threaded_goal_pass_quality {
+                decision.observation.threaded_goal_pass_goal_gain_yards
+            } else {
+                0.0
+            },
+            threaded_goal_pass_reception_window_score: if emit_threaded_goal_pass_quality {
+                decision
+                    .observation
+                    .threaded_goal_pass_reception_window_score
+            } else {
+                0.0
+            },
+            threaded_goal_pass_receiver_openness: if emit_threaded_goal_pass_quality {
+                decision.observation.threaded_goal_pass_receiver_openness
+            } else {
+                0.0
+            },
+            threaded_goal_pass_expected_completion: if emit_threaded_goal_pass_quality {
+                decision.observation.threaded_goal_pass_expected_completion
+            } else {
+                0.0
+            },
+            threaded_goal_pass_stride_fit: if emit_threaded_goal_pass_quality {
+                decision.observation.threaded_goal_pass_stride_fit
+            } else {
+                0.0
+            },
             target_open_space_score,
             target_teammate_occupied_space_pressure,
         },
@@ -28536,7 +28586,7 @@ fn playback_intents_from_frame_with_pitch(
     });
     candidates
         .into_iter()
-        .take(8)
+        .take(SOCCER_PLAYBACK_INTENT_LIMIT)
         .map(|(_, _, intent)| intent)
         .collect()
 }
@@ -28581,7 +28631,7 @@ fn playback_intents_from_agents(
     });
     candidates
         .into_iter()
-        .take(8)
+        .take(SOCCER_PLAYBACK_INTENT_LIMIT)
         .map(|(_, _, intent)| intent)
         .collect()
 }
@@ -100814,6 +100864,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("Pause live simulation"));
         assert!(html.contains("Queue next soccer match"));
         assert!(html.contains("liveIntentCandidates"));
+        assert!(html.contains("const LIVE_INTENT_LIMIT = 3"));
+        assert!(html.contains(".slice(0, LIVE_INTENT_LIMIT)"));
         assert!(html.contains("drawDecisionIntentTraces"));
         assert!(html.contains("decision?.actionTarget"));
         assert!(html.contains("CONTROLLER_KEYMAPS"));
@@ -100904,6 +100956,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("\"flank-low-cross\""));
         assert!(html.contains("\"flank-high-cross\""));
         assert!(html.contains("\"killer-pass\""));
+        assert!(html.contains("threadedGoalPassForwardYards"));
+        assert!(html.contains("threadedGoalPassGoalGainYards"));
+        assert!(html.contains("threadedGoalPassReceptionWindowScore"));
+        assert!(html.contains("threadedGoalPassReceiverOpenness"));
+        assert!(html.contains("threadedGoalPassExpectedCompletion"));
+        assert!(html.contains("threadedGoalPassStrideFit"));
+        assert!(html.contains("label: \"KPass\""));
+        assert!(html.contains(" KG${Number(intent.threadedGoalPassGoalGainYards"));
         assert!(html.contains("function flankLaneTargetsForDirective"));
         assert!(html.contains("function drawFlankPolicyLanes"));
         assert!(html.contains("drawFlankPolicyLanes(r)"));
@@ -101372,6 +101432,34 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_intent.get("decisiveGoalActionPressure").is_some());
         assert!(first_intent.get("shotLaneOpen").is_some());
         assert!(first_intent.get("threadedGoalPassAvailable").is_some());
+        if let Some(threaded_intent) = frames.iter().find_map(|frame| {
+            frame
+                .get("intents")
+                .and_then(|intents| intents.as_array())
+                .and_then(|intents| {
+                    intents.iter().find(|intent| {
+                        intent["threadedGoalPassAvailable"].as_bool() == Some(true)
+                            && intent["action"].as_str() == Some("killer-pass")
+                    })
+                })
+        }) {
+            assert!(threaded_intent
+                .get("threadedGoalPassForwardYards")
+                .is_some());
+            assert!(threaded_intent
+                .get("threadedGoalPassGoalGainYards")
+                .is_some());
+            assert!(threaded_intent
+                .get("threadedGoalPassReceptionWindowScore")
+                .is_some());
+            assert!(threaded_intent
+                .get("threadedGoalPassReceiverOpenness")
+                .is_some());
+            assert!(threaded_intent
+                .get("threadedGoalPassExpectedCompletion")
+                .is_some());
+            assert!(threaded_intent.get("threadedGoalPassStrideFit").is_some());
+        }
         assert!(first_intent.get("targetOpenSpaceScore").is_some());
         assert!(first_intent
             .get("targetTeammateOccupiedSpacePressure")

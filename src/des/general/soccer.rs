@@ -43824,7 +43824,7 @@ impl SoccerRealtimeSession {
     }
 
     pub fn state_response(&self) -> SoccerLiveStateResponse {
-        let frame = self.sim.to_frame();
+        let frame = self.sim.to_live_http_frame();
         let controller_threads = self.controller_thread_stats();
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
@@ -89201,6 +89201,58 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .iter()
                 .any(|player| player.id != holder_id && player.last_decision.is_none()),
             "autonomous non-holders should avoid cloned full decision traces"
+        );
+    }
+
+    #[test]
+    fn live_state_response_uses_compact_http_frame() {
+        let mut session = SoccerRealtimeSession::new(MatchConfig {
+            duration_seconds: 0.2,
+            seed: 57,
+            max_human_players: 1,
+            ..Default::default()
+        });
+        session.sim.clear_controller_assignments();
+        session.sim.run_time_step();
+        let holder_id = session.sim.ball.holder.expect("live state holder");
+
+        let state = session.state_response();
+        let holder = state
+            .frame
+            .players
+            .iter()
+            .find(|player| player.id == holder_id)
+            .expect("holder frame");
+
+        assert!(
+            state.frame.shared_positions.histories.is_empty(),
+            "live state polling should not clone duplicate shared position histories"
+        );
+        assert!(
+            !state.frame.intents.is_empty(),
+            "live state polling should retain compact tactical intents for UI overlays"
+        );
+        assert!(
+            holder.last_decision.is_some(),
+            "live state polling should retain the holder MDP/POMDP trace"
+        );
+        assert!(
+            state
+                .frame
+                .players
+                .iter()
+                .any(|player| player.id != holder_id && player.last_decision.is_none()),
+            "live state polling should omit full autonomous non-holder traces"
+        );
+        let full_decision_count = state
+            .frame
+            .players
+            .iter()
+            .filter(|player| player.last_decision.is_some())
+            .count();
+        assert!(
+            full_decision_count <= 1 + state.controller_assignments.len(),
+            "live state polling should expose only holder/controller decisions, got {full_decision_count}"
         );
     }
 

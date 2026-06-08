@@ -77770,13 +77770,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             ..Default::default()
         })));
         let input_queue = session.lock().unwrap().input_queue();
-        let raw = r#"tick,source_frame_id,clock_seconds,player_id,name,team,role,shirt,x_norm,y_norm,home_x_norm,home_y_norm,ball_x_norm,ball_y_norm,ball_holder,last_touch_team
-0,broadcast-normalized-0001,0.0,0,Home passer,Home,Midfielder,8,0.500000,0.583333,0.500000,0.541667,0.500000,0.583333,0,Home
-0,broadcast-normalized-0001,0.0,1,Home runner,Home,Forward,9,0.550000,0.683333,0.550000,0.666667,0.500000,0.583333,0,Home
-0,broadcast-normalized-0001,0.0,2,Away defender,Away,Defender,4,0.725000,0.650000,0.725000,0.650000,0.500000,0.583333,0,Home
-1,broadcast-normalized-0002,1.0,0,Home passer,Home,Midfielder,8,0.502500,0.586667,0.500000,0.541667,0.550000,0.683333,1,Home
-1,broadcast-normalized-0002,1.0,1,Home runner,Home,Forward,9,0.550000,0.683333,0.550000,0.666667,0.550000,0.683333,1,Home
-1,broadcast-normalized-0002,1.0,2,Away defender,Away,Defender,4,0.706250,0.654167,0.725000,0.650000,0.550000,0.683333,1,Home
+        let raw = r#"tick,source_frame_id,clock_seconds,player_id,name,team,role,shirt,x_norm,y_norm,home_x_norm,home_y_norm,ball_x_norm,ball_y_norm,ball_holder,last_touch_team,facing_degrees,receive_facing,action_facing
+0,broadcast-normalized-0001,0.0,0,Home passer,Home,Midfielder,8,0.500000,0.583333,0.500000,0.541667,0.500000,0.583333,0,Home,180,northEast,90
+0,broadcast-normalized-0001,0.0,1,Home runner,Home,Forward,9,0.550000,0.683333,0.550000,0.666667,0.500000,0.583333,0,Home,0,north,0
+0,broadcast-normalized-0001,0.0,2,Away defender,Away,Defender,4,0.725000,0.650000,0.725000,0.650000,0.500000,0.583333,0,Home,180,west,180
+1,broadcast-normalized-0002,1.0,0,Home passer,Home,Midfielder,8,0.502500,0.586667,0.500000,0.541667,0.550000,0.683333,1,Home,180,northEast,90
+1,broadcast-normalized-0002,1.0,1,Home runner,Home,Forward,9,0.550000,0.683333,0.550000,0.666667,0.550000,0.683333,1,Home,0,north,0
+1,broadcast-normalized-0002,1.0,2,Away defender,Away,Defender,4,0.706250,0.654167,0.725000,0.650000,0.550000,0.683333,1,Home,180,west,180
 "#;
         let body = serde_json::json!({
             "source": "broadcast-normalized.csv",
@@ -77836,6 +77836,53 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 >= value["importedNeuralSamples"].as_u64().unwrap()
         );
         assert!(value["policyProbability"]["homeStates"].as_u64().unwrap() > 0);
+
+        let policy = handle_live_soccer_request(
+            "GET /api/team-policy HTTP/1.1\r\nHost: local\r\n\r\n",
+            &session,
+            &input_queue,
+        );
+        assert_eq!(policy.status, 200);
+        let policy_value: serde_json::Value =
+            serde_json::from_str(&policy.body).expect("tracking-trained policy json");
+        let imported_pass_state = policy_value["homeEntries"]
+            .as_array()
+            .expect("home entries")
+            .iter()
+            .find(|entry| {
+                entry["action"] == "pass"
+                    && entry["state"]["role"] == "Midfielder"
+                    && entry["state"]["receiveFacing"] == "NorthEast"
+                    && entry["state"]["actionFacing"] == "South"
+            })
+            .expect("tracking CSV import should train pass state with explicit facing buckets");
+        assert!(
+            imported_pass_state["state"]["playerFineCellId"]
+                .as_u64()
+                .is_some(),
+            "tracking-imported pass state should retain the fine player grid: {imported_pass_state:?}"
+        );
+        let imported_pass_target = policy_value["homeTargetEntries"]
+            .as_array()
+            .expect("home target entries")
+            .iter()
+            .find(|entry| {
+                entry["action"] == "pass"
+                    && entry["state"]["receiveFacing"] == "NorthEast"
+                    && entry["state"]["actionFacing"] == "South"
+                    && entry["targetFineCellId"].as_u64().is_some()
+                    && entry["targetTacticalCellId"].as_u64().is_some()
+                    && entry["targetMacroCellId"].as_u64().is_some()
+                    && entry["targetRootCellId"].as_u64().is_some()
+            })
+            .expect("tracking CSV import should train target grid for the explicit-facing pass");
+        assert!(
+            imported_pass_target["targetFineCellId"].as_u64().unwrap()
+                != imported_pass_state["state"]["playerFineCellId"]
+                    .as_u64()
+                    .unwrap(),
+            "target-grid policy should store the receiver cell, not just echo the passer cell: state={imported_pass_state:?} target={imported_pass_target:?}"
+        );
     }
 
     #[test]

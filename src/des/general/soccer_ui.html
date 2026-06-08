@@ -876,22 +876,28 @@ function tacticalLivenessState() {
   const passAttempts = Number(meta.passAttempts ?? ((s.passesAttemptedHome ?? 0) + (s.passesAttemptedAway ?? 0)));
   const completedPasses = Number(meta.completedPasses ?? ((s.passesCompletedHome ?? 0) + (s.passesCompletedAway ?? 0)));
   const shotAttempts = Number(meta.shotAttempts ?? ((s.shotsHome ?? 0) + (s.shotsAway ?? 0)));
+  const frameLivenessKnown = Boolean(meta.frameLivenessKnown);
   const offBallOpenSpaceSupportKnown = Boolean(meta.offBallOpenSpaceSupportKnown);
   const offBallOpenSpaceMoves = Number(meta.offBallOpenSpaceMoves ?? 0);
   const offBallOpenSpaceGain = Number(meta.offBallOpenSpaceGain ?? 0);
+  const ballMovementYards = Number(meta.ballMovementYards ?? 0);
+  const ballGoalwardProgressYards = Number(meta.ballGoalwardProgressYards ?? 0);
+  const ballActiveFrames = Number(meta.ballActiveFrames ?? 0);
   const sustainedPassWindow = Boolean(meta.sustainedPassWindow);
   const sustainedShotWindow = Boolean(meta.sustainedShotWindow);
   const passOk = meta.passActivityOk == null ? (!sustainedPassWindow || passAttempts > 0) : Boolean(meta.passActivityOk);
   const completedOk = meta.completedPassActivityOk == null ? (!sustainedPassWindow || completedPasses > 0) : Boolean(meta.completedPassActivityOk);
   const shotOk = meta.shotActivityOk == null ? (!sustainedShotWindow || shotAttempts > 0) : Boolean(meta.shotActivityOk);
   const openSpaceOk = meta.openSpaceSupportOk == null ? true : Boolean(meta.openSpaceSupportOk);
-  return {passAttempts, completedPasses, shotAttempts, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk};
+  const goalwardOk = meta.goalwardProgressOk == null ? true : Boolean(meta.goalwardProgressOk);
+  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk};
 }
 function tacticalLivenessLabel() {
   const live = tacticalLivenessState();
-  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk;
+  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk;
   const support = live.offBallOpenSpaceSupportKnown ? live.offBallOpenSpaceMoves : "?";
-  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} O${support}${ok ? "" : " !"}`;
+  const goalward = live.frameLivenessKnown ? live.ballGoalwardProgressYards.toFixed(0) : "?";
+  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} O${support} G${goalward}${ok ? "" : " !"}`;
 }
 function tacticalLivenessTitle() {
   const live = tacticalLivenessState();
@@ -902,11 +908,15 @@ function tacticalLivenessTitle() {
     live.offBallOpenSpaceSupportKnown
       ? `off-ball open-space moves=${live.offBallOpenSpaceMoves}; gain=${live.offBallOpenSpaceGain.toFixed(2)}`
       : "off-ball open-space support not measured",
+    live.frameLivenessKnown
+      ? `ball goalward progress=${live.ballGoalwardProgressYards.toFixed(2)}yd; movement=${live.ballMovementYards.toFixed(2)}yd; active frames=${live.ballActiveFrames}`
+      : "ball goalward progress not measured",
   ];
   if (!live.passOk) parts.push("20s+ run has no pass attempts");
   if (!live.completedOk) parts.push("20s+ run has no completed passes");
   if (!live.shotOk) parts.push("45s+ run has no shots");
   if (!live.openSpaceOk) parts.push("20s+ run has no off-ball open-space support");
+  if (!live.goalwardOk) parts.push("multi-frame run has no goalward ball progress");
   return parts.join("; ");
 }
 function totalLoadedSeconds() {

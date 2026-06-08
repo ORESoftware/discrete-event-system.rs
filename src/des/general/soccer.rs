@@ -31540,27 +31540,9 @@ fn soccer_accounting_check_frame_liveness(
     }
 
     let mut previous_players = HashMap::<usize, Vec2>::new();
-    let mut previous_ball = None::<Vec2>;
     let mut moving_players = HashSet::<usize>::new();
-    let mut open_space_support = SoccerOpenSpaceSupportAccumulator::default();
+    let mut frame_liveness = SoccerFrameLivenessAccumulator::default();
     for frame in &trace.frames {
-        if let Some(prev_ball) = previous_ball {
-            let movement = frame.ball.position.distance(prev_ball);
-            if movement.is_finite() {
-                report.ball_movement_yards += movement;
-            }
-            if let Some(team) = soccer_accounting_frame_ball_team(frame) {
-                let goalward = (frame.ball.position.y - prev_ball.y) * team.attack_dir();
-                if goalward.is_finite() && goalward > 0.0 {
-                    report.ball_goalward_progress_yards += goalward;
-                }
-            }
-        }
-        if frame.ball.holder.is_some() || frame.ball.velocity.len() > 0.05 {
-            report.ball_active_frames = report.ball_active_frames.saturating_add(1);
-        }
-        previous_ball = Some(frame.ball.position);
-
         for player in &frame.players {
             if let Some(prev) = previous_players.insert(player.id, player.position) {
                 let movement = player.position.distance(prev);
@@ -31572,10 +31554,14 @@ fn soccer_accounting_check_frame_liveness(
                 }
             }
         }
-        open_space_support.observe_frame(frame);
+        frame_liveness.observe_frame(frame);
     }
-    report.off_ball_open_space_moves = open_space_support.moves;
-    report.off_ball_open_space_gain = open_space_support.gain;
+    let frame_liveness = frame_liveness.metrics();
+    report.ball_movement_yards = frame_liveness.ball_movement_yards;
+    report.ball_goalward_progress_yards = frame_liveness.ball_goalward_progress_yards;
+    report.ball_active_frames = frame_liveness.ball_active_frames;
+    report.off_ball_open_space_moves = frame_liveness.off_ball_open_space_moves;
+    report.off_ball_open_space_gain = frame_liveness.off_ball_open_space_gain;
     report.moving_player_count = moving_players.len();
 
     let expected_movers = if trace.summary.ticks >= 5 { 6 } else { 2 };
@@ -31631,14 +31617,40 @@ fn soccer_accounting_check_frame_liveness(
 }
 
 #[derive(Clone, Debug, Default)]
-struct SoccerOpenSpaceSupportAccumulator {
-    previous_players: HashMap<usize, Vec2>,
-    moves: usize,
-    gain: f64,
+struct SoccerFrameLivenessMetrics {
+    off_ball_open_space_moves: usize,
+    off_ball_open_space_gain: f64,
+    ball_movement_yards: f64,
+    ball_goalward_progress_yards: f64,
+    ball_active_frames: usize,
 }
 
-impl SoccerOpenSpaceSupportAccumulator {
+#[derive(Clone, Debug, Default)]
+struct SoccerFrameLivenessAccumulator {
+    previous_players: HashMap<usize, Vec2>,
+    previous_ball: Option<Vec2>,
+    metrics: SoccerFrameLivenessMetrics,
+}
+
+impl SoccerFrameLivenessAccumulator {
     fn observe_frame(&mut self, frame: &MatchFrame) {
+        if let Some(prev_ball) = self.previous_ball {
+            let movement = frame.ball.position.distance(prev_ball);
+            if movement.is_finite() {
+                self.metrics.ball_movement_yards += movement;
+            }
+            if let Some(team) = soccer_accounting_frame_ball_team(frame) {
+                let goalward = (frame.ball.position.y - prev_ball.y) * team.attack_dir();
+                if goalward.is_finite() && goalward > 0.0 {
+                    self.metrics.ball_goalward_progress_yards += goalward;
+                }
+            }
+        }
+        if frame.ball.holder.is_some() || frame.ball.velocity.len() > 0.05 {
+            self.metrics.ball_active_frames = self.metrics.ball_active_frames.saturating_add(1);
+        }
+        self.previous_ball = Some(frame.ball.position);
+
         let possession_team = soccer_accounting_frame_ball_team(frame);
         let holder = frame.ball.holder;
         for player in &frame.players {
@@ -31664,19 +31676,24 @@ impl SoccerOpenSpaceSupportAccumulator {
             );
             let gain = after_space - before_space;
             if gain.is_finite() && gain > 0.25 {
-                self.moves = self.moves.saturating_add(1);
-                self.gain += gain;
+                self.metrics.off_ball_open_space_moves =
+                    self.metrics.off_ball_open_space_moves.saturating_add(1);
+                self.metrics.off_ball_open_space_gain += gain;
             }
         }
     }
+
+    fn metrics(&self) -> SoccerFrameLivenessMetrics {
+        self.metrics.clone()
+    }
 }
 
-fn soccer_open_space_support_for_frames(frames: &[MatchFrame]) -> (usize, f64) {
-    let mut accumulator = SoccerOpenSpaceSupportAccumulator::default();
+fn soccer_frame_liveness_for_frames(frames: &[MatchFrame]) -> SoccerFrameLivenessMetrics {
+    let mut accumulator = SoccerFrameLivenessAccumulator::default();
     for frame in frames {
         accumulator.observe_frame(frame);
     }
-    (accumulator.moves, accumulator.gain)
+    accumulator.metrics()
 }
 
 fn soccer_accounting_frame_ball_team(frame: &MatchFrame) -> Option<Team> {
@@ -50355,19 +50372,19 @@ pub fn soccer_simulation_trace_jsonl(trace: &SimulationTrace) -> String {
 }
 
 fn soccer_playback_tactical_liveness_json(summary: &MatchSummary) -> serde_json::Value {
-    soccer_playback_tactical_liveness_json_with_open_space(summary, None)
+    soccer_playback_tactical_liveness_json_with_frame_liveness(summary, None)
 }
 
 fn soccer_playback_tactical_liveness_json_for_trace(trace: &SimulationTrace) -> serde_json::Value {
-    soccer_playback_tactical_liveness_json_with_open_space(
+    soccer_playback_tactical_liveness_json_with_frame_liveness(
         &trace.summary,
-        Some(soccer_open_space_support_for_frames(&trace.frames)),
+        Some(soccer_frame_liveness_for_frames(&trace.frames)),
     )
 }
 
-fn soccer_playback_tactical_liveness_json_with_open_space(
+fn soccer_playback_tactical_liveness_json_with_frame_liveness(
     summary: &MatchSummary,
-    open_space_support: Option<(usize, f64)>,
+    frame_liveness: Option<SoccerFrameLivenessMetrics>,
 ) -> serde_json::Value {
     let pass_attempts = summary
         .stats
@@ -50383,24 +50400,32 @@ fn soccer_playback_tactical_liveness_json_with_open_space(
         .saturating_add(summary.stats.shots_away);
     let sustained_pass_window = summary.ticks >= 200;
     let sustained_shot_window = summary.ticks >= 450;
-    let (off_ball_open_space_moves, off_ball_open_space_gain) =
-        open_space_support.unwrap_or((0, 0.0));
-    let open_space_support_known = open_space_support.is_some();
-    let open_space_support_ok =
-        !sustained_pass_window || !open_space_support_known || off_ball_open_space_moves > 0;
+    let frame_liveness_known = frame_liveness.is_some();
+    let frame_liveness = frame_liveness.unwrap_or_default();
+    let open_space_support_ok = !sustained_pass_window
+        || !frame_liveness_known
+        || frame_liveness.off_ball_open_space_moves > 0;
+    let goalward_progress_ok = summary.ticks < 5
+        || !frame_liveness_known
+        || frame_liveness.ball_goalward_progress_yards > 0.10;
     serde_json::json!({
         "passAttempts": pass_attempts,
         "completedPasses": completed_passes,
         "shotAttempts": shot_attempts,
-        "offBallOpenSpaceSupportKnown": open_space_support_known,
-        "offBallOpenSpaceMoves": off_ball_open_space_moves,
-        "offBallOpenSpaceGain": off_ball_open_space_gain,
+        "frameLivenessKnown": frame_liveness_known,
+        "offBallOpenSpaceSupportKnown": frame_liveness_known,
+        "offBallOpenSpaceMoves": frame_liveness.off_ball_open_space_moves,
+        "offBallOpenSpaceGain": frame_liveness.off_ball_open_space_gain,
+        "ballMovementYards": frame_liveness.ball_movement_yards,
+        "ballGoalwardProgressYards": frame_liveness.ball_goalward_progress_yards,
+        "ballActiveFrames": frame_liveness.ball_active_frames,
         "sustainedPassWindow": sustained_pass_window,
         "sustainedShotWindow": sustained_shot_window,
         "passActivityOk": !sustained_pass_window || pass_attempts > 0,
         "completedPassActivityOk": !sustained_pass_window || completed_passes > 0,
         "shotActivityOk": !sustained_shot_window || shot_attempts > 0,
         "openSpaceSupportOk": open_space_support_ok,
+        "goalwardProgressOk": goalward_progress_ok,
     })
 }
 
@@ -50446,12 +50471,12 @@ fn soccer_playback_metadata_json(
     controller_yield: ControllerYieldStats,
     expected_frame_count: usize,
     record_every_ticks: Option<u64>,
-    open_space_support: Option<(usize, f64)>,
+    frame_liveness: Option<SoccerFrameLivenessMetrics>,
 ) -> serde_json::Value {
     let generated_at_unix_ms = soccer_artifact_generated_at_unix_ms();
     let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
     let tactical_liveness =
-        soccer_playback_tactical_liveness_json_with_open_space(summary, open_space_support);
+        soccer_playback_tactical_liveness_json_with_frame_liveness(summary, frame_liveness);
     let controller_contract = soccer_controller_runtime_contract(config);
     let ui_contract = soccer_ui_runtime_contract();
     let rules_contract = soccer_rules_runtime_contract(config);
@@ -50511,7 +50536,7 @@ fn write_soccer_playback_artifacts_to_dir(
         trace.controller_yield,
         trace.frames.len(),
         None,
-        Some(soccer_open_space_support_for_frames(&trace.frames)),
+        Some(soccer_frame_liveness_for_frames(&trace.frames)),
     );
     let meta_json = serde_json::to_string(&meta)
         .map_err(|err| soccer_json_io_error("serialize metadata", err))?;
@@ -50549,22 +50574,22 @@ fn write_soccer_playback_artifacts_streaming_to_dir(
     {
         let frames_file = fs::File::create(&frames_tmp_path)?;
         let mut frames_writer = BufWriter::new(frames_file);
-        let mut open_space_support = SoccerOpenSpaceSupportAccumulator::default();
+        let mut frame_liveness = SoccerFrameLivenessAccumulator::default();
         let initial_match_frame = sim.to_frame();
-        open_space_support.observe_frame(&initial_match_frame);
+        frame_liveness.observe_frame(&initial_match_frame);
         let initial_frame = SoccerPlaybackFrame::from(&initial_match_frame);
         write_playback_frame_jsonl_line(&mut frames_writer, &initial_frame)?;
         for _ in 0..total_ticks {
             sim.run_time_step();
             if sim.tick % record_every_ticks == 0 || sim.tick == total_ticks {
                 let match_frame = sim.to_frame();
-                open_space_support.observe_frame(&match_frame);
+                frame_liveness.observe_frame(&match_frame);
                 let playback_frame = SoccerPlaybackFrame::from(&match_frame);
                 write_playback_frame_jsonl_line(&mut frames_writer, &playback_frame)?;
             }
         }
         frames_writer.flush()?;
-        let open_space_support = Some((open_space_support.moves, open_space_support.gain));
+        let frame_liveness = Some(frame_liveness.metrics());
         let summary = sim.summary();
         let expected_frame_count =
             1 + usize::try_from(total_ticks.div_ceil(record_every_ticks)).unwrap_or(usize::MAX);
@@ -50576,7 +50601,7 @@ fn write_soccer_playback_artifacts_streaming_to_dir(
             sim.controller_yield_stats(),
             expected_frame_count,
             Some(record_every_ticks),
-            open_space_support,
+            frame_liveness,
         );
         let meta_json = serde_json::to_string(&meta)
             .map_err(|err| soccer_json_io_error("serialize metadata", err))?;
@@ -67172,22 +67197,38 @@ mod tests {
                 .shots_home
                 .saturating_add(trace.summary.stats.shots_away)
         );
-        let support = soccer_open_space_support_for_frames(&trace.frames);
+        let frame_liveness = soccer_frame_liveness_for_frames(&trace.frames);
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["frameLivenessKnown"],
+            true
+        );
         assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["offBallOpenSpaceSupportKnown"],
             true
         );
         assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["offBallOpenSpaceMoves"].as_u64(),
-            Some(support.0 as u64)
+            Some(frame_liveness.off_ball_open_space_moves as u64)
         );
         assert!(
             (records.last().unwrap()["tacticalLiveness"]["offBallOpenSpaceGain"]
                 .as_f64()
                 .expect("open-space gain")
-                - support.1)
+                - frame_liveness.off_ball_open_space_gain)
                 .abs()
                 < 1e-9
+        );
+        assert!(
+            (records.last().unwrap()["tacticalLiveness"]["ballGoalwardProgressYards"]
+                .as_f64()
+                .expect("goalward progress")
+                - frame_liveness.ball_goalward_progress_yards)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["ballActiveFrames"].as_u64(),
+            Some(frame_liveness.ball_active_frames as u64)
         );
         assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["sustainedPassWindow"],
@@ -67210,20 +67251,37 @@ mod tests {
         assert_eq!(pre_shot_window["passActivityOk"], false);
         assert_eq!(pre_shot_window["completedPassActivityOk"], false);
         assert_eq!(pre_shot_window["shotActivityOk"], true);
+        assert_eq!(pre_shot_window["frameLivenessKnown"], false);
         assert_eq!(pre_shot_window["offBallOpenSpaceSupportKnown"], false);
         assert_eq!(pre_shot_window["openSpaceSupportOk"], true);
+        assert_eq!(pre_shot_window["goalwardProgressOk"], true);
 
-        let no_support =
-            soccer_playback_tactical_liveness_json_with_open_space(&summary, Some((0, 0.0)));
+        let no_support = soccer_playback_tactical_liveness_json_with_frame_liveness(
+            &summary,
+            Some(SoccerFrameLivenessMetrics::default()),
+        );
+        assert_eq!(no_support["frameLivenessKnown"], true);
         assert_eq!(no_support["offBallOpenSpaceSupportKnown"], true);
         assert_eq!(no_support["offBallOpenSpaceMoves"], 0);
         assert_eq!(no_support["openSpaceSupportOk"], false);
+        assert_eq!(no_support["goalwardProgressOk"], false);
 
-        let support =
-            soccer_playback_tactical_liveness_json_with_open_space(&summary, Some((3, 4.5)));
+        let support = soccer_playback_tactical_liveness_json_with_frame_liveness(
+            &summary,
+            Some(SoccerFrameLivenessMetrics {
+                off_ball_open_space_moves: 3,
+                off_ball_open_space_gain: 4.5,
+                ball_movement_yards: 9.0,
+                ball_goalward_progress_yards: 2.25,
+                ball_active_frames: 8,
+            }),
+        );
         assert_eq!(support["offBallOpenSpaceMoves"], 3);
         assert_eq!(support["offBallOpenSpaceGain"], 4.5);
+        assert_eq!(support["ballGoalwardProgressYards"], 2.25);
+        assert_eq!(support["ballActiveFrames"], 8);
         assert_eq!(support["openSpaceSupportOk"], true);
+        assert_eq!(support["goalwardProgressOk"], true);
 
         summary.ticks = 450;
         summary.simulated_seconds = 45.0;
@@ -100639,9 +100697,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function tacticalLivenessTitle()"));
         assert!(html.contains("offBallOpenSpaceMoves"));
         assert!(html.contains("offBallOpenSpaceGain"));
+        assert!(html.contains("frameLivenessKnown"));
+        assert!(html.contains("ballGoalwardProgressYards"));
+        assert!(html.contains("goalwardProgressOk"));
         assert!(html.contains("openSpaceSupportOk"));
         assert!(html.contains("O${support}"));
+        assert!(html.contains("G${goalward}"));
         assert!(html.contains("off-ball open-space moves="));
+        assert!(html.contains("ball goalward progress="));
         assert!(html.contains("tacticalLiveness.textContent = tacticalLivenessLabel()"));
         assert!(html.contains("tacticalLiveness.title = tacticalLivenessTitle()"));
         assert!(html.contains("defaultTenMinuteContract"));
@@ -101654,24 +101717,41 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .shots_home
                 .saturating_add(trace.summary.stats.shots_away)
         );
-        let support = soccer_open_space_support_for_frames(&trace.frames);
+        let frame_liveness = soccer_frame_liveness_for_frames(&trace.frames);
+        assert_eq!(meta["tacticalLiveness"]["frameLivenessKnown"], true);
         assert_eq!(
             meta["tacticalLiveness"]["offBallOpenSpaceSupportKnown"],
             true
         );
         assert_eq!(
             meta["tacticalLiveness"]["offBallOpenSpaceMoves"].as_u64(),
-            Some(support.0 as u64)
+            Some(frame_liveness.off_ball_open_space_moves as u64)
         );
         assert!(
             (meta["tacticalLiveness"]["offBallOpenSpaceGain"]
                 .as_f64()
                 .expect("open-space gain")
-                - support.1)
+                - frame_liveness.off_ball_open_space_gain)
                 .abs()
                 < 1e-9
         );
+        assert!(
+            (meta["tacticalLiveness"]["ballGoalwardProgressYards"]
+                .as_f64()
+                .expect("goalward progress")
+                - frame_liveness.ball_goalward_progress_yards)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["ballActiveFrames"].as_u64(),
+            Some(frame_liveness.ball_active_frames as u64)
+        );
         assert_eq!(meta["tacticalLiveness"]["openSpaceSupportOk"], true);
+        assert_eq!(
+            meta["tacticalLiveness"]["goalwardProgressOk"],
+            trace.summary.ticks < 5 || frame_liveness.ball_goalward_progress_yards > 0.10
+        );
         assert_eq!(meta["tacticalLiveness"]["sustainedPassWindow"], false);
         assert_eq!(meta["stepTiming"]["ticks"], trace.step_timing.ticks);
         assert_eq!(meta["stepTiming"]["totalMs"], trace.step_timing.total_ms);
@@ -101839,6 +101919,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .as_u64()
             .is_some());
         assert!(meta["tacticalLiveness"]["shotAttempts"].as_u64().is_some());
+        assert_eq!(meta["tacticalLiveness"]["frameLivenessKnown"], true);
         assert_eq!(
             meta["tacticalLiveness"]["offBallOpenSpaceSupportKnown"],
             true
@@ -101849,7 +101930,16 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(meta["tacticalLiveness"]["offBallOpenSpaceGain"]
             .as_f64()
             .is_some());
+        assert!(meta["tacticalLiveness"]["ballGoalwardProgressYards"]
+            .as_f64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["ballActiveFrames"]
+            .as_u64()
+            .is_some());
         assert!(meta["tacticalLiveness"]["openSpaceSupportOk"]
+            .as_bool()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["goalwardProgressOk"]
             .as_bool()
             .is_some());
         assert_eq!(meta["tacticalLiveness"]["sustainedPassWindow"], false);

@@ -7354,6 +7354,33 @@ impl PlayerAgent {
                 decisive_family_floor,
             );
         }
+        if carry_forward_legal
+            && !goal_attack_shot_required
+            && observation.yards_to_goal < observation.yards_to_own_goal
+            && observation.yards_to_goal <= 58.0
+            && observation.forward_dribble_space_yards >= 3.0
+            && release_pressure < 0.50
+        {
+            let final_third_ramp = ((58.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
+            let grass_fit = (observation.forward_dribble_space_yards / 14.0).clamp(0.0, 1.0);
+            let role_floor = match self.role {
+                PlayerRole::Forward => 0.30,
+                PlayerRole::Midfielder => 0.24,
+                PlayerRole::Defender => 0.14,
+                PlayerRole::Goalkeeper => 0.0,
+            };
+            let progression_floor = (role_floor
+                + final_third_ramp * 0.12
+                + grass_fit * 0.10
+                + offensive_urgency * 0.06
+                + goal_attack * 0.05)
+                .clamp(0.0, 0.54);
+            ensure_min_legal_option_probability(
+                &mut options,
+                "carry-forward",
+                progression_floor,
+            );
+        }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
         options
@@ -92411,6 +92438,83 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             carry_reward > poor_pass_reward + 0.35,
             "carry should beat forced poor pass: carry={carry_reward} pass={poor_pass_reward}"
+        );
+    }
+
+    #[test]
+    fn calm_attacking_half_holder_gets_progression_carry_floor() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 26_177,
+            ..Default::default()
+        });
+        let holder = 9;
+        let receiver = 7;
+        let marker = 14;
+        park_players_except(&mut sim, &[holder, receiver, marker]);
+        sim.players[holder].role = PlayerRole::Forward;
+        sim.players[holder].position = Vec2::new(42.0, 74.0);
+        sim.players[holder].home_position = sim.players[holder].position;
+        sim.players[holder].velocity = Vec2::new(0.0, 2.4);
+        sim.players[holder].skills.dribbling = 8.2;
+        sim.players[holder].skills.shooting = 7.2;
+        sim.players[holder].skills.decision_noise = 0.0;
+        sim.players[holder].preferences.dribble_bias = 0.70;
+        sim.players[holder].preferences.pass_bias = 0.95;
+        sim.players[receiver].position = Vec2::new(54.0, 79.0);
+        sim.players[receiver].home_position = sim.players[receiver].position;
+        sim.players[marker].position = Vec2::new(66.0, 90.0);
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.shared_positions.sync_from_players_and_ball(
+            &sim.players,
+            &sim.officials,
+            &sim.ball,
+            sim.tick,
+            sim.clock_seconds,
+        );
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut observation = snapshot.observation_for(holder);
+        observation.perceived_pressure = 0.08;
+        observation.pressure_urgency = 0.04;
+        observation.immediate_dispossession_risk = 0.03;
+        observation.forward_dribble_space_yards = observation.forward_dribble_space_yards.max(9.0);
+        observation.yards_to_goal = 46.0;
+        observation.yards_to_own_goal = 74.0;
+        observation.expected_pass_completion = 0.64;
+        observation.best_pass_receiver_openness = 0.48;
+        observation.floor_pass_lane_score = 0.56;
+        observation.shot_lane_open = false;
+        observation.shot_block_probability = 0.78;
+
+        let options = sim.players[holder].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            1,
+            0,
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let carry = options
+            .iter()
+            .find(|option| option.label == "carry-forward")
+            .expect("carry-forward option");
+        let pass = options
+            .iter()
+            .find(|option| option.label == "pass1")
+            .expect("pass option");
+        assert!(carry.legal);
+        assert!(
+            carry.probability >= 0.30,
+            "attacking-half holder with grass ahead should have a real progression-carry share: carry={carry:?} pass={pass:?}"
+        );
+        assert!(
+            carry.probability > pass.probability * 0.70,
+            "progression carry should stay competitive with the outlet pass: carry={carry:?} pass={pass:?}"
         );
     }
 

@@ -32047,6 +32047,7 @@ struct SoccerFrameLivenessMetrics {
     complete_schedule_frames: usize,
     central_brain_decision_frames: usize,
     ball_decision_frames: usize,
+    official_decision_frames: usize,
     human_controlled_player_decisions: usize,
     human_input_present_decisions: usize,
     human_input_consumed_decisions: usize,
@@ -32203,6 +32204,8 @@ impl SoccerFrameLivenessAccumulator {
             let Some(decision) = official.last_decision.as_ref() else {
                 continue;
             };
+            self.metrics.official_decision_frames =
+                self.metrics.official_decision_frames.saturating_add(1);
             if decision.operation_order.len() > 1 {
                 self.metrics.official_operation_order_samples = self
                     .metrics
@@ -51470,6 +51473,7 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "completeScheduleFrames": frame_liveness.complete_schedule_frames,
         "centralBrainDecisionFrames": frame_liveness.central_brain_decision_frames,
         "ballDecisionFrames": frame_liveness.ball_decision_frames,
+        "officialDecisionFrames": frame_liveness.official_decision_frames,
         "humanControlledPlayerDecisions": frame_liveness.human_controlled_player_decisions,
         "humanInputPresentDecisions": frame_liveness.human_input_present_decisions,
         "humanInputConsumedDecisions": frame_liveness.human_input_consumed_decisions,
@@ -68777,6 +68781,10 @@ mod tests {
             Some(frame_liveness.ball_decision_frames as u64)
         );
         assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["officialDecisionFrames"].as_u64(),
+            Some(frame_liveness.official_decision_frames as u64)
+        );
+        assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["humanControlledPlayerDecisions"].as_u64(),
             Some(frame_liveness.human_controlled_player_decisions as u64)
         );
@@ -68892,6 +68900,7 @@ mod tests {
                 complete_schedule_frames: 9,
                 central_brain_decision_frames: 8,
                 ball_decision_frames: 8,
+                official_decision_frames: 24,
                 human_controlled_player_decisions: 5,
                 human_input_present_decisions: 4,
                 human_input_consumed_decisions: 4,
@@ -68941,6 +68950,7 @@ mod tests {
         assert_eq!(support["completeScheduleFrames"], 9);
         assert_eq!(support["centralBrainDecisionFrames"], 8);
         assert_eq!(support["ballDecisionFrames"], 8);
+        assert_eq!(support["officialDecisionFrames"], 24);
         assert_eq!(support["humanControlledPlayerDecisions"], 5);
         assert_eq!(support["humanInputPresentDecisions"], 4);
         assert_eq!(support["humanInputConsumedDecisions"], 4);
@@ -105616,6 +105626,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             Some(frame_liveness.ball_decision_frames as u64)
         );
         assert_eq!(
+            meta["tacticalLiveness"]["officialDecisionFrames"].as_u64(),
+            Some(frame_liveness.official_decision_frames as u64)
+        );
+        assert_eq!(
             meta["tacticalLiveness"]["humanControlledPlayerDecisions"].as_u64(),
             Some(frame_liveness.human_controlled_player_decisions as u64)
         );
@@ -106002,6 +106016,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .as_u64()
             .is_some());
         assert!(meta["tacticalLiveness"]["ballDecisionFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["officialDecisionFrames"]
             .as_u64()
             .is_some());
         assert!(meta["tacticalLiveness"]["humanControlledPlayerDecisions"]
@@ -106418,6 +106435,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 6000);
         assert_eq!(meta["tacticalLiveness"]["ballDecisionFrames"], 6000);
+        assert_eq!(
+            meta["tacticalLiveness"]["officialDecisionFrames"],
+            SOCCER_MATCH_OFFICIAL_COUNT as u64 * config.total_ticks()
+        );
         assert!(
             meta["tacticalLiveness"]["playerOperationOrderSamples"]
                 .as_u64()

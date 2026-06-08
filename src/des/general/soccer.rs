@@ -113,9 +113,9 @@ const CLEAN_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.34;
 const CLEAN_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.32;
 const CLEAN_SHOT_MIN_KEEPER_BEAT_PROBABILITY: f64 = 0.08;
 const SPECULATIVE_LONG_SHOT_MAX_YARDS: f64 = 45.0;
-const SPECULATIVE_LONG_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.30;
-const SPECULATIVE_LONG_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.14;
-const SPECULATIVE_LONG_SHOT_SKILL_GATE: f64 = 0.78;
+const SPECULATIVE_LONG_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.46;
+const SPECULATIVE_LONG_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.10;
+const SPECULATIVE_LONG_SHOT_SKILL_GATE: f64 = 0.68;
 const KILLER_PASS_MAX_YARDS_TO_GOAL: f64 = 52.0;
 const KILLER_PASS_MIN_FORWARD_YARDS: f64 = 4.0;
 const KILLER_PASS_MIN_RECEIVER_GOAL_GAIN_YARDS: f64 = 5.0;
@@ -31879,8 +31879,12 @@ struct SoccerFrameLivenessMetrics {
     human_input_consumed_decisions: usize,
     human_input_unique_controller_slots: usize,
     human_input_max_queue_age_ms: u64,
+    final_third_possession_frames: usize,
+    inside_twenty_possession_frames: usize,
+    shot_option_legal_frames: usize,
     clear_shot_window_frames: usize,
     clear_shot_window_decisive_actions: usize,
+    clear_shot_window_shots: usize,
     clear_shot_window_recycles: usize,
     killer_pass_window_frames: usize,
     killer_pass_window_passes: usize,
@@ -32096,11 +32100,37 @@ impl SoccerFrameLivenessAccumulator {
         if !is_holder || !decision.observation.has_ball {
             return;
         }
+        if decision.observation.yards_to_goal <= 40.0 {
+            self.metrics.final_third_possession_frames = self
+                .metrics
+                .final_third_possession_frames
+                .saturating_add(1);
+        }
+        if decision.observation.yards_to_goal <= CLEAN_SHOT_MUST_SHOOT_YARDS {
+            self.metrics.inside_twenty_possession_frames = self
+                .metrics
+                .inside_twenty_possession_frames
+                .saturating_add(1);
+        }
+        if shot_decision_is_qualified_for_role(&decision.observation, player.role)
+            || speculative_long_shot_is_qualified(
+                &decision.observation,
+                player.role,
+                ability01(player.skills.shooting),
+            )
+        {
+            self.metrics.shot_option_legal_frames =
+                self.metrics.shot_option_legal_frames.saturating_add(1);
+        }
         let decisive_goal_action =
             soccer_frame_liveness_action_is_shot(action) || action == "killer-pass";
         if clean_twenty_yard_shot_is_qualified(&decision.observation, player.role) {
             self.metrics.clear_shot_window_frames =
                 self.metrics.clear_shot_window_frames.saturating_add(1);
+            if soccer_frame_liveness_action_is_shot(action) {
+                self.metrics.clear_shot_window_shots =
+                    self.metrics.clear_shot_window_shots.saturating_add(1);
+            }
             if decisive_goal_action {
                 self.metrics.clear_shot_window_decisive_actions = self
                     .metrics
@@ -51063,6 +51093,9 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
     let clear_shot_window_ok = !frame_liveness_known
         || frame_liveness.clear_shot_window_frames == 0
         || frame_liveness.clear_shot_window_decisive_actions > 0;
+    let clear_shot_window_shot_ok = !frame_liveness_known
+        || frame_liveness.clear_shot_window_frames == 0
+        || frame_liveness.clear_shot_window_shots > 0;
     let killer_pass_window_ok = !frame_liveness_known
         || frame_liveness.killer_pass_window_frames == 0
         || frame_liveness.killer_pass_window_passes > 0;
@@ -51109,8 +51142,12 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "humanInputConsumedDecisions": frame_liveness.human_input_consumed_decisions,
         "humanInputUniqueControllerSlots": frame_liveness.human_input_unique_controller_slots,
         "humanInputMaxQueueAgeMs": frame_liveness.human_input_max_queue_age_ms,
+        "finalThirdPossessionFrames": frame_liveness.final_third_possession_frames,
+        "insideTwentyPossessionFrames": frame_liveness.inside_twenty_possession_frames,
+        "shotOptionLegalFrames": frame_liveness.shot_option_legal_frames,
         "clearShotWindowFrames": frame_liveness.clear_shot_window_frames,
         "clearShotWindowDecisiveActions": frame_liveness.clear_shot_window_decisive_actions,
+        "clearShotWindowShots": frame_liveness.clear_shot_window_shots,
         "clearShotWindowRecycles": frame_liveness.clear_shot_window_recycles,
         "killerPassWindowFrames": frame_liveness.killer_pass_window_frames,
         "killerPassWindowPasses": frame_liveness.killer_pass_window_passes,
@@ -51135,6 +51172,7 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "agentAccountingOk": agent_accounting_ok,
         "humanInputConsumedOk": human_input_consumed_ok,
         "clearShotWindowOk": clear_shot_window_ok,
+        "clearShotWindowShotOk": clear_shot_window_shot_ok,
         "killerPassWindowOk": killer_pass_window_ok,
         }),
     );
@@ -51300,9 +51338,9 @@ fn write_soccer_playback_artifacts_streaming_to_dir(
         write_playback_frame_jsonl_line(&mut frames_writer, &initial_frame)?;
         for _ in 0..total_ticks {
             sim.run_time_step();
+            let match_frame = sim.to_frame();
+            frame_liveness.observe_frame(&match_frame);
             if sim.tick % record_every_ticks == 0 || sim.tick == total_ticks {
-                let match_frame = sim.to_frame();
-                frame_liveness.observe_frame(&match_frame);
                 let playback_frame = SoccerPlaybackFrame::from(&match_frame);
                 write_playback_frame_jsonl_line(&mut frames_writer, &playback_frame)?;
             }
@@ -54853,19 +54891,19 @@ fn speculative_long_shot_attempt_probability(
         .max(observation.pressure_urgency * 0.72)
         .clamp(0.0, 1.0);
     let role_bonus = match role {
-        PlayerRole::Forward => 0.020,
-        PlayerRole::Midfielder => 0.012,
+        PlayerRole::Forward => 0.060,
+        PlayerRole::Midfielder => 0.034,
         PlayerRole::Defender => 0.004,
         PlayerRole::Goalkeeper => 0.0,
     };
-    (0.012
+    (0.030
         + role_bonus
-        + shooting_skill.clamp(0.0, 1.0) * 0.050
-        + urgency * 0.040
-        + distance_fit * 0.025
-        + lane_fit * 0.018
-        + observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.020)
-        .clamp(0.0, 0.18)
+        + shooting_skill.clamp(0.0, 1.0) * 0.082
+        + urgency * 0.070
+        + distance_fit * 0.052
+        + lane_fit * 0.042
+        + observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.036)
+        .clamp(0.0, 0.34)
 }
 
 fn goal_proximity_shot_pressure_score(
@@ -68361,12 +68399,28 @@ mod tests {
             Some(frame_liveness.human_input_consumed_decisions as u64)
         );
         assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["finalThirdPossessionFrames"].as_u64(),
+            Some(frame_liveness.final_third_possession_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["insideTwentyPossessionFrames"].as_u64(),
+            Some(frame_liveness.inside_twenty_possession_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["shotOptionLegalFrames"].as_u64(),
+            Some(frame_liveness.shot_option_legal_frames as u64)
+        );
+        assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["clearShotWindowFrames"].as_u64(),
             Some(frame_liveness.clear_shot_window_frames as u64)
         );
         assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["clearShotWindowDecisiveActions"].as_u64(),
             Some(frame_liveness.clear_shot_window_decisive_actions as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["clearShotWindowShots"].as_u64(),
+            Some(frame_liveness.clear_shot_window_shots as u64)
         );
         assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["killerPassWindowFrames"].as_u64(),
@@ -68448,8 +68502,12 @@ mod tests {
                 human_input_consumed_decisions: 4,
                 human_input_unique_controller_slots: 2,
                 human_input_max_queue_age_ms: 19,
+                final_third_possession_frames: 6,
+                inside_twenty_possession_frames: 4,
+                shot_option_legal_frames: 3,
                 clear_shot_window_frames: 4,
                 clear_shot_window_decisive_actions: 2,
+                clear_shot_window_shots: 1,
                 clear_shot_window_recycles: 2,
                 killer_pass_window_frames: 3,
                 killer_pass_window_passes: 1,
@@ -68488,8 +68546,12 @@ mod tests {
         assert_eq!(support["humanInputConsumedDecisions"], 4);
         assert_eq!(support["humanInputUniqueControllerSlots"], 2);
         assert_eq!(support["humanInputMaxQueueAgeMs"], 19);
+        assert_eq!(support["finalThirdPossessionFrames"], 6);
+        assert_eq!(support["insideTwentyPossessionFrames"], 4);
+        assert_eq!(support["shotOptionLegalFrames"], 3);
         assert_eq!(support["clearShotWindowFrames"], 4);
         assert_eq!(support["clearShotWindowDecisiveActions"], 2);
+        assert_eq!(support["clearShotWindowShots"], 1);
         assert_eq!(support["killerPassWindowFrames"], 3);
         assert_eq!(support["killerPassWindowPasses"], 1);
         assert_eq!(support["openSpaceSupportOk"], true);
@@ -68502,6 +68564,7 @@ mod tests {
         assert_eq!(support["agentAccountingOk"], true);
         assert_eq!(support["humanInputConsumedOk"], true);
         assert_eq!(support["clearShotWindowOk"], true);
+        assert_eq!(support["clearShotWindowShotOk"], true);
         assert_eq!(support["killerPassWindowOk"], true);
 
         let fixed_operation_order = soccer_playback_tactical_liveness_json_with_frame_liveness(
@@ -68611,6 +68674,7 @@ mod tests {
             }),
         );
         assert_eq!(recycled_goal_window["clearShotWindowOk"], false);
+        assert_eq!(recycled_goal_window["clearShotWindowShotOk"], false);
         assert_eq!(recycled_goal_window["killerPassWindowOk"], false);
 
         summary.ticks = 450;
@@ -103319,8 +103383,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("humanControlledPlayerDecisions"));
         assert!(html.contains("humanInputPresentDecisions"));
         assert!(html.contains("humanInputConsumedOk"));
+        assert!(html.contains("finalThirdPossessionFrames"));
+        assert!(html.contains("insideTwentyPossessionFrames"));
+        assert!(html.contains("shotOptionLegalFrames"));
         assert!(html.contains("clearShotWindowFrames"));
+        assert!(html.contains("clearShotWindowShots"));
         assert!(html.contains("clearShotWindowOk"));
+        assert!(html.contains("clearShotWindowShotOk"));
         assert!(html.contains("killerPassWindowFrames"));
         assert!(html.contains("killerPassWindowOk"));
         assert!(html.contains("M${model}"));
@@ -104576,12 +104645,28 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             Some(frame_liveness.human_input_consumed_decisions as u64)
         );
         assert_eq!(
+            meta["tacticalLiveness"]["finalThirdPossessionFrames"].as_u64(),
+            Some(frame_liveness.final_third_possession_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["insideTwentyPossessionFrames"].as_u64(),
+            Some(frame_liveness.inside_twenty_possession_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["shotOptionLegalFrames"].as_u64(),
+            Some(frame_liveness.shot_option_legal_frames as u64)
+        );
+        assert_eq!(
             meta["tacticalLiveness"]["clearShotWindowFrames"].as_u64(),
             Some(frame_liveness.clear_shot_window_frames as u64)
         );
         assert_eq!(
             meta["tacticalLiveness"]["clearShotWindowDecisiveActions"].as_u64(),
             Some(frame_liveness.clear_shot_window_decisive_actions as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["clearShotWindowShots"].as_u64(),
+            Some(frame_liveness.clear_shot_window_shots as u64)
         );
         assert_eq!(
             meta["tacticalLiveness"]["killerPassWindowFrames"].as_u64(),
@@ -104648,6 +104733,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             meta["tacticalLiveness"]["clearShotWindowOk"],
             frame_liveness.clear_shot_window_frames == 0
                 || frame_liveness.clear_shot_window_decisive_actions > 0
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["clearShotWindowShotOk"],
+            frame_liveness.clear_shot_window_frames == 0
+                || frame_liveness.clear_shot_window_shots > 0
         );
         assert_eq!(
             meta["tacticalLiveness"]["killerPassWindowOk"],
@@ -104938,10 +105028,22 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(meta["tacticalLiveness"]["humanInputMaxQueueAgeMs"]
             .as_u64()
             .is_some());
+        assert!(meta["tacticalLiveness"]["finalThirdPossessionFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["insideTwentyPossessionFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["shotOptionLegalFrames"]
+            .as_u64()
+            .is_some());
         assert!(meta["tacticalLiveness"]["clearShotWindowFrames"]
             .as_u64()
             .is_some());
         assert!(meta["tacticalLiveness"]["clearShotWindowDecisiveActions"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["clearShotWindowShots"]
             .as_u64()
             .is_some());
         assert!(meta["tacticalLiveness"]["killerPassWindowFrames"]
@@ -104982,6 +105084,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .as_bool()
             .is_some());
         assert!(meta["tacticalLiveness"]["clearShotWindowOk"]
+            .as_bool()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["clearShotWindowShotOk"]
             .as_bool()
             .is_some());
         assert!(meta["tacticalLiveness"]["killerPassWindowOk"]
@@ -105199,6 +105304,24 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "default 10-minute trace should include autonomous shot attempts"
         );
         assert_eq!(meta["tacticalLiveness"]["shotActivityOk"], true);
+        assert!(meta["tacticalLiveness"]["finalThirdPossessionFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["insideTwentyPossessionFrames"]
+            .as_u64()
+            .is_some());
+        assert!(
+            meta["tacticalLiveness"]["shotOptionLegalFrames"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should expose at least one legal shot-option frame"
+        );
+        assert!(meta["tacticalLiveness"]["clearShotWindowShots"]
+            .as_u64()
+            .is_some());
+        assert_eq!(meta["tacticalLiveness"]["clearShotWindowOk"], true);
+        assert_eq!(meta["tacticalLiveness"]["clearShotWindowShotOk"], true);
         assert!(
             meta["tacticalLiveness"]["ballActiveFrames"]
                 .as_u64()
@@ -105243,12 +105366,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(meta["tacticalLiveness"]["openSpaceSupportOk"], true);
         assert_eq!(meta["tacticalLiveness"]["goalwardProgressOk"], true);
-        assert_eq!(meta["tacticalLiveness"]["agentAccountingFrames"], 61);
-        assert_eq!(meta["tacticalLiveness"]["agentAccountingOkFrames"], 61);
-        assert_eq!(meta["tacticalLiveness"]["fullRosterFrames"], 61);
-        assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 61);
-        assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 60);
-        assert_eq!(meta["tacticalLiveness"]["ballDecisionFrames"], 60);
+        assert_eq!(meta["tacticalLiveness"]["agentAccountingFrames"], 6001);
+        assert_eq!(meta["tacticalLiveness"]["agentAccountingOkFrames"], 6001);
+        assert_eq!(meta["tacticalLiveness"]["fullRosterFrames"], 6001);
+        assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 6001);
+        assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 6000);
+        assert_eq!(meta["tacticalLiveness"]["ballDecisionFrames"], 6000);
         assert!(
             meta["tacticalLiveness"]["playerOperationOrderSamples"]
                 .as_u64()

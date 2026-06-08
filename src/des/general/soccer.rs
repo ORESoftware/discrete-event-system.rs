@@ -2104,6 +2104,55 @@ fn ensure_min_legal_option_probability(
     options[target_idx].score = options[target_idx].score.max(required_score);
 }
 
+fn ensure_min_legal_option_family_probability(
+    options: &mut [AgentActionOptionTrace],
+    labels: &[&str],
+    min_probability: f64,
+) {
+    let min_probability = min_probability.clamp(0.0, 0.99);
+    if min_probability <= 0.0 || labels.is_empty() {
+        return;
+    }
+    let in_family = |option: &AgentActionOptionTrace| {
+        option.legal && labels.iter().any(|label| option.label.as_str() == *label)
+    };
+    let mut family_count = 0usize;
+    let mut family_total = 0.0;
+    let mut other_total = 0.0;
+    for option in options.iter() {
+        if in_family(option) {
+            family_count += 1;
+            family_total += option.score.max(0.0);
+        } else if option.legal {
+            other_total += option.score.max(0.0);
+        }
+    }
+    if family_count == 0 {
+        return;
+    }
+    if other_total <= 1e-9 {
+        for option in options.iter_mut().filter(|option| in_family(option)) {
+            option.score = option.score.max(1.0);
+        }
+        return;
+    }
+    let required_family_total = min_probability / (1.0 - min_probability) * other_total;
+    if family_total >= required_family_total {
+        return;
+    }
+    if family_total > 1e-9 {
+        let multiplier = (required_family_total / family_total).clamp(1.0, 24.0);
+        for option in options.iter_mut().filter(|option| in_family(option)) {
+            option.score *= multiplier;
+        }
+    } else {
+        let score_per_option = required_family_total / family_count as f64;
+        for option in options.iter_mut().filter(|option| in_family(option)) {
+            option.score = option.score.max(score_per_option);
+        }
+    }
+}
+
 fn weighted_fisher_yates_order<T>(mut items: Vec<(T, f64)>, rng: &mut SeededRandom) -> Vec<T> {
     let mut ordered = Vec::with_capacity(items.len());
     while !items.is_empty() {
@@ -6852,6 +6901,12 @@ impl PlayerAgent {
         let single_thread_goal_pressure =
             single_pass_goal_thread_pressure_score(observation).clamp(0.0, 1.0);
         let threaded_goal_receiver_available = observation.threaded_goal_pass_available;
+        let approaching_threaded_goal_fit =
+            if threaded_goal_receiver_available && observation.visible_forward_pass_options > 0 {
+                killer_pass_goal_range_fit(observation).powf(0.44)
+            } else {
+                0.0
+            };
         let killer_pass_legal = pass_target_count > 0
             && observation.visible_forward_pass_options > 0
             && threaded_goal_receiver_available
@@ -6873,6 +6928,7 @@ impl PlayerAgent {
                 + killer_pass_range_fit * 1.05
                 + killer_pass_goal_pressure * 1.42
                 + single_thread_goal_pressure * 1.34
+                + approaching_threaded_goal_fit * 0.38
                 + goal_entry_pressure * 0.78
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
@@ -7053,7 +7109,8 @@ impl PlayerAgent {
                     + threaded_lane_fit * 0.16
                     + close_threaded_goal_fit * 0.14
                     + goal_entry_pressure * 0.16
-                    + single_thread_goal_pressure * 0.18)
+                    + single_thread_goal_pressure * 0.18
+                    + approaching_threaded_goal_fit * 0.08)
                     .clamp(0.0, 0.84),
             );
             ensure_min_legal_option_probability(&mut options, "killer-pass", killer_floor);
@@ -7088,6 +7145,28 @@ impl PlayerAgent {
             ] {
                 scale_legal_option_score(&mut options, label, recycle_multiplier);
             }
+        }
+        if decisive_goal_pressure >= 0.08 && (shot_legal || killer_pass_legal) {
+            let decisive_family_floor = (0.08
+                + decisive_goal_pressure * 0.50
+                + goal_entry_pressure * 0.18
+                + goal_attack * 0.10
+                + offensive_urgency * 0.06
+                + single_thread_goal_pressure * 0.10
+                + approaching_threaded_goal_fit * 0.08)
+                .clamp(
+                    0.0,
+                    if goal_attack_shot_required {
+                        0.88
+                    } else {
+                        0.78
+                    },
+                );
+            ensure_min_legal_option_family_probability(
+                &mut options,
+                &["shoot", "killer-pass"],
+                decisive_family_floor,
+            );
         }
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
@@ -27873,6 +27952,22 @@ pub struct SoccerPlaybackIntentFrame {
     pub action_tick_probability: f64,
     #[serde(default)]
     pub considered_actions: usize,
+    #[serde(default)]
+    pub yards_to_goal: f64,
+    #[serde(default)]
+    pub goal_attack_window_score: f64,
+    #[serde(default)]
+    pub killer_pass_goal_pressure: f64,
+    #[serde(default)]
+    pub decisive_goal_action_pressure: f64,
+    #[serde(default)]
+    pub shot_lane_open: bool,
+    #[serde(default)]
+    pub threaded_goal_pass_available: bool,
+    #[serde(default)]
+    pub target_open_space_score: f64,
+    #[serde(default)]
+    pub target_teammate_occupied_space_pressure: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27986,7 +28081,40 @@ fn playback_player_decision_stats(decision: Option<&AgentDecisionTrace>) -> (f64
     playback_selected_action_option_stats(decision, action)
 }
 
-fn playback_intent_from_decision(
+fn playback_intent_target_space_metrics(
+    players: impl IntoIterator<Item = (usize, Team, Vec2)>,
+    team: Team,
+    target: Vec2,
+    exclude_player_id: Option<usize>,
+) -> (f64, f64) {
+    let mut opponent_distance_sq: f64 = 35.0_f64.powi(2);
+    let mut teammate_crowding_sq: f64 = 25.0_f64.powi(2);
+    let mut nearest_teammate_distance_sq = f64::INFINITY;
+    for (player_id, player_team, position) in players {
+        if !vec2_is_finite(position) {
+            continue;
+        }
+        let delta = position - target;
+        let distance_sq = delta.x * delta.x + delta.y * delta.y;
+        if player_team != team {
+            opponent_distance_sq = opponent_distance_sq.min(distance_sq);
+        } else {
+            if distance_sq > 0.01 {
+                teammate_crowding_sq = teammate_crowding_sq.min(distance_sq);
+            }
+            if exclude_player_id != Some(player_id) {
+                nearest_teammate_distance_sq = nearest_teammate_distance_sq.min(distance_sq);
+            }
+        }
+    }
+    let open_space_score =
+        open_space_score_from_distances(opponent_distance_sq.sqrt(), teammate_crowding_sq.sqrt());
+    let teammate_pressure =
+        teammate_occupied_space_pressure_from_distance(nearest_teammate_distance_sq.sqrt());
+    (open_space_score, teammate_pressure)
+}
+
+fn playback_intent_from_decision<F>(
     player_id: usize,
     team: Team,
     role: PlayerRole,
@@ -27995,20 +28123,24 @@ fn playback_intent_from_decision(
     ball_holder: Option<usize>,
     field_width_yards: f64,
     field_length_yards: f64,
-) -> Option<(f64, usize, SoccerPlaybackIntentFrame)> {
+    target_space_metrics: F,
+) -> Option<(f64, usize, SoccerPlaybackIntentFrame)>
+where
+    F: Fn(Vec2) -> (f64, f64),
+{
     let action = normalize_soccer_action_label(&decision.action).to_string();
     let priority =
         playback_intent_priority(player_id, team, role, &action, possession_team, ball_holder)?;
     let action_target = decision.action_target.as_ref();
-    let target_point = action_target.and_then(|target| target.point);
-    if target_point.is_none() {
-        return None;
-    }
+    let target_point = action_target.and_then(|target| target.point)?;
     let target_grid = action_target
         .and_then(|target| target.grid)
         .or_else(|| {
-            target_point
-                .map(|point| pitch_grid_address(point, field_width_yards, field_length_yards))
+            Some(pitch_grid_address(
+                target_point,
+                field_width_yards,
+                field_length_yards,
+            ))
         })
         .map(playback_player_grid_frame);
     let target_facing = action_target
@@ -28017,15 +28149,25 @@ fn playback_intent_from_decision(
     let urgency = decision.observation.decision_urgency.clamp(0.0, 1.0);
     let (action_score, action_probability, action_tick_probability, considered_actions) =
         playback_selected_action_option_stats(decision, &action);
+    let decisive_goal_action_pressure = decision
+        .observation
+        .decisive_goal_action_pressure
+        .max(near_goal_decisive_action_pressure_score(
+            &decision.observation,
+            role,
+        ))
+        .clamp(0.0, 1.0);
+    let (target_open_space_score, target_teammate_occupied_space_pressure) =
+        target_space_metrics(target_point);
     Some((
-        priority + urgency * 4.0,
+        priority + urgency * 4.0 + decisive_goal_action_pressure * 3.0,
         player_id,
         SoccerPlaybackIntentFrame {
             player_id,
             team,
             role,
             action: action.clone(),
-            target_point,
+            target_point: Some(target_point),
             target_player: action_target.and_then(|target| target.player_id),
             target_grid,
             target_facing,
@@ -28035,6 +28177,18 @@ fn playback_intent_from_decision(
             action_probability,
             action_tick_probability,
             considered_actions,
+            yards_to_goal: decision.observation.yards_to_goal,
+            goal_attack_window_score: decision.observation.goal_attack_window_score,
+            killer_pass_goal_pressure: decision
+                .observation
+                .killer_pass_goal_pressure
+                .max(killer_pass_goal_pressure_score(&decision.observation))
+                .clamp(0.0, 1.0),
+            decisive_goal_action_pressure,
+            shot_lane_open: decision.observation.shot_lane_open,
+            threaded_goal_pass_available: decision.observation.threaded_goal_pass_available,
+            target_open_space_score,
+            target_teammate_occupied_space_pressure,
         },
     ))
 }
@@ -28073,6 +28227,17 @@ fn playback_intents_from_frame_with_pitch(
                 frame.ball.holder,
                 field_width_yards,
                 field_length_yards,
+                |target| {
+                    playback_intent_target_space_metrics(
+                        frame
+                            .players
+                            .iter()
+                            .map(|player| (player.id, player.team, player.position)),
+                        player.team,
+                        target,
+                        Some(player.id),
+                    )
+                },
             )
         })
         .collect::<Vec<_>>();
@@ -28108,6 +28273,16 @@ fn playback_intents_from_agents(
                 ball_holder,
                 field_width_yards,
                 field_length_yards,
+                |target| {
+                    playback_intent_target_space_metrics(
+                        players
+                            .iter()
+                            .map(|player| (player.id, player.team, player.position)),
+                        player.team,
+                        target,
+                        Some(player.id),
+                    )
+                },
             )
         })
         .collect::<Vec<_>>();
@@ -33314,7 +33489,11 @@ pub struct SoccerDecisionModelContract {
     pub generic_recycling_damped_by_decisive_goal_pressure: bool,
     pub ordinary_pass_recycling_damped_by_goal_thread_pressure: bool,
     pub near_goal_recycling_dampening_enabled: bool,
+    pub shot_killer_pass_family_probability_floor_enabled: bool,
     pub forward_progress_bias_enabled: bool,
+    pub support_target_open_space_metrics_enabled: bool,
+    pub support_target_teammate_occupied_pressure_enabled: bool,
+    pub playback_intent_target_space_metrics_enabled: bool,
     pub player_skill_profile_enabled: bool,
     pub player_skill_scale_min: f64,
     pub player_skill_scale_max: f64,
@@ -34004,7 +34183,11 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         generic_recycling_damped_by_decisive_goal_pressure: true,
         ordinary_pass_recycling_damped_by_goal_thread_pressure: true,
         near_goal_recycling_dampening_enabled: true,
+        shot_killer_pass_family_probability_floor_enabled: true,
         forward_progress_bias_enabled: true,
+        support_target_open_space_metrics_enabled: true,
+        support_target_teammate_occupied_pressure_enabled: true,
+        playback_intent_target_space_metrics_enabled: true,
         player_skill_profile_enabled: true,
         player_skill_scale_min: 1.0,
         player_skill_scale_max: 10.0,
@@ -58808,6 +58991,73 @@ mod tests {
         for option in options {
             assert!((0.0..=1.0).contains(&option.tick_probability));
         }
+    }
+
+    #[test]
+    fn option_family_probability_floor_lifts_shot_and_killer_pass_together() {
+        let mut options = vec![
+            AgentActionOptionTrace::new("shoot", 0.05, true),
+            AgentActionOptionTrace::new("killer-pass", 0.15, true),
+            AgentActionOptionTrace::new("pass1", 1.00, true),
+            AgentActionOptionTrace::new("dribble", 0.80, true),
+            AgentActionOptionTrace::new("clearance", 4.00, false),
+        ];
+
+        ensure_min_legal_option_family_probability(&mut options, &["shoot", "killer-pass"], 0.62);
+        let options = normalize_action_options(options);
+        let probability = |label: &str| {
+            options
+                .iter()
+                .find(|option| option.label == label)
+                .map(|option| option.probability)
+                .unwrap_or(0.0)
+        };
+        let shoot = probability("shoot");
+        let killer = probability("killer-pass");
+        let decisive = shoot + killer;
+
+        assert!(
+            decisive >= 0.62 - 1e-9,
+            "shot/killer-pass family should receive its combined floor: options={options:?}"
+        );
+        assert!(
+            shoot > 0.0 && killer > 0.0 && (killer / shoot - 3.0).abs() < 1e-9,
+            "family floor should preserve the relative shot/killer-pass preference instead of flattening it: shoot={shoot} killer={killer}"
+        );
+        assert_eq!(
+            probability("clearance"),
+            0.0,
+            "illegal options must not contribute to the family floor"
+        );
+    }
+
+    #[test]
+    fn playback_intent_target_space_metrics_flag_teammate_occupied_space() {
+        let occupied_target = Vec2::new(42.0, 66.0);
+        let open_target = Vec2::new(58.0, 82.0);
+        let players = [
+            (8, Team::Home, Vec2::new(40.0, 62.0)),
+            (9, Team::Home, occupied_target),
+            (12, Team::Away, Vec2::new(42.0, 75.0)),
+        ];
+
+        let (occupied_space, occupied_pressure) =
+            playback_intent_target_space_metrics(players, Team::Home, occupied_target, Some(8));
+        let (open_space, open_pressure) =
+            playback_intent_target_space_metrics(players, Team::Home, open_target, Some(8));
+
+        assert!(
+            occupied_pressure > 0.90,
+            "target with another teammate already there should be flagged as occupied: {occupied_pressure}"
+        );
+        assert!(
+            open_pressure < occupied_pressure * 0.50,
+            "open target should have much lower teammate pressure: open={open_pressure} occupied={occupied_pressure}"
+        );
+        assert!(
+            open_space > occupied_space,
+            "open target should score better than teammate-occupied target: open={open_space} occupied={occupied_space}"
+        );
     }
 
     #[test]
@@ -93001,6 +93251,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_intent["actionProbability"].as_f64().is_some());
         assert!(first_intent["actionTickProbability"].as_f64().is_some());
         assert!(first_intent["consideredActions"].as_u64().unwrap_or(0) > 0);
+        assert!(first_intent["yardsToGoal"].as_f64().is_some());
+        assert!(first_intent["goalAttackWindowScore"].as_f64().is_some());
+        assert!(first_intent["killerPassGoalPressure"].as_f64().is_some());
+        assert!(first_intent["decisiveGoalActionPressure"]
+            .as_f64()
+            .is_some());
+        assert!(first_intent["shotLaneOpen"].as_bool().is_some());
+        assert!(first_intent["threadedGoalPassAvailable"]
+            .as_bool()
+            .is_some());
+        assert!(first_intent["targetOpenSpaceScore"].as_f64().is_some());
+        assert!(first_intent["targetTeammateOccupiedSpacePressure"]
+            .as_f64()
+            .is_some());
         let player0_schedule_index = agent_schedule
             .iter()
             .position(|entry| {
@@ -98680,6 +98944,19 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("i.actionTickProbability"));
         assert!(html.contains("i.consideredActions"));
         assert!(html.contains("P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}"));
+        assert!(html.contains("decisiveGoalActionPressure"));
+        assert!(html.contains("killerPassGoalPressure"));
+        assert!(html.contains("function liveIntentTitle"));
+        assert!(html.contains("actionIntent.title = liveIntentTitle(primaryIntent)"));
+        assert!(html.contains("D${pressure.toFixed(2)} K${killer.toFixed(2)}"));
+        assert!(html.contains("targetOpenSpaceScore"));
+        assert!(html.contains("targetTeammateOccupiedSpacePressure"));
+        assert!(html.contains("S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}"));
+        assert!(
+            html.contains("supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled}")
+        );
+        assert!(html
+            .contains("shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}"));
         assert!(html.contains("function intentTargetGridLabel"));
         assert!(html.contains("i?.targetGrid"));
         assert!(html.contains("i?.targetFacing"));
@@ -98874,7 +99151,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             true
         );
         assert_eq!(model["nearGoalRecyclingDampeningEnabled"], true);
+        assert_eq!(model["shotKillerPassFamilyProbabilityFloorEnabled"], true);
         assert_eq!(model["forwardProgressBiasEnabled"], true);
+        assert_eq!(model["supportTargetOpenSpaceMetricsEnabled"], true);
+        assert_eq!(model["supportTargetTeammateOccupiedPressureEnabled"], true);
+        assert_eq!(model["playbackIntentTargetSpaceMetricsEnabled"], true);
         assert_eq!(model["playerSkillProfileEnabled"], true);
         assert_eq!(model["playerSkillScaleMin"], 1.0);
         assert_eq!(model["playerSkillScaleMax"], 10.0);
@@ -100294,6 +100575,16 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_intent.get("actionScore").is_some());
         assert!(first_intent.get("actionProbability").is_some());
         assert!(first_intent.get("actionTickProbability").is_some());
+        assert!(first_intent.get("yardsToGoal").is_some());
+        assert!(first_intent.get("goalAttackWindowScore").is_some());
+        assert!(first_intent.get("killerPassGoalPressure").is_some());
+        assert!(first_intent.get("decisiveGoalActionPressure").is_some());
+        assert!(first_intent.get("shotLaneOpen").is_some());
+        assert!(first_intent.get("threadedGoalPassAvailable").is_some());
+        assert!(first_intent.get("targetOpenSpaceScore").is_some());
+        assert!(first_intent
+            .get("targetTeammateOccupiedSpacePressure")
+            .is_some());
         assert!(first_intent
             .get("consideredActions")
             .and_then(|value| value.as_u64())

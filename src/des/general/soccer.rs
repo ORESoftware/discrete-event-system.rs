@@ -12329,13 +12329,14 @@ impl BallAgent {
                 self.curl_acceleration = Vec2::zero();
                 self.altitude_yards = 0.0;
                 self.last_touch_team = Some(player.team);
-                if !self
+                let action = self
                     .last_decision
                     .as_ref()
-                    .is_some_and(|decision| restart_action_label(&decision.action).is_some())
-                {
-                    self.record_decision(context.tick, "held", context.scheduled_index);
-                }
+                    .and_then(|decision| {
+                        restart_action_label(&decision.action).map(|_| decision.action.clone())
+                    })
+                    .unwrap_or_else(|| "held".to_string());
+                self.record_decision(context.tick, &action, context.scheduled_index);
             }
             self.untargeted_long_ball_launcher = None;
             self.untargeted_long_ball_flight = None;
@@ -59107,6 +59108,21 @@ mod tests {
                 .any(|operation| operation == "resolve-control"),
             "ball decision should include possession/control resolution: {decision:?}"
         );
+
+        sim.run_time_step();
+        let second_frame = sim.to_frame();
+        let second_decision = second_frame
+            .ball
+            .last_decision
+            .expect("ball decision trace after second tick");
+        assert_eq!(
+            second_decision.tick, 1,
+            "ball agent trace should refresh every scheduled run_time_step, even when the ball is held or in a restart context"
+        );
+        assert_eq!(
+            second_decision.scheduled_index,
+            second_frame.ball.scheduled_index
+        );
     }
 
     #[test]
@@ -64302,15 +64318,51 @@ mod tests {
                 .count(),
             3
         );
-        assert!(frame
+        let ball_schedule_index = frame
             .agent_schedule
             .iter()
-            .any(|entry| entry.kind == AgentScheduleKind::Ball));
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
+            .expect("ball agent should be scheduled as its own run_time_step entity");
+        assert_eq!(frame.ball.scheduled_index, Some(ball_schedule_index));
+        let ball_decision = frame
+            .ball
+            .last_decision
+            .as_ref()
+            .expect("ball agent should record its own run_time_step decision trace");
+        assert_eq!(ball_decision.scheduled_index, Some(ball_schedule_index));
+        assert_eq!(ball_decision.tick, frame.tick.saturating_sub(1));
+        assert_eq!(ball_decision.position, frame.ball.position);
+        assert_eq!(ball_decision.velocity, frame.ball.velocity);
+        assert_eq!(ball_decision.operation_order.len(), 7);
+        for operation in [
+            "sync-holder",
+            "apply-curl",
+            "apply-resistance",
+            "advance-position",
+            "resolve-shot",
+            "resolve-boundary",
+            "resolve-control",
+        ] {
+            assert!(
+                ball_decision
+                    .operation_order
+                    .iter()
+                    .any(|entry| entry == operation),
+                "ball agent operation order should include {operation}: {:?}",
+                ball_decision.operation_order
+            );
+        }
         assert_eq!(frame.central_brain.tracked_players.len(), 22);
         assert_eq!(frame.central_brain.tracked_officials, 3);
         assert_eq!(frame.shared_positions.latest.len(), 22);
         assert_eq!(frame.shared_positions.official_latest.len(), 3);
-        assert!(frame.shared_positions.ball_latest().is_some());
+        let shared_ball = frame
+            .shared_positions
+            .ball_latest()
+            .expect("shared position board should track the ball agent");
+        assert_eq!(shared_ball.tick, frame.tick);
+        assert_eq!(shared_ball.position, frame.ball.position);
+        assert_eq!(shared_ball.velocity, frame.ball.velocity);
     }
 
     #[test]

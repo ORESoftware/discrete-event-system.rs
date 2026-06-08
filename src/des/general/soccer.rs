@@ -71,6 +71,7 @@ const CONTROLLER_INPUT_YIELD_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
 const CONTROLLER_INPUT_COALESCE_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 2;
 const CONTROLLER_INPUT_LATE_YIELD_SLICE_MS: u64 = DEFAULT_CONTROLLER_DEBOUNCE_MS + 1;
 const CONTROLLER_INPUT_LATE_YIELD_BUDGET_MS: u64 = CONTROLLER_INPUT_YIELD_MS;
+const SOCCER_MAX_HUMAN_CONTROLLER_SLOTS: usize = 4;
 const FIRST_TOUCH_WINDOW_TICKS: u64 = 3;
 const PITCH_FINE_GRID_COLUMNS: usize = 12;
 const PITCH_FINE_GRID_ROWS: usize = 16;
@@ -10965,7 +10966,7 @@ impl SharedControllerAssignments {
 
     pub fn set_human_slots(&self, human_slots: usize) {
         let mut store = soccer_rwlock_write(&self.inner, "controller_assignment");
-        store.human_slots = human_slots.min(4);
+        store.human_slots = human_slots.min(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
         let human_slots = store.human_slots;
         store.player_by_slot.retain(|slot, _| *slot < human_slots);
     }
@@ -10976,7 +10977,7 @@ impl SharedControllerAssignments {
         assignments: &[ControllerAssignment],
     ) {
         let mut store = soccer_rwlock_write(&self.inner, "controller_assignment");
-        store.human_slots = human_slots.min(4);
+        store.human_slots = human_slots.min(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
         store.player_by_slot.clear();
         for assignment in assignments {
             if assignment.controller_slot < store.human_slots {
@@ -11126,7 +11127,7 @@ pub fn spawn_human_controller_threads(
     controller_slots: usize,
     debounce_interval: Duration,
 ) -> Result<Vec<HumanControllerThread>, String> {
-    (0..controller_slots.min(4))
+    (0..controller_slots.min(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS))
         .map(|slot| HumanControllerThread::spawn(input_queue.clone(), slot, debounce_interval))
         .collect()
 }
@@ -13557,7 +13558,9 @@ impl MatchConfig {
         } else {
             DEFAULT_BALL_STOP_SPEED_YPS
         };
-        config.max_human_players = config.max_human_players.min(4);
+        config.max_human_players = config
+            .max_human_players
+            .min(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
 
         config
     }
@@ -13627,7 +13630,8 @@ impl MatchConfig {
     }
 
     pub fn human_slots(&self) -> usize {
-        self.max_human_players.min(4)
+        self.max_human_players
+            .min(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS)
     }
 }
 
@@ -31697,6 +31701,30 @@ pub struct SoccerDecisionModelContract {
     pub playback_intent_target_grid_enabled: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerControllerRuntimeContract {
+    pub max_human_controllers: usize,
+    pub configured_human_controllers: usize,
+    pub native_thread_per_controller_enabled: bool,
+    pub single_threaded_simulation_loop: bool,
+    pub shared_input_queue_uses_rw_lock: bool,
+    pub controller_mailbox_uses_condvar: bool,
+    pub main_loop_uses_condvar_yield: bool,
+    pub notification_driven_input: bool,
+    pub assignment_filter_enabled: bool,
+    pub same_slot_coalescing_enabled: bool,
+    pub fallback_direct_queue_without_threads: bool,
+    pub latency_budget_telemetry_enabled: bool,
+    pub default_debounce_ms: u64,
+    pub coalesce_ms: u64,
+    pub yield_budget_ms: u64,
+    pub late_yield_slice_ms: u64,
+    pub queue_limit: usize,
+    pub max_queue_age_ms: u64,
+    pub thread_name_prefix: String,
+}
+
 fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
     SoccerPlaybackAgentContract {
         expected_total_agents: 1 + SOCCER_MATCH_PLAYER_COUNT + SOCCER_MATCH_OFFICIAL_COUNT + 1,
@@ -31715,6 +31743,30 @@ fn soccer_playback_agent_contract() -> SoccerPlaybackAgentContract {
         field_entities_use_fisher_yates: true,
         per_frame_schedule_summary_required: true,
         slim_frames_omit_full_agent_schedule: true,
+    }
+}
+
+fn soccer_controller_runtime_contract(config: &MatchConfig) -> SoccerControllerRuntimeContract {
+    SoccerControllerRuntimeContract {
+        max_human_controllers: SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
+        configured_human_controllers: config.human_slots(),
+        native_thread_per_controller_enabled: true,
+        single_threaded_simulation_loop: true,
+        shared_input_queue_uses_rw_lock: true,
+        controller_mailbox_uses_condvar: true,
+        main_loop_uses_condvar_yield: true,
+        notification_driven_input: true,
+        assignment_filter_enabled: true,
+        same_slot_coalescing_enabled: true,
+        fallback_direct_queue_without_threads: true,
+        latency_budget_telemetry_enabled: true,
+        default_debounce_ms: DEFAULT_CONTROLLER_DEBOUNCE_MS,
+        coalesce_ms: CONTROLLER_INPUT_COALESCE_MS,
+        yield_budget_ms: CONTROLLER_INPUT_YIELD_MS,
+        late_yield_slice_ms: CONTROLLER_INPUT_LATE_YIELD_SLICE_MS,
+        queue_limit: HUMAN_INPUT_QUEUE_LIMIT,
+        max_queue_age_ms: HUMAN_INPUT_MAX_QUEUE_AGE_MS,
+        thread_name_prefix: "soccer-human-controller-".to_string(),
     }
 }
 
@@ -41377,7 +41429,7 @@ impl SoccerRealtimeSession {
         for assignment in &controller_assignments {
             slot_count = slot_count.max(assignment.controller_slot.saturating_add(1));
         }
-        slot_count = slot_count.min(4);
+        slot_count = slot_count.min(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
         let mut queue_ages_by_slot = vec![Vec::<f64>::new(); slot_count];
         let expired_inputs = self.input_queue.expired_len();
         let mut consumed_inputs = 0usize;
@@ -47213,6 +47265,7 @@ fn soccer_playback_metadata_json(
 ) -> serde_json::Value {
     let generated_at_unix_ms = soccer_artifact_generated_at_unix_ms();
     let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
+    let controller_contract = soccer_controller_runtime_contract(config);
     serde_json::json!({
         "runId": soccer_artifact_run_id(config.seed, generated_at_unix_ms),
         "generatedAtUnixMs": generated_at_unix_ms,
@@ -47222,6 +47275,7 @@ fn soccer_playback_metadata_json(
         "cadence": cadence,
         "agentContract": soccer_playback_agent_contract(),
         "decisionModel": soccer_decision_model_contract(),
+        "controllerContract": controller_contract,
         "playback": {
             "dtSeconds": config.dt_seconds,
             "durationSeconds": config.effective_duration_seconds(),
@@ -47231,6 +47285,7 @@ fn soccer_playback_metadata_json(
             "cadence": cadence,
             "agentContract": soccer_playback_agent_contract(),
             "decisionModel": soccer_decision_model_contract(),
+            "controllerContract": controller_contract,
         },
         "events": events,
     })
@@ -92144,9 +92199,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains(
             "trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null"
         ));
+        assert!(html.contains(
+            "trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null"
+        ));
         assert!(html.contains("expectedTotalAgents"));
         assert!(html.contains("expectedPlayerCount"));
         assert!(html.contains("decisionModel"));
+        assert!(html.contains("controllerContract"));
+        assert!(html.contains("maxHumanControllers"));
+        assert!(html.contains("notificationDrivenInput"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains("defaultTenMinuteContract"));
         assert!(html.contains(
@@ -92369,9 +92430,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("sel && sel.value !== \"\""));
         assert!(html.contains("autonomous.value = \"\""));
         assert!(html.contains("function visibleHumanSlotCount()"));
+        assert!(html.contains("function maxHumanControllerSlots()"));
         assert!(html.contains("const configured = Number(trace.config?.maxHumanPlayers)"));
+        assert!(html.contains(
+            "const contractSlots = Number(trace.controllerContract?.maxHumanControllers)"
+        ));
         assert!(html.contains("const slotCount = configured > 0 ? configured : fallback"));
-        assert!(html.contains("return Math.min(Math.max(slotCount, 0), 4)"));
+        assert!(html.contains("return Math.min(Math.max(slotCount, 0), maxHumanControllerSlots())"));
         assert!(html.contains("for (let i = 0; i < visibleHumanSlotCount(); i++)"));
         assert!(html.contains("function playerLabel(p)"));
         assert!(html.contains("function syncStaticSlotAvailability()"));
@@ -92444,6 +92509,42 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(grids[3].get("parentLevel").is_none());
     }
 
+    fn assert_soccer_controller_contract_json(meta: &serde_json::Value, config: &MatchConfig) {
+        assert_eq!(
+            meta["controllerContract"],
+            meta["playback"]["controllerContract"]
+        );
+        let contract = &meta["controllerContract"];
+        assert_eq!(
+            contract["maxHumanControllers"],
+            SOCCER_MAX_HUMAN_CONTROLLER_SLOTS
+        );
+        assert_eq!(contract["configuredHumanControllers"], config.human_slots());
+        assert_eq!(contract["nativeThreadPerControllerEnabled"], true);
+        assert_eq!(contract["singleThreadedSimulationLoop"], true);
+        assert_eq!(contract["sharedInputQueueUsesRwLock"], true);
+        assert_eq!(contract["controllerMailboxUsesCondvar"], true);
+        assert_eq!(contract["mainLoopUsesCondvarYield"], true);
+        assert_eq!(contract["notificationDrivenInput"], true);
+        assert_eq!(contract["assignmentFilterEnabled"], true);
+        assert_eq!(contract["sameSlotCoalescingEnabled"], true);
+        assert_eq!(contract["fallbackDirectQueueWithoutThreads"], true);
+        assert_eq!(contract["latencyBudgetTelemetryEnabled"], true);
+        assert_eq!(
+            contract["defaultDebounceMs"],
+            DEFAULT_CONTROLLER_DEBOUNCE_MS
+        );
+        assert_eq!(contract["coalesceMs"], CONTROLLER_INPUT_COALESCE_MS);
+        assert_eq!(contract["yieldBudgetMs"], CONTROLLER_INPUT_YIELD_MS);
+        assert_eq!(
+            contract["lateYieldSliceMs"],
+            CONTROLLER_INPUT_LATE_YIELD_SLICE_MS
+        );
+        assert_eq!(contract["queueLimit"], HUMAN_INPUT_QUEUE_LIMIT);
+        assert_eq!(contract["maxQueueAgeMs"], HUMAN_INPUT_MAX_QUEUE_AGE_MS);
+        assert_eq!(contract["threadNamePrefix"], "soccer-human-controller-");
+    }
+
     #[test]
     fn soccer_playback_artifact_writer_persists_split_assets() {
         let trace = run_simulation(
@@ -92511,6 +92612,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             true
         );
         assert_soccer_decision_model_contract_json(&meta);
+        assert_soccer_controller_contract_json(&meta, &trace.config);
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(meta["playback"]["dtSeconds"], trace.config.dt_seconds);
         assert_eq!(
@@ -92591,6 +92693,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["agentContract"]["expectedCentralBrains"], 1);
         assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
         assert_soccer_decision_model_contract_json(&meta);
+        assert_soccer_controller_contract_json(&meta, &config);
         assert_eq!(
             meta["stepTiming"]["tickBudgetMs"],
             config.dt_seconds * 1000.0

@@ -448,6 +448,7 @@ const trace = {
   cadence: null,
   agentContract: null,
   decisionModel: null,
+  controllerContract: null,
   stepTiming: null,
   frames: [],
   events: [],
@@ -861,6 +862,7 @@ function resetTraceState() {
   trace.cadence = null;
   trace.agentContract = null;
   trace.decisionModel = null;
+  trace.controllerContract = null;
   trace.stepTiming = null;
   trace.frames = [];
   trace.events = [];
@@ -1724,11 +1726,18 @@ function isFormEditingTarget(target) {
 function selectedPassTarget() {
   return passTarget.value === "" ? null : Number(passTarget.value);
 }
+function maxHumanControllerSlots() {
+  const contractSlots = Number(trace.controllerContract?.maxHumanControllers);
+  return contractSlots > 0 ? contractSlots : 4;
+}
+function controllerInputRuntimeMode() {
+  return trace.controllerContract?.notificationDrivenInput ? "notify" : "poll";
+}
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);
   const fallback = Number(FALLBACK_CONFIG.maxHumanPlayers || 4);
   const slotCount = configured > 0 ? configured : fallback;
-  return Math.min(Math.max(slotCount, 0), 4);
+  return Math.min(Math.max(slotCount, 0), maxHumanControllerSlots());
 }
 function keyName(code) {
   return String(code || "")
@@ -2132,6 +2141,7 @@ async function loadTraceMeta(signal) {
   trace.cadence = meta.cadence || meta.playback?.cadence || null;
   trace.agentContract = meta.agentContract || meta.playback?.agentContract || null;
   trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null;
+  trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;
   trace.events = Array.isArray(meta.events) ? meta.events : [];
   trace.runId = meta.runId || null;

@@ -13685,7 +13685,7 @@ impl PossessionProgressTracker {
 
     fn qualifies_for_stall_penalty(&self) -> bool {
         self.completed_passes >= POSSESSION_STALL_PASS_THRESHOLD
-            && self.best_gain_yards < POSSESSION_STALL_MIN_GAIN_YARDS
+            && self.best_completed_pass_chain_gain_yards < POSSESSION_STALL_MIN_GAIN_YARDS
     }
 
     fn elapsed_seconds(&self, clock_seconds: f64) -> f64 {
@@ -70556,6 +70556,79 @@ mod tests {
                 .as_ref()
                 .map(|tracker| tracker.rewarded_milestones),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn stall_penalty_ignores_uncontrolled_long_ball_gain() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 15084,
+            ..Default::default()
+        });
+        let passer = 5;
+        let link = 7;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, link, receiver]);
+        sim.tick = 47;
+        sim.ball.holder = Some(receiver);
+        sim.ball.position = Vec2::new(40.0, 68.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.possession_chain.clear();
+        sim.possession_chain.push_back(passer);
+        sim.possession_chain.push_back(link);
+        sim.possession_chain.push_back(receiver);
+        let mut tracker = PossessionProgressTracker::new(Team::Home, Vec2::new(40.0, 30.0));
+        tracker.completed_passes = POSSESSION_STALL_PASS_THRESHOLD;
+        tracker.best_gain_yards = 38.0;
+        tracker.best_completed_pass_chain_gain_yards = 18.0;
+        sim.possession_progress_tracker = Some(tracker);
+        let event_start = sim.reward_events.len();
+
+        sim.finish_possession_progress_chain(false);
+
+        let total_penalty = sim.reward_events[event_start..]
+            .iter()
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert!(
+            total_penalty < -POSSESSION_STALL_PENALTY_POINTS + 1e-9,
+            "uncontrolled long ball travel should not rescue a stagnant 4-pass chain: {total_penalty}"
+        );
+    }
+
+    #[test]
+    fn stall_penalty_accepts_completed_teammate_chain_gain() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 15085,
+            ..Default::default()
+        });
+        let passer = 5;
+        let link = 7;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, link, receiver]);
+        sim.tick = 48;
+        sim.ball.holder = Some(receiver);
+        sim.ball.position = Vec2::new(40.0, 68.0);
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.possession_chain.clear();
+        sim.possession_chain.push_back(passer);
+        sim.possession_chain.push_back(link);
+        sim.possession_chain.push_back(receiver);
+        let mut tracker = PossessionProgressTracker::new(Team::Home, Vec2::new(40.0, 30.0));
+        tracker.completed_passes = POSSESSION_STALL_PASS_THRESHOLD;
+        tracker.best_gain_yards = 38.0;
+        tracker.best_completed_pass_chain_gain_yards = 31.0;
+        sim.possession_progress_tracker = Some(tracker);
+        let event_start = sim.reward_events.len();
+
+        sim.finish_possession_progress_chain(false);
+
+        assert_eq!(
+            sim.reward_events.len(),
+            event_start,
+            "a 30-yard gain only avoids the stall penalty after completed teammate control"
         );
     }
 

@@ -9798,6 +9798,24 @@ impl PlayerAgent {
             }
             "pass" if observation.has_ball => {
                 let visible_targets = snapshot.ranked_visible_pass_targets(self.id, 11);
+                if let Some(target) = learned_generic_pass_killer_upgrade_target_for(
+                    self,
+                    snapshot,
+                    observation,
+                    &visible_targets,
+                ) {
+                    return Some((
+                        SoccerAction::Pass {
+                            target_player: Some(target),
+                            power: 0.66
+                                + 0.24
+                                    * ability01(self.skills.passing_completion_rate)
+                                        .max(ability01(self.skills.vision)),
+                            flight: PassFlight::Floor,
+                        },
+                        "killer-pass".to_string(),
+                    ));
+                }
                 let target = plan
                     .target_player
                     .filter(|target| visible_targets.contains(target))
@@ -57723,6 +57741,39 @@ fn sample_control_candidate(
     candidates.last().map(|(id, team, _)| (*id, *team))
 }
 
+fn learned_generic_pass_killer_upgrade_target_for(
+    player: &PlayerAgent,
+    snapshot: &WorldSnapshot,
+    observation: &SoccerPomdpObservation,
+    visible_targets: &[usize],
+) -> Option<usize> {
+    if !observation.has_ball
+        || player.role == PlayerRole::Goalkeeper
+        || !observation.threaded_goal_pass_available
+        || observation.visible_forward_pass_options == 0
+        || observation.yards_to_goal > KILLER_PASS_MAX_YARDS_TO_GOAL
+    {
+        return None;
+    }
+    let goal_thread_pressure = single_pass_goal_thread_pressure_score(observation)
+        .max(killer_pass_goal_pressure_score(observation))
+        .max(observation.killer_pass_goal_pressure.clamp(0.0, 1.0))
+        .max(observation.decisive_goal_action_pressure.clamp(0.0, 1.0) * 0.82);
+    if goal_thread_pressure < 0.58
+        && !threaded_goal_pass_can_override_forced_shot(observation, player.role)
+    {
+        return None;
+    }
+    let target = snapshot.killer_pass_target_for(player.id, visible_targets)?;
+    if snapshot
+        .pending_offside_for_pass(player.id, target)
+        .is_some()
+    {
+        return None;
+    }
+    Some(target)
+}
+
 fn restart_kind_action(kind: BallRestartKind) -> &'static str {
     match kind {
         BallRestartKind::ThrowIn => "throw-in",
@@ -102360,6 +102411,123 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(
             killer > pass1 * 2.6,
             "threaded goal pass should swamp ordinary pass1: killer={killer} pass1={pass1} options={options:?}"
+        );
+    }
+
+    #[test]
+    fn learned_generic_pass_upgrades_to_killer_pass_near_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_246,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blockers = [13, 14, 15, 16];
+        park_players_except(
+            &mut sim,
+            &[
+                attacker,
+                runner,
+                keeper,
+                blockers[0],
+                blockers[1],
+                blockers[2],
+                blockers[3],
+            ],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 98.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.2);
+        sim.players[attacker].skills.passing_completion_rate = 9.3;
+        sim.players[attacker].skills.passing = 9.0;
+        sim.players[attacker].skills.vision = 9.6;
+        sim.players[attacker].skills.shooting = 7.1;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(56.0, 110.0);
+        sim.players[runner].velocity = Vec2::new(0.8, 6.2);
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        for (idx, blocker) in blockers.iter().copied().enumerate() {
+            sim.players[blocker].position = match idx {
+                0 => Vec2::new(40.0, 106.0),
+                1 => Vec2::new(34.0, 111.0),
+                2 => Vec2::new(47.0, 112.0),
+                _ => Vec2::new(40.0, 114.0),
+            };
+            sim.players[blocker].skills.defending = 9.8;
+            sim.players[blocker].skills.defensive_tracking = 9.8;
+            sim.players[blocker].skills.aggression = 9.0;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        let visible_targets = snapshot.ranked_visible_pass_targets(attacker, 11);
+        assert_eq!(
+            snapshot.killer_pass_target_for(attacker, &visible_targets),
+            Some(runner)
+        );
+        assert!(
+            learned_generic_pass_killer_upgrade_target_for(
+                &sim.players[attacker],
+                &snapshot,
+                &observation,
+                &visible_targets,
+            )
+            .is_some(),
+            "test setup should expose a learned-pass killer upgrade: {observation:?}"
+        );
+
+        let learned_plan = SoccerLearnedPlan {
+            action: "pass".to_string(),
+            target_player: None,
+            target_point: None,
+        };
+        let mut player = sim.players[attacker].clone();
+        let intent = player.run_time_step_with_context(
+            &snapshot,
+            snapshot.mdp_state_for_player(attacker),
+            observation,
+            None,
+            Some(&learned_plan),
+            &mut mulberry32(22_246),
+        );
+        let decision = player.last_decision.as_ref().expect("decision trace");
+        assert_eq!(decision.action, "killer-pass");
+        assert!(decision
+            .operation_order
+            .contains(&"learned-policy".to_string()));
+        match &intent.action {
+            SoccerAction::Pass {
+                target_player: Some(target),
+                flight: PassFlight::Floor,
+                ..
+            } => assert_eq!(*target, runner),
+            other => panic!("learned generic pass should upgrade to killer pass, got {other:?}"),
+        }
+
+        sim.players[attacker].last_decision = player.last_decision.clone();
+        sim.apply_player_intent(intent);
+        let after = WorldSnapshot::from_match(&sim);
+        let transitions = sim.learning_transitions_for(&snapshot, &after, 0, 0, &[]);
+        let transition = transitions
+            .iter()
+            .find(|transition| transition.player_id == attacker)
+            .expect("attacker learning transition");
+        assert_eq!(transition.action, "killer-pass");
+        assert!(
+            transition.decision_context.target_forward_yards > 0.0,
+            "killer pass transition should train a forward threaded target: {:?}",
+            transition.decision_context
         );
     }
 

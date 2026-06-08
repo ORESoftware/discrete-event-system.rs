@@ -8277,6 +8277,27 @@ impl PlayerAgent {
             }
         }
 
+        if !has_ball {
+            if let Some((target, sprint)) = snapshot.loose_long_ball_recovery_intent_for(self.id) {
+                let action = SoccerAction::MoveTo(target);
+                self.last_decision = Some(self.decision_trace(
+                    snapshot,
+                    mdp_state,
+                    observation,
+                    belief,
+                    vec!["long-ball-duel".to_string(), "recover".to_string()],
+                    single_action_option("long-ball-duel"),
+                    &action,
+                    "recover",
+                ));
+                return PlayerIntent {
+                    player_id: self.id,
+                    action,
+                    sprint,
+                };
+            }
+        }
+
         if let Some(plan) = learned_plan {
             if let Some((action, action_label)) =
                 self.action_from_learned_plan(plan, snapshot, &observation)
@@ -21135,6 +21156,70 @@ impl WorldSnapshot {
         self.active_rebound_for_player(player_id).is_some()
     }
 
+    fn loose_untargeted_long_ball_team(&self) -> Option<Team> {
+        if self.ball.holder.is_some() || self.pending_pass.is_some() {
+            return None;
+        }
+        let action = self.ball.last_decision.as_ref()?.action.as_str();
+        if is_untargeted_long_ball_action(action)
+            && (self.ball.velocity.len() >= 6.0 || self.ball.altitude_yards > 0.02)
+        {
+            self.ball.last_touch_team
+        } else {
+            None
+        }
+    }
+
+    fn loose_long_ball_recovery_target(&self) -> Option<Vec2> {
+        self.loose_untargeted_long_ball_team()?;
+        Some(
+            self.projected_loose_ball_target()
+                .unwrap_or(self.ball.position)
+                .clamp_to_pitch(self.field_width, self.field_length),
+        )
+    }
+
+    fn loose_long_ball_recovery_intent_for(&self, player_id: usize) -> Option<(Vec2, bool)> {
+        self.loose_untargeted_long_ball_team()?;
+        let me = self.players.iter().find(|player| player.id == player_id)?;
+        if me.role == PlayerRole::Goalkeeper {
+            return None;
+        }
+        let target = self.loose_long_ball_recovery_target()?;
+        let current = self.player_snapshot_position(me);
+        let distance = current.distance(target);
+        if distance > 50.0 {
+            return None;
+        }
+        let my_time = loose_ball_arrival_time_seconds(self, me, target);
+        let mut own_best = f64::INFINITY;
+        let mut opponent_best = f64::INFINITY;
+        for player in &self.players {
+            if player.role == PlayerRole::Goalkeeper {
+                continue;
+            }
+            let arrival = loose_ball_arrival_time_seconds(self, player, target);
+            if player.team == me.team {
+                own_best = own_best.min(arrival);
+            } else {
+                opponent_best = opponent_best.min(arrival);
+            }
+        }
+        if !own_best.is_finite() || !opponent_best.is_finite() {
+            return None;
+        }
+
+        let target_in_own_half = pass_origin_in_own_half(me.team, target, self.field_length);
+        let primary_contender = my_time <= own_best + if target_in_own_half { 1.20 } else { 0.45 };
+        let contested = (own_best - opponent_best).abs() <= 1.15
+            || loose_ball_fifty_fifty_duel_for(self, player_id);
+        if !(primary_contender && (contested || target_in_own_half)) {
+            return None;
+        }
+
+        Some((target, distance > 3.0))
+    }
+
     fn loose_ball_recovery_target_for(&self, player_id: usize) -> Vec2 {
         if self.active_rebound_for_player(player_id).is_some() {
             return self
@@ -26905,7 +26990,10 @@ fn loose_ball_fifty_fifty_duel_for(snapshot: &WorldSnapshot, player_id: usize) -
     let Some(me) = snapshot.players.iter().find(|p| p.id == player_id) else {
         return false;
     };
-    if snapshot.ball.holder.is_some() || snapshot.ball.velocity.len() > 10.0 {
+    if snapshot.ball.holder.is_some()
+        || (snapshot.ball.velocity.len() > 10.0
+            && snapshot.loose_untargeted_long_ball_team().is_none())
+    {
         return false;
     }
     let Some((home, away)) = loose_ball_fifty_fifty_duel(snapshot) else {
@@ -26922,6 +27010,8 @@ fn loose_ball_fifty_fifty_duel(snapshot: &WorldSnapshot) -> Option<(usize, usize
     if snapshot.ball.holder.is_some() {
         return None;
     }
+    let long_ball_target = snapshot.loose_long_ball_recovery_target();
+    let target = long_ball_target.unwrap_or(snapshot.ball.position);
     let nearest = |team| {
         snapshot
             .players
@@ -26932,21 +27022,25 @@ fn loose_ball_fifty_fifty_duel(snapshot: &WorldSnapshot) -> Option<(usize, usize
                 let velocity_toward_ball = player
                     .velocity
                     .normalized()
-                    .dot((snapshot.ball.position - position).normalized());
+                    .dot((target - position).normalized());
+                let arrival_time = loose_ball_arrival_time_seconds(snapshot, player, target);
                 Some((
                     player.id,
-                    position.distance(snapshot.ball.position),
+                    position.distance(target),
                     velocity_toward_ball,
+                    arrival_time,
                 ))
             })
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
     };
     let home = nearest(Team::Home)?;
     let away = nearest(Team::Away)?;
-    let distance_close = home.1.min(away.1) <= 18.0;
-    let distance_even = (home.1 - away.1).abs() <= 2.8;
-    let velocity_even = (home.2 - away.2).abs() <= 0.55;
-    (distance_close && distance_even && velocity_even).then_some((home.0, away.0))
+    let long_ball = long_ball_target.is_some();
+    let distance_close = home.1.min(away.1) <= if long_ball { 42.0 } else { 18.0 };
+    let distance_even = (home.1 - away.1).abs() <= if long_ball { 5.5 } else { 2.8 };
+    let velocity_even = (home.2 - away.2).abs() <= if long_ball { 0.90 } else { 0.55 };
+    let arrival_even = (home.3 - away.3).abs() <= if long_ball { 1.15 } else { 0.45 };
+    (distance_close && (arrival_even || distance_even && velocity_even)).then_some((home.0, away.0))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -72288,6 +72382,67 @@ mod tests {
             false,
         );
         assert!(reward > 0.8, "50:50 contest reward: {reward}");
+    }
+
+    #[test]
+    fn untargeted_long_ball_duel_sprints_to_projected_drop_zone() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1510,
+            ..Default::default()
+        });
+        let home_runner = 8;
+        let away_defender = 13;
+        park_players_except(&mut sim, &[home_runner, away_defender]);
+        sim.tick = 18;
+        sim.clock_seconds = 1.8;
+        sim.ball.holder = None;
+        sim.ball.position = Vec2::new(40.0, 50.0);
+        sim.ball.velocity = Vec2::new(0.0, 18.0);
+        sim.ball.altitude_yards = 6.0;
+        sim.ball.last_touch_team = Some(Team::Home);
+        sim.ball
+            .record_decision(sim.tick, "route-one", Some(BALL_AGENT_ID));
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let drop_zone = snapshot
+            .loose_long_ball_recovery_target()
+            .expect("route-one long ball should expose a projected drop zone");
+        sim.players[home_runner].position = Vec2::new(drop_zone.x - 4.0, drop_zone.y);
+        sim.players[home_runner].velocity = Vec2::zero();
+        sim.players[away_defender].position = Vec2::new(drop_zone.x + 4.0, drop_zone.y);
+        sim.players[away_defender].velocity = Vec2::zero();
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let drop_zone = snapshot
+            .loose_long_ball_recovery_target()
+            .expect("route-one long ball should remain projected after player placement");
+
+        assert_eq!(
+            loose_ball_fifty_fifty_duel(&snapshot),
+            Some((home_runner, away_defender)),
+            "untargeted long balls should be labeled as 50:50 contests at the projected landing zone"
+        );
+
+        let mut defender = sim.players[away_defender].clone();
+        let intent = defender.run_time_step(&snapshot, None, None, &mut SeededRandom::new(1510));
+        let SoccerAction::MoveTo(target) = intent.action else {
+            panic!("long-ball defender should contest the drop zone, got {intent:?}");
+        };
+        assert!(
+            target.distance(drop_zone) < 0.01,
+            "long-ball defender should target the projected drop zone: target={target:?} drop={drop_zone:?}"
+        );
+        assert!(
+            intent.sprint,
+            "long-ball 50:50 recovery should be urgent enough to sprint: {intent:?}"
+        );
+        let decision = defender
+            .last_decision
+            .as_ref()
+            .expect("long-ball recovery decision");
+        assert_eq!(decision.action, "recover");
+        assert_eq!(decision.operation_order[0], "long-ball-duel");
+        assert_eq!(decision.action_options[0].label, "long-ball-duel");
     }
 
     #[test]

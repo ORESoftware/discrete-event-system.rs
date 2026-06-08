@@ -361,7 +361,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 125;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 131;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -428,9 +428,15 @@ const SOCCER_NEURAL_FEATURE_BALL_SURFACE_GRASS_RESISTANCE: usize = 121;
 const SOCCER_NEURAL_FEATURE_BALL_SURFACE_STOP_SPEED: usize = 122;
 const SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_TOTAL_LOSS: usize = 123;
 const SOCCER_NEURAL_FEATURE_BALL_RESISTANCE_ROLLING_CONTACT: usize = 124;
+const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_FORWARD: usize = 125;
+const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_GOAL_GAIN: usize = 126;
+const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_WINDOW: usize = 127;
+const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_OPENNESS: usize = 128;
+const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_COMPLETION: usize = 129;
+const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_STRIDE: usize = 130;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112, 113, 115, 117, 118, 119,
+    110, 111, 112, 113, 115, 117, 118, 119, 125,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1498,6 +1504,20 @@ pub struct SoccerPomdpObservation {
     pub visible_forward_pass_options: usize,
     #[serde(default)]
     pub threaded_goal_pass_available: bool,
+    #[serde(default)]
+    pub threaded_goal_pass_target: Option<usize>,
+    #[serde(default)]
+    pub threaded_goal_pass_forward_yards: f64,
+    #[serde(default)]
+    pub threaded_goal_pass_goal_gain_yards: f64,
+    #[serde(default)]
+    pub threaded_goal_pass_reception_window_score: f64,
+    #[serde(default)]
+    pub threaded_goal_pass_receiver_openness: f64,
+    #[serde(default)]
+    pub threaded_goal_pass_expected_completion: f64,
+    #[serde(default)]
+    pub threaded_goal_pass_stride_fit: f64,
     #[serde(default)]
     pub best_forward_pass_receiver_openness: f64,
     #[serde(default)]
@@ -3167,6 +3187,18 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub threaded_goal_pass_available: bool,
     #[serde(default)]
+    pub threaded_goal_pass_forward_bin: u8,
+    #[serde(default)]
+    pub threaded_goal_pass_goal_gain_bin: u8,
+    #[serde(default)]
+    pub threaded_goal_pass_reception_window_bin: u8,
+    #[serde(default)]
+    pub threaded_goal_pass_receiver_openness_bin: u8,
+    #[serde(default)]
+    pub threaded_goal_pass_expected_completion_bin: u8,
+    #[serde(default)]
+    pub threaded_goal_pass_stride_fit_bin: u8,
+    #[serde(default)]
     pub best_forward_pass_receiver_openness_bin: u8,
     #[serde(default)]
     pub nearest_forward_teammate_distance_bin: u8,
@@ -3551,6 +3583,30 @@ impl SoccerQStateKey {
             teammates_ahead_bin: observation.teammates_ahead.min(4) as u8,
             visible_forward_pass_options_bin: observation.visible_forward_pass_options.min(3) as u8,
             threaded_goal_pass_available: observation.threaded_goal_pass_available,
+            threaded_goal_pass_forward_bin: distance_bucket(
+                observation.threaded_goal_pass_forward_yards,
+                &[4.0, 8.0, 14.0, 22.0],
+            ),
+            threaded_goal_pass_goal_gain_bin: distance_bucket(
+                observation.threaded_goal_pass_goal_gain_yards,
+                &[5.0, 9.0, 15.0, 24.0],
+            ),
+            threaded_goal_pass_reception_window_bin: distance_bucket(
+                observation.threaded_goal_pass_reception_window_score,
+                &[0.15, 0.35, 0.60, 0.82],
+            ),
+            threaded_goal_pass_receiver_openness_bin: distance_bucket(
+                observation.threaded_goal_pass_receiver_openness,
+                &[0.20, 0.40, 0.62, 0.82],
+            ),
+            threaded_goal_pass_expected_completion_bin: distance_bucket(
+                observation.threaded_goal_pass_expected_completion,
+                &[0.35, 0.55, 0.72, 0.86],
+            ),
+            threaded_goal_pass_stride_fit_bin: distance_bucket(
+                observation.threaded_goal_pass_stride_fit,
+                &[0.20, 0.40, 0.62, 0.82],
+            ),
             best_forward_pass_receiver_openness_bin: distance_bucket(
                 observation.best_forward_pass_receiver_openness,
                 &[0.20, 0.40, 0.62, 0.82],
@@ -3879,6 +3935,15 @@ impl SoccerQStateKey {
             && self.teammates_ahead_bin == other.teammates_ahead_bin
             && self.visible_forward_pass_options_bin == other.visible_forward_pass_options_bin
             && self.threaded_goal_pass_available == other.threaded_goal_pass_available
+            && self.threaded_goal_pass_forward_bin == other.threaded_goal_pass_forward_bin
+            && self.threaded_goal_pass_goal_gain_bin == other.threaded_goal_pass_goal_gain_bin
+            && self.threaded_goal_pass_reception_window_bin
+                == other.threaded_goal_pass_reception_window_bin
+            && self.threaded_goal_pass_receiver_openness_bin
+                == other.threaded_goal_pass_receiver_openness_bin
+            && self.threaded_goal_pass_expected_completion_bin
+                == other.threaded_goal_pass_expected_completion_bin
+            && self.threaded_goal_pass_stride_fit_bin == other.threaded_goal_pass_stride_fit_bin
             && self.best_forward_pass_receiver_openness_bin
                 == other.best_forward_pass_receiver_openness_bin
             && self.nearest_forward_teammate_distance_bin
@@ -6971,6 +7036,7 @@ impl PlayerAgent {
         let single_thread_goal_pressure =
             single_pass_goal_thread_pressure_score(observation).clamp(0.0, 1.0);
         let threaded_goal_receiver_available = observation.threaded_goal_pass_available;
+        let threaded_goal_pass_quality = threaded_goal_pass_quality_fit(observation);
         let approaching_threaded_goal_fit =
             if threaded_goal_receiver_available && observation.visible_forward_pass_options > 0 {
                 killer_pass_goal_range_fit(observation).powf(0.44)
@@ -6989,15 +7055,25 @@ impl PlayerAgent {
             * (0.72
                 + observation.expected_pass_completion.clamp(0.0, 1.0) * 0.28
                 + observation
+                    .threaded_goal_pass_expected_completion
+                    .clamp(0.0, 1.0)
+                    * 0.16
+                + observation
                     .best_forward_pass_receiver_openness
                     .clamp(0.0, 1.0)
                     * 0.22
+                + observation
+                    .threaded_goal_pass_receiver_openness
+                    .clamp(0.0, 1.0)
+                    * 0.14
                 + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.24
+                + observation.threaded_goal_pass_stride_fit.clamp(0.0, 1.0) * 0.14
                 + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.24)
             * (1.0
                 + killer_pass_range_fit * 1.05
                 + killer_pass_goal_pressure * 1.42
                 + single_thread_goal_pressure * 1.50
+                + threaded_goal_pass_quality * 0.62
                 + approaching_threaded_goal_fit * 0.38
                 + goal_entry_pressure * 0.78
                 + goal_attack * 0.42)
@@ -7164,13 +7240,15 @@ impl PlayerAgent {
             );
         }
         if killer_pass_legal && killer_pass_goal_pressure >= 0.24 {
-            let threaded_lane_fit = (observation
-                .best_forward_pass_receiver_openness
-                .clamp(0.0, 1.0)
-                * 0.34
-                + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
-                + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
-                .clamp(0.0, 1.0);
+            let threaded_lane_fit = threaded_goal_pass_quality.max(
+                (observation
+                    .best_forward_pass_receiver_openness
+                    .clamp(0.0, 1.0)
+                    * 0.34
+                    + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+                    + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
+                    .clamp(0.0, 1.0),
+            );
             let close_threaded_goal_fit =
                 ((36.0 - observation.yards_to_goal) / 18.0).clamp(0.0, 1.0);
             let killer_floor = killer_pass_goal_pressure_floor(observation).max(
@@ -17975,6 +18053,18 @@ struct ForwardSupportContext {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct KillerPassTargetAssessment {
+    target_id: usize,
+    forward_yards: f64,
+    goal_gain_yards: f64,
+    reception_window_score: f64,
+    receiver_openness: f64,
+    expected_completion: f64,
+    stride_fit: f64,
+    score: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct CandidateOccupancy {
     open_space_score: f64,
     nearest_teammate_distance: f64,
@@ -19544,6 +19634,13 @@ impl WorldSnapshot {
                 teammates_ahead: 0,
                 visible_forward_pass_options: 0,
                 threaded_goal_pass_available: false,
+                threaded_goal_pass_target: None,
+                threaded_goal_pass_forward_yards: 0.0,
+                threaded_goal_pass_goal_gain_yards: 0.0,
+                threaded_goal_pass_reception_window_score: 0.0,
+                threaded_goal_pass_receiver_openness: 0.0,
+                threaded_goal_pass_expected_completion: 0.0,
+                threaded_goal_pass_stride_fit: 0.0,
                 best_forward_pass_receiver_openness: 0.0,
                 nearest_forward_teammate_distance_yards: 0.0,
                 floor_pass_lane_score: 0.0,
@@ -19832,10 +19929,12 @@ impl WorldSnapshot {
         };
         let forward_support_context =
             self.forward_support_context_for(player_id, &visible_pass_targets);
-        let threaded_goal_pass_available = has_ball
-            && self
-                .killer_pass_target_for(player_id, &visible_pass_targets)
-                .is_some();
+        let threaded_goal_pass_assessment = if has_ball {
+            self.killer_pass_target_assessment_for(player_id, &visible_pass_targets)
+        } else {
+            None
+        };
+        let threaded_goal_pass_available = threaded_goal_pass_assessment.is_some();
         let floor_pass_lane_score = if has_ball {
             floor_pass_lane_score_for_snapshot(self, me, me_position, &visible_pass_targets)
         } else {
@@ -20280,6 +20379,33 @@ impl WorldSnapshot {
             teammates_ahead: forward_support_context.teammates_ahead,
             visible_forward_pass_options: forward_support_context.visible_forward_pass_options,
             threaded_goal_pass_available,
+            threaded_goal_pass_target: threaded_goal_pass_assessment
+                .as_ref()
+                .map(|assessment| assessment.target_id),
+            threaded_goal_pass_forward_yards: threaded_goal_pass_assessment
+                .as_ref()
+                .map(|assessment| assessment.forward_yards)
+                .unwrap_or(0.0),
+            threaded_goal_pass_goal_gain_yards: threaded_goal_pass_assessment
+                .as_ref()
+                .map(|assessment| assessment.goal_gain_yards)
+                .unwrap_or(0.0),
+            threaded_goal_pass_reception_window_score: threaded_goal_pass_assessment
+                .as_ref()
+                .map(|assessment| assessment.reception_window_score)
+                .unwrap_or(0.0),
+            threaded_goal_pass_receiver_openness: threaded_goal_pass_assessment
+                .as_ref()
+                .map(|assessment| assessment.receiver_openness)
+                .unwrap_or(0.0),
+            threaded_goal_pass_expected_completion: threaded_goal_pass_assessment
+                .as_ref()
+                .map(|assessment| assessment.expected_completion)
+                .unwrap_or(0.0),
+            threaded_goal_pass_stride_fit: threaded_goal_pass_assessment
+                .as_ref()
+                .map(|assessment| assessment.stride_fit)
+                .unwrap_or(0.0),
             best_forward_pass_receiver_openness: forward_support_context
                 .best_forward_pass_receiver_openness,
             nearest_forward_teammate_distance_yards: forward_support_context
@@ -20640,6 +20766,15 @@ impl WorldSnapshot {
         player_id: usize,
         visible_targets: &[usize],
     ) -> Option<usize> {
+        self.killer_pass_target_assessment_for(player_id, visible_targets)
+            .map(|assessment| assessment.target_id)
+    }
+
+    fn killer_pass_target_assessment_for(
+        &self,
+        player_id: usize,
+        visible_targets: &[usize],
+    ) -> Option<KillerPassTargetAssessment> {
         let me = self.players.iter().find(|p| p.id == player_id)?;
         if self.ball.holder != Some(player_id) || me.role == PlayerRole::Goalkeeper {
             return None;
@@ -20737,10 +20872,22 @@ impl WorldSnapshot {
                     + role_bonus
                     + runner_bonus
                     - reception_teammate_penalty * 0.72;
-                Some((target_id, score))
+                Some(KillerPassTargetAssessment {
+                    target_id,
+                    forward_yards: forward,
+                    goal_gain_yards: goal_gain,
+                    reception_window_score: window,
+                    receiver_openness: quality.receiver_openness,
+                    expected_completion: quality.expected_completion,
+                    stride_fit: quality.stride_fit,
+                    score,
+                })
             })
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(target_id, _)| target_id)
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     fn ranked_pass_targets_filtered(
@@ -33623,6 +33770,9 @@ pub struct SoccerDecisionModelContract {
     pub single_threaded_killer_pass_enabled: bool,
     pub single_pass_goal_thread_pressure_enabled: bool,
     pub single_thread_goal_pressure_learning_feature_enabled: bool,
+    pub threaded_goal_pass_quality_in_pomdp_observation: bool,
+    pub threaded_goal_pass_quality_binned_in_mdp_state: bool,
+    pub threaded_goal_pass_quality_in_neural_features: bool,
     pub goal_entry_boosts_killer_pass_score: bool,
     pub single_thread_goal_pressure_boosts_decisive_action: bool,
     pub single_thread_goal_pressure_damps_recycling: bool,
@@ -34343,6 +34493,9 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         single_threaded_killer_pass_enabled: true,
         single_pass_goal_thread_pressure_enabled: true,
         single_thread_goal_pressure_learning_feature_enabled: true,
+        threaded_goal_pass_quality_in_pomdp_observation: true,
+        threaded_goal_pass_quality_binned_in_mdp_state: true,
+        threaded_goal_pass_quality_in_neural_features: true,
         goal_entry_boosts_killer_pass_score: true,
         single_thread_goal_pressure_boosts_decisive_action: true,
         single_thread_goal_pressure_damps_recycling: true,
@@ -37446,6 +37599,12 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.ball_surface_stop_speed_bin, 5.0),
         soccer_neural_bin(state.ball_resistance_total_loss_bin, 5.0),
         soccer_neural_bin(state.ball_resistance_rolling_contact_bin, 5.0),
+        soccer_neural_bin(state.threaded_goal_pass_forward_bin, 5.0),
+        soccer_neural_bin(state.threaded_goal_pass_goal_gain_bin, 5.0),
+        soccer_neural_bin(state.threaded_goal_pass_reception_window_bin, 5.0),
+        soccer_neural_bin(state.threaded_goal_pass_receiver_openness_bin, 5.0),
+        soccer_neural_bin(state.threaded_goal_pass_expected_completion_bin, 5.0),
+        soccer_neural_bin(state.threaded_goal_pass_stride_fit_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -53791,6 +53950,39 @@ fn killer_pass_goal_range_fit(observation: &SoccerPomdpObservation) -> f64 {
     }
 }
 
+fn threaded_goal_pass_quality_fit(observation: &SoccerPomdpObservation) -> f64 {
+    if !observation.threaded_goal_pass_available {
+        return 0.0;
+    }
+    let explicit_quality = (observation
+        .threaded_goal_pass_receiver_openness
+        .clamp(0.0, 1.0)
+        * 0.22
+        + observation
+            .threaded_goal_pass_expected_completion
+            .clamp(0.0, 1.0)
+            * 0.18
+        + observation.threaded_goal_pass_stride_fit.clamp(0.0, 1.0) * 0.18
+        + observation
+            .threaded_goal_pass_reception_window_score
+            .clamp(0.0, 1.0)
+            * 0.22
+        + (observation.threaded_goal_pass_goal_gain_yards / 22.0).clamp(0.0, 1.0) * 0.12
+        + (observation.threaded_goal_pass_forward_yards / 26.0).clamp(0.0, 1.0) * 0.08)
+        .clamp(0.0, 1.0);
+    if explicit_quality > 0.0 {
+        explicit_quality
+    } else {
+        (observation
+            .best_forward_pass_receiver_openness
+            .clamp(0.0, 1.0)
+            * 0.36
+            + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
+            .clamp(0.0, 1.0)
+    }
+}
+
 fn goal_entry_decisive_pressure_score(observation: &SoccerPomdpObservation) -> f64 {
     if observation.yards_to_goal > GOAL_URGENCY_MAX_YARDS {
         return 0.0;
@@ -53821,13 +54013,15 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
     .clamp(0.0, 1.0)
     .powf(0.60);
     let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
-    let receiver_lane_fit = (observation
-        .best_forward_pass_receiver_openness
-        .clamp(0.0, 1.0)
-        * 0.42
-        + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
-        + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.28)
-        .clamp(0.0, 1.0);
+    let receiver_lane_fit = threaded_goal_pass_quality_fit(observation).max(
+        (observation
+            .best_forward_pass_receiver_openness
+            .clamp(0.0, 1.0)
+            * 0.42
+            + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.28)
+            .clamp(0.0, 1.0),
+    );
     (range_fit.powf(0.55) * 0.34
         + final_third_fit * 0.25
         + receiver_lane_fit * 0.27
@@ -53852,13 +54046,15 @@ fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) 
     .clamp(0.0, 1.0)
     .powf(0.58);
     let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
-    let receiver_lane_fit = (observation
-        .best_forward_pass_receiver_openness
-        .clamp(0.0, 1.0)
-        * 0.36
-        + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
-        + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
-        .clamp(0.0, 1.0);
+    let receiver_lane_fit = threaded_goal_pass_quality_fit(observation).max(
+        (observation
+            .best_forward_pass_receiver_openness
+            .clamp(0.0, 1.0)
+            * 0.36
+            + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
+            .clamp(0.0, 1.0),
+    );
     let blocked_shot_invitation = if observation.shot_lane_open {
         ((observation.shot_block_probability.clamp(0.0, 1.0) - 0.24) / 0.56).clamp(0.0, 1.0)
     } else {
@@ -53908,13 +54104,15 @@ fn threaded_goal_pass_can_override_forced_shot(
     {
         return false;
     }
-    let threaded_lane = (observation
-        .best_forward_pass_receiver_openness
-        .clamp(0.0, 1.0)
-        * 0.34
-        + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
-        + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
-        .clamp(0.0, 1.0);
+    let threaded_lane = threaded_goal_pass_quality_fit(observation).max(
+        (observation
+            .best_forward_pass_receiver_openness
+            .clamp(0.0, 1.0)
+            * 0.34
+            + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
+            .clamp(0.0, 1.0),
+    );
     if threaded_lane < 0.66 || killer_pass_goal_pressure_score(observation) < 0.48 {
         return false;
     }
@@ -53966,13 +54164,15 @@ fn near_goal_decisive_action_pressure_score(
     let threaded_lane_fit = if observation.threaded_goal_pass_available
         && observation.visible_forward_pass_options > 0
     {
-        (observation
-            .best_forward_pass_receiver_openness
-            .clamp(0.0, 1.0)
-            * 0.36
-            + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
-            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
-            .clamp(0.0, 1.0)
+        threaded_goal_pass_quality_fit(observation).max(
+            (observation
+                .best_forward_pass_receiver_openness
+                .clamp(0.0, 1.0)
+                * 0.36
+                + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+                + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
+                .clamp(0.0, 1.0),
+        )
     } else {
         0.0
     };
@@ -54011,11 +54211,13 @@ fn killer_pass_forced_by_goal_pressure(
     }
     let shot_not_clean = !shot_decision_is_qualified_for_role(observation, role)
         || observation.shot_block_probability.clamp(0.0, 1.0) >= 0.48;
-    let threaded_lane = observation.floor_pass_lane_score.clamp(0.0, 1.0) >= 0.44
-        && observation
-            .best_forward_pass_receiver_openness
-            .clamp(0.0, 1.0)
-            >= 0.42;
+    let threaded_quality = threaded_goal_pass_quality_fit(observation);
+    let threaded_lane = threaded_quality >= 0.42
+        || (observation.floor_pass_lane_score.clamp(0.0, 1.0) >= 0.44
+            && observation
+                .best_forward_pass_receiver_openness
+                .clamp(0.0, 1.0)
+                >= 0.42);
     (shot_not_clean || threaded_goal_pass_can_override_forced_shot(observation, role))
         && threaded_lane
         && killer_pass_goal_pressure_score(observation) >= 0.46
@@ -54039,13 +54241,15 @@ fn final_third_killer_pass_preemption_probability(
         return 0.0;
     };
     let range_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
-    let lane_fit = (observation
-        .best_forward_pass_receiver_openness
-        .clamp(0.0, 1.0)
-        * 0.34
-        + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
-        + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
-        .clamp(0.0, 1.0);
+    let lane_fit = threaded_goal_pass_quality_fit(observation).max(
+        (observation
+            .best_forward_pass_receiver_openness
+            .clamp(0.0, 1.0)
+            * 0.34
+            + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+            + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.36)
+            .clamp(0.0, 1.0),
+    );
     let shot_block_fit =
         ((observation.shot_block_probability.clamp(0.0, 1.0) - 0.34) / 0.46).clamp(0.0, 1.0);
     let shot_quality_gap = if observation.shot_lane_open {
@@ -58888,6 +59092,25 @@ mod tests {
             observation.threaded_goal_pass_available,
             "test setup should expose an actual threaded goal-pass receiver"
         );
+        assert_eq!(
+            observation.threaded_goal_pass_target,
+            Some(receiver),
+            "POMDP observation should name the single threaded goal-pass receiver"
+        );
+        assert!(
+            observation.threaded_goal_pass_goal_gain_yards
+                >= KILLER_PASS_MIN_RECEIVER_GOAL_GAIN_YARDS,
+            "POMDP observation should expose meaningful goal gain for the threaded route: {}",
+            observation.threaded_goal_pass_goal_gain_yards
+        );
+        assert!(
+            observation.threaded_goal_pass_reception_window_score > 0.45
+                && observation.threaded_goal_pass_receiver_openness > 0.40
+                && observation.threaded_goal_pass_expected_completion > 0.40
+                && observation.threaded_goal_pass_stride_fit > 0.40,
+            "POMDP observation should expose threaded-pass quality metrics: {:?}",
+            observation
+        );
         assert!(
             observation.decisive_goal_action_pressure > 0.60,
             "test setup should expose high decisive goal action pressure: {}",
@@ -58906,6 +59129,14 @@ mod tests {
             "Q-state should bucket final-third decisive pressure: {q_key:?}"
         );
         assert!(
+            q_key.threaded_goal_pass_goal_gain_bin >= 1
+                && q_key.threaded_goal_pass_reception_window_bin >= 2
+                && q_key.threaded_goal_pass_receiver_openness_bin >= 2
+                && q_key.threaded_goal_pass_expected_completion_bin >= 1
+                && q_key.threaded_goal_pass_stride_fit_bin >= 2,
+            "Q-state should bucket threaded goal-pass quality: {q_key:?}"
+        );
+        assert!(
             features[SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE] > 0.60,
             "neural learner should see killer-pass pressure"
         );
@@ -58920,6 +59151,26 @@ mod tests {
         assert!(
             features[SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE] > 0.60,
             "neural learner should see single-threaded goal pass pressure"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_GOAL_GAIN] > 0.20,
+            "neural learner should see threaded goal-pass gain"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_WINDOW] > 0.40,
+            "neural learner should see threaded reception window quality"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_OPENNESS] > 0.40,
+            "neural learner should see threaded receiver openness"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_COMPLETION] > 0.20,
+            "neural learner should see threaded completion quality"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_STRIDE] >= 0.40,
+            "neural learner should see threaded stride fit"
         );
     }
 
@@ -99657,6 +99908,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             model["singleThreadGoalPressureLearningFeatureEnabled"],
             true
         );
+        assert_eq!(model["threadedGoalPassQualityInPomdpObservation"], true);
+        assert_eq!(model["threadedGoalPassQualityBinnedInMdpState"], true);
+        assert_eq!(model["threadedGoalPassQualityInNeuralFeatures"], true);
         assert_eq!(model["goalEntryBoostsKillerPassScore"], true);
         assert_eq!(model["singleThreadGoalPressureBoostsDecisiveAction"], true);
         assert_eq!(model["singleThreadGoalPressureDampsRecycling"], true);

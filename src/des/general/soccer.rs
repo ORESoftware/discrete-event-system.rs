@@ -32498,6 +32498,9 @@ pub struct SoccerRulesRuntimeContract {
     pub direct_corner_kick_offside_exempt: bool,
     pub direct_free_kick_offside_applies: bool,
     pub assistant_refs_track_offside_line: bool,
+    pub assistant_refs_stay_off_pitch: bool,
+    pub assistant_refs_stay_in_assigned_half: bool,
+    pub assistant_ref_touchline_offset_yards: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32959,6 +32962,9 @@ fn soccer_rules_runtime_contract(config: &MatchConfig) -> SoccerRulesRuntimeCont
         direct_corner_kick_offside_exempt: offside_exempt_restart_action("corner-kick"),
         direct_free_kick_offside_applies: !offside_exempt_restart_action("direct-free-kick"),
         assistant_refs_track_offside_line: true,
+        assistant_refs_stay_off_pitch: true,
+        assistant_refs_stay_in_assigned_half: true,
+        assistant_ref_touchline_offset_yards: ASSISTANT_REF_TOUCHLINE_OFFSET_YARDS,
     }
 }
 
@@ -97704,6 +97710,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["directCornerKickOffsideExempt"], true);
         assert_eq!(contract["directFreeKickOffsideApplies"], true);
         assert_eq!(contract["assistantRefsTrackOffsideLine"], true);
+        assert_eq!(contract["assistantRefsStayOffPitch"], true);
+        assert_eq!(contract["assistantRefsStayInAssignedHalf"], true);
+        assert_eq!(
+            contract["assistantRefTouchlineOffsetYards"],
+            ASSISTANT_REF_TOUCHLINE_OFFSET_YARDS
+        );
     }
 
     fn assert_soccer_physics_contract_json(meta: &serde_json::Value, config: &MatchConfig) {

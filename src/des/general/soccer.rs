@@ -32195,6 +32195,33 @@ pub struct SoccerUiRuntimeContract {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SoccerRulesRuntimeContract {
+    pub laws_of_game_contract_enabled: bool,
+    pub kickoff_restart_enabled: bool,
+    pub post_goal_kickoff_enabled: bool,
+    pub players_reset_to_own_half_on_kickoff: bool,
+    pub kickoff_center_circle_enforced: bool,
+    pub set_play_restarts_enabled: bool,
+    pub supported_restart_actions: Vec<String>,
+    pub goal_line_detection_enabled: bool,
+    pub configured_goal_width_yards: f64,
+    pub default_goal_width_yards: f64,
+    pub offside_rule_enabled: bool,
+    pub offside_own_half_exempt: bool,
+    pub offside_uses_ball_and_second_last_defender: bool,
+    pub offside_interference_phase_enabled: bool,
+    pub offside_interference_radius_yards: f64,
+    pub offside_resets_on_teammate_touch: bool,
+    pub offside_resets_on_deliberate_defender_control: bool,
+    pub direct_goal_kick_offside_exempt: bool,
+    pub direct_throw_in_offside_exempt: bool,
+    pub direct_corner_kick_offside_exempt: bool,
+    pub direct_free_kick_offside_applies: bool,
+    pub assistant_refs_track_offside_line: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SoccerMovementGaitContract {
     pub gait: MovementGait,
     pub speed_multiplier: f64,
@@ -32546,6 +32573,45 @@ fn soccer_ui_runtime_contract() -> SoccerUiRuntimeContract {
         shared_position_panel_enabled: true,
         agent_kinematics_panel_enabled: true,
         central_brain_panel_enabled: true,
+    }
+}
+
+fn soccer_rules_runtime_contract(config: &MatchConfig) -> SoccerRulesRuntimeContract {
+    SoccerRulesRuntimeContract {
+        laws_of_game_contract_enabled: true,
+        kickoff_restart_enabled: true,
+        post_goal_kickoff_enabled: true,
+        players_reset_to_own_half_on_kickoff: true,
+        kickoff_center_circle_enforced: true,
+        set_play_restarts_enabled: true,
+        supported_restart_actions: [
+            "kickoff",
+            "throw-in",
+            "goal-kick",
+            "corner-kick",
+            "free-kick",
+            "direct-free-kick",
+            "indirect-free-kick",
+            "offside",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        goal_line_detection_enabled: true,
+        configured_goal_width_yards: config.goal_width_yards,
+        default_goal_width_yards: DEFAULT_GOAL_WIDTH_YARDS,
+        offside_rule_enabled: true,
+        offside_own_half_exempt: true,
+        offside_uses_ball_and_second_last_defender: true,
+        offside_interference_phase_enabled: true,
+        offside_interference_radius_yards: OFFSIDE_INTERFERENCE_RADIUS_YARDS,
+        offside_resets_on_teammate_touch: true,
+        offside_resets_on_deliberate_defender_control: true,
+        direct_goal_kick_offside_exempt: offside_exempt_restart_action("goal-kick"),
+        direct_throw_in_offside_exempt: offside_exempt_restart_action("throw-in"),
+        direct_corner_kick_offside_exempt: offside_exempt_restart_action("corner-kick"),
+        direct_free_kick_offside_applies: !offside_exempt_restart_action("direct-free-kick"),
+        assistant_refs_track_offside_line: true,
     }
 }
 
@@ -48129,6 +48195,7 @@ fn soccer_playback_metadata_json(
     let cadence = soccer_simulation_cadence(config, record_every_ticks, expected_frame_count);
     let controller_contract = soccer_controller_runtime_contract(config);
     let ui_contract = soccer_ui_runtime_contract();
+    let rules_contract = soccer_rules_runtime_contract(config);
     let physics_contract = soccer_physics_runtime_contract(config);
     let learning_contract = soccer_learning_runtime_contract(config);
     serde_json::json!({
@@ -48143,6 +48210,7 @@ fn soccer_playback_metadata_json(
         "decisionModel": soccer_decision_model_contract(),
         "controllerContract": controller_contract,
         "uiContract": ui_contract,
+        "rulesContract": rules_contract,
         "physicsContract": physics_contract,
         "learningContract": learning_contract,
         "playback": {
@@ -48157,6 +48225,7 @@ fn soccer_playback_metadata_json(
             "decisionModel": soccer_decision_model_contract(),
             "controllerContract": controller_contract,
             "uiContract": ui_contract,
+            "rulesContract": rules_contract,
             "physicsContract": physics_contract,
             "learningContract": learning_contract,
         },
@@ -94914,6 +94983,51 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["centralBrainPanelEnabled"], true);
     }
 
+    fn assert_soccer_rules_contract_json(meta: &serde_json::Value, config: &MatchConfig) {
+        assert_eq!(meta["rulesContract"], meta["playback"]["rulesContract"]);
+        let contract = &meta["rulesContract"];
+        assert_eq!(contract["lawsOfGameContractEnabled"], true);
+        assert_eq!(contract["kickoffRestartEnabled"], true);
+        assert_eq!(contract["postGoalKickoffEnabled"], true);
+        assert_eq!(contract["playersResetToOwnHalfOnKickoff"], true);
+        assert_eq!(contract["kickoffCenterCircleEnforced"], true);
+        assert_eq!(contract["setPlayRestartsEnabled"], true);
+        assert_eq!(
+            contract["supportedRestartActions"],
+            serde_json::json!([
+                "kickoff",
+                "throw-in",
+                "goal-kick",
+                "corner-kick",
+                "free-kick",
+                "direct-free-kick",
+                "indirect-free-kick",
+                "offside"
+            ])
+        );
+        assert_eq!(contract["goalLineDetectionEnabled"], true);
+        assert_eq!(
+            contract["configuredGoalWidthYards"],
+            config.goal_width_yards
+        );
+        assert_eq!(contract["defaultGoalWidthYards"], DEFAULT_GOAL_WIDTH_YARDS);
+        assert_eq!(contract["offsideRuleEnabled"], true);
+        assert_eq!(contract["offsideOwnHalfExempt"], true);
+        assert_eq!(contract["offsideUsesBallAndSecondLastDefender"], true);
+        assert_eq!(contract["offsideInterferencePhaseEnabled"], true);
+        assert_eq!(
+            contract["offsideInterferenceRadiusYards"],
+            OFFSIDE_INTERFERENCE_RADIUS_YARDS
+        );
+        assert_eq!(contract["offsideResetsOnTeammateTouch"], true);
+        assert_eq!(contract["offsideResetsOnDeliberateDefenderControl"], true);
+        assert_eq!(contract["directGoalKickOffsideExempt"], true);
+        assert_eq!(contract["directThrowInOffsideExempt"], true);
+        assert_eq!(contract["directCornerKickOffsideExempt"], true);
+        assert_eq!(contract["directFreeKickOffsideApplies"], true);
+        assert_eq!(contract["assistantRefsTrackOffsideLine"], true);
+    }
+
     fn assert_soccer_physics_contract_json(meta: &serde_json::Value, config: &MatchConfig) {
         assert_eq!(meta["physicsContract"], meta["playback"]["physicsContract"]);
         let contract = &meta["physicsContract"];
@@ -95304,6 +95418,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &trace.config);
         assert_soccer_ui_contract_json(&meta);
+        assert_soccer_rules_contract_json(&meta, &trace.config);
         assert_soccer_physics_contract_json(&meta, &trace.config);
         assert_soccer_learning_contract_json(&meta, &trace.config);
         assert_eq!(meta["config"]["dtSeconds"], trace.config.dt_seconds);
@@ -95418,6 +95533,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_soccer_decision_model_contract_json(&meta);
         assert_soccer_controller_contract_json(&meta, &config);
         assert_soccer_ui_contract_json(&meta);
+        assert_soccer_rules_contract_json(&meta, &config);
         assert_soccer_physics_contract_json(&meta, &config);
         assert_soccer_learning_contract_json(&meta, &config);
         assert_eq!(

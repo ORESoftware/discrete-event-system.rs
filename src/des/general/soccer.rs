@@ -69854,6 +69854,49 @@ mod tests {
     }
 
     #[test]
+    fn four_assigned_human_players_check_controller_slots_when_silent() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            max_human_players: 4,
+            seed: 22_802,
+            ..Default::default()
+        });
+        sim.clear_controller_assignments();
+        let controlled_players = [0usize, 1, 2, 3];
+        for (slot, player_id) in controlled_players.iter().copied().enumerate() {
+            sim.assign_controller_slot(slot, Some(player_id))
+                .expect("assign silent controller slot");
+        }
+
+        sim.run_time_step();
+
+        let yield_stats = sim.controller_yield_stats();
+        assert_eq!(yield_stats.assigned_players, controlled_players.len());
+        assert_eq!(
+            yield_stats.last_queued_after, 0,
+            "silent controller slots should not leave queued input after the scheduler yield"
+        );
+        assert_eq!(sim.human_inputs.queued_len(), 0);
+        for (slot, player_id) in controlled_players.iter().copied().enumerate() {
+            let player = &sim.players[player_id];
+            assert_eq!(player.controller_slot, Some(slot));
+            let decision = player
+                .last_decision
+                .as_ref()
+                .expect("silent human-controlled player should still run its agent loop");
+            assert_ne!(
+                decision.operation_order.first().map(String::as_str),
+                Some("human-input"),
+                "quiet controller slot {slot} should not emit a fake human-input action"
+            );
+            assert_eq!(decision.observation.controller_slot, Some(slot));
+            assert!(decision.observation.human_controlled);
+            assert!(!decision.observation.human_input_present);
+            assert_eq!(decision.observation.human_input_seq, None);
+        }
+    }
+
+    #[test]
     fn controller_input_router_debounces_assigned_slot_burst_without_queue_growth() {
         let q = SharedHumanInputs::new();
         let assignments = SharedControllerAssignments::new(4);

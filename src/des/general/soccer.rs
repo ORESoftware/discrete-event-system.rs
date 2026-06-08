@@ -95620,6 +95620,126 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn away_goal_approach_killer_pass_probability_ramps_toward_home_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_244,
+            ..Default::default()
+        });
+        let attacker = 19;
+        let runner = 20;
+        let keeper = 0;
+        let blockers = [1, 2, 3, 4];
+        park_players_except(
+            &mut sim,
+            &[
+                attacker,
+                runner,
+                keeper,
+                blockers[0],
+                blockers[1],
+                blockers[2],
+                blockers[3],
+            ],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].skills.shooting = 7.0;
+        sim.players[attacker].skills.passing_completion_rate = 9.2;
+        sim.players[attacker].skills.vision = 9.4;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.76;
+        sim.players[attacker].preferences.shoot_bias = 0.44;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].velocity = Vec2::new(1.0, -6.8);
+        sim.players[runner].skills.shooting = 8.9;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 3.5);
+        sim.players[keeper].skills.goalkeeping = 5.2;
+        for blocker in blockers {
+            sim.players[blocker].skills.defending = 9.8;
+            sim.players[blocker].skills.defensive_tracking = 9.8;
+            sim.players[blocker].skills.aggression = 9.0;
+        }
+
+        let mut previous_killer = 0.0;
+        let mut previous_thread_pressure = 0.0;
+        for (idx, y) in [36.0_f64, 28.0, 22.0].into_iter().enumerate() {
+            let runner_y = (y - 16.0).max(9.0);
+            sim.players[attacker].position = Vec2::new(40.0, y);
+            sim.players[attacker].velocity = Vec2::new(0.0, -3.8);
+            sim.players[runner].position = Vec2::new(52.0, runner_y);
+            sim.players[1].position = Vec2::new(40.0, (y - 10.0).max(10.0));
+            sim.players[2].position = Vec2::new(28.0, (runner_y - 3.0).max(6.0));
+            sim.players[3].position = Vec2::new(58.0, (runner_y - 2.0).max(6.0));
+            sim.players[4].position = Vec2::new(31.0, (y - 18.0).max(12.0));
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Away);
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(attacker);
+            let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+            assert!(
+                pass_targets.contains(&runner),
+                "away runner should stay visible for the threaded pass: y={y} targets={pass_targets:?}"
+            );
+            assert_eq!(
+                snapshot.killer_pass_target_for(attacker, &pass_targets),
+                Some(runner),
+                "away runner should be the best killer-pass target at y={y}"
+            );
+            assert!(
+                observation.shot_block_probability >= 0.44,
+                "home defender should meaningfully block the away shot lane: y={y} block={}",
+                observation.shot_block_probability
+            );
+
+            let options = sim.players[attacker].possession_action_options(
+                &observation,
+                &snapshot.tactical_directive(Team::Away),
+                pass_targets.len(),
+                snapshot
+                    .ranked_visible_aerial_pass_targets(attacker, 3)
+                    .len(),
+                false,
+                sim.config.dt_seconds,
+                snapshot.field_width,
+            );
+            let killer = options
+                .iter()
+                .find(|option| option.label == "killer-pass" && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0);
+            let pass1 = options
+                .iter()
+                .find(|option| option.label == "pass1" && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0);
+            let thread_pressure = single_pass_goal_thread_pressure_score(&observation);
+            if idx > 0 {
+                assert!(
+                    killer > previous_killer + 0.04,
+                    "away killer-pass probability should ramp as holder nears home goal: y={y} killer={killer} previous={previous_killer} options={options:?}"
+                );
+                assert!(
+                    thread_pressure > previous_thread_pressure + 0.03,
+                    "away single threaded goal-pass pressure should ramp toward home goal: y={y} pressure={thread_pressure} previous={previous_thread_pressure} observation={observation:?}"
+                );
+            }
+            if idx == 2 {
+                assert!(
+                    killer > pass1 * 3.0,
+                    "away near-goal threaded killer-pass should swamp ordinary pass1: killer={killer} pass1={pass1} options={options:?}"
+                );
+            }
+            previous_killer = killer;
+            previous_thread_pressure = thread_pressure;
+        }
+    }
+
+    #[test]
     fn single_threaded_goal_pass_pressure_preempts_recycling_near_goal() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

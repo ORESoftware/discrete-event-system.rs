@@ -3788,13 +3788,15 @@ function applyInputAck(ack, requestedCount = 0) {
   if (!ack) return;
   const accepted = Number(ack.acceptedInputs ?? 0);
   const requested = Number(requestedCount || 0);
+  const rejected = Number(ack.rejectedInputs ?? Math.max(0, requested - accepted));
   const queued = Boolean(ack.queued);
   const queueDepth = Number(ack.queuedHumanInputs ?? state?.queuedHumanInputs ?? 0);
   if (state && Number.isFinite(queueDepth)) state.queuedHumanInputs = queueDepth;
-  if (accepted <= 0 && requested > 0) {
-    statusEl.textContent = `input rejected ${requested} ${plural(requested, "frame")}`;
+  if (accepted <= 0 && rejected > 0) {
+    statusEl.textContent = `input rejected ${rejected} ${plural(rejected, "frame")}`;
   } else if (accepted > 0) {
-    const suffix = queued ? ` Q${queueDepth}` : "";
+    const rejectedSuffix = rejected > 0 ? ` R${rejected}` : "";
+    const suffix = `${queued ? ` Q${queueDepth}` : ""}${rejectedSuffix}`;
     statusEl.textContent = `${accepted}/${Math.max(requested, accepted)} input accepted${suffix}`;
   }
   inputQueue.textContent = queuedHumanInputsLabel();

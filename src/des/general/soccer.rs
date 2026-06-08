@@ -37020,6 +37020,8 @@ pub struct SoccerLearningSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct SoccerInputAck {
     pub accepted_inputs: usize,
+    #[serde(default)]
+    pub rejected_inputs: usize,
     pub queued: bool,
     #[serde(default)]
     pub queued_human_inputs: usize,
@@ -48267,6 +48269,7 @@ fn handle_live_soccer_request_inner(
         }
         ("POST", "/api/input") => match parse_human_input_payload(req.body) {
             Ok(inputs) => {
+                let requested_inputs = inputs.len();
                 let (count, queued_human_inputs) = match input_dispatch {
                     LiveInputDispatch::Router(router) => {
                         let count = router.push_human_inputs(inputs);
@@ -48290,6 +48293,7 @@ fn handle_live_soccer_request_inner(
                 };
                 LiveHttpResponse::json(&SoccerInputAck {
                     accepted_inputs: count,
+                    rejected_inputs: requested_inputs.saturating_sub(count),
                     queued: count > 0,
                     queued_human_inputs,
                 })
@@ -96830,6 +96834,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("id=\"shotBlocks\""));
         assert!(html.body.contains("function applyInputAck"));
         assert!(html.body.contains("input rejected"));
+        assert!(html.body.contains("ack.rejectedInputs"));
         assert!(html.body.contains("input accepted"));
         assert!(html
             .body
@@ -100191,6 +100196,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(ack.status, 200);
         let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(ack_value["acceptedInputs"], 0);
+        assert_eq!(ack_value["rejectedInputs"], 1);
         assert_eq!(ack_value["queued"], false);
         assert_eq!(ack_value["queuedHumanInputs"], 0);
         assert_eq!(input_queue.queued_len(), 0);
@@ -100216,6 +100222,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(ack.status, 200);
         let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(ack_value["acceptedInputs"], 0);
+        assert_eq!(ack_value["rejectedInputs"], 1);
         assert_eq!(ack_value["queued"], false);
         assert_eq!(ack_value["queuedHumanInputs"], 0);
         assert_eq!(input_queue.queued_len(), 0);
@@ -100237,6 +100244,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(ack.status, 200);
         let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
         assert_eq!(ack_value["acceptedInputs"], 1);
+        assert_eq!(ack_value["rejectedInputs"], 0);
         assert_eq!(ack_value["queued"], true);
         assert_eq!(
             session.lock().unwrap().controller_thread_stats()[0].accepted_frames,

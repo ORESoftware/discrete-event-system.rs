@@ -396,6 +396,7 @@
       <div class="metric"><span>Speed</span><b id="simSpeed">20x 20t</b></div>
       <div class="metric"><span>Contracts</span><b id="runtimeContracts">pending</b></div>
       <div class="metric"><span>Accounting</span><b id="liveAccounting">pending</b></div>
+      <div class="metric"><span>Physics</span><b id="livePhysics">pending</b></div>
       <div class="surface-control">
         <label for="gridOverlayLevel">Grid</label>
         <select id="gridOverlayLevel" aria-label="Grid overlay">
@@ -605,6 +606,7 @@ const matchStep = document.getElementById("matchStep");
 const simSpeed = document.getElementById("simSpeed");
 const runtimeContracts = document.getElementById("runtimeContracts");
 const liveAccounting = document.getElementById("liveAccounting");
+const livePhysics = document.getElementById("livePhysics");
 const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const learning = document.getElementById("learning");
 const shapeLearning = document.getElementById("shapeLearning");
@@ -1144,6 +1146,35 @@ function liveAccountingTitle(report = state?.liveAccounting) {
   const violations = Array.isArray(report.violations) ? report.violations : [];
   for (const violation of violations.slice(0, 5)) {
     lines.push(`${violation.subject}.${violation.metric}: expected ${violation.expected}; actual ${violation.actual}`);
+  }
+  return lines.join("\n");
+}
+function livePhysicsLabel(report = state?.livePhysics) {
+  if (!report) return "pending";
+  const status = report.ok === false || Number(report.violationCount ?? 0) > 0 ? "warn" : "ok";
+  const pSpeed = Number(report.maxPlayerSpeedYps ?? 0);
+  const oSpeed = Number(report.maxOfficialSpeedYps ?? 0);
+  const bSpeed = Number(report.maxBallSpeedYps ?? 0);
+  const pAccel = Number(report.maxPlayerAccelYps2 ?? 0);
+  const bAccel = Number(report.maxBallAccelYps2 ?? 0);
+  const histories = `H${Number(report.minPlayerHistoryLen ?? 0)}-${Number(report.maxPlayerHistoryLen ?? 0)}/${Number(report.ballHistoryLen ?? 0)}`;
+  const violations = Number(report.violationCount ?? 0);
+  return `${status} P${pSpeed.toFixed(1)} O${oSpeed.toFixed(1)} B${bSpeed.toFixed(1)} A${pAccel.toFixed(0)}/${bAccel.toFixed(0)} ${histories}${violations ? ` !${violations}` : ""}`;
+}
+function livePhysicsTitle(report = state?.livePhysics) {
+  if (!report) return "Live frame physics not loaded";
+  const lines = [
+    `ok=${report.ok} tick=${report.tick} violations=${report.violationCount}`,
+    `counts players=${report.playerCount} officials=${report.officialCount} ball=${report.ballPresent}`,
+    `speed y/s players=${Number(report.maxPlayerSpeedYps ?? 0).toFixed(3)}/${report.playerMaxSpeedYps} officials=${Number(report.maxOfficialSpeedYps ?? 0).toFixed(3)}/${report.playerMaxSpeedYps} ball=${Number(report.maxBallSpeedYps ?? 0).toFixed(3)}/${report.ballMaxSpeedYps}`,
+    `accel y/s2 players=${Number(report.maxPlayerAccelYps2 ?? 0).toFixed(3)}/${report.playerMaxAccelYps2} officials=${Number(report.maxOfficialAccelYps2 ?? 0).toFixed(3)}/${report.playerMaxAccelYps2} ball=${Number(report.maxBallAccelYps2 ?? 0).toFixed(3)}/${report.ballMaxAccelYps2}`,
+    `jerk y/s3 players=${Number(report.maxPlayerJerkYps3 ?? 0).toFixed(3)} officials=${Number(report.maxOfficialJerkYps3 ?? 0).toFixed(3)} ball=${Number(report.maxBallJerkYps3 ?? 0).toFixed(3)}`,
+    `histories players=${report.minPlayerHistoryLen}-${report.maxPlayerHistoryLen} officials=${report.minOfficialHistoryLen}-${report.maxOfficialHistoryLen} ball=${report.ballHistoryLen}`,
+    `pitchMarginYards=${report.pitchMarginYards}`,
+  ];
+  const violations = Array.isArray(report.violations) ? report.violations : [];
+  for (const violation of violations.slice(0, 5)) {
+    lines.push(`${violation.subject}.${violation.metric}: value ${violation.value}; limit ${violation.limit}`);
   }
   return lines.join("\n");
 }
@@ -2952,6 +2983,8 @@ function render() {
   runtimeContracts.title = runtimeContractsTitle();
   liveAccounting.textContent = liveAccountingLabel();
   liveAccounting.title = liveAccountingTitle();
+  livePhysics.textContent = livePhysicsLabel();
+  livePhysics.title = livePhysicsTitle();
   learning.textContent = learningLabel(state.learning);
   shapeLearning.textContent = shapeLearningLabel(state.tacticalSummary);
   policyAutosave.textContent = policyAutosaveLabel(state.policyAutosave);
@@ -4105,6 +4138,7 @@ async function stepOnce(options = {}) {
       decisionModel: response.decisionModel || state.decisionModel,
       learningContract: response.learningContract || state.learningContract,
       liveAccounting: response.liveAccounting || state.liveAccounting,
+      livePhysics: response.livePhysics || state.livePhysics,
       stepTiming: response.stepTiming,
       controllerAssignments: response.controllerAssignments,
       controllerThreads: response.controllerThreads || [],

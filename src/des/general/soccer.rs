@@ -29984,6 +29984,37 @@ pub struct SoccerLiveFrameAccountingReport {
     pub violations: Vec<SoccerAccountingSmokeViolation>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerLiveFramePhysicsReport {
+    pub tick: u64,
+    pub ok: bool,
+    pub player_count: usize,
+    pub official_count: usize,
+    pub ball_present: bool,
+    pub max_player_speed_yps: f64,
+    pub max_official_speed_yps: f64,
+    pub max_ball_speed_yps: f64,
+    pub max_player_accel_yps2: f64,
+    pub max_official_accel_yps2: f64,
+    pub max_ball_accel_yps2: f64,
+    pub max_player_jerk_yps3: f64,
+    pub max_official_jerk_yps3: f64,
+    pub max_ball_jerk_yps3: f64,
+    pub player_max_speed_yps: f64,
+    pub ball_max_speed_yps: f64,
+    pub player_max_accel_yps2: f64,
+    pub ball_max_accel_yps2: f64,
+    pub pitch_margin_yards: f64,
+    pub min_player_history_len: usize,
+    pub max_player_history_len: usize,
+    pub min_official_history_len: usize,
+    pub max_official_history_len: usize,
+    pub ball_history_len: usize,
+    pub violation_count: usize,
+    pub violations: Vec<SoccerPhysicsSmokeViolation>,
+}
+
 impl SoccerLiveFrameAccountingReport {
     fn push_violation(
         &mut self,
@@ -30000,6 +30031,29 @@ impl SoccerLiveFrameAccountingReport {
             metric: metric.into(),
             expected: expected.into(),
             actual: actual.into(),
+            message: message.into(),
+        });
+        self.violation_count = self.violations.len();
+        self.ok = self.violations.is_empty();
+    }
+}
+
+impl SoccerLiveFramePhysicsReport {
+    fn push_violation(
+        &mut self,
+        tick: u64,
+        subject: impl Into<String>,
+        metric: impl Into<String>,
+        value: f64,
+        limit: f64,
+        message: impl Into<String>,
+    ) {
+        self.violations.push(SoccerPhysicsSmokeViolation {
+            tick,
+            subject: subject.into(),
+            metric: metric.into(),
+            value,
+            limit,
             message: message.into(),
         });
         self.violation_count = self.violations.len();
@@ -30397,6 +30451,295 @@ pub fn soccer_live_frame_accounting_report(frame: &MatchFrame) -> SoccerLiveFram
     report.violation_count = report.violations.len();
     report.ok = report.violations.is_empty();
     report
+}
+
+pub fn soccer_live_frame_physics_report(
+    frame: &MatchFrame,
+    config: &MatchConfig,
+) -> SoccerLiveFramePhysicsReport {
+    let limits = SoccerPhysicsSmokeLimits::default();
+    let mut report = SoccerLiveFramePhysicsReport {
+        tick: frame.tick,
+        ok: true,
+        player_count: frame.players.len(),
+        official_count: frame.officials.len(),
+        ball_present: true,
+        player_max_speed_yps: limits.player_max_speed_yps,
+        ball_max_speed_yps: limits.ball_max_speed_yps,
+        player_max_accel_yps2: limits.player_max_accel_yps2,
+        ball_max_accel_yps2: limits.ball_max_accel_yps2,
+        pitch_margin_yards: limits.pitch_margin_yards,
+        min_player_history_len: frame
+            .players
+            .iter()
+            .map(|player| player.position_history.len())
+            .min()
+            .unwrap_or(0),
+        max_player_history_len: frame
+            .players
+            .iter()
+            .map(|player| player.position_history.len())
+            .max()
+            .unwrap_or(0),
+        min_official_history_len: frame
+            .officials
+            .iter()
+            .map(|official| official.position_history.len())
+            .min()
+            .unwrap_or(0),
+        max_official_history_len: frame
+            .officials
+            .iter()
+            .map(|official| official.position_history.len())
+            .max()
+            .unwrap_or(0),
+        ball_history_len: frame.ball_history.len(),
+        ..SoccerLiveFramePhysicsReport::default()
+    };
+
+    live_check_position_bounds(
+        &mut report,
+        frame.tick,
+        "ball",
+        frame.ball.position,
+        config,
+        limits.pitch_margin_yards,
+    );
+    if let Some(value) = live_check_motion_vector(
+        &mut report,
+        frame.tick,
+        "ball",
+        "velocity",
+        frame.ball.velocity,
+        Some(limits.ball_max_speed_yps),
+    ) {
+        report.max_ball_speed_yps = report.max_ball_speed_yps.max(value);
+    }
+    if let Some(value) = live_check_motion_vector(
+        &mut report,
+        frame.tick,
+        "ball",
+        "acceleration",
+        frame.ball.acceleration,
+        Some(limits.ball_max_accel_yps2),
+    ) {
+        report.max_ball_accel_yps2 = report.max_ball_accel_yps2.max(value);
+    }
+    if let Some(value) = live_check_motion_vector(
+        &mut report,
+        frame.tick,
+        "ball",
+        "jerk",
+        frame.ball.jerk,
+        None,
+    ) {
+        report.max_ball_jerk_yps3 = report.max_ball_jerk_yps3.max(value);
+    }
+
+    for player in &frame.players {
+        let subject = format!("player:{}", player.id);
+        live_check_position_bounds(
+            &mut report,
+            frame.tick,
+            &subject,
+            player.position,
+            config,
+            limits.pitch_margin_yards,
+        );
+        if let Some(value) = live_check_motion_vector(
+            &mut report,
+            frame.tick,
+            &subject,
+            "velocity",
+            player.velocity,
+            Some(limits.player_max_speed_yps),
+        ) {
+            report.max_player_speed_yps = report.max_player_speed_yps.max(value);
+        }
+        if let Some(value) = live_check_motion_vector(
+            &mut report,
+            frame.tick,
+            &subject,
+            "acceleration",
+            player.acceleration,
+            Some(limits.player_max_accel_yps2),
+        ) {
+            report.max_player_accel_yps2 = report.max_player_accel_yps2.max(value);
+        }
+        if let Some(value) =
+            live_check_motion_vector(&mut report, frame.tick, &subject, "jerk", player.jerk, None)
+        {
+            report.max_player_jerk_yps3 = report.max_player_jerk_yps3.max(value);
+        }
+    }
+
+    for official in &frame.officials {
+        let subject = format!("official:{}", official.id);
+        live_check_position_bounds(
+            &mut report,
+            frame.tick,
+            &subject,
+            official.position,
+            config,
+            limits.pitch_margin_yards,
+        );
+        if let Some(value) = live_check_motion_vector(
+            &mut report,
+            frame.tick,
+            &subject,
+            "velocity",
+            official.velocity,
+            Some(limits.player_max_speed_yps),
+        ) {
+            report.max_official_speed_yps = report.max_official_speed_yps.max(value);
+        }
+        if let Some(value) = live_check_motion_vector(
+            &mut report,
+            frame.tick,
+            &subject,
+            "acceleration",
+            official.acceleration,
+            Some(limits.player_max_accel_yps2),
+        ) {
+            report.max_official_accel_yps2 = report.max_official_accel_yps2.max(value);
+        }
+        if let Some(value) = live_check_motion_vector(
+            &mut report,
+            frame.tick,
+            &subject,
+            "jerk",
+            official.jerk,
+            None,
+        ) {
+            report.max_official_jerk_yps3 = report.max_official_jerk_yps3.max(value);
+        }
+    }
+
+    let min_player_history_len = report.min_player_history_len;
+    let max_player_history_len = report.max_player_history_len;
+    let min_official_history_len = report.min_official_history_len;
+    let max_official_history_len = report.max_official_history_len;
+    let ball_history_len = report.ball_history_len;
+    live_check_history_len(
+        &mut report,
+        frame.tick,
+        "players",
+        min_player_history_len,
+        max_player_history_len,
+        PLAYER_POSITION_HISTORY_LIMIT,
+    );
+    live_check_history_len(
+        &mut report,
+        frame.tick,
+        "officials",
+        min_official_history_len,
+        max_official_history_len,
+        OFFICIAL_POSITION_HISTORY_LIMIT,
+    );
+    live_check_history_len(
+        &mut report,
+        frame.tick,
+        "ball",
+        ball_history_len,
+        ball_history_len,
+        BALL_POSITION_HISTORY_LIMIT,
+    );
+
+    report.violation_count = report.violations.len();
+    report.ok = report.violations.is_empty();
+    report
+}
+
+fn live_check_position_bounds(
+    report: &mut SoccerLiveFramePhysicsReport,
+    tick: u64,
+    subject: &str,
+    position: Vec2,
+    config: &MatchConfig,
+    margin: f64,
+) {
+    if !vec2_is_finite(position) {
+        report.push_violation(
+            tick,
+            subject,
+            "positionFinite",
+            0.0,
+            0.0,
+            "position must be finite",
+        );
+        return;
+    }
+    let x_limit = config.field_width_yards + margin.max(0.0);
+    let y_limit = config.field_length_yards + margin.max(0.0);
+    let outside = (-margin - position.x)
+        .max(position.x - x_limit)
+        .max(-margin - position.y)
+        .max(position.y - y_limit);
+    if outside > 0.0 {
+        report.push_violation(
+            tick,
+            subject,
+            "pitchBounds",
+            outside,
+            0.0,
+            "position left the tolerated pitch bounds",
+        );
+    }
+}
+
+fn live_check_motion_vector(
+    report: &mut SoccerLiveFramePhysicsReport,
+    tick: u64,
+    subject: &str,
+    metric: &str,
+    vector: Vec2,
+    limit: Option<f64>,
+) -> Option<f64> {
+    if !vec2_is_finite(vector) {
+        report.push_violation(
+            tick,
+            subject,
+            format!("{metric}Finite"),
+            0.0,
+            0.0,
+            format!("{metric} must be finite"),
+        );
+        return None;
+    }
+    let value = vector.len();
+    if let Some(limit) = limit {
+        if value > limit {
+            report.push_violation(
+                tick,
+                subject,
+                metric,
+                value,
+                limit,
+                format!("{metric} exceeded live physics limit"),
+            );
+        }
+    }
+    Some(value)
+}
+
+fn live_check_history_len(
+    report: &mut SoccerLiveFramePhysicsReport,
+    tick: u64,
+    subject: &str,
+    min_len: usize,
+    max_len: usize,
+    limit: usize,
+) {
+    if min_len == 0 || max_len > limit {
+        report.push_violation(
+            tick,
+            subject,
+            "historyWindow",
+            max_len as f64,
+            limit as f64,
+            "position history must be present and within the configured live window",
+        );
+    }
 }
 
 pub fn soccer_simulation_accounting_smoke_report(
@@ -33791,6 +34134,8 @@ pub struct SoccerStepResponse {
     #[serde(default)]
     pub live_accounting: SoccerLiveFrameAccountingReport,
     #[serde(default)]
+    pub live_physics: SoccerLiveFramePhysicsReport,
+    #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
     #[serde(default)]
@@ -33851,6 +34196,8 @@ pub struct SoccerLiveStateResponse {
     pub learning_contract: SoccerLearningRuntimeContract,
     #[serde(default)]
     pub live_accounting: SoccerLiveFrameAccountingReport,
+    #[serde(default)]
+    pub live_physics: SoccerLiveFramePhysicsReport,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
@@ -43797,6 +44144,7 @@ impl SoccerRealtimeSession {
 
         let frame = self.sim.to_frame();
         let live_accounting = soccer_live_frame_accounting_report(&frame);
+        let live_physics = soccer_live_frame_physics_report(&frame, &self.sim.config);
         let controller_threads = self.controller_thread_stats();
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
@@ -43832,6 +44180,7 @@ impl SoccerRealtimeSession {
             decision_model: soccer_decision_model_contract(),
             learning_contract: soccer_learning_runtime_contract(&self.sim.config),
             live_accounting,
+            live_physics,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -43869,6 +44218,7 @@ impl SoccerRealtimeSession {
 
         let frame = self.sim.to_live_http_frame();
         let live_accounting = soccer_live_frame_accounting_report(&frame);
+        let live_physics = soccer_live_frame_physics_report(&frame, &self.sim.config);
         let controller_threads = self.controller_thread_stats();
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
@@ -43904,6 +44254,7 @@ impl SoccerRealtimeSession {
             decision_model: soccer_decision_model_contract(),
             learning_contract: soccer_learning_runtime_contract(&self.sim.config),
             live_accounting,
+            live_physics,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -44478,6 +44829,7 @@ impl SoccerRealtimeSession {
     pub fn state_response(&self) -> SoccerLiveStateResponse {
         let frame = self.sim.to_live_http_frame();
         let live_accounting = soccer_live_frame_accounting_report(&frame);
+        let live_physics = soccer_live_frame_physics_report(&frame, &self.sim.config);
         let controller_threads = self.controller_thread_stats();
         let controller_yield = self.sim.controller_yield_stats();
         let controller_latency_budget =
@@ -44505,6 +44857,7 @@ impl SoccerRealtimeSession {
             decision_model: soccer_decision_model_contract(),
             learning_contract: soccer_learning_runtime_contract(&self.sim.config),
             live_accounting,
+            live_physics,
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -65008,6 +65361,21 @@ mod tests {
         assert!(step.live_accounting.central_brain_decision_present);
         assert!(step.live_accounting.ball_decision_present);
         assert!(step.live_accounting.operation_traces_checked >= 5);
+        assert!(step.live_physics.ok, "{:?}", step.live_physics.violations);
+        assert_eq!(step.live_physics.player_count, 22);
+        assert_eq!(step.live_physics.official_count, 3);
+        assert!(step.live_physics.ball_present);
+        assert!(step.live_physics.max_player_speed_yps.is_finite());
+        assert!(step.live_physics.max_official_speed_yps.is_finite());
+        assert!(step.live_physics.max_ball_speed_yps.is_finite());
+        assert_eq!(
+            step.live_physics.player_max_speed_yps,
+            SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS
+        );
+        assert_eq!(
+            step.live_physics.ball_max_speed_yps,
+            SOCCER_PHYSICS_BALL_MAX_SPEED_YPS
+        );
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
         assert_eq!(step.frame.central_brain.tracked_officials, 3);
@@ -91232,6 +91600,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .unwrap()
                 >= 5
         );
+        assert_eq!(step_value["livePhysics"]["ok"], true);
+        assert_eq!(step_value["livePhysics"]["playerCount"], 22);
+        assert_eq!(step_value["livePhysics"]["officialCount"], 3);
+        assert_eq!(step_value["livePhysics"]["ballPresent"], true);
+        assert_eq!(
+            step_value["livePhysics"]["playerMaxSpeedYps"],
+            SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS
+        );
+        assert_eq!(
+            step_value["livePhysics"]["ballMaxSpeedYps"],
+            SOCCER_PHYSICS_BALL_MAX_SPEED_YPS
+        );
     }
 
     #[test]
@@ -99239,6 +99619,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function liveAccountingTitle("));
         assert!(html.contains("liveAccounting.textContent = liveAccountingLabel()"));
         assert!(html.contains("liveAccounting: response.liveAccounting || state.liveAccounting"));
+        assert!(html.contains("id=\"livePhysics\""));
+        assert!(html.contains("function livePhysicsLabel("));
+        assert!(html.contains("function livePhysicsTitle("));
+        assert!(html.contains("livePhysics.textContent = livePhysicsLabel()"));
+        assert!(html.contains("livePhysics: response.livePhysics || state.livePhysics"));
         assert!(html.contains("id=\"gkPhysics\""));
         assert!(html.contains("function goalkeeperPhysicsLabel()"));
         assert!(html.contains("function goalkeeperPhysicsTitle()"));

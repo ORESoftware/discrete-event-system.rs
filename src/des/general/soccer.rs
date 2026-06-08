@@ -6459,6 +6459,7 @@ impl PlayerAgent {
         let defensive_urgency = observation.defensive_urgency.clamp(0.0, 1.0);
         let decision_urgency = observation.decision_urgency.clamp(0.0, 1.0);
         let goal_attack = observation.goal_attack_window_score.clamp(0.0, 1.0);
+        let goal_entry_pressure = goal_entry_decisive_pressure_score(observation);
         let speculative_long_shot =
             speculative_long_shot_is_qualified(observation, self.role, shooting);
         let shot_legal =
@@ -6493,6 +6494,7 @@ impl PlayerAgent {
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
             * (1.0 + goal_attack * 1.20)
             * (1.0 + goal_proximity_shot_pressure * 1.05)
+            * (1.0 + goal_entry_pressure * 0.74)
             * (1.0 + striker_shot_bonus * 1.35)
             * (1.0 + decisive_goal_pressure * 0.95)
             * 0.042)
@@ -6502,6 +6504,7 @@ impl PlayerAgent {
                     + striker_shot_bonus * 0.18
                     + goal_attack * 0.22
                     + goal_proximity_shot_pressure * 0.30
+                    + goal_entry_pressure * 0.20
                     + decisive_goal_pressure * 0.26,
             )
             .max(close_shot_attempt)
@@ -6869,6 +6872,7 @@ impl PlayerAgent {
                 + killer_pass_range_fit * 1.05
                 + killer_pass_goal_pressure * 1.22
                 + single_thread_goal_pressure * 0.92
+                + goal_entry_pressure * 0.62
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
             * (1.0 + decisive_goal_pressure * 0.72)
@@ -7018,7 +7022,11 @@ impl PlayerAgent {
                     + observation.shot_beat_goalkeeper_probability.clamp(0.0, 1.0) * 0.28
                     + (1.0 - observation.shot_block_probability.clamp(0.0, 1.0)) * 0.30)
                     .clamp(0.0, 1.0);
-                (0.12 + decisive_goal_pressure * 0.46 + shot_lane_fit * 0.16).clamp(0.0, 0.84)
+                (0.12 + decisive_goal_pressure * 0.46 + shot_lane_fit * 0.16)
+                    .clamp(0.0, 0.84)
+                    .max(
+                        (0.10 + goal_entry_pressure * 0.42 + shot_lane_fit * 0.18).clamp(0.0, 0.82),
+                    )
             } else {
                 0.0
             };
@@ -7043,6 +7051,7 @@ impl PlayerAgent {
                     + decisive_goal_pressure * 0.42
                     + threaded_lane_fit * 0.16
                     + close_threaded_goal_fit * 0.10
+                    + goal_entry_pressure * 0.16
                     + single_thread_goal_pressure * 0.14)
                     .clamp(0.0, 0.84),
             );
@@ -7056,6 +7065,7 @@ impl PlayerAgent {
                 } else {
                     0.0
                 }
+                - goal_entry_pressure * 0.16
                 - goal_attack * 0.10)
                 .clamp(0.16, 1.0);
             for label in [
@@ -52215,11 +52225,28 @@ fn killer_pass_goal_range_fit(observation: &SoccerPomdpObservation) -> f64 {
     }
 }
 
+fn goal_entry_decisive_pressure_score(observation: &SoccerPomdpObservation) -> f64 {
+    if observation.yards_to_goal > GOAL_URGENCY_MAX_YARDS {
+        return 0.0;
+    }
+    let entry_fit = ((GOAL_URGENCY_MAX_YARDS - observation.yards_to_goal)
+        / (GOAL_URGENCY_MAX_YARDS - GOAL_URGENCY_KEEPER_CROWD_YARDS).max(1.0))
+    .clamp(0.0, 1.0)
+    .powf(0.72);
+    let crowded_keeper_fit = if observation.yards_to_goal < GOAL_URGENCY_KEEPER_CROWD_YARDS {
+        (observation.yards_to_goal / GOAL_URGENCY_KEEPER_CROWD_YARDS).clamp(0.42, 1.0)
+    } else {
+        1.0
+    };
+    (entry_fit * crowded_keeper_fit).clamp(0.0, 1.0)
+}
+
 fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 {
     let range_fit = killer_pass_goal_range_fit(observation);
     if range_fit <= 0.0 {
         return 0.0;
     }
+    let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
     let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
     let receiver_lane_fit = (observation
         .best_forward_pass_receiver_openness
@@ -52232,7 +52259,8 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
         + final_third_fit * 0.26
         + receiver_lane_fit * 0.22
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.10
-        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.04)
+        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.04
+        + goal_entry_fit * 0.08)
         .clamp(0.0, 1.0)
 }
 
@@ -52244,6 +52272,7 @@ fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) 
         return 0.0;
     }
     let range_fit = killer_pass_goal_range_fit(observation).powf(0.48);
+    let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
     let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
     let receiver_lane_fit = (observation
         .best_forward_pass_receiver_openness
@@ -52261,7 +52290,8 @@ fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) 
         + final_third_fit * 0.22
         + receiver_lane_fit * 0.36
         + blocked_shot_invitation * 0.12
-        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.04)
+        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.04
+        + goal_entry_fit * 0.08)
         .clamp(0.0, 1.0)
 }
 
@@ -52271,15 +52301,17 @@ fn killer_pass_goal_pressure_floor(observation: &SoccerPomdpObservation) -> f64 
         return 0.0;
     }
     let danger_zone_fit = ((36.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
+    let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
     (0.08
         + pressure * 0.30
         + danger_zone_fit * 0.10
+        + goal_entry_fit * 0.08
         + observation
             .best_forward_pass_receiver_openness
             .clamp(0.0, 1.0)
             * 0.08
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.06)
-        .clamp(0.12, 0.58)
+        .clamp(0.12, 0.64)
 }
 
 fn threaded_goal_pass_can_override_forced_shot(
@@ -52359,12 +52391,15 @@ fn near_goal_decisive_action_pressure_score(
         PlayerRole::Goalkeeper => 0.0,
     };
 
+    let goal_entry_fit = goal_entry_decisive_pressure_score(observation);
+
     ((range_fit * 0.34
         + final_third_fit * 0.22
         + shot_lane_fit.max(threaded_lane_fit) * 0.24
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.13
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.07
-        + single_thread_fit * 0.08)
+        + single_thread_fit * 0.08
+        + goal_entry_fit * 0.09)
         * role_fit)
         .clamp(0.0, 1.0)
 }
@@ -94097,7 +94132,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
 
         let mut previous_decisive = 0.0;
         let mut previous_recycle = f64::INFINITY;
-        for (idx, y) in [74.0, 88.0, 101.0].into_iter().enumerate() {
+        for (idx, y) in [90.0, 98.0, 104.0].into_iter().enumerate() {
             sim.players[attacker].position = Vec2::new(40.0, y);
             sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
             sim.players[runner].position = Vec2::new(47.0, (y + 18.0).min(112.0));
@@ -94134,15 +94169,33 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 + option_probability("carry-forward");
 
             if idx > 0 {
-                assert!(
-                    decisive > previous_decisive + 0.04,
-                    "decisive shoot/killer-pass pressure should ramp toward goal: y={y} decisive={decisive} previous={previous_decisive} options={options:?}"
-                );
-                assert!(
-                    recycle < previous_recycle,
-                    "generic recycle/carry pressure should be damped as the ball nears goal: y={y} recycle={recycle} previous={previous_recycle} options={options:?}"
-                );
+                if previous_decisive < 0.92 {
+                    assert!(
+                        decisive > previous_decisive + 0.04,
+                        "decisive shoot/killer-pass pressure should ramp toward goal before saturation: y={y} decisive={decisive} previous={previous_decisive} options={options:?}"
+                    );
+                } else {
+                    assert!(
+                        decisive >= 0.92,
+                        "decisive shoot/killer-pass pressure should stay dominant near goal after saturation: y={y} decisive={decisive} previous={previous_decisive} options={options:?}"
+                    );
+                }
+                if previous_recycle > 0.08 {
+                    assert!(
+                        recycle < previous_recycle,
+                        "generic recycle/carry pressure should be damped as the ball nears goal: y={y} recycle={recycle} previous={previous_recycle} options={options:?}"
+                    );
+                } else {
+                    assert!(
+                        recycle <= 0.08,
+                        "generic recycle/carry pressure should stay tiny after decisive saturation: y={y} recycle={recycle} previous={previous_recycle} options={options:?}"
+                    );
+                }
             }
+            assert!(
+                decisive > recycle,
+                "goal-entry decisions should favor a shot or killer pass over recycling: y={y} decisive={decisive} recycle={recycle} options={options:?}"
+            );
             previous_decisive = decisive;
             previous_recycle = recycle;
         }
@@ -94454,7 +94507,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         }
 
         let mut previous_killer = 0.0;
-        for (idx, y) in [72.0, 84.0, 94.0].into_iter().enumerate() {
+        let mut previous_thread_pressure = 0.0;
+        for (idx, y) in [84.0, 94.0, 100.0].into_iter().enumerate() {
             sim.players[attacker].position = Vec2::new(40.0, y);
             sim.players[attacker].velocity = Vec2::new(0.0, 3.8);
             sim.players[runner].position = Vec2::new(52.0, (y + 18.0).min(112.0));
@@ -94500,13 +94554,30 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .find(|option| option.label == "killer-pass" && option.legal)
                 .map(|option| option.probability)
                 .unwrap_or(0.0);
+            let pass1 = options
+                .iter()
+                .find(|option| option.label == "pass1" && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0);
+            let thread_pressure = single_pass_goal_thread_pressure_score(&observation);
             if idx > 0 {
                 assert!(
                     killer > previous_killer + 0.04,
                     "killer-pass probability should ramp as blocked holder nears goal: y={y} killer={killer} previous={previous_killer} options={options:?}"
                 );
+                assert!(
+                    thread_pressure > previous_thread_pressure + 0.03,
+                    "single threaded goal-pass pressure should ramp independently: y={y} pressure={thread_pressure} previous={previous_thread_pressure} observation={observation:?}"
+                );
+            }
+            if idx == 2 {
+                assert!(
+                    killer > pass1 * 3.0,
+                    "near-goal threaded killer-pass should swamp ordinary pass1: killer={killer} pass1={pass1} options={options:?}"
+                );
             }
             previous_killer = killer;
+            previous_thread_pressure = thread_pressure;
         }
     }
 

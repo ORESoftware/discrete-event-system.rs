@@ -52625,11 +52625,96 @@ fn tracking_pass_label(
     before: &WorldSnapshot,
     after: &WorldSnapshot,
 ) -> &'static str {
-    if tracking_pass_flight_between(before_frame, after_frame, before, after).is_aerial() {
+    let flight = tracking_pass_flight_between(before_frame, after_frame, before, after);
+    if flight.is_aerial() {
         "aerial-pass"
+    } else if tracking_floor_pass_is_killer_pass(before, after, flight) {
+        "killer-pass"
     } else {
         "pass"
     }
+}
+
+fn tracking_floor_pass_is_killer_pass(
+    before: &WorldSnapshot,
+    after: &WorldSnapshot,
+    flight: PassFlight,
+) -> bool {
+    if flight.is_aerial() {
+        return false;
+    }
+    let Some(passer_id) = before.ball.holder else {
+        return false;
+    };
+    let Some(passer) = before.players.iter().find(|player| player.id == passer_id) else {
+        return false;
+    };
+    let Some(receiver_id) = after
+        .ball
+        .holder
+        .filter(|receiver_id| *receiver_id != passer_id)
+        .or_else(|| infer_tracking_pass_receiver(passer, before, after))
+    else {
+        return false;
+    };
+    let Some(receiver) = after
+        .players
+        .iter()
+        .find(|player| player.id == receiver_id && player.team == passer.team)
+    else {
+        return false;
+    };
+    if receiver.role == PlayerRole::Goalkeeper
+        || before
+            .pending_offside_for_pass(passer_id, receiver_id)
+            .is_some()
+    {
+        return false;
+    }
+
+    let origin = before.ball.position;
+    let target = after
+        .player_position(receiver_id)
+        .unwrap_or(after.ball.position)
+        .clamp_to_pitch(before.field_width, before.field_length);
+    let is_cross = pass_would_be_cross(
+        origin,
+        target,
+        passer.team,
+        before.field_width,
+        before.field_length,
+    );
+    if is_cross || !before.clear_line(origin, target, passer.team.other(), 1.35) {
+        return false;
+    }
+
+    let nearest_opponent = after.nearest_opponent_distance_at(passer.team, target);
+    let receiver_openness = (nearest_opponent / 12.0).clamp(0.0, 1.0);
+    let receiver_velocity = after
+        .player_velocity(receiver_id)
+        .or_else(|| before.player_velocity(receiver_id))
+        .unwrap_or(receiver.velocity);
+    let pass_vector = target - origin;
+    let stride_fit = if pass_vector.len() > 1e-6 {
+        let pass_dir = pass_vector.normalized();
+        let forward_stride = receiver_velocity.dot(pass_dir).max(0.0);
+        (0.34 + (forward_stride / 8.0).clamp(0.0, 1.0) * 0.66).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    completed_killer_pass_reward_from_parts(
+        passer.team,
+        flight,
+        is_cross,
+        origin,
+        target,
+        receiver.role,
+        &receiver.skills,
+        before.field_width,
+        before.field_length,
+        receiver_openness,
+        stride_fit,
+    ) > 0.0
 }
 
 fn tracking_pass_flight_between(
@@ -99626,6 +99711,83 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 },
             ],
         }
+    }
+
+    fn sample_tracking_threaded_goal_pass_dataset() -> SoccerTrackingDataset {
+        let mut tracking = sample_tracking_pass_dataset();
+        tracking.source = "unit-threaded-goal-pass".to_string();
+
+        tracking.frames[0].ball_position = Vec2::new(40.0, 84.0);
+        tracking.frames[0].ball_velocity = Some(Vec2::zero());
+        tracking.frames[0].ball_action = None;
+        tracking.frames[0].action_player = None;
+        tracking.frames[0].ball_holder = Some(0);
+        tracking.frames[0].players[0].position = Vec2::new(40.0, 84.0);
+        tracking.frames[0].players[1].position = Vec2::new(47.0, 96.0);
+        tracking.frames[0].players[1].velocity = Some(Vec2::new(0.8, 5.2));
+        tracking.frames[0].players[2].position = Vec2::new(68.0, 94.0);
+
+        tracking.frames[1].ball_position = Vec2::new(49.0, 103.0);
+        tracking.frames[1].ball_velocity = Some(Vec2::new(9.0, 19.0));
+        tracking.frames[1].ball_action = Some("pass".to_string());
+        tracking.frames[1].action_player = Some(0);
+        tracking.frames[1].ball_holder = Some(1);
+        tracking.frames[1].players[0].position = Vec2::new(40.1, 84.4);
+        tracking.frames[1].players[1].position = Vec2::new(49.0, 103.0);
+        tracking.frames[1].players[1].velocity = Some(Vec2::new(0.6, 5.4));
+        tracking.frames[1].players[2].position = Vec2::new(69.0, 96.0);
+        tracking
+    }
+
+    #[test]
+    fn tracking_geometry_infers_threaded_goal_pass_without_manual_killer_label() {
+        let tracking = sample_tracking_threaded_goal_pass_dataset();
+        let dataset = tracking
+            .to_learning_dataset()
+            .expect("threaded goal-pass tracking import");
+
+        let passer_transition = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("passer transition");
+        assert_eq!(passer_transition.action, "killer-pass");
+        assert_eq!(
+            passer_transition
+                .action_target
+                .as_ref()
+                .and_then(|target| target.player_id),
+            Some(1)
+        );
+        assert!(
+            passer_transition.decision_context.target_forward_yards
+                >= KILLER_PASS_MIN_FORWARD_YARDS,
+            "tracking transition should preserve forward target context: {:?}",
+            passer_transition.decision_context
+        );
+        assert!(
+            passer_transition.reward > 0.0,
+            "geometry-inferred killer pass should carry positive learning reward: {passer_transition:?}"
+        );
+
+        let mut policies = SoccerTeamQPolicies::new(SoccerQPolicyOptions::default());
+        policies.train_adversarial(&dataset.transitions);
+        assert!(
+            policies
+                .home
+                .q_values
+                .keys()
+                .any(|key| key.action == "killer-pass"),
+            "MDP/Q policy should train the inferred killer-pass action"
+        );
+        assert!(
+            policies
+                .home
+                .target_values
+                .keys()
+                .any(|key| key.action == "killer-pass"),
+            "target-grid policy should train the inferred killer-pass receiver cell"
+        );
     }
 
     #[test]

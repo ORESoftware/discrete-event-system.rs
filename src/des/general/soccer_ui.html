@@ -1604,6 +1604,34 @@ function drawPitchGridOverlay(r) {
   }
   ctx.restore();
 }
+function assistantOffsideLines(frame = currentFrame()) {
+  if (!Array.isArray(frame?.officials)) return [];
+  const seen = new Set();
+  const lines = [];
+  for (const official of frame.officials) {
+    const line = official.offsideLine || official.offside_line;
+    if (!line) continue;
+    const key = `${line.attackingTeam || line.attacking_team}:${Number(line.effectiveLineY ?? line.effective_line_y ?? 0).toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(line);
+  }
+  return lines;
+}
+function drawAssistantOffsideLines(f, r) {
+  for (const line of assistantOffsideLines(f)) {
+    const y = mapPoint({x: 0, y: Number(line.effectiveLineY ?? line.effective_line_y ?? 0)}, r).y;
+    const attackingTeam = line.attackingTeam || line.attacking_team;
+    ctx.beginPath();
+    ctx.moveTo(r.x, y);
+    ctx.lineTo(r.x + r.w, y);
+    ctx.strokeStyle = attackingTeam === "Home" ? "rgba(31,111,235,.72)" : "rgba(214,69,69,.72)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([9, 7]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
 function drawGoalPosts(r) {
   const config = trace.config || FALLBACK_CONFIG;
   const fieldWidth = Number(config.fieldWidthYards || 80);
@@ -1869,6 +1897,7 @@ function render() {
   drawPitchGridOverlay(r);
   const f = currentFrame();
   if (!f) return;
+  drawAssistantOffsideLines(f, r);
   drawPendingPassPhase(f, r);
   drawPendingReboundPhase(f, r);
   drawIntentTraces(f, r);

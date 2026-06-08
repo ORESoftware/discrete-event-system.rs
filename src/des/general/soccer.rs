@@ -27454,6 +27454,24 @@ pub struct SoccerPlaybackOfficialFrame {
     pub last_action: Option<String>,
     #[serde(default)]
     pub operation_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offside_line: Option<SoccerPlaybackOffsideLineFrame>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerPlaybackOffsideLineFrame {
+    pub attacking_team: Team,
+    pub effective_line_y: f64,
+}
+
+fn soccer_playback_offside_line_frame(
+    line: Option<AssistantOffsideLineSnapshot>,
+) -> Option<SoccerPlaybackOffsideLineFrame> {
+    line.map(|line| SoccerPlaybackOffsideLineFrame {
+        attacking_team: line.attacking_team,
+        effective_line_y: line.effective_line_y,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28099,8 +28117,8 @@ impl SoccerPlaybackFrame {
                 holder: sim.ball.holder,
                 last_touch_team: sim.ball.last_touch_team,
             },
-            pending_pass: decision_snapshot.pending_pass,
-            pending_rebound: decision_snapshot.pending_rebound,
+            pending_pass: decision_snapshot.pending_pass.clone(),
+            pending_rebound: decision_snapshot.pending_rebound.clone(),
             players: sim
                 .players
                 .iter()
@@ -28169,6 +28187,9 @@ impl SoccerPlaybackFrame {
                         .as_ref()
                         .map(|decision| decision.operation_order.clone())
                         .unwrap_or_default(),
+                    offside_line: soccer_playback_offside_line_frame(
+                        assistant_offside_line_snapshot(&decision_snapshot, official.kind),
+                    ),
                 })
                 .collect(),
             score_home: sim.score_home,
@@ -28334,6 +28355,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                         .as_ref()
                         .map(|decision| decision.operation_order.clone())
                         .unwrap_or_default(),
+                    offside_line: soccer_playback_offside_line_frame(official.offside_line.clone()),
                 })
                 .collect(),
             score_home: frame.score_home,
@@ -95058,6 +95080,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("pass.receiverUrgency"));
         assert!(html.contains("offside.interferenceRadiusYards"));
         assert!(html.contains("drawPendingPassPhase(f, r)"));
+        assert!(html.contains("function assistantOffsideLines"));
+        assert!(html.contains("function drawAssistantOffsideLines"));
+        assert!(html.contains("official.offsideLine || official.offside_line"));
+        assert!(html.contains("drawAssistantOffsideLines(f, r)"));
         assert!(html.contains("${central}${Number(s.playerCount || 0)}p/"));
         assert!(html.contains("${hasCentral ? \"C+\" : \"\"}${players}p/${officials}o"));
         assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));
@@ -96499,6 +96525,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .unwrap()
             .iter()
             .all(|official| official["scheduledIndex"].as_u64().is_some()));
+        assert_eq!(
+            scheduled_frame["officials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|official| official["offsideLine"].is_object())
+                .count(),
+            2
+        );
         assert!(scheduled_frame["ball"]["scheduledIndex"].as_u64().is_some());
         assert!(scheduled_frame["ball"]["decisionSpeedYps"]
             .as_f64()

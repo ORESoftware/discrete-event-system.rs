@@ -70691,6 +70691,103 @@ mod tests {
     }
 
     #[test]
+    fn batched_live_step_consumes_controller_thread_input_between_ticks() {
+        let mut session = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+            duration_seconds: 0.4,
+            max_human_players: 1,
+            seed: 22_809,
+            ..Default::default()
+        });
+        session
+            .assign_controller_slot(SoccerControllerAssignmentRequest {
+                controller_slot: 0,
+                player_id: Some(0),
+            })
+            .expect("assign slot 0");
+        let input_queue = session.input_queue();
+        assert!(input_queue.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 1,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let writer_queue = input_queue.clone();
+        let writer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(120);
+            while Instant::now() < deadline {
+                if writer_queue.queued_len_for_slots(&[0]) == 0 {
+                    return writer_queue.push(HumanInputFrame {
+                        controller_slot: 0,
+                        player_id: Some(0),
+                        seq: 2,
+                        axis: Vec2::new(0.0, 1.0),
+                        sprint: true,
+                        pass: false,
+                        pass_flight: PassFlight::Floor,
+                        shoot: false,
+                        action: None,
+                        target_player: None,
+                    });
+                }
+                std::thread::yield_now();
+            }
+            false
+        });
+
+        let response = session.step(SoccerStepRequest {
+            inputs: Vec::new(),
+            ticks: 2,
+            record_every_ticks: Some(1),
+        });
+
+        assert!(
+            writer.join().expect("between-tick controller writer joins"),
+            "controller thread should enqueue fresh input after the first batched tick drains"
+        );
+        assert_eq!(
+            response.accepted_inputs, 0,
+            "second controller frame should arrive from the shared thread queue, not the HTTP request body"
+        );
+        assert_eq!(response.frames.len(), 2);
+        let first_decision = response.frames[0]
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .and_then(|player| player.last_decision.as_ref())
+            .expect("first batched frame human decision");
+        let second_decision = response.frames[1]
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .and_then(|player| player.last_decision.as_ref())
+            .expect("second batched frame human decision");
+        assert_eq!(
+            first_decision.operation_order,
+            vec!["human-input".to_string()]
+        );
+        assert_eq!(first_decision.observation.human_input_seq, Some(1));
+        assert_eq!(
+            second_decision.operation_order,
+            vec!["human-input".to_string()]
+        );
+        assert_eq!(second_decision.observation.human_input_seq, Some(2));
+        assert_eq!(input_queue.queued_len_for_slots(&[0]), 0);
+        assert!(
+            response.controller_yield.wait_attempts >= 2,
+            "batched live stepping should yield once per simulated tick: {:?}",
+            response.controller_yield
+        );
+        assert_eq!(response.controller_latency_budget.consumed_inputs, 1);
+    }
+
+    #[test]
     fn late_controller_wait_time_is_reported_as_controller_yield_timing() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

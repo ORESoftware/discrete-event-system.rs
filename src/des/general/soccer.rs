@@ -103257,6 +103257,73 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn default_full_match_streaming_writer_emits_sparse_jsonl() {
+        let config = MatchConfig {
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            full_game_learning_enabled: false,
+            formation_lp_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            adversarial_embedding_exploitation_enabled: false,
+            max_human_players: 0,
+            ..MatchConfig::default()
+        };
+        assert_eq!(config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(
+            config.effective_duration_seconds(),
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(config.total_ticks(), 6_000);
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let out_dir = std::env::temp_dir().join(format!(
+            "des-soccer-default-sparse-streaming-{unique}-{}",
+            std::process::id()
+        ));
+
+        let paths = write_soccer_playback_artifacts_streaming_to_dir(&out_dir, config.clone(), 100)
+            .expect("write sparse default playback assets");
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&paths.meta_path).expect("meta asset"))
+                .expect("meta json");
+        assert_eq!(meta["summary"]["ticks"], 6_000);
+        assert_eq!(meta["playback"]["totalTicks"], 6_000);
+        assert_eq!(meta["cadence"]["dtSeconds"], DEFAULT_DT_SECONDS);
+        assert_eq!(meta["cadence"]["durationSeconds"], DEFAULT_DURATION_SECONDS);
+        assert_eq!(meta["cadence"]["totalTicks"], 6_000);
+        assert_eq!(meta["cadence"]["recordEveryTicks"], 100);
+        assert_eq!(meta["cadence"]["expectedFrameCount"], 61);
+        assert_eq!(meta["cadence"]["tenHzTimestepContract"], true);
+        assert_eq!(meta["cadence"]["tenMinuteDurationContract"], true);
+        assert_eq!(meta["cadence"]["defaultTenMinuteContract"], true);
+
+        let frame_lines = fs::read_to_string(&paths.frames_path).expect("frames asset");
+        let lines = frame_lines.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines.len(),
+            61,
+            "sparse default playback should emit initial frame plus every 100 ticks"
+        );
+        let first_frame: serde_json::Value =
+            serde_json::from_str(lines.first().expect("first frame")).expect("first frame json");
+        let last_frame: serde_json::Value =
+            serde_json::from_str(lines.last().expect("last frame")).expect("last frame json");
+        assert_eq!(first_frame["tick"], 0);
+        assert_eq!(last_frame["tick"], 6_000);
+        assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
+        assert_eq!(last_frame["players"].as_array().unwrap().len(), 22);
+        assert_eq!(last_frame["officials"].as_array().unwrap().len(), 3);
+
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
     fn default_full_match_cadence_contract_is_ten_minutes_at_ten_hz() {
         let config = MatchConfig::default();
         let cadence = soccer_full_match_cadence(&config);

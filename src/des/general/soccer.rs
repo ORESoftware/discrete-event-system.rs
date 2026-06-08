@@ -95513,6 +95513,82 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn away_clear_goal_approach_shot_probability_ramps_toward_home_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_245,
+            ..Default::default()
+        });
+        let attacker = 19;
+        let keeper = 0;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].skills.shooting = 7.8;
+        sim.players[attacker].skills.right_foot_shot_power = 8.1;
+        sim.players[attacker].skills.left_foot_shot_power = 7.2;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.62;
+        sim.players[attacker].preferences.dribble_bias = 0.74;
+        sim.players[keeper].position = Vec2::new(40.0, 3.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+
+        let mut previous_shoot = 0.0;
+        for (idx, y) in [32.0_f64, 26.0, 20.0].into_iter().enumerate() {
+            sim.players[attacker].position = Vec2::new(40.0, y);
+            sim.players[attacker].velocity = Vec2::new(0.0, -4.0);
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Away);
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(attacker);
+            assert!(observation.shot_lane_open);
+            assert!(shot_decision_is_qualified_for_role(
+                &observation,
+                sim.players[attacker].role
+            ));
+
+            let options = sim.players[attacker].possession_action_options(
+                &observation,
+                &snapshot.tactical_directive(Team::Away),
+                snapshot.ranked_visible_pass_targets(attacker, 3).len(),
+                snapshot
+                    .ranked_visible_aerial_pass_targets(attacker, 3)
+                    .len(),
+                false,
+                sim.config.dt_seconds,
+                snapshot.field_width,
+            );
+            let shoot = options
+                .iter()
+                .find(|option| option.label == "shoot" && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0);
+            let recycle = ["pass1", "pass2", "aerial-pass1", "dribble", "carry-forward"]
+                .iter()
+                .filter_map(|label| {
+                    options
+                        .iter()
+                        .find(|option| option.label == *label && option.legal)
+                        .map(|option| option.probability)
+                })
+                .sum::<f64>();
+            if idx > 0 {
+                assert!(
+                    shoot > previous_shoot + 0.05,
+                    "away clear shot probability should ramp as home goal gets closer: y={y} shoot={shoot} previous={previous_shoot} options={options:?}"
+                );
+            }
+            assert!(
+                shoot > recycle,
+                "away clear goal approach should favor shooting over recycling: y={y} shoot={shoot} recycle={recycle} options={options:?}"
+            );
+            previous_shoot = shoot;
+        }
+    }
+
+    #[test]
     fn blocked_goal_approach_killer_pass_probability_ramps_toward_goal() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

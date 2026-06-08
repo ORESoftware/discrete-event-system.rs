@@ -96155,6 +96155,30 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn default_full_match_cadence_contract_is_ten_minutes_at_ten_hz() {
+        let config = MatchConfig::default();
+        let cadence = soccer_full_match_cadence(&config);
+
+        assert_eq!(config.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(
+            config.effective_duration_seconds(),
+            DEFAULT_DURATION_SECONDS
+        );
+        assert_eq!(config.total_ticks(), 6_000);
+        assert_eq!(cadence.dt_seconds, DEFAULT_DT_SECONDS);
+        assert_eq!(cadence.tick_hz, 10.0);
+        assert_eq!(cadence.tick_millis, 100.0);
+        assert_eq!(cadence.duration_seconds, DEFAULT_DURATION_SECONDS);
+        assert_eq!(cadence.total_ticks, 6_000);
+        assert_eq!(cadence.default_total_ticks, 6_000);
+        assert_eq!(cadence.record_every_ticks, Some(1));
+        assert_eq!(cadence.expected_frame_count, 6_001);
+        assert!(cadence.ten_hz_timestep_contract);
+        assert!(cadence.ten_minute_duration_contract);
+        assert!(cadence.default_ten_minute_contract);
+    }
+
+    #[test]
     fn live_soccer_page_exposes_intent_overlay() {
         let html = soccer_live_page_html();
 

@@ -93279,6 +93279,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("centralBrainControllerAssignmentLabel(b)"));
         assert!(html.contains("function soccerApiUrl"));
         assert!(html.contains("async function postSoccerJson"));
+        assert!(html.contains("id=\"controllerRuntime\""));
+        assert!(html.contains("function controllerRuntimeLabel"));
+        assert!(html.contains("function controllerRuntimeTitle"));
+        assert!(html.contains("nativeThreadPerControllerEnabled"));
+        assert!(html.contains("sharedInputQueueUsesRwLock"));
+        assert!(html.contains("controllerMailboxUsesCondvar"));
+        assert!(html.contains("mainLoopUsesCondvarYield"));
+        assert!(html.contains("notificationDrivenInput"));
+        assert!(html.contains("sameSlotCoalescingEnabled"));
+        assert!(html.contains("controllerRuntime.textContent = controllerRuntimeLabel()"));
+        assert!(html.contains("controllerRuntime.title = controllerRuntimeTitle()"));
         assert!(html.contains("function syncControllerAssignment"));
         assert!(html.contains("postSoccerJson(\"/api/assign\", payload, \"assign\")"));
         assert!(html.contains("function applyControllerAssignments"));

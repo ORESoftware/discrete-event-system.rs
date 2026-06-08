@@ -70849,6 +70849,77 @@ mod tests {
     }
 
     #[test]
+    fn learning_disabled_runtime_does_not_grow_training_buffers_or_timing_cost() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.5,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            full_game_learning_enabled: false,
+            learning_interval_ticks: 1,
+            policy_train_max_transitions_per_tick: 1,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15072,
+            ..Default::default()
+        })
+        .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let mut policy = SoccerQPolicy::default();
+        assert!(policy.set_action_value_for_snapshot(&snapshot, 5, "pass", 5.0));
+        sim.set_learned_policy(policy);
+
+        let seeded_policy_visits = sim
+            .learned_policy()
+            .map(SoccerQPolicy::visit_count)
+            .unwrap_or(0);
+        let seeded_team_visits = sim
+            .team_policies()
+            .map(|policies| policies.home.visit_count() + policies.away.visit_count())
+            .unwrap_or(0);
+
+        for _ in 0..sim.config.total_ticks() {
+            sim.run_time_step();
+        }
+
+        let learning = sim.learning_snapshot();
+        assert!(!learning.learning_enabled);
+        assert!(!learning.learning_logging_enabled);
+        assert!(!learning.full_game_learning_enabled);
+        assert!(!learning.neural_learning_enabled);
+        assert_eq!(learning.total_transitions, 0);
+        assert_eq!(learning.deferred_reward_transitions, 0);
+        assert_eq!(learning.full_game_learning_episode_transitions, 0);
+        assert!(sim.learning_transitions.is_empty());
+        assert!(sim.episode_learning_transitions.is_empty());
+        assert!(sim.recent_learning_history.is_empty());
+        assert!(sim.deferred_reward_transitions.is_empty());
+        assert_eq!(
+            sim.learned_policy()
+                .map(SoccerQPolicy::visit_count)
+                .unwrap_or(0),
+            seeded_policy_visits
+        );
+        assert_eq!(
+            sim.team_policies()
+                .map(|policies| policies.home.visit_count() + policies.away.visit_count())
+                .unwrap_or(0),
+            seeded_team_visits
+        );
+
+        let timing = sim.step_timing_stats();
+        assert_eq!(timing.learning_defense_ms, 0.0);
+        assert_eq!(timing.learning_transitions_ms, 0.0);
+        assert_eq!(timing.recent_learning_ms, 0.0);
+        assert_eq!(timing.neural_samples_ms, 0.0);
+        assert_eq!(timing.policy_train_ms, 0.0);
+        assert_eq!(timing.learning_log_ms, 0.0);
+        assert_eq!(timing.full_game_learning_ms, 0.0);
+        assert_eq!(timing.learning_over_budget_ticks, 0);
+    }
+
+    #[test]
     fn neural_learning_trains_inline_alongside_team_q_policy() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.2,

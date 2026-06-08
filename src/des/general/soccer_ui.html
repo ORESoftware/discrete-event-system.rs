@@ -1697,6 +1697,35 @@ function drawIntentTraces(f, r) {
     }
   }
 }
+function pendingReboundPhase(frame = currentFrame()) {
+  return frame?.pendingRebound || frame?.pending_rebound || null;
+}
+function drawPendingReboundPhase(f, r) {
+  const rebound = pendingReboundPhase(f);
+  const parry = rebound?.parryPosition || rebound?.parry_position;
+  if (!parry) return;
+  const target = mapPoint(parry, r);
+  const keeperId = rebound.keeperId ?? rebound.keeper_id;
+  const keeper = f?.players?.find(player => player.id === keeperId);
+  const pulse = 0.5 + Math.sin(Number(f?.tick || 0) * 0.75) * 0.5;
+  ctx.save();
+  if (keeper?.position) {
+    drawArrow(mapPoint(keeper.position, r), target, "rgba(246,201,68,.64)", 2.25, true);
+  }
+  ctx.beginPath();
+  ctx.arc(target.x, target.y, 21 + pulse * 5, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(246,201,68,.92)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(target.x, target.y, 7, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,.84)";
+  ctx.fill();
+  ctx.strokeStyle = "#7a4b00";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
 function gaitCueStrength(gait) {
   const key = String(gait || "stand").toLowerCase();
   if (key.includes("sprint")) return 1.0;
@@ -1790,6 +1819,7 @@ function render() {
   drawPitchGridOverlay(r);
   const f = currentFrame();
   if (!f) return;
+  drawPendingReboundPhase(f, r);
   drawIntentTraces(f, r);
   for (const o of f.officials) drawOfficial(o, r);
   for (const p of f.players) drawPlayer(p, r);

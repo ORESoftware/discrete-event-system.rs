@@ -27796,6 +27796,8 @@ pub struct SoccerPlaybackFrame {
     pub ball: SoccerPlaybackBallFrame,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_pass: Option<PendingPassSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_rebound: Option<PendingRebound>,
     pub players: Vec<SoccerPlaybackPlayerFrame>,
     pub officials: Vec<SoccerPlaybackOfficialFrame>,
     pub score_home: u32,
@@ -28047,11 +28049,10 @@ impl SoccerPlaybackFrame {
             .possession_team
             .or(ball_holder_team)
             .or(sim.ball.last_touch_team);
-        let pending_pass = WorldSnapshot::from_match_with_options(
+        let decision_snapshot = WorldSnapshot::from_match_with_options(
             sim,
             WorldSnapshotOptions::DEFENSIVE_OR_LOOSE_AGENT_DECISION,
-        )
-        .pending_pass;
+        );
 
         SoccerPlaybackFrame {
             tick: sim.tick,
@@ -28098,7 +28099,8 @@ impl SoccerPlaybackFrame {
                 holder: sim.ball.holder,
                 last_touch_team: sim.ball.last_touch_team,
             },
-            pending_pass,
+            pending_pass: decision_snapshot.pending_pass,
+            pending_rebound: decision_snapshot.pending_rebound,
             players: sim
                 .players
                 .iter()
@@ -28267,6 +28269,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                 last_touch_team: frame.ball.last_touch_team,
             },
             pending_pass: frame.pending_pass.clone(),
+            pending_rebound: frame.pending_rebound.clone(),
             players: frame
                 .players
                 .iter()
@@ -28579,6 +28582,8 @@ pub struct MatchFrame {
     pub ball_history: Vec<BallPositionSample>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_pass: Option<PendingPassSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_rebound: Option<PendingRebound>,
     pub players: Vec<PlayerSnapshot>,
     #[serde(default)]
     pub shared_positions: SharedPlayerPositionSnapshot,
@@ -38176,6 +38181,7 @@ impl SoccerMatch {
             ball,
             ball_history: snapshot.ball_history,
             pending_pass: snapshot.pending_pass,
+            pending_rebound: snapshot.pending_rebound,
             players,
             shared_positions: snapshot.shared_positions,
             officials,
@@ -88894,6 +88900,29 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .events
             .iter()
             .any(|event| event.kind == "keeper-parry" && event.player_id == Some(keeper_id)));
+        let frame = sim.to_frame();
+        assert!(frame.pending_rebound.is_some());
+        assert_eq!(
+            frame
+                .pending_rebound
+                .as_ref()
+                .map(|rebound| rebound.parry_position),
+            Some(sim.ball.position)
+        );
+        let playback = SoccerPlaybackFrame::from_match(&sim);
+        assert_eq!(
+            playback
+                .pending_rebound
+                .as_ref()
+                .map(|rebound| rebound.parry_position),
+            Some(sim.ball.position)
+        );
+        let playback_json =
+            serde_json::to_value(&playback).expect("parry playback frame should serialize");
+        assert_eq!(
+            playback_json["pendingRebound"]["parryPosition"],
+            serde_json::json!(sim.ball.position)
+        );
     }
 
     #[test]
@@ -95018,6 +95047,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("fieldShuffleAgents"));
         assert!(html.contains("expectedFieldShuffleAgents"));
         assert!(html.contains("F${field}/${expectedField}"));
+        assert!(html.contains("function pendingReboundPhase"));
+        assert!(html.contains("function drawPendingReboundPhase"));
+        assert!(html.contains("pendingRebound"));
+        assert!(html.contains("parryPosition || rebound?.parry_position"));
+        assert!(html.contains("drawPendingReboundPhase(f, r)"));
         assert!(html.contains("${central}${Number(s.playerCount || 0)}p/"));
         assert!(html.contains("${hasCentral ? \"C+\" : \"\"}${players}p/${officials}o"));
         assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));

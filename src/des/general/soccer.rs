@@ -96868,6 +96868,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .players
             .iter()
             .all(|player| player.scheduled_index.is_some()));
+        let mut player_operation_orders = HashSet::new();
         for player in &frame.players {
             let decision = player.last_decision.as_ref().expect(
                 "every scheduled player agent should expose a run_time_step decision trace",
@@ -96884,7 +96885,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 "player {} should expose its internal operation order",
                 player.id
             );
+            player_operation_orders.insert(decision.operation_order.join(">"));
         }
+        assert!(
+            player_operation_orders.len() > 1,
+            "player run_time_step operation order should vary across agents according to state/preferences: {player_operation_orders:?}"
+        );
         assert!(frame
             .officials
             .iter()

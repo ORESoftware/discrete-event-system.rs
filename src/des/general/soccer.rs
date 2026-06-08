@@ -58286,6 +58286,23 @@ mod tests {
         assert_eq!(frame.central_brain.scheduled_index, Some(0));
         assert_eq!(frame.central_brain.tracked_players.len(), 22);
         assert_eq!(frame.central_brain.tracked_officials, 3);
+        assert!(frame
+            .players
+            .iter()
+            .all(|player| player
+                .last_decision
+                .as_ref()
+                .is_some_and(
+                    |decision| decision.scheduled_index == player.scheduled_index
+                        && !decision.operation_order.is_empty()
+                )));
+        assert!(frame.officials.iter().all(|official| official
+            .last_decision
+            .as_ref()
+            .is_some_and(
+                |decision| decision.scheduled_index == official.scheduled_index
+                    && !decision.operation_order.is_empty()
+            )));
         assert_eq!(frame.ball.scheduled_index, Some(ball_schedule_index));
         assert_eq!(
             frame

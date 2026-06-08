@@ -10634,8 +10634,35 @@ pub struct HumanInputDrainResult {
     pub queue_age_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HumanControllerSlotMask(u8);
+
+impl HumanControllerSlotMask {
+    fn from_slots(controller_slots: &[usize]) -> Self {
+        let mut mask = 0u8;
+        for &slot in controller_slots {
+            if slot < SOCCER_MAX_HUMAN_CONTROLLER_SLOTS {
+                mask |= 1u8 << slot;
+            }
+        }
+        HumanControllerSlotMask(mask)
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn contains(self, controller_slot: usize) -> bool {
+        controller_slot < SOCCER_MAX_HUMAN_CONTROLLER_SLOTS
+            && (self.0 & (1u8 << controller_slot)) != 0
+    }
+}
+
 impl SharedHumanInputStore {
     fn push(&mut self, input: HumanInputFrame, enqueued_unix_ms: u64) -> bool {
+        if input.controller_slot >= SOCCER_MAX_HUMAN_CONTROLLER_SLOTS {
+            return false;
+        }
         if self
             .latest_seq_by_slot
             .get(&input.controller_slot)
@@ -10754,14 +10781,15 @@ impl SharedHumanInputStore {
         controller_slots: Option<&[usize]>,
         consumed_unix_ms: u64,
     ) -> u64 {
-        if controller_slots.is_some_and(|slots| slots.is_empty()) {
+        let slot_mask = controller_slots.map(HumanControllerSlotMask::from_slots);
+        if slot_mask.is_some_and(HumanControllerSlotMask::is_empty) {
             return 0;
         }
         let mut expired = 0u64;
         let mut retained = VecDeque::with_capacity(self.pending.len());
         while let Some(queued) = self.pending.pop_front() {
-            let slot_matches = controller_slots
-                .map(|slots| slots.contains(&queued.input.controller_slot))
+            let slot_matches = slot_mask
+                .map(|mask| mask.contains(queued.input.controller_slot))
                 .unwrap_or(true);
             let queue_age_ms = consumed_unix_ms.saturating_sub(queued.enqueued_unix_ms);
             if slot_matches && queue_age_ms > HUMAN_INPUT_MAX_QUEUE_AGE_MS {
@@ -10779,12 +10807,13 @@ impl SharedHumanInputStore {
     }
 
     fn pending_len_for_slots(&self, controller_slots: &[usize]) -> usize {
-        if controller_slots.is_empty() {
+        let slot_mask = HumanControllerSlotMask::from_slots(controller_slots);
+        if slot_mask.is_empty() {
             return 0;
         }
         self.pending
             .iter()
-            .filter(|queued| controller_slots.contains(&queued.input.controller_slot))
+            .filter(|queued| slot_mask.contains(queued.input.controller_slot))
             .count()
     }
 
@@ -69227,6 +69256,44 @@ mod tests {
     }
 
     #[test]
+    fn human_input_queue_rejects_controller_slots_beyond_four() {
+        let q = SharedHumanInputs::new();
+        let version = q.notification_version();
+
+        assert!(!q.push(test_human_input(
+            SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
+            Some(0),
+            1
+        )));
+        assert!(
+            !q.push_with_enqueue_unix_ms(test_human_input(99, Some(0), 2), soccer_unix_millis())
+        );
+
+        assert_eq!(q.queued_len(), 0);
+        assert_eq!(
+            q.queued_len_for_slots(&[SOCCER_MAX_HUMAN_CONTROLLER_SLOTS, 99]),
+            0
+        );
+        assert_eq!(q.last_seq_for_slot(SOCCER_MAX_HUMAN_CONTROLLER_SLOTS), None);
+        assert_eq!(
+            q.notification_version(),
+            version,
+            "invalid controller slots should not notify/yield the main loop"
+        );
+    }
+
+    #[test]
+    fn human_input_assigned_slot_filter_uses_fixed_four_slot_contract() {
+        let q = SharedHumanInputs::new();
+        assert!(q.push(test_human_input(0, Some(0), 1)));
+        assert!(q.push(test_human_input(3, Some(3), 1)));
+
+        assert_eq!(q.queued_len_for_slots(&[3, 0, 3, 99]), 2);
+        assert_eq!(q.queued_len_for_slots(&[1, 2, 99]), 0);
+        assert_eq!(q.queued_len_for_slots(&[99]), 0);
+    }
+
+    #[test]
     fn human_input_queue_can_drain_one_controller_slot() {
         let q = SharedHumanInputs::new();
         assert!(q.push(HumanInputFrame {
@@ -70281,28 +70348,31 @@ mod tests {
     }
 
     #[test]
-    fn human_input_queue_limit_evictions_are_counted_in_slot_telemetry() {
+    fn human_input_queue_stays_bounded_by_four_coalesced_controller_slots() {
         let q = SharedHumanInputs::new();
 
-        for seq in 1..=HUMAN_INPUT_QUEUE_LIMIT as u64 {
-            assert!(q.push(test_human_input(seq as usize, Some(0), seq)));
+        for seq in 1..=(HUMAN_INPUT_QUEUE_LIMIT as u64 + 16) {
+            let slot = (seq as usize - 1) % SOCCER_MAX_HUMAN_CONTROLLER_SLOTS;
+            assert!(q.push(test_human_input(slot, Some(slot), seq)));
         }
-        assert_eq!(q.queued_len(), HUMAN_INPUT_QUEUE_LIMIT);
+        assert_eq!(q.queued_len(), SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
         assert_eq!(q.expired_len(), 0);
-
-        assert!(q.push(test_human_input(
-            HUMAN_INPUT_QUEUE_LIMIT + 1,
-            Some(0),
-            HUMAN_INPUT_QUEUE_LIMIT as u64 + 1,
-        )));
-
-        assert_eq!(q.queued_len(), HUMAN_INPUT_QUEUE_LIMIT);
         assert_eq!(
-            q.expired_len_for_slot(1),
-            1,
-            "evicting an old controller frame should be visible in per-slot telemetry"
+            q.queued_len(),
+            SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
+            "per-slot coalescing should keep the soft-real-time queue below the emergency cap"
         );
-        assert_eq!(q.expired_len(), 1);
+
+        let latest = q.drain_latest_by_slot();
+        assert_eq!(latest.len(), SOCCER_MAX_HUMAN_CONTROLLER_SLOTS);
+        for slot in 0..SOCCER_MAX_HUMAN_CONTROLLER_SLOTS {
+            let input = latest.get(&slot).expect("coalesced slot input");
+            assert_eq!(input.controller_slot, slot);
+            assert!(
+                input.seq > HUMAN_INPUT_QUEUE_LIMIT as u64,
+                "slot {slot} should keep its latest high-watermark frame"
+            );
+        }
     }
 
     #[test]

@@ -80760,6 +80760,67 @@ mod tests {
     }
 
     #[test]
+    fn tracking_dataset_imported_states_separate_pressure_and_urgency_context() {
+        let calm_tracking = sample_tracking_pass_dataset();
+        let calm_dataset = calm_tracking
+            .to_learning_dataset()
+            .expect("calm tracking conversion");
+        let calm_passer = calm_dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0 && transition.action == "pass")
+            .expect("calm passer");
+
+        let mut pressured_tracking = sample_tracking_pass_dataset();
+        pressured_tracking.source = "unit-pressured-pass".to_string();
+        for frame in &mut pressured_tracking.frames {
+            if let Some(defender) = frame.players.iter_mut().find(|player| player.id == 2) {
+                defender.position = Vec2::new(41.0, 70.4);
+                defender.velocity = Some(Vec2::new(-1.2, 0.0));
+                defender.facing = Some(FacingBucket::West);
+            }
+        }
+        let pressured_dataset = pressured_tracking
+            .to_learning_dataset()
+            .expect("pressured tracking conversion");
+        let pressured_passer = pressured_dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0 && transition.action == "pass")
+            .expect("pressured passer");
+
+        assert!(
+            pressured_passer.observation.nearest_opponent_distance
+                < calm_passer.observation.nearest_opponent_distance,
+            "pressured footage should put the defender closer to the ballholder"
+        );
+        assert!(
+            pressured_passer.observation.pressure_urgency
+                > calm_passer.observation.pressure_urgency + 0.10,
+            "tracking import should preserve pressure urgency: calm={:.3} pressured={:.3}",
+            calm_passer.observation.pressure_urgency,
+            pressured_passer.observation.pressure_urgency
+        );
+        assert!(
+            pressured_passer.observation.decision_urgency
+                > calm_passer.observation.decision_urgency + 0.10,
+            "tracking import should preserve decision urgency: calm={:.3} pressured={:.3}",
+            calm_passer.observation.decision_urgency,
+            pressured_passer.observation.decision_urgency
+        );
+        let calm_state = SoccerQStateKey::from_transition(calm_passer);
+        let pressured_state = SoccerQStateKey::from_transition(pressured_passer);
+        assert!(
+            pressured_state.pressure_urgency_bin > calm_state.pressure_urgency_bin,
+            "MDP key should separate calm vs pressured pass footage"
+        );
+        assert!(
+            pressured_state.decision_urgency_bin > calm_state.decision_urgency_bin,
+            "POMDP-derived urgency should reach the tabular state key"
+        );
+    }
+
+    #[test]
     fn tracking_dataset_rejects_invalid_detector_confidence() {
         let mut tracking = sample_tracking_pass_dataset();
         tracking.frames[0].ball_confidence = Some(1.4);

@@ -311,6 +311,8 @@ const SOCCER_POLICY_POSTGRES_SCHEMA_SOURCE: &str =
 const SOCCER_POLICY_POSTGRES_BACKEND: &str = "aws-rds-postgres";
 const SOCCER_POLICY_POSTGRES_RETENTION_MODEL: &str = "branch-tip-policy-version-plus-run-deltas";
 const SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY: bool = false;
+const SOCCER_POLICY_POSTGRES_FLUSH_CADENCE: &str =
+    "completed-game-batch-or-manual-branch-tip-policy-version-export";
 const SOCCER_POLICY_POSTGRES_EXPERIMENTS_TABLE: &str = "des_soccer_learning_experiments";
 const SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE: &str = "des_soccer_learning_policy_versions";
 const SOCCER_POLICY_POSTGRES_POLICY_ENTRIES_TABLE: &str = "des_soccer_learning_policy_entries";
@@ -36502,6 +36504,9 @@ pub struct SoccerPolicyStorageStatus {
     pub postgres_active_db_writes_enabled: bool,
     pub postgres_flush_cadence: String,
     pub postgres_writes_per_timestep: bool,
+    pub postgres_live_autosave_writes_enabled: bool,
+    pub postgres_completed_game_batches_enabled: bool,
+    pub postgres_policy_version_batches_enabled: bool,
     pub postgres_branch_tip_exports_batched: bool,
     #[serde(default)]
     pub postgres_table: Option<String>,
@@ -46062,9 +46067,11 @@ impl SoccerRealtimeSession {
             postgres_enabled: true,
             postgres_export_enabled: true,
             postgres_active_db_writes_enabled: false,
-            postgres_flush_cadence: "manual-live-export-or-learning-queue-completed-game-batch"
-                .to_string(),
+            postgres_flush_cadence: SOCCER_POLICY_POSTGRES_FLUSH_CADENCE.to_string(),
             postgres_writes_per_timestep: false,
+            postgres_live_autosave_writes_enabled: false,
+            postgres_completed_game_batches_enabled: true,
+            postgres_policy_version_batches_enabled: true,
             postgres_branch_tip_exports_batched: true,
             postgres_table: Some(SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE.to_string()),
             postgres_contract: SoccerPolicyPostgresStorageContract::default(),
@@ -96373,11 +96380,23 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(
             state_value["policyStorage"]["postgresFlushCadence"],
-            "manual-live-export-or-learning-queue-completed-game-batch"
+            SOCCER_POLICY_POSTGRES_FLUSH_CADENCE
         );
         assert_eq!(
             state_value["policyStorage"]["postgresWritesPerTimestep"],
             false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresLiveAutosaveWritesEnabled"],
+            false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresCompletedGameBatchesEnabled"],
+            true
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresPolicyVersionBatchesEnabled"],
+            true
         );
         assert_eq!(
             state_value["policyStorage"]["postgresBranchTipExportsBatched"],
@@ -97647,7 +97666,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(
             autosave_value["storage"]["postgresFlushCadence"],
-            "manual-live-export-or-learning-queue-completed-game-batch"
+            SOCCER_POLICY_POSTGRES_FLUSH_CADENCE
         );
         assert_eq!(
             autosave_value["storage"]["postgresTable"],
@@ -97661,6 +97680,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             autosave_value["storage"]["postgresWritesPerTimestep"],
             false
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresLiveAutosaveWritesEnabled"],
+            false
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresCompletedGameBatchesEnabled"],
+            true
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresPolicyVersionBatchesEnabled"],
+            true
         );
         assert_eq!(
             autosave_value["storage"]["postgresBranchTipExportsBatched"],
@@ -98219,9 +98250,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(!state.policy_storage.postgres_active_db_writes_enabled);
         assert_eq!(
             state.policy_storage.postgres_flush_cadence,
-            "manual-live-export-or-learning-queue-completed-game-batch"
+            SOCCER_POLICY_POSTGRES_FLUSH_CADENCE
         );
         assert!(!state.policy_storage.postgres_writes_per_timestep);
+        assert!(!state.policy_storage.postgres_live_autosave_writes_enabled);
+        assert!(state.policy_storage.postgres_completed_game_batches_enabled);
+        assert!(state.policy_storage.postgres_policy_version_batches_enabled);
         assert!(state.policy_storage.postgres_branch_tip_exports_batched);
         assert_eq!(
             state.policy_storage.postgres_table.as_deref(),

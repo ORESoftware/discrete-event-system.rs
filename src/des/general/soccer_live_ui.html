@@ -741,6 +741,7 @@ const SEMANTIC_BALL_ACTIONS = new Set([
   "flank-low-cross",
   "flank-high-cross",
   "first-time-pass",
+  "killer-pass",
   "clearance",
   "route-one",
   "shoot",
@@ -769,6 +770,7 @@ const INTENT_TRACE_ACTIONS = new Set([
   "flank-low-cross",
   "flank-high-cross",
   "first-time-pass",
+  "killer-pass",
   "clearance",
   "route-one",
   "carry-forward",
@@ -1169,7 +1171,7 @@ function intentPriority(player, action, frame = state?.frame) {
   const possession = livePossessionTeam(frame);
   const holderBonus = holder === player.id ? 32 : 0;
   if (["shoot", "first-time-shot", "first-time-header"].includes(action)) return 110 + holderBonus;
-  if (["pass", "aerial-pass", "flank-low-cross", "flank-high-cross", "first-time-pass"].includes(action)) return 104 + holderBonus;
+  if (["pass", "aerial-pass", "flank-low-cross", "flank-high-cross", "first-time-pass", "killer-pass"].includes(action)) return 104 + holderBonus;
   if (["clearance", "route-one"].includes(action)) return 98 + holderBonus;
   if (["carry-forward", "carry-out", "protect-ball", "left-cut", "right-cut", "nutmeg", "fake-left-cut-right", "fake-right-cut-left", "hold-up-flank"].includes(action)) return 92 + holderBonus;
   if (action === "space" && possession === player.team) {
@@ -1217,7 +1219,7 @@ function liveIntentCandidates(frame = state?.frame) {
       const priority = intentPriority(player, action, frame);
       if (priority == null) return null;
       const urgency = clamp(Number(decision?.observation?.decisionUrgency ?? 0), 0, 1);
-      const flight = ["aerial-pass", "flank-high-cross", "clearance", "route-one"].includes(action) ? "aerial" : ["pass", "flank-low-cross", "first-time-pass"].includes(action) ? "floor" : null;
+      const flight = ["aerial-pass", "flank-high-cross", "clearance", "route-one"].includes(action) ? "aerial" : ["pass", "flank-low-cross", "first-time-pass", "killer-pass"].includes(action) ? "floor" : null;
       return {
         player,
         action,
@@ -2614,15 +2616,16 @@ function drawDecisionIntentTraces(r) {
     const isSupport = intent.action === "space";
     const isOverlap = intent.action === "overlap-run";
     const isCross = intent.action === "flank-low-cross" || intent.action === "flank-high-cross";
+    const isKillerPass = intent.action === "killer-pass";
     const isAerial = intent.flight === "aerial";
     const color = isHolder
-      ? (isCross ? "rgba(246,201,68,.96)" : isAerial ? "rgba(246,201,68,.88)" : "rgba(255,255,255,.86)")
+      ? (isCross || isKillerPass ? "rgba(246,201,68,.96)" : isAerial ? "rgba(246,201,68,.88)" : "rgba(255,255,255,.86)")
       : isOverlap ? "rgba(246,201,68,.78)"
       : (player.team === "Home" ? "rgba(137,205,255,.58)" : "rgba(255,164,164,.58)");
     drawIntentArrow(from, to, color, isHolder ? 3.2 : isOverlap ? 2.8 : 2, isSupport || isOverlap || isAerial);
-    if (intent.targetPlayer != null || isAerial || isCross || isOverlap) {
+    if (intent.targetPlayer != null || isAerial || isCross || isKillerPass || isOverlap) {
       ctx.beginPath();
-      ctx.arc(to.x, to.y, isHolder || isCross ? 7 : isOverlap ? 6 : 5, 0, Math.PI * 2);
+      ctx.arc(to.x, to.y, isHolder || isCross || isKillerPass ? 7 : isOverlap ? 6 : 5, 0, Math.PI * 2);
       ctx.strokeStyle = color;
       ctx.lineWidth = isHolder ? 2.5 : 1.5;
       ctx.stroke();

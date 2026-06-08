@@ -5741,7 +5741,7 @@ fn normalize_soccer_action_label(action: &str) -> &str {
         "pass1" | "pass2" | "pass3" => "pass",
         "aerial-pass1" | "aerial-pass2" | "aerial-pass3" => "aerial-pass",
         "killer" | "killer_pass" | "killerpass" | "through-pass" | "through_pass"
-        | "threaded-pass" | "threaded_pass" => "killer-pass",
+        | "throughpass" | "threaded-pass" | "threaded_pass" | "threadedpass" => "killer-pass",
         "low-cross"
         | "low_cross"
         | "lowcross"
@@ -27293,9 +27293,7 @@ fn playback_intent_priority(
     };
     match action {
         "shoot" | "first-time-shot" | "first-time-header" => Some(110.0 + holder_bonus),
-        "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass" => {
-            Some(104.0 + holder_bonus)
-        }
+        action if is_pass_like_action(action) => Some(104.0 + holder_bonus),
         "clearance" | "route-one" => Some(98.0 + holder_bonus),
         "left-cut"
         | "carry-forward"
@@ -34280,6 +34278,7 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
             | "fake-left-cut-right"
             | "fake-right-cut-left"
             | "pass"
+            | "killer-pass"
             | "aerial-pass"
             | "flank-low-cross"
             | "flank-high-cross"
@@ -35869,10 +35868,7 @@ impl SoccerMatch {
         action: String,
     ) -> SoccerLearnedPlan {
         let normalized_action = normalize_soccer_action_label(&action).to_string();
-        let is_pass = matches!(
-            normalized_action.as_str(),
-            "pass" | "aerial-pass" | "first-time-pass" | "flank-low-cross" | "flank-high-cross"
-        );
+        let is_pass = pass_like_action_flight(&normalized_action).is_some();
         let mut plan = SoccerLearnedPlan {
             action,
             target_player: None,
@@ -42428,6 +42424,7 @@ fn semantic_tracking_ball_action(action: &str) -> Option<String> {
         | "aerial-pass"
         | "flank-low-cross"
         | "flank-high-cross"
+        | "killer-pass"
         | "first-time-pass"
         | "clearance"
         | "route-one"
@@ -48500,6 +48497,14 @@ fn normalize_tracking_ball_action(raw: &str) -> Result<Option<String>, String> {
     let action = match compact.as_str() {
         "none" | "na" | "null" | "noaction" => return Ok(None),
         "groundpass" | "floorpass" | "shortpass" => "pass",
+        "killer"
+        | "killerpass"
+        | "throughpass"
+        | "threadedpass"
+        | "splitpass"
+        | "splittingpass"
+        | "linebreakingpass"
+        | "defensesplittingpass" => "killer-pass",
         "lowcross" | "flanklowcross" | "downflanklowcross" | "playdownflanklowcross" => {
             "flank-low-cross"
         }
@@ -48551,6 +48556,7 @@ fn normalize_tracking_ball_action(raw: &str) -> Result<Option<String>, String> {
         | "aerial-pass"
         | "flank-low-cross"
         | "flank-high-cross"
+        | "killer-pass"
         | "first-time-pass"
         | "clearance"
         | "route-one"
@@ -49293,9 +49299,9 @@ fn tracking_explicit_holder_action(
     let action = normalize_tracking_ball_action(raw_action).ok().flatten()?;
     match action.as_str() {
         "pass" => Some(tracking_pass_label(before_frame, after_frame, before, after).to_string()),
-        "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass"
-        | "clearance" | "route-one" | "shoot" | "first-time-shot" | "first-time-header"
-        | "control-touch" => Some(action),
+        "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "killer-pass"
+        | "first-time-pass" | "clearance" | "route-one" | "shoot" | "first-time-shot"
+        | "first-time-header" | "control-touch" => Some(action),
         action if is_dribble_action_label(action) => Some(action.to_string()),
         _ => None,
     }
@@ -49350,7 +49356,7 @@ fn tracking_action_target_trace(
         player.team.goal_y(before.field_length),
     );
     let (point, target_player) = match normalize_soccer_action_label(action) {
-        "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass" => {
+        action if is_pass_like_action(action) => {
             let holder_teammate = after.ball.holder.and_then(|holder| {
                 after
                     .players
@@ -49639,7 +49645,7 @@ fn soccer_moment_action_target_trace(
     );
     let marker_target = marker.and_then(|marker| marker.target_player);
     let (point, target_player) = match normalized {
-        "pass" | "aerial-pass" | "flank-low-cross" | "flank-high-cross" | "first-time-pass" => {
+        action if is_pass_like_action(action) => {
             let target_player = marker_target.or(after.ball.holder);
             let point = target_player
                 .and_then(|id| {
@@ -52895,10 +52901,10 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
     let held_restart = held_restart_action_for_snapshot(snapshot, player_id);
     if let Some(restart_label) = held_restart {
         return match restart_label {
-            "throw-in" => matches!(action, "pass" | "aerial-pass"),
-            "corner-kick" => matches!(action, "pass" | "aerial-pass" | "shoot"),
-            "goal-kick" | "kickoff" => matches!(action, "pass" | "aerial-pass"),
-            "free-kick" => matches!(action, "pass" | "aerial-pass" | "shoot"),
+            "throw-in" => is_pass_like_action(action),
+            "corner-kick" => is_pass_like_action(action) || matches!(action, "shoot"),
+            "goal-kick" | "kickoff" => is_pass_like_action(action),
+            "free-kick" => is_pass_like_action(action) || matches!(action, "shoot"),
             _ => false,
         };
     }
@@ -73612,6 +73618,51 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn tracking_dataset_csv_imports_killer_pass_action_metadata() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            seed: 108,
+            ..Default::default()
+        };
+        let raw = r#"tick,clock_seconds,player_id,name,team,role,shirt,x,y,ball_x,ball_y,ball_vx,ball_vy,ball_altitude_yards,pass_flight,ball_action,action_player,ball_holder,last_touch_team,score_home,score_away
+0,0.0,0,Home creator,Home,Midfielder,8,36.0,62.0,36.0,62.0,0.0,0.0,0.0,,,0,0,Home,0,0
+0,0.0,1,Home runner,Home,Forward,9,42.0,76.0,36.0,62.0,0.0,0.0,0.0,,,0,0,Home,0,0
+0,0.0,2,Away defender,Away,Defender,4,48.0,72.0,36.0,62.0,0.0,0.0,0.0,,,0,0,Home,0,0
+1,0.1,0,Home creator,Home,Midfielder,8,36.2,62.5,42.0,80.0,5.0,15.0,0.0,floor,through-pass,0,1,Home,0,0
+1,0.1,1,Home runner,Home,Forward,9,42.0,80.0,42.0,80.0,5.0,15.0,0.0,floor,through-pass,0,1,Home,0,0
+1,0.1,2,Away defender,Away,Defender,4,48.0,73.0,42.0,80.0,5.0,15.0,0.0,floor,through-pass,0,1,Home,0,0
+"#;
+
+        let tracking = soccer_tracking_dataset_from_csv(raw, config, "unit-csv-killer-pass")
+            .expect("csv killer pass");
+        assert_eq!(tracking.frames[1].pass_flight, Some(PassFlight::Floor));
+        assert_eq!(
+            tracking.frames[1].ball_action.as_deref(),
+            Some("killer-pass")
+        );
+        assert_eq!(tracking.frames[1].action_player, Some(0));
+
+        let dataset = tracking.to_learning_dataset().expect("learning dataset");
+        let creator = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("creator transition");
+        assert_eq!(creator.action, "killer-pass");
+        let action_target = creator
+            .action_target
+            .as_ref()
+            .expect("killer pass target trace");
+        assert_eq!(action_target.player_id, Some(1));
+
+        let policy =
+            train_soccer_q_policy_from_tracking(&tracking, SoccerQPolicyOptions::default())
+                .expect("policy from killer pass csv");
+        let state = SoccerQStateKey::from_transition(creator);
+        assert!(policy.q_value(&state, "killer-pass").is_some());
+    }
+
+    #[test]
     fn tracking_dataset_csv_imports_normalized_footage_coordinates() {
         let config = MatchConfig {
             duration_seconds: 0.2,
@@ -90962,17 +91013,19 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("Wt${weight.toFixed(0)}"));
         assert!(html.contains("\"flank-low-cross\""));
         assert!(html.contains("\"flank-high-cross\""));
+        assert!(html.contains("\"killer-pass\""));
         assert!(html.contains("function flankLaneTargetsForDirective"));
         assert!(html.contains("function drawFlankPolicyLanes"));
         assert!(html.contains("drawFlankPolicyLanes(r)"));
         assert!(html.contains("intent.action === \"overlap-run\""));
         assert!(html.contains("intent.action === \"flank-low-cross\""));
         assert!(html.contains("intent.action === \"flank-high-cross\""));
+        assert!(html.contains("intent.action === \"killer-pass\""));
         assert!(html.contains(
             "[\"aerial-pass\", \"flank-high-cross\", \"clearance\", \"route-one\"].includes(action)"
         ));
         assert!(
-            html.contains("[\"pass\", \"flank-low-cross\", \"first-time-pass\"].includes(action)")
+            html.contains("[\"pass\", \"flank-low-cross\", \"first-time-pass\", \"killer-pass\"].includes(action)")
         );
         assert!(html.contains("trackingPhysicsSmokeLabel"));
         assert!(html.contains("trackingTacticalImportLabel"));
@@ -91345,6 +91398,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(
             playback_pass_flight_for_action("pass"),
+            Some(PassFlight::Floor)
+        );
+        assert_eq!(
+            playback_pass_flight_for_action("killer-pass"),
             Some(PassFlight::Floor)
         );
         assert_eq!(playback_pass_flight_for_action("shoot"), None);

@@ -81366,6 +81366,92 @@ mod tests {
     }
 
     #[test]
+    fn tracking_dataset_imports_all_visible_players_as_learning_samples() {
+        let mut tracking = sample_tracking_pass_dataset();
+        tracking.source = "unit-pass-all-visible-agents".to_string();
+        tracking.frames[0].players[1].position = Vec2::new(48.0, 78.0);
+        tracking.frames[0].players[1].velocity = Some(Vec2::new(-1.0, 4.0));
+        tracking.frames[1].players[1].position = Vec2::new(44.0, 82.0);
+        tracking.frames[1].players[1].velocity = Some(Vec2::new(-4.0, 4.0));
+        tracking.frames[0].players[2].position = Vec2::new(58.0, 78.0);
+        tracking.frames[0].players[2].velocity = Some(Vec2::new(-1.5, 0.5));
+        tracking.frames[1].players[2].position = Vec2::new(56.5, 78.5);
+        tracking.frames[1].players[2].velocity = Some(Vec2::new(-1.5, 0.5));
+
+        let dataset = tracking
+            .to_learning_dataset()
+            .expect("tracking conversion should train every visible player");
+        assert_eq!(
+            dataset.transitions.len(),
+            3,
+            "every player visible in both tracking frames should produce a learning transition"
+        );
+
+        let passer = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0)
+            .expect("passer transition");
+        let runner = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 1)
+            .expect("off-ball runner transition");
+        let defender = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 2)
+            .expect("defender transition");
+
+        assert_eq!(passer.action, "pass");
+        assert_eq!(runner.action, "run-in-behind");
+        assert_eq!(defender.action, "defend");
+        assert!(!runner.observation.has_ball);
+        assert!(runner.observation.visible_ball);
+        assert!(runner.observation.visible_teammates > 0);
+        assert!(defender.observation.visible_opponents > 0);
+        assert!(
+            defender.observation.nearest_opponent_distance.is_finite(),
+            "defensive tracking samples should retain POMDP pressure geometry"
+        );
+
+        for transition in [&passer, &runner, &defender] {
+            assert!(transition.reward.is_finite());
+            assert!(transition.state.player_grid.fine.id > 0);
+            assert_eq!(
+                transition.state.player_grid.fine.id,
+                transition.observation.player_grid.fine.id
+            );
+            assert_eq!(
+                transition.next_state.player_grid.fine.id,
+                transition.next_observation.player_grid.fine.id
+            );
+            assert!(
+                (transition.belief.pressure
+                    - belief_from_observation(&transition.observation).pressure)
+                    .abs()
+                    < 1e-12
+            );
+            assert_eq!(
+                transition.decision_context.tracking_confidence,
+                1.0,
+                "default-confidence tracking rows should still annotate imported samples"
+            );
+        }
+
+        let policy = train_soccer_q_policy(&dataset, SoccerQPolicyOptions::default());
+        for transition in [&passer, &runner, &defender] {
+            let state = SoccerQStateKey::from_transition(transition);
+            assert!(
+                policy.q_value(&state, &transition.action).is_some(),
+                "policy should learn the imported {} action for player {}",
+                transition.action,
+                transition.player_id
+            );
+        }
+    }
+
+    #[test]
     fn tracking_dataset_infers_possession_and_pass_from_position_only_ball_tracks() {
         let mut tracking = sample_tracking_pass_dataset();
         tracking.source = "unit-inferred-holder-pass".to_string();

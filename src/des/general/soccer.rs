@@ -58020,6 +58020,49 @@ mod tests {
     }
 
     #[test]
+    fn completed_killer_pass_reward_ramps_as_goal_thread_gets_closer() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let receiver = 9;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.first_touch = 8.7;
+        sim.players[receiver].skills.shooting = 8.9;
+        sim.players[receiver].skills.top_speed = 9.1;
+        sim.players[receiver].skills.dribbling = 8.0;
+
+        let mut previous_bonus = 0.0;
+        for (idx, origin_y) in [80.0, 90.0, 100.0].into_iter().enumerate() {
+            let origin = Vec2::new(40.0, origin_y);
+            let receiver_start = Vec2::new(42.0, origin_y + 6.0);
+            let threaded_target = Vec2::new(40.0, origin_y + 14.0);
+            let mut threaded =
+                test_pending_pass(Team::Home, passer, receiver, origin, threaded_target);
+            threaded.receiver_openness = 0.90;
+            threaded.receiver_position_at_launch = Some(receiver_start);
+            threaded.receiver_velocity_at_launch = Some(Vec2::new(0.2, 4.6));
+
+            let bonus = completed_killer_pass_reward(
+                &threaded,
+                &sim.players[receiver],
+                sim.config.field_width_yards,
+                sim.config.field_length_yards,
+            );
+
+            assert!(
+                bonus > 0.0,
+                "threaded goal-channel pass should receive killer-pass credit at y={origin_y}"
+            );
+            if idx > 0 {
+                assert!(
+                    bonus > previous_bonus + 0.15,
+                    "killer-pass reward should ramp as the passer and receiver move closer to goal: y={origin_y} bonus={bonus} previous={previous_bonus}"
+                );
+            }
+            previous_bonus = bonus;
+        }
+    }
+
+    #[test]
     fn completed_pass_reward_event_includes_dangerous_cross_bonus() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let crosser = 8;

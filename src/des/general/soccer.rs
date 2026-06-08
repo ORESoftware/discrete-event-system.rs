@@ -30449,6 +30449,9 @@ pub struct SoccerAccountingSmokeReport {
     pub frames_analyzed: usize,
     pub events_analyzed: usize,
     pub full_time_reached: bool,
+    pub pass_attempts: u32,
+    pub completed_passes: u32,
+    pub shot_attempts: u32,
     pub possession_frames: usize,
     pub non_possession_frames: usize,
     pub home_possession_frames: usize,
@@ -32819,6 +32822,14 @@ fn soccer_accounting_check_stats(
     );
 
     let stats = &trace.summary.stats;
+    report.pass_attempts = stats
+        .passes_attempted_home
+        .saturating_add(stats.passes_attempted_away);
+    report.completed_passes = stats
+        .passes_completed_home
+        .saturating_add(stats.passes_completed_away);
+    report.shot_attempts = stats.shots_home.saturating_add(stats.shots_away);
+
     soccer_accounting_expect_le(
         report,
         "stats",
@@ -32883,6 +32894,37 @@ fn soccer_accounting_check_stats(
         stats.shots_home,
         "away shot blocks cannot exceed home shots",
     );
+
+    if trace.summary.ticks >= 200 && report.pass_attempts == 0 {
+        report.push_violation(
+            trace.summary.ticks,
+            "liveness",
+            "passActivity",
+            "at least one pass attempt in a 20s+ autonomous match",
+            report.pass_attempts.to_string(),
+            "autonomous soccer should circulate the ball instead of only moving bodies",
+        );
+    }
+    if trace.summary.ticks >= 200 && report.completed_passes == 0 {
+        report.push_violation(
+            trace.summary.ticks,
+            "liveness",
+            "completedPassActivity",
+            "at least one completed pass in a 20s+ autonomous match",
+            report.completed_passes.to_string(),
+            "autonomous soccer should complete passes during sustained play",
+        );
+    }
+    if trace.summary.ticks >= 450 && report.shot_attempts == 0 {
+        report.push_violation(
+            trace.summary.ticks,
+            "liveness",
+            "shotActivity",
+            "at least one shot attempt in a 45s+ autonomous match",
+            report.shot_attempts.to_string(),
+            "autonomous soccer should eventually turn goal pressure into shots",
+        );
+    }
 
     soccer_accounting_check_event_stat_count(
         report,
@@ -71959,6 +72001,60 @@ mod tests {
             "accounting smoke violations: {:?}",
             report.violations
         );
+    }
+
+    #[test]
+    fn accounting_smoke_report_flags_tactically_silent_long_match() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                duration_seconds: 45.0,
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..SoccerNeuralLearningConfig::default()
+                },
+                max_human_players: 0,
+                seed: 22_902,
+                ..MatchConfig::default()
+            },
+            5,
+        );
+        trace.events.clear();
+        trace.summary.score_home = 0;
+        trace.summary.score_away = 0;
+        trace.summary.stats.passes_attempted_home = 0;
+        trace.summary.stats.passes_attempted_away = 0;
+        trace.summary.stats.passes_completed_home = 0;
+        trace.summary.stats.passes_completed_away = 0;
+        trace.summary.stats.shots_home = 0;
+        trace.summary.stats.shots_away = 0;
+        trace.summary.stats.shots_on_target_home = 0;
+        trace.summary.stats.shots_on_target_away = 0;
+        trace.summary.stats.saves_home = 0;
+        trace.summary.stats.saves_away = 0;
+        trace.summary.stats.shot_blocks_home = 0;
+        trace.summary.stats.shot_blocks_away = 0;
+        for frame in &mut trace.frames {
+            frame.score_home = 0;
+            frame.score_away = 0;
+        }
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(!report.ok());
+        assert_eq!(report.pass_attempts, 0);
+        assert_eq!(report.completed_passes, 0);
+        assert_eq!(report.shot_attempts, 0);
+        for metric in ["passActivity", "completedPassActivity", "shotActivity"] {
+            assert!(
+                report.violations.iter().any(|violation| {
+                    violation.subject == "liveness" && violation.metric == metric
+                }),
+                "tactically silent long match should flag {metric}: {:?}",
+                report.violations
+            );
+        }
     }
 
     #[test]

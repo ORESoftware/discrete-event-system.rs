@@ -13110,9 +13110,15 @@ impl BallAgent {
             }
         }
 
-        if loose_long_ball_team.is_none() {
-            self.record_decision(context.tick, "roll", context.scheduled_index);
-        }
+        self.record_decision(
+            context.tick,
+            if loose_long_ball_team.is_some() {
+                "long-ball-flight"
+            } else {
+                "roll"
+            },
+            context.scheduled_index,
+        );
         BallStepOutcome::None
     }
 
@@ -34482,6 +34488,7 @@ pub struct SoccerDecisionModelContract {
     pub player_physical_trait_fields: Vec<String>,
     pub player_skills_in_pomdp_observation: bool,
     pub player_skills_binned_in_mdp_state: bool,
+    pub player_skills_in_neural_features: bool,
     pub surface_physics_in_pomdp_observation: bool,
     pub surface_physics_binned_in_mdp_state: bool,
     pub surface_physics_in_neural_features: bool,
@@ -34752,6 +34759,10 @@ pub struct SoccerLearningRuntimeContract {
     pub policy_persistence_autosave_default_interval_seconds: f64,
     pub policy_persistence_redis_enabled: bool,
     pub policy_persistence_postgres_branch_tip_exports_batched: bool,
+    pub policy_persistence_live_autosave_backend: String,
+    pub policy_persistence_live_autosave_writes_to_postgres: bool,
+    pub policy_persistence_postgres_completed_game_batches: bool,
+    pub policy_persistence_postgres_policy_version_batches: bool,
     pub postgres_contract: SoccerPolicyPostgresStorageContract,
     pub reward_contract: SoccerLearningRewardContract,
 }
@@ -34888,6 +34899,10 @@ fn soccer_learning_runtime_contract(config: &MatchConfig) -> SoccerLearningRunti
             * config.dt_seconds,
         policy_persistence_redis_enabled: false,
         policy_persistence_postgres_branch_tip_exports_batched: true,
+        policy_persistence_live_autosave_backend: "json-disk".to_string(),
+        policy_persistence_live_autosave_writes_to_postgres: false,
+        policy_persistence_postgres_completed_game_batches: true,
+        policy_persistence_postgres_policy_version_batches: true,
         postgres_contract: SoccerPolicyPostgresStorageContract::default(),
         reward_contract: soccer_learning_reward_contract(),
     }
@@ -35231,6 +35246,7 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         player_physical_trait_fields: soccer_player_physical_trait_contract_fields(),
         player_skills_in_pomdp_observation: true,
         player_skills_binned_in_mdp_state: true,
+        player_skills_in_neural_features: true,
         surface_physics_in_pomdp_observation: true,
         surface_physics_binned_in_mdp_state: true,
         surface_physics_in_neural_features: true,
@@ -36205,6 +36221,10 @@ pub struct SoccerPolicyPostgresStorageContract {
     pub retention_model: String,
     pub stores_all_weight_history: bool,
     pub batched_branch_tip_export: bool,
+    pub completed_game_batches_enabled: bool,
+    pub policy_version_batches_enabled: bool,
+    pub live_autosave_writes_to_postgres: bool,
+    pub batch_cadence: String,
     pub writes_per_timestep: bool,
     pub redis_enabled: bool,
     pub autosave_min_interval_ticks: u64,
@@ -36224,6 +36244,11 @@ impl Default for SoccerPolicyPostgresStorageContract {
             retention_model: SOCCER_POLICY_POSTGRES_RETENTION_MODEL.to_string(),
             stores_all_weight_history: SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY,
             batched_branch_tip_export: true,
+            completed_game_batches_enabled: true,
+            policy_version_batches_enabled: true,
+            live_autosave_writes_to_postgres: false,
+            batch_cadence:
+                "completed-game-batches-and-branch-tip-policy-version-exports".to_string(),
             writes_per_timestep: false,
             redis_enabled: false,
             autosave_min_interval_ticks: MIN_POLICY_AUTOSAVE_INTERVAL_TICKS,
@@ -57810,7 +57835,13 @@ fn learned_action_label_is_legal(action: &str, snapshot: &WorldSnapshot, player_
     }
     match action {
         "shoot" => {
-            observation.has_ball && shot_decision_is_qualified_for_role(&observation, player.role)
+            observation.has_ball
+                && (shot_decision_is_qualified_for_role(&observation, player.role)
+                    || speculative_long_shot_is_qualified(
+                        &observation,
+                        player.role,
+                        ability01(player.skills.shooting),
+                    ))
         }
         "pass" => observation.has_ball && snapshot.best_visible_pass_target(player_id).is_some(),
         "killer-pass" => {
@@ -74951,6 +74982,58 @@ mod tests {
     }
 
     #[test]
+    fn q_policy_can_select_open_lane_speculative_long_shot() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 1421,
+            ..Default::default()
+        });
+        let attacker = 9;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].role = PlayerRole::Forward;
+        sim.players[attacker].position = Vec2::new(40.0, 76.0);
+        sim.players[attacker].skills.shooting = 8.9;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.82;
+        sim.players[keeper].position = Vec2::new(40.0, 118.4);
+        sim.players[keeper].skills.goalkeeping = 9.8;
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        assert!(
+            !shot_decision_is_qualified_for_role(&observation, sim.players[attacker].role),
+            "test setup should stay outside the ordinary close-shot gate: {observation:?}"
+        );
+        assert!(speculative_long_shot_is_qualified(
+            &observation,
+            sim.players[attacker].role,
+            ability01(sim.players[attacker].skills.shooting)
+        ));
+
+        let mut policy = SoccerQPolicy::default();
+        assert!(policy.set_action_value_for_snapshot(&snapshot, attacker, "shoot", 5.0));
+        assert!(policy.set_action_value_for_snapshot(&snapshot, attacker, "dribble", 2.0));
+
+        assert_eq!(
+            policy
+                .best_action_for_snapshot(&snapshot, attacker)
+                .as_deref(),
+            Some("shoot"),
+            "learned policy should be allowed to exploit open-lane speculative shooting states"
+        );
+        assert!(policy
+            .ranked_action_values_for_snapshot(&snapshot, attacker, 3)
+            .expect("ranked actions")
+            .1
+            .iter()
+            .any(|trace| trace.label == "shoot"));
+    }
+
+    #[test]
     fn blocked_striker_window_requires_through_line_to_shoot() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -85794,6 +85877,63 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             sim.events.last().map(|event| event.kind.as_str()),
             Some("clearance")
+        );
+    }
+
+    #[test]
+    fn untargeted_long_ball_flight_records_ball_agent_schedule_index() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = 2;
+        park_players_except(&mut sim, &[defender]);
+        sim.players[defender].position = Vec2::new(31.0, 24.0);
+        sim.ball.holder = Some(defender);
+        sim.ball.position = sim.players[defender].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        let target = clearance_target_for_player(
+            Team::Home,
+            sim.players[defender].position,
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+
+        sim.launch_untargeted_long_ball(defender, target, 0.94, "clearance");
+        assert_eq!(
+            sim.ball
+                .last_decision
+                .as_ref()
+                .and_then(|decision| decision.scheduled_index),
+            None,
+            "player launch records the clearance before the ball agent's scheduled loop runs"
+        );
+        sim.players[defender].position = Vec2::new(5.0, 5.0);
+
+        sim.tick = sim.tick.saturating_add(1);
+        sim.clock_seconds += sim.config.dt_seconds;
+        sim.last_agent_schedule = vec![
+            AgentScheduleEntry {
+                kind: AgentScheduleKind::CentralBrain,
+                id: CENTRAL_BRAIN_AGENT_ID,
+                label: "central brain".to_string(),
+            },
+            AgentScheduleEntry {
+                kind: AgentScheduleKind::Ball,
+                id: BALL_AGENT_ID,
+                label: "ball".to_string(),
+            },
+        ];
+
+        sim.run_ball_time_step();
+
+        let decision = sim
+            .ball
+            .last_decision
+            .as_ref()
+            .expect("ball-agent flight decision");
+        assert_eq!(decision.action, "long-ball-flight");
+        assert_eq!(decision.scheduled_index, Some(1));
+        assert!(
+            !decision.operation_order.is_empty(),
+            "ball-agent flight should expose its internal operation order"
         );
     }
 
@@ -103569,6 +103709,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(model["playerSkillsInPomdpObservation"], true);
         assert_eq!(model["playerSkillsBinnedInMdpState"], true);
+        assert_eq!(model["playerSkillsInNeuralFeatures"], true);
         assert_eq!(model["surfacePhysicsInPomdpObservation"], true);
         assert_eq!(model["surfacePhysicsBinnedInMdpState"], true);
         assert_eq!(model["surfacePhysicsInNeuralFeatures"], true);
@@ -104050,6 +104191,22 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             true
         );
         assert_eq!(
+            contract["policyPersistenceLiveAutosaveBackend"],
+            "json-disk"
+        );
+        assert_eq!(
+            contract["policyPersistenceLiveAutosaveWritesToPostgres"],
+            false
+        );
+        assert_eq!(
+            contract["policyPersistencePostgresCompletedGameBatches"],
+            true
+        );
+        assert_eq!(
+            contract["policyPersistencePostgresPolicyVersionBatches"],
+            true
+        );
+        assert_eq!(
             contract["postgresContract"]["backend"],
             SOCCER_POLICY_POSTGRES_BACKEND
         );
@@ -104060,6 +104217,22 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             contract["postgresContract"]["storesAllWeightHistory"],
             SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY
+        );
+        assert_eq!(
+            contract["postgresContract"]["completedGameBatchesEnabled"],
+            true
+        );
+        assert_eq!(
+            contract["postgresContract"]["policyVersionBatchesEnabled"],
+            true
+        );
+        assert_eq!(
+            contract["postgresContract"]["liveAutosaveWritesToPostgres"],
+            false
+        );
+        assert_eq!(
+            contract["postgresContract"]["batchCadence"],
+            "completed-game-batches-and-branch-tip-policy-version-exports"
         );
         assert_eq!(
             contract["postgresContract"]["tables"]["policyVersions"],
@@ -104925,6 +105098,97 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(meta["cadence"]["tenHzTimestepContract"], true);
         assert_eq!(meta["cadence"]["tenMinuteDurationContract"], true);
         assert_eq!(meta["cadence"]["defaultTenMinuteContract"], true);
+        assert_eq!(
+            meta["tacticalLiveness"],
+            meta["playback"]["tacticalLiveness"]
+        );
+        assert!(
+            meta["tacticalLiveness"]["passAttempts"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should include live ball circulation"
+        );
+        assert!(
+            meta["tacticalLiveness"]["ballActiveFrames"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should include active ball-agent frames"
+        );
+        assert!(
+            meta["tacticalLiveness"]["playerDecisionModelSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should export player MDP/POMDP decisions"
+        );
+        assert!(
+            meta["tacticalLiveness"]["ballDecisionFrames"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should export ball-agent decisions"
+        );
+        assert_eq!(meta["tacticalLiveness"]["openSpaceSupportOk"], true);
+        assert_eq!(meta["tacticalLiveness"]["goalwardProgressOk"], true);
+        assert_eq!(meta["tacticalLiveness"]["agentAccountingFrames"], 61);
+        assert_eq!(meta["tacticalLiveness"]["agentAccountingOkFrames"], 61);
+        assert_eq!(meta["tacticalLiveness"]["fullRosterFrames"], 61);
+        assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 61);
+        assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 60);
+        assert_eq!(meta["tacticalLiveness"]["ballDecisionFrames"], 60);
+        assert_eq!(meta["tacticalLiveness"]["agentAccountingOk"], true);
+        assert_eq!(meta["agentContract"], meta["playback"]["agentContract"]);
+        assert_eq!(meta["agentContract"]["expectedTotalAgents"], 27);
+        assert_eq!(meta["agentContract"]["expectedFieldShuffleAgents"], 26);
+        assert_eq!(meta["agentContract"]["expectedPlayerCount"], 22);
+        assert_eq!(meta["agentContract"]["expectedHomePlayers"], 11);
+        assert_eq!(meta["agentContract"]["expectedAwayPlayers"], 11);
+        assert_eq!(meta["agentContract"]["expectedOfficialCount"], 3);
+        assert_eq!(meta["agentContract"]["expectedCenterReferees"], 1);
+        assert_eq!(meta["agentContract"]["expectedAssistantReferees"], 2);
+        assert_eq!(meta["agentContract"]["expectedBallAgents"], 1);
+        assert_eq!(meta["agentContract"]["expectedCentralBrains"], 1);
+        assert_eq!(meta["agentContract"]["centralBrainRunTimeStepEnabled"], true);
+        assert_eq!(meta["agentContract"]["playerRunTimeStepEnabled"], true);
+        assert_eq!(meta["agentContract"]["officialRunTimeStepEnabled"], true);
+        assert_eq!(meta["agentContract"]["ballRunTimeStepEnabled"], true);
+        assert_eq!(
+            meta["agentContract"]["centralBrainRunsBeforeFieldShuffle"],
+            true
+        );
+        assert_eq!(meta["agentContract"]["fieldEntitiesUseFisherYates"], true);
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksAllPlayers"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksAllOfficials"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksBallKinematics"],
+            true
+        );
+        assert_eq!(
+            meta["agentContract"]["centralBrainTracksControllerAssignments"],
+            true
+        );
+        assert_eq!(meta["controllerContract"], meta["playback"]["controllerContract"]);
+        assert_eq!(meta["controllerContract"]["maxHumanControllers"], 4);
+        assert_eq!(meta["controllerContract"]["configuredHumanControllers"], 0);
+        assert_eq!(
+            meta["controllerContract"]["singleThreadedSimulationLoop"],
+            true
+        );
+        assert_eq!(meta["controllerContract"]["sharedInputQueueUsesRwLock"], true);
+        assert_eq!(
+            meta["controllerContract"]["nativeThreadPerControllerEnabled"],
+            true
+        );
+        assert_eq!(meta["controllerContract"]["notificationDrivenInput"], true);
+        assert_eq!(meta["controllerContract"]["mainLoopUsesCondvarYield"], true);
 
         let frame_lines = fs::read_to_string(&paths.frames_path).expect("frames asset");
         let lines = frame_lines.lines().collect::<Vec<_>>();
@@ -104942,6 +105206,31 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
         assert_eq!(last_frame["players"].as_array().unwrap().len(), 22);
         assert_eq!(last_frame["officials"].as_array().unwrap().len(), 3);
+        assert_eq!(first_frame["agentScheduleSummary"]["totalAgents"], 0);
+        assert_eq!(first_frame["agentScheduleSummary"]["complete"], false);
+        for (idx, line) in lines.iter().enumerate().skip(1) {
+            let frame: serde_json::Value =
+                serde_json::from_str(line).expect("scheduled sparse frame json");
+            assert_eq!(frame["agentScheduleSummary"]["complete"], true);
+            assert_eq!(frame["agentScheduleSummary"]["totalAgents"], 27);
+            assert_eq!(frame["agentScheduleSummary"]["fieldShuffleAgents"], 26);
+            assert_eq!(
+                frame["agentScheduleSummary"]["expectedFieldShuffleAgents"],
+                26
+            );
+            assert!(
+                frame["ball"]["operationOrder"]
+                    .as_array()
+                    .is_some_and(|order| !order.is_empty()),
+                "sparse gameplay frame {idx} should retain the ball-agent decision trace"
+            );
+            assert!(
+                frame["centralBrain"]["trackedPlayers"]
+                    .as_array()
+                    .is_some_and(|players| players.len() == 22),
+                "sparse gameplay frame {idx} should retain the central-brain field view"
+            );
+        }
 
         let _ = fs::remove_dir_all(&out_dir);
     }

@@ -105158,6 +105158,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             true
         );
         assert!(
+            meta["tacticalLiveness"]["shotAttempts"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "default 10-minute trace should include autonomous shot attempts"
+        );
+        assert_eq!(meta["tacticalLiveness"]["shotActivityOk"], true);
+        assert!(
             meta["tacticalLiveness"]["ballActiveFrames"]
                 .as_u64()
                 .unwrap_or(0)

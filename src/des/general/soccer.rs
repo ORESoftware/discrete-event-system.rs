@@ -67081,6 +67081,89 @@ mod tests {
     }
 
     #[test]
+    fn team_policy_artifact_round_trips_passing_and_first_touch_skill_bins() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            learning_logging_enabled: false,
+            seed: 15064,
+            ..Default::default()
+        });
+        let player_id = 5;
+        sim.players[player_id].skills.passing = 9.3;
+        sim.players[player_id].skills.first_touch = 8.1;
+        sim.players[player_id].skills.passing_completion_rate = 9.0;
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let player = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == player_id)
+            .expect("policy player");
+        let state = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(player_id),
+            &snapshot.observation_for(player_id),
+            player.team,
+            player.role,
+        );
+        assert_eq!(state.skill_passing_bin, skill_bucket(9.3));
+        assert_eq!(state.skill_first_touch_bin, skill_bucket(8.1));
+
+        let target = Vec2::new(42.0, 88.0);
+        let target_grid = pitch_grid_address(target, snapshot.field_width, snapshot.field_length);
+        let mut policies = SoccerTeamQPolicies::new(SoccerQPolicyOptions::default());
+        let team_policy = policies.policy_mut(player.team);
+        assert!(team_policy.set_action_value(state.clone(), "pass", 4.25));
+        assert!(team_policy.set_target_value(state.clone(), "pass", target_grid, 2.75));
+        sim.set_team_policies(policies);
+
+        let artifact = sim.team_policy_artifact();
+        let artifact_json =
+            serde_json::to_string(&artifact).expect("serialize team policy artifact");
+        let decoded_artifact: SoccerTeamPolicyArtifact =
+            serde_json::from_str(&artifact_json).expect("deserialize team policy artifact");
+        let decoded_entries = match player.team {
+            Team::Home => &decoded_artifact.home_entries,
+            Team::Away => &decoded_artifact.away_entries,
+        };
+        let decoded_targets = match player.team {
+            Team::Home => &decoded_artifact.home_target_entries,
+            Team::Away => &decoded_artifact.away_target_entries,
+        };
+        let decoded_entry = decoded_entries
+            .iter()
+            .find(|entry| entry.action == "pass")
+            .expect("serialized pass entry");
+        assert_eq!(
+            decoded_entry.state.skill_passing_bin,
+            state.skill_passing_bin
+        );
+        assert_eq!(
+            decoded_entry.state.skill_first_touch_bin,
+            state.skill_first_touch_bin
+        );
+        let decoded_target = decoded_targets
+            .iter()
+            .find(|entry| entry.action == "pass")
+            .expect("serialized pass target entry");
+        assert_eq!(
+            decoded_target.state.skill_passing_bin,
+            state.skill_passing_bin
+        );
+        assert_eq!(
+            decoded_target.state.skill_first_touch_bin,
+            state.skill_first_touch_bin
+        );
+
+        let restored =
+            SoccerTeamQPolicies::from_artifact(&decoded_artifact).expect("restore team policies");
+        let restored_policy = restored.policy(player.team);
+        assert_eq!(restored_policy.q_value(&state, "pass"), Some(4.25));
+        let restored_target = restored_policy
+            .best_target_grid_for_state_action(&state, "pass")
+            .expect("restored target grid");
+        assert_eq!(restored_target.target_fine_cell_id, target_grid.fine.id);
+    }
+
+    #[test]
     fn team_policy_artifact_exports_postgres_branch_tip_rows() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

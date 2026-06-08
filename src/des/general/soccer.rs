@@ -70787,6 +70787,34 @@ mod tests {
             .expect("passer transition");
         assert_eq!(passer.action, "pass");
         assert!(passer.reward.is_finite());
+        let passer_position = tracking.frames[0]
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .expect("tracking passer")
+            .position;
+        let passer_grid = pitch_grid_address(
+            passer_position,
+            tracking.config.field_width_yards,
+            tracking.config.field_length_yards,
+        );
+        assert_eq!(passer.state.player_grid, passer_grid);
+        assert_eq!(passer.observation.player_grid, passer_grid);
+        assert_eq!(
+            passer_grid.fine.parent_id,
+            Some(passer_grid.tactical.id),
+            "imported tracking states should retain the fine -> tactical grid parent"
+        );
+        assert_eq!(
+            passer_grid.tactical.parent_id,
+            Some(passer_grid.macro_zone.id),
+            "imported tracking states should retain the tactical -> macro grid parent"
+        );
+        assert_eq!(
+            passer_grid.macro_zone.parent_id,
+            Some(passer_grid.whole_pitch.id),
+            "imported tracking states should retain the macro -> whole-pitch grid parent"
+        );
         let action_target = passer
             .action_target
             .as_ref()
@@ -70814,6 +70842,10 @@ mod tests {
             train_soccer_q_policy_from_tracking(&tracking, SoccerQPolicyOptions::default())
                 .expect("tracking policy");
         let state = SoccerQStateKey::from_transition(passer);
+        assert_eq!(state.player_fine_cell_id, passer_grid.fine.id);
+        assert_eq!(state.player_tactical_cell_id, passer_grid.tactical.id);
+        assert_eq!(state.player_macro_cell_id, passer_grid.macro_zone.id);
+        assert_eq!(state.player_root_cell_id, passer_grid.whole_pitch.id);
         assert!(policy.q_value(&state, "pass").is_some());
         let target_entries = policy.target_entries();
         assert!(!target_entries.is_empty());
@@ -70825,6 +70857,14 @@ mod tests {
         assert_eq!(
             learned_target.target_tactical_cell_id,
             target_grid.tactical.id
+        );
+        assert_eq!(
+            learned_target.target_macro_cell_id,
+            target_grid.macro_zone.id
+        );
+        assert_eq!(
+            learned_target.target_root_cell_id,
+            target_grid.whole_pitch.id
         );
 
         let artifact =

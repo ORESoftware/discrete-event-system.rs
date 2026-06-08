@@ -7917,20 +7917,30 @@ impl PlayerAgent {
                     )
                 }
             } else if input.pass {
-                let pass_flight = input.pass_flight;
-                (
-                    SoccerAction::Pass {
-                        target_player: input.target_player,
-                        power: 0.78,
-                        flight: pass_flight,
-                    },
-                    if pass_flight.is_aerial() {
-                        "aerial-pass"
-                    } else {
-                        "pass"
-                    }
-                    .to_string(),
-                )
+                if has_ball {
+                    let pass_flight = input.pass_flight;
+                    (
+                        SoccerAction::Pass {
+                            target_player: input.target_player,
+                            power: 0.78,
+                            flight: pass_flight,
+                        },
+                        if pass_flight.is_aerial() {
+                            "aerial-pass"
+                        } else {
+                            "pass"
+                        }
+                        .to_string(),
+                    )
+                } else {
+                    let dir = input.axis.normalized();
+                    (
+                        SoccerAction::MoveTo(
+                            self.position + dir * if input.sprint { 7.0 } else { 4.5 },
+                        ),
+                        "human-move".to_string(),
+                    )
+                }
             } else {
                 let dir = input.axis.normalized();
                 (
@@ -65864,6 +65874,79 @@ mod tests {
         assert_eq!(decision.observation.controller_slot, Some(0));
         assert_eq!(decision.observation.human_controlled, true);
         assert_eq!(decision.observation.human_input_present, false);
+    }
+
+    #[test]
+    fn assigned_off_ball_human_pass_input_moves_instead_of_emitting_impossible_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 1,
+            seed: 775,
+            ..Default::default()
+        });
+        let controlled = 0;
+        let holder = 5;
+        sim.active_set_play = None;
+        sim.assign_controller_slot(0, Some(controlled))
+            .expect("assign controller slot");
+        park_players_except(&mut sim, &[controlled, holder]);
+        sim.players[controlled].position = Vec2::new(32.0, 36.0);
+        sim.players[controlled].velocity = Vec2::zero();
+        sim.players[holder].position = Vec2::new(40.0, 58.0);
+        sim.players[holder].velocity = Vec2::zero();
+        sim.ball.holder = Some(holder);
+        sim.ball.position = sim.players[holder].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(sim.players[holder].team);
+        sim.pending_pass = None;
+        sim.pending_shot = None;
+        assert!(sim.human_inputs.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(controlled),
+            seq: 1,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: true,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: Some(9),
+        }));
+
+        sim.run_time_step();
+
+        let decision = sim.players[controlled]
+            .last_decision
+            .as_ref()
+            .expect("controlled player decision");
+        assert_eq!(
+            decision.operation_order.first().map(String::as_str),
+            Some("human-input")
+        );
+        assert_eq!(decision.action, "human-move");
+        assert!(
+            matches!(
+                decision
+                    .action_target
+                    .as_ref()
+                    .and_then(|target| target.player_id),
+                None
+            ),
+            "off-ball human pass should not target a pass receiver: {decision:?}"
+        );
+        assert_eq!(
+            sim.ball.holder,
+            Some(holder),
+            "off-ball pass input must not release or steal possession"
+        );
+        assert!(
+            sim.pending_pass.is_none(),
+            "off-ball pass input must not create a pending pass"
+        );
+        assert!(
+            sim.players[controlled].position.x > 32.0,
+            "human axis should still move the selected off-ball player"
+        );
     }
 
     #[test]

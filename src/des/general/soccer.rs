@@ -29438,6 +29438,8 @@ pub struct SimulationRunSummary {
     pub step_timing: SoccerStepTimingStats,
     #[serde(default)]
     pub controller_yield: ControllerYieldStats,
+    #[serde(default)]
+    pub tactical_liveness: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48155,6 +48157,7 @@ pub fn run_simulation_summary(config: MatchConfig) -> SimulationRunSummary {
     let summary = sim.summary();
     let step_timing = sim.step_timing_stats();
     let controller_yield = sim.controller_yield_stats();
+    let tactical_liveness = soccer_playback_tactical_liveness_json(&summary);
     let events = sim.events;
     SimulationRunSummary {
         config,
@@ -48162,6 +48165,7 @@ pub fn run_simulation_summary(config: MatchConfig) -> SimulationRunSummary {
         events,
         step_timing,
         controller_yield,
+        tactical_liveness,
     }
 }
 
@@ -59519,6 +59523,18 @@ mod tests {
         assert_eq!(summary.summary.ticks, 200);
         assert_eq!(summary.step_timing.ticks, 200);
         assert_eq!(summary.controller_yield.skipped_no_assignment, 200);
+        assert_eq!(summary.tactical_liveness["frameLivenessKnown"], false);
+        assert_eq!(summary.tactical_liveness["sustainedPassWindow"], true);
+        assert_eq!(summary.tactical_liveness["passActivityOk"], true);
+        assert_eq!(summary.tactical_liveness["completedPassActivityOk"], true);
+        assert_eq!(
+            summary.tactical_liveness["passAttempts"].as_u64(),
+            Some(attempted_passes as u64)
+        );
+        assert_eq!(
+            summary.tactical_liveness["completedPasses"].as_u64(),
+            Some(completed_passes as u64)
+        );
         assert!(
             attempted_passes >= 2,
             "summary-only autonomous match should still record real pass attempts, got {attempted_passes}; stats={stats:?}"
@@ -59616,6 +59632,13 @@ mod tests {
         assert_eq!(summary.summary.ticks, 450);
         assert_eq!(summary.step_timing.ticks, 450);
         assert_eq!(summary.controller_yield.skipped_no_assignment, 450);
+        assert_eq!(summary.tactical_liveness["frameLivenessKnown"], false);
+        assert_eq!(summary.tactical_liveness["sustainedShotWindow"], true);
+        assert_eq!(summary.tactical_liveness["shotActivityOk"], true);
+        assert_eq!(
+            summary.tactical_liveness["shotAttempts"].as_u64(),
+            Some(shots as u64)
+        );
         assert!(
             shots >= 1,
             "summary-only autonomous match should still record shot attempts without retaining frames; stats={stats:?}"

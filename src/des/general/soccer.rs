@@ -103980,6 +103980,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ui?.liveInputPostEnabled"));
         assert!(html.contains("playback ${playbackPosts}"));
         assert!(html.contains("live ${livePosts}"));
+        assert!(html.contains("function soccerLivePostApiEnabled()"));
+        assert!(html.contains("current.pathname.includes(\"/soccer/live\")"));
+        assert!(html.contains("throw new Error(\"playback mode uses GET-only assets\")"));
+        assert!(html.contains("if (!soccerLivePostApiEnabled()) return;"));
+        assert!(html.contains("if (!soccerLivePostApiEnabled()) return \"Playback local\";"));
         assert!(html.contains("uiContract: null"));
         assert!(html
             .contains("trace.uiContract = meta.uiContract || meta.playback?.uiContract || null"));
@@ -105562,7 +105567,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let first_frame: serde_json::Value =
             serde_json::from_str(frame_lines.lines().next().expect("first frame line"))
                 .expect("frame json");
-        assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
+        let players = first_frame["players"].as_array().expect("playback players");
+        assert_eq!(players.len(), 22);
         assert_eq!(first_frame["officials"].as_array().unwrap().len(), 3);
 
         let blocking_file = out_dir.join("not-a-directory");
@@ -106230,7 +106236,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(lines.last().expect("last frame")).expect("last frame json");
         assert_eq!(first_frame["tick"], 0);
         assert_eq!(last_frame["tick"], 6_000);
-        assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
+        let players = first_frame["players"].as_array().expect("playback players");
+        assert_eq!(players.len(), 22);
         assert_eq!(last_frame["players"].as_array().unwrap().len(), 22);
         assert_eq!(last_frame["officials"].as_array().unwrap().len(), 3);
         assert_eq!(first_frame["agentScheduleSummary"]["totalAgents"], 0);
@@ -106668,7 +106675,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let first_frame: serde_json::Value =
             serde_json::from_str(first_line).expect("playback frame json");
 
-        assert_eq!(first_frame["players"].as_array().unwrap().len(), 22);
+        let players = first_frame["players"].as_array().expect("playback players");
+        assert_eq!(players.len(), 22);
         assert_eq!(first_frame["officials"].as_array().unwrap().len(), 3);
         assert_eq!(
             first_frame["centralBrain"]["trackedPlayers"]
@@ -106680,7 +106688,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_frame["players"][0].get("position").is_some());
         assert!(first_frame["players"][0].get("shirt").is_some());
         assert!(first_frame["players"][0].get("movementGait").is_some());
-        let skill_bands = first_frame["players"][0]["skillBands"]
+        let skill_bands = players[0]["skillBands"]
             .as_str()
             .expect("compact playback skill bands");
         assert_eq!(skill_bands.len(), 8);
@@ -106688,6 +106696,26 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let shooting = u8::from_str_radix(&skill_bands[3..4], 36).expect("shooting skill band");
         assert!(speed > 0 && speed <= 10);
         assert!(shooting > 0 && shooting <= 10);
+        let mut unique_skill_bands = HashSet::new();
+        for player in players {
+            let bands = player["skillBands"]
+                .as_str()
+                .expect("each playback player should expose compact skill bands");
+            assert_eq!(bands.len(), 8);
+            assert!(
+                bands
+                    .chars()
+                    .all(|ch| { ch.to_digit(36).is_some_and(|band| (1..=10).contains(&band)) }),
+                "skill bands should be compact 1..=10 base36 values: {bands}"
+            );
+            unique_skill_bands.insert(bands.to_string());
+        }
+        assert!(
+            unique_skill_bands.len() >= 8,
+            "slim playback should preserve differentiated player skills, got {} unique bands: {:?}",
+            unique_skill_bands.len(),
+            unique_skill_bands
+        );
         assert!(first_frame["ball"].get("velocity").is_some());
         assert!(first_frame["ball"].get("altitudeYards").is_some());
         assert!(first_frame["homeDirective"]

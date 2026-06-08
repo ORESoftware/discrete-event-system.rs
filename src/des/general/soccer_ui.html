@@ -1227,6 +1227,14 @@ function centralBrainShapeLabel(b) {
   };
   return `${shapeText("H", b?.homeShape)}${shapeText("A", b?.awayShape)}`;
 }
+function centralBrainBallKinematics(b) {
+  return Array.isArray(b?.ballKinematics) ? b.ballKinematics : null;
+}
+function centralBrainBallVec(b, key, offset) {
+  if (b?.[key]) return b[key];
+  const compact = centralBrainBallKinematics(b);
+  return {x: Number(compact?.[offset] ?? 0), y: Number(compact?.[offset + 1] ?? 0)};
+}
 function centralBrainLabel(b) {
   if (!b) return "22p 3o Loose";
   const players = Array.isArray(b.trackedPlayers) ? b.trackedPlayers.length : 0;
@@ -1236,11 +1244,14 @@ function centralBrainLabel(b) {
   const holder = b.ballHolder == null ? "" : ` #${b.ballHolder}`;
   const center = b.centerOfPlay;
   const centerText = center ? ` C${Number(center.x ?? 0).toFixed(0)},${Number(center.y ?? 0).toFixed(0)}` : "";
-  const ballSpeed = vecLen(b.ballVelocity || {x: 0, y: 0});
-  const ballAccel = vecLen(b.ballAcceleration || {x: 0, y: 0});
-  const ballJerk = vecLen(b.ballJerk || {x: 0, y: 0});
-  const ballZ = Number(b.ballAltitudeYards ?? 0);
-  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}`;
+  const compactBall = centralBrainBallKinematics(b);
+  const ballSpeed = vecLen(centralBrainBallVec(b, "ballVelocity", 2));
+  const ballAccel = vecLen(centralBrainBallVec(b, "ballAcceleration", 4));
+  const ballJerk = vecLen(centralBrainBallVec(b, "ballJerk", 6));
+  const ballZ = Number(b.ballAltitudeYards ?? compactBall?.[8] ?? 0);
+  const ballSchedule = playbackScheduleSlotLabel(b.ballScheduledIndex);
+  const ballAction = b.ballLastAction ? ` ${b.ballLastAction}` : "";
+  const ballText = ` B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)} z${ballZ.toFixed(1)}${ballSchedule}${ballAction}`;
   const controllerText = centralBrainControllerAssignmentLabel(b);
   const shapeText = centralBrainShapeLabel(b);
   return `${players}p ${officials}o${schedule} ${possession}${holder}${controllerText}${centerText}${shapeText}${ballText}`;

@@ -28171,12 +28171,44 @@ fn soccer_playback_offside_line_frame(
 pub struct SoccerPlaybackCentralBrainFrame {
     pub possession_team: Option<Team>,
     pub ball_holder: Option<usize>,
+    #[serde(default)]
+    pub ball_kinematics: [f64; 9],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ball_scheduled_index: Option<usize>,
     pub tracked_players: Vec<usize>,
     pub tracked_officials: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_shape: Option<CentralBrainTeamShapeTrace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub away_shape: Option<CentralBrainTeamShapeTrace>,
+}
+
+fn soccer_playback_compact_f64(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * 10.0).round() / 10.0
+    } else {
+        0.0
+    }
+}
+
+fn soccer_playback_ball_kinematics(
+    position: Vec2,
+    velocity: Vec2,
+    acceleration: Vec2,
+    jerk: Vec2,
+    altitude_yards: f64,
+) -> [f64; 9] {
+    [
+        soccer_playback_compact_f64(position.x),
+        soccer_playback_compact_f64(position.y),
+        soccer_playback_compact_f64(velocity.x),
+        soccer_playback_compact_f64(velocity.y),
+        soccer_playback_compact_f64(acceleration.x),
+        soccer_playback_compact_f64(acceleration.y),
+        soccer_playback_compact_f64(jerk.x),
+        soccer_playback_compact_f64(jerk.y),
+        soccer_playback_compact_f64(altitude_yards),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29085,6 +29117,14 @@ impl SoccerPlaybackFrame {
             central_brain: SoccerPlaybackCentralBrainFrame {
                 possession_team,
                 ball_holder: sim.ball.holder,
+                ball_kinematics: soccer_playback_ball_kinematics(
+                    sim.ball.position,
+                    sim.ball.velocity,
+                    sim.ball.acceleration,
+                    sim.ball.jerk,
+                    sim.ball.altitude_yards,
+                ),
+                ball_scheduled_index: schedule_lookup.ball(),
                 tracked_players: sim.players.iter().map(|player| player.id).collect(),
                 tracked_officials: sim.officials.len(),
                 home_shape: sim
@@ -29253,6 +29293,14 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
             central_brain: SoccerPlaybackCentralBrainFrame {
                 possession_team: frame.central_brain.possession_team,
                 ball_holder: frame.central_brain.ball_holder,
+                ball_kinematics: soccer_playback_ball_kinematics(
+                    frame.central_brain.ball_position,
+                    frame.central_brain.ball_velocity,
+                    frame.central_brain.ball_acceleration,
+                    frame.central_brain.ball_jerk,
+                    frame.central_brain.ball_altitude_yards,
+                ),
+                ball_scheduled_index: frame.central_brain.ball_scheduled_index,
                 tracked_players: frame
                     .central_brain
                     .tracked_players
@@ -104307,9 +104355,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("Playback ready"));
         assert!(html.contains("ballAltitudeYards"));
         assert!(html.contains("altitudeYards"));
-        assert!(html.contains("b.ballAcceleration"));
-        assert!(html.contains("b.ballJerk"));
+        assert!(html.contains("function centralBrainBallKinematics"));
+        assert!(html.contains("b?.ballKinematics"));
+        assert!(html.contains("centralBrainBallVec(b, \"ballAcceleration\", 4)"));
+        assert!(html.contains("centralBrainBallVec(b, \"ballJerk\", 6)"));
         assert!(html.contains("b.ballAltitudeYards"));
+        assert!(html.contains("b.ballScheduledIndex"));
+        assert!(html.contains("b.ballLastAction"));
         assert!(html
             .contains("B${ballSpeed.toFixed(0)}/${ballAccel.toFixed(0)}/${ballJerk.toFixed(0)}"));
         assert!(html.contains("brain.teamCentroid"));
@@ -106929,6 +106981,42 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .len(),
             22
         );
+        let brain_ball = first_frame["centralBrain"]["ballKinematics"]
+            .as_array()
+            .expect("compact central-brain ball kinematics");
+        assert_eq!(brain_ball.len(), 9);
+        let compact_json = |value: &serde_json::Value| {
+            serde_json::json!(soccer_playback_compact_f64(
+                value.as_f64().expect("numeric ball field")
+            ))
+        };
+        assert_eq!(
+            brain_ball[0],
+            compact_json(&first_frame["ball"]["position"]["x"])
+        );
+        assert_eq!(
+            brain_ball[1],
+            compact_json(&first_frame["ball"]["position"]["y"])
+        );
+        assert_eq!(
+            brain_ball[2],
+            compact_json(&first_frame["ball"]["velocity"]["x"])
+        );
+        assert_eq!(
+            brain_ball[3],
+            compact_json(&first_frame["ball"]["velocity"]["y"])
+        );
+        assert_eq!(
+            brain_ball[4],
+            compact_json(&first_frame["ball"]["acceleration"]["x"])
+        );
+        assert_eq!(
+            brain_ball[5],
+            compact_json(&first_frame["ball"]["acceleration"]["y"])
+        );
+        assert_eq!(brain_ball[6], compact_json(&first_frame["ball"]["jerk"]["x"]));
+        assert_eq!(brain_ball[7], compact_json(&first_frame["ball"]["jerk"]["y"]));
+        assert_eq!(brain_ball[8], compact_json(&first_frame["ball"]["altitudeYards"]));
         assert!(first_frame["players"][0].get("position").is_some());
         assert!(first_frame["players"][0].get("shirt").is_some());
         assert!(first_frame["players"][0].get("movementGait").is_some());
@@ -107008,6 +107096,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .iter()
             .find(|frame| frame["tick"].as_u64().unwrap_or(0) > 0)
             .expect("scheduled playback frame");
+        assert!(
+            scheduled_frame["centralBrain"]["ballScheduledIndex"]
+                .as_u64()
+                .is_some(),
+            "scheduled central brain playback should keep the ball agent schedule index"
+        );
         assert!(scheduled_frame["centralBrain"]["homeShape"]
             .get("centroidToBallYards")
             .is_some());

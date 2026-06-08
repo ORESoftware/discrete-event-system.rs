@@ -96133,6 +96133,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             step_value["uiContract"]["playbackLoadPostsToHttpApi"],
             false
         );
+        assert_eq!(step_value["uiContract"]["playbackStepPostEnabled"], false);
+        assert_eq!(step_value["uiContract"]["playbackInputPostEnabled"], false);
         assert_eq!(
             step_value["uiContract"]["playbackExternalPersistenceEnabled"],
             false
@@ -96141,6 +96143,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             step_value["uiContract"]["liveSimulationPostApiEnabled"],
             true
         );
+        assert_eq!(step_value["uiContract"]["liveStepPostEnabled"], true);
+        assert_eq!(step_value["uiContract"]["liveInputPostEnabled"], true);
         assert_eq!(step_value["uiContract"]["liveStepPostBatchesTicks"], true);
         assert_eq!(
             step_value["uiContract"]["liveInputPostBatchesControllerFrames"],
@@ -103971,7 +103975,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("policyPersistenceStoresAllWeightHistory"));
         assert!(html.contains("policyPersistenceExternalWritesPerTimestep"));
         assert!(html.contains("policyPersistencePlaybackHttpPostsEnabled"));
+        assert!(html.contains("ui?.playbackStepPostEnabled"));
+        assert!(html.contains("ui?.playbackInputPostEnabled"));
+        assert!(html.contains("ui?.liveStepPostEnabled"));
+        assert!(html.contains("ui?.liveInputPostEnabled"));
         assert!(html.contains("playback ${playbackPosts}"));
+        assert!(html.contains("live ${livePosts}"));
+        assert!(html.contains("uiContract: null"));
+        assert!(html
+            .contains("trace.uiContract = meta.uiContract || meta.playback?.uiContract || null"));
         assert!(html.contains("trace.stepTiming = meta.stepTiming || meta.step_timing || null"));
         assert!(html.contains(
             "trace.tacticalLiveness = meta.tacticalLiveness || meta.playback?.tacticalLiveness || null"
@@ -106458,6 +106470,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("policyPersistencePlaybackHttpPostsEnabled"));
         assert!(html.contains("policyPersistenceExplicitPostgresExportEndpointEnabled"));
         assert!(html.contains("policyPersistenceExplicitPostgresExportBatched"));
+        assert!(html.contains("ui.liveStepPostEnabled"));
+        assert!(html.contains("ui.liveInputPostEnabled"));
+        assert!(html.contains("ui.playbackStepPostEnabled"));
+        assert!(html.contains("ui.playbackInputPostEnabled"));
+        assert!(html.contains("live-post"));
+        assert!(html.contains("pb-get"));
     }
 
     #[test]

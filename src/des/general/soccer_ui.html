@@ -469,6 +469,7 @@ const trace = {
   agentContract: null,
   decisionModel: null,
   controllerContract: null,
+  uiContract: null,
   physicsContract: null,
   learningContract: null,
   stepTiming: null,
@@ -916,8 +917,12 @@ function tacticalLivenessState() {
   const humanInputConsumedDecisions = Number(meta.humanInputConsumedDecisions ?? 0);
   const humanInputUniqueControllerSlots = Number(meta.humanInputUniqueControllerSlots ?? 0);
   const humanInputMaxQueueAgeMs = Number(meta.humanInputMaxQueueAgeMs ?? 0);
+  const finalThirdPossessionFrames = Number(meta.finalThirdPossessionFrames ?? 0);
+  const insideTwentyPossessionFrames = Number(meta.insideTwentyPossessionFrames ?? 0);
+  const shotOptionLegalFrames = Number(meta.shotOptionLegalFrames ?? 0);
   const clearShotWindowFrames = Number(meta.clearShotWindowFrames ?? 0);
   const clearShotWindowDecisiveActions = Number(meta.clearShotWindowDecisiveActions ?? 0);
+  const clearShotWindowShots = Number(meta.clearShotWindowShots ?? 0);
   const clearShotWindowRecycles = Number(meta.clearShotWindowRecycles ?? 0);
   const killerPassWindowFrames = Number(meta.killerPassWindowFrames ?? 0);
   const killerPassWindowPasses = Number(meta.killerPassWindowPasses ?? 0);
@@ -938,12 +943,13 @@ function tacticalLivenessState() {
   const agentAccountingOk = meta.agentAccountingOk == null ? true : Boolean(meta.agentAccountingOk);
   const humanInputOk = meta.humanInputConsumedOk == null ? true : Boolean(meta.humanInputConsumedOk);
   const clearShotOk = meta.clearShotWindowOk == null ? true : Boolean(meta.clearShotWindowOk);
+  const clearShotShotOk = meta.clearShotWindowShotOk == null ? true : Boolean(meta.clearShotWindowShotOk);
   const killerPassOk = meta.killerPassWindowOk == null ? true : Boolean(meta.killerPassWindowOk);
-  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, centralBrainOperationOrderSamples, centralBrainOperationOrderUniqueFirstOps, centralBrainOperationOrderUniqueFullOrders, playerOperationOrderSamples, playerOperationOrderUniqueFirstOps, playerOperationOrderUniqueFullOrders, ballOperationOrderSamples, ballOperationOrderUniqueFirstOps, ballOperationOrderUniqueFullOrders, officialOperationOrderSamples, officialOperationOrderUniqueFirstOps, officialOperationOrderUniqueFullOrders, playerDecisionModelSamples, playerMdpGridSamples, playerPomdpGridSamples, playerActionFacingSamples, playerReceiveFacingSamples, playerGaitSamples, playerUniqueGaits, playerHighIntensityGaitSamples, playerBackwardGaitSamples, playerLateralGaitSamples, agentAccountingFrames, agentAccountingOkFrames, fullRosterFrames, completeScheduleFrames, centralBrainDecisionFrames, ballDecisionFrames, humanControlledPlayerDecisions, humanInputPresentDecisions, humanInputConsumedDecisions, humanInputUniqueControllerSlots, humanInputMaxQueueAgeMs, clearShotWindowFrames, clearShotWindowDecisiveActions, clearShotWindowRecycles, killerPassWindowFrames, killerPassWindowPasses, killerPassWindowRecycles, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk, centralBrainOperationOrderOk, operationOrderOk, ballOperationOrderOk, officialOperationOrderOk, decisionModelOk, movementGaitOk, agentAccountingOk, humanInputOk, clearShotOk, killerPassOk};
+  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, centralBrainOperationOrderSamples, centralBrainOperationOrderUniqueFirstOps, centralBrainOperationOrderUniqueFullOrders, playerOperationOrderSamples, playerOperationOrderUniqueFirstOps, playerOperationOrderUniqueFullOrders, ballOperationOrderSamples, ballOperationOrderUniqueFirstOps, ballOperationOrderUniqueFullOrders, officialOperationOrderSamples, officialOperationOrderUniqueFirstOps, officialOperationOrderUniqueFullOrders, playerDecisionModelSamples, playerMdpGridSamples, playerPomdpGridSamples, playerActionFacingSamples, playerReceiveFacingSamples, playerGaitSamples, playerUniqueGaits, playerHighIntensityGaitSamples, playerBackwardGaitSamples, playerLateralGaitSamples, agentAccountingFrames, agentAccountingOkFrames, fullRosterFrames, completeScheduleFrames, centralBrainDecisionFrames, ballDecisionFrames, humanControlledPlayerDecisions, humanInputPresentDecisions, humanInputConsumedDecisions, humanInputUniqueControllerSlots, humanInputMaxQueueAgeMs, finalThirdPossessionFrames, insideTwentyPossessionFrames, shotOptionLegalFrames, clearShotWindowFrames, clearShotWindowDecisiveActions, clearShotWindowShots, clearShotWindowRecycles, killerPassWindowFrames, killerPassWindowPasses, killerPassWindowRecycles, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk, centralBrainOperationOrderOk, operationOrderOk, ballOperationOrderOk, officialOperationOrderOk, decisionModelOk, movementGaitOk, agentAccountingOk, humanInputOk, clearShotOk, clearShotShotOk, killerPassOk};
 }
 function tacticalLivenessLabel() {
   const live = tacticalLivenessState();
-  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk && live.centralBrainOperationOrderOk && live.operationOrderOk && live.ballOperationOrderOk && live.officialOperationOrderOk && live.decisionModelOk && live.movementGaitOk && live.agentAccountingOk && live.humanInputOk && live.clearShotOk && live.killerPassOk;
+  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk && live.centralBrainOperationOrderOk && live.operationOrderOk && live.ballOperationOrderOk && live.officialOperationOrderOk && live.decisionModelOk && live.movementGaitOk && live.agentAccountingOk && live.humanInputOk && live.clearShotOk && live.clearShotShotOk && live.killerPassOk;
   const support = live.offBallOpenSpaceSupportKnown ? live.offBallOpenSpaceMoves : "?";
   const goalward = live.frameLivenessKnown ? live.ballGoalwardProgressYards.toFixed(0) : "?";
   const ops = live.frameLivenessKnown ? `${live.playerOperationOrderUniqueFirstOps}/${live.playerOperationOrderSamples}` : "?";
@@ -992,7 +998,7 @@ function tacticalLivenessTitle() {
       ? `human input decisions=${live.humanInputConsumedDecisions}/${live.humanInputPresentDecisions}; controlled decisions=${live.humanControlledPlayerDecisions}; controller slots=${live.humanInputUniqueControllerSlots}; max queue age=${live.humanInputMaxQueueAgeMs}ms`
       : "human input liveness not measured",
     live.frameLivenessKnown
-      ? `clear shot windows=${live.clearShotWindowFrames}; decisive=${live.clearShotWindowDecisiveActions}; recycled=${live.clearShotWindowRecycles}`
+      ? `clear shot windows=${live.clearShotWindowFrames}; shots=${live.clearShotWindowShots}; decisive=${live.clearShotWindowDecisiveActions}; recycled=${live.clearShotWindowRecycles}; finalThirdPossessionFrames=${live.finalThirdPossessionFrames}; insideTwentyPossessionFrames=${live.insideTwentyPossessionFrames}; shotOptionLegalFrames=${live.shotOptionLegalFrames}`
       : "clear shot windows not measured",
     live.frameLivenessKnown
       ? `killer-pass windows=${live.killerPassWindowFrames}; passes=${live.killerPassWindowPasses}; recycled=${live.killerPassWindowRecycles}`
@@ -2278,13 +2284,15 @@ function goalkeeperPhysicsTitle() {
 }
 function learningPersistenceLabel() {
   const contract = trace.learningContract || trace.playback?.learningContract || null;
+  const ui = trace.uiContract || trace.playback?.uiContract || null;
   if (!contract) return "learn ?";
   const mode = contract.learningEnabled ? "learn" : "observe";
   const backend = contract.policyPersistenceBackend || "json";
   const retention = contract.policyPersistenceStoresAllWeightHistory ? "history" : "tip";
   const batched = contract.policyPersistenceExternalWritesPerTimestep === false ? "batched" : "per-tick?";
-  const playbackPosts = contract.policyPersistencePlaybackHttpPostsEnabled ? "POST" : "GET";
-  return `${mode} ${backend} ${retention} ${batched} playback ${playbackPosts}`;
+  const playbackPosts = contract.policyPersistencePlaybackHttpPostsEnabled || ui?.playbackStepPostEnabled || ui?.playbackInputPostEnabled ? "POST" : "GET";
+  const livePosts = ui?.liveStepPostEnabled || ui?.liveInputPostEnabled ? "POST" : "off";
+  return `${mode} ${backend} ${retention} ${batched} playback ${playbackPosts} live ${livePosts}`;
 }
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);
@@ -2776,6 +2784,7 @@ async function loadTraceMeta(signal) {
   trace.agentContract = meta.agentContract || meta.playback?.agentContract || null;
   trace.decisionModel = meta.decisionModel || meta.playback?.decisionModel || null;
   trace.controllerContract = meta.controllerContract || meta.playback?.controllerContract || null;
+  trace.uiContract = meta.uiContract || meta.playback?.uiContract || null;
   trace.physicsContract = meta.physicsContract || meta.playback?.physicsContract || null;
   trace.learningContract = meta.learningContract || meta.playback?.learningContract || null;
   trace.stepTiming = meta.stepTiming || meta.step_timing || null;

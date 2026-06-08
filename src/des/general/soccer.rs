@@ -32430,6 +32430,9 @@ pub struct SoccerPhysicsRuntimeContract {
     pub shared_position_latest_tracks_players_officials_ball: bool,
     pub shared_position_history_tracks_players_officials_ball: bool,
     pub shared_position_history_limit: usize,
+    pub shared_position_player_history_limit: usize,
+    pub shared_position_official_history_limit: usize,
+    pub shared_position_ball_history_limit: usize,
     pub shared_position_expected_player_count: usize,
     pub shared_position_expected_official_count: usize,
     pub shared_position_expected_ball_count: usize,
@@ -32718,6 +32721,9 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         shared_position_latest_tracks_players_officials_ball: true,
         shared_position_history_tracks_players_officials_ball: true,
         shared_position_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        shared_position_player_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        shared_position_official_history_limit: PLAYER_POSITION_HISTORY_LIMIT,
+        shared_position_ball_history_limit: BALL_POSITION_HISTORY_LIMIT,
         shared_position_expected_player_count: SOCCER_MATCH_PLAYER_COUNT,
         shared_position_expected_official_count: SOCCER_MATCH_OFFICIAL_COUNT,
         shared_position_expected_ball_count: 1,
@@ -95588,6 +95594,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             contract["sharedPositionHistoryLimit"],
             PLAYER_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            contract["sharedPositionPlayerHistoryLimit"],
+            PLAYER_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            contract["sharedPositionOfficialHistoryLimit"],
+            PLAYER_POSITION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            contract["sharedPositionBallHistoryLimit"],
+            BALL_POSITION_HISTORY_LIMIT
         );
         assert_eq!(
             contract["sharedPositionExpectedPlayerCount"],

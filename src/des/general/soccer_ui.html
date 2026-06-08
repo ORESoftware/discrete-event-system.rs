@@ -2318,7 +2318,7 @@ function learningPersistenceLabel() {
   const batched = contract.policyPersistenceExternalWritesPerTimestep === false ? "batched" : "per-tick?";
   const playbackPosts = contract.policyPersistencePlaybackHttpPostsEnabled || ui?.playbackStepPostEnabled || ui?.playbackInputPostEnabled ? "POST" : "GET";
   const livePosts = ui?.liveStepPostEnabled || ui?.liveInputPostEnabled ? "POST" : "off";
-  return `${mode} ${backend} ${retention} ${batched} playback ${playbackPosts} live ${livePosts}`;
+  return `${mode} ${backend} ${retention} ${batched} playback ${playbackPosts} live-only ${livePosts}`;
 }
 function visibleHumanSlotCount() {
   const configured = Number(trace.config?.maxHumanPlayers);

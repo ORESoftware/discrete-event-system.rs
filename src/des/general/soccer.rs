@@ -104906,6 +104906,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("const assignedByPlayer = new Map"));
         assert!(html.contains("playerOpt.disabled = assignedElsewhere"));
         assert!(html.contains("keymap.textContent = controllerKeymapLabel(slot)"));
+        assert!(html.contains("Pass/Shoot ${keyName(map.action)}"));
+        assert!(html.contains("Active: Thread T"));
         assert!(html.contains("Thread T"));
         assert!(html.contains("Clear C"));
         assert!(html.contains("Route R"));

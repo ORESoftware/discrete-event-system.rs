@@ -105,7 +105,7 @@ const SHOT_BAILOUT_ON_FRAME_PROBABILITY: f64 = 0.20;
 const STRIKER_SHOT_WINDOW_YARDS: f64 = 30.0;
 const TEAMMATE_MUST_SHOOT_YARDS: f64 = 25.0;
 const STRIKER_MUST_SHOOT_YARDS: f64 = TEAMMATE_MUST_SHOOT_YARDS;
-const ATTACKING_GOAL_PRESSURE_SHOT_YARDS: f64 = TEAMMATE_MUST_SHOOT_YARDS + 2.0;
+const ATTACKING_GOAL_PRESSURE_SHOT_YARDS: f64 = TEAMMATE_MUST_SHOOT_YARDS + 7.0;
 const CLEAN_SHOT_MUST_SHOOT_YARDS: f64 = 20.0;
 const CLEAN_SHOT_MAX_BLOCK_PROBABILITY: f64 = 0.34;
 const CLEAN_SHOT_MIN_ON_FRAME_PROBABILITY: f64 = 0.32;
@@ -50476,10 +50476,11 @@ fn attacking_goal_pressure_shot_attempt_probability(
     (0.10
         + role_bonus
         + shooting_skill.clamp(0.0, 1.0) * 0.10
-        + range_fit * 0.18
+        + range_fit * 0.22
         + observation.offensive_urgency.clamp(0.0, 1.0) * 0.12
+        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.08
         + observation.shot_on_frame_probability.clamp(0.0, 1.0) * 0.08)
-        .clamp(0.0, 0.58)
+        .clamp(0.0, 0.66)
 }
 
 fn speculative_long_shot_is_qualified(
@@ -50816,11 +50817,11 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
         + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.28)
         .clamp(0.0, 1.0);
-    (range_fit.sqrt() * 0.34
-        + final_third_fit * 0.24
+    (range_fit.powf(0.55) * 0.38
+        + final_third_fit * 0.26
         + receiver_lane_fit * 0.22
-        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.14
-        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.06)
+        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.10
+        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.04)
         .clamp(0.0, 1.0)
 }
 
@@ -50829,14 +50830,16 @@ fn killer_pass_goal_pressure_floor(observation: &SoccerPomdpObservation) -> f64 
     if pressure <= 0.0 {
         return 0.0;
     }
+    let danger_zone_fit = ((36.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
     (0.08
-        + pressure * 0.28
+        + pressure * 0.30
+        + danger_zone_fit * 0.10
         + observation
             .best_forward_pass_receiver_openness
             .clamp(0.0, 1.0)
             * 0.08
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.06)
-        .clamp(0.12, 0.48)
+        .clamp(0.12, 0.58)
 }
 
 fn near_goal_decisive_action_pressure_score(
@@ -91537,6 +91540,158 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             killer > carry,
             "blocked final-third holder should look for the threaded pass before another hold: killer={killer} carry={carry} options={options:?}"
         );
+    }
+
+    #[test]
+    fn clear_goal_approach_shot_probability_ramps_before_must_shoot_window() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_238,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let keeper = 11;
+        park_players_except(&mut sim, &[attacker, keeper]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].skills.shooting = 7.8;
+        sim.players[attacker].skills.right_foot_shot_power = 8.1;
+        sim.players[attacker].skills.left_foot_shot_power = 7.2;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.62;
+        sim.players[attacker].preferences.dribble_bias = 0.74;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+
+        let mut previous_shoot = 0.0;
+        for (idx, y) in [88.0, 94.0, 100.0].into_iter().enumerate() {
+            sim.players[attacker].position = Vec2::new(40.0, y);
+            sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(attacker);
+            assert!(observation.shot_lane_open);
+            assert!(shot_decision_is_qualified_for_role(
+                &observation,
+                sim.players[attacker].role
+            ));
+
+            let options = sim.players[attacker].possession_action_options(
+                &observation,
+                &snapshot.tactical_directive(Team::Home),
+                snapshot.ranked_visible_pass_targets(attacker, 3).len(),
+                snapshot
+                    .ranked_visible_aerial_pass_targets(attacker, 3)
+                    .len(),
+                false,
+                sim.config.dt_seconds,
+                snapshot.field_width,
+            );
+            let shoot = options
+                .iter()
+                .find(|option| option.label == "shoot" && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0);
+            if idx > 0 {
+                assert!(
+                    shoot > previous_shoot + 0.05,
+                    "clear shot probability should ramp as goal gets closer: y={y} shoot={shoot} previous={previous_shoot} options={options:?}"
+                );
+            }
+            previous_shoot = shoot;
+        }
+    }
+
+    #[test]
+    fn blocked_goal_approach_killer_pass_probability_ramps_toward_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_239,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blockers = [13, 14, 15];
+        park_players_except(&mut sim, &[attacker, runner, keeper, 13, 14, 15]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].skills.shooting = 7.0;
+        sim.players[attacker].skills.passing_completion_rate = 9.2;
+        sim.players[attacker].skills.vision = 9.4;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.76;
+        sim.players[attacker].preferences.shoot_bias = 0.44;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].velocity = Vec2::new(1.0, 6.8);
+        sim.players[runner].skills.shooting = 8.9;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.2;
+        for blocker in blockers {
+            sim.players[blocker].skills.defending = 9.8;
+            sim.players[blocker].skills.defensive_tracking = 9.8;
+            sim.players[blocker].skills.aggression = 9.0;
+        }
+
+        let mut previous_killer = 0.0;
+        for (idx, y) in [72.0, 84.0, 94.0].into_iter().enumerate() {
+            sim.players[attacker].position = Vec2::new(40.0, y);
+            sim.players[attacker].velocity = Vec2::new(0.0, 3.8);
+            sim.players[runner].position = Vec2::new(52.0, (y + 18.0).min(112.0));
+            sim.players[13].position = Vec2::new(40.0, (y + 10.0).min(108.0));
+            sim.players[14].position = Vec2::new(31.0, (y + 24.0).min(114.0));
+            sim.players[15].position = Vec2::new(57.0, (y + 26.0).min(115.0));
+            sim.ball.holder = Some(attacker);
+            sim.ball.position = sim.players[attacker].position;
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(attacker);
+            let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+            assert!(
+                pass_targets.contains(&runner),
+                "runner should stay visible for the threaded pass: y={y} targets={pass_targets:?}"
+            );
+            assert_eq!(
+                snapshot.killer_pass_target_for(attacker, &pass_targets),
+                Some(runner),
+                "runner should be the best killer-pass target at y={y}"
+            );
+            assert!(
+                observation.shot_block_probability >= 0.48,
+                "test should model a shot lane blocked enough to prefer a threaded pass: y={y} block={}",
+                observation.shot_block_probability
+            );
+
+            let options = sim.players[attacker].possession_action_options(
+                &observation,
+                &snapshot.tactical_directive(Team::Home),
+                pass_targets.len(),
+                snapshot
+                    .ranked_visible_aerial_pass_targets(attacker, 3)
+                    .len(),
+                false,
+                sim.config.dt_seconds,
+                snapshot.field_width,
+            );
+            let killer = options
+                .iter()
+                .find(|option| option.label == "killer-pass" && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0);
+            if idx > 0 {
+                assert!(
+                    killer > previous_killer + 0.04,
+                    "killer-pass probability should ramp as blocked holder nears goal: y={y} killer={killer} previous={previous_killer} options={options:?}"
+                );
+            }
+            previous_killer = killer;
+        }
     }
 
     fn sample_position_only_kinematics_tracking_dataset() -> SoccerTrackingDataset {

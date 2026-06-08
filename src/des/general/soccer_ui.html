@@ -883,9 +883,29 @@ function tacticalLivenessState() {
   const ballMovementYards = Number(meta.ballMovementYards ?? 0);
   const ballGoalwardProgressYards = Number(meta.ballGoalwardProgressYards ?? 0);
   const ballActiveFrames = Number(meta.ballActiveFrames ?? 0);
+  const centralBrainOperationOrderSamples = Number(meta.centralBrainOperationOrderSamples ?? 0);
+  const centralBrainOperationOrderUniqueFirstOps = Number(meta.centralBrainOperationOrderUniqueFirstOps ?? 0);
+  const centralBrainOperationOrderUniqueFullOrders = Number(meta.centralBrainOperationOrderUniqueFullOrders ?? 0);
   const playerOperationOrderSamples = Number(meta.playerOperationOrderSamples ?? 0);
   const playerOperationOrderUniqueFirstOps = Number(meta.playerOperationOrderUniqueFirstOps ?? 0);
   const playerOperationOrderUniqueFullOrders = Number(meta.playerOperationOrderUniqueFullOrders ?? 0);
+  const ballOperationOrderSamples = Number(meta.ballOperationOrderSamples ?? 0);
+  const ballOperationOrderUniqueFirstOps = Number(meta.ballOperationOrderUniqueFirstOps ?? 0);
+  const ballOperationOrderUniqueFullOrders = Number(meta.ballOperationOrderUniqueFullOrders ?? 0);
+  const officialOperationOrderSamples = Number(meta.officialOperationOrderSamples ?? 0);
+  const officialOperationOrderUniqueFirstOps = Number(meta.officialOperationOrderUniqueFirstOps ?? 0);
+  const officialOperationOrderUniqueFullOrders = Number(meta.officialOperationOrderUniqueFullOrders ?? 0);
+  const playerDecisionModelSamples = Number(meta.playerDecisionModelSamples ?? 0);
+  const playerMdpGridSamples = Number(meta.playerMdpGridSamples ?? 0);
+  const playerPomdpGridSamples = Number(meta.playerPomdpGridSamples ?? 0);
+  const playerActionFacingSamples = Number(meta.playerActionFacingSamples ?? 0);
+  const playerReceiveFacingSamples = Number(meta.playerReceiveFacingSamples ?? 0);
+  const agentAccountingFrames = Number(meta.agentAccountingFrames ?? 0);
+  const agentAccountingOkFrames = Number(meta.agentAccountingOkFrames ?? 0);
+  const fullRosterFrames = Number(meta.fullRosterFrames ?? 0);
+  const completeScheduleFrames = Number(meta.completeScheduleFrames ?? 0);
+  const centralBrainDecisionFrames = Number(meta.centralBrainDecisionFrames ?? 0);
+  const ballDecisionFrames = Number(meta.ballDecisionFrames ?? 0);
   const humanControlledPlayerDecisions = Number(meta.humanControlledPlayerDecisions ?? 0);
   const humanInputPresentDecisions = Number(meta.humanInputPresentDecisions ?? 0);
   const humanInputConsumedDecisions = Number(meta.humanInputConsumedDecisions ?? 0);
@@ -904,22 +924,29 @@ function tacticalLivenessState() {
   const shotOk = meta.shotActivityOk == null ? (!sustainedShotWindow || shotAttempts > 0) : Boolean(meta.shotActivityOk);
   const openSpaceOk = meta.openSpaceSupportOk == null ? true : Boolean(meta.openSpaceSupportOk);
   const goalwardOk = meta.goalwardProgressOk == null ? true : Boolean(meta.goalwardProgressOk);
+  const centralBrainOperationOrderOk = meta.centralBrainOperationOrderRandomizedOk == null ? true : Boolean(meta.centralBrainOperationOrderRandomizedOk);
   const operationOrderOk = meta.playerOperationOrderRandomizedOk == null ? true : Boolean(meta.playerOperationOrderRandomizedOk);
+  const ballOperationOrderOk = meta.ballOperationOrderRandomizedOk == null ? true : Boolean(meta.ballOperationOrderRandomizedOk);
+  const officialOperationOrderOk = meta.officialOperationOrderRandomizedOk == null ? true : Boolean(meta.officialOperationOrderRandomizedOk);
+  const decisionModelOk = meta.playerDecisionModelTraceOk == null ? true : Boolean(meta.playerDecisionModelTraceOk);
+  const agentAccountingOk = meta.agentAccountingOk == null ? true : Boolean(meta.agentAccountingOk);
   const humanInputOk = meta.humanInputConsumedOk == null ? true : Boolean(meta.humanInputConsumedOk);
   const clearShotOk = meta.clearShotWindowOk == null ? true : Boolean(meta.clearShotWindowOk);
   const killerPassOk = meta.killerPassWindowOk == null ? true : Boolean(meta.killerPassWindowOk);
-  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, playerOperationOrderSamples, playerOperationOrderUniqueFirstOps, playerOperationOrderUniqueFullOrders, humanControlledPlayerDecisions, humanInputPresentDecisions, humanInputConsumedDecisions, humanInputUniqueControllerSlots, humanInputMaxQueueAgeMs, clearShotWindowFrames, clearShotWindowDecisiveActions, clearShotWindowRecycles, killerPassWindowFrames, killerPassWindowPasses, killerPassWindowRecycles, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk, operationOrderOk, humanInputOk, clearShotOk, killerPassOk};
+  return {passAttempts, completedPasses, shotAttempts, frameLivenessKnown, offBallOpenSpaceSupportKnown, offBallOpenSpaceMoves, offBallOpenSpaceGain, ballMovementYards, ballGoalwardProgressYards, ballActiveFrames, centralBrainOperationOrderSamples, centralBrainOperationOrderUniqueFirstOps, centralBrainOperationOrderUniqueFullOrders, playerOperationOrderSamples, playerOperationOrderUniqueFirstOps, playerOperationOrderUniqueFullOrders, ballOperationOrderSamples, ballOperationOrderUniqueFirstOps, ballOperationOrderUniqueFullOrders, officialOperationOrderSamples, officialOperationOrderUniqueFirstOps, officialOperationOrderUniqueFullOrders, playerDecisionModelSamples, playerMdpGridSamples, playerPomdpGridSamples, playerActionFacingSamples, playerReceiveFacingSamples, agentAccountingFrames, agentAccountingOkFrames, fullRosterFrames, completeScheduleFrames, centralBrainDecisionFrames, ballDecisionFrames, humanControlledPlayerDecisions, humanInputPresentDecisions, humanInputConsumedDecisions, humanInputUniqueControllerSlots, humanInputMaxQueueAgeMs, clearShotWindowFrames, clearShotWindowDecisiveActions, clearShotWindowRecycles, killerPassWindowFrames, killerPassWindowPasses, killerPassWindowRecycles, sustainedPassWindow, sustainedShotWindow, passOk, completedOk, shotOk, openSpaceOk, goalwardOk, centralBrainOperationOrderOk, operationOrderOk, ballOperationOrderOk, officialOperationOrderOk, decisionModelOk, agentAccountingOk, humanInputOk, clearShotOk, killerPassOk};
 }
 function tacticalLivenessLabel() {
   const live = tacticalLivenessState();
-  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk && live.operationOrderOk && live.humanInputOk && live.clearShotOk && live.killerPassOk;
+  const ok = live.passOk && live.completedOk && live.shotOk && live.openSpaceOk && live.goalwardOk && live.centralBrainOperationOrderOk && live.operationOrderOk && live.ballOperationOrderOk && live.officialOperationOrderOk && live.decisionModelOk && live.agentAccountingOk && live.humanInputOk && live.clearShotOk && live.killerPassOk;
   const support = live.offBallOpenSpaceSupportKnown ? live.offBallOpenSpaceMoves : "?";
   const goalward = live.frameLivenessKnown ? live.ballGoalwardProgressYards.toFixed(0) : "?";
   const ops = live.frameLivenessKnown ? `${live.playerOperationOrderUniqueFirstOps}/${live.playerOperationOrderSamples}` : "?";
+  const model = live.frameLivenessKnown ? `${live.playerMdpGridSamples}/${live.playerDecisionModelSamples}` : "?";
+  const agents = live.frameLivenessKnown ? `${live.agentAccountingOkFrames}/${live.agentAccountingFrames}` : "?";
   const human = live.frameLivenessKnown ? `${live.humanInputConsumedDecisions}/${live.humanInputPresentDecisions}` : "?";
   const clear = live.frameLivenessKnown ? `${live.clearShotWindowDecisiveActions}/${live.clearShotWindowFrames}` : "?";
   const killer = live.frameLivenessKnown ? `${live.killerPassWindowPasses}/${live.killerPassWindowFrames}` : "?";
-  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} R${ops} H${human} C${clear} K${killer} O${support} G${goalward}${ok ? "" : " !"}`;
+  return `P${live.completedPasses}/${live.passAttempts} S${live.shotAttempts} M${model} A${agents} R${ops} H${human} C${clear} K${killer} O${support} G${goalward}${ok ? "" : " !"}`;
 }
 function tacticalLivenessTitle() {
   const live = tacticalLivenessState();
@@ -934,8 +961,23 @@ function tacticalLivenessTitle() {
       ? `ball goalward progress=${live.ballGoalwardProgressYards.toFixed(2)}yd; movement=${live.ballMovementYards.toFixed(2)}yd; active frames=${live.ballActiveFrames}`
       : "ball goalward progress not measured",
     live.frameLivenessKnown
+      ? `central brain operation-order samples=${live.centralBrainOperationOrderSamples}; first-op diversity=${live.centralBrainOperationOrderUniqueFirstOps}; full-order diversity=${live.centralBrainOperationOrderUniqueFullOrders}`
+      : "central brain operation-order diversity not measured",
+    live.frameLivenessKnown
       ? `player operation-order samples=${live.playerOperationOrderSamples}; first-op diversity=${live.playerOperationOrderUniqueFirstOps}; full-order diversity=${live.playerOperationOrderUniqueFullOrders}`
       : "player operation-order diversity not measured",
+    live.frameLivenessKnown
+      ? `ball operation-order samples=${live.ballOperationOrderSamples}; first-op diversity=${live.ballOperationOrderUniqueFirstOps}; full-order diversity=${live.ballOperationOrderUniqueFullOrders}`
+      : "ball operation-order diversity not measured",
+    live.frameLivenessKnown
+      ? `official operation-order samples=${live.officialOperationOrderSamples}; first-op diversity=${live.officialOperationOrderUniqueFirstOps}; full-order diversity=${live.officialOperationOrderUniqueFullOrders}`
+      : "official operation-order diversity not measured",
+    live.frameLivenessKnown
+      ? `decision-model samples=${live.playerDecisionModelSamples}; mdp grid=${live.playerMdpGridSamples}; pomdp grid=${live.playerPomdpGridSamples}; action facing=${live.playerActionFacingSamples}; receive facing=${live.playerReceiveFacingSamples}`
+      : "decision-model liveness not measured",
+    live.frameLivenessKnown
+      ? `agent accounting frames=${live.agentAccountingOkFrames}/${live.agentAccountingFrames}; full roster=${live.fullRosterFrames}; complete schedule=${live.completeScheduleFrames}; central brain decisions=${live.centralBrainDecisionFrames}; ball decisions=${live.ballDecisionFrames}`
+      : "agent accounting liveness not measured",
     live.frameLivenessKnown
       ? `human input decisions=${live.humanInputConsumedDecisions}/${live.humanInputPresentDecisions}; controlled decisions=${live.humanControlledPlayerDecisions}; controller slots=${live.humanInputUniqueControllerSlots}; max queue age=${live.humanInputMaxQueueAgeMs}ms`
       : "human input liveness not measured",
@@ -951,7 +993,12 @@ function tacticalLivenessTitle() {
   if (!live.shotOk) parts.push("45s+ run has no shots");
   if (!live.openSpaceOk) parts.push("20s+ run has no off-ball open-space support");
   if (!live.goalwardOk) parts.push("multi-frame run has no goalward ball progress");
+  if (!live.centralBrainOperationOrderOk) parts.push("central brain internal operation order did not vary");
   if (!live.operationOrderOk) parts.push("player internal operation order did not vary");
+  if (!live.ballOperationOrderOk) parts.push("ball internal operation order did not vary");
+  if (!live.officialOperationOrderOk) parts.push("official internal operation order did not vary");
+  if (!live.decisionModelOk) parts.push("player MDP/POMDP decision traces are incomplete");
+  if (!live.agentAccountingOk) parts.push("agent roster/schedule accounting is incomplete");
   if (!live.humanInputOk) parts.push("human controller input was observed but not consumed");
   if (!live.clearShotOk) parts.push("clear 20-yard shot window was recycled");
   if (!live.killerPassOk) parts.push("threaded goal-pass window was recycled");

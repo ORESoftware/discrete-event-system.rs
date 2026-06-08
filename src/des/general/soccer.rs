@@ -21685,12 +21685,12 @@ impl WorldSnapshot {
         } else {
             (0.18 + distance_to_ball / 42.0 * 0.42).clamp(0.18, 0.60)
         };
+        let receiver_sprint_speed = player_top_speed_yps(me.role, &me.skills)
+            * fatigue_speed_factor(me.skills.stamina, me.fatigue)
+            * MovementGait::Sprint.speed_multiplier();
         let fallback_target = (self.ball.position + self.ball.velocity * lead_seconds)
             .clamp_to_pitch(self.field_width, self.field_length);
         let target = if self.ball.velocity.len() > 0.25 {
-            let sprint_speed = player_top_speed_yps(me.role, &me.skills)
-                * fatigue_speed_factor(me.skills.stamina, me.fatigue)
-                * MovementGait::Sprint.speed_multiplier();
             let remaining_ball_path = self.ball.position.distance(pass.intended_target);
             let ball_time_to_target = (remaining_ball_path / self.ball.velocity.len().max(0.25))
                 .clamp(0.12, if pressured_reception { 0.85 } else { 1.35 });
@@ -21701,11 +21701,27 @@ impl WorldSnapshot {
                 let t = horizon * step as f64 / 6.0;
                 let candidate = (self.ball.position + self.ball.velocity * t)
                     .clamp_to_pitch(self.field_width, self.field_length);
-                let arrival_time = current.distance(candidate) / sprint_speed.max(1.0);
+                let arrival_time = current.distance(candidate) / receiver_sprint_speed.max(1.0);
                 let lateness = (arrival_time - t).max(0.0);
+                let opponent_arrival_time =
+                    self.nearest_opponent_arrival_time_to(me.team, candidate);
+                let contest_margin = opponent_arrival_time - arrival_time;
+                let contest_score = if pressured_reception {
+                    (contest_margin / 1.10).clamp(-1.4, 1.6) * 1.18
+                } else {
+                    (contest_margin / 1.40).clamp(-0.8, 1.0) * 0.42
+                };
+                let pressure_early_touch_bonus = if pressured_reception {
+                    (1.0 - t / horizon.max(0.01)).clamp(0.0, 1.0) * 0.22
+                } else {
+                    0.0
+                };
                 let forward_receive =
                     ((candidate.y - current.y) * me.team.attack_dir()).clamp(-4.0, 12.0);
-                let score = -lateness * 3.2 - arrival_time * 0.10 + forward_receive * 0.035;
+                let score = -lateness * 3.2 - arrival_time * 0.10
+                    + forward_receive * 0.035
+                    + contest_score
+                    + pressure_early_touch_bonus;
                 if score > best_score {
                     best_score = score;
                     best_target = candidate;
@@ -21715,11 +21731,28 @@ impl WorldSnapshot {
         } else {
             fallback_target
         };
+        let receiver_target_time = current.distance(target) / receiver_sprint_speed.max(1.0);
+        let opponent_target_time = self.nearest_opponent_arrival_time_to(me.team, target);
+        let defender_can_contest = opponent_target_time <= receiver_target_time + 0.75;
         let sprint = pass.receiver_urgency >= 0.30
             || pass.off_target_yards > 0.75
             || distance_to_ball > 4.5
-            || pressured_reception;
+            || pressured_reception
+            || defender_can_contest;
         Some((target, sprint))
+    }
+
+    fn nearest_opponent_arrival_time_to(&self, team: Team, target: Vec2) -> f64 {
+        self.players
+            .iter()
+            .filter(|player| player.team == team.other())
+            .map(|player| {
+                let sprint_speed = player_top_speed_yps(player.role, &player.skills)
+                    * fatigue_speed_factor(player.skills.stamina, player.fatigue)
+                    * MovementGait::Sprint.speed_multiplier();
+                self.player_snapshot_position(player).distance(target) / sprint_speed.max(1.0)
+            })
+            .fold(f64::INFINITY, f64::min)
     }
 
     fn projected_loose_ball_target(&self) -> Option<Vec2> {
@@ -31631,9 +31664,29 @@ struct SoccerFrameLivenessMetrics {
     ball_movement_yards: f64,
     ball_goalward_progress_yards: f64,
     ball_active_frames: usize,
+    central_brain_operation_order_samples: usize,
+    central_brain_operation_order_unique_first_ops: usize,
+    central_brain_operation_order_unique_full_orders: usize,
     player_operation_order_samples: usize,
     player_operation_order_unique_first_ops: usize,
     player_operation_order_unique_full_orders: usize,
+    ball_operation_order_samples: usize,
+    ball_operation_order_unique_first_ops: usize,
+    ball_operation_order_unique_full_orders: usize,
+    official_operation_order_samples: usize,
+    official_operation_order_unique_first_ops: usize,
+    official_operation_order_unique_full_orders: usize,
+    player_decision_model_samples: usize,
+    player_mdp_grid_samples: usize,
+    player_pomdp_grid_samples: usize,
+    player_action_facing_samples: usize,
+    player_receive_facing_samples: usize,
+    agent_accounting_frames: usize,
+    agent_accounting_ok_frames: usize,
+    full_roster_frames: usize,
+    complete_schedule_frames: usize,
+    central_brain_decision_frames: usize,
+    ball_decision_frames: usize,
     human_controlled_player_decisions: usize,
     human_input_present_decisions: usize,
     human_input_consumed_decisions: usize,
@@ -31651,14 +31704,22 @@ struct SoccerFrameLivenessMetrics {
 struct SoccerFrameLivenessAccumulator {
     previous_players: HashMap<usize, Vec2>,
     previous_ball: Option<Vec2>,
+    central_brain_operation_order_first_ops: HashSet<String>,
+    central_brain_operation_order_full_orders: HashSet<String>,
     player_operation_order_first_ops: HashSet<String>,
     player_operation_order_full_orders: HashSet<String>,
+    ball_operation_order_first_ops: HashSet<String>,
+    ball_operation_order_full_orders: HashSet<String>,
+    official_operation_order_first_ops: HashSet<String>,
+    official_operation_order_full_orders: HashSet<String>,
     human_input_controller_slots: HashSet<usize>,
     metrics: SoccerFrameLivenessMetrics,
 }
 
 impl SoccerFrameLivenessAccumulator {
     fn observe_frame(&mut self, frame: &MatchFrame) {
+        self.observe_agent_accounting_liveness(frame);
+        self.observe_non_player_operation_liveness(frame);
         if let Some(prev_ball) = self.previous_ball {
             let movement = frame.ball.position.distance(prev_ball);
             if movement.is_finite() {
@@ -31709,11 +31770,97 @@ impl SoccerFrameLivenessAccumulator {
         }
     }
 
+    fn observe_non_player_operation_liveness(&mut self, frame: &MatchFrame) {
+        if let Some(decision) = frame.central_brain.last_decision.as_ref() {
+            if decision.operation_order.len() > 1 {
+                self.metrics.central_brain_operation_order_samples = self
+                    .metrics
+                    .central_brain_operation_order_samples
+                    .saturating_add(1);
+                if let Some(first) = decision.operation_order.first() {
+                    self.central_brain_operation_order_first_ops
+                        .insert(first.clone());
+                }
+                self.central_brain_operation_order_full_orders
+                    .insert(decision.operation_order.join(">"));
+                self.metrics.central_brain_operation_order_unique_first_ops =
+                    self.central_brain_operation_order_first_ops.len();
+                self.metrics
+                    .central_brain_operation_order_unique_full_orders =
+                    self.central_brain_operation_order_full_orders.len();
+            }
+        }
+        if let Some(decision) = frame.ball.last_decision.as_ref() {
+            if decision.operation_order.len() > 1 {
+                self.metrics.ball_operation_order_samples =
+                    self.metrics.ball_operation_order_samples.saturating_add(1);
+                if let Some(first) = decision.operation_order.first() {
+                    self.ball_operation_order_first_ops.insert(first.clone());
+                }
+                self.ball_operation_order_full_orders
+                    .insert(decision.operation_order.join(">"));
+                self.metrics.ball_operation_order_unique_first_ops =
+                    self.ball_operation_order_first_ops.len();
+                self.metrics.ball_operation_order_unique_full_orders =
+                    self.ball_operation_order_full_orders.len();
+            }
+        }
+        for official in &frame.officials {
+            let Some(decision) = official.last_decision.as_ref() else {
+                continue;
+            };
+            if decision.operation_order.len() > 1 {
+                self.metrics.official_operation_order_samples = self
+                    .metrics
+                    .official_operation_order_samples
+                    .saturating_add(1);
+                if let Some(first) = decision.operation_order.first() {
+                    self.official_operation_order_first_ops
+                        .insert(first.clone());
+                }
+                self.official_operation_order_full_orders
+                    .insert(decision.operation_order.join(">"));
+                self.metrics.official_operation_order_unique_first_ops =
+                    self.official_operation_order_first_ops.len();
+                self.metrics.official_operation_order_unique_full_orders =
+                    self.official_operation_order_full_orders.len();
+            }
+        }
+    }
+
+    fn observe_agent_accounting_liveness(&mut self, frame: &MatchFrame) {
+        let report = soccer_live_frame_accounting_report(frame);
+        self.metrics.agent_accounting_frames =
+            self.metrics.agent_accounting_frames.saturating_add(1);
+        if report.ok {
+            self.metrics.agent_accounting_ok_frames =
+                self.metrics.agent_accounting_ok_frames.saturating_add(1);
+        }
+        if report.player_count == report.expected_player_count
+            && report.official_count == report.expected_official_count
+            && report.expected_ball_count == 1
+        {
+            self.metrics.full_roster_frames = self.metrics.full_roster_frames.saturating_add(1);
+        }
+        if report.schedule_complete {
+            self.metrics.complete_schedule_frames =
+                self.metrics.complete_schedule_frames.saturating_add(1);
+        }
+        if report.central_brain_decision_present {
+            self.metrics.central_brain_decision_frames =
+                self.metrics.central_brain_decision_frames.saturating_add(1);
+        }
+        if report.ball_decision_present {
+            self.metrics.ball_decision_frames = self.metrics.ball_decision_frames.saturating_add(1);
+        }
+    }
+
     fn observe_player_decision_liveness(&mut self, player: &PlayerSnapshot, is_holder: bool) {
         let Some(decision) = player.last_decision.as_ref() else {
             return;
         };
         let action = decision.action.as_str();
+        self.observe_player_decision_model_liveness(decision);
         if decision.operation_order.len() > 1 {
             self.metrics.player_operation_order_samples = self
                 .metrics
@@ -31802,6 +31949,31 @@ impl SoccerFrameLivenessAccumulator {
         }
     }
 
+    fn observe_player_decision_model_liveness(&mut self, decision: &AgentDecisionTrace) {
+        self.metrics.player_decision_model_samples =
+            self.metrics.player_decision_model_samples.saturating_add(1);
+        if soccer_frame_liveness_grid_address_is_resolved(&decision.mdp_state.player_grid) {
+            self.metrics.player_mdp_grid_samples =
+                self.metrics.player_mdp_grid_samples.saturating_add(1);
+        }
+        if soccer_frame_liveness_grid_address_is_resolved(&decision.observation.player_grid) {
+            self.metrics.player_pomdp_grid_samples =
+                self.metrics.player_pomdp_grid_samples.saturating_add(1);
+        }
+        if decision.mdp_state.action_facing != FacingBucket::Unknown
+            || decision.observation.action_facing != FacingBucket::Unknown
+        {
+            self.metrics.player_action_facing_samples =
+                self.metrics.player_action_facing_samples.saturating_add(1);
+        }
+        if decision.mdp_state.receive_facing != FacingBucket::Unknown
+            || decision.observation.receive_facing != FacingBucket::Unknown
+        {
+            self.metrics.player_receive_facing_samples =
+                self.metrics.player_receive_facing_samples.saturating_add(1);
+        }
+    }
+
     fn metrics(&self) -> SoccerFrameLivenessMetrics {
         self.metrics.clone()
     }
@@ -31809,6 +31981,13 @@ impl SoccerFrameLivenessAccumulator {
 
 fn soccer_frame_liveness_action_is_shot(action: &str) -> bool {
     matches!(action, "shoot" | "first-time-shot" | "first-time-header")
+}
+
+fn soccer_frame_liveness_grid_address_is_resolved(grid: &PitchGridAddress) -> bool {
+    grid.fine.level == PitchGridLevel::Fine
+        && grid.tactical.level == PitchGridLevel::Tactical
+        && grid.macro_zone.level == PitchGridLevel::Macro
+        && grid.whole_pitch.level == PitchGridLevel::WholePitch
 }
 
 fn soccer_frame_liveness_for_frames(frames: &[MatchFrame]) -> SoccerFrameLivenessMetrics {
@@ -34106,6 +34285,8 @@ pub struct SoccerDecisionModelContract {
     pub threaded_goal_pass_can_override_forced_shot: bool,
     pub decisive_goal_action_pressure_enabled: bool,
     pub decisive_goal_action_probability_ramps_toward_goal: bool,
+    pub goal_proximity_shot_killer_pass_family_ramps_toward_goal: bool,
+    pub single_threaded_killer_pass_targets_goalward_receiver: bool,
     pub near_goal_decision_prioritizes_shot_or_killer_pass: bool,
     pub generic_recycling_damped_by_decisive_goal_pressure: bool,
     pub ordinary_pass_recycling_damped_by_goal_thread_pressure: bool,
@@ -34829,6 +35010,8 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         threaded_goal_pass_can_override_forced_shot: true,
         decisive_goal_action_pressure_enabled: true,
         decisive_goal_action_probability_ramps_toward_goal: true,
+        goal_proximity_shot_killer_pass_family_ramps_toward_goal: true,
+        single_threaded_killer_pass_targets_goalward_receiver: true,
         near_goal_decision_prioritizes_shot_or_killer_pass: true,
         generic_recycling_damped_by_decisive_goal_pressure: true,
         ordinary_pass_recycling_damped_by_goal_thread_pressure: true,
@@ -50535,6 +50718,29 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         || frame_liveness.player_operation_order_samples < 3
         || frame_liveness.player_operation_order_unique_first_ops > 1
         || frame_liveness.player_operation_order_unique_full_orders > 1;
+    let central_brain_operation_order_randomized_ok = !frame_liveness_known
+        || frame_liveness.central_brain_operation_order_samples < 3
+        || frame_liveness.central_brain_operation_order_unique_first_ops > 1
+        || frame_liveness.central_brain_operation_order_unique_full_orders > 1;
+    let ball_operation_order_randomized_ok = !frame_liveness_known
+        || frame_liveness.ball_operation_order_samples < 3
+        || frame_liveness.ball_operation_order_unique_first_ops > 1
+        || frame_liveness.ball_operation_order_unique_full_orders > 1;
+    let official_operation_order_randomized_ok = !frame_liveness_known
+        || frame_liveness.official_operation_order_samples < 3
+        || frame_liveness.official_operation_order_unique_first_ops > 1
+        || frame_liveness.official_operation_order_unique_full_orders > 1;
+    let player_decision_model_trace_ok = !frame_liveness_known
+        || frame_liveness.player_decision_model_samples == 0
+        || (frame_liveness.player_mdp_grid_samples >= frame_liveness.player_decision_model_samples
+            && frame_liveness.player_pomdp_grid_samples
+                >= frame_liveness.player_decision_model_samples
+            && frame_liveness.player_action_facing_samples > 0);
+    let agent_accounting_ok = !frame_liveness_known
+        || frame_liveness.agent_accounting_frames == 0
+        || (frame_liveness.agent_accounting_ok_frames == frame_liveness.agent_accounting_frames
+            && frame_liveness.full_roster_frames == frame_liveness.agent_accounting_frames
+            && frame_liveness.complete_schedule_frames == frame_liveness.agent_accounting_frames);
     let human_input_consumed_ok = !frame_liveness_known
         || frame_liveness.human_input_present_decisions == 0
         || frame_liveness.human_input_consumed_decisions
@@ -50545,7 +50751,7 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
     let killer_pass_window_ok = !frame_liveness_known
         || frame_liveness.killer_pass_window_frames == 0
         || frame_liveness.killer_pass_window_passes > 0;
-    serde_json::json!({
+    let mut liveness = serde_json::json!({
         "passAttempts": pass_attempts,
         "completedPasses": completed_passes,
         "shotAttempts": shot_attempts,
@@ -50556,9 +50762,33 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "ballMovementYards": frame_liveness.ball_movement_yards,
         "ballGoalwardProgressYards": frame_liveness.ball_goalward_progress_yards,
         "ballActiveFrames": frame_liveness.ball_active_frames,
+        "centralBrainOperationOrderSamples": frame_liveness.central_brain_operation_order_samples,
+        "centralBrainOperationOrderUniqueFirstOps": frame_liveness.central_brain_operation_order_unique_first_ops,
+        "centralBrainOperationOrderUniqueFullOrders": frame_liveness.central_brain_operation_order_unique_full_orders,
         "playerOperationOrderSamples": frame_liveness.player_operation_order_samples,
         "playerOperationOrderUniqueFirstOps": frame_liveness.player_operation_order_unique_first_ops,
         "playerOperationOrderUniqueFullOrders": frame_liveness.player_operation_order_unique_full_orders,
+        "ballOperationOrderSamples": frame_liveness.ball_operation_order_samples,
+        "ballOperationOrderUniqueFirstOps": frame_liveness.ball_operation_order_unique_first_ops,
+        "ballOperationOrderUniqueFullOrders": frame_liveness.ball_operation_order_unique_full_orders,
+        "officialOperationOrderSamples": frame_liveness.official_operation_order_samples,
+        "officialOperationOrderUniqueFirstOps": frame_liveness.official_operation_order_unique_first_ops,
+        "officialOperationOrderUniqueFullOrders": frame_liveness.official_operation_order_unique_full_orders,
+        "playerDecisionModelSamples": frame_liveness.player_decision_model_samples,
+        "playerMdpGridSamples": frame_liveness.player_mdp_grid_samples,
+        "playerPomdpGridSamples": frame_liveness.player_pomdp_grid_samples,
+        "playerActionFacingSamples": frame_liveness.player_action_facing_samples,
+        "playerReceiveFacingSamples": frame_liveness.player_receive_facing_samples,
+    });
+    soccer_merge_json_object(
+        &mut liveness,
+        serde_json::json!({
+        "agentAccountingFrames": frame_liveness.agent_accounting_frames,
+        "agentAccountingOkFrames": frame_liveness.agent_accounting_ok_frames,
+        "fullRosterFrames": frame_liveness.full_roster_frames,
+        "completeScheduleFrames": frame_liveness.complete_schedule_frames,
+        "centralBrainDecisionFrames": frame_liveness.central_brain_decision_frames,
+        "ballDecisionFrames": frame_liveness.ball_decision_frames,
         "humanControlledPlayerDecisions": frame_liveness.human_controlled_player_decisions,
         "humanInputPresentDecisions": frame_liveness.human_input_present_decisions,
         "humanInputConsumedDecisions": frame_liveness.human_input_consumed_decisions,
@@ -50570,6 +50800,11 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "killerPassWindowFrames": frame_liveness.killer_pass_window_frames,
         "killerPassWindowPasses": frame_liveness.killer_pass_window_passes,
         "killerPassWindowRecycles": frame_liveness.killer_pass_window_recycles,
+        }),
+    );
+    soccer_merge_json_object(
+        &mut liveness,
+        serde_json::json!({
         "sustainedPassWindow": sustained_pass_window,
         "sustainedShotWindow": sustained_shot_window,
         "passActivityOk": !sustained_pass_window || pass_attempts > 0,
@@ -50577,11 +50812,25 @@ fn soccer_playback_tactical_liveness_json_with_frame_liveness(
         "shotActivityOk": !sustained_shot_window || shot_attempts > 0,
         "openSpaceSupportOk": open_space_support_ok,
         "goalwardProgressOk": goalward_progress_ok,
+        "centralBrainOperationOrderRandomizedOk": central_brain_operation_order_randomized_ok,
         "playerOperationOrderRandomizedOk": player_operation_order_randomized_ok,
+        "ballOperationOrderRandomizedOk": ball_operation_order_randomized_ok,
+        "officialOperationOrderRandomizedOk": official_operation_order_randomized_ok,
+        "playerDecisionModelTraceOk": player_decision_model_trace_ok,
+        "agentAccountingOk": agent_accounting_ok,
         "humanInputConsumedOk": human_input_consumed_ok,
         "clearShotWindowOk": clear_shot_window_ok,
         "killerPassWindowOk": killer_pass_window_ok,
-    })
+        }),
+    );
+    liveness
+}
+
+fn soccer_merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) {
+    let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) else {
+        return;
+    };
+    target.extend(source.clone());
 }
 
 #[derive(Clone, Debug)]
@@ -67400,6 +67649,94 @@ mod tests {
             Some(frame_liveness.player_operation_order_unique_full_orders as u64)
         );
         assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["centralBrainOperationOrderSamples"]
+                .as_u64(),
+            Some(frame_liveness.central_brain_operation_order_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["centralBrainOperationOrderUniqueFirstOps"]
+                .as_u64(),
+            Some(frame_liveness.central_brain_operation_order_unique_first_ops as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]
+                ["centralBrainOperationOrderUniqueFullOrders"]
+                .as_u64(),
+            Some(frame_liveness.central_brain_operation_order_unique_full_orders as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["ballOperationOrderSamples"].as_u64(),
+            Some(frame_liveness.ball_operation_order_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["ballOperationOrderUniqueFirstOps"]
+                .as_u64(),
+            Some(frame_liveness.ball_operation_order_unique_first_ops as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["ballOperationOrderUniqueFullOrders"]
+                .as_u64(),
+            Some(frame_liveness.ball_operation_order_unique_full_orders as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["officialOperationOrderSamples"].as_u64(),
+            Some(frame_liveness.official_operation_order_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["officialOperationOrderUniqueFirstOps"]
+                .as_u64(),
+            Some(frame_liveness.official_operation_order_unique_first_ops as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["officialOperationOrderUniqueFullOrders"]
+                .as_u64(),
+            Some(frame_liveness.official_operation_order_unique_full_orders as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["playerDecisionModelSamples"].as_u64(),
+            Some(frame_liveness.player_decision_model_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["playerMdpGridSamples"].as_u64(),
+            Some(frame_liveness.player_mdp_grid_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["playerPomdpGridSamples"].as_u64(),
+            Some(frame_liveness.player_pomdp_grid_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["playerActionFacingSamples"].as_u64(),
+            Some(frame_liveness.player_action_facing_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["playerReceiveFacingSamples"].as_u64(),
+            Some(frame_liveness.player_receive_facing_samples as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["agentAccountingFrames"].as_u64(),
+            Some(frame_liveness.agent_accounting_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["agentAccountingOkFrames"].as_u64(),
+            Some(frame_liveness.agent_accounting_ok_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["fullRosterFrames"].as_u64(),
+            Some(frame_liveness.full_roster_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["completeScheduleFrames"].as_u64(),
+            Some(frame_liveness.complete_schedule_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["centralBrainDecisionFrames"].as_u64(),
+            Some(frame_liveness.central_brain_decision_frames as u64)
+        );
+        assert_eq!(
+            records.last().unwrap()["tacticalLiveness"]["ballDecisionFrames"].as_u64(),
+            Some(frame_liveness.ball_decision_frames as u64)
+        );
+        assert_eq!(
             records.last().unwrap()["tacticalLiveness"]["humanControlledPlayerDecisions"].as_u64(),
             Some(frame_liveness.human_controlled_player_decisions as u64)
         );
@@ -67474,6 +67811,26 @@ mod tests {
                 player_operation_order_samples: 12,
                 player_operation_order_unique_first_ops: 3,
                 player_operation_order_unique_full_orders: 7,
+                central_brain_operation_order_samples: 9,
+                central_brain_operation_order_unique_first_ops: 2,
+                central_brain_operation_order_unique_full_orders: 6,
+                ball_operation_order_samples: 9,
+                ball_operation_order_unique_first_ops: 2,
+                ball_operation_order_unique_full_orders: 6,
+                official_operation_order_samples: 18,
+                official_operation_order_unique_first_ops: 3,
+                official_operation_order_unique_full_orders: 9,
+                player_decision_model_samples: 12,
+                player_mdp_grid_samples: 12,
+                player_pomdp_grid_samples: 12,
+                player_action_facing_samples: 11,
+                player_receive_facing_samples: 2,
+                agent_accounting_frames: 9,
+                agent_accounting_ok_frames: 9,
+                full_roster_frames: 9,
+                complete_schedule_frames: 9,
+                central_brain_decision_frames: 8,
+                ball_decision_frames: 8,
                 human_controlled_player_decisions: 5,
                 human_input_present_decisions: 4,
                 human_input_consumed_decisions: 4,
@@ -67494,6 +67851,26 @@ mod tests {
         assert_eq!(support["playerOperationOrderSamples"], 12);
         assert_eq!(support["playerOperationOrderUniqueFirstOps"], 3);
         assert_eq!(support["playerOperationOrderUniqueFullOrders"], 7);
+        assert_eq!(support["centralBrainOperationOrderSamples"], 9);
+        assert_eq!(support["centralBrainOperationOrderUniqueFirstOps"], 2);
+        assert_eq!(support["centralBrainOperationOrderUniqueFullOrders"], 6);
+        assert_eq!(support["ballOperationOrderSamples"], 9);
+        assert_eq!(support["ballOperationOrderUniqueFirstOps"], 2);
+        assert_eq!(support["ballOperationOrderUniqueFullOrders"], 6);
+        assert_eq!(support["officialOperationOrderSamples"], 18);
+        assert_eq!(support["officialOperationOrderUniqueFirstOps"], 3);
+        assert_eq!(support["officialOperationOrderUniqueFullOrders"], 9);
+        assert_eq!(support["playerDecisionModelSamples"], 12);
+        assert_eq!(support["playerMdpGridSamples"], 12);
+        assert_eq!(support["playerPomdpGridSamples"], 12);
+        assert_eq!(support["playerActionFacingSamples"], 11);
+        assert_eq!(support["playerReceiveFacingSamples"], 2);
+        assert_eq!(support["agentAccountingFrames"], 9);
+        assert_eq!(support["agentAccountingOkFrames"], 9);
+        assert_eq!(support["fullRosterFrames"], 9);
+        assert_eq!(support["completeScheduleFrames"], 9);
+        assert_eq!(support["centralBrainDecisionFrames"], 8);
+        assert_eq!(support["ballDecisionFrames"], 8);
         assert_eq!(support["humanControlledPlayerDecisions"], 5);
         assert_eq!(support["humanInputPresentDecisions"], 4);
         assert_eq!(support["humanInputConsumedDecisions"], 4);
@@ -67505,7 +67882,12 @@ mod tests {
         assert_eq!(support["killerPassWindowPasses"], 1);
         assert_eq!(support["openSpaceSupportOk"], true);
         assert_eq!(support["goalwardProgressOk"], true);
+        assert_eq!(support["centralBrainOperationOrderRandomizedOk"], true);
         assert_eq!(support["playerOperationOrderRandomizedOk"], true);
+        assert_eq!(support["ballOperationOrderRandomizedOk"], true);
+        assert_eq!(support["officialOperationOrderRandomizedOk"], true);
+        assert_eq!(support["playerDecisionModelTraceOk"], true);
+        assert_eq!(support["agentAccountingOk"], true);
         assert_eq!(support["humanInputConsumedOk"], true);
         assert_eq!(support["clearShotWindowOk"], true);
         assert_eq!(support["killerPassWindowOk"], true);
@@ -67523,6 +67905,78 @@ mod tests {
             fixed_operation_order["playerOperationOrderRandomizedOk"],
             false
         );
+
+        let fixed_central_brain_operation_order =
+            soccer_playback_tactical_liveness_json_with_frame_liveness(
+                &summary,
+                Some(SoccerFrameLivenessMetrics {
+                    central_brain_operation_order_samples: 4,
+                    central_brain_operation_order_unique_first_ops: 1,
+                    central_brain_operation_order_unique_full_orders: 1,
+                    ..SoccerFrameLivenessMetrics::default()
+                }),
+            );
+        assert_eq!(
+            fixed_central_brain_operation_order["centralBrainOperationOrderRandomizedOk"],
+            false
+        );
+
+        let fixed_ball_operation_order = soccer_playback_tactical_liveness_json_with_frame_liveness(
+            &summary,
+            Some(SoccerFrameLivenessMetrics {
+                ball_operation_order_samples: 4,
+                ball_operation_order_unique_first_ops: 1,
+                ball_operation_order_unique_full_orders: 1,
+                ..SoccerFrameLivenessMetrics::default()
+            }),
+        );
+        assert_eq!(
+            fixed_ball_operation_order["ballOperationOrderRandomizedOk"],
+            false
+        );
+
+        let fixed_official_operation_order =
+            soccer_playback_tactical_liveness_json_with_frame_liveness(
+                &summary,
+                Some(SoccerFrameLivenessMetrics {
+                    official_operation_order_samples: 4,
+                    official_operation_order_unique_first_ops: 1,
+                    official_operation_order_unique_full_orders: 1,
+                    ..SoccerFrameLivenessMetrics::default()
+                }),
+            );
+        assert_eq!(
+            fixed_official_operation_order["officialOperationOrderRandomizedOk"],
+            false
+        );
+
+        let missing_decision_model_grid =
+            soccer_playback_tactical_liveness_json_with_frame_liveness(
+                &summary,
+                Some(SoccerFrameLivenessMetrics {
+                    player_decision_model_samples: 4,
+                    player_mdp_grid_samples: 3,
+                    player_pomdp_grid_samples: 4,
+                    player_action_facing_samples: 2,
+                    ..SoccerFrameLivenessMetrics::default()
+                }),
+            );
+        assert_eq!(
+            missing_decision_model_grid["playerDecisionModelTraceOk"],
+            false
+        );
+
+        let missing_agent_accounting = soccer_playback_tactical_liveness_json_with_frame_liveness(
+            &summary,
+            Some(SoccerFrameLivenessMetrics {
+                agent_accounting_frames: 4,
+                agent_accounting_ok_frames: 4,
+                full_roster_frames: 4,
+                complete_schedule_frames: 3,
+                ..SoccerFrameLivenessMetrics::default()
+            }),
+        );
+        assert_eq!(missing_agent_accounting["agentAccountingOk"], false);
 
         let dropped_human_input = soccer_playback_tactical_liveness_json_with_frame_liveness(
             &summary,
@@ -86852,6 +87306,74 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn pressured_pending_pass_receiver_prioritizes_early_intercept_margin() {
+        let setup = |defender_position: Vec2| {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+            let passer = 6;
+            let receiver = 9;
+            let defender = 12;
+            sim.ball.holder = None;
+            sim.ball.position = Vec2::new(40.0, 60.0);
+            sim.ball.velocity = Vec2::new(10.0, 0.0);
+            sim.ball.last_touch_team = Some(Team::Home);
+            park_players_except(&mut sim, &[passer, receiver, defender]);
+            sim.players[passer].position = Vec2::new(38.0, 52.0);
+            sim.players[receiver].position = Vec2::new(43.0, 67.0);
+            sim.players[receiver].skills.top_speed = 8.2;
+            sim.players[defender].position = defender_position;
+            sim.players[defender].skills.top_speed = 8.4;
+            sim.pending_pass = Some(PendingPass {
+                team: Team::Home,
+                from: passer,
+                target: Some(receiver),
+                flight: PassFlight::Floor,
+                is_cross: false,
+                launch_tick: sim.tick,
+                origin: sim.players[passer].position,
+                intended_target: Vec2::new(60.0, 60.0),
+                distance_yards: sim.players[passer].position.distance(Vec2::new(60.0, 60.0)),
+                receiver_openness: pass_receiver_openness_for_agents(
+                    &sim.players,
+                    Team::Home,
+                    sim.players[receiver].position,
+                ),
+                passer_skill: ability01(sim.players[passer].skills.passing_completion_rate),
+                launch_speed_yps: 20.0,
+                receiver_position_at_launch: Some(sim.players[receiver].position),
+                receiver_velocity_at_launch: Some(sim.players[receiver].velocity),
+                offside: None,
+            });
+            sim
+        };
+
+        let pressured = setup(Vec2::new(48.0, 60.0));
+        let open = setup(Vec2::new(70.0, 90.0));
+        let pressured_snapshot = WorldSnapshot::from_match(&pressured);
+        let open_snapshot = WorldSnapshot::from_match(&open);
+        let (pressured_target, pressured_sprint) = pressured_snapshot
+            .pending_pass_reception_target_for(9)
+            .expect("pressured pending pass target");
+        let (open_target, open_sprint) = open_snapshot
+            .pending_pass_reception_target_for(9)
+            .expect("open pending pass target");
+
+        assert!(pressured_sprint);
+        assert!(open_sprint);
+        assert!(
+            pressured_target.x < open_target.x - 2.0,
+            "pressured receiver should choose an earlier path intercept before the defender can arrive: pressured={pressured_target:?} open={open_target:?}"
+        );
+        assert!(
+            segment_distance_to_point(
+                pressured_snapshot.ball.position,
+                pressured_snapshot.ball.position + pressured_snapshot.ball.velocity * 4.0,
+                pressured_target,
+            ) < 0.75,
+            "pressured receiver target should stay on the moving pass path: {pressured_target:?}"
+        );
+    }
+
+    #[test]
     fn pressured_pending_pass_recovery_is_learned_as_rewarded_state_action() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let passer = 6;
@@ -93965,6 +94487,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             step_value["decisionModel"]["killerPassProbabilityRampsTowardGoal"],
             true
         );
+        assert_eq!(
+            step_value["decisionModel"]["goalProximityShotKillerPassFamilyRampsTowardGoal"],
+            true
+        );
+        assert_eq!(
+            step_value["decisionModel"]["singleThreadedKillerPassTargetsGoalwardReceiver"],
+            true
+        );
         assert_eq!(step_value["learningContract"]["mdpEnabled"], true);
         assert_eq!(step_value["learningContract"]["pomdpEnabled"], true);
         assert_eq!(
@@ -100986,6 +101516,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("playerOperationOrderSamples"));
         assert!(html.contains("playerOperationOrderUniqueFirstOps"));
         assert!(html.contains("playerOperationOrderRandomizedOk"));
+        assert!(html.contains("centralBrainOperationOrderSamples"));
+        assert!(html.contains("centralBrainOperationOrderRandomizedOk"));
+        assert!(html.contains("ballOperationOrderSamples"));
+        assert!(html.contains("ballOperationOrderRandomizedOk"));
+        assert!(html.contains("officialOperationOrderSamples"));
+        assert!(html.contains("officialOperationOrderRandomizedOk"));
+        assert!(html.contains("playerDecisionModelSamples"));
+        assert!(html.contains("playerMdpGridSamples"));
+        assert!(html.contains("playerDecisionModelTraceOk"));
+        assert!(html.contains("agentAccountingFrames"));
+        assert!(html.contains("agentAccountingOkFrames"));
+        assert!(html.contains("agentAccountingOk"));
         assert!(html.contains("humanControlledPlayerDecisions"));
         assert!(html.contains("humanInputPresentDecisions"));
         assert!(html.contains("humanInputConsumedOk"));
@@ -100993,6 +101535,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("clearShotWindowOk"));
         assert!(html.contains("killerPassWindowFrames"));
         assert!(html.contains("killerPassWindowOk"));
+        assert!(html.contains("M${model}"));
+        assert!(html.contains("A${agents}"));
         assert!(html.contains("R${ops}"));
         assert!(html.contains("H${human}"));
         assert!(html.contains("C${clear}"));
@@ -101002,6 +101546,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("off-ball open-space moves="));
         assert!(html.contains("ball goalward progress="));
         assert!(html.contains("player operation-order samples="));
+        assert!(html.contains("central brain operation-order samples="));
+        assert!(html.contains("ball operation-order samples="));
+        assert!(html.contains("official operation-order samples="));
+        assert!(html.contains("decision-model samples="));
+        assert!(html.contains("agent accounting frames="));
         assert!(html.contains("human input decisions="));
         assert!(html.contains("clear shot windows="));
         assert!(html.contains("killer-pass windows="));
@@ -101395,6 +101944,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(model["threadedGoalPassCanOverrideForcedShot"], true);
         assert_eq!(model["decisiveGoalActionPressureEnabled"], true);
         assert_eq!(model["decisiveGoalActionProbabilityRampsTowardGoal"], true);
+        assert_eq!(
+            model["goalProximityShotKillerPassFamilyRampsTowardGoal"],
+            true
+        );
+        assert_eq!(
+            model["singleThreadedKillerPassTargetsGoalwardReceiver"],
+            true
+        );
         assert_eq!(model["nearGoalDecisionPrioritizesShotOrKillerPass"], true);
         assert_eq!(model["genericRecyclingDampedByDecisiveGoalPressure"], true);
         assert_eq!(
@@ -102060,6 +102617,86 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             Some(frame_liveness.player_operation_order_unique_full_orders as u64)
         );
         assert_eq!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderSamples"].as_u64(),
+            Some(frame_liveness.central_brain_operation_order_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderUniqueFirstOps"].as_u64(),
+            Some(frame_liveness.central_brain_operation_order_unique_first_ops as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderUniqueFullOrders"].as_u64(),
+            Some(frame_liveness.central_brain_operation_order_unique_full_orders as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["ballOperationOrderSamples"].as_u64(),
+            Some(frame_liveness.ball_operation_order_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["ballOperationOrderUniqueFirstOps"].as_u64(),
+            Some(frame_liveness.ball_operation_order_unique_first_ops as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["ballOperationOrderUniqueFullOrders"].as_u64(),
+            Some(frame_liveness.ball_operation_order_unique_full_orders as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["officialOperationOrderSamples"].as_u64(),
+            Some(frame_liveness.official_operation_order_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["officialOperationOrderUniqueFirstOps"].as_u64(),
+            Some(frame_liveness.official_operation_order_unique_first_ops as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["officialOperationOrderUniqueFullOrders"].as_u64(),
+            Some(frame_liveness.official_operation_order_unique_full_orders as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerDecisionModelSamples"].as_u64(),
+            Some(frame_liveness.player_decision_model_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerMdpGridSamples"].as_u64(),
+            Some(frame_liveness.player_mdp_grid_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerPomdpGridSamples"].as_u64(),
+            Some(frame_liveness.player_pomdp_grid_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerActionFacingSamples"].as_u64(),
+            Some(frame_liveness.player_action_facing_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerReceiveFacingSamples"].as_u64(),
+            Some(frame_liveness.player_receive_facing_samples as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["agentAccountingFrames"].as_u64(),
+            Some(frame_liveness.agent_accounting_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["agentAccountingOkFrames"].as_u64(),
+            Some(frame_liveness.agent_accounting_ok_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["fullRosterFrames"].as_u64(),
+            Some(frame_liveness.full_roster_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["completeScheduleFrames"].as_u64(),
+            Some(frame_liveness.complete_schedule_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["centralBrainDecisionFrames"].as_u64(),
+            Some(frame_liveness.central_brain_decision_frames as u64)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["ballDecisionFrames"].as_u64(),
+            Some(frame_liveness.ball_decision_frames as u64)
+        );
+        assert_eq!(
             meta["tacticalLiveness"]["humanControlledPlayerDecisions"].as_u64(),
             Some(frame_liveness.human_controlled_player_decisions as u64)
         );
@@ -102097,6 +102734,42 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             frame_liveness.player_operation_order_samples < 3
                 || frame_liveness.player_operation_order_unique_first_ops > 1
                 || frame_liveness.player_operation_order_unique_full_orders > 1
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderRandomizedOk"],
+            frame_liveness.central_brain_operation_order_samples < 3
+                || frame_liveness.central_brain_operation_order_unique_first_ops > 1
+                || frame_liveness.central_brain_operation_order_unique_full_orders > 1
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["ballOperationOrderRandomizedOk"],
+            frame_liveness.ball_operation_order_samples < 3
+                || frame_liveness.ball_operation_order_unique_first_ops > 1
+                || frame_liveness.ball_operation_order_unique_full_orders > 1
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["officialOperationOrderRandomizedOk"],
+            frame_liveness.official_operation_order_samples < 3
+                || frame_liveness.official_operation_order_unique_first_ops > 1
+                || frame_liveness.official_operation_order_unique_full_orders > 1
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerDecisionModelTraceOk"],
+            frame_liveness.player_decision_model_samples == 0
+                || (frame_liveness.player_mdp_grid_samples
+                    >= frame_liveness.player_decision_model_samples
+                    && frame_liveness.player_pomdp_grid_samples
+                        >= frame_liveness.player_decision_model_samples
+                    && frame_liveness.player_action_facing_samples > 0)
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["agentAccountingOk"],
+            frame_liveness.agent_accounting_frames == 0
+                || (frame_liveness.agent_accounting_ok_frames
+                    == frame_liveness.agent_accounting_frames
+                    && frame_liveness.full_roster_frames == frame_liveness.agent_accounting_frames
+                    && frame_liveness.complete_schedule_frames
+                        == frame_liveness.agent_accounting_frames)
         );
         assert_eq!(
             meta["tacticalLiveness"]["humanInputConsumedOk"],
@@ -102311,6 +102984,78 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 .as_u64()
                 .is_some()
         );
+        assert!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderSamples"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderUniqueFirstOps"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderUniqueFullOrders"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(meta["tacticalLiveness"]["ballOperationOrderSamples"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["ballOperationOrderUniqueFirstOps"]
+            .as_u64()
+            .is_some());
+        assert!(
+            meta["tacticalLiveness"]["ballOperationOrderUniqueFullOrders"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(meta["tacticalLiveness"]["officialOperationOrderSamples"]
+            .as_u64()
+            .is_some());
+        assert!(
+            meta["tacticalLiveness"]["officialOperationOrderUniqueFirstOps"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            meta["tacticalLiveness"]["officialOperationOrderUniqueFullOrders"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(meta["tacticalLiveness"]["playerDecisionModelSamples"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["playerMdpGridSamples"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["playerPomdpGridSamples"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["playerActionFacingSamples"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["playerReceiveFacingSamples"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["agentAccountingFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["agentAccountingOkFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["fullRosterFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["completeScheduleFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["centralBrainDecisionFrames"]
+            .as_u64()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["ballDecisionFrames"]
+            .as_u64()
+            .is_some());
         assert!(meta["tacticalLiveness"]["humanControlledPlayerDecisions"]
             .as_u64()
             .is_some());
@@ -102345,6 +103090,25 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .as_bool()
             .is_some());
         assert!(meta["tacticalLiveness"]["playerOperationOrderRandomizedOk"]
+            .as_bool()
+            .is_some());
+        assert!(
+            meta["tacticalLiveness"]["centralBrainOperationOrderRandomizedOk"]
+                .as_bool()
+                .is_some()
+        );
+        assert!(meta["tacticalLiveness"]["ballOperationOrderRandomizedOk"]
+            .as_bool()
+            .is_some());
+        assert!(
+            meta["tacticalLiveness"]["officialOperationOrderRandomizedOk"]
+                .as_bool()
+                .is_some()
+        );
+        assert!(meta["tacticalLiveness"]["playerDecisionModelTraceOk"]
+            .as_bool()
+            .is_some());
+        assert!(meta["tacticalLiveness"]["agentAccountingOk"]
             .as_bool()
             .is_some());
         assert!(meta["tacticalLiveness"]["humanInputConsumedOk"]
@@ -102447,6 +103211,30 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .contains(&format!("soccer-{}", config.seed)));
 
         let frame_lines = fs::read_to_string(&paths.frames_path).expect("frames asset");
+        assert!(
+            meta["tacticalLiveness"]["playerDecisionModelSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "streaming playback trace should include player MDP/POMDP decision samples"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerMdpGridSamples"].as_u64(),
+            meta["tacticalLiveness"]["playerDecisionModelSamples"].as_u64(),
+            "every sampled player MDP state should carry resolved pitch-grid cells"
+        );
+        assert_eq!(
+            meta["tacticalLiveness"]["playerPomdpGridSamples"].as_u64(),
+            meta["tacticalLiveness"]["playerDecisionModelSamples"].as_u64(),
+            "every sampled player POMDP observation should carry resolved pitch-grid cells"
+        );
+        assert!(
+            meta["tacticalLiveness"]["playerActionFacingSamples"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "streaming playback trace should include player action-facing buckets"
+        );
         let ticks = frame_lines
             .lines()
             .map(|line| {

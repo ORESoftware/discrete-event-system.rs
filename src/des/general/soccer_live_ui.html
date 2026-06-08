@@ -394,6 +394,7 @@
       <div class="metric"><span>Ticks</span><b id="ticks">0</b></div>
       <div class="metric"><span>Step</span><b id="matchStep">dt 0.1s 10:00</b></div>
       <div class="metric"><span>Speed</span><b id="simSpeed">20x 20t</b></div>
+      <div class="metric"><span>Contracts</span><b id="runtimeContracts">pending</b></div>
       <div class="surface-control">
         <label for="gridOverlayLevel">Grid</label>
         <select id="gridOverlayLevel" aria-label="Grid overlay">
@@ -601,6 +602,7 @@ const replaySeedButton = document.getElementById("replaySeed");
 const ticks = document.getElementById("ticks");
 const matchStep = document.getElementById("matchStep");
 const simSpeed = document.getElementById("simSpeed");
+const runtimeContracts = document.getElementById("runtimeContracts");
 const gridOverlayLevel = document.getElementById("gridOverlayLevel");
 const learning = document.getElementById("learning");
 const shapeLearning = document.getElementById("shapeLearning");
@@ -1079,6 +1081,42 @@ function learningLabel(l) {
     ? ` N${String(l.neuralLearningBackend || "inline").slice(0, 1).toUpperCase()}${Number(l.neuralLearningTrainingSteps ?? 0)}/${Number(l.neuralLearningSamples ?? 0)}`
     : "";
   return `${mode}${log}${neural} I${interval} C${cap}${deferredText} T${total} H${home}/${homeTargets} A${away}/${awayTargets}`;
+}
+function runtimeContractsLabel() {
+  const agent = state?.agentContract || {};
+  const controller = state?.controllerContract || {};
+  const rules = state?.rulesContract || {};
+  const decision = state?.decisionModel || {};
+  const learningContract = state?.learningContract || {};
+  const players = Number(agent.expectedPlayerCount ?? state?.frame?.players?.length ?? 0);
+  const officials = Number(agent.expectedOfficialCount ?? state?.frame?.officials?.length ?? 0);
+  const ballAgents = Number(agent.expectedBallAgents ?? 0);
+  const slots = Number(controller.maxHumanControllers ?? state?.config?.maxHumanPlayers ?? 0);
+  const mdp = decision.mdpStateGridEnabled && decision.pomdpObservationGridEnabled ? "MDP/POMDP" : "policy?";
+  const rulesText = rules.offsideRuleEnabled && rules.postGoalKickoffEnabled ? "rules" : "rules?";
+  const learnText = learningContract.learningEnabled === false ? "observe" : "learn";
+  return `${players}p/${officials}o/${ballAgents}b ${slots}H ${mdp} ${rulesText} ${learnText}`;
+}
+function runtimeContractsTitle() {
+  const agent = state?.agentContract || {};
+  const controller = state?.controllerContract || {};
+  const ui = state?.uiContract || {};
+  const rules = state?.rulesContract || {};
+  const decision = state?.decisionModel || {};
+  const learningContract = state?.learningContract || {};
+  if (!state?.agentContract && !state?.controllerContract && !state?.decisionModel) {
+    return "Runtime contracts not loaded";
+  }
+  const lines = [
+    `agents=${agent.expectedTotalAgents} fieldShuffle=${agent.expectedFieldShuffleAgents} players=${agent.expectedPlayerCount} officials=${agent.expectedOfficialCount} ball=${agent.expectedBallAgents}`,
+    `fisherYates=${agent.fieldEntitiesUseFisherYates} playerOpsRandom=${agent.playerOperationOrderRandomized} officialOpsRandom=${agent.officialOperationOrderRandomized} ballOpsRandom=${agent.ballOperationOrderRandomized}`,
+    `controllers=${controller.maxHumanControllers} configured=${controller.configuredHumanControllers} nativeThreads=${controller.nativeThreadPerControllerEnabled} notify=${controller.notificationDrivenInput}`,
+    `uiCanvas=${ui.birdEyeCanvas2dEnabled} runNew=${ui.runNewSimulationButtonEnabled} fourSlots=${ui.fourHumanControllerSlotsEnabled} goalposts=${ui.goalpostsRendered}`,
+    `rulesOffside=${rules.offsideRuleEnabled} ownHalfExempt=${rules.offsideOwnHalfExempt} postGoalKickoff=${rules.postGoalKickoffEnabled} assistantRefs=${rules.assistantRefsTrackOffsideLine}`,
+    `decisionMdp=${decision.mdpStateGridEnabled} pomdp=${decision.pomdpObservationGridEnabled} killerPass=${decision.killerPassProbabilityRampsTowardGoal} shotRamp=${decision.shotProbabilityRampsTowardGoal}`,
+    `learning=${learningContract.learningEnabled} logging=${learningContract.learningLoggingEnabled} backend=${learningContract.policyPersistenceBackend} retention=${learningContract.policyPersistenceRetentionModel}`,
+  ];
+  return lines.join("\n");
 }
 function shapeLearningLabel(summary = state?.tacticalSummary) {
   if (!summary) return "L0.00 C0.00 D0.0 K0.00 B0.00 R0.00 Look0 D0.00 P0.00";
@@ -2881,6 +2919,8 @@ function render() {
   ticks.textContent = `${state.summary.ticks} / ${totalTicks}${remainingText}`;
   matchStep.textContent = matchStepLabel();
   simSpeed.textContent = simSpeedLabel();
+  runtimeContracts.textContent = runtimeContractsLabel();
+  runtimeContracts.title = runtimeContractsTitle();
   learning.textContent = learningLabel(state.learning);
   shapeLearning.textContent = shapeLearningLabel(state.tacticalSummary);
   policyAutosave.textContent = policyAutosaveLabel(state.policyAutosave);
@@ -4026,7 +4066,13 @@ async function stepOnce(options = {}) {
       episodeIndex: response.episodeIndex,
       completedEpisodes: response.completedEpisodes,
       summary: response.summary,
+      agentContract: response.agentContract || state.agentContract,
+      controllerContract: response.controllerContract || state.controllerContract,
+      uiContract: response.uiContract || state.uiContract,
+      rulesContract: response.rulesContract || state.rulesContract,
       physicsContract: response.physicsContract || state.physicsContract,
+      decisionModel: response.decisionModel || state.decisionModel,
+      learningContract: response.learningContract || state.learningContract,
       stepTiming: response.stepTiming,
       controllerAssignments: response.controllerAssignments,
       controllerThreads: response.controllerThreads || [],

@@ -32903,6 +32903,42 @@ impl Default for SoccerPhysicsRuntimeContract {
     }
 }
 
+impl Default for SoccerPlaybackAgentContract {
+    fn default() -> Self {
+        soccer_playback_agent_contract()
+    }
+}
+
+impl Default for SoccerControllerRuntimeContract {
+    fn default() -> Self {
+        soccer_controller_runtime_contract(&MatchConfig::default())
+    }
+}
+
+impl Default for SoccerUiRuntimeContract {
+    fn default() -> Self {
+        soccer_ui_runtime_contract()
+    }
+}
+
+impl Default for SoccerRulesRuntimeContract {
+    fn default() -> Self {
+        soccer_rules_runtime_contract(&MatchConfig::default())
+    }
+}
+
+impl Default for SoccerDecisionModelContract {
+    fn default() -> Self {
+        soccer_decision_model_contract()
+    }
+}
+
+impl Default for SoccerLearningRuntimeContract {
+    fn default() -> Self {
+        soccer_learning_runtime_contract(&MatchConfig::default())
+    }
+}
+
 fn soccer_controller_runtime_contract(config: &MatchConfig) -> SoccerControllerRuntimeContract {
     SoccerControllerRuntimeContract {
         max_human_controllers: SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
@@ -33315,7 +33351,19 @@ pub struct SoccerStepResponse {
     #[serde(default)]
     pub cadence: SoccerSimulationCadence,
     #[serde(default)]
+    pub agent_contract: SoccerPlaybackAgentContract,
+    #[serde(default)]
+    pub controller_contract: SoccerControllerRuntimeContract,
+    #[serde(default)]
+    pub ui_contract: SoccerUiRuntimeContract,
+    #[serde(default)]
+    pub rules_contract: SoccerRulesRuntimeContract,
+    #[serde(default)]
     pub physics_contract: SoccerPhysicsRuntimeContract,
+    #[serde(default)]
+    pub decision_model: SoccerDecisionModelContract,
+    #[serde(default)]
+    pub learning_contract: SoccerLearningRuntimeContract,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
@@ -33362,7 +33410,19 @@ pub struct SoccerLiveStateResponse {
     #[serde(default)]
     pub cadence: SoccerSimulationCadence,
     #[serde(default)]
+    pub agent_contract: SoccerPlaybackAgentContract,
+    #[serde(default)]
+    pub controller_contract: SoccerControllerRuntimeContract,
+    #[serde(default)]
+    pub ui_contract: SoccerUiRuntimeContract,
+    #[serde(default)]
+    pub rules_contract: SoccerRulesRuntimeContract,
+    #[serde(default)]
     pub physics_contract: SoccerPhysicsRuntimeContract,
+    #[serde(default)]
+    pub decision_model: SoccerDecisionModelContract,
+    #[serde(default)]
+    pub learning_contract: SoccerLearningRuntimeContract,
     #[serde(default)]
     pub step_timing: SoccerStepTimingStats,
     pub controller_assignments: Vec<ControllerAssignment>,
@@ -43335,7 +43395,13 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
             cadence,
+            agent_contract: soccer_playback_agent_contract(),
+            controller_contract: soccer_controller_runtime_contract(&self.sim.config),
+            ui_contract: soccer_ui_runtime_contract(),
+            rules_contract: soccer_rules_runtime_contract(&self.sim.config),
             physics_contract: soccer_physics_runtime_contract(&self.sim.config),
+            decision_model: soccer_decision_model_contract(),
+            learning_contract: soccer_learning_runtime_contract(&self.sim.config),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -43399,7 +43465,13 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
             cadence,
+            agent_contract: soccer_playback_agent_contract(),
+            controller_contract: soccer_controller_runtime_contract(&self.sim.config),
+            ui_contract: soccer_ui_runtime_contract(),
+            rules_contract: soccer_rules_runtime_contract(&self.sim.config),
             physics_contract: soccer_physics_runtime_contract(&self.sim.config),
+            decision_model: soccer_decision_model_contract(),
+            learning_contract: soccer_learning_runtime_contract(&self.sim.config),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -43992,7 +44064,13 @@ impl SoccerRealtimeSession {
             summary: self.sim.summary(),
             match_clock: self.sim.match_clock(),
             cadence: soccer_full_match_cadence(&self.sim.config),
+            agent_contract: soccer_playback_agent_contract(),
+            controller_contract: soccer_controller_runtime_contract(&self.sim.config),
+            ui_contract: soccer_ui_runtime_contract(),
+            rules_contract: soccer_rules_runtime_contract(&self.sim.config),
             physics_contract: soccer_physics_runtime_contract(&self.sim.config),
+            decision_model: soccer_decision_model_contract(),
+            learning_contract: soccer_learning_runtime_contract(&self.sim.config),
             step_timing: self.sim.step_timing_stats(),
             controller_assignments: self.sim.controller_assignments(),
             controller_threads,
@@ -64398,6 +64476,15 @@ mod tests {
         assert!(initial.cadence.ten_hz_timestep_contract);
         assert!(initial.cadence.ten_minute_duration_contract);
         assert!(initial.cadence.default_ten_minute_contract);
+        assert_eq!(initial.agent_contract.expected_player_count, 22);
+        assert_eq!(initial.agent_contract.expected_official_count, 3);
+        assert_eq!(initial.agent_contract.expected_ball_agents, 1);
+        assert!(initial.agent_contract.field_entities_use_fisher_yates);
+        assert_eq!(initial.controller_contract.max_human_controllers, 4);
+        assert!(initial.controller_contract.notification_driven_input);
+        assert!(initial.ui_contract.bird_eye_canvas_2d_enabled);
+        assert!(initial.rules_contract.offside_rule_enabled);
+        assert!(initial.rules_contract.post_goal_kickoff_enabled);
         assert_eq!(
             initial.physics_contract.goalkeeper_clear_sightline_save_cap,
             GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP
@@ -64450,6 +64537,18 @@ mod tests {
         assert_eq!(
             step.physics_contract.goalkeeper_parry_max_yards,
             GOALKEEPER_PARRY_MAX_YARDS
+        );
+        assert!(step.decision_model.mdp_state_grid_enabled);
+        assert!(step.decision_model.pomdp_observation_grid_enabled);
+        assert!(
+            step.decision_model
+                .killer_pass_probability_ramps_toward_goal
+        );
+        assert!(step.learning_contract.mdp_enabled);
+        assert!(step.learning_contract.pomdp_enabled);
+        assert_eq!(
+            step.learning_contract.policy_persistence_backend,
+            SOCCER_POLICY_POSTGRES_BACKEND
         );
         assert_eq!(step.frame.agent_schedule.len(), 27);
         assert_eq!(step.frame.central_brain.tracked_players.len(), 22);
@@ -90597,6 +90696,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             serde_json::from_str(&state.body).expect("mounted state json");
         assert_eq!(state_value["config"]["seed"], 67);
         assert_eq!(state_value["summary"]["ticks"], 0);
+        assert_eq!(state_value["agentContract"]["expectedPlayerCount"], 22);
+        assert_eq!(state_value["agentContract"]["expectedOfficialCount"], 3);
+        assert_eq!(state_value["agentContract"]["expectedBallAgents"], 1);
+        assert_eq!(
+            state_value["agentContract"]["fieldEntitiesUseFisherYates"],
+            true
+        );
+        assert_eq!(state_value["controllerContract"]["maxHumanControllers"], 4);
+        assert_eq!(
+            state_value["controllerContract"]["notificationDrivenInput"],
+            true
+        );
+        assert_eq!(state_value["uiContract"]["birdEyeCanvas2dEnabled"], true);
+        assert_eq!(state_value["rulesContract"]["offsideRuleEnabled"], true);
+        assert_eq!(state_value["rulesContract"]["postGoalKickoffEnabled"], true);
         assert_eq!(
             state_value["physicsContract"]["goalkeeperClearSightlineSaveCap"],
             GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP
@@ -90627,6 +90741,21 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             step_value["physicsContract"]["closeHardShotsCanCreateRebounds"],
             true
+        );
+        assert_eq!(step_value["decisionModel"]["mdpStateGridEnabled"], true);
+        assert_eq!(
+            step_value["decisionModel"]["pomdpObservationGridEnabled"],
+            true
+        );
+        assert_eq!(
+            step_value["decisionModel"]["killerPassProbabilityRampsTowardGoal"],
+            true
+        );
+        assert_eq!(step_value["learningContract"]["mdpEnabled"], true);
+        assert_eq!(step_value["learningContract"]["pomdpEnabled"], true);
+        assert_eq!(
+            step_value["learningContract"]["policyPersistenceBackend"],
+            SOCCER_POLICY_POSTGRES_BACKEND
         );
     }
 
@@ -98614,6 +98743,22 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ballHistorySamplesForFrame"));
         assert!(html.contains("ballHistoryKinematicsLabel"));
         assert!(html.contains("f.ballHistory"));
+        assert!(html.contains("id=\"runtimeContracts\""));
+        assert!(html.contains("function runtimeContractsLabel()"));
+        assert!(html.contains("function runtimeContractsTitle()"));
+        assert!(html.contains("agentContract: response.agentContract || state.agentContract"));
+        assert!(html.contains(
+            "controllerContract: response.controllerContract || state.controllerContract"
+        ));
+        assert!(html.contains("uiContract: response.uiContract || state.uiContract"));
+        assert!(html.contains("rulesContract: response.rulesContract || state.rulesContract"));
+        assert!(html.contains("decisionModel: response.decisionModel || state.decisionModel"));
+        assert!(
+            html.contains("learningContract: response.learningContract || state.learningContract")
+        );
+        assert!(html.contains("runtimeContracts.textContent = runtimeContractsLabel()"));
+        assert!(html.contains("mdpStateGridEnabled"));
+        assert!(html.contains("pomdpObservationGridEnabled"));
         assert!(html.contains("id=\"gkPhysics\""));
         assert!(html.contains("function goalkeeperPhysicsLabel()"));
         assert!(html.contains("function goalkeeperPhysicsTitle()"));

@@ -55269,15 +55269,21 @@ mod tests {
         );
         let skill_signature = |skills: &SkillProfile| {
             format!(
-                "{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}",
+                "{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}:{:.1}",
                 skills.top_speed,
                 skills.acceleration,
+                skills.strength,
                 skills.shooting,
+                skills.right_foot_shot_power,
+                skills.left_foot_shot_power,
+                skills.passing,
                 skills.passing_completion_rate,
+                skills.flair_passing,
                 skills.dribbling,
+                skills.first_touch,
                 skills.defending,
                 skills.goalkeeping,
-                skills.defensive_tracking
+                skills.defensive_tracking,
             )
         };
         let skill_signatures = sim
@@ -55299,14 +55305,19 @@ mod tests {
                 ("shooting", skills.shooting),
                 ("right_foot_shot_power", skills.right_foot_shot_power),
                 ("left_foot_shot_power", skills.left_foot_shot_power),
+                ("passing", skills.passing),
                 ("passing_completion_rate", skills.passing_completion_rate),
                 ("flair_passing", skills.flair_passing),
                 ("crossing_left", skills.crossing_left),
                 ("crossing_right", skills.crossing_right),
                 ("dribbling", skills.dribbling),
+                ("first_touch", skills.first_touch),
                 ("defending", skills.defending),
                 ("goalkeeping", skills.goalkeeping),
                 ("defensive_tracking", skills.defensive_tracking),
+                ("stamina", skills.stamina),
+                ("vision", skills.vision),
+                ("aggression", skills.aggression),
             ] {
                 assert!(
                     (1.0..=10.0).contains(&value),
@@ -55318,7 +55329,8 @@ mod tests {
                 );
             }
             assert!(
-                player.skills.weight_pounds.is_finite() && player.skills.weight_pounds > 120.0,
+                player.skills.weight_pounds.is_finite()
+                    && (120.0..=240.0).contains(&player.skills.weight_pounds),
                 "player {} should have plausible weight for physics: {}",
                 player.id,
                 player.skills.weight_pounds

@@ -154,6 +154,8 @@ const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.15;
 const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS: f64 = 30.0;
 const COMPLETED_DANGEROUS_CROSS_BONUS_POINTS: f64 = 3.8;
 const COMPLETED_CROSS_MAX_BONUS_POINTS: f64 = 5.0;
+const COMPLETED_KILLER_PASS_BONUS_POINTS: f64 = 4.8;
+const COMPLETED_KILLER_PASS_MAX_BONUS_POINTS: f64 = 6.0;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
 const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 2.10;
 const NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF: f64 = 0.90;
@@ -23822,6 +23824,90 @@ fn completed_cross_reward(
     )
 }
 
+fn completed_killer_pass_reward_from_parts(
+    team: Team,
+    flight: PassFlight,
+    is_cross: bool,
+    origin: Vec2,
+    target: Vec2,
+    receiver_role: PlayerRole,
+    receiver_skills: &SkillProfile,
+    field_width: f64,
+    field_length: f64,
+    receiver_openness: f64,
+    stride_fit: f64,
+) -> f64 {
+    if is_cross || flight.is_aerial() {
+        return 0.0;
+    }
+    let forward_yards = (target.y - origin.y) * team.attack_dir();
+    if forward_yards < KILLER_PASS_MIN_FORWARD_YARDS {
+        return 0.0;
+    }
+    let origin_yards_to_goal = (team.goal_y(field_length) - origin.y).abs();
+    if origin_yards_to_goal > KILLER_PASS_MAX_YARDS_TO_GOAL {
+        return 0.0;
+    }
+    let target_yards_to_goal = (team.goal_y(field_length) - target.y).abs();
+    let goal_gain = origin_yards_to_goal - target_yards_to_goal;
+    if goal_gain < KILLER_PASS_MIN_RECEIVER_GOAL_GAIN_YARDS {
+        return 0.0;
+    }
+    let goal_channel =
+        (1.0 - target_yards_to_goal / (TEAMMATE_MUST_SHOOT_YARDS + 8.0)).clamp(0.0, 1.0);
+    if goal_channel <= 0.0 {
+        return 0.0;
+    }
+    let centrality = goalmouth_centrality(target, field_width);
+    let range_fit = ((KILLER_PASS_MAX_YARDS_TO_GOAL - origin_yards_to_goal)
+        / KILLER_PASS_MAX_YARDS_TO_GOAL)
+        .clamp(0.0, 1.0);
+    let receiver_role_fit = match receiver_role {
+        PlayerRole::Forward => 1.0,
+        PlayerRole::Midfielder => 0.82,
+        PlayerRole::Defender => 0.46,
+        PlayerRole::Goalkeeper => 0.0,
+    };
+    let receiver_finish_tool = (ability01(receiver_skills.first_touch) * 0.34
+        + ability01(receiver_skills.shooting) * 0.32
+        + ability01(receiver_skills.top_speed) * 0.18
+        + ability01(receiver_skills.dribbling) * 0.16)
+        .clamp(0.0, 1.0);
+    let stride_fit = stride_fit.clamp(0.0, 1.0);
+    let openness = receiver_openness.clamp(0.0, 1.0);
+    let threaded_fit = (goal_gain / 22.0).clamp(0.0, 1.0) * 0.18
+        + range_fit * 0.12
+        + goal_channel * 0.24
+        + centrality * 0.16
+        + openness * 0.12
+        + stride_fit * 0.20;
+    (COMPLETED_KILLER_PASS_BONUS_POINTS
+        * threaded_fit
+        * (0.62 + receiver_role_fit * 0.22 + receiver_finish_tool * 0.24).clamp(0.55, 1.08))
+    .clamp(0.0, COMPLETED_KILLER_PASS_MAX_BONUS_POINTS)
+}
+
+fn completed_killer_pass_reward(
+    pass: &PendingPass,
+    receiver: &PlayerAgent,
+    field_width: f64,
+    field_length: f64,
+) -> f64 {
+    completed_killer_pass_reward_from_parts(
+        pass.team,
+        pass.flight,
+        pass.is_cross,
+        pass.origin,
+        pass.intended_target,
+        receiver.role,
+        &receiver.skills,
+        field_width,
+        field_length,
+        pass.receiver_openness,
+        completed_pass_stride_anticipation_fit(pass),
+    )
+}
+
 fn pass_stride_anticipation_reward_from_fit(
     stride_fit: f64,
     target_forward_yards: f64,
@@ -25208,6 +25294,19 @@ fn soccer_transition_reward_with_tactics(
                         &action_context,
                         player.team,
                         receiver_openness,
+                    );
+                    reward += completed_killer_pass_reward_from_parts(
+                        player.team,
+                        flight,
+                        is_cross,
+                        origin,
+                        target,
+                        receiver_player.role,
+                        &receiver_player.skills,
+                        before.field_width,
+                        before.field_length,
+                        receiver_openness,
+                        pass_into_stride_fit_for_context(&action_context, player.team),
                     );
                 }
             }
@@ -31788,6 +31887,8 @@ pub struct SoccerLearningRewardContract {
     pub completed_forward_pass_base_reward_opponent_half: f64,
     pub completed_forward_pass_progress_reward_per_yard: f64,
     pub completed_forward_pass_progress_reward_max_yards: f64,
+    pub completed_killer_pass_bonus_points: f64,
+    pub completed_killer_pass_max_bonus_points: f64,
     pub dense_forward_pass_progress_reward_per_yard: f64,
     pub dense_forward_carry_progress_reward_per_yard: f64,
     pub near_goal_no_shot_penalty_points: f64,
@@ -31878,6 +31979,8 @@ fn soccer_learning_reward_contract() -> SoccerLearningRewardContract {
             COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD,
         completed_forward_pass_progress_reward_max_yards:
             COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS,
+        completed_killer_pass_bonus_points: COMPLETED_KILLER_PASS_BONUS_POINTS,
+        completed_killer_pass_max_bonus_points: COMPLETED_KILLER_PASS_MAX_BONUS_POINTS,
         dense_forward_pass_progress_reward_per_yard: DENSE_FORWARD_PASS_PROGRESS_REWARD_PER_YARD,
         dense_forward_carry_progress_reward_per_yard: DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD,
         near_goal_no_shot_penalty_points: NEAR_GOAL_NO_SHOT_PENALTY_POINTS,
@@ -37602,6 +37705,12 @@ impl SoccerMatch {
             self.config.field_length_yards,
         ) + completed_pass_anticipation_reward(pass)
             + completed_cross_reward(
+                pass,
+                receiver_player,
+                self.config.field_width_yards,
+                self.config.field_length_yards,
+            )
+            + completed_killer_pass_reward(
                 pass,
                 receiver_player,
                 self.config.field_width_yards,
@@ -56162,6 +56271,65 @@ mod tests {
     }
 
     #[test]
+    fn completed_killer_pass_reward_values_threaded_goal_channel_delivery() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let receiver = 9;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.first_touch = 8.8;
+        sim.players[receiver].skills.shooting = 8.9;
+        sim.players[receiver].skills.top_speed = 8.5;
+        sim.players[receiver].skills.dribbling = 8.1;
+
+        let origin = Vec2::new(40.0, 84.0);
+        let receiver_start = Vec2::new(43.0, 94.0);
+        let threaded_target = Vec2::new(40.0, 106.0);
+        let mut threaded = test_pending_pass(Team::Home, passer, receiver, origin, threaded_target);
+        threaded.receiver_openness = 0.92;
+        threaded.receiver_position_at_launch = Some(receiver_start);
+        threaded.receiver_velocity_at_launch = Some(Vec2::new(0.2, 4.8));
+
+        let mut lateral = threaded.clone();
+        lateral.intended_target = Vec2::new(58.0, 86.0);
+        lateral.distance_yards = lateral.origin.distance(lateral.intended_target);
+
+        let mut aerial = threaded.clone();
+        aerial.flight = PassFlight::Aerial;
+
+        let threaded_bonus = completed_killer_pass_reward(
+            &threaded,
+            &sim.players[receiver],
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let lateral_bonus = completed_killer_pass_reward(
+            &lateral,
+            &sim.players[receiver],
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+        let aerial_bonus = completed_killer_pass_reward(
+            &aerial,
+            &sim.players[receiver],
+            sim.config.field_width_yards,
+            sim.config.field_length_yards,
+        );
+
+        assert!(
+            threaded_bonus > 3.2,
+            "threaded floor pass into the goal channel should get killer-pass credit: {threaded_bonus}"
+        );
+        assert_eq!(
+            lateral_bonus, 0.0,
+            "lateral recycling should not receive killer-pass goal-channel credit"
+        );
+        assert_eq!(
+            aerial_bonus, 0.0,
+            "aerial deliveries use cross/aerial-duel rewards, not floor-threaded killer-pass credit"
+        );
+    }
+
+    #[test]
     fn completed_pass_reward_event_includes_dangerous_cross_bonus() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
         let crosser = 8;
@@ -56199,6 +56367,43 @@ mod tests {
         assert!(
             passer_reward > base + 2.0,
             "completed cross event should include cross bonus: reward={passer_reward} base={base}"
+        );
+    }
+
+    #[test]
+    fn completed_pass_reward_event_includes_killer_pass_goal_channel_bonus() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let receiver = 9;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.first_touch = 8.6;
+        sim.players[receiver].skills.shooting = 8.8;
+        sim.players[receiver].skills.top_speed = 8.4;
+        let origin = Vec2::new(40.0, 84.0);
+        let target = Vec2::new(40.0, 106.0);
+        let mut threaded = test_pending_pass(Team::Home, passer, receiver, origin, target);
+        threaded.receiver_openness = 0.90;
+        threaded.receiver_position_at_launch = Some(Vec2::new(43.0, 94.0));
+        threaded.receiver_velocity_at_launch = Some(Vec2::new(0.1, 4.6));
+
+        let base = completed_pass_reward(
+            threaded.team,
+            threaded.origin,
+            threaded.intended_target,
+            sim.config.field_length_yards,
+        ) + completed_pass_anticipation_reward(&threaded);
+        let event_start = sim.reward_events.len();
+
+        sim.record_completed_pass_reward(&threaded, receiver);
+
+        let passer_reward = sim.reward_events[event_start..]
+            .iter()
+            .filter(|event| event.player_id == passer)
+            .map(|event| event.amount)
+            .sum::<f64>();
+        assert!(
+            passer_reward > base + 3.0,
+            "completed threaded goal-channel pass should include killer-pass bonus: reward={passer_reward} base={base}"
         );
     }
 
@@ -56264,6 +56469,73 @@ mod tests {
         assert!(
             dangerous > sterile + 1.2,
             "completed cross into scoring channel should beat wide-to-wide delivery: dangerous={dangerous} sterile={sterile}"
+        );
+    }
+
+    #[test]
+    fn transition_reward_infers_threaded_killer_pass_goal_channel_bonus() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 14233,
+            ..Default::default()
+        });
+        let passer = 6;
+        let receiver = 9;
+        let origin = Vec2::new(40.0, 84.0);
+        let target = Vec2::new(40.0, 106.0);
+        sim.players[passer].position = origin;
+        sim.players[passer].home_position = origin;
+        sim.players[receiver].position = Vec2::new(43.0, 94.0);
+        sim.players[receiver].velocity = Vec2::new(0.1, 4.6);
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].skills.first_touch = 8.6;
+        sim.players[receiver].skills.shooting = 8.8;
+        sim.players[receiver].skills.top_speed = 8.4;
+        sim.ball.holder = Some(passer);
+        sim.ball.position = origin;
+        sim.ball.last_touch_team = Some(Team::Home);
+        let before = WorldSnapshot::from_match(&sim);
+
+        let reward_for_action = |action: &str| {
+            let mut after = before.clone();
+            after.ball.holder = Some(receiver);
+            after.ball.position = target;
+            after.ball.velocity = Vec2::zero();
+            after.set_player_position(receiver, target);
+            let mut decision = test_decision_trace(&before, passer, action);
+            decision.action_target = Some(AgentActionTargetTrace {
+                point: Some(target),
+                player_id: Some(receiver),
+                grid: Some(pitch_grid_address(
+                    target,
+                    before.field_width,
+                    before.field_length,
+                )),
+                facing: facing_bucket_from_vector(target - origin),
+                dribble_touch: None,
+            });
+            decision.observation.expected_pass_completion = 0.88;
+            decision.observation.best_pass_receiver_openness = 0.90;
+            decision.observation.best_pass_stride_fit = 0.82;
+            decision.observation.floor_pass_lane_score = 0.88;
+            soccer_transition_reward(
+                &sim.players[passer],
+                &decision,
+                &before,
+                &after,
+                0,
+                0,
+                0,
+                0,
+                true,
+            )
+        };
+
+        let threaded_floor = reward_for_action("killer-pass");
+        let aerial_same_target = reward_for_action("aerial-pass");
+        assert!(
+            threaded_floor > aerial_same_target + 2.0,
+            "floor-threaded killer pass should learn above same-target aerial delivery: threaded={threaded_floor} aerial={aerial_same_target}"
         );
     }
 
@@ -93032,6 +93304,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(
             rewards["completedForwardPassProgressRewardPerYard"],
             COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD
+        );
+        assert_eq!(
+            rewards["completedKillerPassBonusPoints"],
+            COMPLETED_KILLER_PASS_BONUS_POINTS
+        );
+        assert_eq!(
+            rewards["completedKillerPassMaxBonusPoints"],
+            COMPLETED_KILLER_PASS_MAX_BONUS_POINTS
         );
         assert_eq!(
             rewards["denseForwardCarryProgressRewardPerYard"],

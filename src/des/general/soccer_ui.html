@@ -543,6 +543,21 @@ const CONTROLLER_KEYMAPS = [
   {left: "KeyJ", right: "KeyL", up: "KeyI", down: "KeyK", sprint: "KeyU", pass: "KeyO", shoot: "KeyP"},
   {left: "Numpad4", right: "Numpad6", up: "Numpad8", down: "Numpad5", sprint: "Numpad0", pass: "Numpad7", shoot: "Numpad9"}
 ];
+const GAMEPAD_BUTTONS = {
+  action: 0,
+  pass: 1,
+  carry: 2,
+  protect: 3,
+  clearance: 4,
+  sprint: 5,
+  routeOne: 6,
+  dpadUp: 12,
+  dpadDown: 13,
+  dpadLeft: 14,
+  dpadRight: 15,
+};
+const GAMEPAD_STICK_DEADZONE = 0.18;
+const gamepadButtonLatch = new Map();
 let frameIndex = 0;
 let playing = false;
 let lastTs = 0;
@@ -1960,6 +1975,7 @@ function updateMetrics() {
   events.innerHTML = (trace.events || []).slice(-12).reverse().map(e => `<li>${fmtClock(e.clockSeconds)} ${e.description}</li>`).join("");
 }
 function tick(ts) {
+  queueGamepadInputs();
   if (!lastTs) lastTs = ts;
   const elapsed = ts - lastTs;
   const fps = 10 * Number(speed.value);
@@ -2342,11 +2358,10 @@ function controllerSprintForSlot(slot) {
   const map = CONTROLLER_KEYMAPS[slot] || CONTROLLER_KEYMAPS[0];
   return keys.has(map.sprint);
 }
-function queueSlotInput(slot, pass = false, shoot = false, action = null) {
+function queueControllerFrame(slot, axis, sprint, pass = false, shoot = false, action = null) {
   const playerId = selectedPlayer(slot);
   if (playerId == null) return false;
   setActiveSlot(slot);
-  const axis = controllerAxisForSlot(slot);
   window.dispatchHumanInput({
     controllerSlot: slot,
     playerId,
@@ -2361,8 +2376,80 @@ function queueSlotInput(slot, pass = false, shoot = false, action = null) {
   });
   return true;
 }
+function queueSlotInput(slot, pass = false, shoot = false, action = null) {
+  return queueControllerFrame(
+    slot,
+    controllerAxisForSlot(slot),
+    controllerSprintForSlot(slot),
+    pass,
+    shoot,
+    action
+  );
+}
 function pushInput(pass = false, shoot = false, action = null) {
   return queueSlotInput(activeSlot, pass, shoot, action);
+}
+function gamepadButtonPressed(gamepad, buttonIndex) {
+  const button = gamepad?.buttons?.[buttonIndex];
+  return Boolean(button?.pressed || Number(button?.value || 0) > 0.50);
+}
+function gamepadPressedThisPulse(slot, gamepad, buttonIndex) {
+  const key = `${slot}:${Number(gamepad?.index ?? slot)}:${buttonIndex}`;
+  const pressed = gamepadButtonPressed(gamepad, buttonIndex);
+  const wasPressed = gamepadButtonLatch.get(key) === true;
+  gamepadButtonLatch.set(key, pressed);
+  return pressed && !wasPressed;
+}
+function gamepadAxisValue(value) {
+  const v = Number(value || 0);
+  if (Math.abs(v) < GAMEPAD_STICK_DEADZONE) return 0;
+  return Math.max(-1, Math.min(1, v));
+}
+function axisFromGamepad(gamepad) {
+  const axis = {
+    x: gamepadAxisValue(gamepad?.axes?.[0]),
+    y: -gamepadAxisValue(gamepad?.axes?.[1])
+  };
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadLeft)) axis.x -= 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadRight)) axis.x += 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadUp)) axis.y += 1;
+  if (gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.dpadDown)) axis.y -= 1;
+  const length = Math.hypot(axis.x, axis.y);
+  return length > 1 ? {x: axis.x / length, y: axis.y / length} : axis;
+}
+function connectedGamepads() {
+  if (typeof navigator === "undefined" || typeof navigator.getGamepads !== "function") return [];
+  return Array.from(navigator.getGamepads()).filter(Boolean);
+}
+function gamepadForSlot(slot) {
+  const pads = connectedGamepads();
+  return pads.find(pad => Number(pad.index) === slot) || pads[slot] || null;
+}
+function gamepadActionForSlot(slot, gamepad) {
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.carry)) return "carry-forward";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.protect)) return "protect-ball";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.clearance)) return "clearance";
+  if (gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.routeOne)) return "route-one";
+  return null;
+}
+function queueGamepadInputs() {
+  let queued = 0;
+  for (let slot = 0; slot < visibleHumanSlotCount(); slot++) {
+    const gamepad = gamepadForSlot(slot);
+    if (!gamepad || selectedPlayer(slot) == null) continue;
+    const axis = axisFromGamepad(gamepad);
+    const sprint = gamepadButtonPressed(gamepad, GAMEPAD_BUTTONS.sprint);
+    const actionPressed = gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.action);
+    const passPressed = gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.pass);
+    const explicitAction = gamepadActionForSlot(slot, gamepad);
+    const shoot = actionPressed && (sprint || selectedPlayerCanShoot(slot));
+    const pass = passPressed || (actionPressed && !shoot);
+    if (axis.x !== 0 || axis.y !== 0 || sprint || pass || shoot || explicitAction != null) {
+      if (queueControllerFrame(slot, axis, sprint, pass, shoot, explicitAction)) queued++;
+    }
+  }
+  if (queued > 0) scheduleInputFlush(0);
+  return queued;
 }
 function rebuildPassTargets() {
   const frame = currentFrame();

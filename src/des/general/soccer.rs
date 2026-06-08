@@ -32362,6 +32362,7 @@ pub struct SoccerUiRuntimeContract {
     pub max_human_controller_slots: usize,
     pub keyboard_controller_keymaps_enabled: bool,
     pub gamepad_controller_polling_enabled: bool,
+    pub static_playback_gamepad_polling_enabled: bool,
     pub pitch_grid_overlay_enabled: bool,
     pub goalposts_rendered: bool,
     pub action_intent_overlay_enabled: bool,
@@ -32791,6 +32792,7 @@ fn soccer_ui_runtime_contract() -> SoccerUiRuntimeContract {
         max_human_controller_slots: SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
         keyboard_controller_keymaps_enabled: true,
         gamepad_controller_polling_enabled: true,
+        static_playback_gamepad_polling_enabled: true,
         pitch_grid_overlay_enabled: true,
         goalposts_rendered: true,
         action_intent_overlay_enabled: true,
@@ -95275,6 +95277,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("shoot: \"Numpad9\""));
         assert!(html.contains("function controllerKeymapLabel"));
         assert!(html.contains("function controllerSlotForKey"));
+        assert!(html.contains("const GAMEPAD_BUTTONS = {"));
+        assert!(html.contains("GAMEPAD_STICK_DEADZONE"));
+        assert!(html.contains("navigator.getGamepads"));
+        assert!(html.contains("function gamepadForSlot(slot)"));
+        assert!(html.contains("function gamepadPressedThisPulse(slot, gamepad, buttonIndex)"));
+        assert!(html.contains("function queueGamepadInputs()"));
+        assert!(html.contains("gamepadPressedThisPulse(slot, gamepad, GAMEPAD_BUTTONS.action)"));
+        assert!(html.contains("queueGamepadInputs();"));
+        assert!(
+            html.contains("queueControllerFrame(slot, axis, sprint, pass, shoot, explicitAction)")
+        );
         assert!(html.contains("function queueSlotInput"));
         assert!(html.contains("function coalesceQueuedInputsBySlot"));
         assert!(html.contains("function compactQueuedInputsForBrowser"));
@@ -95477,6 +95490,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(contract["keyboardControllerKeymapsEnabled"], true);
         assert_eq!(contract["gamepadControllerPollingEnabled"], true);
+        assert_eq!(contract["staticPlaybackGamepadPollingEnabled"], true);
         assert_eq!(contract["pitchGridOverlayEnabled"], true);
         assert_eq!(contract["goalpostsRendered"], true);
         assert_eq!(contract["actionIntentOverlayEnabled"], true);

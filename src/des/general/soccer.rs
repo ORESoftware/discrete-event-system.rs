@@ -7381,32 +7381,6 @@ impl PlayerAgent {
                 decisive_family_floor,
             );
         }
-<<<<<<< HEAD
-=======
-        if carry_forward_legal
-            && !goal_attack_shot_required
-            && observation.yards_to_goal < observation.yards_to_own_goal
-            && observation.yards_to_goal <= 58.0
-            && observation.forward_dribble_space_yards >= 3.0
-            && release_pressure < 0.50
-        {
-            let final_third_ramp = ((58.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
-            let grass_fit = (observation.forward_dribble_space_yards / 14.0).clamp(0.0, 1.0);
-            let role_floor = match self.role {
-                PlayerRole::Forward => 0.30,
-                PlayerRole::Midfielder => 0.24,
-                PlayerRole::Defender => 0.14,
-                PlayerRole::Goalkeeper => 0.0,
-            };
-            let progression_floor = (role_floor
-                + final_third_ramp * 0.12
-                + grass_fit * 0.10
-                + offensive_urgency * 0.06
-                + goal_attack * 0.05)
-                .clamp(0.0, 0.54);
-            ensure_min_legal_option_probability(&mut options, "carry-forward", progression_floor);
-        }
->>>>>>> 70a0b1233bf9f11f30d245e199b94f9fe19bc92f
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
         options
@@ -106065,7 +106039,6 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(meta["tacticalLiveness"]["openSpaceSupportOk"], true);
         assert_eq!(meta["tacticalLiveness"]["goalwardProgressOk"], true);
-<<<<<<< HEAD
         let agent_accounting_frames = meta["tacticalLiveness"]["agentAccountingFrames"]
             .as_u64()
             .expect("agent accounting frames");
@@ -106077,7 +106050,6 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             agent_accounting_ok_frames > 0 && agent_accounting_ok_frames <= agent_accounting_frames,
             "default trace should report bounded agent accounting coverage, got {agent_accounting_ok_frames}/{agent_accounting_frames}"
         );
-=======
         assert!(
             meta["tacticalLiveness"]["playerGaitSamples"]
                 .as_u64()
@@ -106107,9 +106079,6 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "default 10-minute trace should include backward defensive movement"
         );
         assert_eq!(meta["tacticalLiveness"]["movementGaitVarietyOk"], true);
-        assert_eq!(meta["tacticalLiveness"]["agentAccountingFrames"], 6001);
-        assert_eq!(meta["tacticalLiveness"]["agentAccountingOkFrames"], 6001);
->>>>>>> 70a0b1233bf9f11f30d245e199b94f9fe19bc92f
         assert_eq!(meta["tacticalLiveness"]["fullRosterFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 6000);

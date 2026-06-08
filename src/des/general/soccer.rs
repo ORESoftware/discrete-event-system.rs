@@ -93053,7 +93053,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         })));
         let input_queue = session.lock().unwrap().input_queue();
 
-        let body = r#"{"ballDragPerTick":0.045,"ballStopSpeedYps":0.65}"#;
+        let body = r#"{"ballDragPerTick":0.045,"ballAirResistance":0.012,"ballGrassResistanceYps2":1.35,"ballStopSpeedYps":0.65}"#;
         let surface = handle_live_soccer_request(
             &format!(
                 "POST /api/surface HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
@@ -93066,16 +93066,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(surface.status, 200);
         let value: serde_json::Value = serde_json::from_str(&surface.body).expect("surface json");
         assert_eq!(value["config"]["ballDragPerTick"], 0.045);
+        assert_eq!(value["config"]["ballAirResistance"], 0.012);
+        assert_eq!(value["config"]["ballGrassResistanceYps2"], 1.35);
         assert_eq!(value["config"]["ballStopSpeedYps"], 0.65);
-        assert_eq!(
-            session
-                .lock()
-                .unwrap()
-                .match_ref()
-                .config
-                .ball_drag_per_tick,
-            0.045
-        );
+        {
+            let session = session.lock().unwrap();
+            let config = &session.match_ref().config;
+            assert_eq!(config.ball_drag_per_tick, 0.045);
+            assert_eq!(config.ball_air_resistance, 0.012);
+            assert_eq!(config.ball_grass_resistance_yps2, 1.35);
+            assert_eq!(config.ball_stop_speed_yps, 0.65);
+        }
 
         let invalid = r#"{"ballDragPerTick":1.1,"ballStopSpeedYps":0.65}"#;
         let rejected = handle_live_soccer_request(
@@ -93088,6 +93089,18 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             &input_queue,
         );
         assert_eq!(rejected.status, 400);
+
+        let invalid_grass = r#"{"ballDragPerTick":0.045,"ballAirResistance":0.012,"ballGrassResistanceYps2":5.4,"ballStopSpeedYps":0.65}"#;
+        let rejected_grass = handle_live_soccer_request(
+            &format!(
+                "POST /api/surface HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                invalid_grass.len(),
+                invalid_grass
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(rejected_grass.status, 400);
     }
 
     #[test]

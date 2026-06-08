@@ -94392,6 +94392,143 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn away_field_player_inside_twenty_with_through_line_shoots_but_blocked_lane_does_not() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_246,
+            ..Default::default()
+        });
+        let attacker = 19;
+        let keeper = 0;
+        let blocker = 2;
+        park_players_except(&mut sim, &[attacker, keeper, blocker]);
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 16.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, -4.2);
+        sim.players[attacker].skills.shooting = 8.4;
+        sim.players[attacker].skills.right_foot_shot_power = 8.5;
+        sim.players[attacker].skills.left_foot_shot_power = 7.7;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.80;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 1.0;
+        sim.players[keeper].position = Vec2::new(56.0, 3.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.players[blocker].position = Vec2::new(70.0, 10.0);
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Away);
+
+        let clear_snapshot = WorldSnapshot::from_match(&sim);
+        let clear_observation = clear_snapshot.observation_for(attacker);
+        assert!(
+            clear_observation.yards_to_goal <= CLEAN_SHOT_MUST_SHOOT_YARDS,
+            "away setup should be inside the original 20-yard shooting rule"
+        );
+        assert!(
+            clear_observation.shot_lane_open,
+            "away clear lane should expose a through-line to goal: {clear_observation:?}"
+        );
+        assert!(clean_twenty_yard_shot_is_qualified(
+            &clear_observation,
+            sim.players[attacker].role
+        ));
+        assert!(must_shoot_near_goal(
+            &clear_observation,
+            sim.players[attacker].role
+        ));
+        let directive = clear_snapshot.tactical_directive(Team::Away);
+        let clear_options = sim.players[attacker].possession_action_options(
+            &clear_observation,
+            &directive,
+            0,
+            0,
+            false,
+            sim.config.dt_seconds,
+            clear_snapshot.field_width,
+        );
+        let clear_shoot = clear_options
+            .iter()
+            .find(|option| option.label == "shoot")
+            .expect("clear shoot option");
+        assert!(clear_shoot.legal);
+        assert!(
+            clear_shoot.probability >= 0.90,
+            "away inside-20 clear through-line should make shooting dominant: {clear_shoot:?}"
+        );
+        assert!(learned_action_label_is_legal(
+            "shoot",
+            &clear_snapshot,
+            attacker
+        ));
+        for seed in 0..80 {
+            let mut player = sim.players[attacker].clone();
+            let intent =
+                player.run_time_step(&clear_snapshot, None, None, &mut mulberry32(22_246 + seed));
+            assert!(
+                matches!(intent.action, SoccerAction::Shoot { .. }),
+                "away midfielder inside 20 should shoot, seed {seed}, got {:?}",
+                intent.action
+            );
+        }
+
+        sim.players[blocker].position = Vec2::new(40.0, 8.0);
+        sim.players[blocker].skills.defending = 10.0;
+        sim.players[blocker].skills.defensive_tracking = 10.0;
+        sim.players[blocker].skills.aggression = 10.0;
+        let blocked_snapshot = WorldSnapshot::from_match(&sim);
+        let blocked_observation = blocked_snapshot.observation_for(attacker);
+        assert!(
+            blocked_observation.yards_to_goal <= CLEAN_SHOT_MUST_SHOOT_YARDS,
+            "blocked away scenario should still be inside the original 20-yard shooting rule"
+        );
+        assert!(!blocked_observation.shot_lane_open);
+        assert!(!clean_twenty_yard_shot_is_qualified(
+            &blocked_observation,
+            sim.players[attacker].role
+        ));
+        assert!(!goal_attack_shot_is_required(
+            &blocked_observation,
+            sim.players[attacker].role
+        ));
+        assert!(!learned_action_label_is_legal(
+            "shoot",
+            &blocked_snapshot,
+            attacker
+        ));
+        let directive = blocked_snapshot.tactical_directive(Team::Away);
+        let options = sim.players[attacker].possession_action_options(
+            &blocked_observation,
+            &directive,
+            0,
+            0,
+            false,
+            sim.config.dt_seconds,
+            blocked_snapshot.field_width,
+        );
+        let shoot = options
+            .iter()
+            .find(|option| option.label == "shoot")
+            .expect("blocked shoot option");
+        assert!(!shoot.legal);
+        assert_eq!(shoot.probability, 0.0);
+        for seed in 0..24 {
+            let mut player = sim.players[attacker].clone();
+            let intent = player.run_time_step(
+                &blocked_snapshot,
+                None,
+                None,
+                &mut mulberry32(22_346 + seed),
+            );
+            assert!(
+                !matches!(intent.action, SoccerAction::Shoot { .. }),
+                "blocked away midfielder inside 20 should not shoot through defender, seed {seed}"
+            );
+        }
+    }
+
+    #[test]
     fn not_shooting_inside_twenty_five_records_learning_penalty() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

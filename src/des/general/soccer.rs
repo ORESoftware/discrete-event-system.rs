@@ -94452,6 +94452,148 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn near_goal_pressure_selects_shot_or_single_threaded_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_243,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let defenders = [13, 14, 15, 16];
+        park_players_except(
+            &mut sim,
+            &[
+                attacker,
+                runner,
+                keeper,
+                defenders[0],
+                defenders[1],
+                defenders[2],
+                defenders[3],
+            ],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 98.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+        sim.players[attacker].skills.shooting = 8.0;
+        sim.players[attacker].skills.passing_completion_rate = 9.0;
+        sim.players[attacker].skills.vision = 9.2;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.shoot_bias = 0.58;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.88;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(56.0, 110.0);
+        sim.players[runner].velocity = Vec2::new(0.8, 6.2);
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.0;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        sim.players[defenders[0]].position = Vec2::new(22.0, 112.0);
+        sim.players[defenders[1]].position = Vec2::new(63.0, 113.0);
+        sim.players[defenders[2]].position = Vec2::new(17.0, 107.0);
+        sim.players[defenders[3]].position = Vec2::new(69.0, 108.0);
+        for defender in defenders {
+            sim.players[defender].skills.defending = 8.6;
+            sim.players[defender].skills.defensive_tracking = 8.6;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let clear_snapshot = WorldSnapshot::from_match(&sim);
+        let clear_observation = clear_snapshot.observation_for(attacker);
+        assert!(
+            clear_observation.shot_lane_open,
+            "wide defenders should leave the shooting lane open: {clear_observation:?}"
+        );
+        let clear_pass_targets = clear_snapshot.ranked_visible_pass_targets(attacker, 3);
+        let clear_options = sim.players[attacker].possession_action_options(
+            &clear_observation,
+            &clear_snapshot.tactical_directive(Team::Home),
+            clear_pass_targets.len(),
+            clear_snapshot
+                .ranked_visible_aerial_pass_targets(attacker, 3)
+                .len(),
+            false,
+            sim.config.dt_seconds,
+            clear_snapshot.field_width,
+        );
+        let option_probability = |options: &[AgentActionOptionTrace], label: &str| {
+            options
+                .iter()
+                .find(|option| option.label == label && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0)
+        };
+        let clear_shoot = option_probability(&clear_options, "shoot");
+        let clear_killer = option_probability(&clear_options, "killer-pass");
+        let clear_decisive = clear_shoot + clear_killer;
+        let clear_recycle = option_probability(&clear_options, "pass1")
+            + option_probability(&clear_options, "pass2")
+            + option_probability(&clear_options, "aerial-pass1")
+            + option_probability(&clear_options, "dribble")
+            + option_probability(&clear_options, "carry-forward");
+        assert!(
+            clear_shoot >= 0.12,
+            "clear near-goal lane should keep a real shooting share even when a runner is available: shoot={clear_shoot} options={clear_options:?}"
+        );
+        assert!(
+            clear_decisive > clear_recycle * 12.0,
+            "clear near-goal lane should prefer shot/killer-pass decisions over recycling: shoot={clear_shoot} killer={clear_killer} decisive={clear_decisive} recycle={clear_recycle} options={clear_options:?}"
+        );
+
+        sim.players[defenders[0]].position = Vec2::new(40.0, 106.0);
+        sim.players[defenders[1]].position = Vec2::new(34.0, 111.0);
+        sim.players[defenders[2]].position = Vec2::new(47.0, 112.0);
+        sim.players[defenders[3]].position = Vec2::new(40.0, 114.0);
+        sim.ball.position = sim.players[attacker].position;
+        let blocked_snapshot = WorldSnapshot::from_match(&sim);
+        let blocked_observation = blocked_snapshot.observation_for(attacker);
+        let blocked_pass_targets = blocked_snapshot.ranked_visible_pass_targets(attacker, 3);
+        assert!(
+            blocked_observation.shot_block_probability >= 0.45,
+            "central defender should meaningfully block the shot lane: {blocked_observation:?}"
+        );
+        assert_eq!(
+            blocked_snapshot.killer_pass_target_for(attacker, &blocked_pass_targets),
+            Some(runner),
+            "blocked lane should expose the single threaded runner toward goal: {blocked_pass_targets:?}"
+        );
+        let blocked_options = sim.players[attacker].possession_action_options(
+            &blocked_observation,
+            &blocked_snapshot.tactical_directive(Team::Home),
+            blocked_pass_targets.len(),
+            blocked_snapshot
+                .ranked_visible_aerial_pass_targets(attacker, 3)
+                .len(),
+            false,
+            sim.config.dt_seconds,
+            blocked_snapshot.field_width,
+        );
+        let blocked_killer = option_probability(&blocked_options, "killer-pass");
+        let blocked_pass1 = option_probability(&blocked_options, "pass1");
+        let blocked_shoot = option_probability(&blocked_options, "shoot");
+        let blocked_decisive = blocked_shoot + blocked_killer;
+        let blocked_recycle = blocked_pass1
+            + option_probability(&blocked_options, "pass2")
+            + option_probability(&blocked_options, "aerial-pass1")
+            + option_probability(&blocked_options, "dribble")
+            + option_probability(&blocked_options, "carry-forward");
+        assert!(
+            blocked_killer >= 0.42,
+            "blocked near-goal lane should produce a strong killer-pass share: killer={blocked_killer} options={blocked_options:?}"
+        );
+        assert!(
+            blocked_killer > blocked_pass1 * 2.6 && blocked_decisive > blocked_recycle * 8.0,
+            "blocked near-goal lane should prefer the single threaded pass/shot family over generic recycling: shoot={blocked_shoot} killer={blocked_killer} pass1={blocked_pass1} decisive={blocked_decisive} recycle={blocked_recycle} options={blocked_options:?}"
+        );
+    }
+
+    #[test]
     fn blocked_final_third_holder_prefers_killer_pass_to_runner() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,

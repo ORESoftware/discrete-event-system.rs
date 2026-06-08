@@ -104382,11 +104382,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function soccerPlaybackAssetMode"));
         assert!(html.contains("pathname.includes(\"/out/\")"));
         assert!(html.contains("!pathname.includes(\"/soccer/live\")"));
-        assert!(html.contains("function soccerLivePostApiEnabled()"));
+        assert!(html.contains("function soccerLivePostApiEnabled(resource = \"api\")"));
         assert!(html.contains("!soccerPlaybackAssetMode(current.pathname)"));
+        assert!(html.contains("ui.liveSimulationPostApiEnabled === false"));
+        assert!(html.contains("if (resource === \"step\") return ui.liveStepPostEnabled !== false"));
+        assert!(html.contains(
+            "if (resource === \"input\" || resource === \"assign\") return ui.liveInputPostEnabled !== false"
+        ));
+        assert!(html.contains("if (!soccerLivePostApiEnabled(resource))"));
         assert!(html.contains("throw new Error(\"playback mode uses GET-only assets\")"));
-        assert!(html.contains("if (!soccerLivePostApiEnabled()) return;"));
-        assert!(html.contains("if (!soccerLivePostApiEnabled()) return \"Playback local\";"));
+        assert!(html.contains("if (!soccerLivePostApiEnabled(\"assign\")) return;"));
+        assert!(html.contains("if (!soccerLivePostApiEnabled(\"input\")) return \"Playback local\";"));
         assert!(html.contains("uiContract: null"));
         assert!(html
             .contains("trace.uiContract = meta.uiContract || meta.playback?.uiContract || null"));

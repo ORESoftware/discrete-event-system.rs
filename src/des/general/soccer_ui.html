@@ -591,7 +591,7 @@ let inputFlushRetryAttempt = 0;
 let lastInputAck = {acceptedInputs: 0, queuedHumanInputs: 0, error: "", at: 0};
 window.__humanInputQueue = [];
 window.dispatchHumanInput = (frame) => {
-  if (!soccerLivePostApiEnabled()) {
+  if (!soccerLivePostApiEnabled("input")) {
     window.__humanInputQueue = [];
     updateInputStatusLabels();
     return;
@@ -723,13 +723,18 @@ function soccerApiUrl(path) {
 function soccerPlaybackAssetMode(pathname = window.location.pathname) {
   return pathname.includes("/out/") || !pathname.includes("/soccer/live");
 }
-function soccerLivePostApiEnabled() {
+function soccerLivePostApiEnabled(resource = "api") {
   const current = new URL(window.location.href);
   const ui = trace.uiContract || trace.playback?.uiContract || {};
-  return !soccerPlaybackAssetMode(current.pathname) && ui.liveSimulationPostApiEnabled !== false;
+  if (soccerPlaybackAssetMode(current.pathname) || ui.liveSimulationPostApiEnabled === false) {
+    return false;
+  }
+  if (resource === "step") return ui.liveStepPostEnabled !== false;
+  if (resource === "input" || resource === "assign") return ui.liveInputPostEnabled !== false;
+  return true;
 }
 async function postSoccerJson(path, payload, resource = "api") {
-  if (!soccerLivePostApiEnabled()) {
+  if (!soccerLivePostApiEnabled(resource)) {
     throw new Error("playback mode uses GET-only assets");
   }
   const options = fetchOptions("application/json");
@@ -2439,7 +2444,7 @@ function applyControllerAssignments(assignments) {
 async function syncControllerAssignment(slot, playerId) {
   const requestId = ++controllerAssignmentSyncSeq;
   const payload = {controllerSlot: slot, playerId: playerId == null ? null : playerId};
-  if (!soccerLivePostApiEnabled()) return;
+  if (!soccerLivePostApiEnabled("assign")) return;
   try {
     const data = await postSoccerJson("/api/assign", payload, "assign");
     if (requestId !== controllerAssignmentSyncSeq) return;
@@ -2454,7 +2459,7 @@ async function syncControllerAssignment(slot, playerId) {
   }
 }
 function scheduleInputFlush(delayMs = LIVE_INPUT_FLUSH_INTERVAL_MS) {
-  if (!soccerLivePostApiEnabled()) {
+  if (!soccerLivePostApiEnabled("input")) {
     window.__humanInputQueue = [];
     updateInputStatusLabels();
     return;
@@ -2484,7 +2489,7 @@ function latestQueuedInputSeq(slot) {
   }, 0);
 }
 function inputStatusLabel(slot) {
-  if (!soccerLivePostApiEnabled()) return "Playback local";
+  if (!soccerLivePostApiEnabled("input")) return "Playback local";
   const queued = slotQueuedInputCount(slot);
   const latestSeq = latestQueuedInputSeq(slot);
   const sending = inputFlushInFlight ? " sending" : "";
@@ -2511,7 +2516,7 @@ function updateInputStatusLabels() {
 }
 async function flushQueuedInputsToInputApi() {
   inputFlushTimer = null;
-  if (!soccerLivePostApiEnabled()) {
+  if (!soccerLivePostApiEnabled("input")) {
     window.__humanInputQueue = [];
     updateInputStatusLabels();
     return;

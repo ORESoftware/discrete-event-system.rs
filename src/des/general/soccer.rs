@@ -32571,6 +32571,13 @@ pub struct SoccerPhysicsRuntimeContract {
     pub grass_resistance_enabled: bool,
     pub nonlinear_ground_resistance_enabled: bool,
     pub altitude_reduces_grass_contact: bool,
+    pub goalkeeper_save_probability_uses_distance_and_sightline: bool,
+    pub goalkeeper_clear_sightline_save_cap: f64,
+    pub goalkeeper_catch_probability_uses_distance_speed_sightline: bool,
+    pub goalkeeper_parry_rebound_enabled: bool,
+    pub goalkeeper_parry_min_yards: f64,
+    pub goalkeeper_parry_max_yards: f64,
+    pub close_hard_shots_can_create_rebounds: bool,
     pub player_max_speed_yps: f64,
     pub ball_max_speed_yps: f64,
     pub player_max_accel_yps2: f64,
@@ -32870,6 +32877,13 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         grass_resistance_enabled: true,
         nonlinear_ground_resistance_enabled: true,
         altitude_reduces_grass_contact: true,
+        goalkeeper_save_probability_uses_distance_and_sightline: true,
+        goalkeeper_clear_sightline_save_cap: GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP,
+        goalkeeper_catch_probability_uses_distance_speed_sightline: true,
+        goalkeeper_parry_rebound_enabled: true,
+        goalkeeper_parry_min_yards: GOALKEEPER_PARRY_MIN_YARDS,
+        goalkeeper_parry_max_yards: GOALKEEPER_PARRY_MAX_YARDS,
+        close_hard_shots_can_create_rebounds: true,
         player_max_speed_yps: SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS,
         ball_max_speed_yps: SOCCER_PHYSICS_BALL_MAX_SPEED_YPS,
         player_max_accel_yps2: SOCCER_PHYSICS_PLAYER_MAX_ACCEL_YPS2,
@@ -97932,6 +97946,28 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["grassResistanceEnabled"], true);
         assert_eq!(contract["nonlinearGroundResistanceEnabled"], true);
         assert_eq!(contract["altitudeReducesGrassContact"], true);
+        assert_eq!(
+            contract["goalkeeperSaveProbabilityUsesDistanceAndSightline"],
+            true
+        );
+        assert_eq!(
+            contract["goalkeeperClearSightlineSaveCap"],
+            GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP
+        );
+        assert_eq!(
+            contract["goalkeeperCatchProbabilityUsesDistanceSpeedSightline"],
+            true
+        );
+        assert_eq!(contract["goalkeeperParryReboundEnabled"], true);
+        assert_eq!(
+            contract["goalkeeperParryMinYards"],
+            GOALKEEPER_PARRY_MIN_YARDS
+        );
+        assert_eq!(
+            contract["goalkeeperParryMaxYards"],
+            GOALKEEPER_PARRY_MAX_YARDS
+        );
+        assert_eq!(contract["closeHardShotsCanCreateRebounds"], true);
         assert_eq!(
             contract["playerMaxSpeedYps"],
             SOCCER_PHYSICS_PLAYER_MAX_SPEED_YPS

@@ -8668,6 +8668,12 @@ impl PlayerAgent {
                 }
             }
 
+            let forced_killer_pass_target =
+                if killer_pass_forced_by_goal_pressure(&observation, self.role) {
+                    snapshot.killer_pass_target_for(self.id, &pass_targets)
+                } else {
+                    None
+                };
             let (action, action_label) = chosen.unwrap_or_else(|| {
                 let carry_to_create = shot_creation_carry_multiplier(&observation) > 1.28
                     && observation.forward_dribble_space_yards > 2.2;
@@ -8708,6 +8714,15 @@ impl PlayerAgent {
                             power: shot_power_for_skill(shooting_skill),
                         },
                         "shoot".to_string(),
+                    )
+                } else if let Some(target) = forced_killer_pass_target {
+                    (
+                        SoccerAction::Pass {
+                            target_player: Some(target),
+                            power: 0.68 + 0.24 * passing_skill.max(ability01(self.skills.vision)),
+                            flight: PassFlight::Floor,
+                        },
+                        "killer-pass".to_string(),
                     )
                 } else if let Some(target) = hold_up_flank_target {
                     let kind = snapshot.side_step_dribble_kind_for(self.id);
@@ -50642,6 +50657,27 @@ fn killer_pass_goal_pressure_floor(observation: &SoccerPomdpObservation) -> f64 
         .clamp(0.12, 0.48)
 }
 
+fn killer_pass_forced_by_goal_pressure(
+    observation: &SoccerPomdpObservation,
+    role: PlayerRole,
+) -> bool {
+    if role == PlayerRole::Goalkeeper
+        || goal_attack_shot_is_required(observation, role)
+        || observation.visible_forward_pass_options == 0
+        || observation.yards_to_goal > 42.0
+    {
+        return false;
+    }
+    let shot_not_clean = !shot_decision_is_qualified_for_role(observation, role)
+        || observation.shot_block_probability.clamp(0.0, 1.0) >= 0.48;
+    let threaded_lane = observation.floor_pass_lane_score.clamp(0.0, 1.0) >= 0.44
+        && observation
+            .best_forward_pass_receiver_openness
+            .clamp(0.0, 1.0)
+            >= 0.42;
+    shot_not_clean && threaded_lane && killer_pass_goal_pressure_score(observation) >= 0.46
+}
+
 fn near_goal_pass_release_multiplier(
     observation: &SoccerPomdpObservation,
     role: PlayerRole,
@@ -54638,6 +54674,117 @@ mod tests {
         assert!(
             killer.score > pass1.score,
             "killer-pass should outrank the generic pass when it threads toward goal: killer={killer:?} pass1={pass1:?}"
+        );
+    }
+
+    #[test]
+    fn blocked_final_third_attacker_falls_back_to_killer_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            dt_seconds: 0.1,
+            seed: 22_906,
+            ..Default::default()
+        });
+        let passer = 8;
+        let receiver = 9;
+        let blockers = [12, 13, 14, 15, 16];
+        park_players_except(
+            &mut sim,
+            &[
+                passer,
+                receiver,
+                blockers[0],
+                blockers[1],
+                blockers[2],
+                blockers[3],
+                blockers[4],
+            ],
+        );
+        sim.players[passer].role = PlayerRole::Midfielder;
+        sim.players[passer].position = Vec2::new(40.0, 88.0);
+        sim.players[passer].velocity = Vec2::new(0.0, 1.8);
+        sim.players[passer].action_facing = FacingBucket::South;
+        sim.players[passer].skills.passing_completion_rate = 9.4;
+        sim.players[passer].skills.passing = 9.2;
+        sim.players[passer].skills.vision = 9.6;
+        sim.players[passer].preferences.pass_bias = 0.04;
+        sim.players[passer].preferences.dribble_bias = 0.04;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].position = Vec2::new(58.0, 100.0);
+        sim.players[receiver].velocity = Vec2::new(0.0, 1.2);
+        sim.players[receiver].skills.shooting = 8.8;
+        sim.players[blockers[0]].position = Vec2::new(32.0, 111.0);
+        sim.players[blockers[1]].position = Vec2::new(36.0, 112.0);
+        sim.players[blockers[2]].position = Vec2::new(40.0, 113.0);
+        sim.players[blockers[3]].position = Vec2::new(44.0, 112.0);
+        sim.players[blockers[4]].position = Vec2::new(48.0, 111.0);
+        for blocker in blockers {
+            sim.players[blocker].skills.defending = 9.8;
+            sim.players[blocker].skills.defensive_tracking = 9.8;
+        }
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let can_see_receiver = snapshot.player_can_see_player(passer, receiver);
+        let clear_receiver_line = snapshot.clear_line(
+            sim.players[passer].position,
+            sim.players[receiver].position,
+            Team::Away,
+            2.5,
+        );
+        let receiver_offside = snapshot.pending_offside_for_pass(passer, receiver);
+        let visible_targets = snapshot.ranked_visible_pass_targets(passer, 3);
+        assert!(
+            visible_targets.contains(&receiver),
+            "receiver should be visible for the threaded lane: {visible_targets:?}; can_see={can_see_receiver}; clear={clear_receiver_line}; offside={receiver_offside:?}"
+        );
+        assert_eq!(
+            snapshot.killer_pass_target_for(passer, &visible_targets),
+            Some(receiver)
+        );
+        let observation = snapshot.observation_for(passer);
+        assert!(!goal_attack_shot_is_required(
+            &observation,
+            sim.players[passer].role
+        ));
+        assert!(
+            killer_pass_forced_by_goal_pressure(&observation, sim.players[passer].role),
+            "blocked final-third threaded lane should force the killer-pass fallback: {observation:?}"
+        );
+
+        let mut player = sim.players[passer].clone();
+        let intent = player.run_time_step(&snapshot, None, None, &mut mulberry32(22_906));
+        match intent.action {
+            SoccerAction::Pass {
+                target_player,
+                power,
+                flight,
+            } => {
+                assert_eq!(target_player, Some(receiver));
+                assert_eq!(flight, PassFlight::Floor);
+                let expected_power = 0.68
+                    + 0.24
+                        * ability01(sim.players[passer].skills.passing_completion_rate)
+                            .max(ability01(sim.players[passer].skills.vision));
+                assert!(
+                    (power - expected_power).abs() <= 1e-9,
+                    "killer pass power should be fit to passer skill: {power} != {expected_power}"
+                );
+            }
+            other => {
+                panic!("blocked final-third fallback should play a killer pass, got {other:?}")
+            }
+        }
+        assert_eq!(
+            player
+                .last_decision
+                .as_ref()
+                .expect("decision trace")
+                .action,
+            "killer-pass"
         );
     }
 

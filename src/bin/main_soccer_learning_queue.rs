@@ -2271,6 +2271,26 @@ mod tests {
     }
 
     #[test]
+    fn queue_postgres_persistence_is_completed_game_batched_not_timestep_or_clock_based() {
+        assert_eq!(
+            default_postgres_policy_version_interval_games(1),
+            DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
+        );
+        assert_eq!(
+            default_postgres_completed_run_batch_games(1),
+            DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES
+        );
+        assert!(DEFAULT_SOCCER_QUEUE_POSTGRES_POLICY_VERSION_INTERVAL_GAMES > 1);
+        assert!(DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_BATCH_GAMES > 1);
+        assert!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_BATCH_QUEUE > 1);
+        assert!(DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_BATCHES > 1);
+        assert!(
+            DEFAULT_SOCCER_QUEUE_POSTGRES_ASYNC_COALESCE_WAIT_MS
+                < DEFAULT_SOCCER_QUEUE_NEURAL_DRAIN_TIMEOUT_MS.saturating_mul(10)
+        );
+    }
+
+    #[test]
     fn default_queue_postgres_completed_run_retention_is_disabled() {
         assert_eq!(
             DEFAULT_SOCCER_QUEUE_POSTGRES_COMPLETED_RUN_RETENTION_GAMES,

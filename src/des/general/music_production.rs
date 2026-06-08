@@ -9,8 +9,11 @@
 
 use std::f64::consts::TAU;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use native_tls::TlsConnector;
 
 use crate::des::general::des_base::visual_block::{
     visual_block_graph_ir, Metadata, VisualBlock, VisualBlockConnectionOptions, VisualBlockLayout,
@@ -25,6 +28,14 @@ use crate::des::shared::capabilities::RandomSource;
 pub const DEFAULT_SAMPLE_RATE: u32 = 44_100;
 pub const DEFAULT_SONG_SECONDS: f64 = 180.0;
 pub const MAX_MUSIC_SAMPLE_SEED_BYTES: u64 = 96 * 1024 * 1024;
+pub const MAX_MUSIC_PUBLIC_MEDIA_SEED_BYTES: usize = 2 * 1024 * 1024;
+
+const MUSIC_MEDIA_HTTP_TIMEOUT_MS: u64 = 20_000;
+const MUSIC_MEDIA_HTTP_MAX_TEXT_BYTES: usize = 6 * 1024 * 1024;
+const MUSIC_MEDIA_HTTP_REDIRECT_LIMIT: usize = 5;
+const MUSIC_MEDIA_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/125 Safari/537.36 des-rs-music-media";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MusicFeatureCategory {
@@ -3023,6 +3034,25 @@ pub struct SelectedMusicUrlSource {
     pub spec: MusicUrlSourceSpec,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedMusicMediaLink {
+    pub source_url: String,
+    pub media_url: String,
+    pub source_kind: MusicUrlSourceKind,
+    pub extractor: String,
+    pub mime_type: String,
+    pub bitrate: Option<u64>,
+    pub content_length: Option<u64>,
+    pub duration_seconds: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MusicDownloadedMediaSample {
+    pub resolved_link: ResolvedMusicMediaLink,
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
 pub fn music_url_input_fields() -> Vec<MusicUrlInputField> {
     vec![
         MusicUrlInputField {
@@ -3173,10 +3203,11 @@ pub fn classify_music_source_url(raw_url: &str) -> Result<MusicUrlSourceSpec, St
     let direct_media_hint = looks_like_audio_download_path(&parsed.path)
         || looks_like_video_download_path(&parsed.path);
     let input_field_id = music_input_field_for_kind(kind).to_string();
-    let downloader_hint = if kind.prefers_external_downloader() && !direct_media_hint {
-        "yt-dlp-or-platform-extractor"
-    } else {
-        "direct-http"
+    let downloader_hint = match (kind, direct_media_hint) {
+        (_, true) => "direct-http",
+        (MusicUrlSourceKind::YouTube, false) => "rust-youtube-player-response",
+        (kind, false) if kind.prefers_external_downloader() => "yt-dlp-or-platform-extractor",
+        _ => "direct-http",
     };
     Ok(MusicUrlSourceSpec {
         raw_url: parsed.raw_url,
@@ -4433,6 +4464,878 @@ pub fn derive_music_sample_seed_from_url_source(spec: &MusicUrlSourceSpec) -> Mu
     }
 }
 
+pub fn resolve_public_music_media_link(raw_url: &str) -> Result<ResolvedMusicMediaLink, String> {
+    let spec = classify_music_source_url(raw_url)?;
+    resolve_public_music_media_link_source(&spec)
+}
+
+pub fn resolve_public_music_media_link_source(
+    spec: &MusicUrlSourceSpec,
+) -> Result<ResolvedMusicMediaLink, String> {
+    match spec.kind {
+        MusicUrlSourceKind::YouTube => resolve_youtube_public_media_link(spec),
+        MusicUrlSourceKind::S3
+        | MusicUrlSourceKind::CloudFront
+        | MusicUrlSourceKind::Cloudflare
+        | MusicUrlSourceKind::StaticAssetHost
+        | MusicUrlSourceKind::DirectAudio
+        | MusicUrlSourceKind::DirectVideo
+            if spec.direct_media_hint =>
+        {
+            Ok(ResolvedMusicMediaLink {
+                source_url: spec.raw_url.clone(),
+                media_url: spec.raw_url.clone(),
+                source_kind: spec.kind,
+                extractor: "direct-http".to_string(),
+                mime_type: if looks_like_audio_download_path(&spec.path) {
+                    "audio/*".to_string()
+                } else {
+                    "video/*".to_string()
+                },
+                bitrate: None,
+                content_length: None,
+                duration_seconds: None,
+            })
+        }
+        _ => Err(format!(
+            "Rust media resolver supports YouTube watch links and direct audio/video URLs; {} still needs a platform extractor",
+            spec.kind.as_str()
+        )),
+    }
+}
+
+pub fn download_public_music_media_sample(
+    raw_url: &str,
+) -> Result<MusicDownloadedMediaSample, String> {
+    let spec = classify_music_source_url(raw_url)?;
+    download_public_music_media_sample_source(&spec)
+}
+
+pub fn download_public_music_media_sample_source(
+    spec: &MusicUrlSourceSpec,
+) -> Result<MusicDownloadedMediaSample, String> {
+    let resolved_link = resolve_public_music_media_link_source(spec)?;
+    let response = fetch_public_music_http_bytes(
+        &resolved_link.media_url,
+        MAX_MUSIC_PUBLIC_MEDIA_SEED_BYTES,
+        Some((
+            0,
+            MAX_MUSIC_PUBLIC_MEDIA_SEED_BYTES.saturating_sub(1) as u64,
+        )),
+        true,
+    )?;
+    let content_type = music_http_header_value(&response.headers, "content-type");
+    let advertised_type = content_type
+        .as_deref()
+        .unwrap_or(resolved_link.mime_type.as_str());
+    if !is_audio_or_video_content_type(advertised_type) {
+        return Err(format!(
+            "direct HTTP resource is not advertised as audio/video (content-type {:?})",
+            advertised_type
+        ));
+    }
+    if response.body.is_empty() {
+        return Err("direct HTTP media response was empty".to_string());
+    }
+    Ok(MusicDownloadedMediaSample {
+        resolved_link,
+        bytes: response.body,
+        content_type,
+    })
+}
+
+pub fn derive_music_sample_seed_from_public_media_link(
+    raw_url: &str,
+) -> Result<MusicSampleSeed, String> {
+    let spec = classify_music_source_url(raw_url)?;
+    derive_music_sample_seed_from_public_media_link_source(&spec)
+}
+
+pub fn derive_music_sample_seed_from_public_media_link_source(
+    spec: &MusicUrlSourceSpec,
+) -> Result<MusicSampleSeed, String> {
+    let sample = download_public_music_media_sample_source(spec)?;
+    Ok(music_sample_seed_from_downloaded_media(spec, &sample))
+}
+
+fn music_sample_seed_from_downloaded_media(
+    spec: &MusicUrlSourceSpec,
+    sample: &MusicDownloadedMediaSample,
+) -> MusicSampleSeed {
+    let mut seed_material = Vec::new();
+    seed_material.extend_from_slice(b"music-url-media-seed\0");
+    seed_material.extend_from_slice(spec.raw_url.as_bytes());
+    seed_material.push(0);
+    seed_material.extend_from_slice(sample.resolved_link.media_url.as_bytes());
+    seed_material.push(0);
+    seed_material.extend_from_slice(sample.resolved_link.mime_type.as_bytes());
+    seed_material.push(0);
+    seed_material.extend_from_slice(&sample.bytes);
+    let seed = hash_bytes_to_seed(&seed_material);
+    let entropy = byte_entropy(&sample.bytes);
+    let suggested_genre = music_url_genre_hint(spec.kind, seed, true);
+    let suggested_bpm =
+        (suggested_genre.default_bpm() + ((seed >> 4) % 17) as f64 - 8.0).clamp(68.0, 188.0);
+    let key_bias_steps = ((seed >> 10) % 13) as i32 - 6;
+    let meter_options = [(4, 4), (7, 8), (9, 8), (11, 8), (13, 16), (15, 16)];
+    let meter_bias = meter_options[((seed >> 18) as usize) % meter_options.len()];
+    let byte_seconds = sample
+        .resolved_link
+        .bitrate
+        .filter(|bitrate| *bitrate > 0)
+        .map(|bitrate| sample.bytes.len() as f64 * 8.0 / bitrate as f64)
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0);
+    let duration_seconds = byte_seconds
+        .or(sample.resolved_link.duration_seconds)
+        .unwrap_or_else(|| 10.0 + (seed % 4000) as f64 / 100.0)
+        .clamp(10.0, 50.0);
+    let resolved_host = ParsedMusicUrl::parse(&sample.resolved_link.media_url)
+        .map(|url| url.host)
+        .unwrap_or_else(|_| "unknown-media-host".to_string());
+    let advertised_type = sample
+        .content_type
+        .as_deref()
+        .unwrap_or(sample.resolved_link.mime_type.as_str());
+    MusicSampleSeed {
+        source_path: spec.raw_url.clone(),
+        duration_seconds,
+        seed,
+        byte_entropy: entropy,
+        suggested_genre,
+        suggested_bpm,
+        key_bias_steps,
+        meter_bias,
+        descriptors: vec![
+            "music-url-media-seed".to_string(),
+            format!("source-kind={}", spec.kind.as_str()),
+            format!("host={}", spec.host),
+            format!("media-host={resolved_host}"),
+            format!("extractor={}", sample.resolved_link.extractor),
+            format!("media-mime={advertised_type}"),
+            format!("downloaded-bytes={}", sample.bytes.len()),
+            format!("byte-entropy={entropy:.3}"),
+        ],
+    }
+}
+
+fn resolve_youtube_public_media_link(
+    spec: &MusicUrlSourceSpec,
+) -> Result<ResolvedMusicMediaLink, String> {
+    let watch_url = canonical_youtube_watch_url(spec)?;
+    let html = fetch_public_music_http_text(&watch_url, MUSIC_MEDIA_HTTP_MAX_TEXT_BYTES)?;
+    let player_json = extract_youtube_initial_player_response_json(&html)
+        .ok_or_else(|| "YouTube watch page did not include ytInitialPlayerResponse".to_string())?;
+    let response: serde_json::Value = serde_json::from_str(&player_json)
+        .map_err(|err| format!("could not parse YouTube player response JSON: {err}"))?;
+    select_youtube_public_media_link_from_player_response(spec, &response)
+}
+
+fn canonical_youtube_watch_url(spec: &MusicUrlSourceSpec) -> Result<String, String> {
+    let video_id = youtube_video_id_from_spec(spec)
+        .ok_or_else(|| "YouTube URL did not include a video id".to_string())?;
+    Ok(format!("https://www.youtube.com/watch?v={video_id}"))
+}
+
+fn youtube_video_id_from_spec(spec: &MusicUrlSourceSpec) -> Option<String> {
+    if host_matches(&spec.host, &["youtu.be"]) {
+        let segment = spec
+            .path
+            .trim_start_matches('/')
+            .split(['?', '#', '/'])
+            .next()
+            .unwrap_or_default();
+        return valid_youtube_video_id(segment).then(|| segment.to_string());
+    }
+    if let Some(value) = query_value_from_url_path(&spec.path, "v") {
+        if valid_youtube_video_id(&value) {
+            return Some(value);
+        }
+    }
+    for prefix in ["/shorts/", "/embed/", "/v/"] {
+        if let Some(rest) = spec.path.strip_prefix(prefix) {
+            let segment = rest
+                .split(['?', '#', '/'])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if valid_youtube_video_id(segment) {
+                return Some(segment.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn valid_youtube_video_id(value: &str) -> bool {
+    (6..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn query_value_from_url_path(path: &str, key: &str) -> Option<String> {
+    let query = path
+        .split_once('?')?
+        .1
+        .split('#')
+        .next()
+        .unwrap_or_default();
+    for pair in query.split('&') {
+        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        if raw_key == key {
+            return percent_decode_url_component(raw_value).ok();
+        }
+    }
+    None
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode_url_component(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("truncated percent escape in URL component".to_string());
+            }
+            let hi = hex_value(bytes[index + 1])
+                .ok_or_else(|| "invalid percent escape in URL component".to_string())?;
+            let lo = hex_value(bytes[index + 2])
+                .ok_or_else(|| "invalid percent escape in URL component".to_string())?;
+            out.push((hi << 4) | lo);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "decoded URL component is not UTF-8".to_string())
+}
+
+fn extract_youtube_initial_player_response_json(html: &str) -> Option<String> {
+    for marker in [
+        "ytInitialPlayerResponse =",
+        "ytInitialPlayerResponse=",
+        "\"ytInitialPlayerResponse\":",
+    ] {
+        if let Some(marker_start) = html.find(marker) {
+            let after_marker = marker_start + marker.len();
+            if let Some(json_start) = html[after_marker..].find('{') {
+                let absolute_start = after_marker + json_start;
+                if let Some(json) = extract_balanced_json_object(html, absolute_start) {
+                    return Some(json);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_balanced_json_object(text: &str, start: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.get(start).copied()? != b'{' {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for index in start..bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth = depth.saturating_add(1),
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(text[start..=index].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct YoutubeMediaCandidate {
+    url: String,
+    mime_type: String,
+    bitrate: Option<u64>,
+    content_length: Option<u64>,
+    duration_seconds: Option<f64>,
+    score: u64,
+}
+
+fn select_youtube_public_media_link_from_player_response(
+    spec: &MusicUrlSourceSpec,
+    response: &serde_json::Value,
+) -> Result<ResolvedMusicMediaLink, String> {
+    let mut candidates = Vec::new();
+    let mut ciphered_media_count = 0usize;
+    if let Some(streaming_data) = response.get("streamingData") {
+        for key in ["formats", "adaptiveFormats"] {
+            if let Some(formats) = streaming_data
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+            {
+                for format in formats {
+                    if !youtube_format_has_audio(format) {
+                        continue;
+                    }
+                    if let Some(url) = format.get("url").and_then(serde_json::Value::as_str) {
+                        if let Some(candidate) =
+                            youtube_media_candidate_from_format(format, response, url)
+                        {
+                            candidates.push(candidate);
+                        }
+                    } else if format.get("signatureCipher").is_some()
+                        || format.get("cipher").is_some()
+                    {
+                        ciphered_media_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort_by(|left, right| right.score.cmp(&left.score));
+    if let Some(candidate) = candidates.into_iter().next() {
+        return Ok(ResolvedMusicMediaLink {
+            source_url: spec.raw_url.clone(),
+            media_url: candidate.url,
+            source_kind: MusicUrlSourceKind::YouTube,
+            extractor: "rust-youtube-player-response".to_string(),
+            mime_type: candidate.mime_type,
+            bitrate: candidate.bitrate,
+            content_length: candidate.content_length,
+            duration_seconds: candidate.duration_seconds,
+        });
+    }
+
+    let playability = response
+        .pointer("/playabilityStatus/reason")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            response
+                .pointer("/playabilityStatus/status")
+                .and_then(serde_json::Value::as_str)
+        });
+    if ciphered_media_count > 0 {
+        return Err(format!(
+            "YouTube returned {ciphered_media_count} signature-protected media URL(s); Rust resolver needs player signature deciphering for this video"
+        ));
+    }
+    if let Some(reason) = playability {
+        Err(format!(
+            "YouTube player response did not expose a direct media URL: {reason}"
+        ))
+    } else {
+        Err("YouTube player response did not expose a direct audio/video URL".to_string())
+    }
+}
+
+fn youtube_format_has_audio(format: &serde_json::Value) -> bool {
+    let mime = format
+        .get("mimeType")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    mime.starts_with("audio/")
+        || mime.contains("mp4a")
+        || mime.contains("opus")
+        || format.get("audioQuality").is_some()
+}
+
+fn youtube_media_candidate_from_format(
+    format: &serde_json::Value,
+    response: &serde_json::Value,
+    url: &str,
+) -> Option<YoutubeMediaCandidate> {
+    ParsedMusicUrl::parse(url).ok()?;
+    let mime_type = format
+        .get("mimeType")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    if !is_audio_or_video_content_type(&mime_type) {
+        return None;
+    }
+    let lower = mime_type.to_ascii_lowercase();
+    let audio_only = lower.starts_with("audio/");
+    let progressive_with_audio =
+        lower.starts_with("video/") && (lower.contains("mp4a") || lower.contains("opus"));
+    if !audio_only && !progressive_with_audio {
+        return None;
+    }
+    let bitrate = u64_json_field(format, "bitrate");
+    let content_length = u64_json_field(format, "contentLength").or_else(|| {
+        query_value_from_url_path(
+            &format!("?{}", url.split('?').nth(1).unwrap_or_default()),
+            "clen",
+        )
+        .and_then(|value| value.parse::<u64>().ok())
+    });
+    let duration_seconds = youtube_format_duration_seconds(format).or_else(|| {
+        response
+            .pointer("/videoDetails/lengthSeconds")
+            .and_then(f64_from_json_value)
+    });
+    let container_bonus = if lower.contains("mp4") {
+        80
+    } else if lower.contains("webm") {
+        50
+    } else {
+        10
+    };
+    let score =
+        if audio_only { 10_000 } else { 5_000 } + container_bonus + bitrate.unwrap_or(0) / 1_000;
+    Some(YoutubeMediaCandidate {
+        url: url.to_string(),
+        mime_type,
+        bitrate,
+        content_length,
+        duration_seconds,
+        score,
+    })
+}
+
+fn youtube_format_duration_seconds(format: &serde_json::Value) -> Option<f64> {
+    format
+        .get("approxDurationMs")
+        .and_then(f64_from_json_value)
+        .map(|millis| millis / 1000.0)
+}
+
+fn u64_json_field(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
+    })
+}
+
+fn f64_from_json_value(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<f64>().ok()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MusicHttpUrl {
+    raw_url: String,
+    scheme: String,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MusicHttpResponse {
+    final_url: String,
+    status_code: u16,
+    status_text: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    truncated: bool,
+}
+
+fn fetch_public_music_http_text(url: &str, max_bytes: usize) -> Result<String, String> {
+    let response = fetch_public_music_http_bytes(url, max_bytes, None, false)?;
+    if response.truncated {
+        return Err(format!(
+            "HTTP response from {} exceeded {} bytes",
+            response.final_url, max_bytes
+        ));
+    }
+    String::from_utf8(response.body).map_err(|_| {
+        format!(
+            "HTTP response from {} was not valid UTF-8 text",
+            response.final_url
+        )
+    })
+}
+
+fn fetch_public_music_http_bytes(
+    url: &str,
+    max_body_bytes: usize,
+    range: Option<(u64, u64)>,
+    allow_truncated: bool,
+) -> Result<MusicHttpResponse, String> {
+    let mut current_url = url.trim().to_string();
+    for _ in 0..=MUSIC_MEDIA_HTTP_REDIRECT_LIMIT {
+        let response = fetch_public_music_http_once(&current_url, max_body_bytes, range)?;
+        if (300..400).contains(&response.status_code) {
+            let Some(location) = music_http_header_value(&response.headers, "location") else {
+                return Err(format!(
+                    "HTTP redirect from {} did not include Location",
+                    response.final_url
+                ));
+            };
+            current_url = resolve_music_http_redirect(&response.final_url, &location)?;
+            continue;
+        }
+        if !(200..300).contains(&response.status_code) {
+            return Err(format!(
+                "HTTP GET {} returned {} {}",
+                response.final_url, response.status_code, response.status_text
+            ));
+        }
+        if response.truncated && !allow_truncated {
+            return Err(format!(
+                "HTTP response from {} exceeded {} bytes",
+                response.final_url, max_body_bytes
+            ));
+        }
+        return Ok(response);
+    }
+    Err(format!(
+        "HTTP GET {url} exceeded {MUSIC_MEDIA_HTTP_REDIRECT_LIMIT} redirects"
+    ))
+}
+
+fn fetch_public_music_http_once(
+    url: &str,
+    max_body_bytes: usize,
+    range: Option<(u64, u64)>,
+) -> Result<MusicHttpResponse, String> {
+    let endpoint = parse_music_http_url(url)?;
+    let timeout = Duration::from_millis(MUSIC_MEDIA_HTTP_TIMEOUT_MS);
+    let address = (endpoint.host.as_str(), endpoint.port)
+        .to_socket_addrs()
+        .map_err(|err| format!("could not resolve {}: {err}", endpoint.host))?
+        .next()
+        .ok_or_else(|| format!("could not resolve {}", endpoint.host))?;
+    let stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|err| format!("could not connect to {}: {err}", endpoint.raw_url))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| format!("could not set HTTP read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|err| format!("could not set HTTP write timeout: {err}"))?;
+    let request = music_http_get_request(&endpoint, range);
+    let (status_code, status_text, headers, body, truncated) = if endpoint.scheme == "https" {
+        let connector = TlsConnector::new()
+            .map_err(|err| format!("could not initialize TLS connector: {err}"))?;
+        let mut tls_stream = connector
+            .connect(&endpoint.host, stream)
+            .map_err(|err| format!("could not negotiate TLS with {}: {err}", endpoint.host))?;
+        write_music_http_request_and_read_response(&mut tls_stream, &request, max_body_bytes)?
+    } else {
+        let mut stream = stream;
+        write_music_http_request_and_read_response(&mut stream, &request, max_body_bytes)?
+    };
+    Ok(MusicHttpResponse {
+        final_url: endpoint.raw_url,
+        status_code,
+        status_text,
+        headers,
+        body,
+        truncated,
+    })
+}
+
+fn parse_music_http_url(raw_url: &str) -> Result<MusicHttpUrl, String> {
+    ParsedMusicUrl::parse(raw_url)?;
+    let trimmed = raw_url.trim();
+    let (scheme, rest) = trimmed
+        .split_once("://")
+        .ok_or_else(|| "HTTP URL must include a scheme".to_string())?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return Err("HTTP URL must use http or https".to_string());
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host = extract_url_host(authority)?;
+    let port = url_authority_port(authority).unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let raw_path = &rest[authority_end..];
+    let path = if raw_path.is_empty() {
+        "/".to_string()
+    } else if raw_path.starts_with('/') {
+        raw_path.split('#').next().unwrap_or(raw_path).to_string()
+    } else {
+        format!("/{}", raw_path.split('#').next().unwrap_or(raw_path))
+    };
+    Ok(MusicHttpUrl {
+        raw_url: trimmed.to_string(),
+        scheme,
+        host,
+        port,
+        path,
+    })
+}
+
+fn url_authority_port(authority: &str) -> Option<u16> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (_, suffix) = rest.split_once(']')?;
+        return suffix.strip_prefix(':')?.parse::<u16>().ok();
+    }
+    let (_, port) = authority.rsplit_once(':')?;
+    if port.bytes().all(|byte| byte.is_ascii_digit()) {
+        port.parse::<u16>().ok()
+    } else {
+        None
+    }
+}
+
+fn music_http_get_request(endpoint: &MusicHttpUrl, range: Option<(u64, u64)>) -> String {
+    let host_header = if (endpoint.scheme == "https" && endpoint.port == 443)
+        || (endpoint.scheme == "http" && endpoint.port == 80)
+    {
+        endpoint.host.clone()
+    } else {
+        format!("{}:{}", endpoint.host, endpoint.port)
+    };
+    let range_header = range
+        .map(|(start, end)| format!("Range: bytes={start}-{end}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "GET {} HTTP/1.1\r\n\
+         Host: {}\r\n\
+         User-Agent: {}\r\n\
+         Accept: */*\r\n\
+         Accept-Encoding: identity\r\n\
+         {}\
+         Connection: close\r\n\
+         \r\n",
+        endpoint.path, host_header, MUSIC_MEDIA_USER_AGENT, range_header
+    )
+}
+
+type MusicHttpReadResult = (u16, String, Vec<(String, String)>, Vec<u8>, bool);
+
+fn write_music_http_request_and_read_response<S: Read + Write>(
+    stream: &mut S,
+    request: &str,
+    max_body_bytes: usize,
+) -> Result<MusicHttpReadResult, String> {
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("could not write HTTP request: {err}"))?;
+    stream
+        .flush()
+        .map_err(|err| format!("could not flush HTTP request: {err}"))?;
+    read_music_http_response(stream, max_body_bytes)
+}
+
+fn read_music_http_response<S: Read>(
+    stream: &mut S,
+    max_body_bytes: usize,
+) -> Result<MusicHttpReadResult, String> {
+    let mut data = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut header_end = None;
+    let mut truncated = false;
+    loop {
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|err| format!("could not read HTTP response: {err}"))?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..n]);
+        if header_end.is_none() {
+            header_end = find_music_http_header_end(&data);
+            if header_end.is_none() && data.len() > 64 * 1024 {
+                return Err("HTTP response headers exceeded 64 KiB".to_string());
+            }
+        }
+        if let Some(end) = header_end {
+            let body_len = data.len().saturating_sub(end);
+            if body_len > max_body_bytes {
+                truncated = true;
+                break;
+            }
+        }
+    }
+    let header_end =
+        header_end.ok_or_else(|| "HTTP response did not include complete headers".to_string())?;
+    let (status_code, status_text, headers) =
+        parse_music_http_response_headers(&data[..header_end])?;
+    let raw_body = data[header_end..].to_vec();
+    let chunked = music_http_header_value(&headers, "transfer-encoding")
+        .map(|value| value.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false);
+    let (mut body, chunk_truncated) = if chunked {
+        decode_music_chunked_body(&raw_body, max_body_bytes)?
+    } else {
+        (raw_body, false)
+    };
+    if body.len() > max_body_bytes {
+        body.truncate(max_body_bytes);
+        truncated = true;
+    }
+    Ok((
+        status_code,
+        status_text,
+        headers,
+        body,
+        truncated || chunk_truncated,
+    ))
+}
+
+fn parse_music_http_response_headers(
+    header_bytes: &[u8],
+) -> Result<(u16, String, Vec<(String, String)>), String> {
+    let header_text = String::from_utf8_lossy(header_bytes);
+    let mut lines = header_text.lines();
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "HTTP response missing status line".to_string())?;
+    let mut status_parts = status_line.splitn(3, ' ');
+    let version = status_parts.next().unwrap_or_default();
+    if !version.starts_with("HTTP/") {
+        return Err("HTTP response status line did not start with HTTP/".to_string());
+    }
+    let status_code = status_parts
+        .next()
+        .ok_or_else(|| "HTTP response missing status code".to_string())?
+        .parse::<u16>()
+        .map_err(|_| "HTTP response status code was not a number".to_string())?;
+    let status_text = status_parts.next().unwrap_or_default().trim().to_string();
+    let headers = lines
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            Some((key.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
+    Ok((status_code, status_text, headers))
+}
+
+fn decode_music_chunked_body(
+    raw_body: &[u8],
+    max_body_bytes: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut body = Vec::new();
+    let mut index = 0usize;
+    let mut truncated = false;
+    while index < raw_body.len() {
+        let Some(line_end) = find_music_bytes(&raw_body[index..], b"\r\n")
+            .or_else(|| find_music_bytes(&raw_body[index..], b"\n"))
+        else {
+            truncated = true;
+            break;
+        };
+        let absolute_line_end = index + line_end;
+        let size_text = String::from_utf8_lossy(&raw_body[index..absolute_line_end]);
+        let size_hex = size_text.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|_| "invalid chunked HTTP response size".to_string())?;
+        let newline_len = if raw_body
+            .get(absolute_line_end..absolute_line_end + 2)
+            .map(|bytes| bytes == b"\r\n")
+            .unwrap_or(false)
+        {
+            2
+        } else {
+            1
+        };
+        index = absolute_line_end + newline_len;
+        if size == 0 {
+            break;
+        }
+        let available = raw_body.len().saturating_sub(index);
+        let take = available.min(size);
+        let remaining_capacity = max_body_bytes.saturating_sub(body.len());
+        body.extend_from_slice(&raw_body[index..index + take.min(remaining_capacity)]);
+        if take < size || body.len() >= max_body_bytes {
+            truncated = true;
+            break;
+        }
+        index += size;
+        if raw_body
+            .get(index..index + 2)
+            .map(|bytes| bytes == b"\r\n")
+            .unwrap_or(false)
+        {
+            index += 2;
+        } else if raw_body.get(index).copied() == Some(b'\n') {
+            index += 1;
+        }
+    }
+    Ok((body, truncated))
+}
+
+fn find_music_http_header_end(data: &[u8]) -> Option<usize> {
+    find_music_bytes(data, b"\r\n\r\n")
+        .map(|index| index + 4)
+        .or_else(|| find_music_bytes(data, b"\n\n").map(|index| index + 2))
+}
+
+fn find_music_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn music_http_header_value(headers: &[(String, String)], name: &str) -> Option<String> {
+    let name = name.to_ascii_lowercase();
+    headers
+        .iter()
+        .find_map(|(key, value)| (key == &name).then(|| value.clone()))
+}
+
+fn resolve_music_http_redirect(current_url: &str, location: &str) -> Result<String, String> {
+    let location = location.trim();
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    let endpoint = parse_music_http_url(current_url)?;
+    if let Some(rest) = location.strip_prefix("//") {
+        return Ok(format!("{}://{rest}", endpoint.scheme));
+    }
+    let authority = if (endpoint.scheme == "https" && endpoint.port == 443)
+        || (endpoint.scheme == "http" && endpoint.port == 80)
+    {
+        endpoint.host
+    } else {
+        format!("{}:{}", endpoint.host, endpoint.port)
+    };
+    if location.starts_with('/') {
+        Ok(format!("{}://{}{}", endpoint.scheme, authority, location))
+    } else {
+        let base = endpoint
+            .path
+            .rsplit_once('/')
+            .map(|(base, _)| if base.is_empty() { "/" } else { base })
+            .unwrap_or("/");
+        Ok(format!(
+            "{}://{}{}/{}",
+            endpoint.scheme,
+            authority,
+            base.trim_end_matches('/'),
+            location
+        ))
+    }
+}
+
+fn is_audio_or_video_content_type(content_type: &str) -> bool {
+    let lower = content_type.to_ascii_lowercase();
+    lower.starts_with("audio/")
+        || lower.starts_with("video/")
+        || lower.contains("audio/")
+        || lower.contains("video/")
+}
+
 pub fn song_spec_from_music_url_source(
     source: &MusicUrlSourceSpec,
     title: impl Into<String>,
@@ -4464,7 +5367,12 @@ pub fn render_music_url_seed_wav(
     let prompt = nonempty_music_form_value(fields, "prompt")
         .or_else(|| nonempty_music_form_value(fields, "music_url_prompt"));
 
-    let sample_seed = derive_music_sample_seed_from_url_source(&selected_source.spec);
+    let sample_seed = if selected_source.spec.kind == MusicUrlSourceKind::YouTube {
+        derive_music_sample_seed_from_public_media_link_source(&selected_source.spec)
+            .map_err(|err| format!("could not resolve/download YouTube media sample: {err}"))?
+    } else {
+        derive_music_sample_seed_from_url_source(&selected_source.spec)
+    };
     let spec =
         song_spec_from_music_sample_seed_with_prompt(&sample_seed, title, duration_seconds, prompt);
     let render = generate_microtonal_song(spec);
@@ -6152,7 +7060,7 @@ mod tests {
                 "https://www.youtube.com/watch?v=abc",
                 MusicUrlSourceKind::YouTube,
                 "youtube_url",
-                "yt-dlp-or-platform-extractor",
+                "rust-youtube-player-response",
             ),
             (
                 "https://fb.watch/example",
@@ -6216,6 +7124,105 @@ mod tests {
             assert_eq!(spec.input_field_id, field, "{url}");
             assert_eq!(spec.downloader_hint, downloader, "{url}");
         }
+    }
+
+    #[test]
+    fn youtube_video_id_parser_handles_common_url_shapes() {
+        let cases = [
+            (
+                "https://www.youtube.com/watch?v=A4LAodkYjJg&feature=share",
+                "A4LAodkYjJg",
+            ),
+            ("https://youtu.be/A4LAodkYjJg?t=30", "A4LAodkYjJg"),
+            (
+                "https://www.youtube.com/shorts/A4LAodkYjJg?si=abc",
+                "A4LAodkYjJg",
+            ),
+            (
+                "https://www.youtube-nocookie.com/embed/A4LAodkYjJg",
+                "A4LAodkYjJg",
+            ),
+        ];
+
+        for (url, expected) in cases {
+            let spec = classify_music_source_url(url).expect("YouTube URL should classify");
+            assert_eq!(youtube_video_id_from_spec(&spec).as_deref(), Some(expected));
+            assert_eq!(
+                canonical_youtube_watch_url(&spec).expect("canonical URL"),
+                format!("https://www.youtube.com/watch?v={expected}")
+            );
+        }
+    }
+
+    #[test]
+    fn youtube_player_response_fixture_selects_direct_progressive_media_url() {
+        let html = r#"
+            <html><script>
+            var ytInitialPlayerResponse = {
+              "streamingData": {
+                "formats": [
+                  {
+                    "itag": 18,
+                    "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+                    "bitrate": 442641,
+                    "approxDurationMs": "31000",
+                    "url": "https://rr1---sn-example.googlevideo.com/videoplayback?mime=video%2Fmp4&clen=123456&sig=test"
+                  }
+                ],
+                "adaptiveFormats": [
+                  {
+                    "itag": 140,
+                    "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                    "bitrate": 132000,
+                    "approxDurationMs": "31000"
+                  }
+                ]
+              },
+              "videoDetails": { "lengthSeconds": "31" }
+            };
+            </script></html>
+        "#;
+        let player_json =
+            extract_youtube_initial_player_response_json(html).expect("player JSON should parse");
+        let response: serde_json::Value =
+            serde_json::from_str(&player_json).expect("fixture JSON should parse");
+        let spec = classify_music_source_url("https://www.youtube.com/watch?v=A4LAodkYjJg")
+            .expect("URL should classify");
+        let resolved = select_youtube_public_media_link_from_player_response(&spec, &response)
+            .expect("fixture has direct progressive media URL");
+
+        assert_eq!(resolved.source_kind, MusicUrlSourceKind::YouTube);
+        assert_eq!(resolved.extractor, "rust-youtube-player-response");
+        assert_eq!(
+            resolved.media_url,
+            "https://rr1---sn-example.googlevideo.com/videoplayback?mime=video%2Fmp4&clen=123456&sig=test"
+        );
+        assert_eq!(
+            resolved.mime_type,
+            "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\""
+        );
+        assert_eq!(resolved.bitrate, Some(442641));
+        assert_eq!(resolved.content_length, Some(123456));
+        assert_eq!(resolved.duration_seconds, Some(31.0));
+    }
+
+    #[test]
+    fn youtube_player_response_reports_signature_cipher_gap() {
+        let response: serde_json::Value = serde_json::json!({
+            "streamingData": {
+                "formats": [{
+                    "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+                    "signatureCipher": "url=https%3A%2F%2Fexample.test%2Fmedia&sp=sig&s=abc"
+                }]
+            }
+        });
+        let spec = classify_music_source_url("https://www.youtube.com/watch?v=A4LAodkYjJg")
+            .expect("URL should classify");
+        let err = select_youtube_public_media_link_from_player_response(&spec, &response)
+            .expect_err("cipher-only fixture should reject");
+
+        assert!(err.contains("signature-protected"), "{err}");
+        assert!(err.contains("signature deciphering"), "{err}");
     }
 
     #[test]

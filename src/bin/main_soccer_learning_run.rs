@@ -3478,11 +3478,23 @@ mod tests {
         );
         assert_eq!(
             continuous_manifest_env_value("SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES"),
-            Some("1")
+            Some("5")
         );
         assert_eq!(
             continuous_manifest_env_value("SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES"),
-            Some("1")
+            Some("5")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_ASYNC_BATCH_QUEUE"),
+            Some("8")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES"),
+            Some("5")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS"),
+            Some("50")
         );
         assert_eq!(
             continuous_manifest_env_value("SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE"),
@@ -3501,6 +3513,10 @@ mod tests {
             Some("true")
         );
         assert_eq!(
+            continuous_manifest_env_value("SOCCER_EVOLUTION_INTERVAL_GAMES"),
+            Some("5")
+        );
+        assert_eq!(
             continuous_manifest_env_value("SOCCER_GAME_ARTIFACT_MODE"),
             Some("summary")
         );
@@ -3509,9 +3525,43 @@ mod tests {
             Some("false")
         );
         assert_continuous_manifest_contains("key: RDS_DATABASE_URL");
-        assert_continuous_manifest_contains("memory: 24Gi");
-        assert_continuous_manifest_contains("memory: 96Gi");
+        assert_continuous_manifest_contains("memory: 32Gi");
+        assert_continuous_manifest_contains("memory: 128Gi");
         assert_continuous_manifest_contains("cpu: \"4\"");
+        assert_continuous_manifest_contains("cpu: \"10\"");
+    }
+
+    #[test]
+    fn continuous_manifest_batches_postgres_writes_by_parallel_wave() {
+        assert_eq!(continuous_manifest_env_value("SOCCER_GAMES"), Some("100"));
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_PARALLEL_GAMES"),
+            Some("5")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_DT_SECONDS"),
+            Some("0.2")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES"),
+            continuous_manifest_env_value("SOCCER_PARALLEL_GAMES")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES"),
+            continuous_manifest_env_value("SOCCER_PARALLEL_GAMES")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_EVOLUTION_INTERVAL_GAMES"),
+            continuous_manifest_env_value("SOCCER_PARALLEL_GAMES")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_MAX_POLICY_ENTRIES_PER_TEAM"),
+            Some("250000")
+        );
+        assert_eq!(
+            continuous_manifest_env_value("SOCCER_MAX_POLICY_TARGET_ENTRIES_PER_TEAM"),
+            Some("250000")
+        );
     }
 
     #[test]
@@ -3540,7 +3590,7 @@ mod tests {
     fn continuous_manifest_varies_cycle_run_ids_and_seeds() {
         assert_eq!(
             continuous_manifest_env_value("SOCCER_RUN_ID_PREFIX"),
-            Some("codex-soccer-learning-continuous")
+            Some("codex-soccer-learning-overnight")
         );
         assert_eq!(
             continuous_manifest_env_value("SOCCER_SEED_BASE"),
@@ -3552,7 +3602,7 @@ mod tests {
         );
         assert_eq!(
             continuous_manifest_env_value("SOCCER_EVOLUTION_SEED_BASE"),
-            Some("20260607")
+            Some("20260608")
         );
         assert_continuous_manifest_contains("stamp=\"$(date -u +%Y%m%dT%H%M%SZ)\"");
         assert_continuous_manifest_contains(
@@ -3574,7 +3624,7 @@ mod tests {
         );
         assert_continuous_manifest_contains("touch \"${ready_file}\"");
         assert_continuous_manifest_contains("readinessProbe:");
-        assert_continuous_manifest_contains("test -f /tmp/codex-soccer-learning-continuous-ready");
+        assert_continuous_manifest_contains("test -f /tmp/codex-soccer-learning-overnight-ready");
         assert_continuous_manifest_contains("progressDeadlineSeconds: 1200");
         assert_continuous_manifest_contains("revisionHistoryLimit: 2");
     }

@@ -68,12 +68,14 @@ spec:
               require_value SOCCER_REQUIRE_POSTGRES true
               require_value SOCCER_NEURAL_LEARNING_ENABLED true
               require_value SOCCER_NEURAL_LEARNING_BACKEND threaded
-              require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 1
-              require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 1
+              require_value SOCCER_PARALLEL_GAMES 5
+              require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 5
+              require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 5
               require_value SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE true
               require_value SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT true
               require_value SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM true
               require_value SOCCER_EVOLUTION_ENABLED true
+              require_value SOCCER_EVOLUTION_INTERVAL_GAMES 5
 
               echo "continuous_started_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               echo "postgres_required=${SOCCER_REQUIRE_POSTGRES}"
@@ -136,7 +138,7 @@ spec:
             - name: CARGO_HOME
               value: /tmp/cargo
             - name: CARGO_BUILD_JOBS
-              value: "2"
+              value: "4"
             - name: CARGO_NET_RETRY
               value: "5"
             - name: RUST_BACKTRACE
@@ -153,19 +155,19 @@ spec:
             - name: SOCCER_REQUIRE_POSTGRES
               value: "true"
             - name: SOCCER_RUN_ID_PREFIX
-              value: codex-soccer-learning-continuous
+              value: codex-soccer-learning-overnight
             - name: SOCCER_SEED_BASE
               value: "2026"
             - name: SOCCER_SEED_STRIDE
               value: "1000"
             - name: SOCCER_EXPERIMENT_SLUG
-              value: soccer-self-play-k8s-smoke
+              value: soccer-self-play-k8s-overnight
             - name: SOCCER_EXPERIMENT_NAME
-              value: Soccer self-play k8s continuous learning
+              value: Soccer self-play k8s overnight evolutionary learning
             - name: SOCCER_GAMES
-              value: "10"
+              value: "100"
             - name: SOCCER_PARALLEL_GAMES
-              value: "1"
+              value: "5"
             - name: SOCCER_HALVES
               value: "2"
             - name: SOCCER_HALF_MINUTES
@@ -175,7 +177,7 @@ spec:
             - name: SOCCER_PERIOD_BREAK_RECOVERY_SECONDS
               value: "900"
             - name: SOCCER_DT_SECONDS
-              value: "2"
+              value: "0.2"
             - name: SOCCER_LEARNING_INTERVAL_TICKS
               value: "4"
             - name: SOCCER_NEURAL_LEARNING_ENABLED
@@ -183,33 +185,33 @@ spec:
             - name: SOCCER_NEURAL_LEARNING_BACKEND
               value: threaded
             - name: SOCCER_NEURAL_BATCH_SIZE
-              value: "16"
+              value: "32"
             - name: SOCCER_NEURAL_TRAIN_EVERY_TICKS
               value: "1"
             - name: SOCCER_NEURAL_MAX_BATCHES_PER_TICK
-              value: "1"
+              value: "2"
             - name: SOCCER_NEURAL_REPLAY_CAPACITY
-              value: "128"
+              value: "2048"
             - name: SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK
-              value: "8"
+              value: "32"
             - name: SOCCER_NEURAL_MAX_PENDING_BATCHES
-              value: "16"
+              value: "64"
             - name: SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES
               value: "16"
             - name: SOCCER_NEURAL_DRAIN_TIMEOUT_MS
-              value: "20000"
+              value: "60000"
             - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
-              value: "1"
-            - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
-              value: "1"
-            - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
-              value: "200"
-            - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
-              value: "2"
-            - name: SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES
-              value: "2"
-            - name: SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS
               value: "5"
+            - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
+              value: "5"
+            - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
+              value: "500"
+            - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
+              value: "8"
+            - name: SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES
+              value: "5"
+            - name: SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS
+              value: "50"
             - name: SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE
               value: "true"
             - name: SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT
@@ -219,11 +221,11 @@ spec:
             - name: SOCCER_EVOLUTION_ENABLED
               value: "true"
             - name: SOCCER_EVOLUTION_INTERVAL_GAMES
-              value: "1"
+              value: "5"
             - name: SOCCER_EVOLUTION_ELITE_GAMES
-              value: "1"
+              value: "5"
             - name: SOCCER_EVOLUTION_WINDOW_GAMES
-              value: "3"
+              value: "25"
             - name: SOCCER_EVOLUTION_MUTATION_RATE
               value: "0.08"
             - name: SOCCER_EVOLUTION_MUTATION_SCALE
@@ -237,9 +239,15 @@ spec:
             - name: SOCCER_EVOLUTION_ELITE_WEIGHT_FLOOR
               value: "0.08"
             - name: SOCCER_EVOLUTION_POPULATION_SIZE
-              value: "4"
+              value: "16"
             - name: SOCCER_EVOLUTION_SEED_BASE
-              value: "20260607"
+              value: "20260608"
+            - name: SOCCER_MAX_POLICY_ENTRIES_PER_TEAM
+              value: "250000"
+            - name: SOCCER_MAX_POLICY_TARGET_ENTRIES_PER_TEAM
+              value: "250000"
+            - name: SOCCER_MIN_POLICY_VISITS
+              value: "1"
             - name: SOCCER_GAME_ARTIFACT_MODE
               value: summary
             - name: SOCCER_WRITE_GAME_ARTIFACTS
@@ -264,11 +272,11 @@ spec:
               value: /dev/null
           resources:
             requests:
-              cpu: 1500m
-              memory: 24Gi
-            limits:
               cpu: "4"
-              memory: 96Gi
+              memory: 32Gi
+            limits:
+              cpu: "10"
+              memory: 128Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -279,7 +287,7 @@ spec:
               command:
                 - /bin/bash
                 - -lc
-                - test -f /tmp/codex-soccer-learning-continuous-ready
+                - test -f /tmp/codex-soccer-learning-overnight-ready
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 90
@@ -289,4 +297,4 @@ spec:
       volumes:
         - name: tmp
           emptyDir:
-            sizeLimit: 96Gi
+            sizeLimit: 128Gi

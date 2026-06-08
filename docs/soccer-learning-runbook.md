@@ -89,6 +89,14 @@ remain frozen. The queue runner also accepts
 `SOCCER_QUEUE_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT`, and queue/set-play runners
 accept `SOCCER_QUEUE_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE` and
 `SOCCER_SET_PLAY_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE` overrides.
+
+For the EC2/k8s continuous RDS runner, batch writes by the parallel game wave:
+with `SOCCER_PARALLEL_GAMES=5`, keep
+`SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES=5` and
+`SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES=5`. The async writer coalesces queued
+Postgres batches with `SOCCER_POSTGRES_ASYNC_COALESCE_BATCHES` and
+`SOCCER_POSTGRES_ASYNC_COALESCE_WAIT_MS`; the wait is milliseconds, not seconds.
+There is no Redis persistence path for soccer-learning weights in this repo.
 Evolutionary policy search is enabled by default; tune it with
 `SOCCER_EVOLUTION_INTERVAL_GAMES`,
 `SOCCER_EVOLUTION_ELITE_GAMES`, `SOCCER_EVOLUTION_MUTATION_RATE`,
@@ -146,5 +154,7 @@ configured, the Rust server adapter defaults to one episode per des-rs request
 so each request reloads the latest active Postgres policy before payload
 construction, then imports the returned MDP/POMDP, neural, and
 tactical-learning weights for the next local or des-rs request. Set
-`SOCCER_SERVER_REQUEST_GAMES` only when you want larger remote batches for
-throughput.
+`SOCCER_SERVER_REQUEST_GAMES` with
+`SOCCER_SERVER_REQUIRE_FRESH_POSTGRES_WEIGHTS=false` and
+`SOCCER_SERVER_ALLOW_POSTGRES_MULTI_GAME_CHUNKS=true` only when you want larger
+remote HTTP batches for throughput.

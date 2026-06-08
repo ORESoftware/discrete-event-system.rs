@@ -320,6 +320,7 @@ const SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE: &str = "des_soccer_learning_run_d
 const SOCCER_POLICY_POSTGRES_MERGE_EVENTS_TABLE: &str = "des_soccer_learning_merge_events";
 const SOCCER_POLICY_VALUE_MICROS_SCALE: f64 = 1_000_000.0;
 const DEFAULT_LIVE_MOMENT_WINDOWS_PATH: &str = "out/soccer-live/moment-windows.jsonl";
+const MIN_POLICY_AUTOSAVE_INTERVAL_TICKS: u64 = 50;
 const DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS: u64 = 600;
 const DEFAULT_POLICY_HISTORY_RECORD_LIMIT: usize = 24;
 const MAX_POLICY_HISTORY_RECORD_LIMIT: usize = 500;
@@ -541,6 +542,10 @@ fn default_live_policy_autoload() -> bool {
 
 fn default_policy_autosave_interval_ticks() -> u64 {
     DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS
+}
+
+fn soccer_policy_autosave_interval_ticks(interval_ticks: u64) -> u64 {
+    interval_ticks.max(MIN_POLICY_AUTOSAVE_INTERVAL_TICKS)
 }
 
 fn default_ball_air_resistance() -> f64 {
@@ -2199,27 +2204,35 @@ fn ensure_min_legal_option_family_probability(
     }
 }
 
-fn weighted_fisher_yates_order<T>(mut items: Vec<(T, f64)>, rng: &mut SeededRandom) -> Vec<T> {
-    let mut ordered = Vec::with_capacity(items.len());
-    while !items.is_empty() {
-        let total: f64 = items.iter().map(|(_, weight)| weight.max(0.0)).sum();
-        let chosen_idx = if total > 1e-9 {
-            let mut draw = rng.next_float() * total;
-            let mut idx = items.len() - 1;
-            for (candidate_idx, (_, weight)) in items.iter().enumerate() {
-                draw -= weight.max(0.0);
-                if draw <= 0.0 {
-                    idx = candidate_idx;
-                    break;
-                }
-            }
-            idx
-        } else {
-            ((rng.next_float() * items.len() as f64).floor() as usize).min(items.len() - 1)
-        };
-        ordered.push(items.swap_remove(chosen_idx).0);
+fn weighted_fisher_yates_weight(weight: f64) -> f64 {
+    if weight.is_finite() && weight > 0.0 {
+        weight
+    } else if weight.is_infinite() && weight.is_sign_positive() {
+        f64::MAX
+    } else {
+        0.0
     }
-    ordered
+}
+
+fn weighted_fisher_yates_order<T>(items: Vec<(T, f64)>, rng: &mut SeededRandom) -> Vec<T> {
+    let mut keyed = Vec::with_capacity(items.len());
+    for (ordinal, (item, weight)) in items.into_iter().enumerate() {
+        let weight = weighted_fisher_yates_weight(weight);
+        let tie_break = rng.next_float();
+        let priority = if weight > 0.0 {
+            let draw = rng.next_float().clamp(f64::MIN_POSITIVE, 1.0);
+            -draw.ln() / weight
+        } else {
+            f64::INFINITY
+        };
+        keyed.push((priority, tie_break, ordinal, item));
+    }
+    keyed.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| a.1.total_cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    keyed.into_iter().map(|(_, _, _, item)| item).collect()
 }
 
 fn time_window_probability(probability_at_reference_dt: f64, dt_seconds: f64) -> f64 {
@@ -7823,10 +7836,7 @@ impl PlayerAgent {
         action: &SoccerAction,
         action_label: impl Into<String>,
     ) -> AgentDecisionTrace {
-        let scheduled_index = snapshot
-            .agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == self.id);
+        let scheduled_index = snapshot.scheduled_player_index(self.id);
         AgentDecisionTrace {
             mdp_state,
             observation,
@@ -13350,10 +13360,7 @@ impl OfficialAgent {
             snapshot.field_width,
             snapshot.field_length,
         );
-        let scheduled_index = snapshot
-            .agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Official && entry.id == self.id);
+        let scheduled_index = snapshot.scheduled_official_index(self.id);
         let action = match self.kind {
             OfficialKind::CenterReferee => "track-center-of-play",
             OfficialKind::AssistantRefereeNear | OfficialKind::AssistantRefereeFar => {
@@ -17792,10 +17799,7 @@ impl CentralBrain {
             })
             .collect::<Vec<_>>();
         controller_assignments.sort_by_key(|assignment| assignment.controller_slot);
-        let ball_scheduled_index = snapshot
-            .agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        let ball_scheduled_index = snapshot.scheduled_ball_index();
         let home_shape =
             team_shape_observation_from_snapshot(snapshot, Team::Home, snapshot.ball.position);
         let away_shape =
@@ -17859,21 +17863,14 @@ impl CentralBrain {
                 position: official.position,
                 velocity: official.velocity,
                 acceleration: official.acceleration,
-                scheduled_index: snapshot.agent_schedule.iter().position(|entry| {
-                    entry.kind == AgentScheduleKind::Official && entry.id == official.id
-                }),
+                scheduled_index: snapshot.scheduled_official_index(official.id),
                 offside_line: assistant_offside_line_snapshot(snapshot, official.kind),
             })
             .collect::<Vec<_>>();
         let tracked_officials = tracked_official_awareness.len();
         let center_of_play = center_of_play_centroids(snapshot);
-        let ball_scheduled_index = snapshot
-            .agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
-        let scheduled_index = snapshot.agent_schedule.iter().position(|entry| {
-            entry.kind == AgentScheduleKind::CentralBrain && entry.id == CENTRAL_BRAIN_AGENT_ID
-        });
+        let ball_scheduled_index = snapshot.scheduled_ball_index();
+        let scheduled_index = snapshot.scheduled_central_brain_index();
         let tracked_players = snapshot
             .players
             .iter()
@@ -18005,6 +18002,8 @@ pub struct WorldSnapshot {
     pub shared_positions: SharedPlayerPositionSnapshot,
     #[serde(default)]
     pub agent_schedule: Vec<AgentScheduleEntry>,
+    #[serde(skip)]
+    schedule_index_lookup: AgentScheduleIndexLookup,
     pub score_home: u32,
     pub score_away: u32,
     pub phase: TacticalPhase,
@@ -18072,6 +18071,7 @@ struct KillerPassTargetAssessment {
     forward_yards: f64,
     goal_gain_yards: f64,
     reception_window_score: f64,
+    goal_channel_fit: f64,
     receiver_openness: f64,
     expected_completion: f64,
     stride_fit: f64,
@@ -18405,7 +18405,60 @@ impl WorldSnapshot {
             .find(|guidance| guidance.player_id == player_id)
     }
 
+    fn scheduled_player_index(&self, player_id: usize) -> Option<usize> {
+        if let Some(idx) = self.schedule_index_lookup.player(player_id) {
+            if self.agent_schedule.get(idx).is_some_and(|entry| {
+                entry.kind == AgentScheduleKind::Player && entry.id == player_id
+            }) {
+                return Some(idx);
+            }
+        }
+        self.agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player_id)
+    }
+
+    fn scheduled_official_index(&self, official_id: usize) -> Option<usize> {
+        if let Some(idx) = self.schedule_index_lookup.official(official_id) {
+            if self.agent_schedule.get(idx).is_some_and(|entry| {
+                entry.kind == AgentScheduleKind::Official && entry.id == official_id
+            }) {
+                return Some(idx);
+            }
+        }
+        self.agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Official && entry.id == official_id)
+    }
+
+    fn scheduled_ball_index(&self) -> Option<usize> {
+        if let Some(idx) = self.schedule_index_lookup.ball() {
+            if self.agent_schedule.get(idx).is_some_and(|entry| {
+                entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID
+            }) {
+                return Some(idx);
+            }
+        }
+        self.agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
+    }
+
+    fn scheduled_central_brain_index(&self) -> Option<usize> {
+        if let Some(idx) = self.schedule_index_lookup.central_brain() {
+            if self.agent_schedule.get(idx).is_some_and(|entry| {
+                entry.kind == AgentScheduleKind::CentralBrain && entry.id == CENTRAL_BRAIN_AGENT_ID
+            }) {
+                return Some(idx);
+            }
+        }
+        self.agent_schedule.iter().position(|entry| {
+            entry.kind == AgentScheduleKind::CentralBrain && entry.id == CENTRAL_BRAIN_AGENT_ID
+        })
+    }
+
     fn from_match_with_options(m: &SoccerMatch, options: WorldSnapshotOptions) -> Self {
+        let schedule_index_lookup = AgentScheduleIndexLookup::from_entries(&m.last_agent_schedule);
         let shared_positions = if options.include_shared_histories {
             m.shared_positions.snapshot_with_current_players(
                 &m.players,
@@ -18425,52 +18478,50 @@ impl WorldSnapshot {
                 m.config.dt_seconds,
             )
         };
-        let players =
-            m.players
-                .iter()
-                .map(|p| PlayerSnapshot {
-                    id: p.id,
-                    name: p.name.clone(),
-                    team: p.team,
-                    role: p.role,
-                    shirt: p.shirt,
-                    position: p.position,
-                    position_history: if options.include_player_histories {
-                        p.position_history.iter().cloned().collect()
-                    } else {
-                        Vec::new()
-                    },
-                    velocity: p.velocity,
-                    movement_gait: p.movement_gait,
-                    receive_facing: p.receive_facing,
-                    action_facing: p.action_facing,
-                    incoming_ball: p.incoming_ball.clone(),
-                    skills: p.skills.clone(),
-                    fatigue: p.fatigue,
-                    home_position: p.home_position,
-                    controller_slot: p.controller_slot,
-                    scheduled_index: m.last_agent_schedule.iter().position(|entry| {
-                        entry.kind == AgentScheduleKind::Player && entry.id == p.id
-                    }),
-                    preferences: p.preferences.clone(),
-                    vision_range_yards: vision_range_yards(p.skills.vision),
-                    field_of_view_degrees: field_of_view_degrees(p.skills.vision),
-                    acceleration: shared_positions
-                        .latest_for(p.id)
-                        .map(|sample| sample.acceleration)
-                        .unwrap_or(p.acceleration),
-                    jerk: shared_positions
-                        .latest_for(p.id)
-                        .map(|sample| sample.jerk)
-                        .unwrap_or(p.jerk),
-                    last_decision: if options.include_player_decisions {
-                        p.last_decision.clone()
-                    } else {
-                        None
-                    },
-                    learned_policy: None,
-                })
-                .collect::<Vec<_>>();
+        let players = m
+            .players
+            .iter()
+            .map(|p| PlayerSnapshot {
+                id: p.id,
+                name: p.name.clone(),
+                team: p.team,
+                role: p.role,
+                shirt: p.shirt,
+                position: p.position,
+                position_history: if options.include_player_histories {
+                    p.position_history.iter().cloned().collect()
+                } else {
+                    Vec::new()
+                },
+                velocity: p.velocity,
+                movement_gait: p.movement_gait,
+                receive_facing: p.receive_facing,
+                action_facing: p.action_facing,
+                incoming_ball: p.incoming_ball.clone(),
+                skills: p.skills.clone(),
+                fatigue: p.fatigue,
+                home_position: p.home_position,
+                controller_slot: p.controller_slot,
+                scheduled_index: schedule_index_lookup.player(p.id),
+                preferences: p.preferences.clone(),
+                vision_range_yards: vision_range_yards(p.skills.vision),
+                field_of_view_degrees: field_of_view_degrees(p.skills.vision),
+                acceleration: shared_positions
+                    .latest_for(p.id)
+                    .map(|sample| sample.acceleration)
+                    .unwrap_or(p.acceleration),
+                jerk: shared_positions
+                    .latest_for(p.id)
+                    .map(|sample| sample.jerk)
+                    .unwrap_or(p.jerk),
+                last_decision: if options.include_player_decisions {
+                    p.last_decision.clone()
+                } else {
+                    None
+                },
+                learned_policy: None,
+            })
+            .collect::<Vec<_>>();
         let pending_pass = m.pending_pass.as_ref().map(|pass| {
             pending_pass_snapshot_from(pass, m.ball.position, m.ball.velocity, &players)
         });
@@ -18504,10 +18555,7 @@ impl WorldSnapshot {
             })
             .unwrap_or(0.0);
         let mut ball = m.ball.to_state();
-        ball.scheduled_index = m
-            .last_agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        ball.scheduled_index = schedule_index_lookup.ball();
 
         WorldSnapshot {
             tick: m.tick,
@@ -18532,6 +18580,7 @@ impl WorldSnapshot {
             players,
             shared_positions,
             agent_schedule: m.last_agent_schedule.clone(),
+            schedule_index_lookup,
             score_home: m.score_home,
             score_away: m.score_away,
             phase: m.central_brain.phase,
@@ -19919,14 +19968,8 @@ impl WorldSnapshot {
             &player_position_confidences,
             me.team.other(),
         );
-        let scheduled_index = self
-            .agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player_id);
-        let ball_scheduled_index = self
-            .agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        let scheduled_index = self.scheduled_player_index(player_id);
+        let ball_scheduled_index = self.scheduled_ball_index();
         let ball_schedule_order =
             schedule_order_relative_to_ball(scheduled_index, ball_scheduled_index);
         let visibility_elapsed = phase_started.elapsed();
@@ -20861,6 +20904,13 @@ impl WorldSnapshot {
                 let reception_teammate_penalty =
                     TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY * reception_teammate_pressure;
                 let window = self.shooting_window_score_at(target, reception);
+                let goal_channel_fit = threaded_goal_channel_fit_for_reception(
+                    me.team,
+                    reception,
+                    self.field_width,
+                    self.field_length,
+                    self.goal_width,
+                );
                 let range_fit = ((KILLER_PASS_MAX_YARDS_TO_GOAL - yards_to_goal)
                     / KILLER_PASS_MAX_YARDS_TO_GOAL)
                     .clamp(0.0, 1.0);
@@ -20882,6 +20932,7 @@ impl WorldSnapshot {
                     + quality.expected_completion * 1.5
                     + quality.stride_fit * 1.25
                     + lane_fit * 1.3
+                    + goal_channel_fit * 1.35
                     + range_fit * 1.2
                     + role_bonus
                     + runner_bonus
@@ -20891,6 +20942,7 @@ impl WorldSnapshot {
                     forward_yards: forward,
                     goal_gain_yards: goal_gain,
                     reception_window_score: window,
+                    goal_channel_fit,
                     receiver_openness: quality.receiver_openness,
                     expected_completion: quality.expected_completion,
                     stride_fit: quality.stride_fit,
@@ -28695,6 +28747,7 @@ impl SoccerPlaybackFrame {
             sim,
             WorldSnapshotOptions::DEFENSIVE_OR_LOOSE_AGENT_DECISION,
         );
+        let schedule_lookup = AgentScheduleIndexLookup::from_entries(&sim.last_agent_schedule);
 
         SoccerPlaybackFrame {
             tick: sim.tick,
@@ -28722,10 +28775,7 @@ impl SoccerPlaybackFrame {
                     .as_ref()
                     .map(|decision| decision.curl_acceleration.len())
                     .unwrap_or_else(|| sim.ball.curl_acceleration.len()),
-                scheduled_index: sim
-                    .last_agent_schedule
-                    .iter()
-                    .position(|entry| entry.kind == AgentScheduleKind::Ball),
+                scheduled_index: schedule_lookup.ball(),
                 last_action: sim
                     .ball
                     .last_decision
@@ -28771,9 +28821,7 @@ impl SoccerPlaybackFrame {
                         receive_facing: player.receive_facing,
                         action_facing: player.action_facing,
                         controller_slot: player.controller_slot,
-                        scheduled_index: sim.last_agent_schedule.iter().position(|entry| {
-                            entry.kind == AgentScheduleKind::Player && entry.id == player.id
-                        }),
+                        scheduled_index: schedule_lookup.player(player.id),
                         last_action: player
                             .last_decision
                             .as_ref()
@@ -28800,9 +28848,7 @@ impl SoccerPlaybackFrame {
                     velocity: official.velocity,
                     acceleration: official.acceleration,
                     jerk: official.jerk,
-                    scheduled_index: sim.last_agent_schedule.iter().position(|entry| {
-                        entry.kind == AgentScheduleKind::Official && entry.id == official.id
-                    }),
+                    scheduled_index: schedule_lookup.official(official.id),
                     last_action: official
                         .last_decision
                         .as_ref()
@@ -29054,6 +29100,53 @@ pub struct AgentScheduleEntry {
     pub kind: AgentScheduleKind,
     pub id: usize,
     pub label: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AgentScheduleIndexLookup {
+    players: HashMap<usize, usize>,
+    officials: HashMap<usize, usize>,
+    ball: Option<usize>,
+    central_brain: Option<usize>,
+}
+
+impl AgentScheduleIndexLookup {
+    fn from_entries(entries: &[AgentScheduleEntry]) -> Self {
+        let mut lookup = AgentScheduleIndexLookup::default();
+        for (idx, entry) in entries.iter().enumerate() {
+            match entry.kind {
+                AgentScheduleKind::CentralBrain => {
+                    lookup.central_brain.get_or_insert(idx);
+                }
+                AgentScheduleKind::Player => {
+                    lookup.players.entry(entry.id).or_insert(idx);
+                }
+                AgentScheduleKind::Official => {
+                    lookup.officials.entry(entry.id).or_insert(idx);
+                }
+                AgentScheduleKind::Ball => {
+                    lookup.ball.get_or_insert(idx);
+                }
+            }
+        }
+        lookup
+    }
+
+    fn player(&self, player_id: usize) -> Option<usize> {
+        self.players.get(&player_id).copied()
+    }
+
+    fn official(&self, official_id: usize) -> Option<usize> {
+        self.officials.get(&official_id).copied()
+    }
+
+    fn ball(&self) -> Option<usize> {
+        self.ball
+    }
+
+    fn central_brain(&self) -> Option<usize> {
+        self.central_brain
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -35954,6 +36047,11 @@ pub struct SoccerPolicyAutosaveRequest {
 pub struct SoccerPolicyAutosaveStatus {
     pub enabled: bool,
     pub interval_ticks: u64,
+    pub min_interval_ticks: u64,
+    pub default_interval_ticks: u64,
+    pub batches_policy_writes: bool,
+    pub writes_per_timestep: bool,
+    pub episode_boundary_checkpoint_enabled: bool,
     pub path: String,
     pub history_path: String,
     pub last_saved_tick: Option<u64>,
@@ -35996,6 +36094,10 @@ pub struct SoccerPolicyPostgresStorageContract {
     pub schema_source: String,
     pub retention_model: String,
     pub stores_all_weight_history: bool,
+    pub batched_branch_tip_export: bool,
+    pub writes_per_timestep: bool,
+    pub redis_enabled: bool,
+    pub autosave_min_interval_ticks: u64,
     pub branch_tip_table: String,
     pub branch_tip_entries_table: String,
     pub run_delta_table: String,
@@ -36011,6 +36113,10 @@ impl Default for SoccerPolicyPostgresStorageContract {
             schema_source: SOCCER_POLICY_POSTGRES_SCHEMA_SOURCE.to_string(),
             retention_model: SOCCER_POLICY_POSTGRES_RETENTION_MODEL.to_string(),
             stores_all_weight_history: SOCCER_POLICY_POSTGRES_STORES_ALL_WEIGHT_HISTORY,
+            batched_branch_tip_export: true,
+            writes_per_timestep: false,
+            redis_enabled: false,
+            autosave_min_interval_ticks: MIN_POLICY_AUTOSAVE_INTERVAL_TICKS,
             branch_tip_table: SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE.to_string(),
             branch_tip_entries_table: SOCCER_POLICY_POSTGRES_POLICY_ENTRIES_TABLE.to_string(),
             run_delta_table: SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE.to_string(),
@@ -36228,7 +36334,15 @@ pub struct SoccerPolicyStorageStatus {
     pub stores_visits: bool,
     pub stores_action_probabilities: bool,
     pub action_probabilities_derived: bool,
+    pub external_writes_per_timestep: bool,
+    pub autosave_batches_policy_writes: bool,
+    pub autosave_min_interval_ticks: u64,
+    pub autosave_interval_ticks: u64,
+    pub episode_boundary_checkpoint_enabled: bool,
+    pub redis_enabled: bool,
     pub postgres_enabled: bool,
+    pub postgres_writes_per_timestep: bool,
+    pub postgres_branch_tip_exports_batched: bool,
     #[serde(default)]
     pub postgres_table: Option<String>,
     #[serde(default)]
@@ -36581,7 +36695,9 @@ impl Default for SoccerPolicyAutosaveState {
         let path = PathBuf::from(DEFAULT_LIVE_TEAM_POLICY_PATH);
         SoccerPolicyAutosaveState {
             enabled: false,
-            interval_ticks: DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS,
+            interval_ticks: soccer_policy_autosave_interval_ticks(
+                DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS,
+            ),
             history_path: policy_history_disk_path(&path),
             path,
             last_saved_tick: None,
@@ -36598,6 +36714,11 @@ impl SoccerPolicyAutosaveState {
         SoccerPolicyAutosaveStatus {
             enabled: self.enabled,
             interval_ticks: self.interval_ticks,
+            min_interval_ticks: MIN_POLICY_AUTOSAVE_INTERVAL_TICKS,
+            default_interval_ticks: DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS,
+            batches_policy_writes: true,
+            writes_per_timestep: false,
+            episode_boundary_checkpoint_enabled: true,
             path: self.path.display().to_string(),
             history_path: self.history_path.display().to_string(),
             last_saved_tick: self.last_saved_tick,
@@ -36613,7 +36734,7 @@ impl SoccerPolicyAutosaveState {
             self.enabled = enabled;
         }
         if let Some(interval_ticks) = request.interval_ticks {
-            self.interval_ticks = interval_ticks.max(1);
+            self.interval_ticks = soccer_policy_autosave_interval_ticks(interval_ticks);
         }
         if request
             .path
@@ -36631,8 +36752,11 @@ impl SoccerPolicyAutosaveState {
             return false;
         }
         match self.last_saved_tick {
-            Some(last_tick) => tick.saturating_sub(last_tick) >= self.interval_ticks.max(1),
-            None => tick >= self.interval_ticks.max(1),
+            Some(last_tick) => {
+                tick.saturating_sub(last_tick)
+                    >= soccer_policy_autosave_interval_ticks(self.interval_ticks)
+            }
+            None => tick >= soccer_policy_autosave_interval_ticks(self.interval_ticks),
         }
     }
 
@@ -40329,6 +40453,7 @@ impl SoccerMatch {
             self.config.field_width_yards,
             self.config.field_length_yards,
         );
+        let schedule_lookup = AgentScheduleIndexLookup::from_entries(&self.last_agent_schedule);
         let mut players = snapshot.players.clone();
         for player in &mut players {
             if include_learned_policy_traces {
@@ -40340,10 +40465,7 @@ impl SoccerMatch {
                     .find(|agent| agent.id == player.id)
                     .and_then(|agent| agent.last_decision.clone());
             }
-            player.scheduled_index = self
-                .last_agent_schedule
-                .iter()
-                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id);
+            player.scheduled_index = schedule_lookup.player(player.id);
         }
         let officials = self
             .officials
@@ -40356,17 +40478,12 @@ impl SoccerMatch {
                 velocity: o.velocity,
                 acceleration: o.acceleration,
                 jerk: o.jerk,
-                scheduled_index: self.last_agent_schedule.iter().position(|entry| {
-                    entry.kind == AgentScheduleKind::Official && entry.id == o.id
-                }),
+                scheduled_index: schedule_lookup.official(o.id),
                 offside_line: assistant_offside_line_snapshot(&snapshot, o.kind),
                 last_decision: o.last_decision.clone(),
             })
             .collect();
-        let ball_scheduled_index = self
-            .last_agent_schedule
-            .iter()
-            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID);
+        let ball_scheduled_index = schedule_lookup.ball();
         let mut ball = self.ball.to_state();
         ball.scheduled_index = ball_scheduled_index;
 
@@ -45775,7 +45892,15 @@ impl SoccerRealtimeSession {
             stores_visits: true,
             stores_action_probabilities: true,
             action_probabilities_derived: true,
+            external_writes_per_timestep: false,
+            autosave_batches_policy_writes: true,
+            autosave_min_interval_ticks: MIN_POLICY_AUTOSAVE_INTERVAL_TICKS,
+            autosave_interval_ticks: autosave.interval_ticks,
+            episode_boundary_checkpoint_enabled: true,
+            redis_enabled: false,
             postgres_enabled: true,
+            postgres_writes_per_timestep: false,
+            postgres_branch_tip_exports_batched: true,
             postgres_table: Some(SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE.to_string()),
             postgres_contract: SoccerPolicyPostgresStorageContract::default(),
         }
@@ -46464,7 +46589,9 @@ impl SoccerLiveServer {
         session.set_moment_storage_path(&moment_path);
         session.update_policy_autosave(SoccerPolicyAutosaveRequest {
             enabled: Some(config.autosave_team_policy),
-            interval_ticks: Some(config.policy_autosave_interval_ticks.max(1)),
+            interval_ticks: Some(soccer_policy_autosave_interval_ticks(
+                config.policy_autosave_interval_ticks,
+            )),
             path: Some(policy_path.display().to_string()),
             save_now: None,
         });
@@ -52758,6 +52885,7 @@ fn tracking_frame_to_world_snapshot(
         players,
         shared_positions,
         agent_schedule: Vec::new(),
+        schedule_index_lookup: AgentScheduleIndexLookup::default(),
         score_home,
         score_away,
         phase,
@@ -54818,6 +54946,27 @@ fn killer_pass_goal_range_fit(observation: &SoccerPomdpObservation) -> f64 {
             / KILLER_PASS_MAX_YARDS_TO_GOAL)
             .clamp(0.0, 1.0)
     }
+}
+
+fn threaded_goal_channel_fit_for_reception(
+    team: Team,
+    reception: Vec2,
+    field_width: f64,
+    field_length: f64,
+    goal_width: f64,
+) -> f64 {
+    let center_x = field_width * 0.5;
+    let goal_y = team.goal_y(field_length);
+    let yards_to_goal = (goal_y - reception.y).abs();
+    let channel_half_width = (goal_width * 2.25).clamp(10.0, field_width * 0.32);
+    let central_fit = (1.0 - (reception.x - center_x).abs() / channel_half_width).clamp(0.0, 1.0);
+    let range_fit = ((KILLER_PASS_MAX_YARDS_TO_GOAL - yards_to_goal)
+        / KILLER_PASS_MAX_YARDS_TO_GOAL)
+        .clamp(0.0, 1.0);
+    let goalmouth_fit = ((TEAMMATE_MUST_SHOOT_YARDS - yards_to_goal)
+        / (TEAMMATE_MUST_SHOOT_YARDS - GOAL_URGENCY_KEEPER_CROWD_YARDS).max(1.0))
+    .clamp(0.0, 1.0);
+    (central_fit * 0.58 + range_fit * 0.20 + goalmouth_fit * 0.22).clamp(0.0, 1.0)
 }
 
 fn threaded_goal_pass_quality_fit(observation: &SoccerPomdpObservation) -> f64 {
@@ -61993,6 +62142,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn world_snapshot_schedule_lookup_matches_schedule_and_falls_back_when_stale() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 309,
+            ..MatchConfig::playback_trace(0.2)
+        });
+        sim.run_time_step();
+        let mut snapshot = WorldSnapshot::from_match_for_agent_decision(&sim);
+
+        for player in &snapshot.players {
+            let expected_index = snapshot
+                .agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == player.id)
+                .expect("player scheduled");
+            assert_eq!(
+                snapshot.scheduled_player_index(player.id),
+                Some(expected_index)
+            );
+            assert_eq!(player.scheduled_index, Some(expected_index));
+        }
+        for official in &sim.officials {
+            let expected_index = snapshot
+                .agent_schedule
+                .iter()
+                .position(|entry| {
+                    entry.kind == AgentScheduleKind::Official && entry.id == official.id
+                })
+                .expect("official scheduled");
+            assert_eq!(
+                snapshot.scheduled_official_index(official.id),
+                Some(expected_index)
+            );
+        }
+        let ball_index = snapshot
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
+            .expect("ball scheduled");
+        assert_eq!(snapshot.scheduled_ball_index(), Some(ball_index));
+
+        let first_player_idx = snapshot
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == 0)
+            .expect("player 0 scheduled");
+        let second_player_idx = snapshot
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Player && entry.id == 1)
+            .expect("player 1 scheduled");
+        snapshot
+            .agent_schedule
+            .swap(first_player_idx, second_player_idx);
+        assert_eq!(
+            snapshot.scheduled_player_index(0),
+            Some(second_player_idx),
+            "snapshot lookup should validate cached slots and fall back after schedule mutation"
+        );
+    }
+
+    #[test]
+    fn weighted_operation_order_preserves_items_and_demotes_non_positive_weights() {
+        let mut rng = mulberry32(22_509);
+        let order = weighted_fisher_yates_order(
+            vec![
+                ("zero", 0.0),
+                ("nan", f64::NAN),
+                ("negative", -3.0),
+                ("strong", 8.0),
+                ("weak", 0.25),
+            ],
+            &mut rng,
+        );
+        assert_eq!(order.len(), 5);
+        assert_eq!(
+            order
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["nan", "negative", "strong", "weak", "zero"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        let first_non_positive = order
+            .iter()
+            .position(|item| matches!(*item, "zero" | "nan" | "negative"))
+            .expect("non-positive weight should appear");
+        assert!(
+            order[..first_non_positive]
+                .iter()
+                .all(|item| matches!(*item, "strong" | "weak")),
+            "positive weighted items should be selected before zero/invalid weights: {order:?}"
+        );
     }
 
     #[test]
@@ -96483,7 +96728,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     #[test]
     fn live_http_policy_autosave_writes_learning_checkpoint_after_step() {
         let session = Arc::new(Mutex::new(SoccerRealtimeSession::new(MatchConfig {
-            duration_seconds: 1.0,
+            duration_seconds: 6.0,
             seed: 157,
             ..Default::default()
         })));
@@ -96515,7 +96760,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let autosave_value: serde_json::Value =
             serde_json::from_str(&autosave.body).expect("autosave config json");
         assert_eq!(autosave_value["autosave"]["enabled"], true);
-        assert_eq!(autosave_value["autosave"]["intervalTicks"], 1);
+        assert_eq!(
+            autosave_value["autosave"]["intervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(
+            autosave_value["autosave"]["minIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(autosave_value["autosave"]["batchesPolicyWrites"], true);
+        assert_eq!(autosave_value["autosave"]["writesPerTimestep"], false);
+        assert_eq!(
+            autosave_value["autosave"]["episodeBoundaryCheckpointEnabled"],
+            true
+        );
         assert_eq!(
             autosave_value["autosave"]["historyPath"],
             history_path.display().to_string()
@@ -96534,6 +96792,23 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             autosave_value["storage"]["postgresTable"],
             SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
         );
+        assert_eq!(autosave_value["storage"]["redisEnabled"], false);
+        assert_eq!(
+            autosave_value["storage"]["externalWritesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresWritesPerTimestep"],
+            false
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresBranchTipExportsBatched"],
+            true
+        );
+        assert_eq!(
+            autosave_value["storage"]["autosaveMinIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
         assert_eq!(autosave_value["autosave"]["historyRecords"], 0);
         assert!(!policy_path.exists());
         assert!(!history_path.exists());
@@ -96549,12 +96824,41 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             &input_queue,
         );
         assert_eq!(step.status, 200);
+        assert!(!policy_path.exists());
+        assert!(!history_path.exists());
+        let step_value: serde_json::Value =
+            serde_json::from_str(&step.body).expect("pre-autosave step json");
+        assert_eq!(
+            step_value["policyAutosave"]["lastSavedTick"],
+            serde_json::Value::Null
+        );
+        assert_eq!(step_value["policyAutosave"]["historyRecords"], 0);
+        assert_eq!(
+            step_value["policyStorage"]["autosaveIntervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+
+        let batch_step_body = r#"{"ticks":46,"recordEveryTicks":46}"#;
+        let batch_step = handle_live_soccer_request(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                batch_step_body.len(),
+                batch_step_body
+            ),
+            &session,
+            &input_queue,
+        );
+        assert_eq!(batch_step.status, 200);
         assert!(policy_path.exists());
         assert!(history_path.exists());
         let step_value: serde_json::Value =
-            serde_json::from_str(&step.body).expect("step with autosave json");
+            serde_json::from_str(&batch_step.body).expect("step with autosave json");
         assert_eq!(step_value["policyAutosave"]["enabled"], true);
-        assert_eq!(step_value["policyAutosave"]["lastSavedTick"], 4);
+        assert_eq!(
+            step_value["policyAutosave"]["intervalTicks"],
+            MIN_POLICY_AUTOSAVE_INTERVAL_TICKS
+        );
+        assert_eq!(step_value["policyAutosave"]["lastSavedTick"], 50);
         assert_eq!(
             step_value["policyAutosave"]["historyPath"],
             history_path.display().to_string()
@@ -96569,13 +96873,13 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
 
         let artifact = read_soccer_team_policy_artifact(&policy_path).expect("autosaved policy");
-        assert_eq!(artifact.summary.ticks, 4);
+        assert_eq!(artifact.summary.ticks, 50);
         assert!(!artifact.home_entries.is_empty());
         assert!(!artifact.away_entries.is_empty());
         let history = read_policy_history_jsonl(&history_path);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0]["kind"], "autosave");
-        assert_eq!(history[0]["tick"].as_u64().unwrap(), 4);
+        assert_eq!(history[0]["tick"].as_u64().unwrap(), 50);
         assert_eq!(history[0]["path"], policy_path.display().to_string());
         assert_eq!(
             history[0]["homePolicyEntries"].as_u64().unwrap(),
@@ -98340,27 +98644,151 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 })
                 .expect("assign human controller");
         }
+        let start_x = session.lock().unwrap().match_ref().players[0].position.x;
         let input_router = session.lock().unwrap().controller_input_router();
-        let _held_session_lock = session.lock().unwrap();
 
-        let input = r#"{"controllerSlot":0,"playerId":0,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}"#;
-        let ack = handle_live_soccer_request_with_input_router(
+        {
+            let _held_session_lock = session.lock().unwrap();
+            let input = r#"{"controllerSlot":0,"playerId":0,"seq":1,"axis":{"x":1.0,"y":0.0},"sprint":true,"pass":false,"shoot":false,"targetPlayer":null}"#;
+            let ack = handle_live_soccer_request_with_input_router(
+                &format!(
+                    "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                    input.len(),
+                    input
+                ),
+                &session,
+                &input_queue,
+                &input_router,
+            );
+
+            assert_eq!(ack.status, 200);
+            let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
+            assert_eq!(ack_value["acceptedInputs"], 1);
+            assert_eq!(ack_value["queued"], true);
+            assert_eq!(ack_value["queuedHumanInputs"], 1);
+        }
+        assert_eq!(input_queue.queued_len(), 1);
+
+        let step_body = r#"{"ticks":1}"#;
+        let step = handle_live_soccer_request_with_input_router(
             &format!(
-                "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
-                input.len(),
-                input
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                step_body.len(),
+                step_body
             ),
             &session,
             &input_queue,
             &input_router,
         );
+        assert_eq!(step.status, 200);
+        let step_value: serde_json::Value = serde_json::from_str(&step.body).expect("step json");
+        assert_eq!(step_value["controllerLatencyBudget"]["consumedInputs"], 1);
+        assert_eq!(step_value["queuedHumanInputs"], 0);
+        assert!(session.lock().unwrap().match_ref().players[0].position.x > start_x);
+    }
 
-        assert_eq!(ack.status, 200);
-        let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
-        assert_eq!(ack_value["acceptedInputs"], 1);
-        assert_eq!(ack_value["queued"], true);
-        assert_eq!(ack_value["queuedHumanInputs"], 1);
-        assert_eq!(input_queue.queued_len(), 1);
+    #[test]
+    fn live_http_input_router_accepts_four_slots_without_session_mutex() {
+        let session = Arc::new(Mutex::new(
+            SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+                duration_seconds: 1.0,
+                max_human_players: 4,
+                seed: 570,
+                ..Default::default()
+            }),
+        ));
+        let input_queue = session.lock().unwrap().input_queue();
+        {
+            let mut guard = session.lock().unwrap();
+            for slot in 0..4 {
+                guard
+                    .assign_controller_slot(SoccerControllerAssignmentRequest {
+                        controller_slot: slot,
+                        player_id: Some(slot),
+                    })
+                    .expect("assign human controller");
+            }
+        }
+        let start_x = {
+            let guard = session.lock().unwrap();
+            (0..4)
+                .map(|player_id| guard.match_ref().players[player_id].position.x)
+                .collect::<Vec<_>>()
+        };
+        let input_router = session.lock().unwrap().controller_input_router();
+
+        let inputs = (0..4)
+            .map(|slot| {
+                serde_json::json!({
+                    "controllerSlot": slot,
+                    "playerId": slot,
+                    "seq": 1,
+                    "axis": {"x": 1.0, "y": 0.0},
+                    "sprint": true,
+                    "pass": false,
+                    "shoot": false,
+                    "targetPlayer": null
+                })
+            })
+            .collect::<Vec<_>>();
+        let input_body = serde_json::to_string(&inputs).expect("serialize controller inputs");
+        {
+            let _held_session_lock = session.lock().unwrap();
+            let ack = handle_live_soccer_request_with_input_router(
+                &format!(
+                    "POST /api/input HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                    input_body.len(),
+                    input_body
+                ),
+                &session,
+                &input_queue,
+                &input_router,
+            );
+
+            assert_eq!(ack.status, 200);
+            let ack_value: serde_json::Value = serde_json::from_str(&ack.body).expect("ack json");
+            assert_eq!(ack_value["acceptedInputs"], 4);
+            assert_eq!(ack_value["queued"], true);
+            assert_eq!(ack_value["queuedHumanInputs"], 4);
+        }
+        assert_eq!(input_queue.queued_len(), 4);
+
+        let step_body = r#"{"ticks":1,"recordEveryTicks":1}"#;
+        let step = handle_live_soccer_request_with_input_router(
+            &format!(
+                "POST /api/step HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                step_body.len(),
+                step_body
+            ),
+            &session,
+            &input_queue,
+            &input_router,
+        );
+        assert_eq!(step.status, 200);
+        let step_value: serde_json::Value = serde_json::from_str(&step.body).expect("step json");
+        assert_eq!(step_value["controllerThreads"].as_array().unwrap().len(), 0);
+        assert_eq!(step_value["controllerYield"]["assignedPlayers"], 4);
+        assert_eq!(step_value["controllerLatencyBudget"]["consumedInputs"], 4);
+        assert_eq!(step_value["queuedHumanInputs"], 0);
+        assert_eq!(
+            step_value["frame"]["centralBrain"]["controlledHumanPlayers"].as_u64(),
+            Some(4)
+        );
+
+        let guard = session.lock().unwrap();
+        for player_id in 0..4 {
+            let player = &guard.match_ref().players[player_id];
+            assert!(
+                player.position.x > start_x[player_id],
+                "player {player_id} should consume its queued controller input after the lock releases"
+            );
+            let decision = player
+                .last_decision
+                .as_ref()
+                .expect("human-controlled player decision");
+            assert_eq!(decision.action, "human-move");
+            assert_eq!(decision.operation_order, vec!["human-input".to_string()]);
+        }
     }
 
     #[test]
@@ -100486,6 +100914,85 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             occupied_snapshot.killer_pass_target_for(attacker, &[runner]),
             None,
             "killer-pass selector should not force a threaded ball into teammate-occupied space"
+        );
+    }
+
+    #[test]
+    fn killer_pass_selector_prefers_single_goal_channel_runner_over_wide_outlet() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_248,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let channel_runner = 9;
+        let wide_runner = 7;
+        let keeper = 11;
+        let line_defenders = [13, 14];
+        park_players_except(
+            &mut sim,
+            &[
+                attacker,
+                channel_runner,
+                wide_runner,
+                keeper,
+                line_defenders[0],
+                line_defenders[1],
+            ],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 90.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 3.2);
+        sim.players[attacker].skills.passing_completion_rate = 9.3;
+        sim.players[attacker].skills.passing = 9.1;
+        sim.players[attacker].skills.vision = 9.5;
+        sim.players[channel_runner].role = PlayerRole::Forward;
+        sim.players[channel_runner].position = Vec2::new(42.0, 94.0);
+        sim.players[channel_runner].velocity = Vec2::new(0.0, 4.8);
+        sim.players[channel_runner].skills.shooting = 8.9;
+        sim.players[channel_runner].skills.first_touch = 8.7;
+        sim.players[channel_runner].skills.top_speed = 9.0;
+        sim.players[wide_runner].role = PlayerRole::Forward;
+        sim.players[wide_runner].position = Vec2::new(62.0, 94.0);
+        sim.players[wide_runner].velocity = Vec2::new(0.0, 4.8);
+        sim.players[wide_runner].skills.shooting = 8.9;
+        sim.players[wide_runner].skills.first_touch = 8.7;
+        sim.players[wide_runner].skills.top_speed = 9.0;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        for defender in line_defenders {
+            sim.players[defender].position = if defender == line_defenders[0] {
+                Vec2::new(19.0, 112.0)
+            } else {
+                Vec2::new(71.0, 112.0)
+            };
+            sim.players[defender].skills.defending = 8.8;
+            sim.players[defender].skills.defensive_tracking = 8.8;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let channel = snapshot
+            .killer_pass_target_assessment_for(attacker, &[channel_runner])
+            .expect("central runner should be a valid killer-pass target");
+        let wide = snapshot
+            .killer_pass_target_assessment_for(attacker, &[wide_runner])
+            .expect("wide runner should still be a valid forward target");
+
+        assert!(
+            channel.goal_channel_fit > wide.goal_channel_fit + 0.30,
+            "central receiver should have the stronger goal-channel fit: channel={channel:?} wide={wide:?}"
+        );
+        assert!(
+            channel.score > wide.score,
+            "goal-channel fit should let the true threaded receiver outrank a wide outlet: channel={channel:?} wide={wide:?}"
+        );
+        assert_eq!(
+            snapshot.killer_pass_target_for(attacker, &[wide_runner, channel_runner]),
+            Some(channel_runner),
+            "selector should choose the single threaded ball toward goal, even when a wide outlet is listed first"
         );
     }
 

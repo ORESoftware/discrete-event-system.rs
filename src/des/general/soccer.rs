@@ -59495,6 +59495,45 @@ mod tests {
     }
 
     #[test]
+    fn summary_only_autonomous_match_records_pass_liveness_without_frames() {
+        let summary = run_simulation_summary(MatchConfig {
+            duration_seconds: 20.0,
+            learning_enabled: false,
+            learning_logging_enabled: false,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: false,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            max_human_players: 0,
+            seed: 22_901,
+            ..MatchConfig::default()
+        });
+        let stats = &summary.summary.stats;
+        let attempted_passes = stats
+            .passes_attempted_home
+            .saturating_add(stats.passes_attempted_away);
+        let completed_passes = stats
+            .passes_completed_home
+            .saturating_add(stats.passes_completed_away);
+
+        assert_eq!(summary.summary.ticks, 200);
+        assert_eq!(summary.step_timing.ticks, 200);
+        assert_eq!(summary.controller_yield.skipped_no_assignment, 200);
+        assert!(
+            attempted_passes >= 2,
+            "summary-only autonomous match should still record real pass attempts, got {attempted_passes}; stats={stats:?}"
+        );
+        assert!(
+            completed_passes >= 1,
+            "summary-only autonomous match should still record completed passes, got {completed_passes}; stats={stats:?}"
+        );
+        assert!(
+            completed_passes <= attempted_passes,
+            "completed passes cannot exceed attempts in summary-only runs: completed={completed_passes} attempted={attempted_passes}; stats={stats:?}"
+        );
+    }
+
+    #[test]
     fn autonomous_match_generates_shot_attempts_without_human_input() {
         let trace = run_simulation(
             MatchConfig {

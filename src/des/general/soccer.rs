@@ -87157,6 +87157,29 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(rich.ball.position, light.ball.position);
         assert_eq!(rich.players.len(), light.players.len());
         assert_eq!(
+            light.shared_positions.latest.len(),
+            SOCCER_MATCH_PLAYER_COUNT
+        );
+        assert_eq!(
+            light.shared_positions.official_latest.len(),
+            SOCCER_MATCH_OFFICIAL_COUNT
+        );
+        assert!(light.shared_positions.ball_latest.is_some());
+        assert!(light.shared_positions.histories.is_empty());
+        assert!(light.shared_positions.official_histories.is_empty());
+        assert!(light.shared_positions.ball_history.is_empty());
+        for player in &light.players {
+            let sample = light
+                .shared_positions
+                .latest_for(player.id)
+                .expect("light snapshot should keep latest player x/y");
+            assert!(
+                sample.position.distance(player.position) < SOCCER_PHYSICS_FRAME_EPSILON_YARDS,
+                "light snapshot shared player position should match authoritative player {}",
+                player.id
+            );
+        }
+        assert_eq!(
             rich.defensive_assignment_for(defender, defender_home, false),
             light.defensive_assignment_for(defender, defender_home, false)
         );

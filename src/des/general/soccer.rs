@@ -75974,6 +75974,48 @@ mod tests {
     }
 
     #[test]
+    fn tracking_dataset_imported_transitions_preserve_pomdp_beliefs() {
+        let tracking = sample_tracking_pass_dataset();
+        let dataset = tracking.to_learning_dataset().expect("tracking conversion");
+        let passer = dataset
+            .transitions
+            .iter()
+            .find(|transition| transition.player_id == 0 && transition.action == "pass")
+            .expect("passer transition");
+        let expected_belief = belief_from_observation(&passer.observation);
+
+        assert!(passer.observation.has_ball);
+        assert!(passer.observation.visible_ball);
+        assert!(
+            passer.observation.player_grid.fine.id > 0,
+            "tracking import should expose the player's decision grid"
+        );
+        assert!(
+            passer.observation.visible_pass_options > 0,
+            "tracking import should expose pass options to the POMDP observation"
+        );
+        assert!(
+            (passer.belief.possession_confidence - expected_belief.possession_confidence).abs()
+                < 1e-12
+        );
+        assert!((passer.belief.pressure - expected_belief.pressure).abs() < 1e-12);
+        assert!((passer.belief.pass_lane_open - expected_belief.pass_lane_open).abs() < 1e-12);
+        assert!((passer.belief.shot_quality - expected_belief.shot_quality).abs() < 1e-12);
+        assert!(
+            passer.belief.possession_confidence >= 0.95,
+            "ballholder belief should preserve high possession confidence"
+        );
+        assert!(
+            passer.belief.pass_lane_open > 0.0,
+            "tracking pass should produce a nonzero pass-lane belief"
+        );
+        assert!(
+            passer.belief.shot_quality.is_finite(),
+            "tracking-derived belief fields must remain finite"
+        );
+    }
+
+    #[test]
     fn tracking_dataset_rejects_invalid_detector_confidence() {
         let mut tracking = sample_tracking_pass_dataset();
         tracking.frames[0].ball_confidence = Some(1.4);

@@ -6845,6 +6845,8 @@ impl PlayerAgent {
             .killer_pass_goal_pressure
             .max(killer_pass_goal_pressure_score(observation))
             .clamp(0.0, 1.0);
+        let single_thread_goal_pressure =
+            single_pass_goal_thread_pressure_score(observation).clamp(0.0, 1.0);
         let threaded_goal_receiver_available = observation.threaded_goal_pass_available;
         let killer_pass_legal = pass_target_count > 0
             && observation.visible_forward_pass_options > 0
@@ -6866,6 +6868,7 @@ impl PlayerAgent {
             * (1.0
                 + killer_pass_range_fit * 1.05
                 + killer_pass_goal_pressure * 1.22
+                + single_thread_goal_pressure * 0.92
                 + goal_attack * 0.42)
             * (1.0 + offensive_urgency * 0.42)
             * (1.0 + decisive_goal_pressure * 0.72)
@@ -6873,7 +6876,7 @@ impl PlayerAgent {
             * floor_pass_patience_multiplier
             * hold_release_multiplier
             * pressured_release_multiplier(observation))
-        .clamp(0.01, 1.48);
+        .clamp(0.01, 1.68);
         options.push(AgentActionOptionTrace::new(
             "killer-pass",
             killer_pass_score,
@@ -7039,13 +7042,22 @@ impl PlayerAgent {
                 (0.10
                     + decisive_goal_pressure * 0.42
                     + threaded_lane_fit * 0.16
-                    + close_threaded_goal_fit * 0.10)
-                    .clamp(0.0, 0.78),
+                    + close_threaded_goal_fit * 0.10
+                    + single_thread_goal_pressure * 0.14)
+                    .clamp(0.0, 0.84),
             );
             ensure_min_legal_option_probability(&mut options, "killer-pass", killer_floor);
         }
         if decisive_goal_pressure >= 0.12 && (shot_legal || killer_pass_legal) {
-            let recycle_multiplier = (1.0 - decisive_goal_pressure * 0.74).clamp(0.25, 1.0);
+            let recycle_multiplier = (1.0
+                - decisive_goal_pressure * 0.74
+                - if killer_pass_legal {
+                    single_thread_goal_pressure * 0.20
+                } else {
+                    0.0
+                }
+                - goal_attack * 0.10)
+                .clamp(0.16, 1.0);
             for label in [
                 "pass1",
                 "pass2",
@@ -32112,11 +32124,13 @@ pub struct SoccerDecisionModelContract {
     pub killer_pass_probability_ramps_toward_goal: bool,
     pub killer_pass_max_yards_to_goal: f64,
     pub single_threaded_killer_pass_enabled: bool,
+    pub single_pass_goal_thread_pressure_enabled: bool,
     pub threaded_goal_pass_can_override_forced_shot: bool,
     pub decisive_goal_action_pressure_enabled: bool,
     pub decisive_goal_action_probability_ramps_toward_goal: bool,
     pub near_goal_decision_prioritizes_shot_or_killer_pass: bool,
     pub generic_recycling_damped_by_decisive_goal_pressure: bool,
+    pub ordinary_pass_recycling_damped_by_goal_thread_pressure: bool,
     pub near_goal_recycling_dampening_enabled: bool,
     pub forward_progress_bias_enabled: bool,
     pub player_skill_profile_enabled: bool,
@@ -32711,11 +32725,13 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         killer_pass_probability_ramps_toward_goal: true,
         killer_pass_max_yards_to_goal: KILLER_PASS_MAX_YARDS_TO_GOAL,
         single_threaded_killer_pass_enabled: true,
+        single_pass_goal_thread_pressure_enabled: true,
         threaded_goal_pass_can_override_forced_shot: true,
         decisive_goal_action_pressure_enabled: true,
         decisive_goal_action_probability_ramps_toward_goal: true,
         near_goal_decision_prioritizes_shot_or_killer_pass: true,
         generic_recycling_damped_by_decisive_goal_pressure: true,
+        ordinary_pass_recycling_damped_by_goal_thread_pressure: true,
         near_goal_recycling_dampening_enabled: true,
         forward_progress_bias_enabled: true,
         player_skill_profile_enabled: true,
@@ -52042,6 +52058,35 @@ fn killer_pass_goal_pressure_score(observation: &SoccerPomdpObservation) -> f64 
         .clamp(0.0, 1.0)
 }
 
+fn single_pass_goal_thread_pressure_score(observation: &SoccerPomdpObservation) -> f64 {
+    if !observation.threaded_goal_pass_available
+        || observation.visible_forward_pass_options == 0
+        || observation.yards_to_goal > KILLER_PASS_MAX_YARDS_TO_GOAL
+    {
+        return 0.0;
+    }
+    let range_fit = killer_pass_goal_range_fit(observation).powf(0.48);
+    let final_third_fit = ((42.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
+    let receiver_lane_fit = (observation
+        .best_forward_pass_receiver_openness
+        .clamp(0.0, 1.0)
+        * 0.36
+        + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
+        + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
+        .clamp(0.0, 1.0);
+    let blocked_shot_invitation = if observation.shot_lane_open {
+        ((observation.shot_block_probability.clamp(0.0, 1.0) - 0.24) / 0.56).clamp(0.0, 1.0)
+    } else {
+        0.78
+    };
+    (range_fit * 0.26
+        + final_third_fit * 0.22
+        + receiver_lane_fit * 0.36
+        + blocked_shot_invitation * 0.12
+        + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.04)
+        .clamp(0.0, 1.0)
+}
+
 fn killer_pass_goal_pressure_floor(observation: &SoccerPomdpObservation) -> f64 {
     let pressure = killer_pass_goal_pressure_score(observation);
     if pressure <= 0.0 {
@@ -52128,6 +52173,7 @@ fn near_goal_decisive_action_pressure_score(
         + observation.best_pass_stride_fit.clamp(0.0, 1.0) * 0.30
         + observation.floor_pass_lane_score.clamp(0.0, 1.0) * 0.34)
         .clamp(0.0, 1.0);
+    let single_thread_fit = single_pass_goal_thread_pressure_score(observation);
     let role_fit = match role {
         PlayerRole::Forward => 1.12,
         PlayerRole::Midfielder => 0.98,
@@ -52139,7 +52185,8 @@ fn near_goal_decisive_action_pressure_score(
         + final_third_fit * 0.22
         + shot_lane_fit.max(threaded_lane_fit) * 0.24
         + observation.goal_attack_window_score.clamp(0.0, 1.0) * 0.13
-        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.07)
+        + observation.offensive_urgency.clamp(0.0, 1.0) * 0.07
+        + single_thread_fit * 0.08)
         * role_fit)
         .clamp(0.0, 1.0)
 }
@@ -94176,6 +94223,117 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn single_threaded_goal_pass_pressure_preempts_recycling_near_goal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_242,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blockers = [13, 14, 15, 16];
+        park_players_except(
+            &mut sim,
+            &[
+                attacker,
+                runner,
+                keeper,
+                blockers[0],
+                blockers[1],
+                blockers[2],
+                blockers[3],
+            ],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 98.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.2);
+        sim.players[attacker].skills.passing_completion_rate = 9.3;
+        sim.players[attacker].skills.passing = 9.0;
+        sim.players[attacker].skills.vision = 9.6;
+        sim.players[attacker].skills.shooting = 7.1;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.dribble_bias = 0.95;
+        sim.players[attacker].preferences.shoot_bias = 0.30;
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(56.0, 110.0);
+        sim.players[runner].velocity = Vec2::new(0.8, 6.2);
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        for (idx, blocker) in blockers.iter().copied().enumerate() {
+            sim.players[blocker].position = match idx {
+                0 => Vec2::new(40.0, 106.0),
+                1 => Vec2::new(34.0, 111.0),
+                2 => Vec2::new(47.0, 112.0),
+                _ => Vec2::new(40.0, 114.0),
+            };
+            sim.players[blocker].skills.defending = 9.8;
+            sim.players[blocker].skills.defensive_tracking = 9.8;
+            sim.players[blocker].skills.aggression = 9.0;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+        assert_eq!(
+            snapshot.killer_pass_target_for(attacker, &pass_targets),
+            Some(runner),
+            "runner should be the single threaded goal target: {pass_targets:?}"
+        );
+        assert!(
+            single_pass_goal_thread_pressure_score(&observation) >= 0.62,
+            "threaded goal pass pressure should be strong near goal: {observation:?}"
+        );
+
+        let options = sim.players[attacker].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            pass_targets.len(),
+            snapshot
+                .ranked_visible_aerial_pass_targets(attacker, 3)
+                .len(),
+            false,
+            sim.config.dt_seconds,
+            snapshot.field_width,
+        );
+        let option_probability = |label: &str| {
+            options
+                .iter()
+                .find(|option| option.label == label && option.legal)
+                .map(|option| option.probability)
+                .unwrap_or(0.0)
+        };
+        let decisive = option_probability("shoot") + option_probability("killer-pass");
+        let recycle = option_probability("pass1")
+            + option_probability("pass2")
+            + option_probability("pass3")
+            + option_probability("aerial-pass1")
+            + option_probability("dribble")
+            + option_probability("carry-forward");
+        let killer = option_probability("killer-pass");
+        let pass1 = option_probability("pass1");
+        assert!(
+            killer >= 0.46,
+            "single threaded pass should have a strong near-goal floor: killer={killer} options={options:?}"
+        );
+        assert!(
+            decisive > recycle,
+            "near-goal policy should prefer shoot/killer-pass over recycling: decisive={decisive} recycle={recycle} options={options:?}"
+        );
+        assert!(
+            killer > pass1 * 2.6,
+            "threaded goal pass should swamp ordinary pass1: killer={killer} pass1={pass1} options={options:?}"
+        );
+    }
+
+    #[test]
     fn threaded_goal_lane_can_override_forced_shot_gate() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -94895,11 +95053,16 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             KILLER_PASS_MAX_YARDS_TO_GOAL
         );
         assert_eq!(model["singleThreadedKillerPassEnabled"], true);
+        assert_eq!(model["singlePassGoalThreadPressureEnabled"], true);
         assert_eq!(model["threadedGoalPassCanOverrideForcedShot"], true);
         assert_eq!(model["decisiveGoalActionPressureEnabled"], true);
         assert_eq!(model["decisiveGoalActionProbabilityRampsTowardGoal"], true);
         assert_eq!(model["nearGoalDecisionPrioritizesShotOrKillerPass"], true);
         assert_eq!(model["genericRecyclingDampedByDecisiveGoalPressure"], true);
+        assert_eq!(
+            model["ordinaryPassRecyclingDampedByGoalThreadPressure"],
+            true
+        );
         assert_eq!(model["nearGoalRecyclingDampeningEnabled"], true);
         assert_eq!(model["forwardProgressBiasEnabled"], true);
         assert_eq!(model["playerSkillProfileEnabled"], true);

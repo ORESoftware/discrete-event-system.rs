@@ -7320,11 +7320,7 @@ impl PlayerAgent {
                 + offensive_urgency * 0.06
                 + goal_attack * 0.05)
                 .clamp(0.0, 0.54);
-            ensure_min_legal_option_probability(
-                &mut options,
-                "carry-forward",
-                progression_floor,
-            );
+            ensure_min_legal_option_probability(&mut options, "carry-forward", progression_floor);
         }
         if decisive_goal_pressure >= 0.12 && (shot_legal || killer_pass_legal) {
             let recycle_multiplier = (1.0
@@ -7381,32 +7377,6 @@ impl PlayerAgent {
                 decisive_family_floor,
             );
         }
-<<<<<<< HEAD
-=======
-        if carry_forward_legal
-            && !goal_attack_shot_required
-            && observation.yards_to_goal < observation.yards_to_own_goal
-            && observation.yards_to_goal <= 58.0
-            && observation.forward_dribble_space_yards >= 3.0
-            && release_pressure < 0.50
-        {
-            let final_third_ramp = ((58.0 - observation.yards_to_goal) / 24.0).clamp(0.0, 1.0);
-            let grass_fit = (observation.forward_dribble_space_yards / 14.0).clamp(0.0, 1.0);
-            let role_floor = match self.role {
-                PlayerRole::Forward => 0.30,
-                PlayerRole::Midfielder => 0.24,
-                PlayerRole::Defender => 0.14,
-                PlayerRole::Goalkeeper => 0.0,
-            };
-            let progression_floor = (role_floor
-                + final_third_ramp * 0.12
-                + grass_fit * 0.10
-                + offensive_urgency * 0.06
-                + goal_attack * 0.05)
-                .clamp(0.0, 0.54);
-            ensure_min_legal_option_probability(&mut options, "carry-forward", progression_floor);
-        }
->>>>>>> 70a0b1233bf9f11f30d245e199b94f9fe19bc92f
         let mut options = normalize_action_options(options);
         annotate_tick_probabilities_from_scores(&mut options, dt_seconds);
         options
@@ -28067,6 +28037,8 @@ pub struct SoccerPlaybackPlayerFrame {
     pub position: Vec2,
     pub velocity: Vec2,
     #[serde(default)]
+    pub skill_bands: String,
+    #[serde(default)]
     pub player_grid: SoccerPlaybackPlayerGridFrame,
     #[serde(default)]
     pub movement_gait: MovementGait,
@@ -28090,6 +28062,34 @@ pub struct SoccerPlaybackPlayerFrame {
     pub action_tick_probability: f64,
     #[serde(default)]
     pub considered_actions: usize,
+}
+
+fn soccer_playback_skill_band(value: f64) -> u8 {
+    if value.is_finite() {
+        value.round().clamp(1.0, 10.0) as u8
+    } else {
+        0
+    }
+}
+
+fn soccer_playback_skill_bands(skills: &SkillProfile) -> String {
+    [
+        soccer_playback_skill_band(skills.top_speed),
+        soccer_playback_skill_band(skills.acceleration),
+        soccer_playback_skill_band(skills.strength),
+        soccer_playback_skill_band(skills.shooting),
+        soccer_playback_skill_band(skills.passing_completion_rate.max(skills.passing)),
+        soccer_playback_skill_band(skills.dribbling),
+        soccer_playback_skill_band(skills.defending.max(skills.defensive_tracking)),
+        soccer_playback_skill_band(skills.goalkeeping),
+    ]
+    .into_iter()
+    .map(|band| {
+        std::char::from_digit(u32::from(band), 36)
+            .unwrap_or('0')
+            .to_ascii_uppercase()
+    })
+    .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -29019,6 +29019,7 @@ impl SoccerPlaybackFrame {
                         shirt: player.shirt,
                         position: player.position,
                         velocity: player.velocity,
+                        skill_bands: soccer_playback_skill_bands(&player.skills),
                         player_grid: playback_player_grid_frame(pitch_grid_address(
                             player.position,
                             sim.config.field_width_yards,
@@ -29188,6 +29189,7 @@ impl From<&MatchFrame> for SoccerPlaybackFrame {
                         shirt: player.shirt,
                         position: player.position,
                         velocity: player.velocity,
+                        skill_bands: soccer_playback_skill_bands(&player.skills),
                         player_grid: playback_player_grid_frame(pitch_grid_address(
                             player.position,
                             DEFAULT_FIELD_WIDTH_YARDS,
@@ -76551,10 +76553,7 @@ mod tests {
             &mut mulberry32(15015),
         );
 
-        let decision = player
-            .last_decision
-            .as_ref()
-            .expect("player decision");
+        let decision = player.last_decision.as_ref().expect("player decision");
         assert_eq!(decision.action, "pass");
         assert_eq!(decision.operation_order[0], "learned-policy");
         assert!(matches!(
@@ -104272,6 +104271,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains(
             "P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)} C${compactConsidered}"
         ));
+        assert!(html.contains("function selectedPlayerSkillBandLabel"));
+        assert!(html.contains("p?.skillBands"));
+        assert!(html.contains("typeof skills === \"string\""));
+        assert!(html.contains("Array.isArray(skills)"));
+        assert!(html.contains("Sk Sp${speed}/Ac${acceleration}/Sh${shooting}/Pa${passing}/Dr${dribbling}/Df${defending}"));
         assert!(html.contains("function pitchGridAddressFromPosition"));
         assert!(html.contains("function gridAddressForPlayer"));
         assert!(html.contains("function selectedPlayerGridFacingLabel"));
@@ -106065,19 +106069,6 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(meta["tacticalLiveness"]["openSpaceSupportOk"], true);
         assert_eq!(meta["tacticalLiveness"]["goalwardProgressOk"], true);
-<<<<<<< HEAD
-        let agent_accounting_frames = meta["tacticalLiveness"]["agentAccountingFrames"]
-            .as_u64()
-            .expect("agent accounting frames");
-        let agent_accounting_ok_frames = meta["tacticalLiveness"]["agentAccountingOkFrames"]
-            .as_u64()
-            .expect("agent accounting ok frames");
-        assert_eq!(agent_accounting_frames, 6001);
-        assert!(
-            agent_accounting_ok_frames > 0 && agent_accounting_ok_frames <= agent_accounting_frames,
-            "default trace should report bounded agent accounting coverage, got {agent_accounting_ok_frames}/{agent_accounting_frames}"
-        );
-=======
         assert!(
             meta["tacticalLiveness"]["playerGaitSamples"]
                 .as_u64()
@@ -106107,9 +106098,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             "default 10-minute trace should include backward defensive movement"
         );
         assert_eq!(meta["tacticalLiveness"]["movementGaitVarietyOk"], true);
-        assert_eq!(meta["tacticalLiveness"]["agentAccountingFrames"], 6001);
-        assert_eq!(meta["tacticalLiveness"]["agentAccountingOkFrames"], 6001);
->>>>>>> 70a0b1233bf9f11f30d245e199b94f9fe19bc92f
+        let agent_accounting_frames = meta["tacticalLiveness"]["agentAccountingFrames"]
+            .as_u64()
+            .expect("agent accounting frames");
+        let agent_accounting_ok_frames = meta["tacticalLiveness"]["agentAccountingOkFrames"]
+            .as_u64()
+            .expect("agent accounting ok frames");
+        assert_eq!(agent_accounting_frames, 6001);
+        assert_eq!(
+            agent_accounting_ok_frames, agent_accounting_frames,
+            "default trace should report complete agent accounting coverage"
+        );
         assert_eq!(meta["tacticalLiveness"]["fullRosterFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["completeScheduleFrames"], 6001);
         assert_eq!(meta["tacticalLiveness"]["centralBrainDecisionFrames"], 6000);
@@ -106681,6 +106680,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_frame["players"][0].get("position").is_some());
         assert!(first_frame["players"][0].get("shirt").is_some());
         assert!(first_frame["players"][0].get("movementGait").is_some());
+        let skill_bands = first_frame["players"][0]["skillBands"]
+            .as_str()
+            .expect("compact playback skill bands");
+        assert_eq!(skill_bands.len(), 8);
+        let speed = u8::from_str_radix(&skill_bands[0..1], 36).expect("speed skill band");
+        let shooting = u8::from_str_radix(&skill_bands[3..4], 36).expect("shooting skill band");
+        assert!(speed > 0 && speed <= 10);
+        assert!(shooting > 0 && shooting <= 10);
         assert!(first_frame["ball"].get("velocity").is_some());
         assert!(first_frame["ball"].get("altitudeYards").is_some());
         assert!(first_frame["homeDirective"]

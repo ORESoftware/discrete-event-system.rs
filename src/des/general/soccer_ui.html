@@ -1431,6 +1431,19 @@ function selectedPlayerDecisionProbabilityLabel(p) {
   const tickProbability = Number(selected?.tickProbability ?? actionProbability);
   return ` P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)} C${legal.length}`;
 }
+function selectedPlayerSkillBandLabel(p) {
+  const skills = p?.skillBands || {};
+  const compactBand = index => parseInt(String(skills || "").charAt(index) || "0", 36) || 0;
+  const band = (name, index) => Number(typeof skills === "string" ? compactBand(index) : Array.isArray(skills) ? skills[index] : skills[name] ?? 0);
+  const speed = band("speed", 0);
+  const acceleration = band("acceleration", 1);
+  const shooting = band("shooting", 3);
+  const passing = band("passing", 4);
+  const dribbling = band("dribbling", 5);
+  const defending = band("defending", 6);
+  if (![speed, acceleration, shooting, passing, dribbling, defending].some(v => v > 0)) return "";
+  return `Sk Sp${speed}/Ac${acceleration}/Sh${shooting}/Pa${passing}/Dr${dribbling}/Df${defending}`;
+}
 function pitchGridAddressFromPosition(position) {
   const config = trace.config || FALLBACK_CONFIG;
   const fieldWidth = Math.max(1, Number(config.fieldWidthYards || 80));
@@ -2533,7 +2546,8 @@ function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
   const ops = operationOrderLabel(p?.lastDecision?.operationOrder || p?.operationOrder, 2);
   const probability = selectedPlayerDecisionProbabilityLabel(p);
   const gridFacing = selectedPlayerGridFacingLabel(p);
-  const agentTrace = action ? `${action}${schedule}${probability} ${gridFacing}${ops ? ` ${ops}` : ""}` : gridFacing;
+  const skillBands = selectedPlayerSkillBandLabel(p);
+  const agentTrace = action ? `${action}${schedule}${probability} ${gridFacing}${skillBands ? ` ${skillBands}` : ""}${ops ? ` ${ops}` : ""}` : `${gridFacing}${skillBands ? ` ${skillBands}` : ""}`;
   if (!observation) return agentTrace || "-";
   const keeperLine = Number(observation.goalkeeperBallGoalLineAlignmentScore ?? 0);
   const breakThreat = Number(observation.defensiveLineBreakThreat ?? 0);

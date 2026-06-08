@@ -28393,6 +28393,8 @@ pub struct SoccerPlaybackIntentFrame {
     #[serde(default)]
     pub yards_to_goal: f64,
     #[serde(default)]
+    pub open_support_outlets: usize,
+    #[serde(default)]
     pub goal_attack_window_score: f64,
     #[serde(default)]
     pub killer_pass_goal_pressure: f64,
@@ -28631,6 +28633,7 @@ where
             action_tick_probability,
             considered_actions,
             yards_to_goal: decision.observation.yards_to_goal,
+            open_support_outlets: decision.observation.open_support_outlets,
             goal_attack_window_score: decision.observation.goal_attack_window_score,
             killer_pass_goal_pressure: decision
                 .observation
@@ -102851,6 +102854,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("decisiveGoalActionPressure"));
         assert!(html.contains("killerPassGoalPressure"));
         assert!(html.contains("singleThreadGoalPressure"));
+        assert!(html.contains("openSupportOutlets"));
+        assert!(html.contains("openSupport=${Number(observation.openSupportOutlets"));
         assert!(html.contains("function liveIntentTitle"));
         assert!(html.contains("actionIntent.title = liveIntentTitle(primaryIntent(f))"));
         assert!(
@@ -102861,7 +102866,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         ));
         assert!(html.contains("targetOpenSpaceScore"));
         assert!(html.contains("targetTeammateOccupiedSpacePressure"));
-        assert!(html.contains("S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}"));
+        assert!(html.contains(
+            "O${outlets.toFixed(0)} S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}"
+        ));
         assert!(
             html.contains("supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled}")
         );
@@ -104619,8 +104626,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("threadedGoalPassReceiverOpenness"));
         assert!(html.contains("threadedGoalPassExpectedCompletion"));
         assert!(html.contains("threadedGoalPassStrideFit"));
+        assert!(html.contains("openSupportOutlets"));
         assert!(html.contains("label: \"KPass\""));
+        assert!(html.contains("OS${Number(o.openSupportOutlets"));
         assert!(html.contains(" KG${Number(intent.threadedGoalPassGoalGainYards"));
+        assert!(html.contains("openSupportOutlets=${Number(intent.openSupportOutlets"));
+        assert!(html.contains(" O${outlets.toFixed(0)}"));
         assert!(html.contains("function flankLaneTargetsForDirective"));
         assert!(html.contains("function drawFlankPolicyLanes"));
         assert!(html.contains("drawFlankPolicyLanes(r)"));
@@ -105116,6 +105127,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_intent.get("actionProbability").is_some());
         assert!(first_intent.get("actionTickProbability").is_some());
         assert!(first_intent.get("yardsToGoal").is_some());
+        assert!(first_intent.get("openSupportOutlets").is_some());
         assert!(first_intent.get("goalAttackWindowScore").is_some());
         assert!(first_intent.get("killerPassGoalPressure").is_some());
         assert!(first_intent.get("singleThreadGoalPressure").is_some());

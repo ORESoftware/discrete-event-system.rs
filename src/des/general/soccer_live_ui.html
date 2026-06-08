@@ -1328,6 +1328,7 @@ function liveIntentCandidates(frame = state?.frame) {
           targetPlayer: intent.targetPlayer ?? null,
           urgency: clamp(Number(intent.urgency ?? 0), 0, 1),
           yardsToGoal: Number(intent.yardsToGoal ?? NaN),
+          openSupportOutlets: Number(intent.openSupportOutlets ?? 0),
           goalAttackWindowScore: clamp(Number(intent.goalAttackWindowScore ?? 0), 0, 1),
           killerPassGoalPressure: clamp(Number(intent.killerPassGoalPressure ?? 0), 0, 1),
           singleThreadGoalPressure: clamp(Number(intent.singleThreadGoalPressure ?? 0), 0, 1),
@@ -1372,6 +1373,7 @@ function liveIntentCandidates(frame = state?.frame) {
         targetPlayer: target.playerId,
         urgency,
         yardsToGoal: Number(decision?.observation?.yardsToGoal ?? NaN),
+        openSupportOutlets: Number(decision?.observation?.openSupportOutlets ?? 0),
         goalAttackWindowScore: clamp(Number(decision?.observation?.goalAttackWindowScore ?? 0), 0, 1),
         killerPassGoalPressure: clamp(Number(decision?.observation?.killerPassGoalPressure ?? 0), 0, 1),
         singleThreadGoalPressure: clamp(Number(decision?.observation?.singleThreadGoalPressure ?? 0), 0, 1),
@@ -1407,6 +1409,7 @@ function liveIntentLabel(intent = primaryLiveIntent()) {
   const pressure = Number(intent.decisiveGoalActionPressure ?? 0);
   const killer = Number(intent.killerPassGoalPressure ?? 0);
   const single = Number(intent.singleThreadGoalPressure ?? 0);
+  const outlets = Number(intent.openSupportOutlets ?? 0);
   const space = Number(intent.targetOpenSpaceScore ?? 0);
   const teammatePressure = Number(intent.targetTeammateOccupiedSpacePressure ?? 0);
   const lane = intent.threadedGoalPassAvailable ? " KP" : intent.shotLaneOpen ? " lane" : "";
@@ -1416,8 +1419,8 @@ function liveIntentLabel(intent = primaryLiveIntent()) {
   const decisive = pressure > 0.01 || killer > 0.01
     ? ` D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}`
     : "";
-  const targetSpace = space > 0 || teammatePressure > 0.01
-    ? ` S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`
+  const targetSpace = space > 0 || teammatePressure > 0.01 || outlets > 0
+    ? ` O${outlets.toFixed(0)} S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`
     : "";
   return `${intent.player.id} ${action}${flight} U${Number(intent.urgency ?? 0).toFixed(2)}${goal}${decisive}${killerQuality}${targetSpace}${lane}`;
 }
@@ -1428,6 +1431,7 @@ function liveIntentTitle(intent = primaryLiveIntent()) {
     `action=${intent.action}`,
     `urgency=${Number(intent.urgency ?? 0).toFixed(3)}`,
     `yardsToGoal=${Number.isFinite(Number(intent.yardsToGoal)) ? Number(intent.yardsToGoal).toFixed(2) : "-"}`,
+    `openSupportOutlets=${Number(intent.openSupportOutlets ?? 0).toFixed(0)}`,
     `goalAttackWindow=${Number(intent.goalAttackWindowScore ?? 0).toFixed(3)}`,
     `decisiveGoalActionPressure=${Number(intent.decisiveGoalActionPressure ?? 0).toFixed(3)}`,
     `killerPassGoalPressure=${Number(intent.killerPassGoalPressure ?? 0).toFixed(3)}`,
@@ -2210,7 +2214,7 @@ function decisionTelemetryItems(d) {
     {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Dribble", value: `${Number(o.forwardDribbleSpaceYards ?? 0).toFixed(1)}y`, score: Number(o.forwardDribbleSpaceYards ?? 0), min: 0, max: 24},
     {label: "Shape", value: `TC${Number(o.teamCentroidToBallYards ?? 0).toFixed(0)} W${Number(o.teamSpreadYards ?? 0).toFixed(0)} NB${Number(o.teamPlayersNearBall ?? 0)} FV${Number(o.teamForwardVelocityYps ?? 0).toFixed(1)}`, score: Number(o.teamPlayersNearBall ?? 0), min: 0, max: 5},
-    {label: "Passes", value: `${Number(o.visiblePassOptions ?? 0)}F ${Number(o.visibleAerialPassOptions ?? 0)}A`},
+    {label: "Passes", value: `${Number(o.visiblePassOptions ?? 0)}F ${Number(o.visibleAerialPassOptions ?? 0)}A OS${Number(o.openSupportOutlets ?? 0)}`},
     {label: "PassQ", value: `C${Number(o.expectedPassCompletion ?? 0).toFixed(2)} O${Number(o.bestPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedPassCompletion ?? 0), min: 0, max: 1},
     {label: "AirQ", value: `C${Number(o.expectedAerialPassCompletion ?? 0).toFixed(2)} O${Number(o.bestAerialPassReceiverOpenness ?? 0).toFixed(2)}`, score: Number(o.expectedAerialPassCompletion ?? 0), min: 0, max: 1},
     {label: "Aerial", value: `B${Number(o.aerialPassBypassScore ?? 0).toFixed(2)} R${Number(o.aerialPassInterceptionRisk ?? 0).toFixed(2)}`, score: Number(o.aerialPassBypassScore ?? 0) - Number(o.aerialPassInterceptionRisk ?? 0) + 1, min: 0, max: 2},

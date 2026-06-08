@@ -1377,13 +1377,15 @@ function liveIntentTitle(decision) {
   const pressure = Number(decision.decisiveGoalActionPressure ?? 0);
   const killer = Number(decision.killerPassGoalPressure ?? 0);
   const single = Number(decision.singleThreadGoalPressure ?? 0);
+  const outlets = Number(decision.openSupportOutlets ?? 0);
   const space = Number(decision.targetOpenSpaceScore ?? 0);
   const teammatePressure = Number(decision.targetTeammateOccupiedSpacePressure ?? 0);
   const parts = [
     `action=${String(decision.action || "move")}`,
     `player=${Number(decision.playerId ?? 0)}`,
     `D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}`,
-    `S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`,
+    `O${outlets.toFixed(0)} S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`,
+    `openSupportOutlets=${outlets.toFixed(0)}`,
     `targetOpenSpaceScore=${space.toFixed(2)}`,
     `targetTeammateOccupiedSpacePressure=${teammatePressure.toFixed(2)}`,
     `singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled}`,
@@ -1509,7 +1511,7 @@ function selectedPlayerPomdpLabel(p = selectedPlayerSnapshot()) {
   const duel = observation.looseBallFiftyFifty ? " 50:50" : "";
   const goal = `G${compactYards(observation.yardsToGoal)}`;
   const pressure = `P${compactNumber(observation.perceivedPressure)} U${compactNumber(observation.decisionUrgency)}`;
-  const pass = `F${Number(observation.visibleForwardPassOptions ?? 0)}/${Number(observation.visiblePassOptions ?? 0)} C${compactNumber(observation.expectedPassCompletion)}`;
+  const pass = `F${Number(observation.visibleForwardPassOptions ?? 0)}/${Number(observation.visiblePassOptions ?? 0)} O${Number(observation.openSupportOutlets ?? 0)} C${compactNumber(observation.expectedPassCompletion)}`;
   const shot = `S${observation.shotLaneOpen ? "O" : "B"} ${compactNumber(observation.shotBeatGoalkeeperProbability)}`;
   return `${ballState}${duel} ${goal} ${pressure} ${pass} ${shot}`;
 }
@@ -1527,7 +1529,7 @@ function selectedPlayerPomdpTitle(p = selectedPlayerSnapshot()) {
     `State: phase=${String(state.phase || "-")} possession=${String(state.possessionTeam ?? "-")} grid=${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0} facing=${String(observation.receiveFacing || state.receiveFacing || "Unknown")}->${String(observation.actionFacing || state.actionFacing || "Unknown")}`,
     `Goal: toGoal=${compactYards(observation.yardsToGoal)} ownGoal=${compactYards(observation.yardsToOwnGoal)} angle=${compactNumber(observation.opponentGoalAngleDegrees, 1)} forwardSpace=${compactYards(observation.forwardDribbleSpaceYards)}`,
     `Pressure: real=${compactNumber(observation.realPressure)} perceived=${compactNumber(observation.perceivedPressure)} urgency=${compactNumber(observation.decisionUrgency)} attack=${compactNumber(observation.offensiveUrgency)} defend=${compactNumber(observation.defensiveUrgency)}`,
-    `Pass: visible=${Number(observation.visiblePassOptions ?? 0)} forward=${Number(observation.visibleForwardPassOptions ?? 0)} aerial=${Number(observation.visibleAerialPassOptions ?? 0)} completion=${compactNumber(observation.expectedPassCompletion)} aerialCompletion=${compactNumber(observation.expectedAerialPassCompletion)} openness=${compactNumber(observation.bestForwardPassReceiverOpenness)} lane=${compactNumber(observation.floorPassLaneScore)} stride=${compactNumber(observation.bestPassStrideFit)}`,
+    `Pass: visible=${Number(observation.visiblePassOptions ?? 0)} forward=${Number(observation.visibleForwardPassOptions ?? 0)} aerial=${Number(observation.visibleAerialPassOptions ?? 0)} openSupport=${Number(observation.openSupportOutlets ?? 0)} completion=${compactNumber(observation.expectedPassCompletion)} aerialCompletion=${compactNumber(observation.expectedAerialPassCompletion)} openness=${compactNumber(observation.bestForwardPassReceiverOpenness)} lane=${compactNumber(observation.floorPassLaneScore)} stride=${compactNumber(observation.bestPassStrideFit)}`,
     `Shot: lane=${observation.shotLaneOpen ? "open" : "blocked"} block=${compactNumber(observation.shotBlockProbability)} onFrame=${compactNumber(observation.shotOnFrameProbability)} beatGK=${compactNumber(observation.shotBeatGoalkeeperProbability)} curl=${compactNumber(observation.shotCurlProbability)}`,
     `Loose: loose=${observation.looseBall ? "yes" : "no"} duel=${observation.looseBallFiftyFifty ? "yes" : "no"} timeToBall=${compactNumber(observation.looseBallPlayerTimeToBallSeconds)} advantage=${compactNumber(observation.looseBallTeamTimeAdvantageSeconds)}`,
   ];

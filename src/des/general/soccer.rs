@@ -1488,6 +1488,8 @@ pub struct SoccerPomdpObservation {
     #[serde(default)]
     pub visible_forward_pass_options: usize,
     #[serde(default)]
+    pub threaded_goal_pass_available: bool,
+    #[serde(default)]
     pub best_forward_pass_receiver_openness: f64,
     #[serde(default)]
     pub nearest_forward_teammate_distance_yards: f64,
@@ -6837,8 +6839,11 @@ impl PlayerAgent {
             .killer_pass_goal_pressure
             .max(killer_pass_goal_pressure_score(observation))
             .clamp(0.0, 1.0);
+        let threaded_goal_receiver_available =
+            observation.threaded_goal_pass_available || observation.killer_pass_goal_pressure > 0.0;
         let killer_pass_legal = pass_target_count > 0
             && observation.visible_forward_pass_options > 0
+            && threaded_goal_receiver_available
             && (!goal_attack_shot_required || threaded_goal_pass_overrides_shot)
             && observation.yards_to_goal <= KILLER_PASS_MAX_YARDS_TO_GOAL
             && observation.floor_pass_lane_score >= 0.20;
@@ -19295,6 +19300,7 @@ impl WorldSnapshot {
                 visible_aerial_pass_options: 0,
                 teammates_ahead: 0,
                 visible_forward_pass_options: 0,
+                threaded_goal_pass_available: false,
                 best_forward_pass_receiver_openness: 0.0,
                 nearest_forward_teammate_distance_yards: 0.0,
                 floor_pass_lane_score: 0.0,
@@ -19576,6 +19582,10 @@ impl WorldSnapshot {
         };
         let forward_support_context =
             self.forward_support_context_for(player_id, &visible_pass_targets);
+        let threaded_goal_pass_available = has_ball
+            && self
+                .killer_pass_target_for(player_id, &visible_pass_targets)
+                .is_some();
         let floor_pass_lane_score = if has_ball {
             floor_pass_lane_score_for_snapshot(self, me, me_position, &visible_pass_targets)
         } else {
@@ -20019,6 +20029,7 @@ impl WorldSnapshot {
             visible_aerial_pass_options: visible_aerial_pass_targets.len(),
             teammates_ahead: forward_support_context.teammates_ahead,
             visible_forward_pass_options: forward_support_context.visible_forward_pass_options,
+            threaded_goal_pass_available,
             best_forward_pass_receiver_openness: forward_support_context
                 .best_forward_pass_receiver_openness,
             nearest_forward_teammate_distance_yards: forward_support_context
@@ -20179,7 +20190,11 @@ impl WorldSnapshot {
             skill_defensive_tracking: me.skills.defensive_tracking,
             open_space_score: self.space_score_at(me_position, me.team),
         };
-        observation.killer_pass_goal_pressure = killer_pass_goal_pressure_score(&observation);
+        observation.killer_pass_goal_pressure = if observation.threaded_goal_pass_available {
+            killer_pass_goal_pressure_score(&observation)
+        } else {
+            0.0
+        };
         observation.decisive_goal_action_pressure =
             near_goal_decisive_action_pressure_score(&observation, me.role);
         let total_elapsed = observation_started.elapsed();
@@ -55886,6 +55901,83 @@ mod tests {
         assert!(
             killer.score > pass1.score,
             "killer-pass should outrank the generic pass when it threads toward goal: killer={killer:?} pass1={pass1:?}"
+        );
+    }
+
+    #[test]
+    fn forward_pass_aggregate_without_goal_receiver_does_not_become_killer_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_905,
+            ..Default::default()
+        });
+        let passer = 8;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].role = PlayerRole::Midfielder;
+        sim.players[passer].position = Vec2::new(40.0, 76.0);
+        sim.players[passer].velocity = Vec2::new(0.0, 2.0);
+        sim.players[passer].skills.passing_completion_rate = 9.2;
+        sim.players[passer].skills.passing = 9.0;
+        sim.players[passer].skills.vision = 9.4;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].position = Vec2::new(42.0, 76.8);
+        sim.players[receiver].velocity = Vec2::zero();
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let visible_targets = snapshot.ranked_visible_pass_targets(passer, 3);
+        assert!(
+            visible_targets.contains(&receiver),
+            "receiver should remain a visible ordinary outlet: {visible_targets:?}"
+        );
+        assert_eq!(
+            snapshot.killer_pass_target_for(passer, &visible_targets),
+            None,
+            "an ordinary outlet must not become a killer pass without a receiver route toward goal"
+        );
+        let mut observation = snapshot.observation_for(passer);
+        observation.shot_lane_open = false;
+        observation.shot_block_probability = 0.82;
+        observation.yards_to_goal = 31.0;
+        observation.goal_attack_window_score = 0.36;
+        observation.offensive_urgency = 0.44;
+        observation.visible_forward_pass_options = 1;
+        observation.best_forward_pass_receiver_openness =
+            observation.best_forward_pass_receiver_openness.max(0.72);
+        observation.best_pass_stride_fit = observation.best_pass_stride_fit.max(0.74);
+        observation.floor_pass_lane_score = observation.floor_pass_lane_score.max(0.66);
+
+        let options = sim.players[passer].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            visible_targets.len(),
+            snapshot.ranked_visible_aerial_pass_targets(passer, 3).len(),
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let killer = options
+            .iter()
+            .find(|option| option.label == "killer-pass")
+            .expect("killer pass option");
+        let pass1 = options
+            .iter()
+            .find(|option| option.label == "pass1")
+            .expect("generic pass option");
+        assert!(
+            !observation.threaded_goal_pass_available && observation.killer_pass_goal_pressure == 0.0,
+            "observation should not expose killer-pass pressure without a true threaded goal receiver: {observation:?}"
+        );
+        assert!(
+            !killer.legal && killer.probability == 0.0,
+            "ordinary forward support should not get the killer-pass probability floor: killer={killer:?} pass1={pass1:?}"
+        );
+        assert!(
+            pass1.legal && pass1.probability > 0.0,
+            "generic pass should remain available even when killer-pass is not: pass1={pass1:?}"
         );
     }
 

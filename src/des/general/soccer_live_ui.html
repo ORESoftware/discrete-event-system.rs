@@ -2166,14 +2166,57 @@ function agentEnergyLabel(p) {
   const available = clamp((stamina / 10) * (1 - fatigue * 0.42), 0, 1);
   return `S${stamina.toFixed(2)} F${fatigue.toFixed(2)} A${available.toFixed(2)}`;
 }
+const COMPACT_SKILL_BAND_KEYS = [
+  ["speed", "Speed"],
+  ["acceleration", "Accel"],
+  ["strength", "Strength"],
+  ["shooting", "Shot"],
+  ["passing", "Pass"],
+  ["dribbling", "Dribble"],
+  ["defending", "Defend"],
+  ["goalkeeping", "Goal"],
+];
+function compactSkillBandValue(skillBands, key, index) {
+  if (typeof skillBands === "string") {
+    return parseInt(skillBands.charAt(index) || "0", 36) || 0;
+  }
+  if (Array.isArray(skillBands)) return Number(skillBands[index] || 0);
+  if (skillBands && typeof skillBands === "object") return Number(skillBands[key] || 0);
+  return 0;
+}
+function compactSkillBandValues(p) {
+  const bands = p?.skillBands;
+  return COMPACT_SKILL_BAND_KEYS.map(([key], index) => clamp(compactSkillBandValue(bands, key, index), 0, 10));
+}
+function compactSkillBandLabel(p) {
+  const values = compactSkillBandValues(p);
+  if (!values.some(value => value > 0)) return "";
+  return `B${values.map(value => value.toFixed(0)).join("/")}`;
+}
+function hasFullSkillProfile(skills) {
+  return !!skills && typeof skills === "object" && !Array.isArray(skills) && Object.keys(skills).length > 0;
+}
 function agentSkillLabel(p) {
   const s = p.skills || {};
+  const compact = compactSkillBandLabel(p);
+  if (!hasFullSkillProfile(p.skills)) return compact || "-";
   const weight = Number(s.weightPounds ?? s.weightLbs ?? 0);
   const weightLabel = weight > 0 ? ` Wt${weight.toFixed(0)}` : "";
-  return `Sp${scoreText(s, "topSpeed", "topSpeedYps")} Ac${scoreText(s, "acceleration", "accelerationYps2")} Sh${scoreText(s, "shooting")} Pa${scoreText(s, "passingCompletionRate", "passing")} Dr${scoreText(s, "dribbling")} Df${scoreText(s, "defending")}${weightLabel}`;
+  const compactLabel = compact ? `${compact} ` : "";
+  return `${compactLabel}Sp${scoreText(s, "topSpeed", "topSpeedYps")} Ac${scoreText(s, "acceleration", "accelerationYps2")} Sh${scoreText(s, "shooting")} Pa${scoreText(s, "passingCompletionRate", "passing")} Dr${scoreText(s, "dribbling")} Df${scoreText(s, "defending")}${weightLabel}`;
 }
 function skillTelemetryItems(p) {
   const s = p.skills || {};
+  if (!hasFullSkillProfile(p.skills)) {
+    const values = compactSkillBandValues(p);
+    return COMPACT_SKILL_BAND_KEYS.map(([, label], index) => ({
+      label,
+      value: values[index].toFixed(0),
+      score: values[index],
+      min: 1,
+      max: 10,
+    }));
+  }
   const items = [
     ["Speed", "topSpeed", "topSpeedYps"],
     ["Accel", "acceleration", "accelerationYps2"],

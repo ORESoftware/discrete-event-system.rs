@@ -106517,6 +106517,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("weightPounds"));
         assert!(html.contains("label: \"Weight\""));
         assert!(html.contains("Wt${weight.toFixed(0)}"));
+        assert!(html.contains("function compactSkillBandLabel"));
+        assert!(html.contains("p?.skillBands"));
+        assert!(html.contains("typeof skillBands === \"string\""));
+        assert!(html.contains("return compact || \"-\""));
         assert!(html.contains("\"flank-low-cross\""));
         assert!(html.contains("\"flank-high-cross\""));
         assert!(html.contains("\"killer-pass\""));

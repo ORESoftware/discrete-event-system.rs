@@ -6845,8 +6845,7 @@ impl PlayerAgent {
             .killer_pass_goal_pressure
             .max(killer_pass_goal_pressure_score(observation))
             .clamp(0.0, 1.0);
-        let threaded_goal_receiver_available =
-            observation.threaded_goal_pass_available || observation.killer_pass_goal_pressure > 0.0;
+        let threaded_goal_receiver_available = observation.threaded_goal_pass_available;
         let killer_pass_legal = pass_target_count > 0
             && observation.visible_forward_pass_options > 0
             && threaded_goal_receiver_available
@@ -51727,6 +51726,7 @@ fn threaded_goal_pass_can_override_forced_shot(
     role: PlayerRole,
 ) -> bool {
     if role == PlayerRole::Goalkeeper
+        || !observation.threaded_goal_pass_available
         || observation.visible_forward_pass_options == 0
         || observation.yards_to_goal > KILLER_PASS_MAX_YARDS_TO_GOAL
     {
@@ -51811,6 +51811,7 @@ fn killer_pass_forced_by_goal_pressure(
     role: PlayerRole,
 ) -> bool {
     if role == PlayerRole::Goalkeeper
+        || !observation.threaded_goal_pass_available
         || observation.visible_forward_pass_options == 0
         || observation.yards_to_goal > 42.0
     {
@@ -56014,6 +56015,90 @@ mod tests {
         assert!(
             pass1.legal && pass1.probability > 0.0,
             "generic pass should remain available even when killer-pass is not: pass1={pass1:?}"
+        );
+    }
+
+    #[test]
+    fn synthetic_killer_pressure_without_threaded_receiver_cannot_legalize_killer_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_910,
+            ..Default::default()
+        });
+        let passer = 8;
+        let receiver = 9;
+        park_players_except(&mut sim, &[passer, receiver]);
+        sim.players[passer].role = PlayerRole::Midfielder;
+        sim.players[passer].position = Vec2::new(40.0, 80.0);
+        sim.players[passer].velocity = Vec2::new(0.0, 2.0);
+        sim.players[passer].skills.passing_completion_rate = 9.3;
+        sim.players[passer].skills.passing = 9.0;
+        sim.players[passer].skills.vision = 9.4;
+        sim.players[receiver].role = PlayerRole::Forward;
+        sim.players[receiver].position = Vec2::new(42.0, 81.0);
+        sim.players[receiver].velocity = Vec2::zero();
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let visible_targets = snapshot.ranked_visible_pass_targets(passer, 3);
+        assert_eq!(
+            snapshot.killer_pass_target_for(passer, &visible_targets),
+            None,
+            "receiver is visible but not a threaded goal receiver"
+        );
+        let mut observation = snapshot.observation_for(passer);
+        observation.yards_to_goal = 28.0;
+        observation.shot_lane_open = false;
+        observation.shot_block_probability = 0.86;
+        observation.visible_forward_pass_options = 1;
+        observation.best_forward_pass_receiver_openness = 0.95;
+        observation.best_pass_stride_fit = 0.95;
+        observation.floor_pass_lane_score = 0.95;
+        observation.goal_attack_window_score = 0.70;
+        observation.offensive_urgency = 0.72;
+        observation.killer_pass_goal_pressure = 0.95;
+        observation.decisive_goal_action_pressure =
+            near_goal_decisive_action_pressure_score(&observation, sim.players[passer].role);
+
+        assert!(
+            !observation.threaded_goal_pass_available,
+            "test must keep the real threaded-route flag false"
+        );
+        assert!(
+            !threaded_goal_pass_can_override_forced_shot(&observation, sim.players[passer].role),
+            "synthetic pressure should not override the shot gate without a real route"
+        );
+        assert!(
+            !killer_pass_forced_by_goal_pressure(&observation, sim.players[passer].role),
+            "synthetic pressure should not force a killer pass without a real route"
+        );
+
+        let options = sim.players[passer].possession_action_options(
+            &observation,
+            &snapshot.tactical_directive(Team::Home),
+            visible_targets.len(),
+            snapshot.ranked_visible_aerial_pass_targets(passer, 3).len(),
+            false,
+            snapshot.dt_seconds,
+            snapshot.field_width,
+        );
+        let killer = options
+            .iter()
+            .find(|option| option.label == "killer-pass")
+            .expect("killer-pass option");
+        let pass1 = options
+            .iter()
+            .find(|option| option.label == "pass1")
+            .expect("generic pass option");
+        assert!(
+            !killer.legal && killer.probability == 0.0,
+            "killer-pass must remain unavailable without a single threaded receiver: killer={killer:?}"
+        );
+        assert!(
+            pass1.legal && pass1.probability > 0.0,
+            "ordinary pass should remain available for non-threaded support: pass1={pass1:?}"
         );
     }
 

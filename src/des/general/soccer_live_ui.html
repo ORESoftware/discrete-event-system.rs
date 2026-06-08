@@ -1103,7 +1103,8 @@ function runtimeContractsLabel() {
   const mdp = decision.mdpStateGridEnabled && decision.pomdpObservationGridEnabled ? "MDP/POMDP" : "policy?";
   const rulesText = rules.offsideRuleEnabled && rules.postGoalKickoffEnabled ? "rules" : "rules?";
   const learnText = learningContract.learningEnabled === false ? "observe" : "learn";
-  return `${players}p/${officials}o/${ballAgents}b ${slots}H ${mdp} ${rulesText} ${learnText}`;
+  const httpText = learningContract.policyPersistenceLiveHttpStepWritesToPostgres ? "step-pg" : "step-batch";
+  return `${players}p/${officials}o/${ballAgents}b ${slots}H ${mdp} ${rulesText} ${learnText} ${httpText}`;
 }
 function runtimeContractsTitle() {
   const agent = state?.agentContract || {};
@@ -1125,6 +1126,7 @@ function runtimeContractsTitle() {
     `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled} teammatePressure=${decision.supportTargetTeammateOccupiedPressureEnabled} intentSpace=${decision.playbackIntentTargetSpaceMetricsEnabled} shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,
     `learning=${learningContract.learningEnabled} logging=${learningContract.learningLoggingEnabled} backend=${learningContract.policyPersistenceBackend} retention=${learningContract.policyPersistenceRetentionModel}`,
     `persistenceWritesPerTick=${learningContract.policyPersistenceWritesPerTimestep} externalWritesPerTick=${learningContract.policyPersistenceExternalWritesPerTimestep} httpBatching=${learningContract.policyPersistenceHttpBatchingRequired} flush=${learningContract.policyPersistenceFlushPolicy}`,
+    `liveHttpStepWritesToPostgres=${learningContract.policyPersistenceLiveHttpStepWritesToPostgres} playbackHttpPosts=${learningContract.policyPersistencePlaybackHttpPostsEnabled} explicitPostgresExport=${learningContract.policyPersistenceExplicitPostgresExportEndpointEnabled} explicitExportBatched=${learningContract.policyPersistenceExplicitPostgresExportBatched}`,
   ];
   return lines.join("\n");
 }

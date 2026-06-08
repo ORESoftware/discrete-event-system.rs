@@ -1618,7 +1618,11 @@ function policyStorageLabel(storage = state?.policyStorage) {
   const retention = String(contract.retentionModel || "").includes("branch-tip")
     ? "tip"
     : "history";
-  const pg = storage.postgresEnabled ? `PG ${retention}` : `no PG ${retention}`;
+  const pg = storage.postgresActiveDbWritesEnabled
+    ? `PG db ${retention}`
+    : storage.postgresExportEnabled
+      ? `PG export ${retention}`
+      : `no PG ${retention}`;
   return `${backend} ${values}/${visits} ${probabilities} ${pg}`;
 }
 function policyProbabilityLabel(summary = state?.policyProbability) {

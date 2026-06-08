@@ -36431,6 +36431,9 @@ pub struct SoccerPolicyStorageStatus {
     pub episode_boundary_checkpoint_enabled: bool,
     pub redis_enabled: bool,
     pub postgres_enabled: bool,
+    pub postgres_export_enabled: bool,
+    pub postgres_active_db_writes_enabled: bool,
+    pub postgres_flush_cadence: String,
     pub postgres_writes_per_timestep: bool,
     pub postgres_branch_tip_exports_batched: bool,
     #[serde(default)]
@@ -45990,6 +45993,10 @@ impl SoccerRealtimeSession {
             episode_boundary_checkpoint_enabled: true,
             redis_enabled: false,
             postgres_enabled: true,
+            postgres_export_enabled: true,
+            postgres_active_db_writes_enabled: false,
+            postgres_flush_cadence: "manual-live-export-or-learning-queue-completed-game-batch"
+                .to_string(),
             postgres_writes_per_timestep: false,
             postgres_branch_tip_exports_batched: true,
             postgres_table: Some(SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE.to_string()),
@@ -95717,7 +95724,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("humanInputQueueAgeMs"));
         assert!(html.body.contains("controllerSlot"));
         assert!(html.body.contains("function policyStorageLabel"));
-        assert!(html.body.contains("PG ${retention}"));
+        assert!(html.body.contains("postgresActiveDbWritesEnabled"));
+        assert!(html.body.contains("PG export"));
         assert!(html.body.contains("id=\"controllerLatency\""));
         assert!(html.body.contains("function consumedHumanInputAgeLabel"));
         assert!(html
@@ -95983,6 +95991,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(state_value["policyStorage"]["redisEnabled"], false);
         assert_eq!(state_value["policyStorage"]["postgresEnabled"], true);
+        assert_eq!(state_value["policyStorage"]["postgresExportEnabled"], true);
+        assert_eq!(
+            state_value["policyStorage"]["postgresActiveDbWritesEnabled"],
+            false
+        );
+        assert_eq!(
+            state_value["policyStorage"]["postgresFlushCadence"],
+            "manual-live-export-or-learning-queue-completed-game-batch"
+        );
         assert_eq!(
             state_value["policyStorage"]["postgresWritesPerTimestep"],
             false
@@ -97248,6 +97265,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             history_path.display().to_string()
         );
         assert_eq!(autosave_value["storage"]["postgresEnabled"], true);
+        assert_eq!(autosave_value["storage"]["postgresExportEnabled"], true);
+        assert_eq!(
+            autosave_value["storage"]["postgresActiveDbWritesEnabled"],
+            false
+        );
+        assert_eq!(
+            autosave_value["storage"]["postgresFlushCadence"],
+            "manual-live-export-or-learning-queue-completed-game-batch"
+        );
         assert_eq!(
             autosave_value["storage"]["postgresTable"],
             SOCCER_POLICY_POSTGRES_POLICY_VERSIONS_TABLE
@@ -97814,6 +97840,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(state.policy_storage.episode_boundary_checkpoint_enabled);
         assert!(!state.policy_storage.redis_enabled);
         assert!(state.policy_storage.postgres_enabled);
+        assert!(state.policy_storage.postgres_export_enabled);
+        assert!(!state.policy_storage.postgres_active_db_writes_enabled);
+        assert_eq!(
+            state.policy_storage.postgres_flush_cadence,
+            "manual-live-export-or-learning-queue-completed-game-batch"
+        );
         assert!(!state.policy_storage.postgres_writes_per_timestep);
         assert!(state.policy_storage.postgres_branch_tip_exports_batched);
         assert_eq!(

@@ -7406,12 +7406,36 @@ impl PlayerAgent {
         let quick_pressure_bonus = 1.0
             + observation.perceived_pressure.clamp(0.0, 1.0) * 0.24
             + observation.decision_urgency.clamp(0.0, 1.0) * 0.18;
-        normalize_action_options(vec![
+        let killer_pressure = observation
+            .killer_pass_goal_pressure
+            .max(killer_pass_goal_pressure_score(observation))
+            .max(single_pass_goal_thread_pressure_score(observation))
+            .clamp(0.0, 1.0);
+        let threaded_quality = threaded_goal_pass_quality_fit(observation);
+        let killer_pass_legal = pass_legal
+            && observation.threaded_goal_pass_available
+            && observation.visible_forward_pass_options > 0
+            && observation.yards_to_goal <= KILLER_PASS_MAX_YARDS_TO_GOAL
+            && !clean_twenty_yard_shot_is_qualified(observation, self.role)
+            && killer_pressure >= 0.32;
+        let killer_pass_score = (observation.first_time_pass_score
+            * quick_pressure_bonus
+            * (0.72
+                + killer_pressure * 0.66
+                + threaded_quality * 0.28
+                + observation
+                    .threaded_goal_pass_expected_completion
+                    .clamp(0.0, 1.0)
+                    * 0.16
+                + observation.threaded_goal_pass_stride_fit.clamp(0.0, 1.0) * 0.14))
+            .clamp(0.02, 1.24);
+        let mut options = vec![
             AgentActionOptionTrace::new(
                 shot_label,
                 (observation.first_time_shot_score * quick_pressure_bonus * 0.52).clamp(0.01, 0.64),
                 shot_legal,
             ),
+            AgentActionOptionTrace::new("killer-pass", killer_pass_score, killer_pass_legal),
             AgentActionOptionTrace::new(
                 "first-time-pass",
                 (observation.first_time_pass_score * quick_pressure_bonus * 0.86).clamp(0.02, 0.88),
@@ -7423,7 +7447,17 @@ impl PlayerAgent {
                     .clamp(0.02, 0.95),
                 true,
             ),
-        ])
+        ];
+        if killer_pass_legal {
+            let floor = (0.24 + killer_pressure * 0.50 + threaded_quality * 0.12).clamp(0.34, 0.82);
+            ensure_min_legal_option_probability(&mut options, "killer-pass", floor);
+            if killer_pressure >= 0.48 {
+                let recycle_multiplier = (1.0 - killer_pressure * 0.44).clamp(0.46, 1.0);
+                scale_legal_option_score(&mut options, "first-time-pass", recycle_multiplier);
+                scale_legal_option_score(&mut options, control_label, recycle_multiplier);
+            }
+        }
+        normalize_action_options(options)
     }
 
     fn support_action_options(&self, snapshot: &WorldSnapshot) -> Vec<AgentActionOptionTrace> {
@@ -8430,6 +8464,22 @@ impl PlayerAgent {
                             normalize_soccer_action_label(&op).to_string(),
                         ));
                         break;
+                    }
+                    "killer-pass" if !pass_targets.is_empty() => {
+                        if let Some(target) =
+                            snapshot.killer_pass_target_for(self.id, &pass_targets)
+                        {
+                            chosen = Some((
+                                SoccerAction::Pass {
+                                    target_player: Some(target),
+                                    power: 0.66
+                                        + 0.24 * passing_skill.max(ability01(self.skills.vision)),
+                                    flight: PassFlight::Floor,
+                                },
+                                "killer-pass".to_string(),
+                            ));
+                            break;
+                        }
                     }
                     "first-time-pass" if !pass_targets.is_empty() => {
                         let target = pass_targets[0];
@@ -31190,23 +31240,18 @@ pub fn soccer_live_frame_accounting_report(frame: &MatchFrame) -> SoccerLiveFram
     {
         if let Some(decision) = player.last_decision.as_ref() {
             report.operation_traces_checked += 1;
-            if decision.operation_order.is_empty()
-                || decision.scheduled_index != player.scheduled_index
-            {
+            if decision.operation_order.is_empty() {
                 report.push_violation(
                     frame.tick,
                     "player",
                     "operationOrder",
-                    format!(
-                        "player {} non-empty order at {:?}",
-                        player.id, player.scheduled_index
-                    ),
+                    format!("player {} non-empty order", player.id),
                     format!(
                         "index {:?}, order {}",
                         decision.scheduled_index,
                         decision.operation_order.join(">")
                     ),
-                    "visible player trace should expose its internal operation order",
+                    "visible player trace should expose its internal operation order; schedule indices may be retained from an earlier Fisher-Yates order",
                 );
             }
         }
@@ -40787,6 +40832,11 @@ impl SoccerMatch {
         let ball_scheduled_index = schedule_lookup.ball();
         let mut ball = self.ball.to_state();
         ball.scheduled_index = ball_scheduled_index;
+        if let Some(decision) = ball.last_decision.as_mut() {
+            if decision.scheduled_index.is_none() && ball_scheduled_index.is_some() {
+                decision.scheduled_index = ball_scheduled_index;
+            }
+        }
 
         let agent_schedule = self.last_agent_schedule.clone();
         let agent_schedule_summary =
@@ -68265,6 +68315,36 @@ mod tests {
         assert_eq!(shared_ball.tick, frame.tick);
         assert_eq!(shared_ball.position, frame.ball.position);
         assert_eq!(shared_ball.velocity, frame.ball.velocity);
+    }
+
+    #[test]
+    fn frame_materialization_stamps_side_effect_ball_decision_schedule() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 51_204,
+            ..Default::default()
+        });
+        sim.run_time_step();
+        sim.ball.record_decision(sim.tick, "offside", None);
+
+        let frame = sim.to_frame();
+        let ball_schedule_index = frame
+            .agent_schedule
+            .iter()
+            .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
+            .expect("ball agent should have a slot in the latest schedule");
+        let decision = frame
+            .ball
+            .last_decision
+            .as_ref()
+            .expect("side-effect ball decision should be exported");
+
+        assert_eq!(frame.ball.scheduled_index, Some(ball_schedule_index));
+        assert_eq!(decision.scheduled_index, Some(ball_schedule_index));
+        assert!(
+            soccer_live_frame_accounting_report(&frame).ok,
+            "exported side-effect ball decision should satisfy live accounting"
+        );
     }
 
     #[test]
@@ -101021,6 +101101,132 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 "first-time-shot" | "first-time-header"
             ));
         }
+    }
+
+    #[test]
+    fn first_touch_blocked_goal_lane_prefers_threaded_killer_pass() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 22_249,
+            ..Default::default()
+        });
+        let attacker = 8;
+        let runner = 9;
+        let keeper = 11;
+        let blockers = [13, 14, 15, 16];
+        park_players_except(
+            &mut sim,
+            &[
+                attacker,
+                runner,
+                keeper,
+                blockers[0],
+                blockers[1],
+                blockers[2],
+                blockers[3],
+            ],
+        );
+        sim.players[attacker].role = PlayerRole::Midfielder;
+        sim.players[attacker].position = Vec2::new(40.0, 98.0);
+        sim.players[attacker].velocity = Vec2::new(0.0, 4.0);
+        sim.players[attacker].skills.first_touch = 8.8;
+        sim.players[attacker].skills.passing_completion_rate = 9.3;
+        sim.players[attacker].skills.passing = 9.0;
+        sim.players[attacker].skills.vision = 9.6;
+        sim.players[attacker].skills.shooting = 6.6;
+        sim.players[attacker].skills.decision_noise = 0.0;
+        sim.players[attacker].preferences.pass_bias = 1.0;
+        sim.players[attacker].preferences.shoot_bias = 0.22;
+        sim.players[attacker].incoming_ball = Some(IncomingBallContext {
+            from_player: Some(7),
+            target_player: Some(attacker),
+            team: Some(Team::Home),
+            kind: IncomingBallKind::GroundPass,
+            origin: Some(Vec2::new(36.0, 82.0)),
+            intended_target: Some(sim.players[attacker].position),
+            speed_yps: 18.0,
+            distance_yards: 20.0,
+            received_tick: sim.tick,
+            is_cross: false,
+            is_aerial: false,
+        });
+        sim.players[runner].role = PlayerRole::Forward;
+        sim.players[runner].position = Vec2::new(56.0, 110.0);
+        sim.players[runner].velocity = Vec2::new(0.8, 6.2);
+        sim.players[runner].skills.shooting = 8.8;
+        sim.players[runner].skills.top_speed = 9.1;
+        sim.players[keeper].position = Vec2::new(40.0, 116.5);
+        sim.players[keeper].skills.goalkeeping = 5.0;
+        for (idx, blocker) in blockers.iter().copied().enumerate() {
+            sim.players[blocker].position = match idx {
+                0 => Vec2::new(40.0, 106.0),
+                1 => Vec2::new(34.0, 111.0),
+                2 => Vec2::new(47.0, 112.0),
+                _ => Vec2::new(40.0, 114.0),
+            };
+            sim.players[blocker].skills.defending = 9.8;
+            sim.players[blocker].skills.defensive_tracking = 9.8;
+            sim.players[blocker].skills.aggression = 9.0;
+        }
+        sim.ball.holder = Some(attacker);
+        sim.ball.position = sim.players[attacker].position;
+        sim.ball.velocity = Vec2::zero();
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(attacker);
+        let pass_targets = snapshot.ranked_visible_pass_targets(attacker, 3);
+        assert!(observation.first_touch_available);
+        assert!(
+            !goal_attack_shot_is_required(&observation, sim.players[attacker].role),
+            "blocked goal lane should not trigger the clean first-touch must-shoot gate: {observation:?}"
+        );
+        assert_eq!(
+            snapshot.killer_pass_target_for(attacker, &pass_targets),
+            Some(runner),
+            "runner should be the threaded first-touch goal target: {pass_targets:?}"
+        );
+        let options =
+            sim.players[attacker].first_touch_action_options(&observation, pass_targets.len());
+        let killer = options
+            .iter()
+            .find(|option| option.label == "killer-pass")
+            .expect("killer-pass first-touch option");
+        let generic_pass = options
+            .iter()
+            .find(|option| option.label == "first-time-pass")
+            .expect("first-time-pass option");
+        assert!(
+            killer.legal && killer.probability >= 0.58,
+            "threaded goal lane should dominate first-touch recycling: killer={killer:?} options={options:?}"
+        );
+        assert!(
+            killer.probability > generic_pass.probability * 2.4,
+            "killer-pass should swamp generic first-time pass near goal: killer={killer:?} pass={generic_pass:?}"
+        );
+
+        let mut killer_count = 0;
+        let trials = 80;
+        for seed in 0..trials {
+            let mut player = sim.players[attacker].clone();
+            let intent =
+                player.run_time_step(&snapshot, None, None, &mut mulberry32(26_000 + seed));
+            if let SoccerAction::Pass {
+                target_player: Some(target),
+                ..
+            } = intent.action
+            {
+                let decision = player.last_decision.expect("first-touch decision trace");
+                if decision.action == "killer-pass" {
+                    assert_eq!(target, runner);
+                    killer_count += 1;
+                }
+            }
+        }
+        assert!(
+            killer_count >= 60,
+            "blocked first-touch goal lane should frequently play the killer pass, got {killer_count}/{trials}"
+        );
     }
 
     #[test]

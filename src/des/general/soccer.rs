@@ -56224,6 +56224,70 @@ mod tests {
     }
 
     #[test]
+    fn fisher_yates_schedule_interleaves_players_officials_and_ball() {
+        let mut observed_official_before_last_player = false;
+        let mut observed_player_before_last_official = false;
+        let mut observed_ball_before_last_field_agent = false;
+
+        for seed in 320..360 {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig {
+                seed,
+                ..MatchConfig::playback_trace(0.2)
+            });
+            sim.run_time_step();
+            let frame = sim.to_frame();
+            let player_slots = frame
+                .agent_schedule
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, entry)| {
+                    (entry.kind == AgentScheduleKind::Player).then_some(slot)
+                })
+                .collect::<Vec<_>>();
+            let official_slots = frame
+                .agent_schedule
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, entry)| {
+                    (entry.kind == AgentScheduleKind::Official).then_some(slot)
+                })
+                .collect::<Vec<_>>();
+            let ball_slot = frame
+                .agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Ball)
+                .expect("ball scheduled");
+            assert_eq!(player_slots.len(), 22);
+            assert_eq!(official_slots.len(), 3);
+            assert_eq!(frame.agent_schedule.len(), 27);
+            assert_eq!(
+                frame
+                    .agent_schedule
+                    .first()
+                    .map(|entry| (&entry.kind, entry.id)),
+                Some((&AgentScheduleKind::CentralBrain, CENTRAL_BRAIN_AGENT_ID))
+            );
+
+            let first_official = *official_slots.first().expect("official slot");
+            let last_official = *official_slots.last().expect("official slot");
+            let first_player = *player_slots.first().expect("player slot");
+            let last_player = *player_slots.last().expect("player slot");
+            observed_official_before_last_player |= first_official < last_player;
+            observed_player_before_last_official |= first_player < last_official;
+            observed_ball_before_last_field_agent |= ball_slot < frame.agent_schedule.len() - 1;
+        }
+
+        assert!(
+            observed_official_before_last_player && observed_player_before_last_official,
+            "Fisher-Yates should interleave officials with the player loop, not append them in a fixed block"
+        );
+        assert!(
+            observed_ball_before_last_field_agent,
+            "ball agent should participate in the shuffled field schedule instead of always running last"
+        );
+    }
+
+    #[test]
     fn ball_decision_trace_records_shuffled_schedule_slot() {
         let mut config = MatchConfig::playback_trace(0.2);
         config.seed = 307;

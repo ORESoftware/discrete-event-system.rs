@@ -89424,6 +89424,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("resetMatch({seed: seedResetValue()})"));
         assert!(html.body.contains("semanticBallActionLabel"));
         assert!(html.body.contains("function scheduleSlotLabel"));
+        assert!(html.body.contains("function agentScheduleSummaryLabel"));
+        assert!(html.body.contains("function agentScheduleFullLabel"));
+        assert!(html.body.contains("fieldShuffleAgents"));
+        assert!(html.body.contains("expectedFieldShuffleAgents"));
+        assert!(html.body.contains("F${field}/${expectedField}"));
+        assert!(html
+            .body
+            .contains("agentOrder.textContent = agentScheduleLabel(f)"));
+        assert!(html
+            .body
+            .contains("agentOrder.title = agentScheduleFullLabel(f)"));
         assert!(html.body.contains("scheduleSlotLabel(ball?.scheduledIndex"));
         assert!(html.body.contains("scheduleSlotLabel(b.ballScheduledIndex"));
         assert!(html
@@ -95004,6 +95015,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function agentScheduleCoverageLabel"));
         assert!(html.contains("function agentScheduleFullLabel"));
         assert!(html.contains("agentScheduleSummary"));
+        assert!(html.contains("fieldShuffleAgents"));
+        assert!(html.contains("expectedFieldShuffleAgents"));
+        assert!(html.contains("F${field}/${expectedField}"));
         assert!(html.contains("${central}${Number(s.playerCount || 0)}p/"));
         assert!(html.contains("${hasCentral ? \"C+\" : \"\"}${players}p/${officials}o"));
         assert!(html.contains("agentOrder.textContent = agentScheduleLabel(f)"));

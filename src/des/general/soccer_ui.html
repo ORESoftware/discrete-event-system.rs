@@ -1088,18 +1088,24 @@ function agentScheduleSummaryForFrame(f) {
   const expectedPlayers = Number(contract?.expectedPlayerCount ?? players);
   const expectedOfficials = Number(contract?.expectedOfficialCount ?? officials);
   const expectedTotal = Number(contract?.expectedTotalAgents ?? schedule.length);
+  const expectedFieldShuffle = Number(contract?.expectedFieldShuffleAgents ?? Math.max(0, expectedTotal - 1));
+  const fieldShuffleAgents = schedule.filter(entry => entry.kind !== "centralBrain").length;
   return {
     totalAgents: schedule.length,
     expectedTotalAgents: expectedTotal,
+    fieldShuffleAgents,
+    expectedFieldShuffleAgents: expectedFieldShuffle,
     playerCount: players,
     expectedPlayerCount: expectedPlayers,
     officialCount: officials,
     expectedOfficialCount: expectedOfficials,
     ballCount: hasBall ? 1 : 0,
+    expectedBallCount: Number(contract?.expectedBallAgents ?? 1),
     centralBrainCount: hasCentral ? 1 : 0,
     duplicateAgents: 0,
     centralBrainFirst: schedule[0]?.kind === "centralBrain",
     complete: schedule.length === expectedTotal
+      && fieldShuffleAgents === expectedFieldShuffle
       && players === expectedPlayers
       && officials === expectedOfficials
       && hasBall
@@ -1120,8 +1126,11 @@ function agentScheduleSummaryLabel(f) {
   const ball = Number(s.ballCount || 0) > 0 ? "/B" : "";
   const expected = Number(s.expectedTotalAgents || 0);
   const total = Number(s.totalAgents || 0);
+  const field = Number(s.fieldShuffleAgents || 0);
+  const expectedField = Number(s.expectedFieldShuffleAgents || 0);
+  const fieldText = expectedField > 0 ? ` F${field}/${expectedField}` : "";
   const complete = s.complete ? " ok" : ` ${total}/${expected || "?"}`;
-  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${complete}`;
+  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${fieldText}${complete}`;
 }
 function agentScheduleFullLabel(f) {
   const schedule = agentScheduleEntriesForFrame(f);

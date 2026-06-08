@@ -972,12 +972,34 @@ function agentScheduleGlyph(entry) {
   if (entry.kind === "ball") return "B";
   return String(entry.id ?? "?");
 }
-function agentScheduleLabel(schedule) {
+function agentScheduleSummaryLabel(frame) {
+  const s = frame?.agentScheduleSummary;
+  if (!s || Number(s.totalAgents || 0) <= 0) return "";
+  const central = Number(s.centralBrainCount || 0) > 0 ? "C+" : "";
+  const ball = Number(s.ballCount || 0) > 0 ? "/B" : "";
+  const field = Number(s.fieldShuffleAgents || 0);
+  const expectedField = Number(s.expectedFieldShuffleAgents || 0);
+  const fieldText = expectedField > 0 ? ` F${field}/${expectedField}` : "";
+  const expected = Number(s.expectedTotalAgents || 0);
+  const total = Number(s.totalAgents || 0);
+  const complete = s.complete ? " ok" : ` ${total}/${expected || "?"}`;
+  return `${central}${Number(s.playerCount || 0)}p/${Number(s.officialCount || 0)}o${ball}${fieldText}${complete}`;
+}
+function agentScheduleFullLabel(frame) {
+  const schedule = Array.isArray(frame?.agentSchedule) ? frame.agentSchedule : [];
+  const summary = agentScheduleSummaryLabel(frame);
+  if (!schedule.length) return summary || "shuffle pending";
+  return `${summary ? `${summary} ` : ""}${schedule.map(agentScheduleGlyph).join(" ")}`;
+}
+function agentScheduleLabel(frameOrSchedule) {
+  const frame = Array.isArray(frameOrSchedule) ? null : frameOrSchedule;
+  const schedule = Array.isArray(frameOrSchedule) ? frameOrSchedule : frameOrSchedule?.agentSchedule;
+  const summary = frame ? agentScheduleSummaryLabel(frame) : "";
   if (!Array.isArray(schedule) || schedule.length === 0) return "shuffle pending";
   const prefix = schedule.slice(0, 6).map(agentScheduleGlyph).join(" ");
   const ball = schedule.find(entry => entry.kind === "ball");
   const suffix = ball ? ` ... ${agentScheduleGlyph(ball)}` : "";
-  return `${prefix}${suffix}`;
+  return `${summary ? `${summary} ` : ""}${prefix}${suffix}`;
 }
 function sharedPositionLabel(frame = state?.frame) {
   const shared = frame?.sharedPositions;
@@ -2781,7 +2803,8 @@ function render() {
   clock.textContent = fmtClock(f.clockSeconds);
   phase.textContent = phaseLabel(f.phase);
   centralBrain.textContent = centralBrainLabel(f.centralBrain);
-  agentOrder.textContent = agentScheduleLabel(f.agentSchedule);
+  agentOrder.textContent = agentScheduleLabel(f);
+  agentOrder.title = agentScheduleFullLabel(f);
   sharedPositions.textContent = sharedPositionLabel(f);
   homeBrain.textContent = teamBrainLabel(f.homeBrain, f.homeDirective);
   awayBrain.textContent = teamBrainLabel(f.awayBrain, f.awayDirective);

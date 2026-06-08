@@ -34548,6 +34548,9 @@ pub struct SoccerControllerRuntimeContract {
 pub struct SoccerUiRuntimeContract {
     pub html_ui_enabled: bool,
     pub bird_eye_canvas_2d_enabled: bool,
+    pub primary_render_surface: String,
+    pub webgl_rendering_enabled: bool,
+    pub three_dimensional_rendering_enabled: bool,
     pub pitch_canvas_id: String,
     pub pitch_canvas_width_px: u32,
     pub pitch_canvas_height_px: u32,
@@ -34613,6 +34616,8 @@ pub struct SoccerPhysicsRuntimeContract {
     pub spatial_dimensions: usize,
     pub view_mode: String,
     pub coordinate_plane: String,
+    pub bird_eye_2d_first_scope_enabled: bool,
+    pub three_d_physics_deferred: bool,
     pub z_dimension_visualized: bool,
     pub html_canvas_2d_rendering: bool,
     pub space_units: String,
@@ -34970,6 +34975,8 @@ fn soccer_physics_runtime_contract(config: &MatchConfig) -> SoccerPhysicsRuntime
         spatial_dimensions: 2,
         view_mode: "birdEye2D".to_string(),
         coordinate_plane: "xyPitchYards".to_string(),
+        bird_eye_2d_first_scope_enabled: true,
+        three_d_physics_deferred: true,
         z_dimension_visualized: false,
         html_canvas_2d_rendering: true,
         space_units: "yards".to_string(),
@@ -35110,6 +35117,9 @@ fn soccer_ui_runtime_contract() -> SoccerUiRuntimeContract {
     SoccerUiRuntimeContract {
         html_ui_enabled: true,
         bird_eye_canvas_2d_enabled: true,
+        primary_render_surface: "html-canvas-2d".to_string(),
+        webgl_rendering_enabled: false,
+        three_dimensional_rendering_enabled: false,
         pitch_canvas_id: "pitch".to_string(),
         pitch_canvas_width_px: 1280,
         pitch_canvas_height_px: 720,
@@ -103830,6 +103840,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         let contract = &meta["uiContract"];
         assert_eq!(contract["htmlUiEnabled"], true);
         assert_eq!(contract["birdEyeCanvas2dEnabled"], true);
+        assert_eq!(contract["primaryRenderSurface"], "html-canvas-2d");
+        assert_eq!(contract["webglRenderingEnabled"], false);
+        assert_eq!(contract["threeDimensionalRenderingEnabled"], false);
         assert_eq!(contract["pitchCanvasId"], "pitch");
         assert_eq!(contract["pitchCanvasWidthPx"], 1280);
         assert_eq!(contract["pitchCanvasHeightPx"], 720);
@@ -103911,6 +103924,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["spatialDimensions"], 2);
         assert_eq!(contract["viewMode"], "birdEye2D");
         assert_eq!(contract["coordinatePlane"], "xyPitchYards");
+        assert_eq!(contract["birdEye2dFirstScopeEnabled"], true);
+        assert_eq!(contract["threeDPhysicsDeferred"], true);
         assert_eq!(contract["zDimensionVisualized"], false);
         assert_eq!(contract["htmlCanvas2dRendering"], true);
         assert_eq!(contract["spaceUnits"], "yards");

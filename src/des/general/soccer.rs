@@ -361,7 +361,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 118;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 119;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -421,9 +421,10 @@ const SOCCER_NEURAL_FEATURE_FIRST_TOUCH_SKILL: usize = 114;
 const SOCCER_NEURAL_FEATURE_KILLER_PASS_GOAL_PRESSURE: usize = 115;
 const SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE: usize = 116;
 const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE: usize = 117;
+const SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE: usize = 118;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112, 113, 115, 117,
+    110, 111, 112, 113, 115, 117, 118,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -1696,6 +1697,8 @@ pub struct SoccerPomdpObservation {
     pub goal_attack_window_score: f64,
     #[serde(default)]
     pub killer_pass_goal_pressure: f64,
+    #[serde(default)]
+    pub single_thread_goal_pressure: f64,
     #[serde(default)]
     pub decisive_goal_action_pressure: f64,
     #[serde(default)]
@@ -3227,6 +3230,8 @@ pub struct SoccerQStateKey {
     #[serde(default)]
     pub killer_pass_goal_pressure_bin: u8,
     #[serde(default)]
+    pub single_thread_goal_pressure_bin: u8,
+    #[serde(default)]
     pub decisive_goal_action_pressure_bin: u8,
     #[serde(default)]
     pub first_touch_kind: IncomingBallKind,
@@ -3665,6 +3670,10 @@ impl SoccerQStateKey {
                 observation.killer_pass_goal_pressure,
                 &[0.12, 0.28, 0.48, 0.70],
             ),
+            single_thread_goal_pressure_bin: distance_bucket(
+                observation.single_thread_goal_pressure,
+                &[0.12, 0.28, 0.48, 0.70],
+            ),
             decisive_goal_action_pressure_bin: distance_bucket(
                 observation.decisive_goal_action_pressure,
                 &[0.12, 0.28, 0.48, 0.70],
@@ -3864,6 +3873,7 @@ impl SoccerQStateKey {
             && self.decision_urgency_bin == other.decision_urgency_bin
             && self.goal_attack_window_bin == other.goal_attack_window_bin
             && self.killer_pass_goal_pressure_bin == other.killer_pass_goal_pressure_bin
+            && self.single_thread_goal_pressure_bin == other.single_thread_goal_pressure_bin
             && self.decisive_goal_action_pressure_bin == other.decisive_goal_action_pressure_bin
             && self.first_touch_kind == other.first_touch_kind
             && self.incoming_ball_speed_bin == other.incoming_ball_speed_bin
@@ -19538,6 +19548,7 @@ impl WorldSnapshot {
                 decision_urgency: 0.0,
                 goal_attack_window_score: 0.0,
                 killer_pass_goal_pressure: 0.0,
+                single_thread_goal_pressure: 0.0,
                 decisive_goal_action_pressure: 0.0,
                 real_time_on_ball_seconds: 0.0,
                 perceived_time_on_ball_seconds: 0.0,
@@ -20279,6 +20290,7 @@ impl WorldSnapshot {
             decision_urgency,
             goal_attack_window_score,
             killer_pass_goal_pressure: 0.0,
+            single_thread_goal_pressure: 0.0,
             decisive_goal_action_pressure: 0.0,
             real_time_on_ball_seconds,
             perceived_time_on_ball_seconds,
@@ -20324,6 +20336,11 @@ impl WorldSnapshot {
         };
         observation.killer_pass_goal_pressure = if observation.threaded_goal_pass_available {
             killer_pass_goal_pressure_score(&observation)
+        } else {
+            0.0
+        };
+        observation.single_thread_goal_pressure = if observation.threaded_goal_pass_available {
+            single_pass_goal_thread_pressure_score(&observation)
         } else {
             0.0
         };
@@ -27959,6 +27976,8 @@ pub struct SoccerPlaybackIntentFrame {
     #[serde(default)]
     pub killer_pass_goal_pressure: f64,
     #[serde(default)]
+    pub single_thread_goal_pressure: f64,
+    #[serde(default)]
     pub decisive_goal_action_pressure: f64,
     #[serde(default)]
     pub shot_lane_open: bool,
@@ -28183,6 +28202,13 @@ where
                 .observation
                 .killer_pass_goal_pressure
                 .max(killer_pass_goal_pressure_score(&decision.observation))
+                .clamp(0.0, 1.0),
+            single_thread_goal_pressure: decision
+                .observation
+                .single_thread_goal_pressure
+                .max(single_pass_goal_thread_pressure_score(
+                    &decision.observation,
+                ))
                 .clamp(0.0, 1.0),
             decisive_goal_action_pressure,
             shot_lane_open: decision.observation.shot_lane_open,
@@ -33479,6 +33505,7 @@ pub struct SoccerDecisionModelContract {
     pub killer_pass_max_yards_to_goal: f64,
     pub single_threaded_killer_pass_enabled: bool,
     pub single_pass_goal_thread_pressure_enabled: bool,
+    pub single_thread_goal_pressure_learning_feature_enabled: bool,
     pub goal_entry_boosts_killer_pass_score: bool,
     pub single_thread_goal_pressure_boosts_decisive_action: bool,
     pub single_thread_goal_pressure_damps_recycling: bool,
@@ -34173,6 +34200,7 @@ fn soccer_decision_model_contract() -> SoccerDecisionModelContract {
         killer_pass_max_yards_to_goal: KILLER_PASS_MAX_YARDS_TO_GOAL,
         single_threaded_killer_pass_enabled: true,
         single_pass_goal_thread_pressure_enabled: true,
+        single_thread_goal_pressure_learning_feature_enabled: true,
         goal_entry_boosts_killer_pass_score: true,
         single_thread_goal_pressure_boosts_decisive_action: true,
         single_thread_goal_pressure_damps_recycling: true,
@@ -37266,6 +37294,7 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.killer_pass_goal_pressure_bin, 5.0),
         soccer_neural_bin(state.decisive_goal_action_pressure_bin, 5.0),
         soccer_neural_bool(state.threaded_goal_pass_available),
+        soccer_neural_bin(state.single_thread_goal_pressure_bin, 5.0),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -58258,10 +58287,22 @@ mod tests {
             !observation.threaded_goal_pass_available && observation.killer_pass_goal_pressure == 0.0,
             "observation should not expose killer-pass pressure without a true threaded goal receiver: {observation:?}"
         );
+        assert_eq!(
+            observation.single_thread_goal_pressure, 0.0,
+            "ordinary forward outlets should not expose single-pass goal-thread pressure"
+        );
         assert!(
             !q_key.threaded_goal_pass_available
                 && features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE] == 0.0,
             "Q-state and neural features should keep ordinary forward outlets separate from true killer routes"
+        );
+        assert_eq!(
+            q_key.single_thread_goal_pressure_bin, 0,
+            "Q-state should keep ordinary forward outlets out of the goal-thread pressure bucket"
+        );
+        assert_eq!(
+            features[SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE], 0.0,
+            "neural features should keep ordinary forward outlets out of the goal-thread pressure input"
         );
         assert!(
             !killer.legal && killer.probability == 0.0,
@@ -58587,6 +58628,8 @@ mod tests {
         observation.best_pass_stride_fit = observation.best_pass_stride_fit.max(0.80);
         observation.floor_pass_lane_score = observation.floor_pass_lane_score.max(0.76);
         observation.killer_pass_goal_pressure = killer_pass_goal_pressure_score(&observation);
+        observation.single_thread_goal_pressure =
+            single_pass_goal_thread_pressure_score(&observation);
         observation.decisive_goal_action_pressure =
             near_goal_decisive_action_pressure_score(&observation, sim.players[passer].role);
 
@@ -58631,7 +58674,13 @@ mod tests {
             observation.decisive_goal_action_pressure
         );
         assert!(
+            observation.single_thread_goal_pressure > 0.60,
+            "test setup should expose high single-threaded goal pass pressure: {}",
+            observation.single_thread_goal_pressure
+        );
+        assert!(
             q_key.killer_pass_goal_pressure_bin >= 3
+                && q_key.single_thread_goal_pressure_bin >= 3
                 && q_key.decisive_goal_action_pressure_bin >= 3
                 && q_key.threaded_goal_pass_available,
             "Q-state should bucket final-third decisive pressure: {q_key:?}"
@@ -58647,6 +58696,10 @@ mod tests {
         assert_eq!(
             features[SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE], 1.0,
             "neural learner should see that a real threaded goal receiver exists"
+        );
+        assert!(
+            features[SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE] > 0.60,
+            "neural learner should see single-threaded goal pass pressure"
         );
     }
 
@@ -75740,6 +75793,68 @@ mod tests {
                 [SOCCER_NEURAL_FEATURE_DECISIVE_GOAL_ACTION_PRESSURE],
             0.0,
             "new decisive goal action pressure input weight should start neutral for 115-input snapshots"
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0][SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE],
+            0.0,
+            "new single-thread goal-pressure input weight should start neutral for 115-input snapshots"
+        );
+    }
+
+    #[test]
+    fn neural_learning_pads_previous_snapshot_before_single_thread_goal_pressure_input() {
+        let config = MatchConfig {
+            duration_seconds: 0.2,
+            max_human_players: 0,
+            neural_learning: SoccerNeuralLearningConfig {
+                enabled: true,
+                backend: SoccerNeuralLearningBackend::Inline,
+                hidden_units: 8,
+                ..SoccerNeuralLearningConfig::default()
+            },
+            seed: 15091,
+            ..Default::default()
+        };
+        let mut previous_snapshot = SoccerMatch::default_11v11(config.clone())
+            .learning_snapshot()
+            .neural_network
+            .expect("initial neural snapshot");
+        let previous_dim = SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE;
+        assert!(SOCCER_NEURAL_LEGACY_FEATURE_DIMS.contains(&previous_dim));
+        let removed_weights = previous_snapshot
+            .layers
+            .first()
+            .map(|layer| layer.weights.len())
+            .unwrap_or(0)
+            .saturating_mul(SOCCER_NEURAL_FEATURE_DIM - previous_dim);
+        previous_snapshot.input_dim = previous_dim;
+        previous_snapshot.parameter_count = previous_snapshot
+            .parameter_count
+            .saturating_sub(removed_weights);
+        for row in &mut previous_snapshot.layers[0].weights {
+            row.truncate(previous_dim);
+        }
+        previous_snapshot.layers[0].weights[0][previous_dim - 1] = 0.117_42;
+
+        let resumed = SoccerMatch::default_11v11(config)
+            .with_neural_network_snapshot(previous_snapshot)
+            .expect("resume previous 118-input neural snapshot");
+        let resumed_snapshot = resumed
+            .learning_snapshot()
+            .neural_network
+            .expect("resumed neural snapshot");
+
+        assert_eq!(resumed_snapshot.input_dim, SOCCER_NEURAL_FEATURE_DIM);
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0]
+                [SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_AVAILABLE],
+            0.117_42
+        );
+        assert_eq!(
+            resumed_snapshot.layers[0].weights[0]
+                [SOCCER_NEURAL_FEATURE_SINGLE_THREAD_GOAL_PRESSURE],
+            0.0,
+            "new single-thread pressure input should start neutral for 118-input snapshots"
         );
     }
 
@@ -93254,6 +93369,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_intent["yardsToGoal"].as_f64().is_some());
         assert!(first_intent["goalAttackWindowScore"].as_f64().is_some());
         assert!(first_intent["killerPassGoalPressure"].as_f64().is_some());
+        assert!(first_intent["singleThreadGoalPressure"].as_f64().is_some());
         assert!(first_intent["decisiveGoalActionPressure"]
             .as_f64()
             .is_some());
@@ -98946,9 +99062,15 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("P${actionProbability.toFixed(2)} T${tickProbability.toFixed(2)}"));
         assert!(html.contains("decisiveGoalActionPressure"));
         assert!(html.contains("killerPassGoalPressure"));
+        assert!(html.contains("singleThreadGoalPressure"));
         assert!(html.contains("function liveIntentTitle"));
         assert!(html.contains("actionIntent.title = liveIntentTitle(primaryIntent)"));
-        assert!(html.contains("D${pressure.toFixed(2)} K${killer.toFixed(2)}"));
+        assert!(
+            html.contains("D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}")
+        );
+        assert!(html.contains(
+            "singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled}"
+        ));
         assert!(html.contains("targetOpenSpaceScore"));
         assert!(html.contains("targetTeammateOccupiedSpacePressure"));
         assert!(html.contains("S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}"));
@@ -99138,6 +99260,10 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         );
         assert_eq!(model["singleThreadedKillerPassEnabled"], true);
         assert_eq!(model["singlePassGoalThreadPressureEnabled"], true);
+        assert_eq!(
+            model["singleThreadGoalPressureLearningFeatureEnabled"],
+            true
+        );
         assert_eq!(model["goalEntryBoostsKillerPassScore"], true);
         assert_eq!(model["singleThreadGoalPressureBoostsDecisiveAction"], true);
         assert_eq!(model["singleThreadGoalPressureDampsRecycling"], true);
@@ -100578,6 +100704,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(first_intent.get("yardsToGoal").is_some());
         assert!(first_intent.get("goalAttackWindowScore").is_some());
         assert!(first_intent.get("killerPassGoalPressure").is_some());
+        assert!(first_intent.get("singleThreadGoalPressure").is_some());
         assert!(first_intent.get("decisiveGoalActionPressure").is_some());
         assert!(first_intent.get("shotLaneOpen").is_some());
         assert!(first_intent.get("threadedGoalPassAvailable").is_some());

@@ -1117,7 +1117,7 @@ function runtimeContractsTitle() {
     `controllers=${controller.maxHumanControllers} configured=${controller.configuredHumanControllers} nativeThreads=${controller.nativeThreadPerControllerEnabled} notify=${controller.notificationDrivenInput}`,
     `uiCanvas=${ui.birdEyeCanvas2dEnabled} runNew=${ui.runNewSimulationButtonEnabled} fourSlots=${ui.fourHumanControllerSlotsEnabled} goalposts=${ui.goalpostsRendered}`,
     `rulesOffside=${rules.offsideRuleEnabled} ownHalfExempt=${rules.offsideOwnHalfExempt} postGoalKickoff=${rules.postGoalKickoffEnabled} assistantRefs=${rules.assistantRefsTrackOffsideLine}`,
-    `decisionMdp=${decision.mdpStateGridEnabled} pomdp=${decision.pomdpObservationGridEnabled} killerPass=${decision.killerPassProbabilityRampsTowardGoal} shotRamp=${decision.shotProbabilityRampsTowardGoal}`,
+    `decisionMdp=${decision.mdpStateGridEnabled} pomdp=${decision.pomdpObservationGridEnabled} killerPass=${decision.killerPassProbabilityRampsTowardGoal} singleThreadLearn=${decision.singleThreadGoalPressureLearningFeatureEnabled} shotRamp=${decision.shotProbabilityRampsTowardGoal}`,
     `supportTargetSpace=${decision.supportTargetOpenSpaceMetricsEnabled} teammatePressure=${decision.supportTargetTeammateOccupiedPressureEnabled} intentSpace=${decision.playbackIntentTargetSpaceMetricsEnabled} shotKillerFloor=${decision.shotKillerPassFamilyProbabilityFloorEnabled}`,
     `learning=${learningContract.learningEnabled} logging=${learningContract.learningLoggingEnabled} backend=${learningContract.policyPersistenceBackend} retention=${learningContract.policyPersistenceRetentionModel}`,
   ];
@@ -1325,6 +1325,7 @@ function liveIntentCandidates(frame = state?.frame) {
           yardsToGoal: Number(intent.yardsToGoal ?? NaN),
           goalAttackWindowScore: clamp(Number(intent.goalAttackWindowScore ?? 0), 0, 1),
           killerPassGoalPressure: clamp(Number(intent.killerPassGoalPressure ?? 0), 0, 1),
+          singleThreadGoalPressure: clamp(Number(intent.singleThreadGoalPressure ?? 0), 0, 1),
           decisiveGoalActionPressure: clamp(Number(intent.decisiveGoalActionPressure ?? 0), 0, 1),
           shotLaneOpen: intent.shotLaneOpen === true,
           threadedGoalPassAvailable: intent.threadedGoalPassAvailable === true,
@@ -1362,6 +1363,7 @@ function liveIntentCandidates(frame = state?.frame) {
         yardsToGoal: Number(decision?.observation?.yardsToGoal ?? NaN),
         goalAttackWindowScore: clamp(Number(decision?.observation?.goalAttackWindowScore ?? 0), 0, 1),
         killerPassGoalPressure: clamp(Number(decision?.observation?.killerPassGoalPressure ?? 0), 0, 1),
+        singleThreadGoalPressure: clamp(Number(decision?.observation?.singleThreadGoalPressure ?? 0), 0, 1),
         decisiveGoalActionPressure,
         shotLaneOpen: decision?.observation?.shotLaneOpen === true,
         threadedGoalPassAvailable: decision?.observation?.threadedGoalPassAvailable === true,
@@ -1387,11 +1389,12 @@ function liveIntentLabel(intent = primaryLiveIntent()) {
   const goal = Number.isFinite(Number(intent.yardsToGoal)) ? ` G${Number(intent.yardsToGoal).toFixed(0)}` : "";
   const pressure = Number(intent.decisiveGoalActionPressure ?? 0);
   const killer = Number(intent.killerPassGoalPressure ?? 0);
+  const single = Number(intent.singleThreadGoalPressure ?? 0);
   const space = Number(intent.targetOpenSpaceScore ?? 0);
   const teammatePressure = Number(intent.targetTeammateOccupiedSpacePressure ?? 0);
   const lane = intent.threadedGoalPassAvailable ? " KP" : intent.shotLaneOpen ? " lane" : "";
   const decisive = pressure > 0.01 || killer > 0.01
-    ? ` D${pressure.toFixed(2)} K${killer.toFixed(2)}`
+    ? ` D${pressure.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)}`
     : "";
   const targetSpace = space > 0 || teammatePressure > 0.01
     ? ` S${space.toFixed(1)} TP${teammatePressure.toFixed(2)}`
@@ -1408,6 +1411,7 @@ function liveIntentTitle(intent = primaryLiveIntent()) {
     `goalAttackWindow=${Number(intent.goalAttackWindowScore ?? 0).toFixed(3)}`,
     `decisiveGoalActionPressure=${Number(intent.decisiveGoalActionPressure ?? 0).toFixed(3)}`,
     `killerPassGoalPressure=${Number(intent.killerPassGoalPressure ?? 0).toFixed(3)}`,
+    `singleThreadGoalPressure=${Number(intent.singleThreadGoalPressure ?? 0).toFixed(3)}`,
     `shotLaneOpen=${!!intent.shotLaneOpen}`,
     `threadedGoalPassAvailable=${!!intent.threadedGoalPassAvailable}`,
     `targetOpenSpaceScore=${Number(intent.targetOpenSpaceScore ?? 0).toFixed(3)}`,
@@ -1844,8 +1848,9 @@ function agentPomdpLabel(d) {
   const goalWindow = Number(o.goalAttackWindowScore ?? 0);
   const decisive = Number(o.decisiveGoalActionPressure ?? 0);
   const killer = Number(o.killerPassGoalPressure ?? 0);
+  const single = Number(o.singleThreadGoalPressure ?? 0);
   const teamShape = `TC${Number(o.teamCentroidToBallYards ?? 0).toFixed(0)} W${Number(o.teamSpreadYards ?? 0).toFixed(0)} NB${Number(o.teamPlayersNearBall ?? 0)} FV${Number(o.teamForwardVelocityYps ?? 0).toFixed(1)}`;
-  return `${ball} ${scheduleText} ${controlText} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} D${decisive.toFixed(2)} K${killer.toFixed(2)} ${teamShape} ${lane}`;
+  return `${ball} ${scheduleText} ${controlText} P${options} Q${passQ.toFixed(2)} B${Number(o.ballDistance ?? 0).toFixed(1)} O${Number(o.nearestOpponentDistance ?? 0).toFixed(1)} G${Number(o.yardsToGoal ?? 0).toFixed(1)} GA${goalWindow.toFixed(2)} D${decisive.toFixed(2)} K${killer.toFixed(2)} 1P${single.toFixed(2)} ${teamShape} ${lane}`;
 }
 function agentBeliefLabel(d) {
   const b = d?.belief;
@@ -2140,7 +2145,7 @@ function decisionTelemetryItems(d) {
     {label: "Input", value: o.humanInputPresent ? `H${o.controllerSlot ?? "-"} #${o.humanInputSeq ?? "-"} ${formatInputAgeMs(o.humanInputQueueAgeMs)}` : "AI"},
     {label: "On ball", value: `${Number(o.realTimeOnBallSeconds ?? 0).toFixed(1)} / ${Number(o.perceivedTimeOnBallSeconds ?? 0).toFixed(1)}s`},
     {label: "Goal", value: `${Number(o.yardsToGoal ?? 0).toFixed(1)}y ${Number(o.opponentGoalAngleDegrees ?? 0).toFixed(0)}deg`},
-    {label: "Decide", value: `D${Number(o.decisiveGoalActionPressure ?? 0).toFixed(2)} K${Number(o.killerPassGoalPressure ?? 0).toFixed(2)} GA${Number(o.goalAttackWindowScore ?? 0).toFixed(2)}`, score: Number(o.decisiveGoalActionPressure ?? 0), min: 0, max: 1},
+    {label: "Decide", value: `D${Number(o.decisiveGoalActionPressure ?? 0).toFixed(2)} K${Number(o.killerPassGoalPressure ?? 0).toFixed(2)} 1P${Number(o.singleThreadGoalPressure ?? 0).toFixed(2)} GA${Number(o.goalAttackWindowScore ?? 0).toFixed(2)}`, score: Number(o.decisiveGoalActionPressure ?? 0), min: 0, max: 1},
     {label: "Keeper", value: `${Number(o.opposingGoalkeeperDistance ?? 0).toFixed(1)}y ${Number(o.opposingGoalkeeperAngleDegrees ?? 0).toFixed(0)}deg`},
     {label: "Dribble", value: `${Number(o.forwardDribbleSpaceYards ?? 0).toFixed(1)}y`, score: Number(o.forwardDribbleSpaceYards ?? 0), min: 0, max: 24},
     {label: "Shape", value: `TC${Number(o.teamCentroidToBallYards ?? 0).toFixed(0)} W${Number(o.teamSpreadYards ?? 0).toFixed(0)} NB${Number(o.teamPlayersNearBall ?? 0)} FV${Number(o.teamForwardVelocityYps ?? 0).toFixed(1)}`, score: Number(o.teamPlayersNearBall ?? 0), min: 0, max: 5},

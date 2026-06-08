@@ -93344,6 +93344,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("id=\"agentKinematics\""));
         assert!(html.contains("id=\"agentShotLane\""));
         assert!(html.contains("id=\"agentTactical\""));
+        assert!(html.contains("id=\"agentPomdp\""));
         assert!(html.contains("historyKinematicsFromPositions"));
         assert!(html.contains("playbackPlayerHistoryForFrame"));
         assert!(html.contains("playerHistoryKinematicsLabel"));
@@ -93362,6 +93363,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("function selectedPlayerShotContext"));
         assert!(html.contains("function selectedPlayerShotLaneLabel"));
         assert!(html.contains("function selectedPlayerTacticalLabel"));
+        assert!(html.contains("function selectedPlayerPomdpLabel"));
+        assert!(html.contains("function selectedPlayerPomdpTitle"));
         assert!(html.contains("function selectedPlayerDecisionProbabilityLabel"));
         assert!(html.contains("p?.actionProbability"));
         assert!(html.contains("p?.actionTickProbability"));
@@ -93390,8 +93393,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("agentTrace ? `${tactical} ${agentTrace}` : tactical"));
         assert!(html.contains("goalkeeperBallGoalLineAlignmentScore"));
         assert!(html.contains("defensiveLineBreakThreat"));
+        assert!(html.contains("visibleForwardPassOptions"));
+        assert!(html.contains("expectedPassCompletion"));
+        assert!(html.contains("shotBeatGoalkeeperProbability"));
+        assert!(html.contains("looseBallFiftyFifty"));
         assert!(html.contains("agentShotLane.textContent = selectedPlayerShotLaneLabel()"));
         assert!(html.contains("agentTactical.textContent = selectedPlayerTacticalLabel(p)"));
+        assert!(html.contains("agentPomdp.textContent = selectedPlayerPomdpLabel(p)"));
+        assert!(html.contains("agentPomdp.title = selectedPlayerPomdpTitle(p)"));
         assert!(
             html.contains("context.kind === \"holder\" && context.nearGoal && context.laneOpen")
         );

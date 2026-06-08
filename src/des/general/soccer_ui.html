@@ -122,7 +122,14 @@
     border-bottom: 1px solid #eef1f4;
     font-size: 13px;
   }
-  .metric b { font-variant-numeric: tabular-nums; }
+  .metric b {
+    max-width: 190px;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
   .section {
     margin: 14px 0 6px;
     font-size: 12px;
@@ -359,6 +366,7 @@
       <div class="metric"><span>Kinematics</span><b id="agentKinematics">-</b></div>
       <div class="metric"><span>Shot Lane</span><b id="agentShotLane">-</b></div>
       <div class="metric"><span>Tactical</span><b id="agentTactical">-</b></div>
+      <div class="metric"><span>MDP/POMDP</span><b id="agentPomdp">-</b></div>
       <div class="row">
         <select id="passTarget"></select>
         <select id="passFlight" aria-label="Pass flight">
@@ -501,6 +509,7 @@ const agentSelected = document.getElementById("agentSelected");
 const agentKinematics = document.getElementById("agentKinematics");
 const agentShotLane = document.getElementById("agentShotLane");
 const agentTactical = document.getElementById("agentTactical");
+const agentPomdp = document.getElementById("agentPomdp");
 const passTarget = document.getElementById("passTarget");
 const passFlight = document.getElementById("passFlight");
 const carryActionButton = document.getElementById("carryAction");
@@ -1243,6 +1252,47 @@ function selectedPlayerGridFacingLabel(p) {
   const action = String(p?.actionFacing || p?.lastDecision?.observation?.actionFacing || "Unknown");
   return ` G${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0} F${receive}->${action}`;
 }
+function compactNumber(value, digits = 2) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number.toFixed(digits) : Number(0).toFixed(digits);
+}
+function compactYards(value) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number)) return "0y";
+  return `${Math.round(number)}y`;
+}
+function selectedPlayerPomdpLabel(p = selectedPlayerSnapshot()) {
+  const decision = p?.lastDecision;
+  const observation = decision?.observation;
+  if (!observation) return "-";
+  const ballState = observation.hasBall ? "B" : "NoB";
+  const duel = observation.looseBallFiftyFifty ? " 50:50" : "";
+  const goal = `G${compactYards(observation.yardsToGoal)}`;
+  const pressure = `P${compactNumber(observation.perceivedPressure)} U${compactNumber(observation.decisionUrgency)}`;
+  const pass = `F${Number(observation.visibleForwardPassOptions ?? 0)}/${Number(observation.visiblePassOptions ?? 0)} C${compactNumber(observation.expectedPassCompletion)}`;
+  const shot = `S${observation.shotLaneOpen ? "O" : "B"} ${compactNumber(observation.shotBeatGoalkeeperProbability)}`;
+  return `${ballState}${duel} ${goal} ${pressure} ${pass} ${shot}`;
+}
+function selectedPlayerPomdpTitle(p = selectedPlayerSnapshot()) {
+  const decision = p?.lastDecision;
+  const observation = decision?.observation;
+  if (!observation) return "No selected-player decision trace";
+  const state = decision?.mdpState || {};
+  const grid = observation.playerGrid || state.playerGrid || gridAddressForPlayer(p);
+  const fine = grid?.fine || {};
+  const tactical = grid?.tactical || {};
+  const macro = grid?.macroZone || grid?.macro_zone || {};
+  const parts = [
+    `Action: ${String(decision.action || p?.lastAction || "-")}`,
+    `State: phase=${String(state.phase || "-")} possession=${String(state.possessionTeam ?? "-")} grid=${fine.id ?? 0}/${tactical.id ?? 0}/${macro.id ?? 0} facing=${String(observation.receiveFacing || state.receiveFacing || "Unknown")}->${String(observation.actionFacing || state.actionFacing || "Unknown")}`,
+    `Goal: toGoal=${compactYards(observation.yardsToGoal)} ownGoal=${compactYards(observation.yardsToOwnGoal)} angle=${compactNumber(observation.opponentGoalAngleDegrees, 1)} forwardSpace=${compactYards(observation.forwardDribbleSpaceYards)}`,
+    `Pressure: real=${compactNumber(observation.realPressure)} perceived=${compactNumber(observation.perceivedPressure)} urgency=${compactNumber(observation.decisionUrgency)} attack=${compactNumber(observation.offensiveUrgency)} defend=${compactNumber(observation.defensiveUrgency)}`,
+    `Pass: visible=${Number(observation.visiblePassOptions ?? 0)} forward=${Number(observation.visibleForwardPassOptions ?? 0)} aerial=${Number(observation.visibleAerialPassOptions ?? 0)} completion=${compactNumber(observation.expectedPassCompletion)} aerialCompletion=${compactNumber(observation.expectedAerialPassCompletion)} openness=${compactNumber(observation.bestForwardPassReceiverOpenness)} lane=${compactNumber(observation.floorPassLaneScore)} stride=${compactNumber(observation.bestPassStrideFit)}`,
+    `Shot: lane=${observation.shotLaneOpen ? "open" : "blocked"} block=${compactNumber(observation.shotBlockProbability)} onFrame=${compactNumber(observation.shotOnFrameProbability)} beatGK=${compactNumber(observation.shotBeatGoalkeeperProbability)} curl=${compactNumber(observation.shotCurlProbability)}`,
+    `Loose: loose=${observation.looseBall ? "yes" : "no"} duel=${observation.looseBallFiftyFifty ? "yes" : "no"} timeToBall=${compactNumber(observation.looseBallPlayerTimeToBallSeconds)} advantage=${compactNumber(observation.looseBallTeamTimeAdvantageSeconds)}`,
+  ];
+  return parts.join("\n");
+}
 function vecLen(v) {
   if (!v) return 0;
   return Math.hypot(Number(v.x || 0), Number(v.y || 0));
@@ -1965,6 +2015,8 @@ function updateAgentStatePanel() {
     agentKinematics.textContent = "-";
     agentShotLane.textContent = "-";
     agentTactical.textContent = "-";
+    agentPomdp.textContent = "-";
+    agentPomdp.title = "";
     return;
   }
   agentSelected.textContent = `${p.team} ${p.shirt} ${p.name}`;
@@ -1975,6 +2027,8 @@ function updateAgentStatePanel() {
   );
   agentShotLane.textContent = selectedPlayerShotLaneLabel();
   agentTactical.textContent = selectedPlayerTacticalLabel(p);
+  agentPomdp.textContent = selectedPlayerPomdpLabel(p);
+  agentPomdp.title = selectedPlayerPomdpTitle(p);
 }
 function selectedPlayerTacticalLabel(p = selectedPlayerSnapshot()) {
   const observation = p?.lastDecision?.observation;

@@ -102319,7 +102319,12 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("action: \"KeyO\""));
         assert!(html.contains("left: \"Numpad4\""));
         assert!(html.contains("action: \"Numpad9\""));
-        assert!(html.contains("Math.min(Number(state.config.maxHumanPlayers || 0), 4)"));
+        assert!(html.contains("const controller = state.controllerContract || {}"));
+        assert!(html.contains("controller.maxHumanControllers ?? 4"));
+        assert!(html.contains(
+            "controller.configuredHumanControllers ?? state.config?.maxHumanPlayers ?? maxSlots"
+        ));
+        assert!(html.contains("Math.min(configured, boundedMax, 4)"));
         assert!(html.contains("for (let slot = 0; slot < humanSlotCount(); slot++)"));
         assert!(html.contains("label.textContent = `Slot ${slot + 1}`"));
         assert!(html.contains("const assignedByPlayer = new Map"));

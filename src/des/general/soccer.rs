@@ -89236,6 +89236,36 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             holder.last_decision.is_some(),
             "live state polling should retain the holder MDP/POMDP trace"
         );
+        let decision = holder
+            .last_decision
+            .as_ref()
+            .expect("holder decision trace");
+        assert!(decision.mdp_state.player_grid.fine.id > 0);
+        assert!(decision.observation.player_grid.fine.id > 0);
+        assert_eq!(
+            decision.mdp_state.player_grid,
+            decision.observation.player_grid
+        );
+        assert_eq!(decision.mdp_state.receive_facing, holder.receive_facing);
+        assert_eq!(
+            decision.mdp_state.action_facing,
+            decision.observation.action_facing
+        );
+        assert!(decision.observation.has_ball);
+        assert!(decision.observation.yards_to_goal.is_finite());
+        assert!(decision.observation.shot_block_probability.is_finite());
+        assert!(decision.observation.decision_urgency.is_finite());
+        assert!(decision.observation.perceived_pressure.is_finite());
+        assert!(decision.observation.skill_dribbling > 0.0);
+        assert!(decision.observation.skill_passing_completion_rate > 0.0);
+        assert!(decision.observation.skill_shooting > 0.0);
+        assert!(
+            decision
+                .action_options
+                .iter()
+                .any(|option| option.legal && option.probability > 0.0),
+            "holder compact decision should retain legal action probabilities"
+        );
         assert!(
             state
                 .frame
@@ -90357,6 +90387,65 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .find(|player| player["id"].as_u64() == Some(holder_id as u64))
             .expect("holder player");
         assert!(holder_player["lastDecision"].get("mdpState").is_some());
+        let holder_decision = &holder_player["lastDecision"];
+        assert!(
+            holder_decision["mdpState"]["playerGrid"]["fine"]["id"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            holder_decision["mdpState"]["playerGrid"],
+            holder_decision["observation"]["playerGrid"]
+        );
+        assert!(holder_decision["mdpState"]["receiveFacing"].is_string());
+        assert!(holder_decision["mdpState"]["actionFacing"].is_string());
+        assert_eq!(holder_decision["observation"]["hasBall"], true);
+        assert!(holder_decision["observation"]["yardsToGoal"]
+            .as_f64()
+            .is_some());
+        assert!(holder_decision["observation"]["shotLaneOpen"].is_boolean());
+        assert!(holder_decision["observation"]["shotBlockProbability"]
+            .as_f64()
+            .is_some());
+        assert!(holder_decision["observation"]["decisionUrgency"]
+            .as_f64()
+            .is_some());
+        assert!(holder_decision["observation"]["perceivedPressure"]
+            .as_f64()
+            .is_some());
+        assert!(
+            holder_decision["observation"]["skillDribbling"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            holder_decision["observation"]["skillPassingCompletionRate"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            holder_decision["observation"]["skillShooting"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(holder_decision["belief"]["possessionConfidence"]
+            .as_f64()
+            .is_some());
+        assert!(holder_decision["belief"]["pressure"].as_f64().is_some());
+        assert!(holder_decision["belief"]["passLaneOpen"].as_f64().is_some());
+        assert!(holder_decision["belief"]["shotQuality"].as_f64().is_some());
+        let holder_options = holder_decision["actionOptions"]
+            .as_array()
+            .expect("holder action options");
+        assert!(holder_options.iter().any(|option| {
+            option["legal"].as_bool().unwrap_or(false)
+                && option["probability"].as_f64().unwrap_or(0.0) > 0.0
+                && option["tickProbability"].as_f64().unwrap_or(0.0) >= 0.0
+        }));
         let holder_schedule_index = agent_schedule
             .iter()
             .position(|entry| {

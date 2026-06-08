@@ -30452,6 +30452,8 @@ pub struct SoccerAccountingSmokeReport {
     pub pass_attempts: u32,
     pub completed_passes: u32,
     pub shot_attempts: u32,
+    pub off_ball_open_space_moves: usize,
+    pub off_ball_open_space_gain: f64,
     pub possession_frames: usize,
     pub non_possession_frames: usize,
     pub home_possession_frames: usize,
@@ -31558,6 +31560,8 @@ fn soccer_accounting_check_frame_liveness(
         }
         previous_ball = Some(frame.ball.position);
 
+        let possession_team = soccer_accounting_frame_ball_team(frame);
+        let holder = frame.ball.holder;
         for player in &frame.players {
             if let Some(prev) = previous_players.insert(player.id, player.position) {
                 let movement = player.position.distance(prev);
@@ -31565,6 +31569,29 @@ fn soccer_accounting_check_frame_liveness(
                     report.player_movement_yards += movement;
                     if movement > 0.025 {
                         moving_players.insert(player.id);
+                    }
+                    if movement > 0.05
+                        && possession_team == Some(player.team)
+                        && holder != Some(player.id)
+                    {
+                        let before_space = soccer_accounting_frame_space_score_at(
+                            frame,
+                            player.team,
+                            prev,
+                            Some(player.id),
+                        );
+                        let after_space = soccer_accounting_frame_space_score_at(
+                            frame,
+                            player.team,
+                            player.position,
+                            Some(player.id),
+                        );
+                        let gain = after_space - before_space;
+                        if gain.is_finite() && gain > 0.25 {
+                            report.off_ball_open_space_moves =
+                                report.off_ball_open_space_moves.saturating_add(1);
+                            report.off_ball_open_space_gain += gain;
+                        }
                     }
                 }
             }
@@ -31608,6 +31635,20 @@ fn soccer_accounting_check_frame_liveness(
             "multi-frame soccer simulation should move the ball toward a team's goal at least once",
         );
     }
+
+    if trace.summary.ticks >= 200 && report.off_ball_open_space_moves == 0 {
+        report.push_violation(
+            trace.summary.ticks,
+            "liveness",
+            "offBallOpenSpaceSupport",
+            "at least one off-ball teammate improves open-space score in a 20s+ match",
+            format!(
+                "moves={} gain={:.6}",
+                report.off_ball_open_space_moves, report.off_ball_open_space_gain
+            ),
+            "autonomous possession should include teammates moving into open space",
+        );
+    }
 }
 
 fn soccer_accounting_frame_ball_team(frame: &MatchFrame) -> Option<Team> {
@@ -31623,6 +31664,31 @@ fn soccer_accounting_frame_ball_team(frame: &MatchFrame) -> Option<Team> {
         })
         .or(frame.central_brain.possession_team)
         .or(frame.ball.last_touch_team)
+}
+
+fn soccer_accounting_frame_space_score_at(
+    frame: &MatchFrame,
+    team: Team,
+    point: Vec2,
+    exclude_player_id: Option<usize>,
+) -> f64 {
+    let mut opponent_distance: f64 = 35.0;
+    let mut teammate_crowding: f64 = 25.0;
+    for player in &frame.players {
+        if exclude_player_id == Some(player.id) || !vec2_is_finite(player.position) {
+            continue;
+        }
+        let distance = player.position.distance(point);
+        if !distance.is_finite() {
+            continue;
+        }
+        if player.team == team {
+            teammate_crowding = teammate_crowding.min(distance);
+        } else {
+            opponent_distance = opponent_distance.min(distance);
+        }
+    }
+    open_space_score_from_distances(opponent_distance, teammate_crowding)
 }
 
 fn soccer_accounting_check_frame_roster(
@@ -72149,6 +72215,87 @@ mod tests {
                 report.violations
             );
         }
+    }
+
+    #[test]
+    fn accounting_smoke_report_observes_off_ball_open_space_support() {
+        let trace = run_simulation(
+            MatchConfig {
+                duration_seconds: 20.0,
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..SoccerNeuralLearningConfig::default()
+                },
+                max_human_players: 0,
+                seed: 22_901,
+                ..MatchConfig::default()
+            },
+            4,
+        );
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert!(
+            report.off_ball_open_space_moves > 0,
+            "sustained autonomous possession should include off-ball players moving into open space: {report:?}"
+        );
+        assert!(
+            report.off_ball_open_space_gain > 0.25,
+            "open-space movement should produce measurable gain: {report:?}"
+        );
+        assert!(
+            !report.violations.iter().any(|violation| {
+                violation.subject == "liveness" && violation.metric == "offBallOpenSpaceSupport"
+            }),
+            "healthy autonomous trace should not flag off-ball support: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn accounting_smoke_report_flags_missing_open_space_support() {
+        let mut trace = run_simulation(
+            MatchConfig {
+                duration_seconds: 20.0,
+                learning_enabled: false,
+                learning_logging_enabled: false,
+                neural_learning: SoccerNeuralLearningConfig {
+                    enabled: false,
+                    ..SoccerNeuralLearningConfig::default()
+                },
+                max_human_players: 0,
+                seed: 22_901,
+                ..MatchConfig::default()
+            },
+            4,
+        );
+        let frozen_positions = trace
+            .frames
+            .first()
+            .expect("initial frame")
+            .players
+            .iter()
+            .map(|player| (player.id, player.position))
+            .collect::<HashMap<_, _>>();
+        for frame in &mut trace.frames {
+            for player in &mut frame.players {
+                if let Some(frozen) = frozen_positions.get(&player.id).copied() {
+                    player.position = frozen;
+                    if let Some(last) = player.position_history.last_mut() {
+                        *last = frozen;
+                    }
+                }
+            }
+        }
+
+        let report = soccer_simulation_accounting_smoke_report(&trace);
+
+        assert_eq!(report.off_ball_open_space_moves, 0);
+        assert!(report.violations.iter().any(|violation| {
+            violation.subject == "liveness" && violation.metric == "offBallOpenSpaceSupport"
+        }));
     }
 
     #[test]

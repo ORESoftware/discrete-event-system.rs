@@ -55818,6 +55818,237 @@ mod tests {
         assert_eq!(sim.config.goal_width_yards, DEFAULT_GOAL_WIDTH_YARDS);
     }
 
+    #[test]
+    fn default_roster_exposes_role_specific_skills_to_learning_state() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            seed: 44_001,
+            ..Default::default()
+        });
+        let role_count = |role: PlayerRole| sim.players.iter().filter(|p| p.role == role).count();
+        assert_eq!(role_count(PlayerRole::Goalkeeper), 2);
+        assert_eq!(role_count(PlayerRole::Defender), 8);
+        assert_eq!(role_count(PlayerRole::Midfielder), 8);
+        assert_eq!(role_count(PlayerRole::Forward), 4);
+
+        let mut unique_skill_signatures = HashSet::new();
+        for player in &sim.players {
+            let s = &player.skills;
+            for (label, value) in [
+                ("top_speed", s.top_speed),
+                ("acceleration", s.acceleration),
+                ("strength", s.strength),
+                ("height", s.height),
+                ("shooting", s.shooting),
+                ("right_foot_shot_power", s.right_foot_shot_power),
+                ("left_foot_shot_power", s.left_foot_shot_power),
+                ("passing", s.passing),
+                ("passing_completion_rate", s.passing_completion_rate),
+                ("flair_passing", s.flair_passing),
+                ("crossing_left", s.crossing_left),
+                ("crossing_right", s.crossing_right),
+                ("dribbling", s.dribbling),
+                ("first_touch", s.first_touch),
+                ("defending", s.defending),
+                ("goalkeeping", s.goalkeeping),
+                ("defensive_tracking", s.defensive_tracking),
+                ("stamina", s.stamina),
+                ("vision", s.vision),
+                ("aggression", s.aggression),
+            ] {
+                assert!(
+                    value.is_finite() && (1.0..=10.0).contains(&value),
+                    "{label} should be a finite 1-10 skill for {}: {value}",
+                    player.name
+                );
+            }
+            assert!(
+                s.weight_pounds.is_finite() && (135.0..=235.0).contains(&s.weight_pounds),
+                "weight should remain in a plausible player range for {}: {}",
+                player.name,
+                s.weight_pounds
+            );
+            unique_skill_signatures.insert((
+                player.role,
+                (s.top_speed * 10.0).round() as i16,
+                (s.acceleration * 10.0).round() as i16,
+                (s.shooting * 10.0).round() as i16,
+                (s.passing_completion_rate * 10.0).round() as i16,
+                (s.dribbling * 10.0).round() as i16,
+                (s.defending * 10.0).round() as i16,
+                (s.goalkeeping * 10.0).round() as i16,
+            ));
+        }
+        assert!(
+            unique_skill_signatures.len() >= 18,
+            "default roster should not flatten into same-skill agents"
+        );
+
+        let role_mean = |role: PlayerRole, skill: fn(&SkillProfile) -> f64| {
+            let mut total = 0.0;
+            let mut count = 0usize;
+            for player in sim.players.iter().filter(|p| p.role == role) {
+                total += skill(&player.skills);
+                count += 1;
+            }
+            total / count.max(1) as f64
+        };
+        let forward_speed = role_mean(PlayerRole::Forward, |s| s.top_speed);
+        let midfielder_speed = role_mean(PlayerRole::Midfielder, |s| s.top_speed);
+        let forward_shooting = role_mean(PlayerRole::Forward, |s| s.shooting);
+        let midfielder_shooting = role_mean(PlayerRole::Midfielder, |s| s.shooting);
+        let midfielder_passing = role_mean(PlayerRole::Midfielder, |s| s.passing_completion_rate);
+        let defender_passing = role_mean(PlayerRole::Defender, |s| s.passing_completion_rate);
+        let forward_dribbling = role_mean(PlayerRole::Forward, |s| s.dribbling);
+        let defender_dribbling = role_mean(PlayerRole::Defender, |s| s.dribbling);
+        let defender_defending = role_mean(PlayerRole::Defender, |s| s.defending);
+        let forward_defending = role_mean(PlayerRole::Forward, |s| s.defending);
+        let goalkeeper_goalkeeping = role_mean(PlayerRole::Goalkeeper, |s| s.goalkeeping);
+        let field_goalkeeping = sim
+            .players
+            .iter()
+            .filter(|p| p.role != PlayerRole::Goalkeeper)
+            .map(|p| p.skills.goalkeeping)
+            .sum::<f64>()
+            / sim
+                .players
+                .iter()
+                .filter(|p| p.role != PlayerRole::Goalkeeper)
+                .count() as f64;
+
+        assert!(
+            forward_speed > midfielder_speed + 1.0,
+            "forwards should be distinctly faster on average: F {forward_speed} M {midfielder_speed}"
+        );
+        assert!(
+            forward_shooting > midfielder_shooting + 1.0,
+            "forwards should be distinctly better shooters: F {forward_shooting} M {midfielder_shooting}"
+        );
+        assert!(
+            midfielder_passing > defender_passing + 0.5,
+            "midfielders should have a passing edge: M {midfielder_passing} D {defender_passing}"
+        );
+        assert!(
+            forward_dribbling > defender_dribbling + 1.6,
+            "forwards should have a dribbling edge: F {forward_dribbling} D {defender_dribbling}"
+        );
+        assert!(
+            defender_defending > forward_defending + 2.0,
+            "defenders should have a defending edge: D {defender_defending} F {forward_defending}"
+        );
+        assert!(
+            goalkeeper_goalkeeping > field_goalkeeping + 6.0,
+            "keepers should be clearly specialized in goal: GK {goalkeeper_goalkeeping} field {field_goalkeeping}"
+        );
+
+        let forward_id = sim
+            .players
+            .iter()
+            .find(|p| p.team == Team::Home && p.role == PlayerRole::Forward)
+            .map(|p| p.id)
+            .expect("home forward");
+        sim.ball.holder = Some(forward_id);
+        sim.ball.position = sim.players[forward_id].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observation = snapshot.observation_for(forward_id);
+        let skills = &sim.players[forward_id].skills;
+        assert_eq!(observation.skill_top_speed, skills.top_speed);
+        assert_eq!(observation.skill_acceleration, skills.acceleration);
+        assert_eq!(observation.skill_strength, skills.strength);
+        assert_eq!(observation.skill_height, skills.height);
+        assert_eq!(observation.skill_weight_pounds, skills.weight_pounds);
+        assert_eq!(observation.skill_dribbling, skills.dribbling);
+        assert_eq!(observation.skill_aggression, skills.aggression);
+        assert_eq!(observation.skill_defending, skills.defending);
+        assert_eq!(observation.skill_shooting, skills.shooting);
+        assert_eq!(
+            observation.skill_right_foot_shot_power,
+            skills.right_foot_shot_power
+        );
+        assert_eq!(
+            observation.skill_left_foot_shot_power,
+            skills.left_foot_shot_power
+        );
+        assert_eq!(
+            observation.skill_passing_completion_rate,
+            skills.passing_completion_rate
+        );
+        assert_eq!(observation.skill_passing, skills.passing);
+        assert_eq!(observation.skill_first_touch, skills.first_touch);
+        assert_eq!(observation.skill_flair_passing, skills.flair_passing);
+        assert_eq!(observation.skill_vision, skills.vision);
+        assert_eq!(observation.skill_crossing_left, skills.crossing_left);
+        assert_eq!(observation.skill_crossing_right, skills.crossing_right);
+        assert_eq!(observation.skill_goalkeeping, skills.goalkeeping);
+        assert_eq!(
+            observation.skill_defensive_tracking,
+            skills.defensive_tracking
+        );
+
+        let q_state = SoccerQStateKey::from_parts(
+            &snapshot.mdp_state_for_player(forward_id),
+            &observation,
+            Team::Home,
+            PlayerRole::Forward,
+        );
+        assert_eq!(q_state.skill_top_speed_bin, skill_bucket(skills.top_speed));
+        assert_eq!(
+            q_state.skill_acceleration_bin,
+            skill_bucket(skills.acceleration)
+        );
+        assert_eq!(q_state.skill_strength_bin, skill_bucket(skills.strength));
+        assert_eq!(q_state.skill_height_bin, skill_bucket(skills.height));
+        assert_eq!(
+            q_state.skill_weight_bin,
+            player_weight_bucket(skills.weight_pounds)
+        );
+        assert_eq!(q_state.skill_dribbling_bin, skill_bucket(skills.dribbling));
+        assert_eq!(
+            q_state.skill_aggression_bin,
+            skill_bucket(skills.aggression)
+        );
+        assert_eq!(q_state.skill_defending_bin, skill_bucket(skills.defending));
+        assert_eq!(q_state.skill_shooting_bin, skill_bucket(skills.shooting));
+        assert_eq!(
+            q_state.skill_right_foot_shot_bin,
+            skill_bucket(skills.right_foot_shot_power)
+        );
+        assert_eq!(
+            q_state.skill_left_foot_shot_bin,
+            skill_bucket(skills.left_foot_shot_power)
+        );
+        assert_eq!(
+            q_state.skill_passing_completion_bin,
+            skill_bucket(skills.passing_completion_rate)
+        );
+        assert_eq!(q_state.skill_passing_bin, skill_bucket(skills.passing));
+        assert_eq!(
+            q_state.skill_first_touch_bin,
+            skill_bucket(skills.first_touch)
+        );
+        assert_eq!(
+            q_state.skill_flair_passing_bin,
+            skill_bucket(skills.flair_passing)
+        );
+        assert_eq!(q_state.skill_vision_bin, skill_bucket(skills.vision));
+        assert_eq!(
+            q_state.skill_crossing_left_bin,
+            skill_bucket(skills.crossing_left)
+        );
+        assert_eq!(
+            q_state.skill_crossing_right_bin,
+            skill_bucket(skills.crossing_right)
+        );
+        assert_eq!(
+            q_state.skill_goalkeeping_bin,
+            skill_bucket(skills.goalkeeping)
+        );
+        assert_eq!(
+            q_state.skill_defensive_tracking_bin,
+            skill_bucket(skills.defensive_tracking)
+        );
+    }
+
     fn assert_kickoff_shape(sim: &SoccerMatch, kickoff_team: Team) {
         let center = Vec2::new(
             sim.config.field_width_yards * 0.5,

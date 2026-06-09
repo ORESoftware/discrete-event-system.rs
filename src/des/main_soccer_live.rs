@@ -38,6 +38,13 @@ where
         .filter(|value| *value > 0)
 }
 
+fn env_nonnegative_u64<F>(lookup: &F, primary: &str, fallback: &str) -> Option<u64>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_value(lookup, primary, fallback).and_then(|raw| raw.parse::<u64>().ok())
+}
+
 fn env_positive_usize<F>(lookup: &F, primary: &str, fallback: &str) -> Option<usize>
 where
     F: Fn(&str) -> Option<String>,
@@ -202,6 +209,13 @@ where
     ) {
         cfg.autoload_team_policy = autoload;
     }
+    if let Some(max_bytes) = env_nonnegative_u64(
+        &lookup,
+        "SOCCER_LIVE_POLICY_AUTOLOAD_MAX_BYTES",
+        "SOCCER_POLICY_AUTOLOAD_MAX_BYTES",
+    ) {
+        cfg.policy_autoload_max_bytes = max_bytes;
+    }
     if let Some(autosave) = env_bool(
         &lookup,
         "SOCCER_LIVE_AUTOSAVE_POLICY",
@@ -261,6 +275,7 @@ mod tests {
         assert!(cfg.match_config.learning_enabled);
         assert!(!cfg.match_config.learning_logging_enabled);
         assert!(cfg.match_config.neural_learning.enabled);
+        assert_eq!(cfg.policy_autoload_max_bytes, 64 * 1024 * 1024);
         assert_eq!(
             cfg.match_config.neural_learning.backend,
             SoccerNeuralLearningBackend::Threaded
@@ -280,6 +295,7 @@ mod tests {
             ("SOCCER_LIVE_NEURAL_LEARNING_ENABLED", "1"),
             ("SOCCER_LIVE_NEURAL_LEARNING_BACKEND", "threaded"),
             ("SOCCER_LIVE_ADVERSARIAL_EMBEDDING_ENABLED", "yes"),
+            ("SOCCER_LIVE_POLICY_AUTOLOAD_MAX_BYTES", "123456"),
         ]);
 
         let cfg =
@@ -290,12 +306,23 @@ mod tests {
         assert_eq!(cfg.http_worker_threads, 6);
         assert_eq!(cfg.match_config.learning_interval_ticks, 7);
         assert!(cfg.match_config.full_game_learning_enabled);
+        assert_eq!(cfg.policy_autoload_max_bytes, 123456);
         assert!(cfg.match_config.neural_learning.enabled);
         assert_eq!(
             cfg.match_config.neural_learning.backend,
             SoccerNeuralLearningBackend::Threaded
         );
         assert!(cfg.match_config.adversarial_embedding_exploitation_enabled);
+    }
+
+    #[test]
+    fn live_server_env_allows_zero_policy_autoload_cap() {
+        let vars = BTreeMap::from([("SOCCER_LIVE_POLICY_AUTOLOAD_MAX_BYTES", "0")]);
+
+        let cfg =
+            live_server_config_from_lookup(|name| vars.get(name).map(|value| value.to_string()));
+
+        assert_eq!(cfg.policy_autoload_max_bytes, 0);
     }
 
     #[test]

@@ -296,6 +296,7 @@ const CENTER_REF_BALL_POSITION_WEIGHT: f64 = 0.20;
 const ASSISTANT_REF_BALL_CLEARANCE_YARDS: f64 = 4.0;
 const ASSISTANT_REF_TOUCHLINE_OFFSET_YARDS: f64 = 0.5;
 const LIVE_HTTP_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const LIVE_HTTP_ACCESS_CONTROL_ALLOW_HEADERS: &str = "content-type, Auth";
 
 fn defensive_line_break_threat_fit(line_gap: f64) -> f64 {
     ((DEFENSIVE_LINE_BREAK_TRIGGER_GAP_YARDS - line_gap)
@@ -322,6 +323,7 @@ const SOCCER_POLICY_POSTGRES_RUN_DELTAS_TABLE: &str = "des_soccer_learning_run_d
 const SOCCER_POLICY_POSTGRES_MERGE_EVENTS_TABLE: &str = "des_soccer_learning_merge_events";
 const SOCCER_POLICY_VALUE_MICROS_SCALE: f64 = 1_000_000.0;
 const DEFAULT_LIVE_MOMENT_WINDOWS_PATH: &str = "out/soccer-live/moment-windows.jsonl";
+const DEFAULT_LIVE_POLICY_AUTOLOAD_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MIN_POLICY_AUTOSAVE_INTERVAL_TICKS: u64 = 50;
 const DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS: u64 = 600;
 const DEFAULT_POLICY_HISTORY_RECORD_LIMIT: usize = 24;
@@ -515,6 +517,10 @@ fn default_live_policy_disk_path() -> String {
 
 fn default_live_moment_disk_path() -> String {
     DEFAULT_LIVE_MOMENT_WINDOWS_PATH.to_string()
+}
+
+fn default_live_policy_autoload_max_bytes() -> u64 {
+    DEFAULT_LIVE_POLICY_AUTOLOAD_MAX_BYTES
 }
 
 fn default_live_http_worker_threads() -> usize {
@@ -8093,6 +8099,14 @@ impl PlayerAgent {
             return (SoccerAction::Shoot { power: 1.0 }, "shoot".to_string());
         }
 
+        self.human_carry_or_protect_action(snapshot, observation)
+    }
+
+    fn human_carry_or_protect_action(
+        &self,
+        snapshot: &WorldSnapshot,
+        observation: &SoccerPomdpObservation,
+    ) -> (SoccerAction, String) {
         let mut kind = if observation.perceived_pressure >= 0.42
             && observation.forward_dribble_space_yards < 1.25
         {
@@ -8115,6 +8129,42 @@ impl PlayerAgent {
             },
             kind.label().to_string(),
         )
+    }
+
+    fn human_pass_or_carry_action(
+        &self,
+        input: &HumanInputFrame,
+        snapshot: &WorldSnapshot,
+        observation: &SoccerPomdpObservation,
+        flight: PassFlight,
+        power: f64,
+    ) -> (SoccerAction, String) {
+        let visible_targets = if flight.is_aerial() {
+            snapshot.ranked_visible_aerial_pass_targets(self.id, 11)
+        } else {
+            snapshot.ranked_visible_pass_targets(self.id, 11)
+        };
+        if let Some(target) = input
+            .target_player
+            .filter(|target| visible_targets.contains(target))
+            .or_else(|| visible_targets.first().copied())
+        {
+            return (
+                SoccerAction::Pass {
+                    target_player: Some(target),
+                    power,
+                    flight,
+                },
+                if flight.is_aerial() {
+                    "aerial-pass"
+                } else {
+                    "pass"
+                }
+                .to_string(),
+            );
+        }
+
+        self.human_carry_or_protect_action(snapshot, observation)
     }
 
     fn sanitized_off_ball_human_move_target(
@@ -8144,21 +8194,19 @@ impl PlayerAgent {
             "shoot" if observation.has_ball => {
                 Some(self.human_shoot_or_carry_action(snapshot, observation))
             }
-            "pass" if observation.has_ball => Some((
-                SoccerAction::Pass {
-                    target_player: input.target_player,
-                    power: 0.78,
-                    flight: PassFlight::Floor,
-                },
-                "pass".to_string(),
+            "pass" if observation.has_ball => Some(self.human_pass_or_carry_action(
+                input,
+                snapshot,
+                observation,
+                PassFlight::Floor,
+                0.78,
             )),
-            "aerial-pass" if observation.has_ball => Some((
-                SoccerAction::Pass {
-                    target_player: input.target_player,
-                    power: 0.78,
-                    flight: PassFlight::Aerial,
-                },
-                "aerial-pass".to_string(),
+            "aerial-pass" if observation.has_ball => Some(self.human_pass_or_carry_action(
+                input,
+                snapshot,
+                observation,
+                PassFlight::Aerial,
+                0.78,
             )),
             "killer-pass" | "clearance" | "route-one" if observation.has_ball => self
                 .action_from_learned_plan(
@@ -8282,18 +8330,12 @@ impl PlayerAgent {
             } else if input.pass {
                 if has_ball {
                     let pass_flight = input.pass_flight;
-                    (
-                        SoccerAction::Pass {
-                            target_player: input.target_player,
-                            power: 0.78,
-                            flight: pass_flight,
-                        },
-                        if pass_flight.is_aerial() {
-                            "aerial-pass"
-                        } else {
-                            "pass"
-                        }
-                        .to_string(),
+                    self.human_pass_or_carry_action(
+                        input,
+                        snapshot,
+                        &observation,
+                        pass_flight,
+                        0.78,
                     )
                 } else {
                     (
@@ -10979,15 +11021,16 @@ impl SharedHumanInputs {
 
     fn push_with_enqueue_unix_ms(&self, input: HumanInputFrame, enqueued_unix_ms: u64) -> bool {
         let controller_slot = input.controller_slot;
-        let mut store = soccer_rwlock_write(&self.inner, "human_input_queue");
-        let accepted = store.push(input, enqueued_unix_ms);
+        let accepted = {
+            let mut store = soccer_rwlock_write(&self.inner, "human_input_queue");
+            store.push(input, enqueued_unix_ms)
+        };
         if accepted {
             let (lock, condvar) = &*self.notifier;
             let mut notifier = soccer_mutex_lock(lock, "human_input_notifier");
             notifier.record_slot_change(controller_slot);
             condvar.notify_all();
         }
-        drop(store);
         accepted
     }
 
@@ -34899,7 +34942,11 @@ pub struct SoccerUiRuntimeContract {
     pub live_step_post_enabled: bool,
     pub live_input_post_enabled: bool,
     pub live_step_post_batches_ticks: bool,
+    pub live_step_post_batches_queued_controller_inputs: bool,
     pub live_input_post_batches_controller_frames: bool,
+    pub live_input_post_low_latency_interrupt_enabled: bool,
+    pub live_post_uses_auth_header: bool,
+    pub live_auth_token_session_storage_enabled: bool,
     pub run_new_simulation_button_enabled: bool,
     pub four_human_controller_slots_enabled: bool,
     pub max_human_controller_slots: usize,
@@ -35499,7 +35546,11 @@ fn soccer_ui_runtime_contract() -> SoccerUiRuntimeContract {
         live_step_post_enabled: true,
         live_input_post_enabled: true,
         live_step_post_batches_ticks: true,
+        live_step_post_batches_queued_controller_inputs: true,
         live_input_post_batches_controller_frames: true,
+        live_input_post_low_latency_interrupt_enabled: true,
+        live_post_uses_auth_header: true,
+        live_auth_token_session_storage_enabled: true,
         run_new_simulation_button_enabled: true,
         four_human_controller_slots_enabled: true,
         max_human_controller_slots: SOCCER_MAX_HUMAN_CONTROLLER_SLOTS,
@@ -37154,6 +37205,8 @@ pub struct SoccerLiveServerConfig {
     pub moment_disk_path: String,
     #[serde(default = "default_live_policy_autoload")]
     pub autoload_team_policy: bool,
+    #[serde(default = "default_live_policy_autoload_max_bytes")]
+    pub policy_autoload_max_bytes: u64,
     #[serde(default)]
     pub autosave_team_policy: bool,
     #[serde(default = "default_policy_autosave_interval_ticks")]
@@ -37175,6 +37228,7 @@ impl Default for SoccerLiveServerConfig {
             policy_disk_path: DEFAULT_LIVE_TEAM_POLICY_PATH.to_string(),
             moment_disk_path: DEFAULT_LIVE_MOMENT_WINDOWS_PATH.to_string(),
             autoload_team_policy: true,
+            policy_autoload_max_bytes: DEFAULT_LIVE_POLICY_AUTOLOAD_MAX_BYTES,
             autosave_team_policy: true,
             policy_autosave_interval_ticks: DEFAULT_POLICY_AUTOSAVE_INTERVAL_TICKS,
         }
@@ -47150,7 +47204,16 @@ impl SoccerLiveServer {
             save_now: None,
         });
         if config.autoload_team_policy && policy_path.exists() {
-            if let Err(err) = session.load_team_policy_artifact_from_path(&policy_path) {
+            let max_bytes = config.policy_autoload_max_bytes;
+            let policy_len = fs::metadata(&policy_path).ok().map(|meta| meta.len());
+            if max_bytes > 0 && policy_len.is_some_and(|len| len > max_bytes) {
+                session.policy_autosave.record_error(format!(
+                    "autoload policy skipped: {} is {} bytes, above {} byte limit",
+                    policy_path.display(),
+                    policy_len.unwrap_or(0),
+                    max_bytes
+                ));
+            } else if let Err(err) = session.load_team_policy_artifact_from_path(&policy_path) {
                 session
                     .policy_autosave
                     .record_error(format!("autoload policy: {err}"));
@@ -47521,11 +47584,12 @@ impl LiveHttpResponse {
 
     fn to_bytes(&self) -> Vec<u8> {
         let headers = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type\r\nAccess-Control-Allow-Methods: GET,POST,OPTIONS\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Allow-Methods: GET,POST,OPTIONS\r\nConnection: close\r\n\r\n",
             self.status,
             self.reason,
             self.content_type,
-            self.body.as_bytes().len()
+            self.body.as_bytes().len(),
+            LIVE_HTTP_ACCESS_CONTROL_ALLOW_HEADERS
         );
         let mut out = headers.into_bytes();
         out.extend_from_slice(self.body.as_bytes());
@@ -47609,7 +47673,7 @@ fn write_live_http_chunked_header<W: Write>(
 ) -> std::io::Result<()> {
     write!(
         writer,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type\r\nAccess-Control-Allow-Methods: GET,POST,OPTIONS\r\nConnection: close\r\n\r\n"
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: {LIVE_HTTP_ACCESS_CONTROL_ALLOW_HEADERS}\r\nAccess-Control-Allow-Methods: GET,POST,OPTIONS\r\nConnection: close\r\n\r\n"
     )
 }
 
@@ -66586,6 +66650,107 @@ mod tests {
     }
 
     #[test]
+    fn human_pass_input_cannot_bypass_pomdp_visibility() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let passer = 6;
+        let visible_teammate = 7;
+        let hidden_teammate = 8;
+        sim.players[passer].controller_slot = Some(0);
+        sim.players[passer].position = Vec2::new(40.0, 60.0);
+        sim.players[passer].velocity = Vec2::new(4.0, 0.0);
+        sim.players[passer].action_facing = FacingBucket::East;
+        sim.players[passer].receive_facing = FacingBucket::East;
+        sim.players[visible_teammate].position = Vec2::new(56.0, 60.0);
+        sim.players[hidden_teammate].position = Vec2::new(18.0, 60.0);
+        for home in 0..11 {
+            if ![passer, visible_teammate, hidden_teammate].contains(&home) {
+                sim.players[home].position = Vec2::new(6.0, 18.0 + home as f64);
+            }
+        }
+        for away in 11..22 {
+            sim.players[away].position = Vec2::new(72.0, 95.0);
+        }
+        sim.ball.holder = Some(passer);
+        sim.ball.position = sim.players[passer].position;
+        sim.ball.last_touch_team = Some(Team::Home);
+
+        let input = HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(passer),
+            seq: 1,
+            axis: Vec2::zero(),
+            sprint: false,
+            pass: true,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: Some(hidden_teammate),
+        };
+
+        let snapshot = WorldSnapshot::from_match(&sim);
+        assert_eq!(
+            snapshot.ranked_visible_pass_targets(passer, 11),
+            vec![visible_teammate]
+        );
+        let mut button_player = sim.players[passer].clone();
+        let button_intent =
+            button_player.run_time_step(&snapshot, Some(&input), None, &mut mulberry32(66_629));
+        assert!(matches!(
+            button_intent.action,
+            SoccerAction::Pass {
+                target_player: Some(target),
+                flight: PassFlight::Floor,
+                ..
+            } if target == visible_teammate
+        ));
+
+        let explicit_input = HumanInputFrame {
+            pass: false,
+            action: Some("pass".to_string()),
+            seq: 2,
+            ..input.clone()
+        };
+        let mut explicit_player = sim.players[passer].clone();
+        let explicit_intent = explicit_player.run_time_step(
+            &snapshot,
+            Some(&explicit_input),
+            None,
+            &mut mulberry32(66_630),
+        );
+        assert!(matches!(
+            explicit_intent.action,
+            SoccerAction::Pass {
+                target_player: Some(target),
+                flight: PassFlight::Floor,
+                ..
+            } if target == visible_teammate
+        ));
+
+        sim.players[visible_teammate].position = Vec2::new(18.0, 62.0);
+        let hidden_snapshot = WorldSnapshot::from_match(&sim);
+        assert!(hidden_snapshot
+            .ranked_visible_pass_targets(passer, 11)
+            .is_empty());
+        let mut hidden_player = sim.players[passer].clone();
+        let hidden_intent = hidden_player.run_time_step(
+            &hidden_snapshot,
+            Some(&input),
+            None,
+            &mut mulberry32(66_631),
+        );
+        assert!(
+            !matches!(
+                hidden_intent.action,
+                SoccerAction::Pass {
+                    target_player: Some(target),
+                    ..
+                } if target == hidden_teammate
+            ),
+            "human pass input should not fall back to an omniscient hidden target"
+        );
+    }
+
+    #[test]
     fn player_operation_order_is_weighted_by_internal_preferences() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             seed: 203,
@@ -70569,6 +70734,51 @@ mod tests {
     }
 
     #[test]
+    fn assigned_slot_waiter_wakes_with_queue_visible_after_push() {
+        let q = SharedHumanInputs::new();
+        let waiter_queue = q.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            ready_tx.send(()).expect("waiter ready");
+            let started = Instant::now();
+            let result = waiter_queue
+                .wait_for_pending_input_for_slots_result(&[0], Duration::from_millis(200));
+            (result, started.elapsed())
+        });
+
+        ready_rx.recv().expect("waiter started");
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(q.push(HumanInputFrame {
+            controller_slot: 0,
+            player_id: Some(0),
+            seq: 1,
+            axis: Vec2::new(1.0, 0.0),
+            sprint: true,
+            pass: false,
+            pass_flight: PassFlight::Floor,
+            shoot: false,
+            action: None,
+            target_player: None,
+        }));
+
+        let (result, elapsed) = waiter.join().expect("waiter joins");
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "assigned-slot wait should wake on input notification without timing out: {elapsed:?}"
+        );
+        assert!(
+            result.notified || result.immediate_pending,
+            "waiter should report notified or immediate pending input: {result:?}"
+        );
+        assert_eq!(
+            result.queued_after, 1,
+            "notified waiter should observe the queued controller frame immediately after wake"
+        );
+        assert_eq!(q.queued_len_for_slots(&[0]), 1);
+        assert_eq!(q.drain_latest_for_slot(0).expect("slot input").seq, 1);
+    }
+
+    #[test]
     fn clearing_controller_slot_notifies_waiters_and_resets_sequence_watermark() {
         let q = SharedHumanInputs::new();
         assert!(q.push(HumanInputFrame {
@@ -72165,6 +72375,11 @@ mod tests {
         {
             let sim = session.match_mut();
             sim.players[5].controller_slot = Some(0);
+            sim.players[5].position = Vec2::new(40.0, 60.0);
+            sim.players[5].velocity = Vec2::new(4.0, 0.0);
+            sim.players[5].action_facing = FacingBucket::East;
+            sim.players[5].receive_facing = FacingBucket::East;
+            sim.players[8].position = Vec2::new(56.0, 60.0);
             sim.ball.holder = Some(5);
             sim.ball.position = sim.players[5].position;
             sim.ball.velocity = Vec2::zero();
@@ -72414,21 +72629,43 @@ mod tests {
             seed: 79,
             ..Default::default()
         });
+        let passer = 6;
+        let target = 8;
         {
             let sim = session.match_mut();
-            sim.players[5].controller_slot = Some(0);
-            sim.players[5].position = Vec2::new(14.0, 84.0);
-            sim.players[8].position = Vec2::new(42.0, 102.0);
-            sim.ball.holder = Some(5);
-            sim.ball.position = sim.players[5].position;
+            sim.players[passer].controller_slot = Some(0);
+            sim.players[passer].position = Vec2::new(40.0, 56.0);
+            sim.players[passer].velocity = Vec2::new(4.0, 0.0);
+            sim.players[passer].action_facing = FacingBucket::East;
+            sim.players[passer].receive_facing = FacingBucket::East;
+            sim.players[target].position = Vec2::new(63.0, 57.0);
+            for home in 0..11 {
+                if home != passer && home != target {
+                    sim.players[home].position = Vec2::new(28.0 + home as f64, 40.0);
+                }
+            }
+            for away in 11..22 {
+                sim.players[away].position = Vec2::new(38.0, 76.0 + (away - 11) as f64);
+            }
+            sim.players[12].position = Vec2::new(31.0, 40.5);
+            sim.players[13].position = Vec2::new(33.0, 41.0);
+            sim.ball.holder = Some(passer);
+            sim.ball.position = sim.players[passer].position;
             sim.ball.velocity = Vec2::zero();
             sim.ball.last_touch_team = Some(Team::Home);
         }
+        let snapshot = WorldSnapshot::from_match(session.match_ref());
+        assert!(
+            snapshot
+                .ranked_visible_aerial_pass_targets(passer, 11)
+                .contains(&target),
+            "fixture target should be a visible legal aerial pass option"
+        );
 
         let response = session.step(SoccerStepRequest {
             inputs: vec![HumanInputFrame {
                 controller_slot: 0,
-                player_id: Some(5),
+                player_id: Some(passer),
                 seq: 1,
                 axis: Vec2::zero(),
                 sprint: false,
@@ -72436,7 +72673,7 @@ mod tests {
                 pass_flight: PassFlight::Aerial,
                 shoot: false,
                 action: None,
-                target_player: Some(8),
+                target_player: Some(target),
             }],
             ticks: 1,
             record_every_ticks: Some(1),
@@ -72448,10 +72685,10 @@ mod tests {
             .pending_pass
             .as_ref()
             .expect("pending aerial pass");
-        assert_eq!(pass.from, 5);
-        assert_eq!(pass.target, Some(8));
+        assert_eq!(pass.from, passer);
+        assert_eq!(pass.target, Some(target));
         assert_eq!(pass.flight, PassFlight::Aerial);
-        let decision = session.match_ref().players[5]
+        let decision = session.match_ref().players[passer]
             .last_decision
             .as_ref()
             .expect("human aerial decision");
@@ -74778,6 +75015,80 @@ mod tests {
         assert!(
             ball_indexes.len() > 1,
             "ball agent should move through the shuffled field schedule, got {ball_indexes:?}"
+        );
+    }
+
+    #[test]
+    fn ball_agent_run_time_step_trace_matches_shuffled_schedule_each_tick() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.8,
+            seed: 13_086,
+            ..Default::default()
+        });
+        let mut ball_indexes = HashSet::new();
+        let mut ball_operation_orders = HashSet::new();
+
+        for _ in 0..8 {
+            sim.run_time_step();
+            let frame = sim.to_frame();
+            let ball_schedule_index = sim
+                .last_agent_schedule
+                .iter()
+                .position(|entry| entry.kind == AgentScheduleKind::Ball && entry.id == BALL_AGENT_ID)
+                .expect("ball agent should be scheduled");
+            let decision = sim
+                .ball
+                .last_decision
+                .as_ref()
+                .expect("ball agent should record a run_time_step decision");
+
+            assert_eq!(decision.tick, sim.tick.saturating_sub(1));
+            assert_eq!(decision.scheduled_index, Some(ball_schedule_index));
+            assert_eq!(frame.ball.scheduled_index, Some(ball_schedule_index));
+            assert_eq!(
+                frame
+                    .ball
+                    .last_decision
+                    .as_ref()
+                    .and_then(|decision| decision.scheduled_index),
+                Some(ball_schedule_index)
+            );
+            assert!(
+                !decision.action.is_empty(),
+                "ball agent action should describe its timestep outcome"
+            );
+            assert_eq!(
+                decision.operation_order.len(),
+                7,
+                "ball agent should trace its internal weighted operation order"
+            );
+            for op in [
+                "sync-holder",
+                "apply-curl",
+                "apply-resistance",
+                "advance-position",
+                "resolve-shot",
+                "resolve-boundary",
+                "resolve-control",
+            ] {
+                assert!(
+                    decision.operation_order.iter().any(|actual| actual == op),
+                    "ball agent operation order should include {op}: {:?}",
+                    decision.operation_order
+                );
+            }
+
+            ball_indexes.insert(ball_schedule_index);
+            ball_operation_orders.insert(decision.operation_order.join(">"));
+        }
+
+        assert!(
+            ball_indexes.len() > 1,
+            "ball agent should be part of the Fisher-Yates field shuffle: {ball_indexes:?}"
+        );
+        assert!(
+            ball_operation_orders.len() > 1,
+            "ball agent internal operation order should vary with tick/schedule"
         );
     }
 
@@ -96702,7 +97013,20 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(step_value["uiContract"]["liveInputPostEnabled"], true);
         assert_eq!(step_value["uiContract"]["liveStepPostBatchesTicks"], true);
         assert_eq!(
+            step_value["uiContract"]["liveStepPostBatchesQueuedControllerInputs"],
+            true
+        );
+        assert_eq!(
             step_value["uiContract"]["liveInputPostBatchesControllerFrames"],
+            true
+        );
+        assert_eq!(
+            step_value["uiContract"]["liveInputPostLowLatencyInterruptEnabled"],
+            true
+        );
+        assert_eq!(step_value["uiContract"]["livePostUsesAuthHeader"], true);
+        assert_eq!(
+            step_value["uiContract"]["liveAuthTokenSessionStorageEnabled"],
             true
         );
         assert_eq!(step_value["liveAccounting"]["ok"], true);
@@ -96738,6 +97062,32 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             step_value["livePhysics"]["frameEpsilonYards"],
             SOCCER_PHYSICS_FRAME_EPSILON_YARDS
         );
+    }
+
+    #[test]
+    fn live_http_cors_allows_legacy_auth_header_for_browser_posts() {
+        let options = LiveHttpResponse::options();
+        let raw = String::from_utf8(options.to_bytes()).expect("options response utf8");
+        assert!(raw.contains("HTTP/1.1 204 No Content"));
+        assert!(raw.contains(&format!(
+            "Access-Control-Allow-Headers: {LIVE_HTTP_ACCESS_CONTROL_ALLOW_HEADERS}"
+        )));
+        assert!(raw.contains("Access-Control-Allow-Methods: GET,POST,OPTIONS"));
+        assert!(raw.contains("Auth"));
+
+        let mut chunked = Vec::new();
+        write_live_http_chunked_header(
+            &mut chunked,
+            200,
+            "OK",
+            "application/x-ndjson; charset=utf-8",
+        )
+        .expect("chunked header");
+        let chunked = String::from_utf8(chunked).expect("chunked header utf8");
+        assert!(chunked.contains(&format!(
+            "Access-Control-Allow-Headers: {LIVE_HTTP_ACCESS_CONTROL_ALLOW_HEADERS}"
+        )));
+        assert!(chunked.contains("Auth"));
     }
 
     #[test]
@@ -99400,6 +99750,69 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(!state.live_http.spawns_per_request);
         assert!(state.live_http.batches_step_ticks);
 
+        let _ = std::fs::remove_file(policy_path);
+    }
+
+    #[test]
+    fn live_server_skips_oversized_team_policy_autoload_before_bind() {
+        let policy_path = std::env::temp_dir().join(format!(
+            "soccer-policy-autoload-oversize-test-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&policy_path);
+
+        let mut source = SoccerRealtimeSession::new_without_controller_threads(MatchConfig {
+            duration_seconds: 1.0,
+            max_human_players: 0,
+            seed: 161,
+            ..Default::default()
+        });
+        source.step(SoccerStepRequest {
+            ticks: 4,
+            record_every_ticks: Some(4),
+            ..Default::default()
+        });
+        let saved = source
+            .save_team_policy_artifact_to_path(&policy_path)
+            .expect("save source policy");
+        assert!(saved.home_policy_entries > 0);
+        assert!(
+            std::fs::metadata(&policy_path)
+                .expect("saved policy metadata")
+                .len()
+                > 1
+        );
+
+        let server = SoccerLiveServer::new(SoccerLiveServerConfig {
+            match_config: MatchConfig {
+                duration_seconds: 1.0,
+                max_human_players: 0,
+                seed: 162,
+                ..Default::default()
+            },
+            http_worker_threads: 2,
+            policy_disk_path: policy_path.display().to_string(),
+            autoload_team_policy: true,
+            policy_autoload_max_bytes: 1,
+            autosave_team_policy: true,
+            ..Default::default()
+        });
+        let state = server.session.lock().unwrap().state_response();
+
+        assert_eq!(state.learning.home_policy_entries, 0);
+        assert_eq!(state.learning.away_policy_entries, 0);
+        assert!(
+            state
+                .policy_autosave
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("autoload policy skipped"),
+            "expected oversized autoload status error, got {:?}",
+            state.policy_autosave.last_error
+        );
+        assert!(state.policy_autosave.enabled);
+        assert!(!state.policy_autosave.writes_per_timestep);
         let _ = std::fs::remove_file(policy_path);
     }
 
@@ -105223,7 +105636,17 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(contract["liveStepPostEnabled"], true);
         assert_eq!(contract["liveInputPostEnabled"], true);
         assert_eq!(contract["liveStepPostBatchesTicks"], true);
+        assert_eq!(
+            contract["liveStepPostBatchesQueuedControllerInputs"],
+            true
+        );
         assert_eq!(contract["liveInputPostBatchesControllerFrames"], true);
+        assert_eq!(
+            contract["liveInputPostLowLatencyInterruptEnabled"],
+            true
+        );
+        assert_eq!(contract["livePostUsesAuthHeader"], true);
+        assert_eq!(contract["liveAuthTokenSessionStorageEnabled"], true);
         assert_eq!(contract["runNewSimulationButtonEnabled"], true);
         assert_eq!(contract["fourHumanControllerSlotsEnabled"], true);
         assert_eq!(
@@ -107134,8 +107557,47 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.contains("ui.liveInputPostEnabled"));
         assert!(html.contains("ui.playbackStepPostEnabled"));
         assert!(html.contains("ui.playbackInputPostEnabled"));
+        assert!(html.contains("ui.liveStepPostBatchesQueuedControllerInputs"));
+        assert!(html.contains("ui.liveInputPostLowLatencyInterruptEnabled"));
+        assert!(html.contains("ui.livePostUsesAuthHeader"));
+        assert!(html.contains("ui.liveAuthTokenSessionStorageEnabled"));
+        assert!(html.contains("stepInputBatch=${ui.liveStepPostBatchesQueuedControllerInputs}"));
+        assert!(html.contains("inputInterrupt=${ui.liveInputPostLowLatencyInterruptEnabled}"));
+        assert!(html.contains("authHeader=${ui.livePostUsesAuthHeader}"));
         assert!(html.contains("live-post"));
         assert!(html.contains("pb-get"));
+        assert!(html.contains("const AUTH_HEADER_NAME = \"Auth\""));
+        assert!(html.contains("const AUTH_STORAGE_KEY = \"desRsAuth\""));
+        assert!(html.contains("function initializeAuthTokenFromLocation()"));
+        assert!(html.contains("window.sessionStorage?.setItem(AUTH_STORAGE_KEY, value)"));
+        assert!(html.contains("[AUTH_HEADER_NAME]: token"));
+        assert!(html.contains("fetch(liveApiPath(path), liveFetchOptions(options))"));
+        assert!(html.contains("fetch(soccerApiUrl(path), liveFetchOptions({"));
+        assert!(html.contains("initializeAuthTokenFromLocation();"));
+    }
+
+    #[test]
+    fn live_soccer_page_blocks_playback_http_posts_by_mode_and_resource() {
+        let html = soccer_live_page_html();
+
+        assert!(html.contains(
+            "function soccerPlaybackAssetMode(pathname = window.location.pathname)"
+        ));
+        assert!(html.contains(
+            "pathname.includes(\"/out/\") && !path.includes(\"/soccer/live\")"
+        ));
+        assert!(html.contains(
+            "if (soccerPlaybackAssetMode(current.pathname) || ui.liveSimulationPostApiEnabled === false)"
+        ));
+        assert!(html
+            .contains("if (resource === \"step\") return ui.liveStepPostEnabled !== false"));
+        assert!(html.contains(
+            "if (resource === \"input\" || resource === \"assign\") return ui.liveInputPostEnabled !== false"
+        ));
+        assert!(html.contains("throw new Error(\"playback mode uses GET-only assets\")"));
+        assert!(html.contains(
+            "if (!soccerLivePostApiEnabled(\"input\")) return \"Playback local\";"
+        ));
     }
 
     #[test]

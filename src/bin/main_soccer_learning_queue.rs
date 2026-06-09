@@ -1297,6 +1297,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let options = SoccerQPolicyOptions {
         alpha: env_f64("SOCCER_ALPHA", 0.20)?,
         gamma: env_f64("SOCCER_GAMMA", 0.96)?,
+        exploration_epsilon: env_f64("SOCCER_EXPLORATION_EPSILON", 0.0)?,
     };
     let period_break_recovery_seconds = env_f64(
         "SOCCER_PERIOD_BREAK_RECOVERY_SECONDS",

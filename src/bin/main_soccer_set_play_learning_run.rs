@@ -273,6 +273,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let options = SoccerQPolicyOptions {
         alpha: env_parse("SOCCER_Q_ALPHA", SoccerQPolicyOptions::default().alpha)?,
         gamma: env_parse("SOCCER_Q_GAMMA", SoccerQPolicyOptions::default().gamma)?,
+        exploration_epsilon: env_parse(
+            "SOCCER_EXPLORATION_EPSILON",
+            SoccerQPolicyOptions::default().exploration_epsilon,
+        )?,
     };
 
     let mut pg_store = SoccerLearningPgStore::connect_from_env()?;

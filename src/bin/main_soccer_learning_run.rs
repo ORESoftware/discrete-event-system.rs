@@ -2336,6 +2336,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let options = SoccerQPolicyOptions {
         alpha: env_f64("SOCCER_ALPHA", 0.20)?,
         gamma: env_f64("SOCCER_GAMMA", 0.96)?,
+        exploration_epsilon: env_f64("SOCCER_EXPLORATION_EPSILON", 0.0)?,
     };
     let mut tactical_learning = env_tactical_learning_weights()?;
     validate_run_settings(

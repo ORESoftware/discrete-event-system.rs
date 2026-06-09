@@ -757,7 +757,11 @@ fn build_payload(
         gamma,
         &tactical_weights,
     )?;
-    let options = SoccerQPolicyOptions { alpha, gamma };
+    let options = SoccerQPolicyOptions {
+        alpha,
+        gamma,
+        exploration_epsilon: env_f64("SOCCER_EXPLORATION_EPSILON", 0.0)?,
+    };
     let tactical_learning = SoccerTacticalLearningWeights {
         attack_spacing_delta_weight,
         attack_spacing_score_weight,

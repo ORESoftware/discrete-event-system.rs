@@ -80662,6 +80662,7 @@ mod tests {
         let options = SoccerQPolicyOptions {
             alpha: 0.5,
             gamma: 0.9,
+            ..Default::default()
         };
         let mut policies = SoccerTeamQPolicies::new(options);
         policies.train_adversarial(&[home_transition.clone(), away_transition.clone()]);
@@ -80889,6 +80890,7 @@ mod tests {
             SoccerQPolicyOptions {
                 alpha: 0.17,
                 gamma: 0.91,
+                ..Default::default()
             },
         );
         let mut seed_params = SoccerSelfPlayLearnedParams::from_training_artifact(&seed_artifact);

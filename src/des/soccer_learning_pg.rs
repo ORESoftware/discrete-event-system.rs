@@ -3,7 +3,7 @@
 //! The canonical table contract lives in `remote/libs/pg-defs/schema/schema.sql`.
 //! This module is a small Rust adapter over that contract for queue runners.
 
-use native_tls::TlsConnector;
+use native_tls::{Certificate, TlsConnector};
 use postgres::types::ToSql;
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
@@ -70,6 +70,25 @@ const SOCCER_POLICY_ENTRY_INSERT_BATCH_SIZE: usize = 1024;
 const SOCCER_RUN_DELTA_INSERT_BATCH_SIZE: usize = 1024;
 const SOCCER_COMPLETED_RUN_INSERT_BATCH_SIZE: usize = 512;
 const SOCCER_POLICY_RETENTION_BRANCH_TIP: &str = "branch_tip";
+
+const SOCCER_PG_CONNECT_DEFAULT_MAX_ATTEMPTS: u32 = 5;
+const SOCCER_PG_CONNECT_BASE_BACKOFF_MILLIS: u64 = 200;
+const SOCCER_PG_CONNECT_MAX_BACKOFF_MILLIS: u64 = 5_000;
+
+// Conflict targets mirror des_soccer_learning_policy_entries_key_uq and
+// des_soccer_learning_run_deltas_key_uq. DO NOTHING (not DO UPDATE) is required
+// so that duplicate keys appearing within a single multi-row INSERT — e.g. two
+// distinct states that collide on the 64-bit state_hash, or an idempotent retry
+// re-inserting the same parent's rows — are skipped instead of aborting the
+// whole transaction. DO UPDATE would raise "cannot affect row a second time".
+const SOCCER_POLICY_ENTRY_ON_CONFLICT_CLAUSE: &str =
+    " on conflict (policy_version_id, team, entry_kind, state_hash, action, \
+target_fine_cell_id, target_tactical_cell_id, target_macro_cell_id, target_root_cell_id) \
+do nothing";
+const SOCCER_RUN_DELTA_ON_CONFLICT_CLAUSE: &str =
+    " on conflict (run_id, team, entry_kind, state_hash, action, \
+target_fine_cell_id, target_tactical_cell_id, target_macro_cell_id, target_root_cell_id) \
+do nothing";
 
 const _: () = {
     assert!(
@@ -443,19 +462,60 @@ pub struct SoccerLearningPgStore {
 
 impl SoccerLearningPgStore {
     pub fn connect(database_url: &str) -> Result<Self, String> {
+        Self::connect_with_retry(database_url, soccer_learning_pg_connect_max_attempts())
+    }
+
+    fn build_tls_connector(database_url: &str) -> Result<MakeTlsConnector, String> {
         let mut tls_builder = TlsConnector::builder();
-        if !soccer_learning_pg_should_verify_certificates(database_url) {
-            // Match libpq sslmode=require/prefer semantics: encrypt the wire,
-            // but do not require an RDS CA bundle in minimal runner images.
+        if soccer_learning_pg_should_verify_certificates(database_url) {
+            // Secure by default: authenticate the server certificate. Operators
+            // on minimal images whose system trust store lacks the RDS CA can
+            // pin an explicit bundle (e.g. the AWS RDS global root) via
+            // SOCCER_PG_SSLROOTCERT / PGSSLROOTCERT instead of disabling checks.
+            for certificate in soccer_learning_pg_root_certificates()? {
+                tls_builder.add_root_certificate(certificate);
+            }
+        } else {
+            // Explicit operator opt-out only (sslmode=disable/allow/prefer or
+            // SOCCER_PG_TLS_INSECURE): encrypt the wire but skip verification.
+            eprintln!(
+                "soccer-learning-pg: TLS certificate verification disabled via opt-out; \
+                 connection is encrypted but unauthenticated"
+            );
             tls_builder.danger_accept_invalid_certs(true);
             tls_builder.danger_accept_invalid_hostnames(true);
         }
         let tls = tls_builder
             .build()
             .map_err(|err| format!("build soccer learning postgres tls connector: {err}"))?;
-        let client = Client::connect(database_url, MakeTlsConnector::new(tls))
-            .map_err(|err| format!("connect soccer learning postgres: {err}"))?;
-        Ok(Self { client })
+        Ok(MakeTlsConnector::new(tls))
+    }
+
+    fn connect_with_retry(database_url: &str, max_attempts: u32) -> Result<Self, String> {
+        let max_attempts = max_attempts.max(1);
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let tls = Self::build_tls_connector(database_url)?;
+            match Client::connect(database_url, tls) {
+                Ok(client) => return Ok(Self { client }),
+                Err(err) => {
+                    let transient = soccer_learning_pg_error_is_transient(&err);
+                    if attempt >= max_attempts || !transient {
+                        return Err(format!(
+                            "connect soccer learning postgres (attempt {attempt}/{max_attempts}): {err}"
+                        ));
+                    }
+                    let backoff = soccer_learning_pg_retry_backoff(attempt);
+                    eprintln!(
+                        "soccer-learning-pg: transient connect error on attempt \
+                         {attempt}/{max_attempts}, retrying in {}ms: {err}",
+                        backoff.as_millis()
+                    );
+                    std::thread::sleep(backoff);
+                }
+            }
+        }
     }
 
     pub fn connect_from_env() -> Result<Option<Self>, String> {
@@ -1863,6 +1923,10 @@ fn insert_run_delta_batch_rows(
             params.push(&delta.merge_weight_micros);
             params.push(&delta.effective_visit_micros);
         }
+        // Idempotent batch insert: a retried run or an in-batch state_hash
+        // collision must not abort the whole transaction. The conflict target
+        // matches des_soccer_learning_run_deltas_key_uq.
+        sql.push_str(SOCCER_RUN_DELTA_ON_CONFLICT_CLAUSE);
         tx.execute(&sql, &params)
             .map_err(|err| format!("insert soccer learning run delta batch: {err}"))?;
     }
@@ -2023,6 +2087,10 @@ fn insert_policy_action_entry_rows(
             params.push(&row.visits);
             params.push(&source_run_id);
         }
+        // Idempotent batch insert: tolerate in-batch state_hash collisions and
+        // re-inserts under the same policy_version_id. Conflict target matches
+        // des_soccer_learning_policy_entries_key_uq.
+        sql.push_str(SOCCER_POLICY_ENTRY_ON_CONFLICT_CLAUSE);
         tx.execute(&sql, &params)
             .map_err(|err| format!("insert soccer policy action entry batch: {err}"))?;
     }
@@ -2087,6 +2155,10 @@ fn insert_policy_target_entry_rows(
             params.push(&row.visits);
             params.push(&source_run_id);
         }
+        // Idempotent batch insert: tolerate in-batch state_hash collisions and
+        // re-inserts under the same policy_version_id. Conflict target matches
+        // des_soccer_learning_policy_entries_key_uq.
+        sql.push_str(SOCCER_POLICY_ENTRY_ON_CONFLICT_CLAUSE);
         tx.execute(&sql, &params)
             .map_err(|err| format!("insert soccer policy target entry batch: {err}"))?;
     }
@@ -2715,9 +2787,136 @@ fn soccer_learning_database_url() -> Option<String> {
 }
 
 fn soccer_learning_pg_should_verify_certificates(database_url: &str) -> bool {
-    soccer_learning_pg_sslmode(database_url).is_some_and(|sslmode| {
-        sslmode.eq_ignore_ascii_case("verify-ca") || sslmode.eq_ignore_ascii_case("verify-full")
-    })
+    soccer_learning_pg_should_verify_certificates_with_override(
+        database_url,
+        soccer_learning_pg_env_flag("SOCCER_PG_TLS_INSECURE"),
+    )
+}
+
+// Secure by default. Verification is relaxed ONLY when the operator explicitly
+// opts out: the SOCCER_PG_TLS_INSECURE escape hatch, or an sslmode that by
+// definition does not authenticate the server (`disable`/`allow`/`prefer`).
+// `require`, `verify-ca`, `verify-full`, an unknown mode, and the no-sslmode
+// default all verify. (This intentionally treats `require` more strictly than
+// libpq, which encrypts without verifying.)
+fn soccer_learning_pg_should_verify_certificates_with_override(
+    database_url: &str,
+    insecure_override: bool,
+) -> bool {
+    if insecure_override {
+        return false;
+    }
+    match soccer_learning_pg_sslmode(database_url) {
+        Some(mode)
+            if mode.eq_ignore_ascii_case("disable")
+                || mode.eq_ignore_ascii_case("allow")
+                || mode.eq_ignore_ascii_case("prefer") =>
+        {
+            false
+        }
+        _ => true,
+    }
+}
+
+fn soccer_learning_pg_env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            let value = value.trim();
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ) && !value.is_empty()
+        })
+        .unwrap_or(false)
+}
+
+// Optional CA bundle (PEM, one or more certificates) used to authenticate the
+// server when the system trust store is insufficient — e.g. the AWS RDS global
+// root on a minimal runner image.
+fn soccer_learning_pg_root_certificates() -> Result<Vec<Certificate>, String> {
+    let Some(path) = ["SOCCER_PG_SSLROOTCERT", "PGSSLROOTCERT"]
+        .into_iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    else {
+        return Ok(Vec::new());
+    };
+    let pem = std::fs::read(&path)
+        .map_err(|err| format!("read soccer learning postgres CA bundle {path}: {err}"))?;
+    let mut certificates = Vec::new();
+    for block in split_pem_certificates(&pem) {
+        let certificate = Certificate::from_pem(&block).map_err(|err| {
+            format!("parse soccer learning postgres CA certificate from {path}: {err}")
+        })?;
+        certificates.push(certificate);
+    }
+    if certificates.is_empty() {
+        return Err(format!(
+            "soccer learning postgres CA bundle {path} contained no PEM certificates"
+        ));
+    }
+    Ok(certificates)
+}
+
+fn split_pem_certificates(pem: &[u8]) -> Vec<Vec<u8>> {
+    const END_MARKER: &[u8] = b"-----END CERTIFICATE-----";
+    let mut blocks = Vec::new();
+    let mut start = 0usize;
+    let mut idx = 0usize;
+    while let Some(found) = find_subslice(&pem[idx..], END_MARKER) {
+        let end = idx + found + END_MARKER.len();
+        blocks.push(pem[start..end].to_vec());
+        // Skip a trailing newline so the next block starts cleanly.
+        idx = end;
+        start = end;
+    }
+    blocks
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn soccer_learning_pg_connect_max_attempts() -> u32 {
+    std::env::var("SOCCER_PG_CONNECT_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.clamp(1, 12))
+        .unwrap_or(SOCCER_PG_CONNECT_DEFAULT_MAX_ATTEMPTS)
+}
+
+fn soccer_learning_pg_retry_backoff(attempt: u32) -> std::time::Duration {
+    // Exponential backoff with a cap; attempt is 1-based.
+    let exponent = attempt.saturating_sub(1).min(6);
+    let millis = SOCCER_PG_CONNECT_BASE_BACKOFF_MILLIS
+        .saturating_mul(1u64 << exponent)
+        .min(SOCCER_PG_CONNECT_MAX_BACKOFF_MILLIS);
+    std::time::Duration::from_millis(millis)
+}
+
+// A connect/IO failure (server unreachable, RDS failover in progress, dropped
+// socket) is transient and worth retrying. A server-reported SQLSTATE is only
+// transient for a known set (too-many-connections, admin shutdown, cannot-
+// connect-now); auth/permission errors are permanent and must fail fast.
+fn soccer_learning_pg_error_is_transient(err: &postgres::Error) -> bool {
+    match err.as_db_error() {
+        None => true,
+        Some(db_error) => matches!(
+            db_error.code().code(),
+            "53300" | "53400" | "57P01" | "57P02" | "57P03" | "08000" | "08003" | "08006"
+                | "08001" | "08004"
+        ),
+    }
 }
 
 fn soccer_learning_pg_sslmode(database_url: &str) -> Option<&str> {
@@ -2730,12 +2929,26 @@ fn soccer_learning_pg_sslmode(database_url: &str) -> Option<&str> {
 
 fn state_hash(state_json: &Value) -> String {
     let raw = serde_json::to_string(state_json).unwrap_or_default();
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in raw.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+    soccer_learning_fnv1a_128_hex(raw.as_bytes())
+}
+
+// 128-bit FNV-1a, rendered as 32 lowercase hex chars. Replaces the prior 64-bit
+// variant to cut the birthday-collision probability of the content-addressed
+// state_hash from ~2^-32 (at a few billion states) to negligible. 32 hex still
+// satisfies the schema CHECK `state_hash ~ '^[a-f0-9]{16,32}$'`, so no migration
+// is required; legacy 16-hex rows remain valid and are never compared by SQL to
+// freshly written rows (run_deltas are write-only; the merge runs in Rust over
+// reconstructed state keys). All three call sites in the crate use this exact
+// function so engine- and persistence-computed hashes stay identical.
+fn soccer_learning_fnv1a_128_hex(bytes: &[u8]) -> String {
+    const OFFSET_BASIS: u128 = 0x6c62272e07bb0142_62b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000_000000000000013b;
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
     }
-    format!("{hash:016x}")
+    format!("{hash:032x}")
 }
 
 fn checked_i32(value: impl TryInto<i64>) -> i32 {
@@ -2782,19 +2995,69 @@ mod tests {
     }
 
     #[test]
-    fn soccer_learning_pg_only_verifies_explicit_verify_modes() {
-        assert!(!soccer_learning_pg_should_verify_certificates(
-            "postgres://u:p@host/db"
+    fn soccer_learning_pg_verifies_certificates_by_default() {
+        // Secure by default: no sslmode and the common `require` both verify.
+        assert!(soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db",
+            false
         ));
-        assert!(!soccer_learning_pg_should_verify_certificates(
-            "postgres://u:p@host/db?sslmode=require"
+        assert!(soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db?sslmode=require",
+            false
         ));
-        assert!(soccer_learning_pg_should_verify_certificates(
-            "postgres://u:p@host/db?sslmode=verify-ca"
+        assert!(soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db?sslmode=verify-ca",
+            false
         ));
-        assert!(soccer_learning_pg_should_verify_certificates(
-            "postgres://u:p@host/db?sslmode=VERIFY-FULL"
+        assert!(soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db?sslmode=VERIFY-FULL",
+            false
         ));
+    }
+
+    #[test]
+    fn soccer_learning_pg_relaxes_only_on_explicit_opt_out() {
+        // Non-authenticating sslmodes opt out.
+        assert!(!soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db?sslmode=disable",
+            false
+        ));
+        assert!(!soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db?sslmode=prefer",
+            false
+        ));
+        assert!(!soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db?sslmode=allow",
+            false
+        ));
+        // The insecure escape hatch overrides everything, including require.
+        assert!(!soccer_learning_pg_should_verify_certificates_with_override(
+            "postgres://u:p@host/db?sslmode=require",
+            true
+        ));
+    }
+
+    #[test]
+    fn soccer_learning_pg_retry_backoff_is_bounded_and_monotonic() {
+        let first = soccer_learning_pg_retry_backoff(1);
+        let second = soccer_learning_pg_retry_backoff(2);
+        assert!(second >= first);
+        let capped = soccer_learning_pg_retry_backoff(100);
+        assert!(capped.as_millis() as u64 <= SOCCER_PG_CONNECT_MAX_BACKOFF_MILLIS);
+    }
+
+    #[test]
+    fn soccer_learning_pg_splits_pem_bundle_into_certificates() {
+        let pem = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n\
+-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n";
+        let blocks = split_pem_certificates(pem);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0]
+            .windows(4)
+            .any(|window| window == b"AAAA"));
+        assert!(blocks[1]
+            .windows(4)
+            .any(|window| window == b"BBBB"));
     }
 
     #[test]

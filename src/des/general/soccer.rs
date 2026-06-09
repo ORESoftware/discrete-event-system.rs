@@ -4167,9 +4167,21 @@ const SOCCER_FACING_INDEX_VALUES: [FacingBucket; 9] = [
 pub struct SoccerQPolicyOptions {
     pub alpha: f64,
     pub gamma: f64,
+    /// Decision-time ε-greedy exploration rate, in [0, 0.9]. Opt-in and 0 by
+    /// default, so action selection stays purely greedy unless a learning run
+    /// enables it (e.g. SOCCER_EXPLORATION_EPSILON). `serde(default)` keeps
+    /// previously-persisted policy options (which lacked the field) at 0.
+    #[serde(default)]
+    pub exploration_epsilon: f64,
 }
 
 const SOCCER_Q_VALUE_LIMIT: f64 = 1_000_000.0;
+
+// Salts keep the two deterministic exploration draws (roll vs. action pick)
+// independent while remaining a pure function of (tick, player) for replay.
+const SOCCER_Q_EXPLORATION_ROLL_SALT: u64 = 0x5350_4f52_4552_4f4c;
+const SOCCER_Q_EXPLORATION_PICK_SALT: u64 = 0x5045_4943_4b45_5249;
+const SOCCER_Q_EXPLORATION_CANDIDATES: usize = 12;
 
 fn soccer_q_sanitized_value(value: f64) -> Option<f64> {
     value
@@ -4193,11 +4205,21 @@ fn soccer_q_sanitized_gamma(value: f64) -> f64 {
     }
 }
 
+fn soccer_q_sanitized_epsilon(value: f64) -> f64 {
+    if value.is_finite() {
+        // Capped well below 1.0: a learning agent should still mostly exploit.
+        value.clamp(0.0, 0.9)
+    } else {
+        0.0
+    }
+}
+
 impl Default for SoccerQPolicyOptions {
     fn default() -> Self {
         SoccerQPolicyOptions {
             alpha: 0.24,
             gamma: 0.94,
+            exploration_epsilon: 0.0,
         }
     }
 }
@@ -30285,12 +30307,17 @@ fn soccer_policy_postgres_state_key(state: &SoccerQStateKey) -> Result<serde_jso
 fn soccer_policy_postgres_state_hash(state: &serde_json::Value) -> Result<String, String> {
     let bytes = serde_json::to_vec(state)
         .map_err(|err| format!("serialize soccer policy state hash input: {err}"))?;
-    let mut hash = 14_695_981_039_346_656_037_u64;
+    // 128-bit FNV-1a (32 lowercase hex). Kept byte-for-byte identical to the
+    // soccer_learning / soccer_learning_pg implementations so the same
+    // serialized state always hashes to the same persisted state_hash.
+    const OFFSET_BASIS: u128 = 0x6c62272e07bb0142_62b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000_000000000000013b;
+    let mut hash = OFFSET_BASIS;
     for byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(1_099_511_628_211);
+        hash ^= u128::from(byte);
+        hash = hash.wrapping_mul(PRIME);
     }
-    Ok(format!("{hash:016x}"))
+    Ok(format!("{hash:032x}"))
 }
 
 fn soccer_policy_value_micros(value: f64) -> i64 {
@@ -40158,22 +40185,79 @@ impl SoccerMatch {
         let player = snapshot.players.iter().find(|p| p.id == player_id)?;
         if let Some(team_policies) = &self.team_policies {
             let policy = team_policies.policy(player.team);
-            if let Some(action) = policy.best_action_for_state_observation(
-                snapshot,
-                player_id,
-                mdp_state,
-                observation,
-            ) {
+            if let Some(action) = self
+                .exploration_action_for_player(policy, snapshot, player_id)
+                .or_else(|| {
+                    policy.best_action_for_state_observation(
+                        snapshot,
+                        player_id,
+                        mdp_state,
+                        observation,
+                    )
+                })
+            {
                 return Some(Self::learned_plan_for_policy(
                     policy, snapshot, player_id, action,
                 ));
             }
         }
-        self.learned_policy.as_ref().and_then(|policy| {
-            policy
-                .best_action_for_state_observation(snapshot, player_id, mdp_state, observation)
-                .map(|action| Self::learned_plan_for_policy(policy, snapshot, player_id, action))
-        })
+        let learned_policy = self.learned_policy.as_ref()?;
+        self.exploration_action_for_player(learned_policy, snapshot, player_id)
+            .or_else(|| {
+                learned_policy
+                    .best_action_for_state_observation(snapshot, player_id, mdp_state, observation)
+            })
+            .map(|action| {
+                Self::learned_plan_for_policy(learned_policy, snapshot, player_id, action)
+            })
+    }
+
+    /// Opt-in ε-greedy exploration for the decision path. Returns a randomly
+    /// chosen *legal* action when the deterministic roll falls under ε, else
+    /// `None` so the caller falls back to greedy selection.
+    ///
+    /// Gating, by design:
+    /// - Only active while `learning_enabled` is true. Realtime/4-controller
+    ///   play, live-learning-toggled-off, and after-the-fact playback all run
+    ///   with learning disabled, so they never explore (selection stays greedy
+    ///   and reproducible there).
+    /// - ε defaults to 0 (`SoccerQPolicyOptions::exploration_epsilon`), so even
+    ///   during a learning run nothing changes unless the run opts in.
+    /// - The two draws are pure functions of (tick, player_id), so an explored
+    ///   episode replays identically frame-for-frame.
+    fn exploration_action_for_player(
+        &self,
+        policy: &SoccerQPolicy,
+        snapshot: &WorldSnapshot,
+        player_id: usize,
+    ) -> Option<String> {
+        if !self.config.learning_enabled {
+            return None;
+        }
+        let epsilon = soccer_q_sanitized_epsilon(policy.options.exploration_epsilon);
+        if epsilon <= 0.0 {
+            return None;
+        }
+        let roll = deterministic_unit_draw(snapshot.tick, player_id, SOCCER_Q_EXPLORATION_ROLL_SALT);
+        if roll >= epsilon {
+            return None;
+        }
+        let (_state, ranked) = policy.ranked_action_values_for_snapshot(
+            snapshot,
+            player_id,
+            SOCCER_Q_EXPLORATION_CANDIDATES,
+        )?;
+        let legal: Vec<&str> = ranked
+            .iter()
+            .filter(|action| action.legal)
+            .map(|action| action.label.as_str())
+            .collect();
+        if legal.is_empty() {
+            return None;
+        }
+        let pick = deterministic_unit_draw(snapshot.tick, player_id, SOCCER_Q_EXPLORATION_PICK_SALT);
+        let index = ((pick * legal.len() as f64) as usize).min(legal.len() - 1);
+        Some(legal[index].to_string())
     }
 
     fn learned_policy_trace_for_player(
@@ -77598,7 +77682,9 @@ mod tests {
                 first.player_root_cell_id
             )
         );
-        assert_eq!(first.state_hash.len(), 16);
+        // 128-bit FNV-1a renders as 32 lowercase hex chars (within the schema's
+        // `^[a-f0-9]{16,32}$` CHECK).
+        assert_eq!(first.state_hash.len(), 32);
         assert!(first.state_hash.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_eq!(first.state_hash, repeated.entries[0].state_hash);
         assert!(export.entries.iter().all(|entry| {

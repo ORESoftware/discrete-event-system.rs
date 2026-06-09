@@ -3533,13 +3533,18 @@ fn state_hash(state_json: &Value) -> String {
     fnv1a_hex(raw.as_bytes())
 }
 
+// 128-bit FNV-1a (32 lowercase hex). Must stay byte-for-byte identical to the
+// persistence layer's soccer_learning_fnv1a_128_hex so engine-computed delta
+// hashes and pg-computed entry hashes agree for the same serialized state.
 fn fnv1a_hex(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
+    const OFFSET_BASIS: u128 = 0x6c62272e07bb0142_62b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000_000000000000013b;
+    let mut hash = OFFSET_BASIS;
     for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
     }
-    format!("{hash:016x}")
+    format!("{hash:032x}")
 }
 
 fn candidate_seed(base_seed: u64, candidate_index: usize, salt: u64) -> u64 {

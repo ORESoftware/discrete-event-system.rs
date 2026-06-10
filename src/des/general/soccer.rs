@@ -37261,7 +37261,11 @@ impl Default for SoccerLiveServerConfig {
         let mut match_config = MatchConfig::live_gameplay();
         match_config.learning_logging_enabled = false;
         match_config.full_game_learning_enabled = false;
-        match_config.formation_lp_enabled = false;
+        // Keep the formation-LP brain on for the live demo: it solves the
+        // whole-field configuration (all players + ball) each tick and feeds its
+        // per-player guidance into the observation/neural features, which is the
+        // context the MDP/neural policy needs to make better decisions.
+        match_config.formation_lp_enabled = true;
         match_config.adversarial_embedding_exploitation_enabled = false;
         SoccerLiveServerConfig {
             host: "127.0.0.1".to_string(),
@@ -68483,7 +68487,9 @@ mod tests {
         assert!(config.learning_enabled);
         assert!(!config.learning_logging_enabled);
         assert!(!config.full_game_learning_enabled);
-        assert!(!config.formation_lp_enabled);
+        // The live demo keeps the whole-field formation LP on so its guidance
+        // feeds player decisions and the neural features.
+        assert!(config.formation_lp_enabled);
         assert!(config.neural_learning.enabled);
         assert_eq!(
             config.neural_learning.backend,
@@ -98395,7 +98401,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(pg_jsonl_entry["kind"], "soccer-policy-postgres-entry");
         assert_eq!(
             pg_jsonl_entry["entry"]["stateHash"].as_str().unwrap().len(),
-            16
+            32
         );
         let agent_schedule = value["frame"]["agentSchedule"]
             .as_array()

@@ -14710,8 +14710,6 @@ impl MatchConfig {
             learning_logging_enabled: true,
             learning_interval_ticks: 1,
             full_game_learning_enabled: true,
-            // Wider goal mouth to reward finishing (pitch stays the 120x80 default).
-            goal_width_yards: 10.0,
             formation_lp_enabled: true,
             neural_learning: SoccerNeuralLearningConfig {
                 enabled: true,
@@ -41368,6 +41366,12 @@ impl SoccerMatch {
         pre_field_snapshot_elapsed += phase_started.elapsed();
         let score_home_before = self.score_home;
         let score_away_before = self.score_away;
+        // `reward_events` is a per-tick scratch buffer: every consumer reads only
+        // the `[reward_event_start..]` slice recorded during this step, and the
+        // events are folded into learning transitions before the step returns.
+        // Clearing here (rather than letting it grow for the whole match) keeps it
+        // bounded to one tick instead of accumulating unboundedly.
+        self.reward_events.clear();
         let reward_event_start = self.reward_events.len();
         let phase_started = Instant::now();
         let adversarial_embedding_signals = self.adversarial_embedding_signals();
@@ -98463,11 +98467,14 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("id=\"replaySeed\""));
         assert!(html.body.contains("height: 100dvh;"));
         assert!(html.body.contains("overflow: hidden;"));
-        assert!(html.body.contains("const FIELD_RENDER_ASPECT = 2;"));
+        // Render aspect is derived from the live field dimensions (length/width)
+        // so px-per-yard is equal on both axes and trajectories keep their angle.
+        assert!(html.body.contains("function fieldRenderAspect()"));
+        assert!(html.body.contains("fieldLength / fieldWidth"));
         assert!(html
             .body
             .contains("<canvas id=\"pitch\" width=\"1280\" height=\"720\"></canvas>"));
-        assert!(html.body.contains("drawW = drawH * FIELD_RENDER_ASPECT"));
+        assert!(html.body.contains("drawW = drawH * aspect"));
         assert!(html.body.contains("x: r.x + Number(p.y || 0)"));
         assert!(html.body.contains("state.config.seed"));
         assert!(html.body.contains("function seedResetValue"));

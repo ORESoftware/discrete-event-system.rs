@@ -566,7 +566,15 @@
 <script>
 const canvas = document.getElementById("pitch");
 const ctx = canvas.getContext("2d");
-const FIELD_RENDER_ASPECT = 2;
+// Render aspect = pitch length / width (length is drawn horizontally). Deriving
+// it from the live field dimensions keeps the px-per-yard scale equal on both
+// axes, so trajectories render at their true angle. (A hardcoded 2:1 stretched a
+// 120x80 pitch horizontally by ~1.33x, skewing diagonal passes/shots.)
+function fieldRenderAspect() {
+  const fieldWidth = Number(state?.config?.fieldWidthYards || 80);
+  const fieldLength = Number(state?.config?.fieldLengthYards || 120);
+  return fieldLength > 0 && fieldWidth > 0 ? fieldLength / fieldWidth : 1.5;
+}
 const homeScore = document.getElementById("homeScore");
 const awayScore = document.getElementById("awayScore");
 const clock = document.getElementById("clock");
@@ -2332,11 +2340,12 @@ function pitchRect() {
   const pad = 34;
   const w = canvas.width - pad * 2;
   const h = canvas.height - pad * 2;
+  const aspect = fieldRenderAspect();
   let drawW = w;
-  let drawH = drawW / FIELD_RENDER_ASPECT;
+  let drawH = drawW / aspect;
   if (drawH > h) {
     drawH = h;
-    drawW = drawH * FIELD_RENDER_ASPECT;
+    drawW = drawH * aspect;
   }
   return {x: (canvas.width - drawW) / 2, y: (canvas.height - drawH) / 2, w: drawW, h: drawH};
 }

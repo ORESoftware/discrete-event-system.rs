@@ -42,15 +42,25 @@ const SITE_PLAYBACK_RECORD_EVERY_TICKS: u64 = 1;
 pub const DEFAULT_FIELD_LENGTH_YARDS: f64 = 120.0;
 pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 80.0;
 pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 8.0;
-// Lower linear drag + air resistance so struck balls keep pace through their
-// flight (a 50+ mph shot should still look fast several frames later).
-pub const DEFAULT_BALL_DRAG_PER_TICK: f64 = 0.017;
-pub const DEFAULT_BALL_AIR_RESISTANCE: f64 = 0.0058;
+pub const DEFAULT_BALL_DRAG_PER_TICK: f64 = 0.028;
+pub const DEFAULT_BALL_AIR_RESISTANCE: f64 = 0.0085;
 pub const DEFAULT_BALL_GRASS_RESISTANCE_YPS2: f64 = 0.96;
 pub const DEFAULT_BALL_STOP_SPEED_YPS: f64 = 0.55;
 pub const DEFAULT_PLAYER_VISION_SKILL: f64 = 7.6;
 pub const DEFAULT_CONTROLLER_DEBOUNCE_MS: u64 = 4;
 const PLAYER_CONTROL_RADIUS_YARDS: f64 = 1.55;
+// Physical reach caps for contesting a moving ball. A fast ball that only nicks
+// the skill-based control radius is unreachable: a player can close at most a
+// lunge (`INTERCEPT_LUNGE_REACH_YARDS`) plus the ground they cover while the ball
+// travels to the contact point. Only applied above a min ball speed so that
+// slow/stationary balls keep their normal (multi-tick) control behavior.
+const INTERCEPT_LUNGE_REACH_YARDS: f64 = 1.3;
+const KINEMATIC_GATE_MIN_BALL_SPEED_YPS: f64 = 10.0;
+// A ball flying overhead can only be contacted by players who can get up to it:
+// a standing reach plus a jump scaled by aerial ability. Higher balls fly over
+// grounded players (the correct "aerial pass passed through" behavior).
+const CONTROL_STANDING_REACH_YARDS: f64 = 1.6;
+const CONTROL_AERIAL_JUMP_REACH_YARDS: f64 = 2.2;
 const OFFSIDE_INTERFERENCE_RADIUS_YARDS: f64 = 3.0;
 const TRACKING_INFERRED_HOLDER_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.35;
 const TRACKING_INFERRED_HOLDER_STICKY_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.70;
@@ -171,6 +181,28 @@ const COMPLETED_KILLER_PASS_MAX_BONUS_POINTS: f64 = 6.0;
 // defender. Aerial passes are exempt — they clear the lane.
 const BLOCKED_LANE_FLOOR_PASS_PENALTY_POINTS: f64 = 6.0;
 const BLOCKED_LANE_FLOOR_PASS_OPEN_THRESHOLD: f64 = 0.5;
+// Conceding a throw-in/goal-kick/corner by knocking the ball out is a turnover.
+// Penalize the offending player unless they were under heavy pressure (>=8/10),
+// where clearing it out of play is an acceptable last resort.
+const OUT_OF_BOUNDS_TURNOVER_PENALTY_POINTS: f64 = 6.0;
+const OUT_OF_BOUNDS_PRESSURE_EXEMPT_THRESHOLD: f64 = 0.8;
+// Attackers may run offside briefly, but should get back onside within a few
+// seconds. After the grace window the penalty grows with how long they linger,
+// and stepping back onside after lingering earns a small recovery reward.
+const OFFSIDE_GRACE_SECONDS: f64 = 3.0;
+// Time-offside and distance-offside are independent dimensions with their own
+// scalars; the per-tick lingering penalty is the sum of a time term and a
+// distance term (further AND longer => more penalty, each weighted separately).
+const OFFSIDE_TIME_PENALTY_PER_SECOND: f64 = 1.2;
+const OFFSIDE_DISTANCE_PENALTY_PER_YARD: f64 = 0.25;
+// Caps so one long/deep stint can't dump an unbounded per-tick penalty.
+const OFFSIDE_LINGER_PENALTY_CAP_SECONDS: f64 = 6.0;
+const OFFSIDE_DISTANCE_PENALTY_CAP_YARDS: f64 = 25.0;
+const OFFSIDE_RECOVERY_REWARD: f64 = 1.0;
+// Center-backs must remain the last line: penalize a central defender for every
+// yard they advance ahead of their wing-backs, amplified when the ball is in the
+// attacking part of the field (so they stay the deepest two ~95% of the time).
+const CENTER_BACK_AHEAD_OF_WINGBACK_PENALTY_PER_YARD: f64 = 0.11;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
 const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 2.10;
 const NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF: f64 = 0.90;
@@ -1109,6 +1141,419 @@ impl FlankAttackPolicy {
 
     fn prefers_high_cross(self) -> bool {
         matches!(self, FlankAttackPolicy::PlayDownFlankHighCross)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Team-level strategy modes (semi-MDP options).
+//
+// These are *team-level* (not per-player) short tactical maneuvers — "options"
+// in the hierarchical-RL sense — that the MDP/POMDP/neural brain selects from to
+// create or deny openings. They are deliberately short-horizon and fully
+// interruptible: most resolve within ~3 passes (`max_passes`), a few patient
+// ones run 5-7, and the brain may abandon/switch the active strategy on any tick
+// ("change on a dime"). The horizon is the *intended* lifetime, not a lock-in.
+// ---------------------------------------------------------------------------
+
+/// Coarse horizontal lane a maneuver pulls the ball into / resolves through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StrategyLane {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+impl StrategyLane {
+    /// -1.0 left .. 0.0 central .. +1.0 right (drives directive flank bias).
+    fn bias(self) -> f64 {
+        match self {
+            StrategyLane::Left => -1.0,
+            StrategyLane::Center => 0.0,
+            StrategyLane::Right => 1.0,
+        }
+    }
+}
+
+/// Strategic shape of an attacking maneuver: where it baits the defense first,
+/// where it tries to resolve the opening, how patient it is, and how direct.
+#[derive(Clone, Copy, Debug)]
+pub struct AttackStrategyShape {
+    pub start_lane: StrategyLane,
+    pub resolve_lane: StrategyLane,
+    pub max_passes: u8,
+    pub directness: f64,
+}
+
+impl AttackStrategyShape {
+    /// A maneuver that finishes in a different lane than it started is a switch.
+    pub fn switches_lane(&self) -> bool {
+        self.start_lane != self.resolve_lane
+    }
+}
+
+/// Team-level attacking maneuvers (create openings). Short and interruptible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamAttackStrategy {
+    #[default]
+    PullWideLeftThenCenter,
+    PullWideRightThenCenter,
+    PullWideLeftSwitchRight,
+    PullWideRightSwitchLeft,
+    HoldUpfieldUntilOpening,
+    GiveAndGoCentral,
+    OneTwoLeftRelease,
+    OneTwoRightRelease,
+    OverloadLeftIsolateRight,
+    OverloadRightIsolateLeft,
+    ThirdManRunCentral,
+    QuickVerticalThroughBall,
+    DrawPressThenPlayThrough,
+    BaitOffsideThenThroughBall,
+    WingOverlapLeftCross,
+    WingOverlapRightCross,
+    UnderlapLeftCutback,
+    UnderlapRightCutback,
+    SwitchPlayDiagonalLeftRight,
+    SwitchPlayDiagonalRightLeft,
+    RecycleViaKeeperReset,
+    DragDefenderOpenChannelLeft,
+    DragDefenderOpenChannelRight,
+    DecoyFarSideCutbackLeft,
+    DecoyFarSideCutbackRight,
+    CentralDoubleOneTwo,
+    DirectLongDiagonalLeft,
+    DirectLongDiagonalRight,
+    PatientPossessionProbe,
+    CounterTransitionVertical,
+    HalfSpaceComboLeft,
+    HalfSpaceComboRight,
+}
+
+impl TeamAttackStrategy {
+    pub const ALL: [TeamAttackStrategy; 32] = [
+        TeamAttackStrategy::PullWideLeftThenCenter,
+        TeamAttackStrategy::PullWideRightThenCenter,
+        TeamAttackStrategy::PullWideLeftSwitchRight,
+        TeamAttackStrategy::PullWideRightSwitchLeft,
+        TeamAttackStrategy::HoldUpfieldUntilOpening,
+        TeamAttackStrategy::GiveAndGoCentral,
+        TeamAttackStrategy::OneTwoLeftRelease,
+        TeamAttackStrategy::OneTwoRightRelease,
+        TeamAttackStrategy::OverloadLeftIsolateRight,
+        TeamAttackStrategy::OverloadRightIsolateLeft,
+        TeamAttackStrategy::ThirdManRunCentral,
+        TeamAttackStrategy::QuickVerticalThroughBall,
+        TeamAttackStrategy::DrawPressThenPlayThrough,
+        TeamAttackStrategy::BaitOffsideThenThroughBall,
+        TeamAttackStrategy::WingOverlapLeftCross,
+        TeamAttackStrategy::WingOverlapRightCross,
+        TeamAttackStrategy::UnderlapLeftCutback,
+        TeamAttackStrategy::UnderlapRightCutback,
+        TeamAttackStrategy::SwitchPlayDiagonalLeftRight,
+        TeamAttackStrategy::SwitchPlayDiagonalRightLeft,
+        TeamAttackStrategy::RecycleViaKeeperReset,
+        TeamAttackStrategy::DragDefenderOpenChannelLeft,
+        TeamAttackStrategy::DragDefenderOpenChannelRight,
+        TeamAttackStrategy::DecoyFarSideCutbackLeft,
+        TeamAttackStrategy::DecoyFarSideCutbackRight,
+        TeamAttackStrategy::CentralDoubleOneTwo,
+        TeamAttackStrategy::DirectLongDiagonalLeft,
+        TeamAttackStrategy::DirectLongDiagonalRight,
+        TeamAttackStrategy::PatientPossessionProbe,
+        TeamAttackStrategy::CounterTransitionVertical,
+        TeamAttackStrategy::HalfSpaceComboLeft,
+        TeamAttackStrategy::HalfSpaceComboRight,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TeamAttackStrategy::PullWideLeftThenCenter => "pull-wide-left-then-center",
+            TeamAttackStrategy::PullWideRightThenCenter => "pull-wide-right-then-center",
+            TeamAttackStrategy::PullWideLeftSwitchRight => "pull-wide-left-switch-right",
+            TeamAttackStrategy::PullWideRightSwitchLeft => "pull-wide-right-switch-left",
+            TeamAttackStrategy::HoldUpfieldUntilOpening => "hold-upfield-until-opening",
+            TeamAttackStrategy::GiveAndGoCentral => "give-and-go-central",
+            TeamAttackStrategy::OneTwoLeftRelease => "one-two-left-release",
+            TeamAttackStrategy::OneTwoRightRelease => "one-two-right-release",
+            TeamAttackStrategy::OverloadLeftIsolateRight => "overload-left-isolate-right",
+            TeamAttackStrategy::OverloadRightIsolateLeft => "overload-right-isolate-left",
+            TeamAttackStrategy::ThirdManRunCentral => "third-man-run-central",
+            TeamAttackStrategy::QuickVerticalThroughBall => "quick-vertical-through-ball",
+            TeamAttackStrategy::DrawPressThenPlayThrough => "draw-press-then-play-through",
+            TeamAttackStrategy::BaitOffsideThenThroughBall => "bait-offside-then-through-ball",
+            TeamAttackStrategy::WingOverlapLeftCross => "wing-overlap-left-cross",
+            TeamAttackStrategy::WingOverlapRightCross => "wing-overlap-right-cross",
+            TeamAttackStrategy::UnderlapLeftCutback => "underlap-left-cutback",
+            TeamAttackStrategy::UnderlapRightCutback => "underlap-right-cutback",
+            TeamAttackStrategy::SwitchPlayDiagonalLeftRight => "switch-play-diagonal-left-right",
+            TeamAttackStrategy::SwitchPlayDiagonalRightLeft => "switch-play-diagonal-right-left",
+            TeamAttackStrategy::RecycleViaKeeperReset => "recycle-via-keeper-reset",
+            TeamAttackStrategy::DragDefenderOpenChannelLeft => "drag-defender-open-channel-left",
+            TeamAttackStrategy::DragDefenderOpenChannelRight => "drag-defender-open-channel-right",
+            TeamAttackStrategy::DecoyFarSideCutbackLeft => "decoy-far-side-cutback-left",
+            TeamAttackStrategy::DecoyFarSideCutbackRight => "decoy-far-side-cutback-right",
+            TeamAttackStrategy::CentralDoubleOneTwo => "central-double-one-two",
+            TeamAttackStrategy::DirectLongDiagonalLeft => "direct-long-diagonal-left",
+            TeamAttackStrategy::DirectLongDiagonalRight => "direct-long-diagonal-right",
+            TeamAttackStrategy::PatientPossessionProbe => "patient-possession-probe",
+            TeamAttackStrategy::CounterTransitionVertical => "counter-transition-vertical",
+            TeamAttackStrategy::HalfSpaceComboLeft => "half-space-combo-left",
+            TeamAttackStrategy::HalfSpaceComboRight => "half-space-combo-right",
+        }
+    }
+
+    pub fn shape(self) -> AttackStrategyShape {
+        use StrategyLane::{Center, Left, Right};
+        let s = |start, resolve, max_passes, directness| AttackStrategyShape {
+            start_lane: start,
+            resolve_lane: resolve,
+            max_passes,
+            directness,
+        };
+        match self {
+            TeamAttackStrategy::PullWideLeftThenCenter => s(Left, Center, 3, 0.30),
+            TeamAttackStrategy::PullWideRightThenCenter => s(Right, Center, 3, 0.30),
+            TeamAttackStrategy::PullWideLeftSwitchRight => s(Left, Right, 3, 0.40),
+            TeamAttackStrategy::PullWideRightSwitchLeft => s(Right, Left, 3, 0.40),
+            TeamAttackStrategy::HoldUpfieldUntilOpening => s(Center, Center, 7, 0.20),
+            TeamAttackStrategy::GiveAndGoCentral => s(Center, Center, 2, 0.55),
+            TeamAttackStrategy::OneTwoLeftRelease => s(Left, Left, 2, 0.55),
+            TeamAttackStrategy::OneTwoRightRelease => s(Right, Right, 2, 0.55),
+            TeamAttackStrategy::OverloadLeftIsolateRight => s(Left, Right, 4, 0.35),
+            TeamAttackStrategy::OverloadRightIsolateLeft => s(Right, Left, 4, 0.35),
+            TeamAttackStrategy::ThirdManRunCentral => s(Center, Center, 3, 0.50),
+            TeamAttackStrategy::QuickVerticalThroughBall => s(Center, Center, 2, 0.80),
+            TeamAttackStrategy::DrawPressThenPlayThrough => s(Center, Center, 3, 0.45),
+            TeamAttackStrategy::BaitOffsideThenThroughBall => s(Center, Center, 2, 0.78),
+            TeamAttackStrategy::WingOverlapLeftCross => s(Left, Left, 3, 0.45),
+            TeamAttackStrategy::WingOverlapRightCross => s(Right, Right, 3, 0.45),
+            TeamAttackStrategy::UnderlapLeftCutback => s(Left, Center, 3, 0.40),
+            TeamAttackStrategy::UnderlapRightCutback => s(Right, Center, 3, 0.40),
+            TeamAttackStrategy::SwitchPlayDiagonalLeftRight => s(Left, Right, 2, 0.60),
+            TeamAttackStrategy::SwitchPlayDiagonalRightLeft => s(Right, Left, 2, 0.60),
+            TeamAttackStrategy::RecycleViaKeeperReset => s(Center, Center, 4, 0.10),
+            TeamAttackStrategy::DragDefenderOpenChannelLeft => s(Left, Center, 3, 0.40),
+            TeamAttackStrategy::DragDefenderOpenChannelRight => s(Right, Center, 3, 0.40),
+            TeamAttackStrategy::DecoyFarSideCutbackLeft => s(Left, Center, 3, 0.45),
+            TeamAttackStrategy::DecoyFarSideCutbackRight => s(Right, Center, 3, 0.45),
+            TeamAttackStrategy::CentralDoubleOneTwo => s(Center, Center, 3, 0.58),
+            TeamAttackStrategy::DirectLongDiagonalLeft => s(Center, Left, 1, 0.90),
+            TeamAttackStrategy::DirectLongDiagonalRight => s(Center, Right, 1, 0.90),
+            TeamAttackStrategy::PatientPossessionProbe => s(Center, Center, 6, 0.18),
+            TeamAttackStrategy::CounterTransitionVertical => s(Center, Center, 2, 0.85),
+            TeamAttackStrategy::HalfSpaceComboLeft => s(Left, Center, 3, 0.52),
+            TeamAttackStrategy::HalfSpaceComboRight => s(Right, Center, 3, 0.52),
+        }
+    }
+}
+
+/// Strategic shape of a defensive maneuver.
+#[derive(Clone, Copy, Debug)]
+pub struct DefenseStrategyShape {
+    /// 0.0 deep low block .. 1.0 high line.
+    pub block_height: f64,
+    /// 0.0 pure zonal .. 1.0 tight man-marking.
+    pub man_orientation: f64,
+    /// 0.0 passive contain .. 1.0 aggressive press.
+    pub press: f64,
+    /// Lane the maneuver tries to herd the ball into, if any.
+    pub force_lane: Option<StrategyLane>,
+    /// Intended lifetime in seconds before re-evaluation (still interruptible).
+    pub max_seconds: f64,
+}
+
+/// Team-level defensive maneuvers (deny openings). Short and interruptible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamDefenseStrategy {
+    #[default]
+    MidBlockZonal,
+    HighPressManOriented,
+    HighPressZonalTrigger,
+    MidBlockManMark,
+    LowBlockCompact,
+    LowBlockParkBus,
+    OffsideTrapStepUp,
+    ForceWideLeftTrap,
+    ForceWideRightTrap,
+    PressTriggerOnBackPass,
+    DropAndScreenCentral,
+    ManMarkKeyReceiver,
+    DoubleTeamBallCarrier,
+    ContainAndDelayCounter,
+    CounterPressGegenpress,
+    RetreatRegroupHalfway,
+    ShowInsideClampCentral,
+    WidePressOverloadBall,
+}
+
+impl TeamDefenseStrategy {
+    pub const ALL: [TeamDefenseStrategy; 18] = [
+        TeamDefenseStrategy::MidBlockZonal,
+        TeamDefenseStrategy::HighPressManOriented,
+        TeamDefenseStrategy::HighPressZonalTrigger,
+        TeamDefenseStrategy::MidBlockManMark,
+        TeamDefenseStrategy::LowBlockCompact,
+        TeamDefenseStrategy::LowBlockParkBus,
+        TeamDefenseStrategy::OffsideTrapStepUp,
+        TeamDefenseStrategy::ForceWideLeftTrap,
+        TeamDefenseStrategy::ForceWideRightTrap,
+        TeamDefenseStrategy::PressTriggerOnBackPass,
+        TeamDefenseStrategy::DropAndScreenCentral,
+        TeamDefenseStrategy::ManMarkKeyReceiver,
+        TeamDefenseStrategy::DoubleTeamBallCarrier,
+        TeamDefenseStrategy::ContainAndDelayCounter,
+        TeamDefenseStrategy::CounterPressGegenpress,
+        TeamDefenseStrategy::RetreatRegroupHalfway,
+        TeamDefenseStrategy::ShowInsideClampCentral,
+        TeamDefenseStrategy::WidePressOverloadBall,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TeamDefenseStrategy::MidBlockZonal => "mid-block-zonal",
+            TeamDefenseStrategy::HighPressManOriented => "high-press-man-oriented",
+            TeamDefenseStrategy::HighPressZonalTrigger => "high-press-zonal-trigger",
+            TeamDefenseStrategy::MidBlockManMark => "mid-block-man-mark",
+            TeamDefenseStrategy::LowBlockCompact => "low-block-compact",
+            TeamDefenseStrategy::LowBlockParkBus => "low-block-park-bus",
+            TeamDefenseStrategy::OffsideTrapStepUp => "offside-trap-step-up",
+            TeamDefenseStrategy::ForceWideLeftTrap => "force-wide-left-trap",
+            TeamDefenseStrategy::ForceWideRightTrap => "force-wide-right-trap",
+            TeamDefenseStrategy::PressTriggerOnBackPass => "press-trigger-on-back-pass",
+            TeamDefenseStrategy::DropAndScreenCentral => "drop-and-screen-central",
+            TeamDefenseStrategy::ManMarkKeyReceiver => "man-mark-key-receiver",
+            TeamDefenseStrategy::DoubleTeamBallCarrier => "double-team-ball-carrier",
+            TeamDefenseStrategy::ContainAndDelayCounter => "contain-and-delay-counter",
+            TeamDefenseStrategy::CounterPressGegenpress => "counter-press-gegenpress",
+            TeamDefenseStrategy::RetreatRegroupHalfway => "retreat-regroup-halfway",
+            TeamDefenseStrategy::ShowInsideClampCentral => "show-inside-clamp-central",
+            TeamDefenseStrategy::WidePressOverloadBall => "wide-press-overload-ball",
+        }
+    }
+
+    pub fn shape(self) -> DefenseStrategyShape {
+        use StrategyLane::{Left, Right};
+        let d = |block_height, man_orientation, press, force_lane, max_seconds| {
+            DefenseStrategyShape {
+                block_height,
+                man_orientation,
+                press,
+                force_lane,
+                max_seconds,
+            }
+        };
+        match self {
+            TeamDefenseStrategy::MidBlockZonal => d(0.50, 0.20, 0.45, None, 8.0),
+            TeamDefenseStrategy::HighPressManOriented => d(0.85, 0.85, 0.95, None, 4.0),
+            TeamDefenseStrategy::HighPressZonalTrigger => d(0.82, 0.30, 0.90, None, 4.0),
+            TeamDefenseStrategy::MidBlockManMark => d(0.50, 0.80, 0.55, None, 7.0),
+            TeamDefenseStrategy::LowBlockCompact => d(0.22, 0.35, 0.30, None, 10.0),
+            TeamDefenseStrategy::LowBlockParkBus => d(0.10, 0.30, 0.20, None, 12.0),
+            TeamDefenseStrategy::OffsideTrapStepUp => d(0.92, 0.25, 0.60, None, 3.0),
+            TeamDefenseStrategy::ForceWideLeftTrap => d(0.60, 0.40, 0.75, Some(Left), 4.0),
+            TeamDefenseStrategy::ForceWideRightTrap => d(0.60, 0.40, 0.75, Some(Right), 4.0),
+            TeamDefenseStrategy::PressTriggerOnBackPass => d(0.70, 0.45, 0.85, None, 3.0),
+            TeamDefenseStrategy::DropAndScreenCentral => d(0.35, 0.25, 0.35, None, 8.0),
+            TeamDefenseStrategy::ManMarkKeyReceiver => d(0.55, 0.95, 0.60, None, 6.0),
+            TeamDefenseStrategy::DoubleTeamBallCarrier => d(0.55, 0.70, 0.88, None, 3.0),
+            TeamDefenseStrategy::ContainAndDelayCounter => d(0.40, 0.30, 0.25, None, 6.0),
+            TeamDefenseStrategy::CounterPressGegenpress => d(0.75, 0.55, 0.98, None, 3.0),
+            TeamDefenseStrategy::RetreatRegroupHalfway => d(0.45, 0.20, 0.20, None, 5.0),
+            TeamDefenseStrategy::ShowInsideClampCentral => d(0.58, 0.40, 0.70, None, 4.0),
+            TeamDefenseStrategy::WidePressOverloadBall => d(0.62, 0.50, 0.82, None, 4.0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod team_strategy_mode_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn defines_thirty_plus_attack_and_fifteen_plus_defense_modes() {
+        // Team-level strategy catalogue: ~30-50 modes total (attack + defense).
+        assert!(
+            TeamAttackStrategy::ALL.len() >= 30,
+            "expected >=30 attack modes, got {}",
+            TeamAttackStrategy::ALL.len()
+        );
+        assert!(
+            TeamDefenseStrategy::ALL.len() >= 15,
+            "expected >=15 defense modes, got {}",
+            TeamDefenseStrategy::ALL.len()
+        );
+        let total = TeamAttackStrategy::ALL.len() + TeamDefenseStrategy::ALL.len();
+        assert!(
+            (30..=80).contains(&total),
+            "total team-level modes should land in the 30-50+ range, got {total}"
+        );
+    }
+
+    #[test]
+    fn strategy_labels_are_unique_and_shapes_are_sane() {
+        let mut labels = HashSet::new();
+        for strat in TeamAttackStrategy::ALL {
+            assert!(labels.insert(strat.as_str()), "duplicate label {strat:?}");
+            let shape = strat.shape();
+            // Maneuvers are short-horizon: ~3 passes typical, up to 7 for the
+            // patient "hold until an opening" plays.
+            assert!(
+                (1..=7).contains(&shape.max_passes),
+                "{strat:?} horizon out of range: {}",
+                shape.max_passes
+            );
+            assert!((0.0..=1.0).contains(&shape.directness));
+        }
+        for strat in TeamDefenseStrategy::ALL {
+            assert!(labels.insert(strat.as_str()), "duplicate label {strat:?}");
+            let shape = strat.shape();
+            assert!((0.0..=1.0).contains(&shape.block_height));
+            assert!((0.0..=1.0).contains(&shape.man_orientation));
+            assert!((0.0..=1.0).contains(&shape.press));
+            assert!(shape.max_seconds > 0.0 && shape.max_seconds <= 20.0);
+        }
+    }
+
+    #[test]
+    fn offside_recovery_reward_can_never_exceed_accrued_lingering_penalty() {
+        // Hardening invariant: stepping back onside must never net positive, so a
+        // player can't farm the recovery reward by briefly dipping offside.
+        let dt = 0.1_f64;
+        for steps_over_grace in 1..=120usize {
+            // Simulate `steps_over_grace` ticks spent past the grace window.
+            let mut clock = OFFSIDE_GRACE_SECONDS;
+            let mut accrued_penalty = 0.0_f64;
+            for _ in 0..steps_over_grace {
+                clock += dt;
+                let over =
+                    (clock - OFFSIDE_GRACE_SECONDS).min(OFFSIDE_LINGER_PENALTY_CAP_SECONDS);
+                // Time term only — a strict lower bound on the real penalty, which
+                // also adds an independent distance term.
+                accrued_penalty += OFFSIDE_TIME_PENALTY_PER_SECOND * over * dt;
+            }
+            let lingered =
+                (clock - OFFSIDE_GRACE_SECONDS).min(OFFSIDE_LINGER_PENALTY_CAP_SECONDS);
+            let recovery = (0.4 * lingered * lingered).min(OFFSIDE_RECOVERY_REWARD);
+            assert!(
+                recovery <= accrued_penalty + 1e-9,
+                "offside recovery {recovery} exceeded accrued penalty {accrued_penalty} after {steps_over_grace} ticks"
+            );
+        }
+    }
+
+    #[test]
+    fn attack_switch_maneuvers_change_lane() {
+        // A "switch" maneuver must resolve in a different lane than it starts.
+        assert!(TeamAttackStrategy::PullWideLeftSwitchRight.shape().switches_lane());
+        assert!(TeamAttackStrategy::SwitchPlayDiagonalRightLeft.shape().switches_lane());
+        assert!(!TeamAttackStrategy::HoldUpfieldUntilOpening.shape().switches_lane());
+        // The patient hold-up option is the long-horizon one.
+        assert_eq!(TeamAttackStrategy::HoldUpfieldUntilOpening.shape().max_passes, 7);
     }
 }
 
@@ -13095,7 +13540,7 @@ impl BallAgent {
                                 self.velocity.len(),
                                 false,
                             );
-                        let save_probability = goalkeeper_save_probability(
+                        let mut save_probability = goalkeeper_save_probability(
                             keeper,
                             shot.origin,
                             crossing_position,
@@ -13103,6 +13548,20 @@ impl BallAgent {
                             context.goal_width,
                             sightline_screen_probability,
                         );
+                        // No hands outside the 18-yard box: a keeper who has left
+                        // the penalty area (too far off the line, or too wide of
+                        // the ~44-yd-wide box) can only foot/body the ball, so
+                        // their shot-stopping ability drops by 50%.
+                        let own_goal_y = match defending_team {
+                            Team::Home => 0.0,
+                            Team::Away => context.field_length,
+                        };
+                        let outside_box_depth = (keeper.position.y - own_goal_y).abs() > 18.0;
+                        let outside_box_width =
+                            (keeper.position.x - context.field_width * 0.5).abs() > 22.0;
+                        if outside_box_depth || outside_box_width {
+                            save_probability *= 0.5;
+                        }
                         if rng.next_float() < save_probability {
                             let save_y = match defending_team {
                                 Team::Home => SHOT_SAVE_DEPTH_YARDS,
@@ -14251,6 +14710,8 @@ impl MatchConfig {
             learning_logging_enabled: true,
             learning_interval_ticks: 1,
             full_game_learning_enabled: true,
+            // Wider goal mouth to reward finishing (pitch stays the 120x80 default).
+            goal_width_yards: 10.0,
             formation_lp_enabled: true,
             neural_learning: SoccerNeuralLearningConfig {
                 enabled: true,
@@ -15133,6 +15594,12 @@ pub struct TeamTacticalDirective {
     pub risk_tolerance: f64,
     #[serde(default)]
     pub flank_attack_policy: FlankAttackPolicy,
+    /// Active team-level attacking maneuver (semi-MDP option). Interruptible.
+    #[serde(default)]
+    pub attack_strategy: TeamAttackStrategy,
+    /// Active team-level defensive maneuver (semi-MDP option). Interruptible.
+    #[serde(default)]
+    pub defense_strategy: TeamDefenseStrategy,
     #[serde(default)]
     pub flank_overlap_run_probability: f64,
     #[serde(default)]
@@ -15166,6 +15633,8 @@ impl TeamTacticalDirective {
             shot_threshold_yards: 20.0,
             risk_tolerance: 0.50,
             flank_attack_policy: FlankAttackPolicy::None,
+            attack_strategy: TeamAttackStrategy::default(),
+            defense_strategy: TeamDefenseStrategy::default(),
             flank_overlap_run_probability: 0.0,
             adversarial_embedding_attack_score: 0.0,
             adversarial_embedding_defense_score: 0.0,
@@ -19851,8 +20320,11 @@ impl WorldSnapshot {
     }
 
     fn clamp_forward_onside_support(&self, player: &PlayerSnapshot, mut target: Vec2) -> Vec2 {
+        // Applies to attacking players (forwards and midfielders): when our team
+        // has the ball and they are not on a sanctioned timed in-behind run, hold
+        // their support position onside instead of camping beyond the last line.
         if self.possession_team() != Some(player.team)
-            || player.role != PlayerRole::Forward
+            || !matches!(player.role, PlayerRole::Forward | PlayerRole::Midfielder)
             || self.in_behind_run_target_for(player.id).is_some()
         {
             return target;
@@ -22656,6 +23128,7 @@ impl WorldSnapshot {
         };
         let mut best = base.clamp_to_pitch(self.field_width, self.field_length);
         let mut best_score = f64::NEG_INFINITY;
+        let offside_line_y = self.second_last_defender_line_for(me.team);
         for dx in [-22.0, -13.0, -6.0, 0.0, 6.0, 13.0, 22.0] {
             for dy in [-8.0, 0.0, 7.0, 14.0, 22.0, 30.0] {
                 let raw_p = Vec2::new(
@@ -22690,7 +23163,12 @@ impl WorldSnapshot {
                     -1.2
                 };
                 let offside_penalty = if self.position_would_be_offside(me.team, p) {
-                    14.0
+                    // Scale with how far past the last-defender line, so the least
+                    // offside (or onside) candidate is strongly preferred rather
+                    // than an arbitrary deep-offside camp.
+                    let past = offside_line_y
+                        .map_or(0.0, |line| ((p.y - line) * me.team.attack_dir()).max(0.0));
+                    14.0 + past * 1.2
                 } else {
                     0.0
                 };
@@ -22746,7 +23224,10 @@ impl WorldSnapshot {
                 }
             }
         }
-        best
+        // Final safety: hold attacking players onside (forwards/mids, in
+        // possession, not on a sanctioned in-behind run) so they never camp
+        // beyond the last line even if scoring would have placed them there.
+        self.clamp_forward_onside_support(me, best)
     }
 
     fn forward_support_context_for(
@@ -24660,6 +25141,52 @@ fn tactical_directive_for_team(
             + overload_score * 3.5;
     let shot_threshold_yards: f64 = shot_base.clamp(16.0, 28.0);
 
+    // Baseline team-level strategy selection (semi-MDP option). Chosen fresh each
+    // tick from context, so it can switch on a dime; the learned policy can later
+    // override this. Maneuver horizons live on the strategy's `shape()`.
+    let ball_side = if ball_position.x < field_width * 0.42 {
+        StrategyLane::Left
+    } else if ball_position.x > field_width * 0.58 {
+        StrategyLane::Right
+    } else {
+        StrategyLane::Center
+    };
+    let attack_strategy = if !has_ball {
+        TeamAttackStrategy::CounterTransitionVertical
+    } else if build_up_phase {
+        TeamAttackStrategy::PatientPossessionProbe
+    } else if flank_attack_policy.is_flank() {
+        match ball_side {
+            StrategyLane::Left => TeamAttackStrategy::WingOverlapLeftCross,
+            StrategyLane::Right => TeamAttackStrategy::WingOverlapRightCross,
+            StrategyLane::Center => TeamAttackStrategy::HoldUpfieldUntilOpening,
+        }
+    } else if overload_score > 0.55 {
+        match ball_side {
+            StrategyLane::Left => TeamAttackStrategy::OverloadLeftIsolateRight,
+            StrategyLane::Right => TeamAttackStrategy::OverloadRightIsolateLeft,
+            StrategyLane::Center => TeamAttackStrategy::CentralDoubleOneTwo,
+        }
+    } else if attacking_phase {
+        match ball_side {
+            StrategyLane::Left => TeamAttackStrategy::PullWideLeftThenCenter,
+            StrategyLane::Right => TeamAttackStrategy::PullWideRightThenCenter,
+            StrategyLane::Center => TeamAttackStrategy::QuickVerticalThroughBall,
+        }
+    } else {
+        TeamAttackStrategy::HoldUpfieldUntilOpening
+    };
+    let defense_strategy = if leading && defending {
+        TeamDefenseStrategy::LowBlockCompact
+    } else if press_intensity > 0.80 {
+        TeamDefenseStrategy::HighPressManOriented
+    } else if press_intensity > 0.62 {
+        TeamDefenseStrategy::CounterPressGegenpress
+    } else if trailing {
+        TeamDefenseStrategy::HighPressZonalTrigger
+    } else {
+        TeamDefenseStrategy::MidBlockZonal
+    };
     TeamTacticalDirective {
         team,
         defensive_line_y,
@@ -24678,6 +25205,8 @@ fn tactical_directive_for_team(
         shot_threshold_yards,
         risk_tolerance,
         flank_attack_policy,
+        attack_strategy,
+        defense_strategy,
         flank_overlap_run_probability,
         adversarial_embedding_attack_score: 0.0,
         adversarial_embedding_defense_score: 0.0,
@@ -26462,6 +26991,45 @@ fn dense_soccer_transition_reward(
             reward -= (dist_from_own_goal - 30.0) * 2.8;
         }
     }
+    // Center-backs (central defenders) must hold as the last line: penalize a
+    // central defender for advancing ahead of the wing-backs, ramped up when the
+    // ball is in the attacking part of the field.
+    if player.role == PlayerRole::Defender
+        && player.home_position.x >= after.field_width * 0.28
+        && player.home_position.x <= after.field_width * 0.72
+    {
+        let wingback_ys: Vec<f64> = after
+            .players
+            .iter()
+            .filter(|p| {
+                p.team == player.team
+                    && p.role == PlayerRole::Defender
+                    && (p.home_position.x < after.field_width * 0.28
+                        || p.home_position.x > after.field_width * 0.72)
+            })
+            .map(|p| after.player_position(p.id).unwrap_or(p.position).y)
+            .collect();
+        if !wingback_ys.is_empty() {
+            let wingback_avg = wingback_ys.iter().sum::<f64>() / wingback_ys.len() as f64;
+            let ahead = ((after_pos.y - wingback_avg) * attack_dir).clamp(0.0, 20.0);
+            if ahead > 0.0 {
+                let ball_advance = ((ball_distance_from_own_goal(
+                    player.team,
+                    after.ball.position,
+                    after.field_length,
+                ) / after.field_length.max(1.0))
+                    - 0.2)
+                    / 0.6;
+                let ball_advance = ball_advance.clamp(0.0, 1.0);
+                // Mostly driven by ball advancement (small floor): a center-back
+                // stepping up in our own-half build-up is fine; the penalty bites
+                // once the ball is in the attacking part of the field.
+                reward -= ahead
+                    * CENTER_BACK_AHEAD_OF_WINGBACK_PENALTY_PER_YARD
+                    * (0.15 + 0.85 * ball_advance);
+            }
+        }
+    }
     let spacing_mode = before.team_spacing_mode_for(player.team);
     let spacing_delta = spacing_mode
         .map(|mode| {
@@ -27019,7 +27587,8 @@ fn pending_pass_reception_reward(
     }
 
     if after.ball.holder == Some(player_id) {
-        reward += 0.65 + urgency * 0.45 + pressure * 0.18;
+        // Securing the pass immediately is the desired outcome — reward it firmly.
+        reward += 1.2 + urgency * 0.45 + pressure * 0.18;
     } else if after
         .ball
         .holder
@@ -27031,12 +27600,13 @@ fn pending_pass_reception_reward(
         })
         .is_some_and(|holder| holder.team != player_team)
     {
-        reward -= 0.55 + urgency * 0.35 + pressure * 0.18;
+        // Letting the ball run straight through to an opponent on reception.
+        reward -= 1.1 + urgency * 0.35 + pressure * 0.18;
     } else if closing_yards < 0.15 && before_ball_distance > 3.0 {
         reward -= 0.20 + urgency * 0.30 + pressure * 0.15;
     }
 
-    reward.clamp(-2.4, 2.8)
+    reward.clamp(-3.0, 3.4)
 }
 
 fn attacking_support_urgency_learning_reward(
@@ -39013,6 +39583,7 @@ pub struct SoccerMatch {
     deferred_reward_transitions: Vec<SoccerLearningTransition>,
     defensive_delay_clocks: HashMap<usize, f64>,
     defensive_beat_clocks: HashMap<usize, f64>,
+    offside_clocks: HashMap<usize, f64>,
     defensive_clear_hold_trackers: HashMap<Team, DefensiveClearAndHoldTracker>,
     adversarial_moment_memory: VecDeque<SoccerMomentWindow>,
     last_agent_schedule: Vec<AgentScheduleEntry>,
@@ -39285,6 +39856,7 @@ impl SoccerMatch {
             deferred_reward_transitions: Vec::new(),
             defensive_delay_clocks: HashMap::new(),
             defensive_beat_clocks: HashMap::new(),
+            offside_clocks: HashMap::new(),
             defensive_clear_hold_trackers: HashMap::new(),
             adversarial_moment_memory: VecDeque::new(),
             last_agent_schedule: Vec::new(),
@@ -40987,6 +41559,7 @@ impl SoccerMatch {
         if self.config.learning_enabled || self.config.learning_logging_enabled {
             let phase_started = Instant::now();
             self.update_defensive_reward_trackers(&tick_start_snapshot, &next_snapshot);
+            self.update_offside_lingering_rewards(&next_snapshot);
             self.update_defensive_clear_and_hold_reward_tracker(
                 &tick_start_snapshot,
                 &next_snapshot,
@@ -43967,6 +44540,7 @@ impl SoccerMatch {
         self.pending_shot = None;
         self.pending_rebound = None;
         self.stat_restart(restart.kind, restart.awarded_team);
+        self.record_out_of_bounds_turnover_penalty(restart.kind, restart.awarded_team);
         let restart_holder = self.nearest_player_on_team(restart.awarded_team, restart.position);
         if let Some(holder_id) = restart_holder {
             if let Some(holder) = self.players.iter_mut().find(|p| p.id == holder_id) {
@@ -44927,6 +45501,101 @@ impl SoccerMatch {
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|player| player.id)
+    }
+
+    fn update_offside_lingering_rewards(&mut self, after: &WorldSnapshot) {
+        let attacking_team = after
+            .controlled_possession_team()
+            .or_else(|| after.possession_team());
+        let Some(attacking_team) = attacking_team else {
+            self.offside_clocks.clear();
+            return;
+        };
+        let Some(line_y) = after.second_last_defender_line_for(attacking_team) else {
+            return;
+        };
+        let ball_y = after.ball.position.y;
+        let attack_dir = attacking_team.attack_dir();
+        let dt = sane_dt_seconds(self.config.dt_seconds, DEFAULT_DT_SECONDS).max(1e-3);
+        // An attacker is in an offside position when they are beyond both the
+        // second-last defender line and the ball in the attacking direction.
+        let states: Vec<(usize, bool, f64)> = self
+            .players
+            .iter()
+            .filter(|p| p.team == attacking_team && p.role != PlayerRole::Goalkeeper)
+            .map(|p| {
+                let pos_y = after.player_position(p.id).unwrap_or(p.position).y;
+                let beyond_line = (pos_y - line_y) * attack_dir;
+                let offside = beyond_line > 0.0 && (pos_y - ball_y) * attack_dir > 0.0;
+                // Yards past the last-defender line — the distance dimension.
+                (p.id, offside, beyond_line.max(0.0))
+            })
+            .collect();
+        let mut events: Vec<(usize, f64)> = Vec::new();
+        for (id, offside, offside_yards) in states {
+            let clock = self.offside_clocks.entry(id).or_insert(0.0);
+            if offside {
+                *clock += dt;
+                if *clock > OFFSIDE_GRACE_SECONDS {
+                    // Independent time and distance terms, each with its own
+                    // scalar, both capped. Further AND longer => more penalty.
+                    let over =
+                        (*clock - OFFSIDE_GRACE_SECONDS).min(OFFSIDE_LINGER_PENALTY_CAP_SECONDS);
+                    let dist = offside_yards.min(OFFSIDE_DISTANCE_PENALTY_CAP_YARDS);
+                    let penalty = OFFSIDE_TIME_PENALTY_PER_SECOND * over
+                        + OFFSIDE_DISTANCE_PENALTY_PER_YARD * dist;
+                    events.push((id, -penalty * dt));
+                }
+            } else {
+                if *clock > OFFSIDE_GRACE_SECONDS {
+                    // Reward getting back onside, scaled by how long they lingered
+                    // (and capped). This is deliberately smaller than the penalty
+                    // already accrued over the stint, so it can never be farmed by
+                    // briefly dipping offside and stepping back.
+                    let lingered = (*clock - OFFSIDE_GRACE_SECONDS).min(OFFSIDE_LINGER_PENALTY_CAP_SECONDS);
+                    events.push((id, (0.4 * lingered * lingered).min(OFFSIDE_RECOVERY_REWARD)));
+                }
+                *clock = 0.0;
+            }
+        }
+        for (id, amount) in events {
+            self.record_reward_event(id, amount);
+        }
+    }
+
+    fn record_out_of_bounds_turnover_penalty(
+        &mut self,
+        restart_kind: BallRestartKind,
+        awarded_team: Team,
+    ) {
+        // Only throw-ins unambiguously mean "the ball was dribbled/passed out
+        // over the touchline." Goal kicks can be wide shots and corners can be
+        // defensive deflections, so attributing those as turnovers misfires.
+        if !matches!(restart_kind, BallRestartKind::ThrowIn) {
+            return;
+        }
+        let offending_team = awarded_team.other();
+        let Some(offender) = self
+            .possession_chain
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| self.players.get(*id).is_some_and(|p| p.team == offending_team))
+        else {
+            return;
+        };
+        let offender_pos = self.players[offender].position;
+        let nearest_opponent = self
+            .players
+            .iter()
+            .filter(|p| p.team == offending_team.other())
+            .map(|p| p.position.distance(offender_pos))
+            .fold(f64::INFINITY, f64::min);
+        let pressure = pressure_from_nearest_distance(nearest_opponent);
+        if pressure >= OUT_OF_BOUNDS_PRESSURE_EXEMPT_THRESHOLD {
+            return;
+        }
+        self.record_reward_event(offender, -OUT_OF_BOUNDS_TURNOVER_PENALTY_POINTS);
     }
 
     fn update_defensive_reward_trackers(&mut self, before: &WorldSnapshot, after: &WorldSnapshot) {
@@ -58069,7 +58738,9 @@ fn goalkeeper_save_probability_from_traits(
     let rush_bonus =
         (rush_speed / top_speed_yps_from_score(skills.top_speed).max(1.0)).clamp(0.0, 1.0) * 0.08;
     let clean_sightline = (1.0 - sightline_screen_probability.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-    let distance_save_bonus = ((shot_distance - 18.0) / 42.0).clamp(0.0, 1.0) * 0.12;
+    // The further out the shot, the more time the keeper has to read and reach
+    // it — long-range efforts (aerial or ground) are saved far more often.
+    let distance_save_bonus = ((shot_distance - 14.0) / 40.0).clamp(0.0, 1.0) * 0.24;
     let clear_long_shot_bonus =
         clean_sightline * ((shot_distance - 24.0) / 38.0).clamp(0.0, 1.0) * 0.10;
     let screened_penalty = sightline_screen_probability.clamp(0.0, 1.0) * 0.16;
@@ -58295,6 +58966,20 @@ fn nearest_ball_controller_for_segment(
             }
             if is_target {
                 control_radius *= 0.48 + openness * 0.62;
+                // A settled receiver (walk/jog/skip/run, not a full sprint) takes
+                // the ball more cleanly than someone sprinting onto it.
+                let gait_control = if matches!(p.movement_gait, MovementGait::Sprint) {
+                    0.82
+                } else {
+                    1.18
+                };
+                // Control is easiest at the ~5 mph sweet spot; a dying ball under
+                // 5 mph is awkward and a fierce drive is hard to take cleanly, so
+                // both sides of the sweet spot reduce the control window.
+                let sweet_spot_yps = mph_to_yps(5.0);
+                let speed_offset = (pass.launch_speed_yps - sweet_spot_yps).abs();
+                let speed_control = (1.18 - (speed_offset / 16.0).clamp(0.0, 0.5)).clamp(0.68, 1.18);
+                control_radius *= gait_control * speed_control;
                 pass_reception_score_bonus += -0.18 + openness * 0.50 + pass.passer_skill * 0.16;
             } else if p.team == pass.team {
                 pass_reception_score_bonus -= 0.08;
@@ -58355,8 +59040,39 @@ fn nearest_ball_controller_for_segment(
             }
         }
         let dist = player_control_position.distance(control_point);
-        if dist > control_radius {
+        // Kinematic reach cap (fast balls only): the ball reaches the contact
+        // point `t_ball = along / ball_speed` seconds into the step, and the
+        // player can only close a lunge plus `player_speed * t_ball`. This stops
+        // a fast ball being "intercepted" from physically impossible distances.
+        let effective_radius = if ball_speed > KINEMATIC_GATE_MIN_BALL_SPEED_YPS {
+            let along = (control_point - previous_ball_pos).len();
+            let t_ball = along / ball_speed;
+            let player_speed = player_top_speed_yps(p.role, &p.skills)
+                * fatigue_speed_factor(p.skills.stamina, p.fatigue);
+            control_radius.min(INTERCEPT_LUNGE_REACH_YARDS + player_speed * t_ball)
+        } else {
+            control_radius
+        };
+        if dist > effective_radius {
             continue;
+        }
+        // Altitude gate: a ball above the ground can only be reached by players
+        // who can get up to it (standing reach + a jump scaled by aerial ability).
+        // High balls fly over grounded players instead of magically being taken.
+        let contact_altitude = pending_pass
+            .filter(|pass| pass.flight.is_aerial())
+            .map(|pass| pass_ball_altitude_yards(pass, control_point))
+            .unwrap_or(if loose_long_ball_team.is_some() {
+                ball_altitude_yards
+            } else {
+                0.0
+            });
+        if contact_altitude > BALL_ROLLING_ALTITUDE_YARDS {
+            let reach_height = CONTROL_STANDING_REACH_YARDS
+                + aerial_duel_skill_from_agent(p) * CONTROL_AERIAL_JUMP_REACH_YARDS;
+            if contact_altitude > reach_height {
+                continue;
+            }
         }
         let to_ball = (control_point - player_control_position).normalized();
         let closing_speed = dot(p.velocity - ball_velocity, to_ball).clamp(-8.0, 8.0);
@@ -62544,7 +63260,7 @@ mod tests {
         );
 
         assert!(
-            goal_reward > forward_pass_reward + 80.0,
+            goal_reward > forward_pass_reward + 70.0,
             "goal should dominate all normal progression rewards: goal={goal_reward} forward_pass={forward_pass_reward}"
         );
         assert!(

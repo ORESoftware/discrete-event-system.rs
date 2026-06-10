@@ -582,6 +582,41 @@ for editing and dragging `des/studio/v1` JSON block diagrams.
 existing `main_soccer_live` binary keeps its original default port; both launch
 paths still honor `SOCCER_LIVE_PORT`/`SOCCER_PORT` when set.
 
+## Soccer Simulation: Emergent Properties, Not Hand-Coded Rules
+
+The soccer model is a learning system (MDP/POMDP value/policy iteration, a
+neural policy, and a whole-field formation LP). Its design discipline is:
+
+> **Realistic team behavior should be an _emergent property_ of lower-level
+> rules — per-action rewards/penalties, the physics, and the LP objective — and
+> must never be hard-coded as the behavior itself.**
+
+We specify the *incentives and the physics*; the *patterns* are then a
+**regularity of the learned policy** — what an RL paper would call an emergent
+behavior, an economist a *stylized fact* the model should reproduce, and a
+probabilist an *invariant distributional property*. They arise because, given
+the rules, conforming is in *equilibrium*: deviating is suboptimal. They are
+**observed and validated**, never set by a switch.
+
+Concretely, these are targets the rules should *induce* (not enforce):
+
+| Desired regularity (emergent) | Lower-level rules that should induce it |
+| --- | --- |
+| Both wing-backs sit behind the two center-backs only ~10% of the time | Wing-back forward-push reward ramps once the ball is >20 yds past the back-four average; center-backs carry a small support depth |
+| Center-backs hold their line; wing-backs provide the width and overlap | Asymmetric support-depth by defender type; pressure/cover terms in the LP |
+| Few back passes; forward progression preferred | Forward-pass completion rewarded, back passes penalized, possession-stall penalty |
+| The ball is rarely given straight to an opponent | Strong interception penalty scaled by receiver openness; decision-time penalty for floor passes into a blocked lane (prefer aerial or don't pass) |
+| Keepers distribute to the flanks, rarely up the middle | Goalkeeper distribution score heavily penalizes the central channel |
+| Keepers rarely stray far from goal | Distance-from-goal penalty ramps past 20/25/30 yds |
+| Dribbling concentrated in the attacking half | Opponent-half carry reward multiplier |
+
+If a desired property is **not** appearing, the fix is to adjust the rules
+(reward weights, LP objective, physics constants) and observe whether the
+property emerges — not to add a rule that forces the property directly. The
+formation LP and the player-configuration context are intended to carry
+**whole-field data** (all 22 players + the ball) so the policy has the context
+those regularities depend on.
+
 ## Development
 
 ### Rust-first implementation rule

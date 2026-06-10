@@ -1515,6 +1515,21 @@ impl SoccerLearningPgStore {
             }
         }
 
+        // A policy version with zero entries loads as a blank policy and would
+        // silently restart learning from scratch. This can legitimately happen
+        // for a pruned/archived version, but never for the active version a run
+        // resumes from — so surface it rather than collapsing quietly.
+        if home_entries.is_empty()
+            && away_entries.is_empty()
+            && home_targets.is_empty()
+            && away_targets.is_empty()
+        {
+            eprintln!(
+                "soccer-learning-pg: loaded policy version {policy_version_id} with zero entries; \
+                 resuming from this version would start learning from a blank policy"
+            );
+        }
+
         Ok(SoccerTeamQPolicies {
             home: SoccerQPolicy::from_entries_with_targets(
                 home_options,

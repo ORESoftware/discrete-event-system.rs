@@ -98395,7 +98395,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(pg_jsonl_entry["kind"], "soccer-policy-postgres-entry");
         assert_eq!(
             pg_jsonl_entry["entry"]["stateHash"].as_str().unwrap().len(),
-            16
+            32
         );
         let agent_schedule = value["frame"]["agentSchedule"]
             .as_array()

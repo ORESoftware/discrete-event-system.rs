@@ -149,10 +149,16 @@ const GOAL_CONTEXT_CREDIT_SCAN_ACTIONS: usize = 48;
 const GOAL_CONTEXT_CREDIT_MAX_AGE_TICKS: u64 = 600;
 const GOAL_CONTEXT_CREDIT_MIN_SCORE: f64 = 0.05;
 const SHOT_ON_TARGET_REWARD_POINTS: f64 = 50.0;
-const COMPLETED_FORWARD_PASS_BASE_REWARD_OWN_HALF: f64 = 7.0;
-const COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF: f64 = 7.6;
-const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.15;
+const COMPLETED_FORWARD_PASS_BASE_REWARD_OWN_HALF: f64 = 9.5;
+const COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF: f64 = 12.0;
+const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.24;
 const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_MAX_YARDS: f64 = 30.0;
+// A completed back pass is a missed forward opportunity; penalize it outright so
+// the policy stops recycling possession backwards. Own-half back passes sit
+// nearer to our own goal and carry more turnover risk, so they sting more than a
+// recycle in the opponent half.
+const COMPLETED_BACK_PASS_PENALTY_OWN_HALF: f64 = 2.6;
+const COMPLETED_BACK_PASS_PENALTY_OPPONENT_HALF: f64 = 1.4;
 const COMPLETED_DANGEROUS_CROSS_BONUS_POINTS: f64 = 3.8;
 const COMPLETED_CROSS_MAX_BONUS_POINTS: f64 = 5.0;
 const COMPLETED_KILLER_PASS_BONUS_POINTS: f64 = 4.8;
@@ -170,6 +176,11 @@ const DEFENSIVE_CLEAR_AND_HOLD_SECOND_SECONDS: f64 = 10.0;
 const DEFENSIVE_CLEAR_AND_HOLD_FIRST_REWARD_POINTS: f64 = 10.0;
 const DEFENSIVE_CLEAR_AND_HOLD_SECOND_REWARD_POINTS: f64 = 20.0;
 const DEFENSIVE_DISPOSSESSION_REWARD_POINTS: f64 = 10.0;
+// Losing the ball is a team failure, not just the dribbler's. When a defender wins
+// the ball, blame the recent possession chain: the player dispossessed eats the
+// largest share, and the previous one or two who built the move share the rest.
+const LOST_POSSESSION_CHAIN_PENALTY_POINTS: f64 = 7.0;
+const LOST_POSSESSION_CHAIN_PENALTY_WEIGHTS: [f64; 3] = [0.55, 0.30, 0.15];
 const FAILED_DISPOSSESSION_PENALTY_POINTS: f64 = 2.0;
 const LOST_FIFTY_FIFTY_DUEL_PENALTY_POINTS: f64 = FAILED_DISPOSSESSION_PENALTY_POINTS;
 const UNTARGETED_LONG_BALL_RECOVERY_REWARD_POINTS: f64 = 5.2;
@@ -366,7 +377,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 132;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 137;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -24757,8 +24768,8 @@ fn completed_pass_reward(team: Team, origin: Vec2, target: Vec2, field_length: f
             COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF + forward_progress_reward
         }
         (PassDirectionBucket::Lateral, _) => 1.6,
-        (PassDirectionBucket::Backward, true) => 0.1,
-        (PassDirectionBucket::Backward, false) => 0.7,
+        (PassDirectionBucket::Backward, true) => -COMPLETED_BACK_PASS_PENALTY_OWN_HALF,
+        (PassDirectionBucket::Backward, false) => -COMPLETED_BACK_PASS_PENALTY_OPPONENT_HALF,
     }
 }
 
@@ -26520,12 +26531,17 @@ fn dense_soccer_transition_reward(
                 };
                 let pressure_multiplier =
                     (1.0 - before_obs.perceived_pressure.clamp(0.0, 1.0) * 0.22).clamp(0.70, 1.0);
+                // Carrying the ball forward is far more valuable in the attacking
+                // half (beats defenders, creates chances) than knocking it around
+                // our own half, so reward opponent-half dribbling more.
+                let half_multiplier = if own_half_holder { 0.90 } else { 1.40 };
                 reward += carry_progress
                     * DENSE_FORWARD_CARRY_PROGRESS_REWARD_PER_YARD
                     * role_multiplier
-                    * pressure_multiplier;
+                    * pressure_multiplier
+                    * half_multiplier;
                 if carry_progress >= 6.0 {
-                    reward += 0.18 * role_multiplier;
+                    reward += 0.18 * role_multiplier * half_multiplier;
                 }
             } else if carry_progress < -1.25 && before_obs.perceived_pressure < 0.30 {
                 reward -= 0.42;
@@ -38863,6 +38879,21 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.threaded_goal_pass_expected_completion_bin, 5.0),
         soccer_neural_bin(state.threaded_goal_pass_stride_fit_bin, 5.0),
         soccer_neural_bin(state.open_support_outlets_bin, 3.0),
+        // Additional raw observation channels (appended; legacy snapshots migrate
+        // these new columns in as zero-weight via the input-dim migration path).
+        // True (un-discounted) pressure alongside the perceived-pressure bin.
+        soccer_neural_unit(transition.observation.real_pressure),
+        // Whether the carrier is in the attacking half — the half signal that
+        // gates forward-pass / dribble value.
+        soccer_neural_bool(
+            transition.observation.yards_to_goal < transition.observation.yards_to_own_goal,
+        ),
+        // Pass-curl skill availability for bending the ball around defenders.
+        soccer_neural_unit(transition.observation.pass_curl_probability),
+        // Local numbers advantage of the attack.
+        soccer_neural_unit(transition.observation.attacking_overload_score),
+        // Signed fatigue edge over the nearest defender.
+        soccer_neural_signed_unit(transition.observation.perceived_fatigue_advantage),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -42499,6 +42530,16 @@ impl SoccerMatch {
         let defender_lead = carried_ball_lead(&self.players[defender_id]);
 
         self.record_quick_receiver_dispossession_penalty(attacker_id);
+        // Spread the turnover penalty back across the attacking team's recent
+        // possession chain while it is still intact (taking the ball clears it).
+        let attacker_team = self.players[attacker_id].team;
+        self.record_weighted_possession_chain_reward_at(
+            self.tick,
+            attacker_team,
+            Some(attacker_id),
+            -LOST_POSSESSION_CHAIN_PENALTY_POINTS,
+            &LOST_POSSESSION_CHAIN_PENALTY_WEIGHTS,
+        );
         self.ball.holder = Some(defender_id);
         self.ball.position = (defender_position + defender_lead * 0.35).clamp_to_pitch(
             self.config.field_width_yards,

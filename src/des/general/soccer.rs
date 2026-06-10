@@ -40,10 +40,8 @@ pub const DEFAULT_HALF_DURATION_SECONDS: f64 = 0.0;
 pub const DEFAULT_HALFTIME_FATIGUE_RECOVERY: f64 = 0.0;
 const SITE_PLAYBACK_RECORD_EVERY_TICKS: u64 = 1;
 pub const DEFAULT_FIELD_LENGTH_YARDS: f64 = 120.0;
-pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 70.0;
-// Wider goal to encourage finishing (the 2D pitch has no crossbar/height, so
-// "taller" maps to a more generous mouth on the top-down model).
-pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 10.0;
+pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 80.0;
+pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 8.0;
 // Lower linear drag + air resistance so struck balls keep pace through their
 // flight (a 50+ mph shot should still look fast several frames later).
 pub const DEFAULT_BALL_DRAG_PER_TICK: f64 = 0.017;

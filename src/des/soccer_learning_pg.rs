@@ -3417,7 +3417,9 @@ mod tests {
         assert_eq!(persisted_state_json["skillPassingBin"], json!(5));
         assert_eq!(persisted_state_json["skillFirstTouchBin"], json!(4));
         let hash = state_hash(&persisted_state_json);
-        assert_eq!(hash.len(), 16);
+        // 128-bit FNV-1a renders as 32 lowercase hex chars (still within the
+        // schema CHECK `state_hash ~ '^[a-f0-9]{16,32}$'`).
+        assert_eq!(hash.len(), 32);
         assert!(hash.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 

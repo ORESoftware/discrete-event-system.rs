@@ -399,6 +399,11 @@ const GUARANTEED_FLOOR_TRAP_RADIUS_YARDS: f64 = 1.0;
 // the break is on — off-ball players push forward into space (and sprint there).
 const COUNTERATTACK_DEFENDERS_AHEAD_THRESHOLD: usize = 5;
 const COUNTERATTACK_FORWARD_SUPPORT_BONUS: f64 = 0.12;
+// Loose-ball retrieval spacing: if an opponent is within this radius the ball is
+// contested (defenders may commit numbers); otherwise only the closest commits
+// and the rest hold a supporting outlet at the support distance.
+const LOOSE_BALL_CONTEST_RADIUS_YARDS: f64 = 5.0;
+const LOOSE_BALL_SUPPORT_DISTANCE_YARDS: f64 = 6.0;
 // Shots struck from beyond this distance are saved at least LONG_RANGE_GK_SAVE_FLOOR
 // of the time by a keeper who is in position (in the box).
 const LONG_RANGE_SHOT_DISTANCE_YARDS: f64 = 30.0;
@@ -22766,6 +22771,38 @@ impl WorldSnapshot {
         }
 
         Some((target, distance > 3.0))
+    }
+
+    /// True if this player is the closest teammate (outfield) to the loose ball,
+    /// i.e. the one who should commit to retrieving it.
+    fn is_primary_loose_ball_retriever(&self, player_id: usize, target: Vec2) -> bool {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return false;
+        };
+        let my_dist = self.player_snapshot_position(me).distance(target);
+        !self.players.iter().any(|p| {
+            p.id != player_id
+                && p.team == me.team
+                && p.role != PlayerRole::Goalkeeper
+                && self.player_snapshot_position(p).distance(target) < my_dist - 1e-6
+        })
+    }
+
+    /// A supporting outlet held at the support distance from the loose ball (on
+    /// the player's own side of it), ready to receive once the ball is won.
+    fn loose_ball_support_outlet_for(&self, player_id: usize, target: Vec2) -> Vec2 {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return target;
+        };
+        let current = self.player_snapshot_position(me);
+        let from_ball = current - target;
+        let dir = if from_ball.len() > 1e-3 {
+            from_ball.normalized()
+        } else {
+            Vec2::new(0.0, -me.team.attack_dir())
+        };
+        (target + dir * LOOSE_BALL_SUPPORT_DISTANCE_YARDS)
+            .clamp_to_pitch(self.field_width, self.field_length)
     }
 
     fn loose_ball_recovery_target_for(&self, player_id: usize) -> Vec2 {

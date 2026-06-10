@@ -395,6 +395,10 @@ const CHASE_EMERGENCY_RADIUS_YARDS: f64 = 5.0;
 const CHASE_EMERGENCY_SPEED_YPS: f64 = 5.0;
 // A non-aerial ball within this radius is always trapped (players are elite at it).
 const GUARANTEED_FLOOR_TRAP_RADIUS_YARDS: f64 = 1.0;
+// Counterattack: with fewer than this many opponents ahead while in possession,
+// the break is on — off-ball players push forward into space (and sprint there).
+const COUNTERATTACK_DEFENDERS_AHEAD_THRESHOLD: usize = 5;
+const COUNTERATTACK_FORWARD_SUPPORT_BONUS: f64 = 0.12;
 // Shots struck from beyond this distance are saved at least LONG_RANGE_GK_SAVE_FLOOR
 // of the time by a keeper who is in position (in the box).
 const LONG_RANGE_SHOT_DISTANCE_YARDS: f64 = 30.0;
@@ -22778,6 +22782,15 @@ impl WorldSnapshot {
             return target;
         };
         if player.role != PlayerRole::Goalkeeper {
+            // Retrieval spacing: on an UNCONTESTED loose ball (no opponent within
+            // ~5 yds) only the closest teammate commits; the rest hold a >5-yd
+            // outlet to receive once it's won, instead of all swarming the ball.
+            if !self.is_primary_loose_ball_retriever(player_id, target)
+                && self.nearest_opponent_distance_at(player.team, target)
+                    > LOOSE_BALL_CONTEST_RADIUS_YARDS
+            {
+                return self.loose_ball_support_outlet_for(player_id, target);
+            }
             return target;
         }
         let current = self.player_snapshot_position(player);
@@ -23214,6 +23227,20 @@ impl WorldSnapshot {
         }
     }
 
+    /// Count opponent outfield players goal-side-ahead of `position` (between it
+    /// and the opponent goal). Few opponents ahead ⇒ space to break into.
+    fn opponents_ahead_of(&self, position: Vec2, team: Team) -> usize {
+        let attack_dir = team.attack_dir();
+        self.players
+            .iter()
+            .filter(|opp| {
+                opp.team != team
+                    && opp.role != PlayerRole::Goalkeeper
+                    && (self.player_snapshot_position(opp).y - position.y) * attack_dir > 0.0
+            })
+            .count()
+    }
+
     pub fn open_space_for(&self, player_id: usize, home: Vec2) -> Vec2 {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return home;
@@ -23228,6 +23255,13 @@ impl WorldSnapshot {
         let possession = self.possession_team() == Some(me.team);
         let own_half_possession =
             possession && pass_origin_in_own_half(me.team, self.ball.position, self.field_length);
+        // Counterattack break: we have the ball and there are few opponents
+        // between this player and the opponent goal — push forward into space to
+        // offer the pass rather than holding shape.
+        let break_on = possession
+            && me.role != PlayerRole::Goalkeeper
+            && self.opponents_ahead_of(me_position, me.team)
+                < COUNTERATTACK_DEFENDERS_AHEAD_THRESHOLD;
         let tendency = me.preferences.offensive_mindedness - me.preferences.defensive_mindedness;
         let role_depth = match me.role {
             PlayerRole::Goalkeeper => -8.0,
@@ -23330,7 +23364,13 @@ impl WorldSnapshot {
                     occupancy.teammate_occupied_space_penalty(movement_relief);
                 let line_shape_penalty =
                     self.role_line_penalty_for_player_target(me, p, movement_relief);
+                let counterattack_bonus = if break_on {
+                    forward_from_ball.clamp(0.0, 30.0) * COUNTERATTACK_FORWARD_SUPPORT_BONUS
+                } else {
+                    0.0
+                };
                 let score = occupancy.open_space_score
+                    + counterattack_bonus
                     + forward.max(-4.0) * (0.04 + directive.risk_tolerance * 0.08)
                     + forward_from_ball.clamp(-6.0, 28.0)
                         * (0.08 + directive.risk_tolerance * 0.09)
@@ -40016,6 +40056,41 @@ impl SoccerStepTimingStats {
 }
 
 impl SoccerMatch {
+    /// Make every player identical — all 0–10 skill ratings maxed, uniform
+    /// physique and decision-noise, and identical proclivities — so learning
+    /// reflects tactics/positioning rather than innate skill gaps. Used by the
+    /// live learning sim (not the test default, which keeps varied skills).
+    pub fn set_uniform_elite_players(&mut self) {
+        let preferences = AgentPreferences::default();
+        let decision_noise = SkillProfile::default().decision_noise;
+        for player in &mut self.players {
+            let s = &mut player.skills;
+            s.top_speed = 10.0;
+            s.acceleration = 10.0;
+            s.strength = 10.0;
+            s.height = 10.0;
+            s.shooting = 10.0;
+            s.right_foot_shot_power = 10.0;
+            s.left_foot_shot_power = 10.0;
+            s.passing = 10.0;
+            s.passing_completion_rate = 10.0;
+            s.flair_passing = 10.0;
+            s.crossing_left = 10.0;
+            s.crossing_right = 10.0;
+            s.dribbling = 10.0;
+            s.first_touch = 10.0;
+            s.defending = 10.0;
+            s.goalkeeping = 10.0;
+            s.defensive_tracking = 10.0;
+            s.stamina = 10.0;
+            s.vision = 10.0;
+            s.aggression = 10.0;
+            s.weight_pounds = default_player_weight_pounds();
+            s.decision_noise = decision_noise;
+            player.preferences = preferences.clone();
+        }
+    }
+
     pub fn default_11v11(config: MatchConfig) -> Self {
         let config = config.sanitized_for_runtime();
         let mut rng = mulberry32(config.seed);
@@ -44169,11 +44244,31 @@ impl SoccerMatch {
                 && opp.velocity.len() >= CHASE_EMERGENCY_SPEED_YPS
         });
         let gait = classify_movement_gait(self.players[player_id].team, to_target, sprint, chased);
+        // Counterattack break: our team has the ball, this player is pushing
+        // forward, and few opponents are ahead — sprint into the space to offer
+        // the pass instead of being damped for being far from the ball.
+        let attack_dir = my_team.attack_dir();
+        let on_break = to_target.y * attack_dir > 0.5
+            && self
+                .ball
+                .holder
+                .and_then(|holder| self.players.get(holder))
+                .is_some_and(|holder| holder.team == my_team)
+            && self
+                .players
+                .iter()
+                .filter(|opp| {
+                    opp.team != my_team
+                        && opp.role != PlayerRole::Goalkeeper
+                        && (opp.position.y - me_pos.y) * attack_dir > 0.0
+                })
+                .count()
+                < COUNTERATTACK_DEFENDERS_AHEAD_THRESHOLD;
         // Urgency scales with proximity to the ball: a player far from the ball
         // moves and accelerates calmly, ramping up to full urgency as they close
         // on it. Linear ("uniform") in distance from 1.0 at the ball down to a
-        // floor — except when chased, which is an all-out emergency regardless.
-        let proximity_urgency = if chased {
+        // floor — except when chased or breaking, which are all-out regardless.
+        let proximity_urgency = if chased || on_break {
             1.0
         } else {
             let ball_distance = me_pos.distance(self.ball.position);
@@ -46700,6 +46795,9 @@ impl SoccerRealtimeSession {
         let mut sim = SoccerMatch::default_11v11(config)
             .with_human_inputs(input_queue.clone())
             .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()));
+        // Live learning sim: every player is identical 10/10 so learning isolates
+        // tactics and positioning from skill differences.
+        sim.set_uniform_elite_players();
         sim.clear_controller_assignments();
         let controller_assignments = SharedControllerAssignments::new(sim.config.human_slots());
         let controller_input_router = HumanControllerInputRouter::new(
@@ -47585,6 +47683,7 @@ impl SoccerRealtimeSession {
 
         let mut next_match =
             SoccerMatch::default_11v11(config).with_human_inputs(self.input_queue.clone());
+        next_match.set_uniform_elite_players();
         if let Some(team_policies) = team_policies {
             next_match.set_team_policies(team_policies);
         } else {

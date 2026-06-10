@@ -856,9 +856,8 @@ mod tests {
     use crate::des::general::bin_packing::{
         bin_packing_problem_from_weights, build_sample_bin_packing_problem,
     };
-    use std::sync::Mutex;
 
-    static BIN_PACKING_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as BIN_PACKING_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

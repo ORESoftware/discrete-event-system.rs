@@ -12,3 +12,7 @@ pub mod transform;
 // Shims for npm packages with no crate equivalent (used by the entity framework).
 pub mod iterable_int;
 pub mod linked_queue;
+// Test-only: the single process-global env lock shared by the `external_*`
+// reference Python-bridge tests (see `test_support` for the data race it fixes).
+#[cfg(test)]
+pub mod test_support;

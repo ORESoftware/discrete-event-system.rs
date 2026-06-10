@@ -831,9 +831,8 @@ mod tests {
     use crate::des::general::knapsack::{
         build_sample_knapsack_problem, KnapsackItem, KnapsackProblem,
     };
-    use std::sync::Mutex;
 
-    static KNAPSACK_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as KNAPSACK_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

@@ -830,9 +830,8 @@ mod tests {
     use crate::des::general::facility_location::{
         build_sample_facility_location_problem, FacilityLocationProblem,
     };
-    use std::sync::Mutex;
 
-    static FACILITY_LOCATION_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as FACILITY_LOCATION_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

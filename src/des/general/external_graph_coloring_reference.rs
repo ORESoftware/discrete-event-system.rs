@@ -737,9 +737,8 @@ mod tests {
     use crate::des::general::graph_coloring::{
         build_sample_graph_coloring_problem, GraphColoringProblem,
     };
-    use std::sync::Mutex;
 
-    static GRAPH_COLORING_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as GRAPH_COLORING_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

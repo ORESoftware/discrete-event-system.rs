@@ -846,9 +846,8 @@ mod tests {
     use crate::des::general::set_cover::{
         build_sample_set_cover_problem, SetCoverProblem, SetCoverSet,
     };
-    use std::sync::Mutex;
 
-    static SET_COVER_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as SET_COVER_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

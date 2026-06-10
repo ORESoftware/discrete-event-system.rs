@@ -676,9 +676,8 @@ pub fn solve_min_cost_flow_with_external_reference(
 mod tests {
     use super::*;
     use crate::des::general::min_cost_flow::MinCostFlowArc;
-    use std::sync::Mutex;
 
-    static MIN_COST_FLOW_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as MIN_COST_FLOW_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

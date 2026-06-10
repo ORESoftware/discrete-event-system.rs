@@ -663,9 +663,8 @@ pub fn solve_euclidean_tsp_with_external_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static TSP_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as TSP_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

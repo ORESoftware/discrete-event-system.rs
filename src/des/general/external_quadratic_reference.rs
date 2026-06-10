@@ -2088,9 +2088,8 @@ mod tests {
         ExternalQuadraticReferenceStatus,
     };
     use std::process::{Command, Stdio};
-    use std::sync::Mutex;
 
-    static QUADRATIC_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as QUADRATIC_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

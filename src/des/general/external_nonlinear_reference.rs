@@ -1053,9 +1053,8 @@ mod tests {
     };
     use crate::des::general::nonlinear_optimization_models::CurveFitPoint;
     use std::process::{Command, Stdio};
-    use std::sync::Mutex;
 
-    static NONLINEAR_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as NONLINEAR_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

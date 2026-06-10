@@ -896,9 +896,8 @@ pub fn solve_flow_shop_with_external_reference(
 mod tests {
     use super::*;
     use crate::des::general::classical_optimization_models::JobOperation;
-    use std::sync::Mutex;
 
-    static SCHEDULING_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as SCHEDULING_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

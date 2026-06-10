@@ -19184,9 +19184,8 @@ mod tests {
         BranchRule, ConcreteLpRelaxationAlgorithm, LpRelaxationAlgorithm, TraceAction,
     };
     use std::process::{Command, Stdio};
-    use std::sync::Mutex;
 
-    static MATH_PROGRAM_EXTERNAL_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as MATH_PROGRAM_EXTERNAL_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

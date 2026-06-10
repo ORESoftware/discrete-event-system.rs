@@ -2596,6 +2596,12 @@ function drawPitch(r) {
   const boxH = r.h * 0.44;
   ctx.strokeRect(r.x, r.y + (r.h - boxH) / 2, boxW, boxH);
   ctx.strokeRect(r.x + r.w - boxW, r.y + (r.h - boxH) / 2, boxW, boxH);
+  // 6-yard (goal) box: 6 yds deep (= 18/3) and 20 yds wide vs the 44-yd
+  // penalty area, drawn proportionally to the 18-yard box.
+  const boxW6 = boxW / 3;
+  const boxH6 = boxH * (20 / 44);
+  ctx.strokeRect(r.x, r.y + (r.h - boxH6) / 2, boxW6, boxH6);
+  ctx.strokeRect(r.x + r.w - boxW6, r.y + (r.h - boxH6) / 2, boxW6, boxH6);
   drawGoalPosts(r);
 }
 function drawGoalPosts(r) {

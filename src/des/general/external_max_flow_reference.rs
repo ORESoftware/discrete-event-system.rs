@@ -792,9 +792,8 @@ pub fn solve_max_flow_with_external_reference(
 mod tests {
     use super::*;
     use crate::des::general::max_flow::{build_textbook_max_flow_problem, MaxFlowEdge};
-    use std::sync::Mutex;
 
-    static MAX_FLOW_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as MAX_FLOW_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

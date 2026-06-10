@@ -748,9 +748,8 @@ mod tests {
     use crate::des::general::minimum_spanning_tree::{
         build_sample_minimum_spanning_tree_problem, MinimumSpanningTreeEdge,
     };
-    use std::sync::Mutex;
 
-    static MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as MINIMUM_SPANNING_TREE_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

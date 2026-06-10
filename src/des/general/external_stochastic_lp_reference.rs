@@ -670,9 +670,8 @@ mod tests {
     use crate::des::general::stochastic_lp::{
         build_production_scenarios, build_production_slp, UniformDemandSpec,
     };
-    use std::sync::Mutex;
 
-    static STOCHASTIC_LP_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as STOCHASTIC_LP_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

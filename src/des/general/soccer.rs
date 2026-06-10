@@ -375,6 +375,24 @@ const DEFENDER_PRESS_MIDFIELDER_IDEAL_YARDS: f64 = 5.0;
 const MIDFIELDER_PRESS_FOCUS_IDEAL_YARDS: f64 = 5.0;
 const FORWARD_TOP_SPEED_MULTIPLIER: f64 = 1.10;
 const STRIKER_ONSIDE_BUFFER_YARDS: f64 = 1.25;
+const DEAD_BALL_ONSIDE_BUFFER_YARDS: f64 = 1.0;
+// Fouls disabled: foul probability is multiplied by this so it is ~0.
+const FOUL_PROBABILITY_SCALE: f64 = 0.000_001;
+// Goal geometry: a real goal is 8 ft (= 8/3 yd) tall under the crossbar and 24 ft
+// (= 8 yd, the goal width) between the posts. A ball that crosses the line under
+// the bar and between the posts is a goal — determined geometrically, not by a
+// random save roll.
+const GOAL_CROSSBAR_HEIGHT_YARDS: f64 = 8.0 / 3.0;
+// Shooting favorability ramps to zero as the goal-mouth angle closes below this.
+const LOW_SHOT_ANGLE_CUTOFF_DEGREES: f64 = 30.0;
+// Central defenders compress to within this many yards of the opponent's foremost
+// attacker, but never push more than this far past the halfway line.
+const CENTRE_BACK_PUSH_UP_GAP_YARDS: f64 = 2.0;
+const CENTRE_BACK_MAX_PAST_HALFWAY_YARDS: f64 = 5.0;
+// A retreating player turns and runs (instead of back-pedalling) only when a
+// fast opponent is this close and moving at least this fast (running/sprinting).
+const CHASE_EMERGENCY_RADIUS_YARDS: f64 = 5.0;
+const CHASE_EMERGENCY_SPEED_YPS: f64 = 5.0;
 const CENTER_REF_BALL_CLEARANCE_YARDS: f64 = 7.0;
 const CENTER_REF_PLAYER_CENTROID_WEIGHT: f64 = 0.46;
 const CENTER_REF_LIVE_PLAY_CENTROID_WEIGHT: f64 = 0.34;
@@ -425,6 +443,9 @@ const LIVE_EPISODE_HISTORY_LIMIT: usize = 12;
 // configured dt), so moment detection is unaffected; only the oldest frames of
 // a single very long continuous match are evicted FIFO.
 const SOCCER_LIVE_TRACKING_FRAMES_LIMIT: usize = 18_000;
+// The Q-policy probability summary (UI only) scans the whole, growing Q-table;
+// refresh it at most this often instead of every step so per-step time stays flat.
+const SOCCER_LIVE_POLICY_SUMMARY_REFRESH_TICKS: u64 = 30;
 const SOCCER_MOMENT_WINDOW_SECONDS: f64 = 10.0;
 const SOCCER_MOMENT_HISTORY_LIMIT: usize = 24;
 const SOCCER_MOMENT_ACTION_LIMIT: usize = 12;
@@ -7296,6 +7317,11 @@ impl PlayerAgent {
             * (0.52 + shooting * 0.62)
             * (1.0 + directive.risk_tolerance * 0.35)
             * (0.78 + (observation.opponent_goal_angle_degrees / 42.0).clamp(0.0, 1.0) * 0.44)
+            // Acute angles are near-impossible to score from: drive shot value to
+            // zero as the goal-mouth angle closes below ~30 degrees (e.g. by the
+            // byline or at a corner), forcing a cutback/pass instead of a shot.
+            * (observation.opponent_goal_angle_degrees / LOW_SHOT_ANGLE_CUTOFF_DEGREES)
+                .clamp(0.0, 1.0)
             * (0.34 + shot_quality_weight)
             * shot_block_penalty
             * (1.0 + offensive_urgency * 2.45 + pressure_urgency * 0.42)
@@ -13599,7 +13625,11 @@ impl BallAgent {
                 previous_position.x + (self.position.x - previous_position.x) * crossing_fraction;
             let crossing_position =
                 Vec2::new(crossing_x.clamp(0.0, context.field_width), goal_line_y);
-            let in_goal = (crossing_x - goal_x).abs() <= context.goal_width * 0.5;
+            // Geometric goal: between the posts (X within the goal width) AND
+            // under the crossbar (ball altitude below goal height). Over the bar or
+            // outside the posts is not a goal.
+            let in_goal = (crossing_x - goal_x).abs() <= context.goal_width * 0.5
+                && self.altitude_yards <= GOAL_CROSSBAR_HEIGHT_YARDS;
             if in_goal {
                 let scoring_team = if self.position.y > context.field_length {
                     Team::Home
@@ -25104,7 +25134,28 @@ fn tactical_directive_for_team(
             line_seed = line_seed * 0.32 + cover_line_seed * 0.68;
         }
     }
-    let defensive_line_y: f64 = line_seed.clamp(field_length * 0.08, field_length * 0.92);
+    let mut defensive_line_y: f64 = line_seed.clamp(field_length * 0.08, field_length * 0.92);
+    // Central defenders push up to within ~2 yds of the opponent's foremost
+    // attacker to compress the field, but never more than 5 yds past halfway.
+    // Raise-only: it squeezes a line that is sitting too deep without pulling
+    // back one that is already higher.
+    if defending {
+        if let Some(foremost) = defensive_cover.foremost_attacker_y {
+            let within_two = foremost - attack_dir * CENTRE_BACK_PUSH_UP_GAP_YARDS;
+            let halfway_cap = field_length * 0.5 + attack_dir * CENTRE_BACK_MAX_PAST_HALFWAY_YARDS;
+            let compressed = if attack_dir > 0.0 {
+                within_two.min(halfway_cap)
+            } else {
+                within_two.max(halfway_cap)
+            };
+            defensive_line_y = if attack_dir > 0.0 {
+                defensive_line_y.max(compressed)
+            } else {
+                defensive_line_y.min(compressed)
+            }
+            .clamp(field_length * 0.08, field_length * 0.92);
+        }
+    }
 
     let risk_tolerance: f64 = (0.46
         + if attacking_phase { 0.15 } else { 0.0 }
@@ -31240,6 +31291,14 @@ pub struct SoccerPhysicsSmokeReport {
     pub max_ball_accel_yps2: f64,
     pub max_player_frame_speed_yps: f64,
     pub max_ball_frame_speed_yps: f64,
+    // Implied acceleration from the frame-to-frame velocity change. A value over
+    // the max acceleration means the velocity changed faster than any force could
+    // do it — an impulse / conservation-of-momentum violation (e.g. a teleport
+    // that instantly zeroes velocity).
+    #[serde(default)]
+    pub max_player_frame_impulse_yps2: f64,
+    #[serde(default)]
+    pub max_ball_frame_impulse_yps2: f64,
     pub violation_count: usize,
     pub violations: Vec<SoccerPhysicsSmokeViolation>,
 }
@@ -31307,8 +31366,8 @@ pub fn soccer_match_frame_physics_smoke_report_with_limits(
     }
 
     let mut previous_clock = None::<f64>;
-    let mut previous_ball = None::<(u64, f64, Vec2)>;
-    let mut previous_players = HashMap::<usize, (u64, f64, Vec2)>::new();
+    let mut previous_ball = None::<(u64, f64, Vec2, Vec2)>;
+    let mut previous_players = HashMap::<usize, (u64, f64, Vec2, Vec2)>::new();
     for frame in frames {
         check_clock_monotonicity(
             &mut report,
@@ -31344,7 +31403,7 @@ pub fn soccer_match_frame_physics_smoke_report_with_limits(
         ) {
             report.max_ball_accel_yps2 = report.max_ball_accel_yps2.max(value);
         }
-        if let Some((prev_tick, prev_clock, prev_pos)) = previous_ball {
+        if let Some((prev_tick, prev_clock, prev_pos, prev_vel)) = previous_ball {
             if let Some(value) = check_frame_displacement(
                 &mut report,
                 frame.tick,
@@ -31359,8 +31418,26 @@ pub fn soccer_match_frame_physics_smoke_report_with_limits(
             ) {
                 report.max_ball_frame_speed_yps = report.max_ball_frame_speed_yps.max(value);
             }
+            if let Some(value) = check_frame_impulse(
+                &mut report,
+                frame.tick,
+                "ball",
+                prev_tick,
+                prev_clock,
+                prev_vel,
+                frame.clock_seconds,
+                frame.ball.velocity,
+                limits.ball_max_accel_yps2,
+            ) {
+                report.max_ball_frame_impulse_yps2 = report.max_ball_frame_impulse_yps2.max(value);
+            }
         }
-        previous_ball = Some((frame.tick, frame.clock_seconds, frame.ball.position));
+        previous_ball = Some((
+            frame.tick,
+            frame.clock_seconds,
+            frame.ball.position,
+            frame.ball.velocity,
+        ));
 
         for player in &frame.players {
             let subject = format!("player:{}", player.id);
@@ -31392,7 +31469,7 @@ pub fn soccer_match_frame_physics_smoke_report_with_limits(
             ) {
                 report.max_player_accel_yps2 = report.max_player_accel_yps2.max(value);
             }
-            if let Some((prev_tick, prev_clock, prev_pos)) =
+            if let Some((prev_tick, prev_clock, prev_pos, prev_vel)) =
                 previous_players.get(&player.id).copied()
             {
                 if let Some(value) = check_frame_displacement(
@@ -31410,10 +31487,29 @@ pub fn soccer_match_frame_physics_smoke_report_with_limits(
                     report.max_player_frame_speed_yps =
                         report.max_player_frame_speed_yps.max(value);
                 }
+                if let Some(value) = check_frame_impulse(
+                    &mut report,
+                    frame.tick,
+                    &subject,
+                    prev_tick,
+                    prev_clock,
+                    prev_vel,
+                    frame.clock_seconds,
+                    player.velocity,
+                    limits.player_max_accel_yps2,
+                ) {
+                    report.max_player_frame_impulse_yps2 =
+                        report.max_player_frame_impulse_yps2.max(value);
+                }
             }
             previous_players.insert(
                 player.id,
-                (frame.tick, frame.clock_seconds, player.position),
+                (
+                    frame.tick,
+                    frame.clock_seconds,
+                    player.position,
+                    player.velocity,
+                ),
             );
         }
     }
@@ -31708,6 +31804,47 @@ fn check_frame_displacement(
         );
     }
     Some(inferred_speed)
+}
+
+/// Conservation-of-momentum / impulse check: the velocity change between frames
+/// implies an acceleration of |Δv|/Δt. If that exceeds the max acceleration the
+/// body can produce, the velocity changed faster than any real force could do it
+/// (e.g. an instant teleport that zeroes velocity). Returns the implied accel.
+fn check_frame_impulse(
+    report: &mut SoccerPhysicsSmokeReport,
+    tick: u64,
+    subject: &str,
+    previous_tick: u64,
+    previous_clock: f64,
+    previous_velocity: Vec2,
+    clock_seconds: f64,
+    velocity: Vec2,
+    accel_limit: f64,
+) -> Option<f64> {
+    let dt = clock_seconds - previous_clock;
+    if dt <= 1e-9 || !dt.is_finite() {
+        return None;
+    }
+    if !vec2_is_finite(previous_velocity) || !vec2_is_finite(velocity) {
+        return None;
+    }
+    let implied_accel = (velocity - previous_velocity).len() / dt;
+    // Generous slack so legitimate hard contacts (kicks, tackles) aren't flagged;
+    // only physically-impossible jumps trip it.
+    let tolerated = accel_limit * 3.0 + 1.0;
+    if implied_accel > tolerated {
+        report.push_violation(
+            tick,
+            subject,
+            "frameImpulse",
+            implied_accel,
+            tolerated,
+            format!(
+                "velocity changed faster than any force allows after tick {previous_tick} (impulse/momentum violation)"
+            ),
+        );
+    }
+    Some(implied_accel)
 }
 
 fn vec2_is_finite(value: Vec2) -> bool {
@@ -44004,7 +44141,17 @@ impl SoccerMatch {
         let previous_velocity = self.players[player_id].velocity;
         let previous_acceleration = self.players[player_id].acceleration;
         let to_target = target - self.players[player_id].position;
-        let gait = classify_movement_gait(self.players[player_id].team, to_target, sprint);
+        // Chased: a fast opponent (running/sprinting) is right on top of us, so a
+        // retreat must become a turn-and-run rather than a back-pedal.
+        let me_pos = self.players[player_id].position;
+        let my_team = self.players[player_id].team;
+        let chased = self.players.iter().any(|opp| {
+            opp.team != my_team
+                && opp.role != PlayerRole::Goalkeeper
+                && opp.position.distance(me_pos) <= CHASE_EMERGENCY_RADIUS_YARDS
+                && opp.velocity.len() >= CHASE_EMERGENCY_SPEED_YPS
+        });
+        let gait = classify_movement_gait(self.players[player_id].team, to_target, sprint, chased);
         let fatigue_factor = fatigue_speed_factor(
             self.players[player_id].skills.stamina,
             self.players[player_id].fatigue,
@@ -45457,6 +45604,30 @@ impl SoccerMatch {
         }
     }
 
+    /// Clamp a dead-ball slot so an attacker is not placed beyond the defending
+    /// team's second-last defender (offside). Frames are read from current
+    /// positions, GK included, so a high keeper is handled by the sort.
+    fn clamp_dead_ball_slot_onside(&self, attacking_team: Team, slot: Vec2) -> Vec2 {
+        let dir = attacking_team.attack_dir();
+        let mut depths: Vec<f64> = self
+            .players
+            .iter()
+            .filter(|p| p.team == attacking_team.other())
+            .map(|p| p.position.y * dir)
+            .collect();
+        if depths.len() < 2 {
+            return slot;
+        }
+        depths.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let onside_depth = depths[1] - DEAD_BALL_ONSIDE_BUFFER_YARDS;
+        if slot.y * dir > onside_depth {
+            Vec2::new(slot.x, onside_depth * dir)
+                .clamp_to_pitch(self.config.field_width_yards, self.config.field_length_yards)
+        } else {
+            slot
+        }
+    }
+
     fn arrange_free_kick_shape(&mut self, team: Team, spot: Vec2, taker: Option<usize>) {
         let width = self.config.field_width_yards;
         let length = self.config.field_length_yards;
@@ -45489,6 +45660,9 @@ impl SoccerMatch {
                 .into_iter()
                 .zip(attack_slots)
             {
+                // Offside applies at free kicks: never place an attacker beyond
+                // the last line, or they spawn offside.
+                let slot = self.clamp_dead_ball_slot_onside(team, slot);
                 self.set_dead_ball_player_position(player_id, slot);
             }
         } else {
@@ -46404,6 +46578,11 @@ pub struct SoccerRealtimeSession {
     controller_threads: Vec<HumanControllerThread>,
     emitted_event_cursor: usize,
     emitted_learning_cursor: usize,
+    // Cached Q-policy probability summary (UI display only). Recomputing it scans
+    // the whole, ever-growing Q-table, so we refresh it at most every N ticks
+    // instead of every step — otherwise per-step time grows linearly with the
+    // number of learned states.
+    cached_policy_probability: Option<(u64, SoccerPolicyProbabilitySummaryStatus)>,
     tracking_frames: Vec<SoccerTrackingFrame>,
     recent_moments: VecDeque<SoccerMomentWindow>,
     next_moment_id: u64,
@@ -46454,6 +46633,7 @@ impl SoccerRealtimeSession {
             controller_threads,
             emitted_event_cursor: 0,
             emitted_learning_cursor: 0,
+            cached_policy_probability: None,
             tracking_frames,
             recent_moments: VecDeque::new(),
             next_moment_id: 0,
@@ -46502,6 +46682,7 @@ impl SoccerRealtimeSession {
             controller_threads,
             emitted_event_cursor: 0,
             emitted_learning_cursor: 0,
+            cached_policy_probability: None,
             tracking_frames,
             recent_moments: VecDeque::new(),
             next_moment_id: 0,
@@ -47210,6 +47391,29 @@ impl SoccerRealtimeSession {
         self.emitted_event_cursor = self.sim.events.len();
         self.emitted_learning_cursor = self.sim.learning_transitions.len();
 
+        // Refresh the (expensive, O(states)) policy-probability summary at most
+        // every SOCCER_LIVE_POLICY_SUMMARY_REFRESH_TICKS ticks instead of every
+        // step, otherwise per-step time grows linearly with the learned-state
+        // count (it scans the whole Q-table just for UI counts).
+        let policy_probability = {
+            let tick = self.sim.tick;
+            let stale = self
+                .cached_policy_probability
+                .as_ref()
+                .map_or(true, |(cached_tick, _)| {
+                    tick.saturating_sub(*cached_tick) >= SOCCER_LIVE_POLICY_SUMMARY_REFRESH_TICKS
+                });
+            if stale {
+                let summary = self.sim.team_policy_probability_summary();
+                self.cached_policy_probability = Some((tick, summary.clone()));
+                summary
+            } else {
+                self.cached_policy_probability
+                    .as_ref()
+                    .map(|(_, summary)| summary.clone())
+                    .unwrap_or_default()
+            }
+        };
         let frame = self.sim.to_live_http_frame();
         let live_accounting = soccer_live_frame_accounting_report(&frame);
         let live_physics = soccer_live_frame_physics_report(&frame, &self.sim.config);
@@ -47234,7 +47438,7 @@ impl SoccerRealtimeSession {
             tactical_summary: self.sim.tactical_summary.clone(),
             policy_autosave: self.policy_autosave.status(),
             policy_storage: self.policy_storage_status(),
-            policy_probability: self.sim.team_policy_probability_summary(),
+            policy_probability,
             episode_index: self.episode_index,
             completed_episodes: self.completed_episode_summaries(),
             summary: self.sim.summary(),
@@ -56033,8 +56237,11 @@ fn tackle_foul_probability(
         (ability01(attacker.dribbling) * 0.55 + ability01(attacker.first_touch) * 0.45) * 0.12;
     let speed_risk = (contact_speed / 10.0).clamp(0.0, 1.0) * 0.18;
     let reach_risk = (contact_distance / 2.2).clamp(0.0, 1.0) * 0.10;
+    // Fouls/free kicks are currently disabled: keep the model intact but scale the
+    // probability to effectively zero so they essentially never fire.
     (0.02 + timing_risk + aggression_risk + control_risk + speed_risk + reach_risk)
         .clamp(0.03, 0.78)
+        * FOUL_PROBABILITY_SCALE
 }
 
 fn carried_ball_lead(player: &PlayerAgent) -> Vec2 {
@@ -59267,12 +59474,17 @@ fn nearest_ball_controller_for_segment(
                 }
             }
         }
+        // The intended receiver of a pass is meeting a ball played to them (and
+        // descending to their feet at the target), so the interception gates
+        // below must not apply — otherwise they "let it run" past their own pass.
+        let is_pass_target = pending_pass.is_some_and(|pass| pass.target == Some(p.id));
         let dist = player_control_position.distance(control_point);
-        // Kinematic reach cap (fast balls only): the ball reaches the contact
-        // point `t_ball = along / ball_speed` seconds into the step, and the
-        // player can only close a lunge plus `player_speed * t_ball`. This stops
-        // a fast ball being "intercepted" from physically impossible distances.
-        let effective_radius = if ball_speed > KINEMATIC_GATE_MIN_BALL_SPEED_YPS {
+        // Kinematic reach cap (fast balls, non-targets only): the ball reaches the
+        // contact point `t_ball = along / ball_speed` seconds into the step, and
+        // the player can only close a lunge plus `player_speed * t_ball`. This
+        // stops a fast ball being "intercepted" from impossible distances without
+        // blocking a legitimate trap.
+        let effective_radius = if !is_pass_target && ball_speed > KINEMATIC_GATE_MIN_BALL_SPEED_YPS {
             let along = (control_point - previous_ball_pos).len();
             let t_ball = along / ball_speed;
             let player_speed = player_top_speed_yps(p.role, &p.skills)
@@ -59284,9 +59496,9 @@ fn nearest_ball_controller_for_segment(
         if dist > effective_radius {
             continue;
         }
-        // Altitude gate: a ball above the ground can only be reached by players
-        // who can get up to it (standing reach + a jump scaled by aerial ability).
-        // High balls fly over grounded players instead of magically being taken.
+        // Altitude gate (non-targets only): a ball above the ground can only be
+        // reached by players who can get up to it. High balls fly over grounded
+        // players — but the intended receiver is taking it at the landing.
         let contact_altitude = pending_pass
             .filter(|pass| pass.flight.is_aerial())
             .map(|pass| pass_ball_altitude_yards(pass, control_point))
@@ -59295,7 +59507,7 @@ fn nearest_ball_controller_for_segment(
             } else {
                 0.0
             });
-        if contact_altitude > BALL_ROLLING_ALTITUDE_YARDS {
+        if !is_pass_target && contact_altitude > BALL_ROLLING_ALTITUDE_YARDS {
             let reach_height = CONTROL_STANDING_REACH_YARDS
                 + aerial_duel_skill_from_agent(p) * CONTROL_AERIAL_JUMP_REACH_YARDS;
             if contact_altitude > reach_height {
@@ -59657,7 +59869,7 @@ fn approach_velocity(current: Vec2, desired: Vec2, accel: f64, dt: f64) -> Vec2 
     }
 }
 
-fn classify_movement_gait(team: Team, to_target: Vec2, sprint: bool) -> MovementGait {
+fn classify_movement_gait(team: Team, to_target: Vec2, sprint: bool, chased: bool) -> MovementGait {
     let distance = to_target.len();
     if distance < 0.18 {
         return MovementGait::Stand;
@@ -59667,10 +59879,24 @@ fn classify_movement_gait(team: Team, to_target: Vec2, sprint: bool) -> Movement
     let forwardness = dir.dot(Vec2::new(0.0, team.attack_dir()));
     let lateral = dir.x.abs();
     let vertical = dir.y.abs();
-    let retreating = forwardness < -0.34;
+    // Any meaningful component back toward our own goal counts as retreating, so
+    // a player keeps their eyes on the ball and back-pedals (walk/jog/skip
+    // backward) instead of turning their back and running. Threshold widened
+    // from -0.34 so shallow/diagonal recoveries also back-pedal.
+    let retreating = forwardness < -0.12;
     let lateral_dominant = lateral > vertical * 1.18;
 
-    if retreating {
+    if retreating && chased {
+        // Being chased down by a fast attacker close behind: you can't back-pedal
+        // fast enough, so turn and run/sprint toward your own goal to keep up.
+        if sprint && distance > 1.0 {
+            MovementGait::Sprint
+        } else if distance > 1.0 {
+            MovementGait::Run
+        } else {
+            MovementGait::BackWalk
+        }
+    } else if retreating {
         if distance <= 2.4 {
             MovementGait::BackWalk
         } else if distance <= 5.2 {
@@ -68690,43 +68916,53 @@ mod tests {
     #[test]
     fn player_movement_uses_discrete_soccer_gaits() {
         assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(0.0, 1.0), false),
+            classify_movement_gait(Team::Home, Vec2::new(0.0, 1.0), false, false),
             MovementGait::Walk
         );
         assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(0.0, -1.0), false),
+            classify_movement_gait(Team::Home, Vec2::new(0.0, -1.0), false, false),
             MovementGait::BackWalk
         );
         assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(0.0, -5.0), false),
+            classify_movement_gait(Team::Home, Vec2::new(0.0, -5.0), false, false),
             MovementGait::BackJog
         );
         assert_eq!(
-            classify_movement_gait(Team::Away, Vec2::new(0.0, 5.0), false),
+            classify_movement_gait(Team::Away, Vec2::new(0.0, 5.0), false, false),
             MovementGait::BackJog
         );
         assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(0.0, -8.0), false),
+            classify_movement_gait(Team::Home, Vec2::new(0.0, -8.0), false, false),
             MovementGait::BackSkip
         );
         assert_eq!(
-            classify_movement_gait(Team::Away, Vec2::new(0.0, 8.0), true),
+            classify_movement_gait(Team::Away, Vec2::new(0.0, 8.0), true, false),
             MovementGait::BackSkip
         );
+        // Chased by a fast attacker: a retreat turns into a run/sprint toward
+        // own goal instead of a back-pedal.
         assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(4.0, 0.2), false),
-            MovementGait::SideStep
+            classify_movement_gait(Team::Home, Vec2::new(0.0, -8.0), true, true),
+            MovementGait::Sprint
         );
         assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(0.0, 6.0), false),
-            MovementGait::Jog
-        );
-        assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(0.0, 12.0), false),
+            classify_movement_gait(Team::Home, Vec2::new(0.0, -8.0), false, true),
             MovementGait::Run
         );
         assert_eq!(
-            classify_movement_gait(Team::Home, Vec2::new(0.0, 6.0), true),
+            classify_movement_gait(Team::Home, Vec2::new(4.0, 0.2), false, false),
+            MovementGait::SideStep
+        );
+        assert_eq!(
+            classify_movement_gait(Team::Home, Vec2::new(0.0, 6.0), false, false),
+            MovementGait::Jog
+        );
+        assert_eq!(
+            classify_movement_gait(Team::Home, Vec2::new(0.0, 12.0), false, false),
+            MovementGait::Run
+        );
+        assert_eq!(
+            classify_movement_gait(Team::Home, Vec2::new(0.0, 6.0), true, false),
             MovementGait::Sprint
         );
         assert!(

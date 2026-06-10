@@ -21017,9 +21017,8 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
-    use std::sync::Mutex;
 
-    static SIMULATION_VALIDATION_PYTHON_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as SIMULATION_VALIDATION_PYTHON_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

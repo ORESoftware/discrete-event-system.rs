@@ -826,9 +826,8 @@ mod tests {
         build_sample_weighted_independent_set_problem, WeightedIndependentSetProblem,
         WeightedIndependentSetVertex,
     };
-    use std::sync::Mutex;
 
-    static WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as WEIGHTED_INDEPENDENT_SET_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

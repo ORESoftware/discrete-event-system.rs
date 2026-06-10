@@ -2491,9 +2491,8 @@ pub fn solve_cp_assignment_with_external_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static CP_SAT_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as CP_SAT_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

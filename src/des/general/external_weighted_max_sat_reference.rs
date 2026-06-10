@@ -775,9 +775,8 @@ mod tests {
     use crate::des::general::weighted_max_sat::{
         build_sample_weighted_max_sat_problem, WeightedMaxSatClause,
     };
-    use std::sync::Mutex;
 
-    static WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as WEIGHTED_MAX_SAT_REFERENCE_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

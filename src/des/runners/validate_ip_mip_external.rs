@@ -1022,9 +1022,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static IP_MIP_EXTERNAL_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::des::shared::test_support::ENV_LOCK as IP_MIP_EXTERNAL_TEST_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,

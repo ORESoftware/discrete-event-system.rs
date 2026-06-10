@@ -97722,7 +97722,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert!(html.body.contains("function liveMountPrefix"));
         assert!(html.body.contains("function liveApiPath"));
         assert!(html.body.contains("function fetchLive"));
-        assert!(html.body.contains("fetch(liveApiPath(path), options)"));
+        assert!(html
+            .body
+            .contains("fetch(liveApiPath(path), liveFetchOptions(options))"));
         assert!(html.body.contains("syncLiveRouteLinks"));
         assert!(html.body.contains("liveRoutePath(\"/fresh\")"));
         assert!(html.body.contains("postgresContract"));

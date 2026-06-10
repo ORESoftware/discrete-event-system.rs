@@ -40,10 +40,14 @@ pub const DEFAULT_HALF_DURATION_SECONDS: f64 = 0.0;
 pub const DEFAULT_HALFTIME_FATIGUE_RECOVERY: f64 = 0.0;
 const SITE_PLAYBACK_RECORD_EVERY_TICKS: u64 = 1;
 pub const DEFAULT_FIELD_LENGTH_YARDS: f64 = 120.0;
-pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 80.0;
-pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 8.0;
-pub const DEFAULT_BALL_DRAG_PER_TICK: f64 = 0.028;
-pub const DEFAULT_BALL_AIR_RESISTANCE: f64 = 0.0085;
+pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 70.0;
+// Wider goal to encourage finishing (the 2D pitch has no crossbar/height, so
+// "taller" maps to a more generous mouth on the top-down model).
+pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 10.0;
+// Lower linear drag + air resistance so struck balls keep pace through their
+// flight (a 50+ mph shot should still look fast several frames later).
+pub const DEFAULT_BALL_DRAG_PER_TICK: f64 = 0.017;
+pub const DEFAULT_BALL_AIR_RESISTANCE: f64 = 0.0058;
 pub const DEFAULT_BALL_GRASS_RESISTANCE_YPS2: f64 = 0.96;
 pub const DEFAULT_BALL_STOP_SPEED_YPS: f64 = 0.55;
 pub const DEFAULT_PLAYER_VISION_SKILL: f64 = 7.6;
@@ -163,6 +167,12 @@ const COMPLETED_DANGEROUS_CROSS_BONUS_POINTS: f64 = 3.8;
 const COMPLETED_CROSS_MAX_BONUS_POINTS: f64 = 5.0;
 const COMPLETED_KILLER_PASS_BONUS_POINTS: f64 = 4.8;
 const COMPLETED_KILLER_PASS_MAX_BONUS_POINTS: f64 = 6.0;
+// Choosing a floor pass when an opponent is sitting in the passing lane is a
+// near-certain turnover; penalize it at decision time (scaled by how blocked the
+// lane is) so the policy either skips the pass or lifts it aerially over the
+// defender. Aerial passes are exempt — they clear the lane.
+const BLOCKED_LANE_FLOOR_PASS_PENALTY_POINTS: f64 = 6.0;
+const BLOCKED_LANE_FLOOR_PASS_OPEN_THRESHOLD: f64 = 0.5;
 const NEAR_GOAL_NO_SHOT_PENALTY_POINTS: f64 = 3.0;
 const EXCESSIVE_HOLD_PENALTY_POINTS: f64 = 2.10;
 const NON_ELITE_DRIBBLE_HOLD_SKILL_CUTOFF: f64 = 0.90;
@@ -22515,13 +22525,32 @@ impl WorldSnapshot {
         let draw = deterministic_unit_draw(self.tick, player.id, 337)
             + deterministic_unit_draw(self.tick, player.id, 353)
             - 1.0;
+        // Wing-backs bomb forward once the ball has advanced past the back line:
+        // ramp the extra push for every yard the ball sits beyond the average of
+        // the team's four defenders, from +20 yds (start) to +60 yds (full).
+        let back_line_advance_ramp = {
+            let defenders: Vec<f64> = self
+                .players
+                .iter()
+                .filter(|p| p.team == player.team && p.role == PlayerRole::Defender)
+                .map(|p| p.position.y)
+                .collect();
+            if defenders.is_empty() {
+                0.0
+            } else {
+                let avg_def_y = defenders.iter().sum::<f64>() / defenders.len() as f64;
+                let ball_upfield = (self.ball.position.y - avg_def_y) * player.team.attack_dir();
+                ((ball_upfield - 20.0) / 40.0).clamp(0.0, 1.0)
+            }
+        };
         let mean_push = 1.4
             + wingback_advance_probability * 4.6
             + space_fit * 3.4
             + cover_fit * 3.2
-            + risk_tolerance * 1.1;
+            + risk_tolerance * 1.1
+            + back_line_advance_ramp * 6.0;
         let spread = 0.85 + (1.0 - space_fit) * 0.55 + (1.0 - cover_fit) * 0.35;
-        soccer_lp_clamped(mean_push + draw * spread, 0.0, 12.5, 0.0)
+        soccer_lp_clamped(mean_push + draw * spread, 0.0, 16.0, 0.0)
     }
 
     fn defender_possession_line_y(&self, player: &PlayerSnapshot, home: Vec2) -> f64 {
@@ -22567,11 +22596,13 @@ impl WorldSnapshot {
         own_half_possession: bool,
     ) -> f64 {
         let wide = self.is_wide_defender(player);
+        // Center backs (non-wide) hold their line and only edge forward; the big
+        // advances belong to the wing-backs (see wingback_extra_push_yards).
         let base = match (wide, own_half_possession) {
             (true, true) => 13.0,
             (true, false) => 18.0,
-            (false, true) => 9.0,
-            (false, false) => 11.0,
+            (false, true) => 4.5,
+            (false, false) => 6.0,
         };
         if wide {
             base + self.wingback_extra_push_yards(player)
@@ -25017,7 +25048,10 @@ fn pass_chain_link_reward(direction: PassDirectionBucket, depth: usize) -> f64 {
 fn intercepted_pass_passer_penalty(pass: &PendingPass, field_length: f64) -> f64 {
     let direction = pass_direction_bucket(pass.team, pass.origin, pass.intended_target);
     let own_half = pass_origin_in_own_half(pass.team, pass.origin, field_length);
-    let openness_cost = (1.0 - pass.receiver_openness.clamp(0.0, 1.0)) * 2.40;
+    // Giving the ball straight to an opponent must be strongly unlearned. The
+    // dominant term is receiver openness: a low-openness target means a defender
+    // was sitting in the lane, so the "pass" was effectively a gift.
+    let openness_cost = (1.0 - pass.receiver_openness.clamp(0.0, 1.0)) * 5.0;
     let direction_cost = match direction {
         PassDirectionBucket::Forward => 0.80,
         PassDirectionBucket::Lateral => 1.35,
@@ -25025,7 +25059,7 @@ fn intercepted_pass_passer_penalty(pass: &PendingPass, field_length: f64) -> f64
     };
     let own_half_cost = if own_half { 1.15 } else { 0.35 };
     let aerial_cost = if pass.flight.is_aerial() { 0.85 } else { 0.0 };
-    (1.65 + openness_cost + direction_cost + own_half_cost + aerial_cost).clamp(2.0, 7.5)
+    (3.0 + openness_cost + direction_cost + own_half_cost + aerial_cost).clamp(4.0, 13.0)
 }
 
 fn quick_receiver_dispossession_passer_penalty(
@@ -26407,6 +26441,23 @@ fn dense_soccer_transition_reward(
     let ball_forward = (after.ball.position.y - before.ball.position.y) * attack_dir;
     let player_forward = (after_pos.y - before_pos.y) * attack_dir;
     let mut reward = 0.0;
+    // Keepers should rarely stray far from goal. Penalty ramps in past 20 yds,
+    // gets steep past 25, and very steep past 30 — so the learned policy keeps the
+    // keeper home except for genuine sweeping, matching the desired rarity
+    // (>20 yds uncommon, >25 rarer, >30 very rare).
+    if player.role == PlayerRole::Goalkeeper {
+        let dist_from_own_goal =
+            ball_distance_from_own_goal(player.team, after_pos, after.field_length);
+        if dist_from_own_goal > 20.0 {
+            reward -= (dist_from_own_goal - 20.0) * 0.6;
+        }
+        if dist_from_own_goal > 25.0 {
+            reward -= (dist_from_own_goal - 25.0) * 1.4;
+        }
+        if dist_from_own_goal > 30.0 {
+            reward -= (dist_from_own_goal - 30.0) * 2.8;
+        }
+    }
     let spacing_mode = before.team_spacing_mode_for(player.team);
     let spacing_delta = spacing_mode
         .map(|mode| {
@@ -26504,6 +26555,19 @@ fn dense_soccer_transition_reward(
             } else if ball_forward.abs() <= 1.25 && before_obs.perceived_pressure < 0.30 {
                 reward -= 0.22;
             }
+            // Floor pass into a blocked lane (opponent in the path) = likely gift
+            // to the opposition. Penalize at decision time, scaled by how blocked
+            // the lane is; aerial passes clear the lane and are exempt.
+            let is_floor_pass = pass_like_action_flight(action)
+                .map_or(true, |flight| !flight.is_aerial());
+            if is_floor_pass {
+                let lane_open = before_obs.floor_pass_lane_score.clamp(0.0, 1.0);
+                if lane_open < BLOCKED_LANE_FLOOR_PASS_OPEN_THRESHOLD {
+                    reward -= BLOCKED_LANE_FLOOR_PASS_PENALTY_POINTS
+                        * (BLOCKED_LANE_FLOOR_PASS_OPEN_THRESHOLD - lane_open)
+                        / BLOCKED_LANE_FLOOR_PASS_OPEN_THRESHOLD;
+                }
+            }
             reward += pass_into_stride_fit_for_context(&decision_context, player.team) * 0.16;
         }
         reward += intentional_long_ball_release_reward(
@@ -26516,6 +26580,12 @@ fn dense_soccer_transition_reward(
             own_goal_relief,
         );
         reward += (before_obs.yards_to_goal - after_obs.yards_to_goal).clamp(-8.0, 8.0) * 0.07;
+        // Discourage low-percentage shots from outside ~30 yds: the value is in
+        // working the ball forward, not blazing away from range. Penalty ramps
+        // with distance beyond the shooting window.
+        if action == "shoot" && before_obs.yards_to_goal > STRIKER_SHOT_WINDOW_YARDS {
+            reward -= ((before_obs.yards_to_goal - STRIKER_SHOT_WINDOW_YARDS) / 10.0).min(3.0) * 2.0;
+        }
         reward += goalmouth_dribble_learning_reward(
             player, action, before_obs, &after_obs, before, after, before_pos, after_pos,
         );
@@ -56963,7 +57033,15 @@ fn goalkeeper_distribution_score(
     let target_width = goalkeeper_flank_width_score(target_position, field_width);
     let passer_width = goalkeeper_flank_width_score(passer_position, field_width);
     let flank_bonus = target_width * 6.4 + (target_width - passer_width).max(0.0) * 2.0;
+    // Keepers distribute to the flanks (outer ~25% channels on each side, where
+    // target_width >= 0.5). Distributing into the central 50% is heavily
+    // discouraged so it stays a rare choice (~80% less common than a flank ball).
     let central_penalty = (1.0 - target_width) * 2.4;
+    let central_channel_penalty = if target_width < 0.5 {
+        (0.5 - target_width) * 16.0
+    } else {
+        0.0
+    };
     let forward_bonus = forward.max(0.0).min(54.0) * 0.035;
     let backward_penalty = if forward < -1.25 {
         if goalkeeper_backward_emergency_release_allowed(
@@ -56980,7 +57058,7 @@ fn goalkeeper_distribution_score(
     } else {
         0.0
     };
-    flank_bonus + forward_bonus - central_penalty - backward_penalty
+    flank_bonus + forward_bonus - central_penalty - central_channel_penalty - backward_penalty
 }
 
 fn goalkeeper_flank_distribution_target(
@@ -57125,7 +57203,9 @@ fn pass_ball_altitude_yards(pass: &PendingPass, ball_position: Vec2) -> f64 {
     }
     let progress = dot(ball_position - pass.origin, path) / denom;
     let progress = progress.clamp(0.0, 1.0);
-    let apex = (3.2 + pass.distance_yards.max(0.0) * 0.055).clamp(4.0, 11.5);
+    // Flatter, more driven arc: long balls should be hit with pace, not floated.
+    // A 50-yard ball now peaks around ~4 yds (was ~6) and a 30-yarder ~3 yds.
+    let apex = (1.8 + pass.distance_yards.max(0.0) * 0.045).clamp(2.2, 8.5);
     (std::f64::consts::PI * progress).sin().max(0.0) * apex
 }
 
@@ -57306,7 +57386,9 @@ fn modulated_pass_speed_yps(
     let openness = receiver_openness.clamp(0.0, 1.0);
     let pressure = 1.0 - openness;
     let base_time = if flight.is_aerial() {
-        (0.52 + distance / 38.0).clamp(0.72, 2.35)
+        // Drive long aerials: less hang time so they carry distance with pace
+        // (a 50-yarder now arrives in ~1.4s instead of ~1.8s).
+        (0.42 + distance / 52.0).clamp(0.55, 1.95)
     } else if is_cross {
         (0.68 + distance / 31.0).clamp(0.82, 2.65)
     } else {
@@ -57320,7 +57402,7 @@ fn modulated_pass_speed_yps(
             mph_to_yps(7.0)
         },
         if flight.is_aerial() {
-            mph_to_yps(56.0)
+            mph_to_yps(64.0)
         } else {
             mph_to_yps(44.0)
         },
@@ -57329,7 +57411,7 @@ fn modulated_pass_speed_yps(
     let fit = (0.30 + skill * 0.55 + openness * 0.10).clamp(0.28, 0.94);
     let noise = triangular_sample(rng) * ((1.0 - skill) * 0.12 + pressure * 0.035);
     let cap = if flight.is_aerial() {
-        mph_to_yps(58.0)
+        mph_to_yps(66.0)
     } else if is_cross {
         mph_to_yps(48.0)
     } else {

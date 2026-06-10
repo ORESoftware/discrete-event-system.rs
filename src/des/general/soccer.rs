@@ -352,6 +352,12 @@ const SOCCER_POLICY_PROBABILITY_ACTION_LIMIT: usize = 6;
 const DEFAULT_MOMENT_HISTORY_RECORD_LIMIT: usize = 24;
 const MAX_MOMENT_HISTORY_RECORD_LIMIT: usize = 500;
 const LIVE_EPISODE_HISTORY_LIMIT: usize = 12;
+// Bounds the per-match in-memory tracking-frame buffer for long-running live
+// sessions (mode 2 is no-rewind, so unbounded history is never needed). The
+// limit dwarfs the SOCCER_MOMENT_WINDOW_SECONDS lookback (≤ ~100 ticks at the
+// configured dt), so moment detection is unaffected; only the oldest frames of
+// a single very long continuous match are evicted FIFO.
+const SOCCER_LIVE_TRACKING_FRAMES_LIMIT: usize = 18_000;
 const SOCCER_MOMENT_WINDOW_SECONDS: f64 = 10.0;
 const SOCCER_MOMENT_HISTORY_LIMIT: usize = 24;
 const SOCCER_MOMENT_ACTION_LIMIT: usize = 12;
@@ -41406,7 +41412,10 @@ impl SoccerMatch {
     }
 
     fn record_reward_event_at(&mut self, tick: u64, player_id: usize, amount: f64) {
-        if amount.abs() <= 1e-9 || player_id >= self.players.len() {
+        // Drop non-finite amounts: `NaN.abs() <= 1e-9` is false, so without this
+        // an upstream NaN/Inf would slip past the magnitude gate and pollute the
+        // reward-event sum used in transition shaping.
+        if !amount.is_finite() || amount.abs() <= 1e-9 || player_id >= self.players.len() {
             return;
         }
         self.reward_events.push(SoccerRewardEvent {
@@ -46198,6 +46207,14 @@ impl SoccerRealtimeSession {
         }
         self.tracking_frames
             .push(tracking_frame_from_match(&self.sim));
+        // FIFO-evict the oldest frames once a long continuous match exceeds the
+        // retention limit. Trim down to 3/4 of the limit so the O(n) drain runs
+        // amortized once per quarter-buffer rather than every tick.
+        if self.tracking_frames.len() > SOCCER_LIVE_TRACKING_FRAMES_LIMIT {
+            let target = SOCCER_LIVE_TRACKING_FRAMES_LIMIT / 4 * 3;
+            let overflow = self.tracking_frames.len() - target;
+            self.tracking_frames.drain(0..overflow);
+        }
     }
 
     pub fn step(&mut self, request: SoccerStepRequest) -> SoccerStepResponse {

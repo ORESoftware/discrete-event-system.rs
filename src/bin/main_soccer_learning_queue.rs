@@ -1067,7 +1067,15 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>
     }
     fs::rename(&tmp_path, path)?;
     if let Some(parent) = path.parent() {
-        let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
+        // Best-effort: fsync the directory so the rename is durable across a
+        // crash. Some filesystems reject directory fsync, so don't fail the
+        // write — but surface the error instead of silently dropping it.
+        if let Err(err) = fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+            eprintln!(
+                "soccer_learning_queue: directory fsync after writing {} failed (artifact may not be crash-durable): {err}",
+                path.display()
+            );
+        }
     }
     Ok(())
 }

@@ -61,6 +61,34 @@ const KINEMATIC_GATE_MIN_BALL_SPEED_YPS: f64 = 10.0;
 // grounded players (the correct "aerial pass passed through" behavior).
 const CONTROL_STANDING_REACH_YARDS: f64 = 1.6;
 const CONTROL_AERIAL_JUMP_REACH_YARDS: f64 = 2.2;
+// Body rotation about the vertical (z) axis. A player's heading turns toward the
+// thing it wants to watch (the ball, or where it's playing) at up to a
+// biomechanical max yaw rate — this also smooths the rendered facing. Turning
+// faster than a comfortable rate, repeatedly, accrues *dizziness* (vestibular
+// disorientation) that decays with rest and degrades control/perception, and it
+// costs energy. Players therefore learn to watch the ball with economical
+// movement rather than whipping their head around.
+const MAX_BODY_YAW_RATE_RAD_S: f64 = 9.0; // ~515 deg/s, a hard biomechanical cap
+const COMFORT_YAW_RATE_RAD_S: f64 = 3.5; // below this, turning is free of dizziness
+const DIZZINESS_GAIN_PER_RAD: f64 = 0.16; // accrual per rad/s over comfort, per sec
+const DIZZINESS_RECOVERY_PER_SECOND: f64 = 0.60;
+const DIZZINESS_MAX: f64 = 1.2;
+const DIZZINESS_CONTROL_PENALTY: f64 = 0.30; // control-radius loss at max dizziness
+const DIZZINESS_REWARD_PENALTY_POINTS: f64 = 2.2; // per unit dizziness, per second
+const YAW_ENERGY_FATIGUE_PER_RAD: f64 = 0.0035; // energy cost of rotating
+// Sustained, contiguous high-urgency involvement near the ball is tiring.
+const BALL_INVOLVEMENT_FATIGUE_PER_SECOND: f64 = 0.045;
+const BALL_INVOLVEMENT_RADIUS_YARDS: f64 = 12.0;
+// Two-tier energy: `fatigue` is the slow aerobic drain; `anaerobic_load` is the
+// fast burst reserve spent by sprints/accelerations and recovered over ~tens of
+// seconds. Effort (committing energy to win a contest) is rewarded; coasting in
+// a high-urgency moment near the ball is penalized — energy is the constraint.
+const ANAEROBIC_SPRINT_LOAD_PER_SECOND: f64 = 0.085;
+const ANAEROBIC_ACCEL_LOAD_PER_YPS2: f64 = 0.0024;
+const ANAEROBIC_RECOVERY_PER_SECOND: f64 = 0.022;
+const EFFORT_REWARD_POINTS: f64 = 2.6;
+const LAZINESS_PENALTY_POINTS: f64 = 2.6;
+const EFFORT_CONTEST_RADIUS_YARDS: f64 = 8.0;
 const OFFSIDE_INTERFERENCE_RADIUS_YARDS: f64 = 3.0;
 const TRACKING_INFERRED_HOLDER_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.35;
 const TRACKING_INFERRED_HOLDER_STICKY_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.70;
@@ -1561,6 +1589,46 @@ mod team_strategy_mode_tests {
         assert!(!TeamAttackStrategy::HoldUpfieldUntilOpening.shape().switches_lane());
         // The patient hold-up option is the long-horizon one.
         assert_eq!(TeamAttackStrategy::HoldUpfieldUntilOpening.shape().max_passes, 7);
+    }
+
+    #[test]
+    fn rapid_head_turning_accrues_dizziness_and_stable_facing_recovers() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            dt_seconds: 0.1,
+            seed: 7,
+            ..Default::default()
+        });
+        let p = 5;
+        sim.players[p].position = Vec2::new(40.0, 60.0);
+        sim.players[p].facing_yaw = 0.0;
+        sim.players[p].dizziness = 0.0;
+        sim.ball.holder = None;
+        // Force repeated large reversals: the ball jumps to opposite sides so the
+        // player whips its head back and forth.
+        for _ in 0..20 {
+            sim.ball.position = Vec2::new(40.0, 95.0);
+            sim.update_player_facing_dizziness_energy();
+            sim.ball.position = Vec2::new(40.0, 25.0);
+            sim.update_player_facing_dizziness_energy();
+        }
+        let dizzy = sim.players[p].dizziness;
+        assert!(
+            dizzy > 0.05,
+            "rapid head reversals should accrue dizziness, got {dizzy}"
+        );
+        // Now settle facing the ball and rest: dizziness must recover.
+        let to_ball = sim.ball.position - sim.players[p].position;
+        sim.players[p].facing_yaw = to_ball.y.atan2(to_ball.x);
+        let before_rest = sim.players[p].dizziness;
+        for _ in 0..30 {
+            sim.update_player_facing_dizziness_energy();
+        }
+        assert!(
+            sim.players[p].dizziness < before_rest,
+            "stable ball-watching should let dizziness recover: {} -> {}",
+            before_rest,
+            sim.players[p].dizziness
+        );
     }
 }
 
@@ -7113,6 +7181,19 @@ pub struct PlayerAgent {
     pub receive_facing: FacingBucket,
     #[serde(default)]
     pub action_facing: FacingBucket,
+    /// Continuous body heading about the z axis (radians), rate-limited by
+    /// biomechanics. Drives smooth facing and the dizziness model.
+    #[serde(default)]
+    pub facing_yaw: f64,
+    /// Accumulated vestibular disorientation from rapid repeated turning; decays
+    /// with rest, degrades control/perception while high.
+    #[serde(default)]
+    pub dizziness: f64,
+    /// Short-burst (anaerobic) energy load: 0 = fresh, 1 = gassed. Spent quickly
+    /// by sprints/accelerations/duels and recovered over ~tens of seconds —
+    /// distinct from `fatigue`, which is the slow aerobic drain over the match.
+    #[serde(default)]
+    pub anaerobic_load: f64,
     #[serde(default)]
     pub incoming_ball: Option<IncomingBallContext>,
     pub skills: SkillProfile,
@@ -27028,6 +27109,33 @@ fn dense_soccer_transition_reward(
             }
         }
     }
+    // Disorientation cost: penalize accumulated dizziness so the policy learns to
+    // watch the ball with economical movement instead of whipping the head around.
+    reward -= player.dizziness.clamp(0.0, DIZZINESS_MAX)
+        * DIZZINESS_REWARD_PENALTY_POINTS
+        * sane_dt_seconds(before.dt_seconds, DEFAULT_DT_SECONDS);
+    // Effort vs laziness: in a high-urgency moment near a contestable ball,
+    // closing it down hard (a 50/50, a chase) is rewarded; coasting/standing off
+    // is penalized. Energy spent on the burst is the natural constraint (it
+    // depletes the anaerobic reserve), so the policy must pick its moments.
+    if player.role != PlayerRole::Goalkeeper {
+        let contest_urgency = before_obs
+            .pressure_urgency
+            .max(before_obs.defensive_urgency)
+            .max(before_obs.offensive_urgency)
+            .clamp(0.0, 1.0);
+        let ball_before = before_pos.distance(before.ball.position);
+        if contest_urgency > 0.5 && ball_before <= EFFORT_CONTEST_RADIUS_YARDS {
+            let approach = ball_before - after_pos.distance(after.ball.position);
+            if approach > 0.3 {
+                reward += EFFORT_REWARD_POINTS
+                    * contest_urgency
+                    * (approach / 1.5).clamp(0.0, 1.0);
+            } else if moved_yards < 0.3 {
+                reward -= LAZINESS_PENALTY_POINTS * contest_urgency;
+            }
+        }
+    }
     let spacing_mode = before.team_spacing_mode_for(player.team);
     let spacing_delta = spacing_mode
         .map(|mode| {
@@ -41559,6 +41667,9 @@ impl SoccerMatch {
             self.clock_seconds,
         );
         self.clear_finished_set_play_if_needed();
+        // Body rotation / dizziness / rotational-and-involvement energy run every
+        // tick on the final positions (independent of learning).
+        self.update_player_facing_dizziness_energy();
         let next_snapshot = WorldSnapshot::from_match_for_learning(self);
         self.update_possession_progress_milestones(
             &tick_start_snapshot,
@@ -43898,10 +44009,16 @@ impl SoccerMatch {
             self.players[player_id].skills.stamina,
             self.players[player_id].fatigue,
         );
+        // A gassed anaerobic reserve caps top-end burst: a player who has just
+        // spent their sprint can't immediately produce another, so they must pace
+        // their efforts.
+        let anaerobic_factor =
+            (1.0 - self.players[player_id].anaerobic_load.clamp(0.0, 1.0) * 0.22).clamp(0.78, 1.0);
         let speed = player_top_speed_yps(
             self.players[player_id].role,
             &self.players[player_id].skills,
         ) * fatigue_factor
+            * anaerobic_factor
             * gait.speed_multiplier();
         let desired = self.collision_aware_desired_velocity(player_id, target, speed);
         let acceleration_factor = (0.62 + fatigue_factor * 0.38).clamp(0.45, 1.05);
@@ -45523,6 +45640,83 @@ impl SoccerMatch {
             .map(|player| player.id)
     }
 
+    fn update_player_facing_dizziness_energy(&mut self) {
+        use std::f64::consts::{PI, TAU};
+        let dt = sane_dt_seconds(self.config.dt_seconds, DEFAULT_DT_SECONDS).max(1e-3);
+        let ball_pos = self.ball.position;
+        let ball_holder = self.ball.holder;
+        for player in &mut self.players {
+            // Desired heading: a ball carrier faces where it's playing; everyone
+            // else keeps their eye on the ball ~99% of the time.
+            let desired_dir = if ball_holder == Some(player.id) {
+                facing_bucket_to_vector(player.action_facing)
+                    .filter(|v| v.len() > 1e-6)
+                    .unwrap_or_else(|| Vec2::new(0.0, player.team.attack_dir()))
+            } else {
+                let to_ball = ball_pos - player.position;
+                if to_ball.len() > 1e-3 {
+                    to_ball.normalized()
+                } else {
+                    Vec2::new(0.0, player.team.attack_dir())
+                }
+            };
+            let desired_yaw = desired_dir.y.atan2(desired_dir.x);
+            // Shortest signed turn, wrapped to [-PI, PI].
+            let mut delta = desired_yaw - player.facing_yaw;
+            while delta > PI {
+                delta -= TAU;
+            }
+            while delta < -PI {
+                delta += TAU;
+            }
+            // Turn toward it, capped by the biomechanical max yaw rate (also
+            // smooths the rendered facing — no more instant snapping).
+            let max_turn = MAX_BODY_YAW_RATE_RAD_S * dt;
+            let actual_turn = delta.clamp(-max_turn, max_turn);
+            player.facing_yaw += actual_turn;
+            while player.facing_yaw > PI {
+                player.facing_yaw -= TAU;
+            }
+            while player.facing_yaw < -PI {
+                player.facing_yaw += TAU;
+            }
+            // Dizziness accrues above a comfortable turn rate and recovers at rest.
+            let turn_rate = actual_turn.abs() / dt;
+            let accrual =
+                (turn_rate - COMFORT_YAW_RATE_RAD_S).max(0.0) * DIZZINESS_GAIN_PER_RAD * dt;
+            player.dizziness = ((player.dizziness + accrual)
+                * (1.0 - DIZZINESS_RECOVERY_PER_SECOND * dt).max(0.0))
+            .clamp(0.0, DIZZINESS_MAX);
+            // Energy: rotating costs effort, and sustained high-urgency work near
+            // the ball is tiring (contiguous high-intensity involvement).
+            let rotation_fatigue = actual_turn.abs() * YAW_ENERGY_FATIGUE_PER_RAD;
+            let involvement_fatigue =
+                if player.position.distance(ball_pos) <= BALL_INVOLVEMENT_RADIUS_YARDS {
+                    let intensity = match player.movement_gait {
+                        MovementGait::Sprint => 1.0,
+                        MovementGait::Run => 0.7,
+                        _ => 0.35,
+                    };
+                    BALL_INVOLVEMENT_FATIGUE_PER_SECOND * intensity * dt
+                } else {
+                    0.0
+                };
+            player.fatigue =
+                (player.fatigue + rotation_fatigue + involvement_fatigue).clamp(0.0, 1.0);
+            // Anaerobic burst reserve: sprints and accelerations spend it; it
+            // recovers steadily over tens of seconds (much faster than aerobic).
+            let burst_load = match player.movement_gait {
+                MovementGait::Sprint => ANAEROBIC_SPRINT_LOAD_PER_SECOND,
+                MovementGait::Run => ANAEROBIC_SPRINT_LOAD_PER_SECOND * 0.45,
+                _ => 0.0,
+            } * dt
+                + player.acceleration.len() * ANAEROBIC_ACCEL_LOAD_PER_YPS2 * dt;
+            player.anaerobic_load = (player.anaerobic_load + burst_load
+                - ANAEROBIC_RECOVERY_PER_SECOND * dt)
+                .clamp(0.0, 1.0);
+        }
+    }
+
     fn update_offside_lingering_rewards(&mut self, after: &WorldSnapshot) {
         let attacking_team = after
             .controlled_possession_team()
@@ -46787,12 +46981,18 @@ impl SoccerRealtimeSession {
             let window_ticks =
                 (SOCCER_MOMENT_WINDOW_SECONDS / self.sim.config.dt_seconds.max(1e-6)).ceil() as u64;
             let start_tick = event.tick.saturating_sub(window_ticks.max(1));
-            let frames = self
+            // tracking_frames is tick-ordered, so the window sits at the tail.
+            // Walk back from the end and stop once we pass start_tick — O(window)
+            // instead of O(all frames), which otherwise grows with match length.
+            let mut frames = self
                 .tracking_frames
                 .iter()
-                .filter(|frame| frame.tick >= start_tick && frame.tick <= event.tick)
+                .rev()
+                .take_while(|frame| frame.tick >= start_tick)
+                .filter(|frame| frame.tick <= event.tick)
                 .cloned()
                 .collect::<Vec<_>>();
+            frames.reverse();
             if frames.is_empty() {
                 continue;
             }
@@ -55657,6 +55857,9 @@ fn player_agent_from_snapshot(player: &PlayerSnapshot) -> PlayerAgent {
         position_history,
         receive_facing: player.receive_facing,
         action_facing: player.action_facing,
+        facing_yaw: 0.0,
+        dizziness: 0.0,
+        anaerobic_load: 0.0,
         incoming_ball: player.incoming_ball.clone(),
         skills: player.skills.clone(),
         fatigue: player.fatigue.clamp(0.0, 1.0),
@@ -58955,9 +59158,11 @@ fn nearest_ball_controller_for_segment(
             ball_pos
         };
         let mut player_control_position = p.position;
-        let mut control_radius = PLAYER_CONTROL_RADIUS_YARDS
+        let mut control_radius = (PLAYER_CONTROL_RADIUS_YARDS
             + ability01(p.skills.first_touch) * 0.48
-            + (1.0 - (ball_speed / 18.0).clamp(0.0, 1.0)) * 0.24;
+            + (1.0 - (ball_speed / 18.0).clamp(0.0, 1.0)) * 0.24)
+            // A disoriented (dizzy) player tracks and traps the ball less cleanly.
+            * (1.0 - p.dizziness.clamp(0.0, 1.0) * DIZZINESS_CONTROL_PENALTY);
         let mut aerial_score_bonus = 0.0;
         let mut pass_reception_score_bonus = 0.0;
         if let Some(pass) = pending_pass {
@@ -60201,6 +60406,10 @@ fn default_players(config: &MatchConfig, rng: &mut SeededRandom) -> Vec<PlayerAg
                 position_history: VecDeque::from([pos]),
                 receive_facing: FacingBucket::Unknown,
                 action_facing: default_team_facing(team),
+                // Initial heading points up-pitch toward the attacking goal.
+                facing_yaw: std::f64::consts::FRAC_PI_2 * team.attack_dir(),
+                dizziness: 0.0,
+                anaerobic_load: 0.0,
                 incoming_ball: None,
                 skills: SkillProfile::blended(id, role, rng),
                 fatigue: 0.0,

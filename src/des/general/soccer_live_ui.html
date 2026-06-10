@@ -4391,6 +4391,16 @@ async function stepOnce(options = {}) {
       throw err;
     }
     applyInputAck(response, inputs.length);
+    // Guard against a rewinding view: ignore a step response whose tick is behind
+    // what we are already showing. That happens with a stale / out-of-order
+    // response or a non-sticky backend (multiple replicas at different ticks). A
+    // genuine episode reset is handled via the state.done branch above, so a
+    // backward tick here is spurious and must not re-render older frames.
+    const incomingTick = Number(response.frame?.tick ?? 0);
+    const currentTick = Number(state.frame?.tick ?? 0);
+    if (incomingTick + 0.5 < currentTick) {
+      return;
+    }
     state = {
       config: state.config,
       frame: response.frame,

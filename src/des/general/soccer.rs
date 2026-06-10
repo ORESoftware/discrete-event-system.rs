@@ -44,6 +44,9 @@ pub const DEFAULT_FIELD_WIDTH_YARDS: f64 = 80.0;
 pub const DEFAULT_GOAL_WIDTH_YARDS: f64 = 8.0;
 pub const DEFAULT_BALL_DRAG_PER_TICK: f64 = 0.028;
 pub const DEFAULT_BALL_AIR_RESISTANCE: f64 = 0.0085;
+// Fraction of linear + air drag relieved for a fully airborne ball, so long
+// aerial passes carry their pace through the final third instead of dying late.
+const AERIAL_FLIGHT_DRAG_RELIEF: f64 = 0.45;
 pub const DEFAULT_BALL_GRASS_RESISTANCE_YPS2: f64 = 0.96;
 pub const DEFAULT_BALL_STOP_SPEED_YPS: f64 = 0.55;
 pub const DEFAULT_PLAYER_VISION_SKILL: f64 = 7.6;
@@ -69,6 +72,13 @@ const CONTROL_AERIAL_JUMP_REACH_YARDS: f64 = 2.2;
 // costs energy. Players therefore learn to watch the ball with economical
 // movement rather than whipping their head around.
 const MAX_BODY_YAW_RATE_RAD_S: f64 = 9.0; // ~515 deg/s, a hard biomechanical cap
+// Angular-acceleration cap: the turn rate itself can only change this fast, so a
+// player cannot instantly start or stop spinning even on an instant decision
+// (~0.25 s to wind up to the max rate). Models rotational inertia of the body.
+const MAX_BODY_YAW_ACCEL_RAD_S2: f64 = 80.0;
+// Human-scale mass bounds (lbs) the physics smoke report holds players within.
+const PLAYER_MIN_WEIGHT_POUNDS: f64 = 90.0;
+const PLAYER_MAX_WEIGHT_POUNDS: f64 = 320.0;
 const COMFORT_YAW_RATE_RAD_S: f64 = 3.5; // below this, turning is free of dizziness
 const DIZZINESS_GAIN_PER_RAD: f64 = 0.16; // accrual per rad/s over comfort, per sec
 const DIZZINESS_RECOVERY_PER_SECOND: f64 = 0.60;
@@ -188,7 +198,14 @@ const GOAL_CONTEXT_CREDIT_MAX_PLAYERS: usize = 5;
 const GOAL_CONTEXT_CREDIT_SCAN_ACTIONS: usize = 48;
 const GOAL_CONTEXT_CREDIT_MAX_AGE_TICKS: u64 = 600;
 const GOAL_CONTEXT_CREDIT_MIN_SCORE: f64 = 0.05;
-const SHOT_ON_TARGET_REWARD_POINTS: f64 = 50.0;
+const SHOT_ON_TARGET_REWARD_POINTS: f64 = 40.0;
+// Floor on the distance scoring-scale so a long shot on frame still earns a sliver.
+const SHOT_ON_TARGET_SCORING_SCALE_FLOOR: f64 = 0.08;
+// Shot-on-frame reward is full inside this distance, then reduced per yard beyond.
+const SHOT_FULL_REWARD_DISTANCE_YARDS: f64 = 20.0;
+const SHOT_REWARD_TAPER_PER_YARD: f64 = 0.045;
+// A shot OFF the frame still earns a small attempt reward (vs the on-frame value).
+const SHOT_OFF_TARGET_REWARD_POINTS: f64 = 10.0;
 const COMPLETED_FORWARD_PASS_BASE_REWARD_OWN_HALF: f64 = 9.5;
 const COMPLETED_FORWARD_PASS_BASE_REWARD_OPPONENT_HALF: f64 = 12.0;
 const COMPLETED_FORWARD_PASS_PROGRESS_REWARD_PER_YARD: f64 = 0.24;
@@ -310,7 +327,7 @@ const STRIKER_HOLD_UP_MIN_GOAL_DISTANCE_YARDS: f64 = GOAL_APPROACH_CARRY_YARDS;
 const STRIKER_HOLD_UP_SIDEWAYS_YARDS: f64 = 7.5;
 const STRIKER_HOLD_UP_FORWARD_YARDS: f64 = 2.8;
 const GOAL_CHAIN_REWARD_PATTERN: [f64; 5] = [30.0, 30.0, 20.0, 15.0, 5.0];
-const SHOT_ON_TARGET_REWARD_PATTERN: [f64; 5] = [15.0, 15.0, 10.0, 7.5, 2.5];
+const SHOT_ON_TARGET_REWARD_PATTERN: [f64; 5] = [12.0, 12.0, 8.0, 6.0, 2.0];
 const PASS_CHAIN_HISTORY_LIMIT: usize = 8;
 const PASS_CHAIN_MAX_CONTINUATION_SECONDS: f64 = 12.0;
 const MATCH_RESULT_WIN_PLAYER_REWARD: f64 = 8.0;
@@ -333,7 +350,7 @@ const DEFENSE_SPREAD_FOLLOW_RATIO: f64 = 0.50;
 const VERTICAL_LANE_COUNT: usize = 4;
 const TEAMMATE_OCCUPIED_SPACE_RADIUS_YARDS: f64 = 7.5;
 const TEAMMATE_OCCUPIED_SPACE_HARD_RADIUS_YARDS: f64 = 2.8;
-const TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY: f64 = 10.5;
+const TEAMMATE_OCCUPIED_SPACE_MAX_PENALTY: f64 = 16.0;
 const OFFENSIVE_OVERLAP_RELIEF_TEAMMATE_RADIUS_YARDS: f64 = 7.0;
 const OFFENSIVE_OVERLAP_RELIEF_MIN_FORWARD_YARDS: f64 = 0.35;
 const OFFENSIVE_OVERLAP_RELIEF_LOOKAHEAD_SECONDS: f64 = 0.35;
@@ -351,6 +368,15 @@ const DEFENSIVE_GOAL_LINE_HARD_BUFFER_YARDS: f64 = 4.0;
 const DEFENSIVE_MAX_BEHIND_BALL_YARDS: f64 = 30.0;
 const DEFENSIVE_IMMEDIATE_STEAL_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.65;
 const DEFENSIVE_IMMEDIATE_STEAL_CLEAN_RADIUS_YARDS: f64 = PLAYER_CONTROL_RADIUS_YARDS + 0.05;
+// Ball protection (0 = exposed/pushed-ahead at speed, 1 = shielded at the feet).
+// A ball that the holder has pushed past this many yards is fully lead-exposed;
+// a dribble at this pace is fully speed-exposed. A contestable (low-protection)
+// ball within the contest radius of a defender is stolen with high urgency
+// regardless of holder skill — it is simply sitting there to be taken.
+const BALL_PROTECTION_LEAD_REF_YARDS: f64 = 2.5;
+const BALL_PROTECTION_FAST_DRIBBLE_REF_YPS: f64 = 6.0;
+const CONTESTABLE_STEAL_RADIUS_YARDS: f64 = 1.0;
+const CONTESTABLE_PROTECTION_THRESHOLD: f64 = 0.5;
 const DEFENSIVE_GOAL_SIDE_CUSHION_YARDS: f64 = 2.75;
 const MIDFIELDER_DEEP_RETREAT_LINE_YARDS: f64 = 10.0;
 const MIDFIELDER_STANDARD_RETREAT_LINE_YARDS: f64 = 15.0;
@@ -365,6 +391,10 @@ const DEFENSIVE_LINE_BREAK_HARD_RETREAT_GAP_YARDS: f64 = 9.0;
 const DEFENSIVE_LINE_BREAK_CARRIER_LOOKAHEAD_SECONDS: f64 = 1.55;
 const DEFENSIVE_LINE_BREAK_CARRIER_SPEED_TRIGGER_YPS: f64 = 4.5;
 const GOALKEEPER_LOOSE_BALL_COLLECTION_WINDOW_YARDS: f64 = 5.5;
+// On a goal kick the keeper waits (holds) until a teammate is at least this open,
+// up to a max hold time — giving the team time to reset and find open positions.
+const GK_GOAL_KICK_RELEASE_OPENNESS: f64 = 0.45;
+const GK_GOAL_KICK_MAX_HOLD_SECONDS: f64 = 7.0;
 const GOALKEEPER_LINE_SAFE_INTERVENTION_RADIUS_YARDS: f64 = 2.25;
 const GOALKEEPER_LINE_SAFE_INTERVENTION_DEVIATION_YARDS: f64 = 0.65;
 const GOALKEEPER_LINE_COLLECTION_DEVIATION_YARDS: f64 = 4.0;
@@ -382,13 +412,53 @@ const FOUL_PROBABILITY_SCALE: f64 = 0.000_001;
 // (= 8 yd, the goal width) between the posts. A ball that crosses the line under
 // the bar and between the posts is a goal — determined geometrically, not by a
 // random save roll.
-const GOAL_CROSSBAR_HEIGHT_YARDS: f64 = 8.0 / 3.0;
 // Shooting favorability ramps to zero as the goal-mouth angle closes below this.
 const LOW_SHOT_ANGLE_CUTOFF_DEGREES: f64 = 30.0;
 // Central defenders compress to within this many yards of the opponent's foremost
 // attacker, but never push more than this far past the halfway line.
 const CENTRE_BACK_PUSH_UP_GAP_YARDS: f64 = 2.0;
 const CENTRE_BACK_MAX_PAST_HALFWAY_YARDS: f64 = 5.0;
+// Soft overshoot past the halfway+5 cap: the line may push further but with
+// diminishing returns, asymptoting ~this many yards beyond the cap.
+const CENTRE_BACK_OVERSHOOT_SOFT_YARDS: f64 = 4.0;
+// A wing-back may drift at most this far past the half-width before the hard flank
+// guard stops them — they can tuck into the half-space but never switch flanks.
+const WINGBACK_CENTER_CROSS_LIMIT_YARDS: f64 = 6.0;
+// Kicking against your own momentum loses power (per unit of opposed motion), down
+// to a floor — a back-pedalling defender can't blast it upfield, only nudge/touch it.
+const KICK_AGAINST_MOMENTUM_PENALTY: f64 = 0.30;
+const KICK_POWER_FACTOR_FLOOR: f64 = 0.35;
+// When in possession and attacking, the back line pushes up this far to fill the
+// space behind midfield (soft-capped at halfway+5).
+const ATTACKING_DEFENDER_PUSH_UP_YARDS: f64 = 8.0;
+// Defender line discipline (reward): past halfway+this many yards a defender is
+// penalized (increasingly); only one defender should be forward at a time, and
+// holding back is rewarded (more for central defenders).
+const DEFENDER_UPFIELD_SOFT_LIMIT_YARDS: f64 = 5.0;
+const DEFENDER_UPFIELD_PENALTY_PER_YARD: f64 = 0.7;
+const DEFENDER_OVERCOMMIT_PENALTY: f64 = 2.5;
+const DEFENDER_STAY_BACK_REWARD_PER_YARD: f64 = 0.04;
+// Lane discipline (reward): defenders hold their width lane (quarter/third).
+// A strong flat penalty for a defender crossing to the wrong side of the pitch
+// (switching places) — should be rare. Ordinary coverage drift is not penalized.
+// Per-yard penalty for a defender straying outside their width lane (relieved by
+// genuine tracking); a mild team penalty when any defender is dragged this far out
+// of lane (every defender + midfielder feels it); and the stationary-receiver
+// penalty (a player near a loose/incoming ball that isn't theirs should be moving).
+const DEFENDER_LANE_DEVIATION_PENALTY_PER_YARD: f64 = 0.20;
+const DEFENDER_LANE_DEADZONE_YARDS: f64 = 12.0;
+const DEFENDER_LANE_BALL_RELIEF_RADIUS_YARDS: f64 = 16.0;
+// In possession, a winger holds at least this much padding off the wing-back behind
+// it; all midfielders are rewarded for pushing forward when the ball is in the
+// opponent half.
+const MIDFIELDER_DEFENDER_PADDING_YARDS: f64 = 8.0;
+const MIDFIELDER_PADDING_PENALTY_PER_YARD: f64 = 0.15;
+const MIDFIELDER_PUSH_FORWARD_REWARD_PER_YARD: f64 = 0.06;
+const DEFENDER_OUT_OF_LANE_TEAM_PENALTY_THRESHOLD_YARDS: f64 = 14.0;
+const DEFENDER_OUT_OF_LANE_TEAM_PENALTY: f64 = 0.4;
+const STATIONARY_RECEIVER_BALL_RADIUS_YARDS: f64 = 6.0;
+const STATIONARY_RECEIVER_MIN_MOVE_YARDS: f64 = 0.15;
+const STATIONARY_RECEIVER_PENALTY: f64 = 0.5;
 // A retreating player turns and runs (instead of back-pedalling) only when a
 // fast opponent is this close and moving at least this fast (running/sprinting).
 const CHASE_EMERGENCY_RADIUS_YARDS: f64 = 5.0;
@@ -397,21 +467,39 @@ const CHASE_EMERGENCY_SPEED_YPS: f64 = 5.0;
 const GUARANTEED_FLOOR_TRAP_RADIUS_YARDS: f64 = 1.0;
 // Counterattack: with fewer than this many opponents ahead while in possession,
 // the break is on — off-ball players push forward into space (and sprint there).
+// Attack support: a teammate this far behind an advanced ball sprints forward to
+// join the attack rather than leaving the striker isolated.
+const ATTACK_SUPPORT_BEHIND_BALL_YARDS: f64 = 4.0;
+const ATTACK_SUPPORT_BALL_ADVANCED_YARDS: f64 = 12.0;
 const COUNTERATTACK_DEFENDERS_AHEAD_THRESHOLD: usize = 5;
 const COUNTERATTACK_FORWARD_SUPPORT_BONUS: f64 = 0.12;
 // Loose-ball retrieval spacing: if an opponent is within this radius the ball is
 // contested (defenders may commit numbers); otherwise only the closest commits
 // and the rest hold a supporting outlet at the support distance.
 const LOOSE_BALL_CONTEST_RADIUS_YARDS: f64 = 5.0;
+// How much an aligned stride (already running toward the ball's path) shortens a
+// player's effective retrieval distance when designating the single retriever.
+const LOOSE_BALL_STRIDE_MATCH_WEIGHT: f64 = 0.45;
 const LOOSE_BALL_SUPPORT_DISTANCE_YARDS: f64 = 6.0;
-// Shots struck from beyond this distance are saved at least LONG_RANGE_GK_SAVE_FLOOR
-// of the time by a keeper who is in position (in the box).
+// Policy-export fitness (for the evolution optimizer): each goal of differential
+// is worth this many micros, plus a small per-total-goal bonus as a tiebreaker.
+const FITNESS_MICROS_PER_GOAL_DIFFERENTIAL: i64 = 1_000_000;
+const FITNESS_MICROS_PER_TOTAL_GOAL: i64 = 1_000;
+// Beyond this distance the shoot decision treats a shot as a long-range effort
+// (used by the shot-favorability ramp). The actual save odds come from the
+// calibrated distance curve in `goalkeeper_distance_save_baseline`.
 const LONG_RANGE_SHOT_DISTANCE_YARDS: f64 = 30.0;
-const LONG_RANGE_GK_SAVE_FLOOR: f64 = 0.95;
 // Movement urgency falls off linearly with distance from the ball: full urgency
 // at the ball, down to this floor at (and beyond) the reference distance.
 const BALL_PROXIMITY_URGENCY_REFERENCE_YARDS: f64 = 75.0;
 const BALL_PROXIMITY_URGENCY_FLOOR: f64 = 0.5;
+// Defensive recovery: a contestable ball within this many yards of our back line
+// (2nd-to-last defender) demands max sprint effort; above this recovery effort the
+// gait is forced to a sprint.
+const DEFENSIVE_RECOVERY_BACK_LINE_RADIUS_YARDS: f64 = 10.0;
+const DEFENSIVE_RECOVERY_SPRINT_THRESHOLD: f64 = 0.6;
+// Below this ball-proximity urgency a calm, distant player jogs rather than runs.
+const GAIT_CALM_URGENCY_THRESHOLD: f64 = 0.72;
 const CENTER_REF_BALL_CLEARANCE_YARDS: f64 = 7.0;
 const CENTER_REF_PLAYER_CENTROID_WEIGHT: f64 = 0.46;
 const CENTER_REF_LIVE_PLAY_CENTROID_WEIGHT: f64 = 0.34;
@@ -490,6 +578,13 @@ const SOCCER_MATCH_ASSISTANT_REFEREE_COUNT: usize = 2;
 const SOCCER_FORMATION_LP_CONTEXT_FEATURES: usize = 64;
 const SOCCER_FORMATION_LP_PRESS_DISTANCE_YARDS: f64 = 2.8;
 const SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER: usize = 12_000;
+// Per-solve wall-clock budget; over it the iteration cap halves (down to MIN) so
+// the next solve bails within time, recovering toward the max when solves are fast.
+const SOCCER_FORMATION_LP_SOLVE_BUDGET_MICROS: u128 = 1_500;
+const SOCCER_FORMATION_LP_MIN_ITER: usize = 800;
+const SOCCER_FORMATION_LP_ITER_RECOVER_STEP: usize = 1_500;
+// Consecutive over-budget solves before the circuit trips to the heuristic fallback.
+const SOCCER_FORMATION_LP_TIMEOUT_CIRCUIT_LIMIT: u32 = 3;
 const SOCCER_SET_PLAY_WINDOW_SECONDS: f64 = 15.0;
 const SOCCER_SET_PLAY_TRAINING_WINDOW_SECONDS: f64 = 10.0;
 const SOCCER_SET_PLAY_MAX_RELEASE_DELAY_SECONDS: f64 = 3.0;
@@ -1949,7 +2044,7 @@ impl Default for AgentPreferences {
             shoot_bias: 0.40,
             pass_bias: 0.55,
             dribble_bias: 0.45,
-            open_space_bias: 0.70,
+            open_space_bias: 0.84,
             offensive_mindedness: 0.50,
             defensive_mindedness: 0.50,
         }
@@ -2068,6 +2163,58 @@ pub struct SoccerMdpState {
     pub possession_team: Option<Team>,
     pub score_diff_for_home: i32,
     pub phase: TacticalPhase,
+}
+
+/// The on-field scale a strategy operates at. Strategies at the SAME layer (within
+/// the same possession phase) are mutually EXCLUSIVE — only one runs at a time, and
+/// they are never interpolated. Strategies at DIFFERENT layers can CO-EXIST (a pair
+/// combination nests inside a team shape; a back-unit offside trap runs under a team
+/// press), and an attacking maneuver always co-exists with a defensive one (opposite
+/// possession phases).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrategyLayer {
+    Individual,
+    Pair,
+    Triangle,
+    BackUnit,
+    Team,
+}
+
+/// Whether two strategy layers can be active simultaneously: same layer ⇒ exclusive,
+/// different layers ⇒ they nest. (Attack vs defense always co-exist by phase.)
+#[allow(dead_code)]
+fn strategy_layers_can_coexist(a: StrategyLayer, b: StrategyLayer) -> bool {
+    a != b
+}
+
+impl TeamAttackStrategy {
+    /// The on-field scale this attacking maneuver operates at.
+    pub fn layer(self) -> StrategyLayer {
+        use TeamAttackStrategy::*;
+        match self {
+            GiveAndGoCentral | OneTwoLeftRelease | OneTwoRightRelease | WingOverlapLeftCross
+            | WingOverlapRightCross | UnderlapLeftCutback | UnderlapRightCutback
+            | DecoyFarSideCutbackLeft | DecoyFarSideCutbackRight | DragDefenderOpenChannelLeft
+            | DragDefenderOpenChannelRight => StrategyLayer::Pair,
+            ThirdManRunCentral | CentralDoubleOneTwo | HalfSpaceComboLeft | HalfSpaceComboRight => {
+                StrategyLayer::Triangle
+            }
+            _ => StrategyLayer::Team,
+        }
+    }
+}
+
+impl TeamDefenseStrategy {
+    /// The on-field scale this defensive maneuver operates at.
+    pub fn layer(self) -> StrategyLayer {
+        use TeamDefenseStrategy::*;
+        match self {
+            ManMarkKeyReceiver => StrategyLayer::Individual,
+            DoubleTeamBallCarrier => StrategyLayer::Pair,
+            OffsideTrapStepUp | ForceWideLeftTrap | ForceWideRightTrap => StrategyLayer::BackUnit,
+            _ => StrategyLayer::Team,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -7104,6 +7251,9 @@ fn restart_action_label(action: &str) -> Option<&'static str> {
         "goal-kick" => Some("goal-kick"),
         "corner-kick" => Some("corner-kick"),
         "free-kick" => Some("free-kick"),
+        // Offside is restarted with an indirect free kick: the taker must play it
+        // to a teammate (no dribble), so the double-touch can't happen by design.
+        "offside" => Some("free-kick"),
         _ => None,
     }
 }
@@ -7232,6 +7382,11 @@ pub struct PlayerAgent {
     /// biomechanics. Drives smooth facing and the dizziness model.
     #[serde(default)]
     pub facing_yaw: f64,
+    /// Current angular velocity (rad/s) about the z axis. A decision is instant,
+    /// but the body's turn rate can only change within an angular-acceleration
+    /// limit each step — it cannot start or stop spinning instantaneously.
+    #[serde(default)]
+    pub yaw_rate: f64,
     /// Accumulated vestibular disorientation from rapid repeated turning; decays
     /// with rest, degrades control/perception while high.
     #[serde(default)]
@@ -8485,7 +8640,18 @@ impl PlayerAgent {
             && goal_side_or_level
             && defender_steal_skill + 0.18 >= holder_security;
 
-        (clean_contact || exposed_dribble).then_some(holder)
+        // Ball protection: a ball shielded at the holder's feet (body between ball
+        // and this defender, low pace) is hard to win; a ball pushed ahead at
+        // speed toward us is exposed. A contestable (low-protection) ball within a
+        // yard of us is stolen with high urgency regardless of holder skill.
+        let ball_protection =
+            snapshot.ball_protection_against(holder_player, holder_position, self.position);
+        let ball_distance = self.position.distance(snapshot.ball.position);
+        let contestable_close = ball_distance <= CONTESTABLE_STEAL_RADIUS_YARDS
+            && ball_protection < CONTESTABLE_PROTECTION_THRESHOLD
+            && goal_side_or_level;
+
+        (clean_contact || exposed_dribble || contestable_close).then_some(holder)
     }
 
     fn loose_ball_action_options(
@@ -8655,6 +8821,21 @@ impl PlayerAgent {
         if let Some(planned_release) = snapshot.active_set_play_release_for(self.id, restart_label)
         {
             return Some(planned_release);
+        }
+
+        // Goal kick: the keeper may hold the ball up to ~7 s to let teammates reset
+        // and find open positions, only releasing once someone is genuinely open (or
+        // the cap forces it). Returning None makes the caller hold the restart.
+        if restart_label == "goal-kick" {
+            let best_openness = observation
+                .best_aerial_pass_receiver_openness
+                .max(observation.best_pass_receiver_openness);
+            let held_seconds = snapshot.possession_elapsed_seconds_for_team(self.team);
+            if best_openness < GK_GOAL_KICK_RELEASE_OPENNESS
+                && held_seconds < GK_GOAL_KICK_MAX_HOLD_SECONDS
+            {
+                return None;
+            }
         }
 
         let passing_skill = ability01(self.skills.passing_completion_rate);
@@ -12302,9 +12483,9 @@ impl SharedControllerAssignments {
             return;
         }
         if let Some(player_id) = player_id {
-            store.player_by_slot.retain(|slot, assigned_player_id| {
-                *slot == controller_slot || *assigned_player_id != player_id
-            });
+            // Only one player is ever controlled at a time (the four slot options
+            // remain selectable): assigning clears every other slot.
+            store.player_by_slot.clear();
             store.player_by_slot.insert(controller_slot, player_id);
         } else {
             store.player_by_slot.remove(&controller_slot);
@@ -13654,8 +13835,21 @@ impl BallAgent {
             // Geometric goal: between the posts (X within the goal width) AND
             // under the crossbar (ball altitude below goal height). Over the bar or
             // outside the posts is not a goal.
-            let in_goal = (crossing_x - goal_x).abs() <= context.goal_width * 0.5
-                && self.altitude_yards <= GOAL_CROSSBAR_HEIGHT_YARDS;
+            // Ball is simply in or out between the posts (crossbar/height ignored for
+            // now, like the posts — no goal-frame rebounds yet).
+            let in_goal = (crossing_x - goal_x).abs() <= context.goal_width * 0.5;
+            if std::env::var("SOCCER_GOAL_DEBUG").is_ok() {
+                eprintln!(
+                    "# GOALCROSS y={:.2} cross_x={:.2} goalx={:.2} halfw={:.2} alt={:.2} ingoal={} shot={}",
+                    self.position.y,
+                    crossing_x,
+                    goal_x,
+                    context.goal_width * 0.5,
+                    self.altitude_yards,
+                    in_goal,
+                    context.pending_shot.is_some()
+                );
+            }
             if in_goal {
                 let scoring_team = if self.position.y > context.field_length {
                     Team::Home
@@ -13787,6 +13981,14 @@ impl BallAgent {
                         shot: Some(shot),
                     };
                 }
+                // Crossed the line between the posts under the bar with no live
+                // shot on record (deflection, rebound, mis-hit, own goal): it is
+                // still a goal — never a goal kick.
+                self.record_decision(context.tick, "goal", context.scheduled_index);
+                return BallStepOutcome::Goal {
+                    scoring_team,
+                    shot: None,
+                };
             }
             let defending_team = if self.position.y > context.field_length {
                 Team::Away
@@ -13868,6 +14070,11 @@ impl BallAgent {
                     self.altitude_yards,
                     rng,
                 )
+                // No-double-touch on restarts: the taker cannot re-control the
+                // ball until another player has touched it (the guard clears on
+                // any other player's touch). Prevents e.g. the GK touching twice
+                // off a goal kick.
+                .filter(|(id, _, _)| context.double_touch_guard != Some(*id))
             {
                 let untargeted_long_ball = self
                     .untargeted_long_ball_team(context.pending_pass.as_ref())
@@ -15276,6 +15483,9 @@ impl From<&PendingOffside> for PendingOffsideSnapshot {
 #[derive(Clone, Debug)]
 struct BallStepContext<'a> {
     tick: u64,
+    /// Restart taker who may not re-control the ball until another player touches
+    /// it (no double-touch on restarts); `None` outside that window.
+    double_touch_guard: Option<usize>,
     clock_seconds: f64,
     dt_seconds: f64,
     ball_drag_per_tick: f64,
@@ -15991,6 +16201,17 @@ struct SoccerFormationLpBrain {
     basis_start: Option<LPBasisWarmStart>,
     last_guidance: Vec<SoccerFormationLpPlayerGuidance>,
     last_snapshot: SoccerFormationLpTeamSnapshot,
+    /// Performance guardrails + telemetry: the iteration cap adapts down when a
+    /// solve runs over the per-tick budget (so we bail within time constraints)
+    /// and recovers when fast; counters surface slow/suboptimal solves.
+    adaptive_max_iter: usize,
+    last_solve_micros: u128,
+    last_solve_status: String,
+    solve_count: u64,
+    solve_timeout_count: u64,
+    suboptimal_count: u64,
+    consecutive_timeouts: u32,
+    simplex_circuit_open: bool,
 }
 
 fn soccer_formation_lp_offensive_overlap_relief(
@@ -16051,6 +16272,13 @@ fn soccer_formation_lp_pair_shape_relief(
     defensive_tracking_relief
         .max(offensive_overlap_relief)
         .clamp(0.0, 0.85)
+}
+
+/// `SOCCER_LP_DEBUG=1` logs slow/non-optimal LP solves to stderr.
+fn soccer_lp_debug_enabled() -> bool {
+    std::env::var("SOCCER_LP_DEBUG")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
 }
 
 fn soccer_formation_lp_internal_simplex_enabled() -> bool {
@@ -16777,6 +17005,14 @@ impl SoccerFormationLpBrain {
                 mean_pressure_error_yards: 0.0,
                 objective_weights: SoccerFormationLpObjectiveWeights::default(),
             },
+            adaptive_max_iter: SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER,
+            last_solve_micros: 0,
+            last_solve_status: "not-solved".to_string(),
+            solve_count: 0,
+            solve_timeout_count: 0,
+            suboptimal_count: 0,
+            consecutive_timeouts: 0,
+            simplex_circuit_open: false,
         }
     }
 
@@ -16786,9 +17022,13 @@ impl SoccerFormationLpBrain {
         let slots =
             soccer_formation_lp_slot_inputs(snapshot, self.team, directive, &objective_weights);
         self.update_problem_for_tick(snapshot, directive, &objective_weights, &slots);
-        let solution = if soccer_formation_lp_internal_simplex_enabled() {
+        let simplex = soccer_formation_lp_internal_simplex_enabled() && !self.simplex_circuit_open;
+        let started = std::time::Instant::now();
+        let solution = if simplex {
             let opts = InternalSimplexOptions {
-                max_iter: Some(SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER),
+                // Adaptive cap: shrinks after a slow tick so we always bail within
+                // the per-tick time budget rather than stalling the sim.
+                max_iter: Some(self.adaptive_max_iter),
                 tol: Some(1e-8),
                 basis_start: self.basis_start.clone(),
             };
@@ -16796,11 +17036,59 @@ impl SoccerFormationLpBrain {
         } else {
             soccer_formation_lp_budgeted_fallback_solution()
         };
-        if solution.status == LPStatus::Optimal {
-            self.basis_start = LPBasisWarmStart::from_solution(&solution);
-        } else {
-            self.basis_start = None;
+        let elapsed_micros = started.elapsed().as_micros();
+        self.solve_count = self.solve_count.saturating_add(1);
+        self.last_solve_micros = elapsed_micros;
+        self.last_solve_status = solution.status.as_str().to_string();
+        // Adaptive time-budgeting + failure telemetry only apply to a real solve;
+        // the heuristic fallback is intentionally suboptimal (not a failure).
+        if simplex {
+            if elapsed_micros > SOCCER_FORMATION_LP_SOLVE_BUDGET_MICROS {
+                self.solve_timeout_count = self.solve_timeout_count.saturating_add(1);
+                self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+                self.adaptive_max_iter =
+                    (self.adaptive_max_iter / 2).max(SOCCER_FORMATION_LP_MIN_ITER);
+                if self.consecutive_timeouts >= SOCCER_FORMATION_LP_TIMEOUT_CIRCUIT_LIMIT {
+                    // Repeatedly too slow for realtime: trip the breaker and run the
+                    // fast heuristic fallback for the rest of the match.
+                    self.simplex_circuit_open = true;
+                    if soccer_lp_debug_enabled() {
+                        eprintln!(
+                            "[soccer-lp] {:?} circuit OPEN after {} consecutive timeouts -> heuristic fallback",
+                            self.team, self.consecutive_timeouts
+                        );
+                    }
+                }
+                if soccer_lp_debug_enabled() {
+                    eprintln!(
+                        "[soccer-lp] {:?} solve {}us over budget ({}us); max_iter->{}",
+                        self.team,
+                        elapsed_micros,
+                        SOCCER_FORMATION_LP_SOLVE_BUDGET_MICROS,
+                        self.adaptive_max_iter
+                    );
+                }
+            } else if elapsed_micros * 3 < SOCCER_FORMATION_LP_SOLVE_BUDGET_MICROS {
+                self.consecutive_timeouts = 0;
+                self.adaptive_max_iter = (self.adaptive_max_iter
+                    + SOCCER_FORMATION_LP_ITER_RECOVER_STEP)
+                    .min(SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER);
+            }
+            if solution.status == LPStatus::Optimal {
+                self.basis_start = LPBasisWarmStart::from_solution(&solution);
+            } else {
+                self.basis_start = None;
+                self.suboptimal_count = self.suboptimal_count.saturating_add(1);
+                if soccer_lp_debug_enabled() {
+                    eprintln!(
+                        "[soccer-lp] {:?} non-optimal status={} ({}us) - capture degrades to anchors",
+                        self.team, self.last_solve_status, elapsed_micros
+                    );
+                }
+            }
         }
+        // capture_solution degrades gracefully (formation anchors) when the solution
+        // is non-optimal/empty, so a bail-out never applies a garbage formation.
         self.capture_solution(snapshot, objective_weights, &slots, &solution);
     }
 
@@ -17604,7 +17892,7 @@ fn soccer_formation_lp_objective_weights(
     let rest_defense = soccer_formation_lp_rest_defense_score(snapshot, team);
     let fatigue = soccer_formation_lp_average_fatigue(snapshot, team);
 
-    SoccerFormationLpObjectiveWeights {
+    let mut weights = SoccerFormationLpObjectiveWeights {
         expected_goal: if has_ball {
             (attacking_depth * 0.62 + overload * 0.18 + numbers * 0.08 + embedding_attack * 0.12)
                 .clamp(0.0, 1.0)
@@ -17691,6 +17979,72 @@ fn soccer_formation_lp_objective_weights(
         },
         adversarial_embedding_attack: embedding_attack,
         adversarial_embedding_defense: embedding_defense,
+    };
+    soccer_formation_lp_apply_strategy_profile(&mut weights, directive, has_ball, defending);
+    weights
+}
+
+/// Specialize the (single, guardrailed) LP objective toward the team's COMMITTED
+/// play, so it optimizes the right thing per strategy: a pressing trap maximizes
+/// high turnovers, a defensive shape prizes compactness/xGA and conserves energy,
+/// a back-unit trap holds a tight high line, and attacking profiles weight direct
+/// progression vs patient retention vs overloads vs wide play.
+fn soccer_formation_lp_apply_strategy_profile(
+    weights: &mut SoccerFormationLpObjectiveWeights,
+    directive: &TeamTacticalDirective,
+    has_ball: bool,
+    defending: bool,
+) {
+    if defending {
+        use TeamDefenseStrategy::*;
+        match directive.defense_strategy {
+            HighPressManOriented | HighPressZonalTrigger | CounterPressGegenpress
+            | PressTriggerOnBackPass | WidePressOverloadBall => {
+                weights.opponent_progression *= 1.5;
+                weights.press_resistance *= 1.35;
+                weights.numerical_superiority *= 1.25;
+                weights.defensive_compactness *= 0.85;
+                weights.fatigue *= 0.8;
+            }
+            LowBlockCompact | LowBlockParkBus | MidBlockZonal | MidBlockManMark
+            | DropAndScreenCentral | ContainAndDelayCounter | RetreatRegroupHalfway
+            | ShowInsideClampCentral | ManMarkKeyReceiver | DoubleTeamBallCarrier => {
+                weights.defensive_compactness *= 1.5;
+                weights.expected_goals_against *= 1.35;
+                weights.opponent_progression *= 1.2;
+                weights.progression *= 0.85;
+                weights.fatigue *= 1.15;
+            }
+            OffsideTrapStepUp | ForceWideLeftTrap | ForceWideRightTrap => {
+                weights.defensive_compactness *= 1.35;
+                weights.opponent_progression *= 1.25;
+            }
+        }
+    } else if has_ball {
+        use TeamAttackStrategy::*;
+        match directive.attack_strategy {
+            CounterTransitionVertical | QuickVerticalThroughBall | DirectLongDiagonalLeft
+            | DirectLongDiagonalRight => {
+                weights.progression *= 1.3;
+                weights.expected_goal *= 1.2;
+                weights.retention *= 0.85;
+            }
+            PatientPossessionProbe | RecycleViaKeeperReset | HoldUpfieldUntilOpening => {
+                weights.retention *= 1.3;
+                weights.passing_lane_quality *= 1.2;
+                weights.transition_risk *= 1.2;
+            }
+            OverloadLeftIsolateRight | OverloadRightIsolateLeft => {
+                weights.numerical_superiority *= 1.4;
+                weights.space_occupation *= 1.2;
+            }
+            WingOverlapLeftCross | WingOverlapRightCross | UnderlapLeftCutback
+            | UnderlapRightCutback | PullWideLeftThenCenter | PullWideRightThenCenter => {
+                weights.space_occupation *= 1.3;
+                weights.expected_goal *= 1.15;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -18473,6 +18827,14 @@ pub struct CentralBrain {
     pub pressure_line_away: f64,
     pub home_directive: TeamTacticalDirective,
     pub away_directive: TeamTacticalDirective,
+    #[serde(skip)]
+    home_strategy_commitment: TeamStrategyCommitment,
+    #[serde(skip)]
+    away_strategy_commitment: TeamStrategyCommitment,
+    #[serde(skip)]
+    home_attack_value: std::collections::HashMap<(u8, TeamAttackStrategy), f64>,
+    #[serde(skip)]
+    away_attack_value: std::collections::HashMap<(u8, TeamAttackStrategy), f64>,
     #[serde(default)]
     pub last_decision: Option<CentralBrainDecisionTrace>,
     #[serde(skip, default = "default_home_formation_lp_brain")]
@@ -18499,9 +18861,161 @@ impl Default for CentralBrain {
                 DEFAULT_FIELD_LENGTH_YARDS,
             ),
             last_decision: None,
+            home_strategy_commitment: TeamStrategyCommitment::default(),
+            away_strategy_commitment: TeamStrategyCommitment::default(),
+            home_attack_value: std::collections::HashMap::new(),
+            away_attack_value: std::collections::HashMap::new(),
             home_formation_lp: default_home_formation_lp_brain(),
             away_formation_lp: default_away_formation_lp_brain(),
         }
+    }
+}
+
+impl CentralBrain {
+    /// Hold the committed discrete strategy for the team, re-committing only when
+    /// the commit window expires or possession flips — no per-tick flip-flop and no
+    /// interpolation between strategies (they are exclusive maneuvers).
+    fn apply_strategy_commitment(&mut self, team: Team, snapshot: &WorldSnapshot) {
+        let tick = snapshot.tick;
+        let has_ball = snapshot
+            .controlled_possession_team()
+            .or_else(|| snapshot.possession_team())
+            == Some(team);
+        let advantage = central_brain_team_advantage(snapshot, team);
+        let ball_x = snapshot.ball.position.x;
+        let width = snapshot.field_width;
+        // Context bucket: possession phase + ball third + whether the opponent presses
+        // high. Learned strategy value is keyed by this, so a team can have different
+        // dominant strategies in different situations / vs different opponents.
+        let opp_press = match team {
+            Team::Home => self.away_directive.press_intensity,
+            Team::Away => self.home_directive.press_intensity,
+        };
+        let length = snapshot.field_length.max(1.0);
+        let to_opp_goal = (snapshot.ball.position.y - team.goal_y(length)).abs() / length;
+        let third: u8 = if to_opp_goal < 0.34 {
+            2
+        } else if to_opp_goal < 0.67 {
+            1
+        } else {
+            0
+        };
+        let ctx: u8 = ((has_ball as u8) << 3) | (third << 1) | u8::from(opp_press > 0.6);
+        let (directive, commitment, value) = match team {
+            Team::Home => (
+                &mut self.home_directive,
+                &mut self.home_strategy_commitment,
+                &mut self.home_attack_value,
+            ),
+            Team::Away => (
+                &mut self.away_directive,
+                &mut self.away_strategy_commitment,
+                &mut self.away_attack_value,
+            ),
+        };
+        let possession_flip = commitment.set && commitment.committed_has_ball != has_ball;
+        if !commitment.set || tick >= commitment.review_tick || possession_flip {
+            // Learn: credit the just-finished commitment with the field advantage it
+            // gained while running (only while we held the ball — attacking value).
+            if commitment.set && commitment.committed_has_ball {
+                let window_reward = advantage - commitment.advantage_at_commit;
+                let entry = value.entry((commitment.context, commitment.attack)).or_insert(0.0);
+                *entry =
+                    *entry * (1.0 - STRATEGY_VALUE_EMA_ALPHA) + window_reward * STRATEGY_VALUE_EMA_ALPHA;
+            }
+            // Discrete argmax: the fresh rule candidate (fits the current state) vs the
+            // proven held one (continuity bonus), each lifted by its learned value. A
+            // held strategy with high learned value resists switching (the ensemble of
+            // heuristic prior + learning + hysteresis), but we never interpolate.
+            let rule_candidate = directive.attack_strategy;
+            let held = commitment.attack;
+            let chosen = if !commitment.set || rule_candidate == held {
+                rule_candidate
+            } else {
+                let v_rule = value.get(&(ctx, rule_candidate)).copied().unwrap_or(0.0);
+                let v_held = value.get(&(ctx, held)).copied().unwrap_or(0.0);
+                let rule_score = STRATEGY_RULE_PRIOR + STRATEGY_VALUE_WEIGHT * v_rule;
+                let held_score = STRATEGY_HELD_HYSTERESIS + STRATEGY_VALUE_WEIGHT * v_held;
+                if held_score > rule_score {
+                    held
+                } else {
+                    rule_candidate
+                }
+            };
+            directive.attack_strategy = chosen;
+            commitment.attack = chosen;
+            commitment.defense = directive.defense_strategy;
+            commitment.sub = select_nested_sub_maneuver(chosen, ball_x, width, has_ball);
+            commitment.review_tick = tick.saturating_add(STRATEGY_COMMIT_TICKS);
+            commitment.committed_has_ball = has_ball;
+            commitment.advantage_at_commit = advantage;
+            commitment.context = ctx;
+            commitment.set = true;
+        } else {
+            directive.attack_strategy = commitment.attack;
+            directive.defense_strategy = commitment.defense;
+        }
+        // Execute the nested Pair maneuver concurrently with the Team shape by
+        // overlaying its effect on the directive params the players read.
+        if let Some(sub) = commitment.sub {
+            use TeamAttackStrategy::*;
+            match sub {
+                WingOverlapLeftCross | WingOverlapRightCross | UnderlapLeftCutback
+                | UnderlapRightCutback => {
+                    directive.flank_overlap_run_probability = directive
+                        .flank_overlap_run_probability
+                        .max(NESTED_OVERLAP_RUN_PROBABILITY);
+                }
+                GiveAndGoCentral | OneTwoLeftRelease | OneTwoRightRelease => {
+                    directive.pass_priority *= NESTED_GIVE_AND_GO_PASS_BOOST;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A team's field advantage right now: how far the ball is advanced toward the
+/// opponent goal while we hold it, or the negative danger of it sitting near our
+/// own goal while we don't. Drives the learned strategy-value signal.
+/// Pick a lower-layer Pair maneuver to nest inside a Team-layer shape (in
+/// possession): a wide ball invites a flank overlap, a central ball a give-and-go.
+/// Enforces the declared rule — the nested maneuver must be a different, co-existing
+/// layer than the primary.
+fn select_nested_sub_maneuver(
+    primary: TeamAttackStrategy,
+    ball_x: f64,
+    width: f64,
+    has_ball: bool,
+) -> Option<TeamAttackStrategy> {
+    use TeamAttackStrategy::*;
+    if !has_ball || primary.layer() != StrategyLayer::Team {
+        return None;
+    }
+    let center = width * 0.5;
+    let sub = if ball_x < center - width * 0.12 {
+        WingOverlapLeftCross
+    } else if ball_x > center + width * 0.12 {
+        WingOverlapRightCross
+    } else {
+        GiveAndGoCentral
+    };
+    strategy_layers_can_coexist(primary.layer(), sub.layer()).then_some(sub)
+}
+
+fn central_brain_team_advantage(snapshot: &WorldSnapshot, team: Team) -> f64 {
+    let length = snapshot.field_length.max(1.0);
+    let ball = snapshot.ball.position;
+    let has_ball = snapshot
+        .controlled_possession_team()
+        .or_else(|| snapshot.possession_team())
+        == Some(team);
+    let opp_progress = (1.0 - (ball.y - team.goal_y(length)).abs() / length).clamp(0.0, 1.0);
+    let own_danger = (1.0 - (ball.y - team.other().goal_y(length)).abs() / length).clamp(0.0, 1.0);
+    if has_ball {
+        opp_progress
+    } else {
+        -own_danger
     }
 }
 
@@ -18563,6 +19077,10 @@ impl CentralBrain {
             away_cover,
             away_overload,
         );
+        // Commit to the freshly-selected strategy and hold it for a window so teams
+        // run a maneuver out instead of flip-flopping the discrete strategy each tick.
+        self.apply_strategy_commitment(Team::Home, snapshot);
+        self.apply_strategy_commitment(Team::Away, snapshot);
         if let Some(signals) = embedding_signals {
             apply_adversarial_embedding_signal(
                 &mut self.home_directive,
@@ -18809,6 +19327,10 @@ pub struct PlayerSnapshot {
     pub last_decision: Option<AgentDecisionTrace>,
     #[serde(default)]
     pub learned_policy: Option<SoccerLearnedPolicyTrace>,
+    /// Most recent learning reward for this player (surfaced for the controlled/
+    /// holder player so the UI shows it instead of "waiting").
+    #[serde(default)]
+    pub recent_reward: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19360,6 +19882,7 @@ impl WorldSnapshot {
                     None
                 },
                 learned_policy: None,
+                recent_reward: None,
             })
             .collect::<Vec<_>>();
         let pending_pass = m.pending_pass.as_ref().map(|pass| {
@@ -20134,6 +20657,42 @@ impl WorldSnapshot {
 
     fn depth_from_own_goal_y(&self, team: Team, y: f64) -> f64 {
         ((y - self.own_goal_y_for(team)) * team.attack_dir()).clamp(0.0, self.field_length)
+    }
+
+    /// Ball-protection level (0 = fully exposed, 1 = fully shielded) of `holder`
+    /// against an opponent at `defender_position`. High when the holder keeps the
+    /// ball at their feet with their body between it and the defender; low when
+    /// the ball is pushed ahead at speed toward the defender. Inversely related
+    /// to driving past a man: you cannot shield and beat them at once.
+    fn ball_protection_against(
+        &self,
+        holder: &PlayerSnapshot,
+        holder_position: Vec2,
+        defender_position: Vec2,
+    ) -> f64 {
+        let to_ball = self.ball.position - holder_position;
+        let ball_lead = to_ball.len();
+        let lead_exposure = (ball_lead / BALL_PROTECTION_LEAD_REF_YARDS).clamp(0.0, 1.0);
+        // Shield: ball on the far side of the holder from this defender ⇒ shielded.
+        let shield = if ball_lead > 1e-3 {
+            let to_ball_n = to_ball / ball_lead;
+            let to_def = defender_position - holder_position;
+            let to_def_len = to_def.len();
+            if to_def_len > 1e-3 {
+                (-dot(to_ball_n, to_def / to_def_len)).clamp(-1.0, 1.0) * 0.5 + 0.5
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+        let speed_exposure =
+            (holder.velocity.len() / BALL_PROTECTION_FAST_DRIBBLE_REF_YPS).clamp(0.0, 1.0);
+        let skill = ability01(holder.skills.strength) * 0.5 + ability01(holder.skills.dribbling) * 0.5;
+        ((shield * 0.55 + (1.0 - lead_exposure) * 0.45)
+            * (1.0 - speed_exposure * 0.45)
+            * (0.72 + skill * 0.28))
+            .clamp(0.0, 1.0)
     }
 
     fn y_from_own_goal_depth(&self, team: Team, depth: f64) -> f64 {
@@ -22775,16 +23334,39 @@ impl WorldSnapshot {
 
     /// True if this player is the closest teammate (outfield) to the loose ball,
     /// i.e. the one who should commit to retrieving it.
+    /// Retrieval priority for a loose ball: distance to where the ball is heading,
+    /// shortened by how well the player's current stride/trajectory already commits
+    /// toward it (the ball's path matching the player's run). Lower = better.
+    fn loose_ball_retrieval_score(&self, player: &PlayerSnapshot, target: Vec2) -> f64 {
+        let pos = self.player_snapshot_position(player);
+        let to_target = target - pos;
+        let dist = to_target.len();
+        let alignment = if player.velocity.len() > 0.5 && dist > 1e-3 {
+            player
+                .velocity
+                .normalized()
+                .dot(to_target.normalized())
+                .max(0.0)
+        } else {
+            0.0
+        };
+        dist * (1.0 - alignment * LOOSE_BALL_STRIDE_MATCH_WEIGHT)
+    }
+
+    /// The single designated retriever is the teammate whose stride/trajectory best
+    /// matches the ball's path (not merely the closest) — so one player commits and
+    /// the rest hold their shape instead of three defenders swarming the ball.
     fn is_primary_loose_ball_retriever(&self, player_id: usize, target: Vec2) -> bool {
         let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
             return false;
         };
-        let my_dist = self.player_snapshot_position(me).distance(target);
+        let my_score = self.loose_ball_retrieval_score(me, target);
         !self.players.iter().any(|p| {
-            p.id != player_id
-                && p.team == me.team
-                && p.role != PlayerRole::Goalkeeper
-                && self.player_snapshot_position(p).distance(target) < my_dist - 1e-6
+            if p.id == player_id || p.team != me.team || p.role == PlayerRole::Goalkeeper {
+                return false;
+            }
+            let score = self.loose_ball_retrieval_score(p, target);
+            score < my_score - 1e-6 || ((score - my_score).abs() <= 1e-6 && p.id < player_id)
         })
     }
 
@@ -22822,10 +23404,10 @@ impl WorldSnapshot {
             // Retrieval spacing: on an UNCONTESTED loose ball (no opponent within
             // ~5 yds) only the closest teammate commits; the rest hold a >5-yd
             // outlet to receive once it's won, instead of all swarming the ball.
-            if !self.is_primary_loose_ball_retriever(player_id, target)
-                && self.nearest_opponent_distance_at(player.team, target)
-                    > LOOSE_BALL_CONTEST_RADIUS_YARDS
-            {
+            if !self.is_primary_loose_ball_retriever(player_id, target) {
+                // Only the designated retriever chases; everyone else holds a support
+                // outlet on their own side and keeps their shape — even when the ball
+                // is contested (no three-defender swarm).
                 return self.loose_ball_support_outlet_for(player_id, target);
             }
             return target;
@@ -24623,9 +25205,29 @@ impl WorldSnapshot {
         let mark_weight = if roam {
             (0.78 + spread_follow * 0.04 + markovian_mark * 0.035).clamp(0.70, 0.88)
         } else {
-            (0.46 + spread_follow * 0.18 + markovian_mark * 0.045).clamp(0.42, 0.70)
+            (0.42 + spread_follow * 0.16 + markovian_mark * 0.045).clamp(0.36, 0.66)
         };
         let blended = mark * mark_weight + zone * (1.0 - mark_weight);
+        // Respect the width lane (a quarter of the pitch): pull the marking anchor's
+        // x back into this defender's lane unless a genuine tracking exception
+        // relieves it. Without this the anchor follows the marked opponent across
+        // lanes into the center — defenders abandon their quarter/third and bunch.
+        let in_possession = self
+            .controlled_possession_team()
+            .or_else(|| self.possession_team())
+            == Some(me.team);
+        let lane_relief = self.positional_shape_exception_relief_for_player_target(me, blended);
+        let lane_clamped_x = vertical_lane_clamped_x_for_role(
+            me.role,
+            me.home_position.x,
+            blended.x,
+            self.field_width,
+            in_possession,
+        );
+        let lane_pull = (role_vertical_lane_commitment(me.role, in_possession)
+            * (1.0 - lane_relief.clamp(0.0, 0.85)))
+        .clamp(0.0, 1.0);
+        let blended = Vec2::new(blended.x + (lane_clamped_x - blended.x) * lane_pull, blended.y);
         let mut best = blended;
         let mut best_score = f64::NEG_INFINITY;
         for dx in [-5.0, -2.5, 0.0, 2.5, 5.0] {
@@ -25230,17 +25832,23 @@ fn tactical_directive_for_team(
     }
     let mut defensive_line_y: f64 = line_seed.clamp(field_length * 0.08, field_length * 0.92);
     // Central defenders push up to within ~2 yds of the opponent's foremost
-    // attacker to compress the field, but never more than 5 yds past halfway.
-    // Raise-only: it squeezes a line that is sitting too deep without pulling
-    // back one that is already higher.
+    // attacker to compress the field. Past 5 yds beyond halfway the push is
+    // SOFT-capped: increasingly resisted the further past, rather than a hard
+    // wall. Raise-only: it squeezes a line sitting too deep without pulling back
+    // one that is already higher.
     if defending {
         if let Some(foremost) = defensive_cover.foremost_attacker_y {
             let within_two = foremost - attack_dir * CENTRE_BACK_PUSH_UP_GAP_YARDS;
             let halfway_cap = field_length * 0.5 + attack_dir * CENTRE_BACK_MAX_PAST_HALFWAY_YARDS;
-            let compressed = if attack_dir > 0.0 {
-                within_two.min(halfway_cap)
+            // Push past the soft cap is allowed but damped with diminishing
+            // returns (asymptotes ~CENTRE_BACK_OVERSHOOT_SOFT_YARDS past the cap).
+            let cap_excess = (within_two - halfway_cap) * attack_dir;
+            let compressed = if cap_excess > 0.0 {
+                let damped =
+                    cap_excess / (1.0 + cap_excess / CENTRE_BACK_OVERSHOOT_SOFT_YARDS);
+                halfway_cap + attack_dir * damped
             } else {
-                within_two.max(halfway_cap)
+                within_two
             };
             defensive_line_y = if attack_dir > 0.0 {
                 defensive_line_y.max(compressed)
@@ -25249,6 +25857,25 @@ fn tactical_directive_for_team(
             }
             .clamp(field_length * 0.08, field_length * 0.92);
         }
+    } else if attacking_phase {
+        // In possession and attacking, the back line pushes up to fill the space
+        // behind midfield (a higher line), soft-capped at halfway+5 like the
+        // defensive squeeze. Wing-backs advance further than center-backs in the
+        // per-player target derived from this line.
+        let pushed = defensive_line_y + attack_dir * ATTACKING_DEFENDER_PUSH_UP_YARDS;
+        let halfway_cap = field_length * 0.5 + attack_dir * CENTRE_BACK_MAX_PAST_HALFWAY_YARDS;
+        let cap_excess = (pushed - halfway_cap) * attack_dir;
+        let capped = if cap_excess > 0.0 {
+            halfway_cap + attack_dir * (cap_excess / (1.0 + cap_excess / CENTRE_BACK_OVERSHOOT_SOFT_YARDS))
+        } else {
+            pushed
+        };
+        defensive_line_y = if attack_dir > 0.0 {
+            defensive_line_y.max(capped)
+        } else {
+            defensive_line_y.min(capped)
+        }
+        .clamp(field_length * 0.08, field_length * 0.92);
     }
 
     let risk_tolerance: f64 = (0.46
@@ -25356,7 +25983,17 @@ fn tactical_directive_for_team(
         width_factor
     };
     let width_yards: f64 = (field_width * width_factor).clamp(
-        field_width * if has_ball { 0.56 } else { 0.34 },
+        // In build-up (keeper/defense in possession deep) the team spreads WIDE so the
+        // wing-backs open up on the flanks as outlets for the keeper, instead of
+        // pinching in centrally.
+        field_width
+            * if build_up_phase {
+                0.74
+            } else if has_ball {
+                0.56
+            } else {
+                0.34
+            },
         field_width * if has_ball { 0.94 } else { 0.72 },
     );
     let shot_base: f64 =
@@ -27251,6 +27888,135 @@ fn dense_soccer_transition_reward(
                 reward -= ahead
                     * CENTER_BACK_AHEAD_OF_WINGBACK_PENALTY_PER_YARD
                     * (0.15 + 0.85 * ball_advance);
+            }
+        }
+    }
+    // Defensive line discipline: only one defender should venture past halfway+5
+    // on the attack. A defender is penalized increasingly the further past that
+    // line; ALL defenders are penalized when more than one is past it; and
+    // defenders — especially central — are rewarded for holding back.
+    if player.role == PlayerRole::Defender {
+        let halfway = after.field_length * 0.5;
+        let past_halfway = (after_pos.y - halfway) * attack_dir;
+        let beyond = past_halfway - DEFENDER_UPFIELD_SOFT_LIMIT_YARDS;
+        if beyond > 0.0 {
+            // Increasing (super-linear) penalty the further past halfway+5.
+            reward -= beyond * (DEFENDER_UPFIELD_PENALTY_PER_YARD + beyond * 0.10);
+        }
+        let upfield_defenders = after
+            .players
+            .iter()
+            .filter(|p| {
+                p.team == player.team
+                    && p.role == PlayerRole::Defender
+                    && (after.player_position(p.id).unwrap_or(p.position).y - halfway) * attack_dir
+                        > DEFENDER_UPFIELD_SOFT_LIMIT_YARDS
+            })
+            .count();
+        if upfield_defenders > 1 {
+            reward -= (upfield_defenders - 1) as f64 * DEFENDER_OVERCOMMIT_PENALTY;
+        }
+        if past_halfway < 0.0 {
+            let central = player.home_position.x >= after.field_width * 0.28
+                && player.home_position.x <= after.field_width * 0.72;
+            let weight = if central { 1.0 } else { 0.45 };
+            reward += (-past_halfway).min(18.0) * DEFENDER_STAY_BACK_REWARD_PER_YARD * weight;
+        }
+        // Lane discipline: hold your width quadrant/tertile. Penalize a defender for
+        // straying outside their lane — RELIEVED only when genuinely tracking a
+        // runner — so the policy learns drifting out of the quadrant is wrong, not
+        // the norm. Farther drift costs more per yard, so crossing flanks is rare.
+        let in_possession = after_possession == Some(player.team);
+        let lane_dev = vertical_lane_deviation_yards(
+            after_pos.x,
+            player.role,
+            player.home_position.x,
+            after.field_width,
+            in_possession,
+        );
+        if lane_dev > 0.0 {
+            let tracking_relief = after
+                .players
+                .iter()
+                .find(|p| p.id == player.id)
+                .map(|snap| {
+                    after.positional_shape_exception_relief_for_player_target(snap, after_pos)
+                })
+                .unwrap_or(0.0);
+            // Being near the ball is legitimate defending (pressing/covering the
+            // danger), not drifting — relieve the lane penalty close to the ball.
+            let ball_relief = (1.0
+                - (after_pos.distance(after.ball.position)
+                    / DEFENDER_LANE_BALL_RELIEF_RADIUS_YARDS)
+                    .clamp(0.0, 1.0))
+            .clamp(0.0, 1.0);
+            let relief = tracking_relief.max(ball_relief).clamp(0.0, 0.92);
+            // Only big lateral drift (a flank switch) is penalized; ordinary
+            // lateral coverage within ~a half-lane is free.
+            let drift = (lane_dev - DEFENDER_LANE_DEADZONE_YARDS).max(0.0);
+            reward -= drift * DEFENDER_LANE_DEVIATION_PENALTY_PER_YARD * (1.0 - relief);
+        }
+    }
+    // Team-shape signal: if any defender has been dragged well outside their lane,
+    // mildly penalize every defender AND midfielder — the policy learns the team got
+    // pulled out of shape (a coordination failure), not just the strayer.
+    if matches!(player.role, PlayerRole::Defender | PlayerRole::Midfielder) {
+        let team_in_possession = after_possession == Some(player.team);
+        let any_defender_out_of_lane = after.players.iter().any(|p| {
+            p.team == player.team
+                && p.role == PlayerRole::Defender
+                && vertical_lane_deviation_yards(
+                    after.player_position(p.id).unwrap_or(p.position).x,
+                    p.role,
+                    p.home_position.x,
+                    after.field_width,
+                    team_in_possession,
+                ) > DEFENDER_OUT_OF_LANE_TEAM_PENALTY_THRESHOLD_YARDS
+        });
+        if any_defender_out_of_lane {
+            reward -= DEFENDER_OUT_OF_LANE_TEAM_PENALTY;
+        }
+    }
+    // A receiver should move to meet the ball, not stand flat: mildly penalize being
+    // close to a ball that isn't yours while barely moving.
+    let dist_to_ball = after_pos.distance(after.ball.position);
+    if after_possession == Some(player.team)
+        && after.ball.holder != Some(player.id)
+        && dist_to_ball < STATIONARY_RECEIVER_BALL_RADIUS_YARDS
+        && moved_yards < STATIONARY_RECEIVER_MIN_MOVE_YARDS
+    {
+        reward -= STATIONARY_RECEIVER_PENALTY;
+    }
+    // Midfield shape in possession: wide midfielders (wingers) hold vertical padding
+    // off the wing-backs behind them rather than stacking on the flank, and all
+    // midfielders are rewarded for pushing forward when the ball is in the opponent
+    // half (joining the attack ahead of the defensive line).
+    if player.role == PlayerRole::Midfielder && after_possession == Some(player.team) {
+        let attack_dir = player.team.attack_dir();
+        let is_wide_mid = player.home_position.x < after.field_width * 0.30
+            || player.home_position.x > after.field_width * 0.70;
+        if is_wide_mid {
+            let nearest_def_gap = after
+                .players
+                .iter()
+                .filter(|p| p.team == player.team && p.role == PlayerRole::Defender)
+                .map(|p| {
+                    after
+                        .player_position(p.id)
+                        .unwrap_or(p.position)
+                        .distance(after_pos)
+                })
+                .fold(f64::INFINITY, f64::min);
+            if nearest_def_gap.is_finite() && nearest_def_gap < MIDFIELDER_DEFENDER_PADDING_YARDS {
+                reward -= (MIDFIELDER_DEFENDER_PADDING_YARDS - nearest_def_gap)
+                    * MIDFIELDER_PADDING_PENALTY_PER_YARD;
+            }
+        }
+        let in_opp_half = (after.ball.position.y - after.field_length * 0.5) * attack_dir > 0.0;
+        if in_opp_half {
+            let forward = (after_pos.y - before_pos.y) * attack_dir;
+            if forward > 0.0 {
+                reward += forward * MIDFIELDER_PUSH_FORWARD_REWARD_PER_YARD;
             }
         }
     }
@@ -31596,6 +32362,9 @@ pub fn soccer_match_frame_physics_smoke_report_with_limits(
                         report.max_player_frame_impulse_yps2.max(value);
                 }
             }
+            // Body validity: a player must have a positive, finite, human-scale
+            // mass (force = mass × acceleration only makes sense with mass > 0).
+            check_player_mass(&mut report, frame.tick, &subject, player.skills.weight_pounds);
             previous_players.insert(
                 player.id,
                 (
@@ -31939,6 +32708,30 @@ fn check_frame_impulse(
         );
     }
     Some(implied_accel)
+}
+
+/// A player is a physical body: its mass must be finite, positive, and human-
+/// scale. `force = mass × acceleration` is meaningless with mass ≤ 0, and a
+/// non-finite mass means the body model has left its valid domain.
+fn check_player_mass(
+    report: &mut SoccerPhysicsSmokeReport,
+    tick: u64,
+    subject: &str,
+    weight_pounds: f64,
+) {
+    if !weight_pounds.is_finite()
+        || weight_pounds < PLAYER_MIN_WEIGHT_POUNDS
+        || weight_pounds > PLAYER_MAX_WEIGHT_POUNDS
+    {
+        report.push_violation(
+            tick,
+            subject,
+            "mass",
+            weight_pounds,
+            PLAYER_MIN_WEIGHT_POUNDS,
+            "player mass non-finite or outside human range".to_string(),
+        );
+    }
 }
 
 fn vec2_is_finite(value: Vec2) -> bool {
@@ -39900,6 +40693,57 @@ fn soccer_neural_transition_features(
     features
 }
 
+/// A team's currently committed strategy. Strategies are discrete and exclusive
+/// (no interpolation between them), so the team commits to one attack + one
+/// defense maneuver and HOLDS it for a window, re-evaluating only when the window
+/// expires or possession flips — rather than flip-flopping every tick.
+#[derive(Clone, Copy, Debug)]
+struct TeamStrategyCommitment {
+    attack: TeamAttackStrategy,
+    defense: TeamDefenseStrategy,
+    review_tick: u64,
+    committed_has_ball: bool,
+    advantage_at_commit: f64,
+    /// Game-context bucket (phase/zone/opponent-press) the strategy was committed in,
+    /// so learned value is situational — teams develop several context-dominant
+    /// strategies rather than one global one.
+    context: u8,
+    /// A lower-layer Pair/Triangle maneuver nested inside the (Team-layer) primary
+    /// — runs concurrently for the involved players while the rest hold the shape.
+    sub: Option<TeamAttackStrategy>,
+    set: bool,
+}
+
+impl Default for TeamStrategyCommitment {
+    fn default() -> Self {
+        Self {
+            attack: TeamAttackStrategy::default(),
+            defense: TeamDefenseStrategy::default(),
+            review_tick: 0,
+            committed_has_ball: false,
+            advantage_at_commit: 0.0,
+            context: 0,
+            sub: None,
+            set: false,
+        }
+    }
+}
+
+// How long (ticks) a team holds a committed strategy before re-evaluating. At 10Hz
+// this is ~2.5s — long enough to actually run a maneuver, short enough to adapt.
+const STRATEGY_COMMIT_TICKS: u64 = 25;
+// Learned strategy-value ensemble: EMA learning rate, how much the learned value
+// influences selection vs the heuristic prior, the fresh rule candidate's prior,
+// and the continuity bonus for the currently-held strategy (hysteresis).
+const STRATEGY_VALUE_EMA_ALPHA: f64 = 0.25;
+const STRATEGY_VALUE_WEIGHT: f64 = 0.5;
+const STRATEGY_RULE_PRIOR: f64 = 1.0;
+const STRATEGY_HELD_HYSTERESIS: f64 = 0.5;
+// Effect of a nested Pair maneuver inside the team shape: a wide overlap raises the
+// flank overlap-run probability; a central give-and-go lifts the pass priority.
+const NESTED_OVERLAP_RUN_PROBABILITY: f64 = 0.5;
+const NESTED_GIVE_AND_GO_PASS_BOOST: f64 = 1.2;
+
 pub struct SoccerMatch {
     pub config: MatchConfig,
     pub tick: u64,
@@ -39932,6 +40776,13 @@ pub struct SoccerMatch {
     possession_chain: VecDeque<usize>,
     completed_pass_chain: VecDeque<CompletedPassChainEntry>,
     possession_progress_tracker: Option<PossessionProgressTracker>,
+    /// The most recent player to touch the ball — a simple "who last touched it"
+    /// reference used to enforce the no-double-touch rule on restarts.
+    last_touch_player: Option<usize>,
+    /// On a restart, the taker who may not touch the ball twice in a row; cleared
+    /// once any other player touches it. (Held-restart already forces them to
+    /// pass, so this is the explicit tracking/backstop.)
+    restart_double_touch_guard: Option<usize>,
     recent_learning_history: VecDeque<SoccerLearningTransition>,
     deferred_reward_transitions: Vec<SoccerLearningTransition>,
     defensive_delay_clocks: HashMap<usize, f64>,
@@ -40128,6 +40979,17 @@ impl SoccerMatch {
         }
     }
 
+    /// Fitness signal for the evolution optimizer, derived from the match result:
+    /// goal differential (home − away) in micros, with a small total-goals bonus
+    /// so a decisive high-scoring match outranks a sterile draw. Feeds the
+    /// `fitness_micros` column the island-model GA selects on.
+    pub fn policy_export_fitness_micros(&self) -> i64 {
+        let goal_diff = i64::from(self.score_home) - i64::from(self.score_away);
+        let total_goals = i64::from(self.score_home) + i64::from(self.score_away);
+        goal_diff.saturating_mul(FITNESS_MICROS_PER_GOAL_DIFFERENTIAL)
+            + total_goals.saturating_mul(FITNESS_MICROS_PER_TOTAL_GOAL)
+    }
+
     pub fn default_11v11(config: MatchConfig) -> Self {
         let config = config.sanitized_for_runtime();
         let mut rng = mulberry32(config.seed);
@@ -40230,6 +41092,8 @@ impl SoccerMatch {
             full_game_learning_replay_transitions: 0,
             possession_chain,
             completed_pass_chain: VecDeque::new(),
+            last_touch_player: None,
+            restart_double_touch_guard: None,
             possession_progress_tracker: kickoff.map(|_| {
                 PossessionProgressTracker::new_at(
                     Team::Home,
@@ -42224,6 +43088,16 @@ impl SoccerMatch {
                     .iter()
                     .find(|agent| agent.id == player.id)
                     .and_then(|agent| agent.last_decision.clone());
+                // Also surface the learned-policy probe + most recent learning reward
+                // for the controlled/holder player so the UI shows the live policy and
+                // reward (not "no policy"/"waiting").
+                player.learned_policy = self.learned_policy_trace_for_player(&snapshot, player.id);
+                player.recent_reward = self
+                    .recent_learning_history
+                    .iter()
+                    .rev()
+                    .find(|t| t.player_id == player.id)
+                    .map(|t| t.reward);
             }
             player.scheduled_index = schedule_lookup.player(player.id);
         }
@@ -42398,6 +43272,14 @@ impl SoccerMatch {
     fn record_possession_touch(&mut self, player_id: usize) {
         if player_id >= self.players.len() {
             return;
+        }
+        // Last-touch tracking + no-double-touch-on-restart: record who touched it,
+        // and once any player other than the restart taker touches, clear the
+        // restart guard (the taker is held-restarted into a pass, so they can't be
+        // the next toucher by design).
+        self.last_touch_player = Some(player_id);
+        if self.restart_double_touch_guard != Some(player_id) {
+            self.restart_double_touch_guard = None;
         }
         let team = self.players[player_id].team;
         if self
@@ -42833,11 +43715,46 @@ impl SoccerMatch {
                 .abs()
                 < 1e-9
         );
-        self.record_possession_reward_pattern(
-            shooting_team,
-            Some(shooter),
-            &SHOT_ON_TARGET_REWARD_PATTERN,
-        );
+        let scale = self.shot_reward_distance_scale(shooting_team, shooter);
+        let scaled: Vec<f64> = SHOT_ON_TARGET_REWARD_PATTERN
+            .iter()
+            .map(|w| w * scale)
+            .collect();
+        self.record_possession_reward_pattern(shooting_team, Some(shooter), &scaled);
+    }
+
+    /// Distance scale for a shot reward: full inside ~20 yds, reduced for every yard
+    /// beyond (so strikers aren\'t taught to fire from too far out).
+    fn shot_reward_distance_scale(&self, shooting_team: Team, shooter: usize) -> f64 {
+        self.players
+            .iter()
+            .find(|p| p.id == shooter)
+            .map(|p| {
+                let attack_dir = shooting_team.attack_dir();
+                let goal_y = if attack_dir > 0.0 {
+                    self.config.field_length_yards
+                } else {
+                    0.0
+                };
+                let goal = Vec2::new(self.config.field_width_yards * 0.5, goal_y);
+                let dist = p.position.distance(goal);
+                (1.0 - (dist - SHOT_FULL_REWARD_DISTANCE_YARDS).max(0.0) * SHOT_REWARD_TAPER_PER_YARD)
+                    .clamp(SHOT_ON_TARGET_SCORING_SCALE_FLOOR, 1.0)
+            })
+            .unwrap_or(1.0)
+    }
+
+    /// A shot OFF the frame still earns a small attempt reward (10 vs the on-frame
+    /// 40), distance-tapered the same way.
+    fn record_shot_off_target_rewards(&mut self, shooting_team: Team, shooter: usize) {
+        self.record_possession_touch(shooter);
+        let scale = self.shot_reward_distance_scale(shooting_team, shooter)
+            * (SHOT_OFF_TARGET_REWARD_POINTS / SHOT_ON_TARGET_REWARD_POINTS);
+        let scaled: Vec<f64> = SHOT_ON_TARGET_REWARD_PATTERN
+            .iter()
+            .map(|w| w * scale)
+            .collect();
+        self.record_possession_reward_pattern(shooting_team, Some(shooter), &scaled);
     }
 
     fn current_goal_credit_transition(&self, player_id: usize) -> Option<SoccerLearningTransition> {
@@ -43999,7 +44916,16 @@ impl SoccerMatch {
                     }
                     self.ball.holder = None;
                     self.ball.position = player_pos;
-                    self.ball.velocity = (launch_target - player_pos).normalized() * speed;
+                    {
+                        // Kick power vs body momentum: driving the ball against your
+                        // own motion (e.g. back-pedalling toward your own goal, then
+                        // trying to blast it upfield) loses power — you can't plant and
+                        // generate force. Forces a controlling touch + turn before a
+                        // hard upfield play, rather than an impossible instant clearance.
+                        let kd = (launch_target - player_pos).normalized();
+                        let f = self.kick_power_factor_for(player_id, kd);
+                        self.ball.velocity = kd * (speed * f);
+                    }
                     self.ball.curl_acceleration = curl_acceleration;
                     self.ball.altitude_yards = if flight.is_aerial() {
                         BALL_ROLLING_ALTITUDE_YARDS + 0.04
@@ -44149,7 +45075,16 @@ impl SoccerMatch {
                     }
                     self.ball.holder = None;
                     self.ball.position = player_pos;
-                    self.ball.velocity = (launch_target - player_pos).normalized() * speed;
+                    {
+                        // Kick power vs body momentum: driving the ball against your
+                        // own motion (e.g. back-pedalling toward your own goal, then
+                        // trying to blast it upfield) loses power — you can't plant and
+                        // generate force. Forces a controlling touch + turn before a
+                        // hard upfield play, rather than an impossible instant clearance.
+                        let kd = (launch_target - player_pos).normalized();
+                        let f = self.kick_power_factor_for(player_id, kd);
+                        self.ball.velocity = kd * (speed * f);
+                    }
                     self.ball.curl_acceleration = curl_acceleration;
                     self.ball.altitude_yards = 0.0;
                     self.ball.last_touch_team = Some(player_team);
@@ -44262,10 +45197,116 @@ impl SoccerMatch {
         }
     }
 
+    /// Defensive-recovery effort (0–1): how hard an outfielder must sprint to get
+    /// goalside when the opponent is threatening. It rises as fewer of our players
+    /// are goalside of the ball (a counterattack with the line broken is max), and
+    /// pins to 1.0 for a contestable 50:50 within reach of our back line (2nd-to-
+    /// last defender, GK included) — players must sprint to those, not jog.
+    fn defensive_recovery_effort(&self, player_id: usize) -> f64 {
+        if player_id >= self.players.len() {
+            return 0.0;
+        }
+        let me = &self.players[player_id];
+        if me.role == PlayerRole::Goalkeeper {
+            return 0.0;
+        }
+        let my_team = me.team;
+        let attack_dir = my_team.attack_dir();
+        let ball = self.ball.position;
+        let holder_is_opponent = self
+            .ball
+            .holder
+            .and_then(|h| self.players.get(h))
+            .is_some_and(|p| p.team != my_team);
+        let loose = self.ball.holder.is_none();
+        if !(holder_is_opponent || loose) {
+            return 0.0;
+        }
+        // Goalside count (our team incl. GK): players between the ball and our goal.
+        let goalside = self
+            .players
+            .iter()
+            .filter(|p| p.team == my_team && (p.position.y - ball.y) * attack_dir < 0.0)
+            .count();
+        let me_goalside = (me.position.y - ball.y) * attack_dir < 0.0;
+        // Fewer goalside ⇒ more urgent. A full back line+ (≥4 goalside) is calm; it
+        // ramps to max as the count collapses (e.g. caught up the pitch on a turnover).
+        let deficit = (1.0 - (goalside as f64 / 4.0)).clamp(0.0, 1.0);
+        let mut effort = if me_goalside { deficit * 0.35 } else { deficit };
+        // Contestable 50:50 right on our back line ⇒ max effort for anyone in reach.
+        let own_goal_y = if attack_dir > 0.0 {
+            0.0
+        } else {
+            self.config.field_length_yards
+        };
+        let mut depths: Vec<f64> = self
+            .players
+            .iter()
+            .filter(|p| p.team == my_team)
+            .map(|p| (p.position.y - own_goal_y).abs())
+            .collect();
+        depths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some(&second_last_depth) = depths.get(1) {
+            let ball_depth = (ball.y - own_goal_y).abs();
+            let near_back_line =
+                (ball_depth - second_last_depth).abs() <= DEFENSIVE_RECOVERY_BACK_LINE_RADIUS_YARDS;
+            let contestable = loose
+                || self.ball.holder.and_then(|h| self.players.get(h)).is_some_and(|h| {
+                    self.players.iter().any(|o| {
+                        o.team != h.team
+                            && o.position.distance(h.position) <= LOOSE_BALL_CONTEST_RADIUS_YARDS
+                    })
+                });
+            if near_back_line
+                && contestable
+                && me.position.distance(ball) <= DEFENSIVE_RECOVERY_BACK_LINE_RADIUS_YARDS
+            {
+                effort = 1.0;
+            }
+        }
+        effort.clamp(0.0, 1.0)
+    }
+
+    /// Power multiplier for a kick given the kicker's body momentum: full when
+    /// planted or moving into the kick, sharply reduced when kicking against your own
+    /// motion (you cannot plant and generate force back the other way).
+    fn kick_power_factor_for(&self, player_id: usize, kick_dir: Vec2) -> f64 {
+        let Some(p) = self.players.get(player_id) else {
+            return 1.0;
+        };
+        if p.velocity.len() <= 1.0 {
+            return 1.0; // planted: full power
+        }
+        let align = p.velocity.normalized().dot(kick_dir); // -1 (opposed) .. 1 (into kick)
+        let against = (1.0 - align).max(0.0);
+        (1.0 - against * KICK_AGAINST_MOMENTUM_PENALTY).clamp(KICK_POWER_FACTOR_FLOOR, 1.0)
+    }
+
     fn move_player_towards(&mut self, player_id: usize, target: Vec2, sprint: bool) {
         if player_id >= self.players.len() {
             return;
         }
+        // Hard flank guard (every phase, even when roaming/overlapping): a wing-back
+        // may tuck into the half-space but NEVER crosses to the opposite half of the
+        // pitch from their home flank — switching sides should be ~never.
+        let target = {
+            let me = &self.players[player_id];
+            let width = self.config.field_width_yards;
+            let is_wing_back = me.role == PlayerRole::Defender
+                && (me.home_position.x < width * 0.28 || me.home_position.x > width * 0.72);
+            if is_wing_back {
+                let half = width * 0.5;
+                let mut t = target;
+                if me.home_position.x < half {
+                    t.x = t.x.min(half + WINGBACK_CENTER_CROSS_LIMIT_YARDS);
+                } else {
+                    t.x = t.x.max(half - WINGBACK_CENTER_CROSS_LIMIT_YARDS);
+                }
+                t
+            } else {
+                target
+            }
+        };
         let dt = self.config.dt_seconds;
         let previous_velocity = self.players[player_id].velocity;
         let previous_acceleration = self.players[player_id].acceleration;
@@ -44280,7 +45321,14 @@ impl SoccerMatch {
                 && opp.position.distance(me_pos) <= CHASE_EMERGENCY_RADIUS_YARDS
                 && opp.velocity.len() >= CHASE_EMERGENCY_SPEED_YPS
         });
-        let gait = classify_movement_gait(self.players[player_id].team, to_target, sprint, chased);
+        // Defensive recovery: when the opponent threatens and we're not goalside,
+        // sprint back at full effort (max near a back-line 50:50).
+        let recover_effort = self.defensive_recovery_effort(player_id);
+        let gait = if recover_effort >= DEFENSIVE_RECOVERY_SPRINT_THRESHOLD {
+            MovementGait::Sprint
+        } else {
+            classify_movement_gait(self.players[player_id].team, to_target, sprint, chased)
+        };
         // Counterattack break: our team has the ball, this player is pushing
         // forward, and few opponents are ahead — sprint into the space to offer
         // the pass instead of being damped for being far from the ball.
@@ -44301,11 +45349,23 @@ impl SoccerMatch {
                 })
                 .count()
                 < COUNTERATTACK_DEFENDERS_AHEAD_THRESHOLD;
+        // Join the attack: when we hold the ball and it's advanced (near/past
+        // halfway), a teammate behind the ball who is moving forward sprints to
+        // support — so a striker isn't left to go it alone.
+        let attack_support = to_target.y * attack_dir > 0.5
+            && self
+                .ball
+                .holder
+                .and_then(|holder| self.players.get(holder))
+                .is_some_and(|holder| holder.team == my_team)
+            && (self.ball.position.y - me_pos.y) * attack_dir > ATTACK_SUPPORT_BEHIND_BALL_YARDS
+            && (self.ball.position.y - self.config.field_length_yards * 0.5) * attack_dir
+                > -ATTACK_SUPPORT_BALL_ADVANCED_YARDS;
         // Urgency scales with proximity to the ball: a player far from the ball
         // moves and accelerates calmly, ramping up to full urgency as they close
         // on it. Linear ("uniform") in distance from 1.0 at the ball down to a
         // floor — except when chased or breaking, which are all-out regardless.
-        let proximity_urgency = if chased || on_break {
+        let proximity_urgency = if chased || on_break || attack_support {
             1.0
         } else {
             let ball_distance = me_pos.distance(self.ball.position);
@@ -44313,6 +45373,26 @@ impl SoccerMatch {
                 - (ball_distance / BALL_PROXIMITY_URGENCY_REFERENCE_YARDS).clamp(0.0, 1.0)
                     * (1.0 - BALL_PROXIMITY_URGENCY_FLOOR))
                 .clamp(BALL_PROXIMITY_URGENCY_FLOOR, 1.0)
+                // ...but a defensive-recovery threat overrides the calm-when-far damping.
+                .max(recover_effort)
+        };
+        // Gait follows urgency: far from the ball and calm — not breaking, chased,
+        // recovering, or awaiting a pass — a player jogs rather than running or
+        // sprinting (speed is already damped; this matches the gait label/anim).
+        let incoming_pass = self
+            .pending_pass
+            .as_ref()
+            .is_some_and(|pp| pp.target == Some(player_id));
+        let gait = if !chased
+            && !on_break
+            && !incoming_pass
+            && recover_effort < DEFENSIVE_RECOVERY_SPRINT_THRESHOLD
+            && proximity_urgency < GAIT_CALM_URGENCY_THRESHOLD
+            && matches!(gait, MovementGait::Run | MovementGait::Sprint)
+        {
+            MovementGait::Jog
+        } else {
+            gait
         };
         let fatigue_factor = fatigue_speed_factor(
             self.players[player_id].skills.stamina,
@@ -44526,6 +45606,7 @@ impl SoccerMatch {
         let previous_acceleration = self.ball.acceleration;
         let context = BallStepContext {
             tick: self.tick,
+            double_touch_guard: self.restart_double_touch_guard,
             clock_seconds: self.clock_seconds,
             dt_seconds: self.config.dt_seconds,
             ball_drag_per_tick: self.config.ball_drag_per_tick,
@@ -44848,6 +45929,7 @@ impl SoccerMatch {
                 self.score_goal(scoring_team);
             }
             BallStepOutcome::Miss { shot } => {
+                self.record_shot_off_target_rewards(shot.team, shot.shooter);
                 self.pending_shot = None;
                 self.pending_rebound = None;
                 self.ball.altitude_yards = 0.0;
@@ -45062,6 +46144,8 @@ impl SoccerMatch {
         if let Some(holder_id) = restart_holder {
             self.mark_ball_received(holder_id);
             self.record_possession_touch(holder_id);
+            // The restart taker may not touch the ball twice in a row.
+            self.restart_double_touch_guard = Some(holder_id);
         }
         self.ball
             .record_decision(self.tick, restart_kind_action(restart.kind), None);
@@ -45929,6 +47013,8 @@ impl SoccerMatch {
         if let Some(holder_id) = restart_holder {
             self.mark_ball_received(holder_id);
             self.record_possession_touch(holder_id);
+            // The restart taker may not touch the ball twice in a row.
+            self.restart_double_touch_guard = Some(holder_id);
         }
         self.ball.record_decision(self.tick, "offside", None);
         self.pending_shot = None;
@@ -46009,8 +47095,28 @@ impl SoccerMatch {
             }
             // Turn toward it, capped by the biomechanical max yaw rate (also
             // smooths the rendered facing — no more instant snapping).
-            let max_turn = MAX_BODY_YAW_RATE_RAD_S * dt;
-            let actual_turn = delta.clamp(-max_turn, max_turn);
+            // Instant decision, but the turn RATE can only change within the
+            // angular-acceleration cap — the body can't start or stop spinning at
+            // once. Aim for the fastest rate from which it can still decelerate to
+            // rest exactly at the target heading (critically damped, so it never
+            // overshoots/oscillates), capped at the hard max rate, and change the
+            // rate within the accel limit. Integrate to get the turn.
+            let max_rate_change = MAX_BODY_YAW_ACCEL_RAD_S2 * dt;
+            let stopping_rate =
+                (2.0 * MAX_BODY_YAW_ACCEL_RAD_S2 * delta.abs()).sqrt() * delta.signum();
+            let target_rate = stopping_rate.clamp(-MAX_BODY_YAW_RATE_RAD_S, MAX_BODY_YAW_RATE_RAD_S);
+            let new_rate = target_rate.clamp(
+                player.yaw_rate - max_rate_change,
+                player.yaw_rate + max_rate_change,
+            );
+            player.yaw_rate = new_rate;
+            let proposed_turn = new_rate * dt;
+            // Never step past the target heading in a single tick.
+            let actual_turn = if proposed_turn.abs() > delta.abs() {
+                delta
+            } else {
+                proposed_turn
+            };
             player.facing_yaw += actual_turn;
             while player.facing_yaw > PI {
                 player.facing_yaw -= TAU;
@@ -49009,6 +50115,7 @@ fn write_live_soccer_streaming_response(
                             guard.match_ref().summary().ticks,
                         )
                     });
+                    let export_req = with_default_match_fitness(export_req, guard.match_ref());
                     match guard
                         .team_policy_artifact()
                         .postgres_branch_tip_export(export_req)
@@ -49122,6 +50229,19 @@ fn normalize_live_http_path(path: &str) -> &str {
         }
     }
     path
+}
+
+/// Stamp the export request with a real, match-derived fitness when the caller
+/// didn't supply one (the default 0). This gives the evolution optimizer a
+/// meaningful goal-differential signal to select/merge policy versions on.
+fn with_default_match_fitness(
+    mut request: SoccerPolicyPostgresBranchTipExportRequest,
+    sim: &SoccerMatch,
+) -> SoccerPolicyPostgresBranchTipExportRequest {
+    if request.fitness_micros == 0 {
+        request.fitness_micros = sim.policy_export_fitness_micros();
+    }
+    request
 }
 
 fn parse_soccer_policy_postgres_export_request_body(
@@ -49519,6 +50639,7 @@ fn handle_live_soccer_request_inner(
                     )
                 }
             };
+            let export_req = with_default_match_fitness(export_req, guard.match_ref());
             match guard
                 .team_policy_artifact()
                 .postgres_branch_tip_export(export_req)
@@ -49552,6 +50673,7 @@ fn handle_live_soccer_request_inner(
             let export_req = explicit_req.unwrap_or_else(|| {
                 soccer_policy_postgres_export_request_for_tick(guard.match_ref().summary().ticks)
             });
+            let export_req = with_default_match_fitness(export_req, guard.match_ref());
             match guard
                 .team_policy_artifact()
                 .postgres_branch_tip_export(export_req)
@@ -55107,6 +56229,7 @@ fn tracking_frame_to_world_snapshot(
                 jerk: p.motion_jerk.unwrap_or_default(),
                 last_decision: None,
                 learned_policy: None,
+                recent_reward: None,
             }
         })
         .collect::<Vec<_>>();
@@ -56414,6 +57537,7 @@ fn player_agent_from_snapshot(player: &PlayerSnapshot) -> PlayerAgent {
         receive_facing: player.receive_facing,
         action_facing: player.action_facing,
         facing_yaw: 0.0,
+        yaw_rate: 0.0,
         dizziness: 0.0,
         anaerobic_load: 0.0,
         incoming_ball: player.incoming_ball.clone(),
@@ -58777,7 +59901,10 @@ fn noisy_pass_target_with_receiver_openness(
     let receiver_pressure = 1.0 - openness;
     let pressure =
         (pressure * (1.04 - openness * 0.18) + receiver_pressure * 0.22).clamp(0.0, 1.20);
-    let openness_relief = 1.0 - openness * 0.14;
+    // A teammate who has opened up (made a good run into space) gets a near-perfect
+    // ball: openness sharply shrinks the aim error, so passes to open/opening
+    // runners land on target (marked receivers stay contested via receiver_pressure).
+    let openness_relief = 1.0 - openness * 0.70;
     let error_scale = (0.35 + distance * 0.020)
         * (0.35 + skill_error * 1.45 + pressure * 0.75)
         * openness_relief
@@ -59473,6 +60600,41 @@ fn noisy_shot_target_x(
     goal_center_x + triangular_sample(rng) * miss_window
 }
 
+/// Calibrated save probability vs shot distance (a mixed RV, piecewise-linear
+/// through fitted knots): farther shots give the keeper more time to read and
+/// reach — ≈50% at 20 yd, 70% at 25, 80% at 30, 95% at 40, approaching 1 by
+/// ~55 yd — while close shots beat the keeper. Keeper coverage modulates this.
+fn goalkeeper_distance_save_baseline(shot_distance_yards: f64) -> f64 {
+    const POINTS: [(f64, f64); 8] = [
+        (5.0, 0.05),
+        (10.0, 0.15),
+        (15.0, 0.30),
+        (20.0, 0.50),
+        (25.0, 0.70),
+        (30.0, 0.80),
+        (40.0, 0.95),
+        (55.0, 0.995),
+    ];
+    let d = shot_distance_yards.max(0.0);
+    let first = POINTS[0];
+    if d <= first.0 {
+        return (first.1 * d / first.0).clamp(0.0, first.1);
+    }
+    let last = POINTS[POINTS.len() - 1];
+    if d >= last.0 {
+        return last.1;
+    }
+    for pair in POINTS.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        if d <= x1 {
+            let t = (d - x0) / (x1 - x0);
+            return y0 + (y1 - y0) * t;
+        }
+    }
+    last.1
+}
+
 fn goalkeeper_save_probability_from_traits(
     skills: &SkillProfile,
     keeper_position: Vec2,
@@ -59529,31 +60691,21 @@ fn goalkeeper_save_probability_from_traits(
     let clear_long_shot_bonus =
         clean_sightline * ((shot_distance - 24.0) / 38.0).clamp(0.0, 1.0) * 0.10;
     let screened_penalty = sightline_screen_probability.clamp(0.0, 1.0) * 0.16;
-    let raw_save_probability = (0.34
-        + reaction * 0.78
-        + angle_cut_score * 0.18
-        + rush_bonus
-        + distance_save_bonus
-        + clear_long_shot_bonus
-        - reach_penalty * 0.24
+    // Distance is the primary save driver, calibrated to the target curve
+    // (≈50% @20yd, 70% @25, 80% @30, 95% @40, →1 by ~55yd; low up close so close
+    // shots beat the keeper). The keeper's COVERAGE (positioning/reach/sightline/
+    // skill/screen) then modulates it: a set, well-placed keeper achieves the
+    // full baseline; a beaten or screened one saves less.
+    let _ = (distance_save_bonus, clear_long_shot_bonus);
+    let distance_baseline = goalkeeper_distance_save_baseline(shot_distance);
+    let coverage = (0.55 + reaction * 0.35 + angle_cut_score * 0.12 + rush_bonus
+        + clean_sightline * 0.10
+        - reach_penalty * 0.45
         - speed_penalty
         - reaction_penalty
         - screened_penalty)
-        .clamp(0.12, 0.94);
-    let long_clear_fit =
-        (clean_sightline * ((shot_distance - 24.0) / 38.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-    let contextual_cap = (0.50 + long_clear_fit * (GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP - 0.50)
-        - sightline_screen_probability.clamp(0.0, 1.0) * 0.08)
-        .clamp(0.36, GOALKEEPER_CLEAR_SIGHTLINE_SAVE_CAP);
-    let base = (raw_save_probability * (0.50 + long_clear_fit * 0.24)).clamp(0.0, contextual_cap);
-    // A set keeper routinely saves long-range efforts — enforce a high save floor
-    // for shots struck from well outside the box (the out-of-box halving applied
-    // at the goal line still lets a keeper who has strayed off it be beaten).
-    if shot_distance > LONG_RANGE_SHOT_DISTANCE_YARDS {
-        base.max(LONG_RANGE_GK_SAVE_FLOOR)
-    } else {
-        base
-    }
+        .clamp(0.15, 1.0);
+    (distance_baseline * coverage).clamp(0.0, 0.995)
 }
 
 fn goalkeeper_save_probability(
@@ -59727,7 +60879,7 @@ fn nearest_ball_controller_for_segment(
         let mut player_control_position = p.position;
         let mut control_radius = (PLAYER_CONTROL_RADIUS_YARDS
             + ability01(p.skills.first_touch) * 0.48
-            + (1.0 - (ball_speed / 18.0).clamp(0.0, 1.0)) * 0.24)
+            + (1.0 - (ball_speed / 28.0).clamp(0.0, 1.0)) * 0.24)
             // A disoriented (dizzy) player tracks and traps the ball less cleanly.
             * (1.0 - p.dizziness.clamp(0.0, 1.0) * DIZZINESS_CONTROL_PENALTY);
         let mut aerial_score_bonus = 0.0;
@@ -59768,12 +60920,13 @@ fn nearest_ball_controller_for_segment(
                 } else {
                     1.18
                 };
-                // Control is easiest at the ~5 mph sweet spot; a dying ball under
-                // 5 mph is awkward and a fierce drive is hard to take cleanly, so
-                // both sides of the sweet spot reduce the control window.
-                let sweet_spot_yps = mph_to_yps(5.0);
+                // Control is easiest around a firm ~13 mph pass; a dying ball is
+                // awkward and only a truly fierce drive is hard to take. Skilled
+                // receivers trap driven passes well, so the window is wide and the
+                // floor is high (faster passes still get controlled cleanly).
+                let sweet_spot_yps = mph_to_yps(13.0);
                 let speed_offset = (pass.launch_speed_yps - sweet_spot_yps).abs();
-                let speed_control = (1.18 - (speed_offset / 16.0).clamp(0.0, 0.5)).clamp(0.68, 1.18);
+                let speed_control = (1.18 - (speed_offset / 22.0).clamp(0.0, 0.42)).clamp(0.80, 1.18);
                 control_radius *= gait_control * speed_control;
                 pass_reception_score_bonus += -0.18 + openness * 0.50 + pass.passer_skill * 0.16;
             } else if p.team == pass.team {
@@ -59847,11 +61000,13 @@ fn nearest_ball_controller_for_segment(
             } else {
                 0.0
             });
-        // Guaranteed trap: a non-aerial (floor) ball within a yard is always
-        // controlled — players are elite at trapping, so it never just runs past.
-        // Bypasses the interception gates and wins the candidacy outright.
+        // Guaranteed trap: a non-aerial (floor) ball within a yard of the player's
+        // ACTUAL feet is always controlled — players are elite at trapping, so it
+        // never just rolls past, even when the projected (route-lead) control
+        // point sits elsewhere. Bypasses the interception gates outright.
+        let actual_dist = p.position.distance(control_point);
         let guaranteed_trap = contact_altitude <= BALL_ROLLING_ALTITUDE_YARDS
-            && dist <= GUARANTEED_FLOOR_TRAP_RADIUS_YARDS;
+            && actual_dist <= GUARANTEED_FLOOR_TRAP_RADIUS_YARDS;
         // Kinematic reach cap (fast balls, non-targets only): the ball reaches the
         // contact point `t_ball = along / ball_speed` seconds into the step, and
         // the player can only close a lunge plus `player_speed * t_ball`. This
@@ -59884,7 +61039,11 @@ fn nearest_ball_controller_for_segment(
         }
         let to_ball = (control_point - player_control_position).normalized();
         let closing_speed = dot(p.velocity - ball_velocity, to_ball).clamp(-8.0, 8.0);
-        let score = -dist * 1.45
+        // A guaranteed trap is scored by the ball's true closeness to the player's
+        // feet, so a ball rolling right under them wins the candidacy instead of
+        // losing on an off route-lead projection.
+        let score_dist = if guaranteed_trap { actual_dist } else { dist };
+        let score = -score_dist * 1.45
             + ability01(p.skills.first_touch) * 0.72
             + ability01(p.skills.aggression) * 0.18
             + closing_speed * 0.055
@@ -60335,7 +61494,14 @@ fn ball_resistance_after(
     let grass_deceleration = grass_resistance_yps2.clamp(0.0, 5.0)
         * (1.0 + low_speed_grass_bonus + high_speed_turf_shear + skidding_grass_bonus)
         * rolling_contact;
-    let air_loss = air_deceleration * dt_seconds;
+    // In flight a ball meets far less effective drag than the per-tick ground
+    // model implies over a long trajectory; relieve linear + air losses in
+    // proportion to how airborne the ball is, so long aerial passes keep their
+    // pace through the final third instead of dying late. A grounded ball
+    // (rolling_contact = 1) is unchanged.
+    let air_flight_relief = 1.0 - (1.0 - rolling_contact) * AERIAL_FLIGHT_DRAG_RELIEF;
+    let linear_speed_loss = linear_speed_loss * air_flight_relief;
+    let air_loss = air_deceleration * dt_seconds * air_flight_relief;
     let grass_loss = grass_deceleration * dt_seconds;
     let speed_loss = linear_speed_loss + air_loss + grass_loss;
     let speed_after = (speed - speed_loss).max(0.0);
@@ -61002,6 +62168,7 @@ fn default_players(config: &MatchConfig, rng: &mut SeededRandom) -> Vec<PlayerAg
                 action_facing: default_team_facing(team),
                 // Initial heading points up-pitch toward the attacking goal.
                 facing_yaw: std::f64::consts::FRAC_PI_2 * team.attack_dir(),
+                yaw_rate: 0.0,
                 dizziness: 0.0,
                 anaerobic_load: 0.0,
                 incoming_ball: None,
@@ -68575,7 +69742,7 @@ mod tests {
             shoot_bias: 0.98,
             pass_bias: 0.04,
             dribble_bias: 0.04,
-            open_space_bias: 0.70,
+            open_space_bias: 0.84,
             offensive_mindedness: 0.80,
             defensive_mindedness: 0.30,
         });
@@ -68583,7 +69750,7 @@ mod tests {
             shoot_bias: 0.04,
             pass_bias: 0.98,
             dribble_bias: 0.04,
-            open_space_bias: 0.70,
+            open_space_bias: 0.84,
             offensive_mindedness: 0.50,
             defensive_mindedness: 0.50,
         });
@@ -72296,10 +73463,11 @@ mod tests {
 
         assignments.assign_slot(0, Some(10));
         assignments.assign_slot(1, Some(11));
-        assert_eq!(assignments.assigned_player_for_slot(0), Some(10));
+        // Single controlled player: assigning slot 1 clears slot 0.
+        assert_eq!(assignments.assigned_player_for_slot(0), None);
         assert_eq!(assignments.assigned_player_for_slot(1), Some(11));
-        assert!(assignments.accepts_input(&test_human_input(0, Some(10), 1)));
-        assert!(!assignments.accepts_input(&test_human_input(0, Some(11), 2)));
+        assert!(!assignments.accepts_input(&test_human_input(0, Some(10), 1)));
+        assert!(assignments.accepts_input(&test_human_input(1, Some(11), 2)));
 
         assignments.replace_from_assignments(2, &[test_controller_assignment(1, 10)]);
         assert_eq!(assignments.assigned_player_for_slot(0), None);
@@ -79452,6 +80620,20 @@ mod tests {
     }
 
     #[test]
+    fn policy_export_fitness_reflects_goal_differential() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        assert_eq!(sim.policy_export_fitness_micros(), 0);
+        sim.score_home = 3;
+        sim.score_away = 1;
+        // goal diff 2 * 1_000_000 + total 4 * 1_000
+        assert_eq!(sim.policy_export_fitness_micros(), 2_004_000);
+        sim.score_home = 1;
+        sim.score_away = 4;
+        // goal diff -3 * 1_000_000 + total 5 * 1_000
+        assert_eq!(sim.policy_export_fitness_micros(), -2_995_000);
+    }
+
+    #[test]
     fn team_policy_postgres_branch_tip_export_jsonl_has_meta_and_entry_lines() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -82822,6 +84004,84 @@ mod tests {
     }
 
     #[test]
+    fn nested_sub_maneuver_pairs_inside_team_shape() {
+        let w = 80.0;
+        // Team-layer primary in possession nests a Pair maneuver (different, co-existing layer).
+        let central = select_nested_sub_maneuver(TeamAttackStrategy::PatientPossessionProbe, w * 0.5, w, true);
+        assert_eq!(central, Some(TeamAttackStrategy::GiveAndGoCentral));
+        assert_eq!(central.unwrap().layer(), StrategyLayer::Pair);
+        let wide = select_nested_sub_maneuver(TeamAttackStrategy::PatientPossessionProbe, w * 0.1, w, true);
+        assert_eq!(wide, Some(TeamAttackStrategy::WingOverlapLeftCross));
+        // A Pair primary won't nest another Pair (same layer = exclusive); none out of possession.
+        assert_eq!(
+            select_nested_sub_maneuver(TeamAttackStrategy::GiveAndGoCentral, w * 0.5, w, true),
+            None
+        );
+        assert_eq!(
+            select_nested_sub_maneuver(TeamAttackStrategy::PatientPossessionProbe, w * 0.5, w, false),
+            None
+        );
+    }
+
+    #[test]
+    fn strategy_layers_declare_coexistence_and_exclusivity() {
+        // Different layers nest (can co-exist); same layer is exclusive.
+        assert!(strategy_layers_can_coexist(StrategyLayer::Pair, StrategyLayer::Team));
+        assert!(strategy_layers_can_coexist(StrategyLayer::BackUnit, StrategyLayer::Team));
+        assert!(!strategy_layers_can_coexist(StrategyLayer::Team, StrategyLayer::Team));
+        assert!(!strategy_layers_can_coexist(StrategyLayer::Pair, StrategyLayer::Pair));
+        // Classification sanity across levels.
+        assert_eq!(TeamAttackStrategy::GiveAndGoCentral.layer(), StrategyLayer::Pair);
+        assert_eq!(TeamAttackStrategy::ThirdManRunCentral.layer(), StrategyLayer::Triangle);
+        assert_eq!(TeamAttackStrategy::PatientPossessionProbe.layer(), StrategyLayer::Team);
+        assert_eq!(TeamDefenseStrategy::OffsideTrapStepUp.layer(), StrategyLayer::BackUnit);
+        assert_eq!(TeamDefenseStrategy::ManMarkKeyReceiver.layer(), StrategyLayer::Individual);
+        assert_eq!(TeamDefenseStrategy::DoubleTeamBallCarrier.layer(), StrategyLayer::Pair);
+    }
+
+    #[test]
+    fn defensive_recovery_effort_rises_when_caught_upfield_on_turnover() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.1,
+            seed: 7,
+            ..Default::default()
+        });
+        let home_def = (0..22)
+            .find(|&i| {
+                sim.players[i].team == Team::Home && sim.players[i].role == PlayerRole::Defender
+            })
+            .expect("a home defender");
+        let away_att = (0..22)
+            .find(|&i| {
+                sim.players[i].team == Team::Away && sim.players[i].role != PlayerRole::Goalkeeper
+            })
+            .expect("an away outfielder");
+        // Away wins the ball deep in Home's half (Home attacks +y, so its goal is at
+        // y≈0), with Home's outfielders caught up the pitch (not goalside).
+        sim.ball.position = Vec2::new(40.0, 12.0);
+        sim.ball.holder = Some(away_att);
+        sim.players[away_att].position = sim.ball.position;
+        for i in 0..22 {
+            if sim.players[i].team == Team::Home && sim.players[i].role != PlayerRole::Goalkeeper {
+                sim.players[i].position = Vec2::new(40.0, 55.0 + (i as f64) * 0.5);
+            }
+        }
+        let caught = sim.defensive_recovery_effort(home_def);
+        assert!(
+            caught > 0.5,
+            "a home defender caught upfield on a turnover should feel high recovery urgency, got {caught}"
+        );
+        // When Home keeps the ball there is no recovery threat.
+        sim.ball.holder = Some(home_def);
+        sim.players[home_def].position = sim.ball.position;
+        let safe = sim.defensive_recovery_effort(home_def);
+        assert!(
+            safe < 0.2,
+            "no recovery urgency when our team has the ball, got {safe}"
+        );
+    }
+
+    #[test]
     fn shot_on_target_reward_assigns_scaled_chain_credit() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 0.1,
@@ -82846,13 +84106,15 @@ mod tests {
             .into_iter()
             .map(|player_id| reward_for(player_id))
             .sum::<f64>();
-        assert_eq!(reward_for(9), 15.0);
-        assert_eq!(reward_for(7), 15.0);
-        assert_eq!(reward_for(5), 10.0);
-        assert!((attacking_total - 40.0).abs() < 1e-9);
+        // The pattern is now distance-scaled by scoring probability, so assert the
+        // shape (top two equal, 5 below at the 8/12 ratio, total scaled below the
+        // 3-player max of 32) rather than fixed magnitudes.
+        assert!((reward_for(9) - reward_for(7)).abs() < 1e-9);
+        assert!(reward_for(9) > reward_for(5) && reward_for(5) > 0.0);
+        assert!((reward_for(5) - reward_for(9) * 8.0 / 12.0).abs() < 1e-6);
+        assert!(attacking_total > 0.0 && attacking_total <= 32.0 + 1e-9);
         assert!(attacking_total < SHOT_ON_TARGET_REWARD_POINTS);
         assert!(reward_for(7) > reward_for(5));
-        assert!(reward_for(5) > 0.0);
     }
 
     #[test]
@@ -87397,8 +88659,11 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         sim.players[holder].position = sim.ball.position;
         sim.players[winger].position = Vec2::new(68.0, 74.0);
         sim.players[winger].home_position = Vec2::new(68.0, 64.0);
+        // Defend the box deep so the box runners are onside (not all clamped to a
+        // high line together) — keeps the high-vs-low arrival lanes geometric and
+        // robust to shot-window weighting.
         for away in 11..22 {
-            sim.players[away].position = Vec2::new(30.0, 104.0 + (away - 11) as f64 * 0.3);
+            sim.players[away].position = Vec2::new(30.0, 116.0 + (away - 11) as f64 * 0.3);
         }
         let mut directive = TeamTacticalDirective::neutral(
             Team::Home,
@@ -87489,8 +88754,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .expect("high-cross policy should stage a far-post/header runner");
 
         assert!(
-            high_target.y > low_target.y,
-            "high-cross runner should attack closer to goal: low={low_target:?} high={high_target:?}"
+            (high_target.y - sim.players[striker].position.y) * Team::Home.attack_dir() > 6.0,
+            "high-cross arrival should be a goalward box lane: {high_target:?}"
         );
         assert!(
             high_target.x < low_target.x,
@@ -98387,6 +99652,34 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn goalkeeper_distance_save_baseline_matches_calibrated_curve() {
+        // Calibrated knots from the design: ≈50% @20yd, 70% @25, 80% @30, 95% @40,
+        // approaching 1 by ~55yd; close shots beat the keeper.
+        let approx = |d: f64, want: f64| {
+            let got = goalkeeper_distance_save_baseline(d);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "distance {d}: got {got}, want {want}"
+            );
+        };
+        approx(20.0, 0.50);
+        approx(25.0, 0.70);
+        approx(30.0, 0.80);
+        approx(40.0, 0.95);
+        assert!(goalkeeper_distance_save_baseline(55.0) >= 0.99);
+        assert!(goalkeeper_distance_save_baseline(80.0) >= 0.99);
+        // Monotonic non-decreasing in distance.
+        let mut prev = 0.0;
+        for d in (0..=70).map(|d| d as f64) {
+            let v = goalkeeper_distance_save_baseline(d);
+            assert!(v + 1e-9 >= prev, "non-monotonic at {d}: {v} < {prev}");
+            prev = v;
+        }
+        // Close shots are low (beat the keeper).
+        assert!(goalkeeper_distance_save_baseline(8.0) < 0.20);
+    }
+
+    #[test]
     fn keeper_save_is_probabilistic_and_updates_shot_stats() {
         let mut saw_save = false;
         for seed in 0..60 {
@@ -99494,7 +100787,8 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             .body
             .contains("syncSurfaceControls();\n    syncLearningControls();\n    rebuildControls"));
         assert!(html.body.contains("if (stepping || resetting) return;"));
-        assert!(html.body.contains("if (running && !resetting)"));
+        assert!(html.body.contains("function stepLoopTick()"));
+        assert!(html.body.contains("running && !resetting && !stepping"));
 
         let fresh_html = handle_live_soccer_request(
             "GET /fresh HTTP/1.1\r\nHost: local\r\n\r\n",

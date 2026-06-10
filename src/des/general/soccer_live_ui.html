@@ -316,6 +316,10 @@
       overflow: visible;
     }
   }
+.padbtn{min-width:30px;height:28px;padding:0 8px;font-size:14px;font-weight:700;border-radius:6px;border:1px solid #2f9b57;background:#16241c;color:#cfe9d8;cursor:pointer;user-select:none}
+.padbtn:hover{background:#1d3327}
+.padbtn.lit{background:#f6a40c;color:#172026;border-color:#f6a40c;box-shadow:0 0 8px rgba(246,164,12,.7)}
+#controlPad{margin:6px 0;display:flex;gap:4px;flex-wrap:wrap;align-items:center}
 </style>
 </head>
 <body>
@@ -355,6 +359,15 @@
         <select id="targetPick"></select>
       </div>
       <div class="status" id="status">connecting</div>
+      <div id="controlPad">
+        <span style="font-size:11px;color:#9fb3c8">Controlled player:</span>
+        <button class="padbtn" id="padUp" title="ArrowUp">↑</button>
+        <button class="padbtn" id="padDown" title="ArrowDown">↓</button>
+        <button class="padbtn" id="padLeft" title="ArrowLeft">←</button>
+        <button class="padbtn" id="padRight" title="ArrowRight">→</button>
+        <button class="padbtn" id="padSprint" title="Shift">Sprint</button>
+        <button class="padbtn" id="padAction" title="Enter">Pass/Shoot</button>
+      </div>
       <div id="feedbackPanel" class="hidden" style="margin:6px 0;padding:8px;border:1px solid #2f9b57;border-radius:6px;background:rgba(35,133,71,.12)">
         <div class="section" style="margin-top:0">Coaching Feedback (paused)</div>
         <div style="font-size:11px;opacity:.8;margin-bottom:6px">Describe what went right/wrong for attack/defense and how to improve. Captured with the whole-field snapshot at this frame.</div>
@@ -454,6 +467,19 @@
         <label for="simTicksPerPulse">Speed</label>
         <input id="simTicksPerPulse" type="range" min="1" max="100" step="1" value="1">
         <input id="simTicksPerPulseNumber" type="number" min="1" max="1000" step="1" value="1">
+      </div>
+      <div class="surface-control">
+        <label for="playbackSpeed">Tempo</label>
+        <select id="playbackSpeed">
+          <option value="0.5">1/2x</option>
+          <option value="0.6667">2/3x</option>
+          <option value="0.75">3/4x</option>
+          <option value="0.8">4/5x</option>
+          <option value="1" selected>1x</option>
+          <option value="1.25">5/4x</option>
+          <option value="1.3333">4/3x</option>
+          <option value="2">2x</option>
+        </select>
       </div>
       <div class="toggle-control">
         <label for="policyAutosaveEnabled"><input id="policyAutosaveEnabled" type="checkbox">Auto Save</label>
@@ -663,6 +689,13 @@ const learningIntervalTicks = document.getElementById("learningIntervalTicks");
 const policyTrainMaxTransitions = document.getElementById("policyTrainMaxTransitions");
 const simTicksPerPulse = document.getElementById("simTicksPerPulse");
 const simTicksPerPulseNumber = document.getElementById("simTicksPerPulseNumber");
+const playbackSpeedSelect = document.getElementById("playbackSpeed");
+let playbackSpeed = 1.0;
+const MIN_STEP_GAP_MS = 16;
+// Offside call: freeze a red line at where offside occurred and pause briefly.
+let offsideFlash = null;
+let offsidePauseUntil = 0;
+const OFFSIDE_FLASH_MS = 2000;
 const policyAutosaveEnabled = document.getElementById("policyAutosaveEnabled");
 const policyAutosaveNow = document.getElementById("policyAutosaveNow");
 const prunePolicyButton = document.getElementById("prunePolicy");
@@ -740,6 +773,7 @@ const keys = new Set();
 let state = null;
 let running = false;
 let activeSlot = 0;
+let autoAssignedController = false;
 let inputSeq = 0;
 let queuedInputs = [];
 let eventLog = [];
@@ -1820,8 +1854,13 @@ function latestTransitionForPlayer(playerId) {
 function selectedRewardLabel(p) {
   if (!p) return "-";
   const t = latestTransitionForPlayer(p.id);
-  if (!t) return "waiting";
-  return `${t.action || "-"} R${signed(t.reward)} t${t.tick ?? "-"}`;
+  if (t) return `${t.action || "-"} R${signed(t.reward)} t${t.tick ?? "-"}`;
+  // Fallback to the recent reward surfaced on the served player (controlled/holder)
+  // with its last action, so it shows the live reward instead of "waiting".
+  if (typeof p.recentReward === "number") {
+    return `${p.lastDecision?.action || "-"} R${signed(p.recentReward)}`;
+  }
+  return "waiting";
 }
 function fullTimeLabel() {
   if (!state?.frame) return "full time";
@@ -2726,6 +2765,27 @@ function drawAssistantOffsideLines(r) {
     ctx.setLineDash([]);
   }
 }
+// On an offside call, draw a solid red line across the pitch at the spot offside
+// occurred (the second-last-defender line), held for the pause window.
+function drawOffsideFlash(r) {
+  if (!offsideFlash || performance.now() >= offsideFlash.untilMs) {
+    offsideFlash = null;
+    return;
+  }
+  const x = mapPoint({x: 0, y: offsideFlash.lineY}, r).x;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x, r.y);
+  ctx.lineTo(x, r.y + r.h);
+  ctx.strokeStyle = "rgba(239,68,68,0.95)";
+  ctx.lineWidth = 4;
+  ctx.stroke();
+  ctx.fillStyle = "rgba(239,68,68,0.95)";
+  ctx.font = "bold 22px sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillText("OFFSIDE", Math.min(x + 8, r.x + r.w - 110), r.y + 8);
+  ctx.restore();
+}
 function pendingPassPhase(frame = state?.frame) {
   return frame?.pendingPass || frame?.pending_pass || null;
 }
@@ -3042,7 +3102,7 @@ function drawGaitCue(p, pt, r) {
   if (cue <= 0.0) return;
   const speed = vecLen(p.velocity || {x: 0, y: 0});
   const motion = norm(fieldDirToCanvas(p.velocity || {x: 0, y: 0}, r));
-  const radius = 13.5 + cue * 4.5;
+  const radius = 10.8 + cue * 3.6;
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
   ctx.strokeStyle = `rgba(246,201,68,${0.12 + cue * 0.34})`;
@@ -3070,7 +3130,7 @@ function drawPlayer(p, r) {
     ctx.save();
     ctx.setLineDash([4, 3]);
     ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 17, 0, Math.PI * 2);
+    ctx.arc(pt.x, pt.y, 13.6, 0, Math.PI * 2);
     ctx.strokeStyle = "#c58a13";
     ctx.lineWidth = 2.5;
     ctx.stroke();
@@ -3078,7 +3138,7 @@ function drawPlayer(p, r) {
   }
   drawGaitCue(p, pt, r);
   ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 12, 0, Math.PI * 2);
+  ctx.arc(pt.x, pt.y, 9.6, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
   drawFacingIndicator(p, pt, r);
@@ -3129,12 +3189,14 @@ function drawBall(ball, r) {
   ctx.stroke();
 }
 function render() {
+  maybeAutoAssignFirstController();
   if (!state) return;
   const f = state.frame;
   const r = pitchRect();
   drawPitch(r);
   drawPitchGridOverlay(r);
   drawAssistantOffsideLines(r);
+  drawOffsideFlash(r);
   drawPendingPassPhase(r);
   drawPendingReboundPhase(r);
   drawFlankPolicyLanes(r);
@@ -3306,11 +3368,19 @@ function liveControllerAssigned() {
 function effectiveSimTicksPerPulse() {
   return liveControllerAssigned() ? 1 : configuredSimTicksPerPulse();
 }
+// Target gap between step starts. The tempo selector scales the base pulse
+// interval (1/2x doubles it, 2x halves it); ticks-per-pulse stays the separate
+// fast-forward multiplier (more ticks advanced per pulse), so the two compose:
+// wall-clock speed = ticksPerPulse * tempo. Clamped so we neither hammer the
+// server nor stall the loop.
+function currentStepIntervalMs() {
+  return clamp(LIVE_STEP_INTERVAL_MS / Math.max(0.05, playbackSpeed), MIN_STEP_GAP_MS, 4000);
+}
 function simSpeedLabel() {
   const configured = configuredSimTicksPerPulse();
   const effective = effectiveSimTicksPerPulse();
   const dt = Number(state?.config?.dtSeconds ?? 0.1);
-  const speed = effective * dt / (LIVE_STEP_INTERVAL_MS / 1000);
+  const speed = effective * dt / (currentStepIntervalMs() / 1000);
   const speedText = speed >= 10 ? speed.toFixed(0) : speed.toFixed(1);
   const inputText = liveControllerAssigned() ? " + input" : "";
   return `${speedText}x ${effective}t${inputText}`;
@@ -3940,6 +4010,26 @@ async function assignSlot(slot, playerId) {
   statusEl.textContent = playerId == null ? "controller cleared" : "controller assigned";
   render();
 }
+async function maybeAutoAssignFirstController() {
+  // Hook up controller 1 out of the box so the arrow keys work immediately: assign
+  // slot 0 to a home midfielder once, unless a controller is already assigned. The
+  // user can reassign by clicking any player, or clear it.
+  if (autoAssignedController) return;
+  if (!state?.frame?.players?.length || humanSlotCount() < 1) return;
+  if ((state.controllerAssignments || []).length > 0) { autoAssignedController = true; return; }
+  const players = state.frame.players;
+  const pick = players.find(p => p.team === "Home" && p.role === "Midfielder")
+            || players.find(p => p.team === "Home" && p.role !== "Goalkeeper")
+            || players[0];
+  if (!pick) return;
+  autoAssignedController = true; // set before await to avoid re-entry
+  try {
+    await assignSlot(0, pick.id);
+    setActiveSlot(0);
+    statusEl.textContent = `controller 1 → #${pick.shirt} · arrow keys move, Enter = pass/shoot`;
+  } catch (err) { autoAssignedController = false; }
+}
+
 async function handlePitchClick(e) {
   if (!state?.frame?.players?.length) return;
   const hit = nearestPlayerAtCanvas(canvasPointFromEvent(e));
@@ -4343,6 +4433,7 @@ async function loadState() {
   lastSemanticBallAction = null;
   rememberSemanticBallActionsFromFrames([state.frame]);
   applyAssignmentsToFrame(state.controllerAssignments);
+  maybeAutoAssignFirstController();
   syncSurfaceControls();
   rebuildControls(state.controllerAssignments);
   statusEl.textContent = state.done ? fullTimeLabel() : "connected";
@@ -4476,6 +4567,22 @@ async function stepOnce(options = {}) {
       policyHistory: previousPolicyHistory
     };
     if (response.events.length) eventLog.push(...response.events);
+    // On an offside call, freeze a red line where it occurred and pause ~2s.
+    const offsideEvent = response.events.find(e => String(e.kind || "").toLowerCase() === "offside");
+    if (offsideEvent) {
+      const lines = assistantOffsideLines();
+      const line = lines.find(l => l.attackingTeam === offsideEvent.team) || lines[0];
+      let lineY = line ? Number(line.effectiveLineY) : null;
+      if (lineY == null || !Number.isFinite(lineY)) {
+        const p = (state.frame?.players || []).find(pl => pl.id === offsideEvent.playerId);
+        lineY = p?.position ? Number(p.position.y) : null;
+      }
+      if (lineY != null && Number.isFinite(lineY)) {
+        const now = performance.now();
+        offsideFlash = { lineY, attackingTeam: offsideEvent.team, untilMs: now + OFFSIDE_FLASH_MS };
+        offsidePauseUntil = now + OFFSIDE_FLASH_MS;
+      }
+    }
     recentLearningTransitions = Array.isArray(response.learningTransitions)
       ? response.learningTransitions
       : [];
@@ -4693,6 +4800,44 @@ prunePolicyButton.addEventListener("click", () => {
 policyAutosavePath.addEventListener("change", () => {
   updatePolicyAutosave(false).catch(e => statusEl.textContent = e.message);
 });
+const padPressed = new Set();
+function controlAxis() {
+  let x = 0, y = 0;
+  if (keys.has("ArrowRight") || padPressed.has("right")) x += 1;
+  if (keys.has("ArrowLeft") || padPressed.has("left")) x -= 1;
+  if (keys.has("ArrowDown") || padPressed.has("down")) y += 1;
+  if (keys.has("ArrowUp") || padPressed.has("up")) y -= 1;
+  return {x, y};
+}
+function litPadButton(dir, on) {
+  const id = {up:"padUp",down:"padDown",left:"padLeft",right:"padRight",sprint:"padSprint"}[dir];
+  const btn = id && document.getElementById(id);
+  if (btn) btn.classList.toggle("lit", !!on);
+}
+// Drive the ACTIVE (single controlled) slot from the arrow pad / arrow keys, so it
+// works whichever slot the controlled player is on.
+function pushControlAxis() {
+  const sprint = keys.has("ShiftRight") || keys.has("ShiftLeft") || padPressed.has("sprint");
+  if (queueInput(false, false, activeSlot, null, {axis: controlAxis(), sprint})) {
+    scheduleInputFlush(0);
+  }
+}
+(function wireControlPad() {
+  const dirs = {padUp: "up", padDown: "down", padLeft: "left", padRight: "right", padSprint: "sprint"};
+  for (const [id, dir] of Object.entries(dirs)) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    const press = e => { e.preventDefault(); padPressed.add(dir); btn.classList.add("lit"); pushControlAxis(); };
+    const release = () => { padPressed.delete(dir); btn.classList.remove("lit"); pushControlAxis(); };
+    btn.addEventListener("mousedown", press);
+    btn.addEventListener("touchstart", press, {passive: false});
+    btn.addEventListener("mouseup", release);
+    btn.addEventListener("mouseleave", release);
+    btn.addEventListener("touchend", release);
+  }
+  const action = document.getElementById("padAction");
+  if (action) action.addEventListener("click", () => { if (queueSlotAction(activeSlot)) scheduleInputFlush(0); });
+})();
 window.addEventListener("keydown", e => {
   if (!isFormEditingTarget(e.target) && /^Digit[1-4]$/.test(e.code)) {
     const slot = Number(e.code.slice(-1)) - 1;
@@ -4715,6 +4860,13 @@ window.addEventListener("keydown", e => {
     return;
   }
   keys.add(e.code);
+  const arrowDir = {ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right"}[e.code];
+  if (arrowDir) {
+    e.preventDefault();
+    litPadButton(arrowDir, true);
+    pushControlAxis();
+    return;
+  }
   const actionSlot = CONTROLLER_KEYMAPS.findIndex(map => map.action === e.code);
   if (actionSlot >= 0 && actionSlot < humanSlotCount()) {
     e.preventDefault();
@@ -4734,6 +4886,8 @@ window.addEventListener("keydown", e => {
 window.addEventListener("keyup", e => {
   const slot = controllerSlotForCode(e.code);
   keys.delete(e.code);
+  const arrowDir = {ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right"}[e.code];
+  if (arrowDir) { litPadButton(arrowDir, false); pushControlAxis(); return; }
   if (CONTROLLER_CODES.has(e.code)) {
     e.preventDefault();
     if (slot >= 0 && slot < humanSlotCount()) {
@@ -4746,9 +4900,35 @@ window.addEventListener("keyup", e => {
 setInterval(() => {
   pulseLowLatencyControllerInput();
 }, LIVE_INPUT_FLUSH_INTERVAL_MS);
-setInterval(() => {
-  if (running && !resetting) stepOnce().catch(e => statusEl.textContent = e.message);
-}, LIVE_STEP_INTERVAL_MS);
+// Drift-aware, self-scheduling step pacer. Unlike a fixed setInterval (whose
+// callbacks queue/burst after a freeze or a backgrounded tab), this runs at most
+// one step at a time and schedules the next start `interval - elapsed` later, so
+// a slow step is absorbed without a catch-up speed-up. The interval comes from
+// the chosen tempo (currentStepIntervalMs).
+function stepLoopTick() {
+  const interval = currentStepIntervalMs();
+  const started = performance.now();
+  const finish = () => {
+    const elapsed = performance.now() - started;
+    const wait = clamp(currentStepIntervalMs() - elapsed, MIN_STEP_GAP_MS, 4000);
+    setTimeout(stepLoopTick, wait);
+  };
+  if (running && !resetting && !stepping && performance.now() >= offsidePauseUntil) {
+    stepOnce()
+      .catch(e => { statusEl.textContent = e.message; })
+      .finally(finish);
+  } else {
+    // Idle (paused or a step already in flight): re-check soon without bursting.
+    setTimeout(stepLoopTick, Math.min(interval, LIVE_STEP_INTERVAL_MS));
+  }
+}
+setTimeout(stepLoopTick, LIVE_STEP_INTERVAL_MS);
+if (playbackSpeedSelect) {
+  playbackSpeedSelect.addEventListener("change", () => {
+    playbackSpeed = Number(playbackSpeedSelect.value) || 1;
+    simSpeed.textContent = simSpeedLabel();
+  });
+}
 initializeAuthTokenFromLocation();
 bootLivePage().catch(e => statusEl.textContent = e.message);
 </script>

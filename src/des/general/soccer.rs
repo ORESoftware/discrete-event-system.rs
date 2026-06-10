@@ -98304,7 +98304,7 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
         assert_eq!(first_pg["team"], "home");
         assert_eq!(first_pg["entryKind"], "action");
         assert_eq!(first_pg["targetFineCellId"], -1);
-        assert_eq!(first_pg["stateHash"].as_str().unwrap().len(), 16);
+        assert_eq!(first_pg["stateHash"].as_str().unwrap().len(), 32);
         assert!(first_pg["roleScope"].as_str().is_some_and(|role| matches!(
             role,
             "goalkeeper" | "defender" | "midfielder" | "forward"

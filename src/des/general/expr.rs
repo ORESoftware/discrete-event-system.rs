@@ -8,6 +8,9 @@
 
 use std::collections::HashMap;
 
+use crate::des::shared::precision::{
+    clamp_unit_interval, safe_div, safe_exp, safe_ln, safe_powf, safe_sqrt,
+};
 use crate::des::shared::transform::Transform;
 
 // -----------------------------------------------------------------------------
@@ -164,6 +167,14 @@ pub fn one() -> Expr {
 }
 
 /// Evaluate a built-in unary math function by name.
+///
+/// Domain-restricted and overflow-prone functions route through the numeric
+/// guards in [`crate::des::shared::precision`] so an out-of-domain or overflowing
+/// argument yields a bounded, finite, logged value instead of a `NaN`/`±∞` that
+/// would silently propagate through a whole simulation trace: `sqrt`/`ln` clamp
+/// to their domain, `exp` clamps overflow, and `asin`/`acos` clamp the argument
+/// to `[-1, 1]`. The total functions (`sin`/`cos`/`tan`/`atan`/hyperbolics/`abs`)
+/// are passed straight through.
 pub struct MathFn;
 
 impl MathFn {
@@ -172,15 +183,15 @@ impl MathFn {
             FuncName::Sin => x.sin(),
             FuncName::Cos => x.cos(),
             FuncName::Tan => x.tan(),
-            FuncName::Asin => x.asin(),
-            FuncName::Acos => x.acos(),
+            FuncName::Asin => clamp_unit_interval(x).asin(),
+            FuncName::Acos => clamp_unit_interval(x).acos(),
             FuncName::Atan => x.atan(),
             FuncName::Sinh => x.sinh(),
             FuncName::Cosh => x.cosh(),
             FuncName::Tanh => x.tanh(),
-            FuncName::Exp => x.exp(),
-            FuncName::Log => x.ln(),
-            FuncName::Sqrt => x.sqrt(),
+            FuncName::Exp => safe_exp(x),
+            FuncName::Log => safe_ln(x),
+            FuncName::Sqrt => safe_sqrt(x),
             FuncName::Abs => x.abs(),
         }
     }
@@ -454,8 +465,12 @@ impl ExprEvaluator {
                     BinOp::Add => a + b,
                     BinOp::Sub => a - b,
                     BinOp::Mul => a * b,
-                    BinOp::Div => a / b,
-                    BinOp::Pow => a.powf(b),
+                    // Guard the two hazardous operators: division regularizes a
+                    // zero denominator with a sign-preserving perturbation, and
+                    // `^` clamps overflow / NaN domains. Both are exact on
+                    // well-posed inputs (see `shared::precision`).
+                    BinOp::Div => safe_div(a, b),
+                    BinOp::Pow => safe_powf(a, b),
                 }
             }
         }
@@ -566,7 +581,17 @@ impl ExprSimplifier {
                                 return num(av / bv);
                             }
                         }
-                        BinOp::Pow => return num(av.powf(*bv)),
+                        BinOp::Pow => {
+                            // Only fold to a literal when the result is finite;
+                            // otherwise keep the expression symbolic so a domain
+                            // error (`(-2)^0.5`) or overflow is surfaced at eval
+                            // time by the guarded evaluator rather than baked in
+                            // as a `NaN`/`∞` constant here.
+                            let p = av.powf(*bv);
+                            if p.is_finite() {
+                                return num(p);
+                            }
+                        }
                     }
                 }
                 let a_num = if let Expr::Num(v) = &a {
@@ -864,5 +889,40 @@ mod tests {
         // x * 1 + 0 -> x
         let e = add(mul(var("x"), num(1.0)), num(0.0));
         assert_eq!(stringify(&simplify(&e)), "x");
+    }
+
+    #[test]
+    fn eval_never_returns_nonfinite() {
+        // Every math hazard reachable through user expressions must evaluate to a
+        // finite value (divide-by-zero, 0/0, sqrt(-1), ln(0), exp overflow,
+        // negative base to a fractional power, acos out of [-1,1]).
+        let mut env = Env::new();
+        env.insert("z".to_string(), 0.0);
+        env.insert("n".to_string(), -4.0);
+        env.insert("big".to_string(), 1000.0);
+        for src in [
+            "1 / z",        // pole -> large finite
+            "z / z",        // 0/0 -> 0
+            "sqrt(n)",      // negative sqrt -> 0
+            "log(z)",       // ln(0) -> large finite negative
+            "log(n)",       // ln(-4) -> ln(4)
+            "exp(big)",     // overflow -> f64::MAX
+            "n ^ 0.5",      // (-4)^0.5 -> clamped
+            "acos(2)",      // out of domain -> acos(1)
+            "1 / (z - z)",  // 1/0 nested
+        ] {
+            let v = evaluate(&parse(src), &env);
+            assert!(v.is_finite(), "`{src}` evaluated to non-finite {v}");
+        }
+    }
+
+    #[test]
+    fn eval_is_exact_on_healthy_inputs() {
+        // Guards must not perturb well-posed arithmetic.
+        let mut env = Env::new();
+        env.insert("x".to_string(), 3.0);
+        assert!((evaluate(&parse("x / 2"), &env) - 1.5).abs() < 1e-12);
+        assert!((evaluate(&parse("sqrt(x*x)"), &env) - 3.0).abs() < 1e-12);
+        assert!((evaluate(&parse("exp(log(x))"), &env) - 3.0).abs() < 1e-12);
     }
 }

@@ -181,6 +181,13 @@ const COMPLETED_KILLER_PASS_MAX_BONUS_POINTS: f64 = 6.0;
 // defender. Aerial passes are exempt — they clear the lane.
 const BLOCKED_LANE_FLOOR_PASS_PENALTY_POINTS: f64 = 6.0;
 const BLOCKED_LANE_FLOOR_PASS_OPEN_THRESHOLD: f64 = 0.5;
+// Under real pressure, a quick lateral ball or a SHORT backward pass that keeps
+// possession is a smart escape from the press. Reward it (scaled by how far over
+// the pressure threshold), so players release early instead of dribbling into
+// trouble or holding too long. A long backward hoof is excluded.
+const PRESSURE_RELIEF_PASS_MIN_PRESSURE: f64 = 0.45;
+const PRESSURE_RELIEF_PASS_BONUS: f64 = 5.0;
+const SHORT_BACK_PASS_MAX_YARDS: f64 = 14.0;
 // Conceding a throw-in/goal-kick/corner by knocking the ball out is a turnover.
 // Penalize the offending player unless they were under heavy pressure (>=8/10),
 // where clearing it out of play is an acceptable last resort.
@@ -14003,25 +14010,18 @@ impl OfficialAgent {
         let offside_line = assistant_offside_line_snapshot(snapshot, self.kind);
         let base_target = match self.kind {
             OfficialKind::CenterReferee => center_referee_play_centroid_target(snapshot),
-            OfficialKind::AssistantRefereeNear => Vec2::new(
+            OfficialKind::AssistantRefereeNear | OfficialKind::AssistantRefereeFar => Vec2::new(
                 assistant_ref_touchline_x(self.kind, snapshot.field_width),
                 assistant_ref_half_y(
                     self.kind,
                     offside_line
                         .as_ref()
                         .map(|line| line.effective_line_y)
-                        .unwrap_or(snapshot.ball.position.y),
-                    snapshot.field_length,
-                ),
-            ),
-            OfficialKind::AssistantRefereeFar => Vec2::new(
-                assistant_ref_touchline_x(self.kind, snapshot.field_width),
-                assistant_ref_half_y(
-                    self.kind,
-                    offside_line
-                        .as_ref()
-                        .map(|line| line.effective_line_y)
-                        .unwrap_or(snapshot.ball.position.y),
+                        // No live offside line (e.g. a loose ball with no settled
+                        // possession): hold the current line rather than sprinting
+                        // off to chase the ball — assistants stay level with the
+                        // second-last defender and only react, they don't roam.
+                        .unwrap_or(self.position.y),
                     snapshot.field_length,
                 ),
             ),
@@ -27139,6 +27139,22 @@ fn dense_soccer_transition_reward(
                 }
             }
             reward += pass_into_stride_fit_for_context(&decision_context, player.team) * 0.16;
+            // Pressure relief: reward an early lateral / short backward release
+            // that keeps possession when genuinely under pressure. Forward is
+            // still best (rewarded above); this stops players dribbling into a
+            // defender or holding the ball until dispossessed.
+            if after_possession == Some(player.team) {
+                let pressure = before_obs.perceived_pressure.clamp(0.0, 1.0);
+                if pressure > PRESSURE_RELIEF_PASS_MIN_PRESSURE {
+                    let lateral = ball_forward.abs() <= 1.25;
+                    let short_back = ball_forward < -1.25
+                        && decision_context.target_distance_yards <= SHORT_BACK_PASS_MAX_YARDS;
+                    if lateral || short_back {
+                        reward += PRESSURE_RELIEF_PASS_BONUS
+                            * (pressure - PRESSURE_RELIEF_PASS_MIN_PRESSURE);
+                    }
+                }
+            }
         }
         reward += intentional_long_ball_release_reward(
             player,
@@ -55955,10 +55971,13 @@ fn excessive_hold_penalty_points(observation: &SoccerPomdpObservation, dribbling
         .max(observation.defensive_urgency)
         .max(observation.immediate_dispossession_risk)
         .clamp(0.0, 1.0);
+    // Holding under pressure is penalized increasingly as pressure rises — but
+    // that escalation is gated by `non_elite_fit`, so an elite dribbler (9-10/10)
+    // stays exempt from the pressure-scaling and only carries the small base.
     (EXCESSIVE_HOLD_PENALTY_POINTS
         * hold_pressure
-        * (0.35 + non_elite_fit * 0.52 + urgency_fit * 0.30))
-        .clamp(0.0, EXCESSIVE_HOLD_PENALTY_POINTS * 1.25)
+        * (0.35 + non_elite_fit * (0.52 + urgency_fit * 0.55)))
+        .clamp(0.0, EXCESSIVE_HOLD_PENALTY_POINTS * 1.6)
 }
 
 fn pressured_stale_dribble_learning_penalty_points(

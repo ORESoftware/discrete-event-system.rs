@@ -25,8 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::des::general::general::fisher_yates_shuffle;
 use crate::des::general::lp::{
-    solve_lp_clarabel, solve_lp_internal, InternalSimplexOptions, LPBasisWarmStart, LPProblem,
-    LPStatus, Sense,
+    solve_lp_clarabel, LPBasisWarmStart, LPProblem, LPStatus, Sense,
 };
 use crate::des::general::des_base::neural_network::NeuralNetworkLike;
 use crate::des::general::neural_network::{
@@ -17340,56 +17339,14 @@ impl SoccerFormationLpBrain {
     ///   interior point itself is returned, so guidance is never worse than a
     ///   pure IPM solve (and the next tick simply re-primes cold).
     fn solve_exact_formation_lp(&mut self) -> crate::des::general::lp::LPSolution {
-        if let Some(basis) = self.basis_start.clone() {
-            return solve_lp_internal(
-                &self.problem,
-                &InternalSimplexOptions {
-                    // Adaptive cap shrinks after a slow tick so we bail within the
-                    // per-tick budget rather than stalling the sim.
-                    max_iter: Some(self.adaptive_max_iter),
-                    tol: Some(1e-8),
-                    basis_start: Some(basis),
-                },
-            );
-        }
-        // Cold: solve from scratch with the simplex. (The internal IPM uses a
-        // dense O(n³) factorization that is far too slow on the full formation
-        // LP — measured at tens of seconds — so it is NOT used here; the simplex
-        // is both faster on this problem and yields the basis the warm path
-        // chains from. See `LPBasisWarmStart::from_primal_point` for the
-        // crossover that would apply if a sparse IPM is added later.)
-        // Cold (first solve / discontinuity cleared the basis): the dense internal
-        // simplex iter-limits on this 521-var/750-constraint LP, so solve with the
-        // SPARSE interior-point (Clarabel) — it converges reliably — then crossover
-        // to a candidate basis the simplex polishes to the true vertex, establishing
-        // the basis future ticks warm-start from. If the polish misses optimality the
-        // interior point is returned (never worse than a pure IPM solve).
-        let ipm = solve_lp_clarabel(&self.problem);
-        if ipm.status == LPStatus::Optimal {
-            if let Some(basis) = LPBasisWarmStart::from_primal_point(&self.problem, &ipm.x, 1e-7) {
-                let polished = solve_lp_internal(
-                    &self.problem,
-                    &InternalSimplexOptions {
-                        max_iter: Some(self.adaptive_max_iter),
-                        tol: Some(1e-8),
-                        basis_start: Some(basis),
-                    },
-                );
-                if polished.status == LPStatus::Optimal {
-                    return polished;
-                }
-            }
-            return ipm;
-        }
-        // Clarabel did not converge (rare): last-resort cold simplex.
-        solve_lp_internal(
-            &self.problem,
-            &InternalSimplexOptions {
-                max_iter: Some(self.adaptive_max_iter),
-                tol: Some(1e-8),
-                basis_start: None,
-            },
-        )
+        // The dense internal simplex needs ~1000 pivots (~400ms) on this 521-var/
+        // 750-constraint degenerate LP whether cold OR warm, and the dense internal
+        // IPM is worse still. The SPARSE interior-point (Clarabel) solves it to
+        // optimality directly. The formation only needs an optimal *point* (player
+        // positions), not a vertex, so we skip the IPM->simplex crossover/polish
+        // entirely — that polish was the ~400ms bottleneck for a vertex we never use.
+        // The circuit breaker in `solve_tick` still guards realtime.
+        solve_lp_clarabel(&self.problem)
     }
 
     fn solve_tick(&mut self, snapshot: &WorldSnapshot, directive: &TeamTacticalDirective) {

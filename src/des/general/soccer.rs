@@ -17411,19 +17411,14 @@ impl SoccerFormationLpBrain {
         }
     }
 
-    /// Hybrid exact solve, matching the cost structure of the per-tick LP:
+    /// Exact per-tick formation solve via the sparse interior-point (Clarabel).
     ///
-    /// * **Warm path** (a basis carried from the previous tick): the field moved
-    ///   only a sliver in 100ms, so the optimal basis is unchanged or a few
-    ///   pivots away — a warm-started simplex finishes cheaply.
-    /// * **Cold path** (no basis: the first solve, or a discontinuity such as a
-    ///   turnover/restart cleared it): a predictable interior-point solve finds a
-    ///   near-optimal point in a bounded number of iterations, then a **crossover**
-    ///   ([`LPBasisWarmStart::from_primal_point`]) rounds it to a candidate basis
-    ///   the simplex polishes to the true vertex — establishing the basis future
-    ///   ticks warm-start from. If the polish does not reach optimality the
-    ///   interior point itself is returned, so guidance is never worse than a
-    ///   pure IPM solve (and the next tick simply re-primes cold).
+    /// The formation LP only needs the optimal *point* (player target positions),
+    /// not a vertex, so there is no warm-start basis to carry between ticks and no
+    /// crossover/polish: the sparse IPM solves the whole problem from scratch each
+    /// tick in a few ms — cheaper here than a dense simplex (~400ms / ~1000 pivots,
+    /// warm or cold) or the dense internal IPM. The realtime guardrails (adaptive
+    /// budget + circuit breaker) live in [`Self::solve_tick`].
     fn solve_exact_formation_lp(&mut self) -> crate::des::general::lp::LPSolution {
         // The dense internal simplex needs ~1000 pivots (~400ms) on this 521-var/
         // 750-constraint degenerate LP whether cold OR warm, and the dense internal

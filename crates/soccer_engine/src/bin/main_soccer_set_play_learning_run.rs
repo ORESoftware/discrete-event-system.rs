@@ -5,19 +5,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use des_engine::des::general::soccer::{
+use soccer_engine::des::general::soccer::{
     train_soccer_set_play_restarts_with_events, MatchConfig, SoccerNeuralBlendConfig,
     SoccerNeuralBlendMode, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
     SoccerNeuralNetworkSnapshot, SoccerQPolicyOptions, SoccerSetPlayRestartKind,
     SoccerSetPlayTrainingEvent, SoccerSetPlayTrainingRequest, SoccerTeamQPolicies, Team, Vec2,
 };
-use des_engine::des::soccer_learning::{
+use soccer_engine::des::soccer_learning::{
     soccer_neural_network_snapshot_fingerprint,
     soccer_policy_version_insert_status_after_active_head, soccer_postgres_policy_refresh_decision,
     soccer_tactical_learning_weights_fingerprint, soccer_team_q_policies_fingerprint,
     SoccerPostgresPolicyRefreshCheck, SOCCER_POLICY_STATUS_ACTIVE,
 };
-use des_engine::des::soccer_learning_pg::SoccerLearningPgStore;
+use soccer_engine::des::soccer_learning_pg::SoccerLearningPgStore;
 use serde::Serialize;
 
 const DEFAULT_SOCCER_SET_PLAY_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE: bool = true;

@@ -13,13 +13,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use des_engine::des::general::soccer::{
+use soccer_engine::des::general::soccer::{
     MatchConfig, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
     SoccerNeuralNetworkSnapshot, SoccerQPolicyOptions, SoccerSelfPlayLearnedParams,
     SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary, SoccerTacticalLearningWeights,
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
-use des_engine::des::soccer_learning::{
+use soccer_engine::des::soccer_learning::{
     evolve_soccer_tactical_learning_weights_from_genomes, evolve_soccer_team_policies,
     run_soccer_learning_queue_with_events, soccer_evolution_options_from_search_metadata,
     soccer_neural_network_snapshot_fingerprint,
@@ -31,7 +31,7 @@ use des_engine::des::soccer_learning::{
     SoccerLearningQueueEvent, SoccerLearningQueueRunnerConfig, SoccerPostgresPolicyRefreshCheck,
     SoccerTacticalLearningGenomeParent, SOCCER_POLICY_STATUS_ACTIVE,
 };
-use des_engine::des::soccer_learning_pg::{
+use soccer_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
 };
 use serde::Serialize;
@@ -2176,7 +2176,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use des_engine::des::general::soccer::{
+    use soccer_engine::des::general::soccer::{
         SoccerMatch, SoccerQEntry, SoccerQPolicy, SoccerQStateKey,
     };
     use std::sync::Mutex;

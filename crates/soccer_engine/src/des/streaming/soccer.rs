@@ -114,7 +114,7 @@ impl StreamingModel for StreamingSoccerPlanner {
         StreamContract::new_for_stream_kind(
             "soccer-planner",
             SolverKind::IterativeSolver,
-            ModelStreamKind::SoccerPlanner,
+            ModelStreamKind::GenericIterative,
             "Soccer rotation planner edited by a command stream. Roster changes \
              are variable edits; status, fixed-position, banned-position, stamina, \
              substitution, and chemistry edits become IP/MIP constraints or \

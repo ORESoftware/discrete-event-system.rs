@@ -9,7 +9,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use des_engine::des::general::soccer::{
+use soccer_engine::des::general::soccer::{
     soccer_moment_records_from_jsonl, soccer_moment_records_to_learning_dataset, MatchConfig,
     SoccerMatch, SoccerMomentWindow, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
     SoccerNeuralNetworkSnapshot, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions,
@@ -17,7 +17,7 @@ use des_engine::des::general::soccer::{
     SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary, SoccerTacticalLearningWeights,
     SoccerTeamPolicyArtifact, SoccerTeamQPolicies,
 };
-use des_engine::des::soccer_learning::{
+use soccer_engine::des::soccer_learning::{
     evolve_soccer_tactical_learning_weights_from_genomes, evolve_soccer_team_policies,
     soccer_evolution_options_from_search_metadata, soccer_learning_run_score,
     soccer_neural_network_snapshot_fingerprint, soccer_policy_delta_entries,
@@ -29,7 +29,7 @@ use des_engine::des::soccer_learning::{
     SoccerPostgresPolicyRefreshCheck, SoccerTacticalLearningGenomeParent,
     SOCCER_POLICY_STATUS_ACTIVE,
 };
-use des_engine::des::soccer_learning_pg::{
+use soccer_engine::des::soccer_learning_pg::{
     SoccerLearningPgCompletedRunInsert, SoccerLearningPgStore,
 };
 use serde::Serialize;
@@ -1531,7 +1531,7 @@ struct CompactGameArtifact {
     episode: usize,
     seed: u64,
     config: MatchConfig,
-    summary: des_engine::des::general::soccer::MatchSummary,
+    summary: soccer_engine::des::general::soccer::MatchSummary,
     tactical_summary: SoccerTacticalLearningSummary,
     transitions: usize,
     home_policy_entries: usize,
@@ -3756,7 +3756,7 @@ mod tests {
     ) -> CompletedGame {
         let policies = test_policy_with_action(1.0 + episode as f64, 2 + episode as u32);
         let starting_policies = Arc::new(policies.clone());
-        let summary = des_engine::des::general::soccer::MatchSummary {
+        let summary = soccer_engine::des::general::soccer::MatchSummary {
             score_home: 1,
             score_away: 0,
             ticks: 10,
@@ -3766,7 +3766,7 @@ mod tests {
         let artifact = SoccerTeamPolicyArtifact {
             config: MatchConfig::default(),
             summary: summary.clone(),
-            learning: des_engine::des::general::soccer::SoccerLearningSnapshot::default(),
+            learning: soccer_engine::des::general::soccer::SoccerLearningSnapshot::default(),
             tactical_summary,
             adversarial: false,
             home_options: Some(SoccerQPolicyOptions::default()),
@@ -3806,7 +3806,7 @@ mod tests {
     fn completed_game_delta_uses_its_own_starting_policy_snapshot() {
         let starting_policies = Arc::new(test_policy_with_action(1.0, 2));
         let policies = test_policy_with_action(3.0, 5);
-        let summary = des_engine::des::general::soccer::MatchSummary {
+        let summary = soccer_engine::des::general::soccer::MatchSummary {
             score_home: 2,
             score_away: 0,
             ticks: 10,
@@ -3816,7 +3816,7 @@ mod tests {
         let artifact = SoccerTeamPolicyArtifact {
             config: MatchConfig::default(),
             summary: summary.clone(),
-            learning: des_engine::des::general::soccer::SoccerLearningSnapshot::default(),
+            learning: soccer_engine::des::general::soccer::SoccerLearningSnapshot::default(),
             tactical_summary: Default::default(),
             adversarial: false,
             home_options: Some(SoccerQPolicyOptions::default()),

@@ -7,17 +7,17 @@
 //! rotation, and reinforcement learning (tabular Q-learning + neural value head,
 //! actor-critic, PFSP league, world model).
 //!
-//! ## Transport-agnostic by default
-//! This crate ships **no HTTP server** in its default build, so it can be
-//! embedded directly in a desktop game. Web concerns are opt-in:
-//! - `web-bridge` — the typed request→reply bridge + HTML generators the axum
-//!   servers wrap (no sockets).
-//! - `embedded-http-server` — the legacy standalone `TcpListener` dev server.
+//! ## Layout
+//! The crate mirrors the original `des::` module tree so the relocated soccer
+//! files keep their `crate::des::…` import paths. Generic subsystems are
+//! re-exported from `des_engine` inside [`des`]; soccer subsystems are local.
 //!
-//! During the extraction this is a workspace member of `discrete-event-system.rs`;
-//! the soccer modules are relocated here phase by phase. This skeleton compiles
-//! green so the workspace stays buildable from the first step.
+//! ## Transport-agnostic
+//! No HTTP transport is required to use the engine — construct a `SoccerMatch` /
+//! `SoccerRealtimeSession` and drive it directly (a desktop game does this). The
+//! web request→reply bridge and the legacy socket server will move behind opt-in
+//! features in a follow-up.
 
-// Re-export the engine so downstream crates can reach generic primitives through
-// a single dependency if they wish.
 pub use des_engine;
+
+pub mod des;

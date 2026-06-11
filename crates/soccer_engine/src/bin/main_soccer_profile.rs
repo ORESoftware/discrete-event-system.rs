@@ -7,7 +7,7 @@
 use std::env;
 use std::time::Instant;
 
-use des_engine::des::general::soccer::{
+use soccer_engine::des::general::soccer::{
     MatchConfig, SoccerMatch, SoccerNeuralLearningBackend, SoccerRealtimeSession,
     SoccerStepRequest, SoccerStepTimingStats,
 };

@@ -417,7 +417,7 @@ pub fn run_named_jsonl<R: BufRead, W: Write>(
 // Shared command-parsing helpers (used by the concrete streamers below).
 // =============================================================================
 
-pub(crate) fn op_of(command: &Value) -> &str {
+pub fn op_of(command: &Value) -> &str {
     command.get("op").and_then(Value::as_str).unwrap_or("")
 }
 
@@ -429,7 +429,7 @@ pub(crate) fn usize_at(command: &Value, key: &str) -> Option<usize> {
     command.get(key).and_then(Value::as_u64).map(|n| n as usize)
 }
 
-pub(crate) fn bool_at(command: &Value, key: &str, default: bool) -> bool {
+pub fn bool_at(command: &Value, key: &str, default: bool) -> bool {
     command.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 

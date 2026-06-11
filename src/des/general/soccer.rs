@@ -680,6 +680,13 @@ const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
 const SOCCER_NEURAL_FEATURE_DIM: usize = 153;
+/// Fixed dimensionality of a persisted **moment embedding** (the vector stored
+/// in pgvector for similarity retrieval). Deliberately decoupled from — and
+/// larger than — `SOCCER_NEURAL_FEATURE_DIM`, which grows as features are added:
+/// the producer pads/truncates into this fixed width so the `vector(N)` column
+/// survives feature-count changes without a migration. Cosine distance is
+/// scale-invariant, so the trailing zero padding does not distort similarity.
+pub const SOCCER_MOMENT_EMBEDDING_DIM: usize = 256;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -41207,7 +41214,11 @@ fn spawn_soccer_neural_learning_worker(
 ) -> SoccerNeuralLearningWorker {
     let (sample_tx, sample_rx) =
         mpsc::sync_channel::<SoccerNeuralLearningWorkerCommand>(max_pending_batches.max(1));
-    let (result_tx, result_rx) = mpsc::channel::<SoccerNeuralLearningWorkerResult>();
+    // Bounded (was unbounded): backpressures the worker if the main loop falls
+    // behind draining results, so the result queue can't grow without limit. Safe
+    // from deadlock — the main only try_sends commands + non-blocking drain_results.
+    let (result_tx, result_rx) =
+        mpsc::sync_channel::<SoccerNeuralLearningWorkerResult>(max_pending_batches.max(1));
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&cancel);
     let handle = thread::spawn(move || {

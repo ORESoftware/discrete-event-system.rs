@@ -265,6 +265,14 @@ fn env_neural_learning_config() -> Result<SoccerNeuralLearningConfig, Box<dyn Er
             "SOCCER_NEURAL_LEARNING_SNAPSHOT_EVERY_BATCHES",
             default.snapshot_every_batches,
         )?,
+        critic_baseline_weight: env_f64(
+            "SOCCER_NEURAL_CRITIC_BASELINE_WEIGHT",
+            default.critic_baseline_weight,
+        )?,
+        lp_coupling_enabled: env_bool(
+            "SOCCER_NEURAL_LP_COUPLING_ENABLED",
+            default.lp_coupling_enabled,
+        )?,
     })
 }
 

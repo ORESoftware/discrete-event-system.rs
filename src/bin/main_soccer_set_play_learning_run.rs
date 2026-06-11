@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use des_engine::des::general::soccer::{
-    train_soccer_set_play_restarts_with_events, MatchConfig, SoccerNeuralLearningBackend,
-    SoccerNeuralLearningConfig, SoccerNeuralNetworkSnapshot, SoccerQPolicyOptions,
-    SoccerSetPlayRestartKind, SoccerSetPlayTrainingEvent, SoccerSetPlayTrainingRequest,
-    SoccerTeamQPolicies, Team, Vec2,
+    train_soccer_set_play_restarts_with_events, MatchConfig, SoccerNeuralBlendConfig,
+    SoccerNeuralBlendMode, SoccerNeuralLearningBackend, SoccerNeuralLearningConfig,
+    SoccerNeuralNetworkSnapshot, SoccerQPolicyOptions, SoccerSetPlayRestartKind,
+    SoccerSetPlayTrainingEvent, SoccerSetPlayTrainingRequest, SoccerTeamQPolicies, Team, Vec2,
 };
 use des_engine::des::soccer_learning::{
     soccer_neural_network_snapshot_fingerprint,
@@ -62,6 +62,27 @@ fn env_neural_backend() -> Result<SoccerNeuralLearningBackend, Box<dyn Error>> {
         "inline" | "sync" => Ok(SoccerNeuralLearningBackend::Inline),
         _ => Err(format!("SOCCER_NEURAL_LEARNING_BACKEND={value:?} is invalid").into()),
     }
+}
+
+/// Decision-time coupling of the trained value head, from the environment. The
+/// set-piece curriculum is where it pays off: short restarts give many dense reps
+/// to warm the head before its value drives play. Off by default.
+///   SOCCER_NEURAL_BLEND_MODE = off | additive | tiebreak | confidence
+///   SOCCER_NEURAL_BLEND_LAMBDA, SOCCER_NEURAL_BLEND_WARMUP_STEPS (optional)
+fn env_neural_blend() -> Result<SoccerNeuralBlendConfig, Box<dyn Error>> {
+    let mut blend = SoccerNeuralBlendConfig::default();
+    if let Some(value) = env_value("SOCCER_NEURAL_BLEND_MODE") {
+        blend.mode = match value.to_ascii_lowercase().as_str() {
+            "off" | "none" => SoccerNeuralBlendMode::Off,
+            "additive" | "add" => SoccerNeuralBlendMode::Additive,
+            "tiebreak" | "tie" => SoccerNeuralBlendMode::TieBreak,
+            "confidence" | "confidencegated" | "gated" => SoccerNeuralBlendMode::ConfidenceGated,
+            _ => return Err(format!("SOCCER_NEURAL_BLEND_MODE={value:?} is invalid").into()),
+        };
+    }
+    blend.lambda = env_parse("SOCCER_NEURAL_BLEND_LAMBDA", blend.lambda)?;
+    blend.warmup_steps = env_parse("SOCCER_NEURAL_BLEND_WARMUP_STEPS", blend.warmup_steps)?;
+    Ok(blend)
 }
 
 fn env_team() -> Result<Team, Box<dyn Error>> {
@@ -269,6 +290,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             "SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES",
             SoccerNeuralLearningConfig::default().snapshot_every_batches,
         )?,
+        critic_baseline_weight: env_parse(
+            "SOCCER_NEURAL_CRITIC_BASELINE_WEIGHT",
+            SoccerNeuralLearningConfig::default().critic_baseline_weight,
+        )?,
+        lp_coupling_enabled: env_bool(
+            "SOCCER_NEURAL_LP_COUPLING_ENABLED",
+            SoccerNeuralLearningConfig::default().lp_coupling_enabled,
+        )?,
     };
     let options = SoccerQPolicyOptions {
         alpha: env_parse("SOCCER_Q_ALPHA", SoccerQPolicyOptions::default().alpha)?,
@@ -374,6 +403,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         options: Some(options.clone()),
         initial_neural_network,
         vector_hint: None,
+        neural_blend: env_neural_blend()?,
     };
     let starting_policies =
         initial_policies.unwrap_or_else(|| SoccerTeamQPolicies::new(options.clone()));
@@ -612,6 +642,7 @@ mod tests {
                 options: Some(options.clone()),
                 initial_neural_network: None,
                 vector_hint: None,
+                neural_blend: SoccerNeuralBlendConfig::default(),
             },
             SoccerTeamQPolicies::new(options),
             |event| {

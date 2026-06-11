@@ -301,24 +301,6 @@ const EXTENDED_SIMULATIONS: &[HtmlIndexSpec] = &[
         href: "shadow-eval/report.html",
         description: "Side-by-side shadow-mode evaluation of controllability and observability metrics.",
     },
-    HtmlIndexSpec {
-        kind: "animation",
-        title: "Soccer IP-MIP feasible solver",
-        href: "soccer-IP-MIP-feasible-solver.html",
-        description: "Mixed-integer solver animation for the soccer rotation feasibility model.",
-    },
-    HtmlIndexSpec {
-        kind: "animation",
-        title: "Soccer IP-MIP feasible run",
-        href: "soccer-IP-MIP-feasible.html",
-        description: "Full soccer rotation feasibility simulation with player movement snapshots.",
-    },
-    HtmlIndexSpec {
-        kind: "simulation",
-        title: "Soccer videogame",
-        href: "soccer-sim.html",
-        description: "Playable 2D 11v11 match artifact with MDP/POMDP player learning, ball physics, possession chains, shots, officials, and controller slots.",
-    },
 ];
 
 /// All featured index groups, in display order.
@@ -499,8 +481,6 @@ pub fn generate_html_artifacts() {
     crate::des::main_factmachine_markets::run();
     generate_two_disease_page();
     crate::des::main_shadow_eval::run();
-    crate::des::main_soccer_rotation::run_anim();
-    crate::des::main_soccer::run();
 }
 
 fn with_opts(mut spec: Value, opts: Value) -> Value {

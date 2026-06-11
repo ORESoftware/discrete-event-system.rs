@@ -134,8 +134,6 @@ pub mod multistage_stochastic;
 pub mod music_production;
 pub mod nonlinear_forecasting_model;
 pub mod signal_transforms;
-pub mod soccer;
-pub mod soccer_rotation;
 pub mod stochastic_flow_mdp;
 pub mod stochastic_lp;
 

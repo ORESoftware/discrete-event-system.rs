@@ -15,6 +15,11 @@ version = "0.0.1"
 edition = "2021"
 description = "Agnostic 2D soccer simulation + reinforcement-learning game engine, built on des_engine."
 license = "MIT OR Apache-2.0"
+# Soccer modules + bins are wired in Step B of the extraction; until then the
+# moved files sit un-declared (orphaned) and these auto-discovery flags keep the
+# skeleton crate building green.
+autobins = false
+autotests = false
 
 [lib]
 name = "soccer_engine"

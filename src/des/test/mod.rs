@@ -59,7 +59,6 @@ pub mod random_variables_test;
 pub mod shortest_path_test;
 pub mod signal_transforms_test;
 pub mod simulated_annealing_test;
-pub mod soccer_test;
 pub mod statistical_optimization_test;
 pub mod stochastic_lp_test;
 pub mod stochastic_sde_test;

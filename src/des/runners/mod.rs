@@ -52,7 +52,6 @@ pub mod validate_references;
 pub mod validate_shortest_path;
 pub mod validate_simulated_annealing;
 pub mod validate_smart_traffic_external;
-pub mod validate_soccer;
 pub mod validate_stochastic_lp;
 pub mod validate_temp_control;
 pub mod validate_two_disease;

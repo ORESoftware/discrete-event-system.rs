@@ -3889,8 +3889,36 @@ function soccerLivePostApiEnabled(resource = "api") {
   if (resource === "input" || resource === "assign") return ui.liveInputPostEnabled !== false;
   return true;
 }
+function liveGameId() {
+  if (window.__SOCCER_GAME_ID__) return window.__SOCCER_GAME_ID__;
+  let id = "";
+  try {
+    const url = new URL(window.location.href);
+    id = (url.searchParams.get("game") || "").trim();
+    if (!id) {
+      // First visit: mint a game uuid and put it in the address bar so the match
+      // is addressable/shareable (`/` becomes `/?game=<uuid>`). Each `/api/*` call
+      // then carries it, and the server creates that game on first contact.
+      id = (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : "g-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+      url.searchParams.set("game", id);
+      window.history.replaceState(null, "", url.toString());
+    }
+  } catch (_) {
+    id = id || ("g-" + Date.now().toString(36));
+  }
+  // Match the server's sanitizer: [a-z0-9-], max 64 chars.
+  id = id.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 64);
+  window.__SOCCER_GAME_ID__ = id;
+  return id;
+}
 function liveApiPath(path) {
-  return livePathWithMount(path);
+  const base = livePathWithMount(path);
+  const id = liveGameId();
+  if (!id) return base;
+  const sep = base.indexOf("?") === -1 ? "?" : "&";
+  return base + sep + "game=" + encodeURIComponent(id);
 }
 function soccerApiUrl(path) {
   return liveApiPath(path);

@@ -69,8 +69,8 @@ spec:
               require_value SOCCER_NEURAL_LEARNING_ENABLED true
               require_value SOCCER_NEURAL_LEARNING_BACKEND threaded
               require_value SOCCER_PARALLEL_GAMES 3
-              require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 5
-              require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 5
+              require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 1
+              require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 1
               require_value SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE true
               require_value SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT true
               require_value SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM true
@@ -201,9 +201,9 @@ spec:
             - name: SOCCER_NEURAL_DRAIN_TIMEOUT_MS
               value: "60000"
             - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
-              value: "5"
+              value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
-              value: "5"
+              value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
               value: "500"
             - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE
@@ -295,6 +295,15 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
+        # Persist the build cache (git checkout + cargo registry + compiled target —
+        # all under /tmp via HOME=/tmp, CARGO_HOME=/tmp/cargo, CARGO_TARGET_DIR=
+        # /tmp/*-target) on the node's local disk, so pod restarts AND node reboots
+        # reuse it. The startup script already does an incremental `git fetch` when
+        # the checkout exists and reuses CARGO_TARGET_DIR, so a warm cache turns the
+        # ~5min cold clone+full rebuild into a ~seconds incremental build. The cold
+        # rebuild-on-every-restart (ephemeral emptyDir) is what caused the post-reboot
+        # rustc stampede that wedged the node.
         - name: tmp
-          emptyDir:
-            sizeLimit: 128Gi
+          hostPath:
+            path: /var/cache/dd-soccer-learning
+            type: DirectoryOrCreate

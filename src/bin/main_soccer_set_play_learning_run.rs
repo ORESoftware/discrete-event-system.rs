@@ -82,6 +82,8 @@ fn env_neural_blend() -> Result<SoccerNeuralBlendConfig, Box<dyn Error>> {
     }
     blend.lambda = env_parse("SOCCER_NEURAL_BLEND_LAMBDA", blend.lambda)?;
     blend.warmup_steps = env_parse("SOCCER_NEURAL_BLEND_WARMUP_STEPS", blend.warmup_steps)?;
+    // Train + consult the neural actor π(family|s) by advantage policy-gradient.
+    blend.actor_critic = env_bool("SOCCER_NEURAL_ACTOR_CRITIC", blend.actor_critic)?;
     Ok(blend)
 }
 

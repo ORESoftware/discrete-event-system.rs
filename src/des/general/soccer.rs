@@ -678,7 +678,7 @@ const ADVERSARIAL_EMBEDDING_MIN_SCORE: f32 = 0.72;
 const SOCCER_MOMENT_REPLAY_SHOT_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_PASS_REWARD: f64 = 30.0;
 const SOCCER_MOMENT_REPLAY_DRIBBLE_REWARD: f64 = 15.0;
-const SOCCER_NEURAL_FEATURE_DIM: usize = 137;
+const SOCCER_NEURAL_FEATURE_DIM: usize = 153;
 const SOCCER_NEURAL_FEATURE_VISION_SKILL: usize = 34;
 const SOCCER_NEURAL_FEATURE_TARGET_DISTANCE: usize = 39;
 const SOCCER_NEURAL_FEATURE_TARGET_FORWARD: usize = 40;
@@ -754,7 +754,7 @@ const SOCCER_NEURAL_FEATURE_THREADED_GOAL_PASS_STRIDE: usize = 130;
 const SOCCER_NEURAL_FEATURE_OPEN_SUPPORT_OUTLETS: usize = 131;
 const SOCCER_NEURAL_LEGACY_FEATURE_DIMS: &[usize] = &[
     61, 62, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 93, 94, 96, 97, 102, 103, 106, 107, 108, 109,
-    110, 111, 112, 113, 115, 117, 118, 119, 125, 131,
+    110, 111, 112, 113, 115, 117, 118, 119, 125, 131, 137,
 ];
 const TEAM_SHAPE_NEAR_BALL_RADIUS_YARDS: f64 = 18.0;
 const DEFAULT_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.015;
@@ -781,6 +781,20 @@ const SOCCER_NEURAL_GRAD_CLIP_NORM: f64 = 8.0;
 /// `tanh(advantage · this)` into a [0, 1] pull, so a modest scale keeps the LP
 /// nudge bounded and smooth.
 const SOCCER_NEURAL_FORMATION_INTENT_SCALE: f64 = 2.0;
+/// Neural **policy head** (actor) hyperparameters. The actor learns `π(family|s)`
+/// by advantage policy-gradient from the critic; these are module constants (not
+/// serde config) to keep the `SoccerNeuralLearningConfig` surface unchanged.
+const SOCCER_POLICY_HIDDEN_UNITS: usize = 24;
+const SOCCER_POLICY_LEARNING_RATE: f64 = 0.05;
+/// Entropy bonus — keeps the actor from collapsing onto one family too early.
+const SOCCER_POLICY_ENTROPY_COEFF: f64 = 0.01;
+/// GAE(λ) trace decay for advantage estimation along an agent's trajectory.
+const SOCCER_POLICY_GAE_LAMBDA: f64 = 0.95;
+/// Gradient-norm ceiling for the actor's SGD step (same guard family as the critic).
+const SOCCER_POLICY_GRAD_CLIP_NORM: f64 = 5.0;
+/// Decision-time weight on the actor's log-probability when it biases action
+/// selection (multiplies `ln π(family|s)` added to each candidate's blend score).
+const SOCCER_POLICY_DECISION_WEIGHT: f64 = 0.6;
 const MAX_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.25;
 const MAX_SOCCER_NEURAL_BATCH_SIZE: usize = 1024;
 const MAX_SOCCER_NEURAL_MAX_BATCHES_PER_TICK: usize = 16;
@@ -2331,6 +2345,61 @@ impl TacticalPhase {
     }
 }
 
+/// Extra value-head observation channels that the single-tick, ego-summarised
+/// feature set was structurally blind to: short-horizon **temporal** signals
+/// (possession duration, ball/own momentum), **relational** multi-agent structure
+/// (the local neighbourhood the scalar aggregates collapse away), and explicit
+/// **opponent intent** (the other team's directive). Every field is derived from
+/// the [`WorldSnapshot`], so it is populated identically at training time and at
+/// decision time (no train/inference distribution gap), and it is consumed only
+/// by `soccer_neural_transition_features` — the discrete Q-key is untouched.
+/// Raw physical units; the feature builder normalises.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerNeuralExtendedObservation {
+    // --- Temporal (short-horizon history) ---
+    /// Seconds the actor's team has held possession (sustained build-up).
+    pub own_possession_seconds: f64,
+    /// Seconds the opponent has held possession (we are chasing / they are set).
+    pub opponent_possession_seconds: f64,
+    /// Seconds the current ball holder has had the ball (hold-too-long signal).
+    pub ball_holder_possession_seconds: f64,
+    /// Signed ball progression toward the actor's attacking goal over the ball
+    /// history window, in yards/sec (momentum; negative = being pushed back).
+    pub ball_forward_progress_rate_yps: f64,
+    /// The actor's own forward displacement over its recent position history,
+    /// in yards (is this player making a run?).
+    pub own_recent_forward_progress_yards: f64,
+    // --- Relational (local multi-agent structure) ---
+    /// Distance to the 2nd-nearest opponent (double-team / press detection; the
+    /// nearest is already a feature).
+    pub second_nearest_opponent_distance: f64,
+    /// Distance to the nearest teammate (support proximity / bunching).
+    pub nearest_teammate_distance: f64,
+    /// Signed forward offset of the nearest teammate (ahead vs behind the actor).
+    pub nearest_teammate_forward_offset: f64,
+    /// Opponents within a tight radius (local congestion).
+    pub local_opponent_count: f64,
+    /// Teammates within a tight radius (overload / over-bunching).
+    pub local_teammate_count: f64,
+    /// Closing speed of the nearest opponent toward the actor, yards/sec
+    /// (positive = closing down).
+    pub nearest_opponent_closing_rate_yps: f64,
+    // --- Opponent intent (the other team's directive) ---
+    /// Opponent press intensity in [0, 1].
+    pub opponent_press_intensity: f64,
+    /// Opponent defensive-line height from the actor's perspective, normalised to
+    /// roughly [-1, 1] (positive = high line pressed toward the actor's goal).
+    pub opponent_defensive_line_offset: f64,
+    /// Opponent risk tolerance in [0, 1].
+    pub opponent_risk_tolerance: f64,
+    /// Opponent attacking-overload score (are they committing numbers forward?).
+    pub opponent_attacking_overload: f64,
+    /// Opponent learned forward-intent (their value-head formation pull), in
+    /// [0, 1]; 0 unless they run the neural blend.
+    pub opponent_neural_intent_attack: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerPomdpObservation {
@@ -2676,6 +2745,11 @@ pub struct SoccerPomdpObservation {
     #[serde(default)]
     pub skill_defensive_tracking: f64,
     pub open_space_score: f64,
+    /// Temporal / relational / opponent-intent channels for the value head. See
+    /// [`SoccerNeuralExtendedObservation`]. Defaulted (all-zero) for legacy
+    /// transitions so old episodes deserialize unchanged.
+    #[serde(default)]
+    pub neural_extended: SoccerNeuralExtendedObservation,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15032,6 +15106,11 @@ pub struct SoccerNeuralBlendConfig {
     /// head can't yank decisions around before it has learned anything.
     #[serde(default = "default_soccer_neural_blend_warmup_steps")]
     pub warmup_steps: usize,
+    /// Train and consult the neural **actor** `π(family|s)` (advantage
+    /// policy-gradient from the critic). When on, the actor's log-probability
+    /// biases action selection on top of the value blend. Off by default.
+    #[serde(default)]
+    pub actor_critic: bool,
 }
 
 fn default_soccer_neural_blend_lambda() -> f64 {
@@ -15059,6 +15138,7 @@ impl Default for SoccerNeuralBlendConfig {
             min_confidence_visits: default_soccer_neural_blend_min_visits(),
             candidates: default_soccer_neural_blend_candidates(),
             warmup_steps: default_soccer_neural_blend_warmup_steps(),
+            actor_critic: false,
         }
     }
 }
@@ -21719,6 +21799,7 @@ impl WorldSnapshot {
                 skill_goalkeeping: 0.0,
                 skill_defensive_tracking: 0.0,
                 open_space_score: 0.0,
+                neural_extended: SoccerNeuralExtendedObservation::default(),
             };
         };
         let me_position = self.player_snapshot_position(me);
@@ -22508,6 +22589,7 @@ impl WorldSnapshot {
             skill_goalkeeping: me.skills.goalkeeping,
             skill_defensive_tracking: me.skills.defensive_tracking,
             open_space_score: self.space_score_at(me_position, me.team),
+            neural_extended: soccer_neural_extended_observation(self, me, me_position),
         };
         observation.killer_pass_goal_pressure = if observation.threaded_goal_pass_available {
             killer_pass_goal_pressure_score(&observation)
@@ -40469,6 +40551,86 @@ impl Drop for SoccerNeuralLearningWorker {
     }
 }
 
+/// One actor-critic training example for the policy head: the state features
+/// (built with a null action so the input is a pure function of state), the
+/// taken action's family index, and its GAE advantage from the critic.
+#[derive(Clone)]
+struct SoccerPolicySample {
+    state_features: [f64; SOCCER_NEURAL_FEATURE_DIM],
+    action_index: usize,
+    advantage: f64,
+}
+
+/// The neural **actor**: `π(family | s)` over [`SOCCER_POLICY_ACTIONS`], trained
+/// by advantage policy-gradient (the critic supplies the advantage). Inline-only
+/// (no worker thread): policy updates happen once per episode over the replay,
+/// so they don't need the value head's streaming/threaded machinery.
+struct SoccerPolicyHead {
+    network: FeedForwardNetwork,
+    training_steps: usize,
+    last_loss: Option<f64>,
+}
+
+impl SoccerPolicyHead {
+    fn new(seed: u32) -> Self {
+        let mut rng = mulberry32(seed ^ 0x9E37_79B9);
+        let network = FeedForwardNetwork::random(
+            &RandomNetworkSpec {
+                input_dim: SOCCER_NEURAL_FEATURE_DIM,
+                hidden_layers: vec![SOCCER_POLICY_HIDDEN_UNITS],
+                output_dim: SOCCER_POLICY_ACTIONS.len(),
+                hidden_activation: ActivationName::Tanh,
+                // Linear outputs = logits; softmax is applied in the trainer/sampler.
+                output_activation: ActivationName::Linear,
+                weight_scale: None,
+            },
+            &mut rng,
+        );
+        SoccerPolicyHead {
+            network,
+            training_steps: 0,
+            last_loss: None,
+        }
+    }
+
+    /// `π(family | s)` for a state-feature vector. Returns `None` on a malformed
+    /// (non-finite / mis-dimensioned) input so a degenerate actor stays out of play.
+    fn action_distribution(
+        &self,
+        state_features: &[f64; SOCCER_NEURAL_FEATURE_DIM],
+    ) -> Option<Vec<f64>> {
+        if state_features.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let probs = self.network.action_probabilities(&state_features[..]);
+        probs.iter().all(|p| p.is_finite()).then_some(probs)
+    }
+
+    /// One advantage policy-gradient pass over a batch of samples.
+    fn train(&mut self, samples: &[SoccerPolicySample]) {
+        let mut loss_sum = 0.0;
+        let mut applied = 0usize;
+        for sample in samples {
+            let result = self.network.train_policy_gradient_sample(
+                &sample.state_features[..],
+                sample.action_index,
+                sample.advantage,
+                SOCCER_POLICY_ENTROPY_COEFF,
+                SOCCER_POLICY_LEARNING_RATE,
+                SOCCER_POLICY_GRAD_CLIP_NORM,
+            );
+            if result.applied && result.loss.is_finite() {
+                loss_sum += result.loss;
+                applied += 1;
+            }
+        }
+        if applied > 0 {
+            self.training_steps = self.training_steps.saturating_add(applied);
+            self.last_loss = Some(loss_sum / applied as f64);
+        }
+    }
+}
+
 struct SoccerNeuralLearner {
     backend: SoccerNeuralLearningBackend,
     inline_network: Option<FeedForwardNetwork>,
@@ -41311,11 +41473,183 @@ fn soccer_neural_action_family_features(action: &str) -> (f64, f64, f64) {
     )
 }
 
+/// The discrete action families the neural **policy head** (`π(a|s)`) ranges
+/// over — a coarse, fixed vocabulary so the actor outputs a small, stable
+/// distribution while the existing machinery still picks the concrete target.
+/// Order is the output-index order and must stay stable (it indexes a trained
+/// network); append only.
+const SOCCER_POLICY_ACTIONS: &[&str] = &[
+    "hold",
+    "space",
+    "control-touch",
+    "dribble",
+    "pass",
+    "aerial-pass",
+    "killer-pass",
+    "flank-low-cross",
+    "flank-high-cross",
+    "clearance",
+    "route-one",
+    "shoot",
+    "tackle",
+];
+
+/// Map any soccer action label to its policy-head family index, or `None` if it
+/// falls outside the policy vocabulary (rare set-piece roles / support actions —
+/// those simply don't train the actor). Dribble-carry, cut, and first-time
+/// variants collapse into their family.
+fn soccer_policy_action_index(action: &str) -> Option<usize> {
+    let family = match normalize_soccer_action_label(action) {
+        "hold" => "hold",
+        "space" | "move" => "space",
+        "control-touch" => "control-touch",
+        "dribble" | "carry-forward" | "carry-out-left" | "carry-out-right" | "left-cut"
+        | "right-cut" | "nutmeg" | "fake-left-cut-right" | "fake-right-cut-left" | "side-step"
+        | "protect-ball" => "dribble",
+        "pass" | "first-time-pass" => "pass",
+        "aerial-pass" => "aerial-pass",
+        "killer-pass" | "threaded" => "killer-pass",
+        "flank-low-cross" => "flank-low-cross",
+        "flank-high-cross" => "flank-high-cross",
+        "clearance" => "clearance",
+        "route-one" => "route-one",
+        "shoot" | "first-time-shot" | "first-time-header" => "shoot",
+        "tackle" => "tackle",
+        _ => return None,
+    };
+    SOCCER_POLICY_ACTIONS.iter().position(|&label| label == family)
+}
+
 fn soccer_neural_flank_policy_feature(policy: FlankAttackPolicy) -> f64 {
     match policy {
         FlankAttackPolicy::None => 0.0,
         FlankAttackPolicy::PlayDownFlankLowCross => -1.0,
         FlankAttackPolicy::PlayDownFlankHighCross => 1.0,
+    }
+}
+
+/// Compute the temporal / relational / opponent-intent observation channels for
+/// `me` from the world snapshot. Pure function of the snapshot, so it yields the
+/// same values whether called while recording a training transition or while
+/// scoring a live decision.
+fn soccer_neural_extended_observation(
+    snapshot: &WorldSnapshot,
+    me: &PlayerSnapshot,
+    me_position: Vec2,
+) -> SoccerNeuralExtendedObservation {
+    let team = me.team;
+    let attack_dir = team.attack_dir();
+    let length = snapshot.field_length.max(1.0);
+
+    // --- Temporal ---
+    let (own_possession_seconds, opponent_possession_seconds) = match team {
+        Team::Home => (
+            snapshot.home_team_possession_seconds,
+            snapshot.away_team_possession_seconds,
+        ),
+        Team::Away => (
+            snapshot.away_team_possession_seconds,
+            snapshot.home_team_possession_seconds,
+        ),
+    };
+    let ball_forward_progress_rate_yps = match (
+        snapshot.ball_history.first(),
+        snapshot.ball_history.last(),
+    ) {
+        (Some(first), Some(last)) if last.tick > first.tick => {
+            let dt = (last.clock_seconds - first.clock_seconds).max(1e-3);
+            (last.position.y - first.position.y) * attack_dir / dt
+        }
+        _ => 0.0,
+    };
+    let own_recent_forward_progress_yards =
+        match (me.position_history.first(), me.position_history.last()) {
+            (Some(first), Some(last)) => (last.y - first.y) * attack_dir,
+            _ => 0.0,
+        };
+
+    // --- Relational (single pass over the other 21 players) ---
+    const LOCAL_RADIUS_YARDS: f64 = 10.0;
+    let mut nearest_opp: Option<(f64, Vec2, Vec2)> = None; // (dist, pos, vel)
+    let mut second_nearest_opp_dist = f64::INFINITY;
+    let mut nearest_teammate_dist = f64::INFINITY;
+    let mut nearest_teammate_forward_offset = 0.0;
+    let mut local_opponent_count = 0.0;
+    let mut local_teammate_count = 0.0;
+    for other in &snapshot.players {
+        if other.id == me.id {
+            continue;
+        }
+        let other_position = snapshot.player_snapshot_position(other);
+        let distance = (other_position - me_position).len();
+        if other.team == team {
+            if distance < nearest_teammate_dist {
+                nearest_teammate_dist = distance;
+                nearest_teammate_forward_offset = (other_position.y - me_position.y) * attack_dir;
+            }
+            if distance <= LOCAL_RADIUS_YARDS {
+                local_teammate_count += 1.0;
+            }
+        } else {
+            if distance < nearest_opp.map(|(d, _, _)| d).unwrap_or(f64::INFINITY) {
+                second_nearest_opp_dist = nearest_opp.map(|(d, _, _)| d).unwrap_or(f64::INFINITY);
+                nearest_opp = Some((distance, other_position, other.velocity));
+            } else if distance < second_nearest_opp_dist {
+                second_nearest_opp_dist = distance;
+            }
+            if distance <= LOCAL_RADIUS_YARDS {
+                local_opponent_count += 1.0;
+            }
+        }
+    }
+    // Closing rate = nearest opponent velocity projected onto the opponent→actor
+    // unit vector (positive = bearing down on the actor).
+    let nearest_opponent_closing_rate_yps = match nearest_opp {
+        Some((distance, position, velocity)) if distance > 1e-3 => {
+            velocity.dot((me_position - position).normalized())
+        }
+        _ => 0.0,
+    };
+    let second_nearest_opponent_distance = if second_nearest_opp_dist.is_finite() {
+        second_nearest_opp_dist
+    } else {
+        40.0
+    };
+    let nearest_teammate_distance = if nearest_teammate_dist.is_finite() {
+        nearest_teammate_dist
+    } else {
+        40.0
+    };
+
+    // --- Opponent intent (the other team's directive on the snapshot) ---
+    let opponent_directive = match team {
+        Team::Home => &snapshot.away_directive,
+        Team::Away => &snapshot.home_directive,
+    };
+    // Defensive line height from the actor's perspective: how far the opponent's
+    // line sits up the pitch toward the actor's own goal (positive = high press).
+    let opponent_defensive_line_offset =
+        ((opponent_directive.defensive_line_y - length * 0.5) / (length * 0.5)) * attack_dir;
+
+    SoccerNeuralExtendedObservation {
+        own_possession_seconds: finite_metric(own_possession_seconds),
+        opponent_possession_seconds: finite_metric(opponent_possession_seconds),
+        ball_holder_possession_seconds: finite_metric(snapshot.ball_holder_possession_seconds),
+        ball_forward_progress_rate_yps: finite_metric(ball_forward_progress_rate_yps),
+        own_recent_forward_progress_yards: finite_metric(own_recent_forward_progress_yards),
+        second_nearest_opponent_distance: finite_metric(second_nearest_opponent_distance),
+        nearest_teammate_distance: finite_metric(nearest_teammate_distance),
+        nearest_teammate_forward_offset: finite_metric(nearest_teammate_forward_offset),
+        local_opponent_count,
+        local_teammate_count,
+        nearest_opponent_closing_rate_yps: finite_metric(nearest_opponent_closing_rate_yps),
+        opponent_press_intensity: finite_metric(opponent_directive.press_intensity),
+        opponent_defensive_line_offset: finite_metric(opponent_defensive_line_offset),
+        opponent_risk_tolerance: finite_metric(opponent_directive.risk_tolerance),
+        opponent_attacking_overload: finite_metric(opponent_directive.attacking_overload_score),
+        opponent_neural_intent_attack: finite_metric(
+            opponent_directive.neural_formation_attack_score,
+        ),
     }
 }
 
@@ -41541,6 +41875,53 @@ fn soccer_neural_transition_features(
         soccer_neural_unit(transition.observation.attacking_overload_score),
         // Signed fatigue edge over the nearest defender.
         soccer_neural_signed_unit(transition.observation.perceived_fatigue_advantage),
+        // --- Extended channels: temporal / relational / opponent-intent ---
+        // (appended; legacy networks migrate these in as zero-weight columns).
+        // Temporal: possession duration and momentum the single-tick view misses.
+        soccer_neural_scaled(transition.observation.neural_extended.own_possession_seconds, 12.0),
+        soccer_neural_scaled(
+            transition.observation.neural_extended.opponent_possession_seconds,
+            12.0,
+        ),
+        soccer_neural_scaled(
+            transition.observation.neural_extended.ball_holder_possession_seconds,
+            6.0,
+        ),
+        soccer_neural_scaled(
+            transition.observation.neural_extended.ball_forward_progress_rate_yps,
+            12.0,
+        ),
+        soccer_neural_scaled(
+            transition.observation.neural_extended.own_recent_forward_progress_yards,
+            10.0,
+        ),
+        // Relational: local multi-agent structure the scalar aggregates collapse.
+        soccer_neural_scaled(
+            transition.observation.neural_extended.second_nearest_opponent_distance,
+            28.0,
+        ),
+        soccer_neural_scaled(
+            transition.observation.neural_extended.nearest_teammate_distance,
+            28.0,
+        ),
+        soccer_neural_scaled(
+            transition.observation.neural_extended.nearest_teammate_forward_offset,
+            20.0,
+        ),
+        soccer_neural_scaled(transition.observation.neural_extended.local_opponent_count, 5.0),
+        soccer_neural_scaled(transition.observation.neural_extended.local_teammate_count, 5.0),
+        soccer_neural_scaled(
+            transition.observation.neural_extended.nearest_opponent_closing_rate_yps,
+            10.0,
+        ),
+        // Opponent intent: the other team's directive (press / line / risk / shape).
+        soccer_neural_unit(transition.observation.neural_extended.opponent_press_intensity),
+        soccer_neural_signed_unit(
+            transition.observation.neural_extended.opponent_defensive_line_offset,
+        ),
+        soccer_neural_unit(transition.observation.neural_extended.opponent_risk_tolerance),
+        soccer_neural_unit(transition.observation.neural_extended.opponent_attacking_overload),
+        soccer_neural_unit(transition.observation.neural_extended.opponent_neural_intent_attack),
     ];
     debug_assert_eq!(features.len(), SOCCER_NEURAL_FEATURE_DIM);
     features
@@ -41617,6 +41998,10 @@ pub struct SoccerMatch {
     /// How the trained value head couples into live action selection. `Off` by
     /// default, so play is unchanged unless a run opts in via `with_neural_blend`.
     neural_blend: SoccerNeuralBlendConfig,
+    /// The neural **actor** `π(family|s)`, trained by advantage policy-gradient
+    /// from the critic (the value head). Present only when the run opts into
+    /// actor-critic (`neural_blend.actor_critic` + neural learning enabled).
+    policy_head: Option<SoccerPolicyHead>,
     pub human_inputs: SharedHumanInputs,
     /// Latched human movement per controller slot. Human input arrives intermittently
     /// (key events, one frame per /api/step) but the sim ticks many times between
@@ -41960,6 +42345,7 @@ impl SoccerMatch {
                 None
             },
             neural_blend: SoccerNeuralBlendConfig::default(),
+            policy_head: None,
             human_inputs: SharedHumanInputs::new(),
             latched_human_inputs: HashMap::new(),
             central_brain: CentralBrain::default(),
@@ -43174,15 +43560,23 @@ impl SoccerMatch {
         role: PlayerRole,
     ) -> Option<String> {
         let blend = self.neural_blend;
-        if blend.mode == SoccerNeuralBlendMode::Off {
+        let value_active = blend.mode != SoccerNeuralBlendMode::Off;
+        let actor_active = blend.actor_critic && self.policy_head.is_some();
+        if !value_active && !actor_active {
             return None;
         }
         let learner = self.neural_learner.as_ref()?;
         if !learner.has_prediction_network() {
             return None;
         }
-        let lambda = blend.effective_lambda(learner.training_steps(), learner.average_loss());
-        if lambda <= 0.0 {
+        // Value-blend weight (ramped); 0 when the value blend is off or still cold.
+        let lambda = if value_active {
+            blend.effective_lambda(learner.training_steps(), learner.average_loss())
+        } else {
+            0.0
+        };
+        if lambda <= 0.0 && !actor_active {
+            // Value head not ready and no actor — let the tabular path decide.
             return None;
         }
         let (_state, ranked) =
@@ -43204,16 +43598,41 @@ impl SoccerMatch {
 
         let mut base =
             self.neural_decision_transition(snapshot, player_id, team, role, mdp_state, observation);
+
+        // Actor: π(family|s). Computed once from state features (null action), then
+        // added as a log-probability bonus to each candidate's family. The action
+        // dims are constant across candidates, so this is a pure function of state.
+        let policy_log_probs: Option<Vec<f64>> = if actor_active {
+            base.action = String::new();
+            let state_features = soccer_neural_transition_features(&base);
+            self.policy_head
+                .as_ref()
+                .and_then(|head| head.action_distribution(&state_features))
+                .map(|dist| dist.iter().map(|&p| p.max(1e-8).ln()).collect())
+        } else {
+            None
+        };
+
         let mut neural_q = |label: &str| -> Option<f64> {
             base.action = label.to_string();
             let features = soccer_neural_transition_features(&base);
             learner.predict_value(&features).map(|v| v * target_scale)
         };
+        let policy_bonus = |label: &str| -> f64 {
+            match &policy_log_probs {
+                Some(log_probs) => soccer_policy_action_index(label)
+                    .and_then(|index| log_probs.get(index))
+                    .map(|&log_p| SOCCER_POLICY_DECISION_WEIGHT * log_p)
+                    .unwrap_or(0.0),
+                None => 0.0,
+            }
+        };
 
         let mut best_label: Option<&str> = None;
         let mut best_score = f64::NEG_INFINITY;
         for candidate in &legal {
-            let score = match blend.mode {
+            // Value contribution (0-weighted when the value blend is off/cold).
+            let value_score = match blend.mode {
                 SoccerNeuralBlendMode::Off => candidate.value,
                 SoccerNeuralBlendMode::Additive => {
                     candidate.value + lambda * neural_q(&candidate.label).unwrap_or(0.0)
@@ -43236,6 +43655,8 @@ impl SoccerMatch {
                     }
                 }
             };
+            // Actor bias: nudge toward the family the learned policy prefers.
+            let score = value_score + policy_bonus(&candidate.label);
             if score > best_score {
                 best_score = score;
                 best_label = Some(candidate.label.as_str());
@@ -43600,6 +44021,135 @@ impl SoccerMatch {
         learner.predict_value(&features)
     }
 
+    /// State-only feature vector for the actor: the transition's features built
+    /// with a **null action**, so the policy input is a pure function of state
+    /// (the action-family channels are constant across candidates). Same builder
+    /// as the critic, so there is no feature drift between heads.
+    fn policy_state_features(
+        &self,
+        transition: &SoccerLearningTransition,
+    ) -> [f64; SOCCER_NEURAL_FEATURE_DIM] {
+        let mut state_only = transition.clone();
+        state_only.action = String::new();
+        soccer_neural_transition_features(&state_only)
+    }
+
+    /// Build actor-critic training samples from a replay: opponent-centered reward
+    /// (the same zero-sum shaping the adversarial Q update uses), the critic's
+    /// value per transition, and a **GAE(λ)** advantage accumulated backward along
+    /// each agent's own trajectory. Only emits samples for actions inside the
+    /// policy vocabulary. Empty unless the critic has a usable network.
+    fn neural_policy_training_samples(
+        &self,
+        replay: &[SoccerLearningTransition],
+    ) -> Vec<SoccerPolicySample> {
+        let Some(learner) = self.neural_learner.as_ref() else {
+            return Vec::new();
+        };
+        if !learner.has_prediction_network() || replay.is_empty() {
+            return Vec::new();
+        }
+        let target_scale = self.config.neural_learning.sanitized_target_scale();
+        let gamma = self
+            .team_policies
+            .as_ref()
+            .map(|tp| soccer_q_sanitized_gamma(tp.home.options.gamma))
+            .unwrap_or_else(|| soccer_q_sanitized_gamma(SoccerQPolicyOptions::default().gamma));
+
+        // Per-tick team reward aggregation for the zero-sum opponent centering.
+        let mut tick_rewards: HashMap<u64, (f64, u32, f64, u32)> = HashMap::new();
+        for transition in replay {
+            let entry = tick_rewards.entry(transition.tick).or_default();
+            let reward = finite_metric(transition.reward);
+            match transition.team {
+                Team::Home => {
+                    entry.0 += reward;
+                    entry.1 += 1;
+                }
+                Team::Away => {
+                    entry.2 += reward;
+                    entry.3 += 1;
+                }
+            }
+        }
+
+        // Per-transition row: opponent-centered reward, critic value (in reward
+        // units), terminal flag, action index, and state features.
+        let opponent_centered_reward = |transition: &SoccerLearningTransition| -> f64 {
+            let (home_sum, home_count, away_sum, away_count) =
+                tick_rewards.get(&transition.tick).copied().unwrap_or_default();
+            let home_avg = if home_count == 0 {
+                0.0
+            } else {
+                home_sum / f64::from(home_count)
+            };
+            let away_avg = if away_count == 0 {
+                0.0
+            } else {
+                away_sum / f64::from(away_count)
+            };
+            let opponent_avg = match transition.team {
+                Team::Home => away_avg,
+                Team::Away => home_avg,
+            };
+            finite_metric(transition.reward) - opponent_avg
+        };
+
+        let reward_adv: Vec<f64> = replay.iter().map(opponent_centered_reward).collect();
+        let values: Vec<f64> = replay
+            .iter()
+            .map(|transition| {
+                learner
+                    .predict_value(&soccer_neural_transition_features(transition))
+                    .map(|value| value * target_scale)
+                    .unwrap_or(0.0)
+            })
+            .collect();
+
+        // Group transition indices by (team, player) and GAE backward per agent.
+        let mut by_agent: HashMap<(Team, usize), Vec<usize>> = HashMap::new();
+        for (index, transition) in replay.iter().enumerate() {
+            by_agent
+                .entry((transition.team, transition.player_id))
+                .or_default()
+                .push(index);
+        }
+        let mut advantages = vec![0.0f64; replay.len()];
+        for (_, mut indices) in by_agent {
+            indices.sort_by_key(|&i| replay[i].tick);
+            let mut next_value = 0.0; // V(s_{t+1}); 0 at the trajectory tail (treated terminal)
+            let mut next_advantage = 0.0;
+            for &i in indices.iter().rev() {
+                let nonterminal = if replay[i].done { 0.0 } else { 1.0 };
+                let delta = reward_adv[i] + gamma * next_value * nonterminal - values[i];
+                let advantage = delta + gamma * SOCCER_POLICY_GAE_LAMBDA * next_advantage * nonterminal;
+                advantages[i] = advantage;
+                next_value = values[i];
+                next_advantage = advantage;
+            }
+        }
+
+        replay
+            .iter()
+            .enumerate()
+            .filter_map(|(index, transition)| {
+                let action_index = soccer_policy_action_index(&transition.action)?;
+                let advantage = advantages[index];
+                advantage.is_finite().then(|| SoccerPolicySample {
+                    state_features: self.policy_state_features(transition),
+                    action_index,
+                    advantage,
+                })
+            })
+            .collect()
+    }
+
+    fn ensure_policy_head(&mut self) {
+        if self.policy_head.is_none() {
+            self.policy_head = Some(SoccerPolicyHead::new(self.config.seed));
+        }
+    }
+
     fn apply_full_game_learning_if_ready(&mut self) {
         if !self.config.learning_enabled
             || !self.config.full_game_learning_enabled
@@ -43647,7 +44197,21 @@ impl SoccerMatch {
         if let Some(policy) = &mut self.learned_policy {
             policy.train(&replay);
         }
+        // Actor (policy head): compute GAE advantages with the *current* critic
+        // (before this episode's value update), then take a policy-gradient step.
+        let policy_samples = if self.neural_blend.actor_critic && self.config.neural_learning.enabled
+        {
+            self.neural_policy_training_samples(&replay)
+        } else {
+            Vec::new()
+        };
         self.train_neural_value_model(neural_samples);
+        if !policy_samples.is_empty() {
+            self.ensure_policy_head();
+            if let Some(policy_head) = &mut self.policy_head {
+                policy_head.train(&policy_samples);
+            }
+        }
     }
 
     pub fn controller_yield_stats(&self) -> ControllerYieldStats {
@@ -81246,6 +81810,164 @@ mod tests {
             snapshot.shooting_window_score_at(player, target)
                 > snapshot.shooting_window_score_at(player, start)
         );
+    }
+
+    #[test]
+    fn policy_action_index_maps_families_and_rejects_out_of_vocab() {
+        // Canonical families resolve to their own index.
+        assert_eq!(
+            soccer_policy_action_index("shoot"),
+            SOCCER_POLICY_ACTIONS.iter().position(|&a| a == "shoot")
+        );
+        // Dribble variants collapse into the "dribble" family.
+        let dribble = SOCCER_POLICY_ACTIONS.iter().position(|&a| a == "dribble");
+        assert_eq!(soccer_policy_action_index("carry-forward"), dribble);
+        assert_eq!(soccer_policy_action_index("nutmeg"), dribble);
+        assert_eq!(soccer_policy_action_index("left-cut"), dribble);
+        // "move" normalizes to "space".
+        assert_eq!(
+            soccer_policy_action_index("move"),
+            SOCCER_POLICY_ACTIONS.iter().position(|&a| a == "space")
+        );
+        // Out-of-vocabulary support/role actions don't train the actor.
+        assert_eq!(soccer_policy_action_index("support-roam"), None);
+        assert_eq!(soccer_policy_action_index("taker"), None);
+    }
+
+    #[test]
+    fn policy_head_advantage_gradient_prefers_the_reinforced_family() {
+        // A positive-advantage action's probability should rise after training,
+        // and a negative-advantage one should fall — the actor learns.
+        let mut head = SoccerPolicyHead::new(7);
+        let mut state = [0.0f64; SOCCER_NEURAL_FEATURE_DIM];
+        state[0] = 0.5;
+        state[5] = -0.3;
+        let reinforced = 4usize; // "pass"
+        let penalised = 11usize; // "shoot"
+        let before = head.action_distribution(&state).expect("finite dist");
+        let samples: Vec<SoccerPolicySample> = (0..40)
+            .flat_map(|_| {
+                [
+                    SoccerPolicySample {
+                        state_features: state,
+                        action_index: reinforced,
+                        advantage: 1.0,
+                    },
+                    SoccerPolicySample {
+                        state_features: state,
+                        action_index: penalised,
+                        advantage: -1.0,
+                    },
+                ]
+            })
+            .collect();
+        head.train(&samples);
+        let after = head.action_distribution(&state).expect("finite dist");
+        assert!(
+            after[reinforced] > before[reinforced],
+            "reinforced family prob should rise: {} -> {}",
+            before[reinforced],
+            after[reinforced]
+        );
+        assert!(
+            after[penalised] < before[penalised],
+            "penalised family prob should fall: {} -> {}",
+            before[penalised],
+            after[penalised]
+        );
+        assert!(head.training_steps > 0);
+        let sum: f64 = after.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9 && after.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn actor_critic_trains_the_policy_head_over_a_full_match() {
+        let mut config = MatchConfig {
+            duration_seconds: 2.0,
+            seed: 4_242,
+            ..Default::default()
+        };
+        config.learning_enabled = true;
+        config.full_game_learning_enabled = true;
+        config.neural_learning.enabled = true;
+        config.neural_learning.backend = SoccerNeuralLearningBackend::Inline;
+        config.neural_learning.hidden_units = 8;
+        config.neural_learning.batch_size = 8;
+        config.neural_learning.replay_capacity = 64;
+        config.neural_learning.replay_samples_per_tick = 8;
+
+        let blend = SoccerNeuralBlendConfig {
+            actor_critic: true,
+            ..Default::default()
+        };
+        let mut sim = SoccerMatch::default_11v11(config)
+            .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()))
+            .with_neural_blend(blend);
+        let total_ticks = sim.config.total_ticks();
+        for _ in 0..total_ticks {
+            sim.run_time_step();
+        }
+        // The full-game learning hook fires at completion: the actor must have
+        // taken at least one advantage policy-gradient step from the critic.
+        let head = sim
+            .policy_head
+            .as_ref()
+            .expect("actor-critic run should create a policy head");
+        assert!(head.training_steps > 0, "policy head should have trained");
+        let mut state = [0.0f64; SOCCER_NEURAL_FEATURE_DIM];
+        state[0] = 0.3;
+        let dist = head
+            .action_distribution(&state)
+            .expect("finite action distribution");
+        assert_eq!(dist.len(), SOCCER_POLICY_ACTIONS.len());
+        let sum: f64 = dist.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9 && dist.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn neural_extended_observation_carries_temporal_relational_and_opponent_signal() {
+        let mut sim = SoccerMatch::default_11v11(MatchConfig {
+            duration_seconds: 0.5,
+            seed: 9_271,
+            ..Default::default()
+        });
+        // Run a few ticks so possession time, positions, and directives develop.
+        for _ in 0..20 {
+            sim.run_time_step();
+        }
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let observer = 6;
+        let ext = snapshot.observation_for(observer).neural_extended;
+
+        // Relational: with a full squad on the pitch the nearest teammate and the
+        // 2nd-nearest opponent are real finite distances, not the empty-field
+        // fallback (40.0) — i.e. the local structure is actually being read.
+        assert!(
+            ext.nearest_teammate_distance > 0.0 && ext.nearest_teammate_distance < 40.0,
+            "nearest teammate distance should be populated, got {}",
+            ext.nearest_teammate_distance
+        );
+        assert!(
+            ext.second_nearest_opponent_distance > 0.0
+                && ext.second_nearest_opponent_distance < 40.0,
+            "2nd-nearest opponent distance should be populated, got {}",
+            ext.second_nearest_opponent_distance
+        );
+        assert!(ext.local_teammate_count >= 0.0 && ext.local_teammate_count <= 10.0);
+        assert!(ext.local_opponent_count >= 0.0 && ext.local_opponent_count <= 11.0);
+
+        // Opponent intent: the opposing directive's press intensity is a real
+        // computed value in (0, 1], proving the directive channel is wired.
+        assert!(
+            ext.opponent_press_intensity > 0.0 && ext.opponent_press_intensity <= 1.0,
+            "opponent press intensity should be read from the directive, got {}",
+            ext.opponent_press_intensity
+        );
+
+        // Temporal channels stay finite (and possession time is non-negative).
+        assert!(ext.own_possession_seconds.is_finite() && ext.own_possession_seconds >= 0.0);
+        assert!(ext.ball_forward_progress_rate_yps.is_finite());
+        assert!(ext.ball_holder_possession_seconds.is_finite());
     }
 
     #[test]

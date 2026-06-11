@@ -421,7 +421,23 @@ impl FeedForwardNetwork {
             loss += 0.5 * e * e;
             d_a[i] = e;
         }
+        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm)
+    }
 
+    /// Backprop a precomputed output gradient `d_a` (∂loss/∂output_activation)
+    /// through the network and apply it with a finite guard + global grad-norm
+    /// clip. Shared by [`train_sample_clipped`] (MSE error) and
+    /// [`train_policy_gradient_sample`] (advantage-weighted softmax). `loss` is
+    /// only reported. Returns `applied=false` (weights untouched) if any gradient
+    /// component is non-finite.
+    fn apply_output_error_gradient(
+        &mut self,
+        trace: &ForwardTrace,
+        mut d_a: Vec<f64>,
+        loss: f64,
+        learning_rate: f64,
+        max_grad_norm: f64,
+    ) -> ClippedTrainResult {
         // Accumulate per-layer gradients without mutating the network yet.
         let mut weight_grads: Vec<Vec<Vec<f64>>> = self
             .layers
@@ -510,6 +526,68 @@ impl FeedForwardNetwork {
         }
     }
 
+    /// One advantage-weighted policy-gradient (REINFORCE-with-baseline) step for a
+    /// softmax policy. The network's outputs are treated as **logits** (the output
+    /// layer must be `Linear`); softmax is applied here. Minimises the surrogate
+    ///   `loss = -advantage·log π(action) − entropy_coeff·H(π)`,
+    /// whose logit gradient is
+    ///   `advantage·(softmaxᵢ − onehotᵢ) + entropy_coeff·pᵢ·(ln pᵢ + H)`.
+    /// A positive advantage pushes probability toward `action`; the entropy term
+    /// keeps the policy from collapsing too early. Same finite-guard + grad-norm
+    /// clip as [`train_sample_clipped`], so a bad step never poisons the actor.
+    pub fn train_policy_gradient_sample(
+        &mut self,
+        input: &[f64],
+        action: usize,
+        advantage: f64,
+        entropy_coeff: f64,
+        learning_rate: f64,
+        max_grad_norm: f64,
+    ) -> ClippedTrainResult {
+        if learning_rate < 0.0 {
+            panic!("learningRate must be non-negative, got {learning_rate}");
+        }
+        assert!(
+            action < self.output_dim,
+            "policy action index {action} out of range for {} outputs",
+            self.output_dim
+        );
+        self.assert_vector(input, self.input_dim, "input");
+        if !advantage.is_finite() {
+            // Nothing to learn from a non-finite advantage; skip cleanly.
+            return ClippedTrainResult {
+                loss: 0.0,
+                applied: false,
+                clipped: false,
+            };
+        }
+
+        let trace = self.forward(input);
+        let logits = &trace.activations[self.layers.len()];
+        let probs = softmax(logits);
+        let entropy: f64 = -probs
+            .iter()
+            .map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 })
+            .sum::<f64>();
+        let log_pi_action = probs[action].max(1e-12).ln();
+        let loss = -advantage * log_pi_action - entropy_coeff * entropy;
+
+        let mut d_a = vec![0.0; self.output_dim];
+        for i in 0..self.output_dim {
+            let onehot = if i == action { 1.0 } else { 0.0 };
+            let policy_grad = advantage * (probs[i] - onehot);
+            let entropy_grad = entropy_coeff * probs[i] * (probs[i].max(1e-12).ln() + entropy);
+            d_a[i] = policy_grad + entropy_grad;
+        }
+        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm)
+    }
+
+    /// Softmax distribution over the network's current outputs (logits). Returns a
+    /// uniform distribution if the logits are degenerate (non-finite sum).
+    pub fn action_probabilities(&self, input: &[f64]) -> NumericVector {
+        softmax(&self.predict(input))
+    }
+
     /// Mean loss over a borrowed batch trained with [`train_sample_clipped`].
     /// Samples whose gradient is non-finite are skipped (no update) and excluded
     /// from the reported mean, so a poisoned sample neither corrupts the network
@@ -548,6 +626,25 @@ fn activate(name: ActivationName, z: f64) -> f64 {
                 0.0
             }
         }
+    }
+}
+
+/// Numerically-stable softmax. Falls back to a uniform distribution if the
+/// logits are degenerate (empty or non-finite sum).
+fn softmax(logits: &[f64]) -> NumericVector {
+    if logits.is_empty() {
+        return Vec::new();
+    }
+    let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !max.is_finite() {
+        return vec![1.0 / logits.len() as f64; logits.len()];
+    }
+    let exps: NumericVector = logits.iter().map(|&z| (z - max).exp()).collect();
+    let sum: f64 = exps.iter().sum();
+    if sum > 0.0 && sum.is_finite() {
+        exps.iter().map(|&e| e / sum).collect()
+    } else {
+        vec![1.0 / logits.len() as f64; logits.len()]
     }
 }
 
@@ -1332,6 +1429,119 @@ mod tests {
     //! classification by a 2-4-1 tanh/sigmoid MLP.
 
     use super::*;
+
+    #[test]
+    fn policy_gradient_raises_probability_of_a_positive_advantage_action() {
+        // 3-action softmax policy over a 2-d state. Repeatedly reinforce action 2
+        // with a positive advantage from a fixed state; its probability must rise.
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.0, 0.0], vec![0.0, 0.0], vec![0.0, 0.0]],
+            biases: vec![0.0, 0.0, 0.0],
+            activation: ActivationName::Linear, // outputs are logits
+        }]);
+        let state = [0.5, -0.25];
+        let before = policy.action_probabilities(&state)[2];
+        for _ in 0..200 {
+            let r = policy.train_policy_gradient_sample(&state, 2, 1.0, 0.0, 0.1, 5.0);
+            assert!(r.applied, "finite advantage step should apply");
+        }
+        let after = policy.action_probabilities(&state)[2];
+        assert!(
+            after > before + 0.2,
+            "reinforced action prob should rise markedly: before={before}, after={after}"
+        );
+        // Distribution stays normalised and finite.
+        let probs = policy.action_probabilities(&state);
+        let sum: f64 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9 && probs.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn policy_gradient_negative_advantage_lowers_probability() {
+        // A negative advantage on an action should push probability away from it.
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.0], vec![0.0]],
+            biases: vec![0.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        let state = [1.0];
+        let before = policy.action_probabilities(&state)[0];
+        for _ in 0..150 {
+            policy.train_policy_gradient_sample(&state, 0, -1.0, 0.0, 0.1, 5.0);
+        }
+        let after = policy.action_probabilities(&state)[0];
+        assert!(
+            after < before - 0.15,
+            "penalised action prob should fall: before={before}, after={after}"
+        );
+    }
+
+    #[test]
+    fn clipped_step_bounds_parameter_update_under_a_huge_target() {
+        // A single linear unit y = w·x + b. With an enormous target the raw error
+        // gradient would yank the weights a long way in one step; the global
+        // gradient-norm clip must bound the parameter delta to lr · max_grad_norm.
+        let layer = DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1]],
+            biases: vec![0.05],
+            activation: ActivationName::Linear,
+        };
+        let mut net = FeedForwardNetwork::new(vec![layer.clone()]);
+        let before: Vec<f64> = net.layers[0].weights[0]
+            .iter()
+            .copied()
+            .chain(net.layers[0].biases.iter().copied())
+            .collect();
+
+        let lr = 0.1;
+        let max_grad_norm = 1.0;
+        let result = net.train_sample_clipped(&[1.0, 1.0], &[1.0e9], lr, max_grad_norm);
+        assert!(result.applied, "a finite-gradient step must be applied");
+        assert!(result.clipped, "a huge target must trip the clip");
+
+        let after: Vec<f64> = net.layers[0].weights[0]
+            .iter()
+            .copied()
+            .chain(net.layers[0].biases.iter().copied())
+            .collect();
+        let step_norm = before
+            .iter()
+            .zip(after.iter())
+            .map(|(b, a)| (a - b) * (a - b))
+            .sum::<f64>()
+            .sqrt();
+        // ‖Δθ‖ = lr · ‖clipped grad‖ ≤ lr · max_grad_norm (+ fp slack).
+        assert!(
+            step_norm <= lr * max_grad_norm + 1e-9,
+            "clipped step norm {step_norm} exceeded lr·max_grad_norm {}",
+            lr * max_grad_norm
+        );
+        assert!(after.iter().all(|v| v.is_finite()), "weights stay finite");
+    }
+
+    #[test]
+    fn clipped_batch_skips_diverged_steps_without_poisoning_weights() {
+        // Drive a non-finite gradient by letting weights blow up first, then feed a
+        // batch through the clipped trainer: the guard must keep every weight
+        // finite (poisoned steps are dropped, not applied).
+        let mut net = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![f64::MAX, f64::MAX]],
+            biases: vec![0.0],
+            activation: ActivationName::Linear,
+        }]);
+        // f64::MAX inputs would overflow to non-finite z; the guard drops the step.
+        let samples: Vec<(&[f64], &[f64])> = vec![(&[f64::MAX, f64::MAX][..], &[0.0][..])];
+        let _ = net.train_batch_slices_clipped(samples.into_iter(), 0.1, 4.0);
+        assert!(
+            net.layers[0]
+                .weights
+                .iter()
+                .flatten()
+                .chain(net.layers[0].biases.iter())
+                .all(|v| v.is_finite()),
+            "non-finite gradient must not poison the weights"
+        );
+    }
 
     #[test]
     fn forward_pass_matches_hand_calc() {

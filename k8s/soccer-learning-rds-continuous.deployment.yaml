@@ -68,7 +68,7 @@ spec:
               require_value SOCCER_REQUIRE_POSTGRES true
               require_value SOCCER_NEURAL_LEARNING_ENABLED true
               require_value SOCCER_NEURAL_LEARNING_BACKEND threaded
-              require_value SOCCER_PARALLEL_GAMES 3
+              require_value SOCCER_PARALLEL_GAMES 1
               require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 1
               require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 1
               require_value SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE true
@@ -167,7 +167,7 @@ spec:
             - name: SOCCER_GAMES
               value: "100"
             - name: SOCCER_PARALLEL_GAMES
-              value: "3"
+              value: "1"
             - name: SOCCER_HALVES
               value: "2"
             - name: SOCCER_HALF_MINUTES

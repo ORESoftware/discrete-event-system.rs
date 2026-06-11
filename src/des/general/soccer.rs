@@ -795,6 +795,12 @@ const SOCCER_POLICY_GRAD_CLIP_NORM: f64 = 5.0;
 /// Decision-time weight on the actor's log-probability when it biases action
 /// selection (multiplies `ln π(family|s)` added to each candidate's blend score).
 const SOCCER_POLICY_DECISION_WEIGHT: f64 = 0.6;
+/// Learned **world model** `P̂(s'|s,a)` hyperparameters. The model regresses the
+/// next state's feature vector from the current (state ⊕ action) features,
+/// enabling 1-step model-based value look-ahead (Dyna-style).
+const SOCCER_WORLD_MODEL_HIDDEN_UNITS: usize = 64;
+const SOCCER_WORLD_MODEL_LEARNING_RATE: f64 = 0.02;
+const SOCCER_WORLD_MODEL_GRAD_CLIP_NORM: f64 = 8.0;
 const MAX_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.25;
 const MAX_SOCCER_NEURAL_BATCH_SIZE: usize = 1024;
 const MAX_SOCCER_NEURAL_MAX_BATCHES_PER_TICK: usize = 16;
@@ -40618,6 +40624,88 @@ impl SoccerPolicyHead {
                 SOCCER_POLICY_ENTROPY_COEFF,
                 SOCCER_POLICY_LEARNING_RATE,
                 SOCCER_POLICY_GRAD_CLIP_NORM,
+            );
+            if result.applied && result.loss.is_finite() {
+                loss_sum += result.loss;
+                applied += 1;
+            }
+        }
+        if applied > 0 {
+            self.training_steps = self.training_steps.saturating_add(applied);
+            self.last_loss = Some(loss_sum / applied as f64);
+        }
+    }
+}
+
+/// A learned 1-step **world model** `P̂(s' | s, a)` over the value-head feature
+/// space: an MLP mapping the current `(state ⊕ action)` feature vector to the
+/// *next* state's feature vector. Model-free RL is purely reactive; a transition
+/// model lets the agent look ahead — score a predicted next state with the critic
+/// (1-step model-based value) or roll out synthetic experience (Dyna). Trained by
+/// clipped MSE on consecutive same-agent transitions. Inline-only, like the actor.
+struct SoccerWorldModel {
+    network: FeedForwardNetwork,
+    training_steps: usize,
+    last_loss: Option<f64>,
+}
+
+impl SoccerWorldModel {
+    fn new(seed: u32) -> Self {
+        let mut rng = mulberry32(seed ^ 0x85EB_CA6B);
+        let network = FeedForwardNetwork::random(
+            &RandomNetworkSpec {
+                input_dim: SOCCER_NEURAL_FEATURE_DIM,
+                hidden_layers: vec![SOCCER_WORLD_MODEL_HIDDEN_UNITS],
+                output_dim: SOCCER_NEURAL_FEATURE_DIM,
+                hidden_activation: ActivationName::Tanh,
+                output_activation: ActivationName::Linear,
+                weight_scale: None,
+            },
+            &mut rng,
+        );
+        SoccerWorldModel {
+            network,
+            training_steps: 0,
+            last_loss: None,
+        }
+    }
+
+    /// Predict the next state's feature vector from `(s, a)` features. `None` on a
+    /// malformed (non-finite) input or output.
+    fn predict_next(
+        &self,
+        features: &[f64; SOCCER_NEURAL_FEATURE_DIM],
+    ) -> Option<[f64; SOCCER_NEURAL_FEATURE_DIM]> {
+        if features.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let prediction = self.network.predict(&features[..]);
+        if prediction.len() != SOCCER_NEURAL_FEATURE_DIM
+            || prediction.iter().any(|value| !value.is_finite())
+        {
+            return None;
+        }
+        let mut out = [0.0f64; SOCCER_NEURAL_FEATURE_DIM];
+        out.copy_from_slice(&prediction);
+        Some(out)
+    }
+
+    /// One clipped-MSE pass over `(features_t, next_state_features)` pairs.
+    fn train(
+        &mut self,
+        pairs: &[(
+            [f64; SOCCER_NEURAL_FEATURE_DIM],
+            [f64; SOCCER_NEURAL_FEATURE_DIM],
+        )],
+    ) {
+        let mut loss_sum = 0.0;
+        let mut applied = 0usize;
+        for (input, target) in pairs {
+            let result = self.network.train_sample_clipped(
+                &input[..],
+                &target[..],
+                SOCCER_WORLD_MODEL_LEARNING_RATE,
+                SOCCER_WORLD_MODEL_GRAD_CLIP_NORM,
             );
             if result.applied && result.loss.is_finite() {
                 loss_sum += result.loss;

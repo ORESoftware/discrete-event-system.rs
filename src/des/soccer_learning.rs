@@ -13,12 +13,14 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::des::general::prng::SeededRandom;
 use crate::des::general::soccer::{
     MatchConfig, MatchSummary, SoccerMatch, SoccerNeuralNetworkSnapshot, SoccerQEntry,
     SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey, SoccerQTargetEntry,
     SoccerSelfPlayEpisodeSummary, SoccerSelfPlayTrainingArtifact, SoccerTacticalLearningSummary,
     SoccerTacticalLearningWeights, SoccerTeamQPolicies, Team,
 };
+use crate::des::shared::capabilities::RandomSource;
 
 pub const SOCCER_LEARNING_FIXED_SCALE: i64 = 1_000_000;
 pub const SOCCER_POLICY_STATUS_ACTIVE: &str = "active";
@@ -898,6 +900,152 @@ pub fn soccer_policy_delta_entries(
         &mut entries,
     );
     SoccerLearningPolicyDelta { entries }
+}
+
+/// A frozen opponent in the league: a past policy snapshot plus its head-to-head
+/// record against the current (training) policy.
+#[derive(Clone, Debug)]
+pub struct SoccerLeagueMember {
+    pub generation: u32,
+    pub policies: SoccerTeamQPolicies,
+    /// Games this frozen member has played against the current policy.
+    pub games: u32,
+    /// Of those, how many the frozen member *won* (i.e. beat the current policy).
+    pub wins_vs_current: u32,
+}
+
+impl SoccerLeagueMember {
+    /// How well this member currently exploits the training policy, in (0, 1),
+    /// Laplace-smoothed so a never-played member still gets sampled.
+    pub fn exploit_rate(&self) -> f64 {
+        (f64::from(self.wins_vs_current) + 1.0) / (f64::from(self.games) + 2.0)
+    }
+}
+
+/// A bounded population of frozen past policies for **prioritized fictitious
+/// self-play** (PFSP). Naive latest-vs-latest self-play overfits to the current
+/// mirror image and stays exploitable; training against a *diverse* set of frozen
+/// opponents — weighted toward the ones that currently beat us — drives the
+/// policy toward a less-exploitable equilibrium. Pure data structure: the
+/// orchestrator decides when to snapshot, who to play, and records outcomes.
+#[derive(Clone, Debug, Default)]
+pub struct SoccerPolicyLeague {
+    members: Vec<SoccerLeagueMember>,
+    capacity: usize,
+}
+
+impl SoccerPolicyLeague {
+    pub fn new(capacity: usize) -> Self {
+        SoccerPolicyLeague {
+            members: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    pub fn members(&self) -> &[SoccerLeagueMember] {
+        &self.members
+    }
+
+    /// Snapshot the current policy into the league. When over capacity, evict the
+    /// *least*-exploiting member — keep the opponents that still trouble us.
+    pub fn insert(&mut self, generation: u32, policies: SoccerTeamQPolicies) {
+        self.members.push(SoccerLeagueMember {
+            generation,
+            policies,
+            games: 0,
+            wins_vs_current: 0,
+        });
+        while self.members.len() > self.capacity {
+            let evict = self
+                .members
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.exploit_rate().total_cmp(&b.1.exploit_rate()))
+                .map(|(index, _)| index);
+            match evict {
+                Some(index) => {
+                    self.members.remove(index);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// PFSP opponent sampling: probability ∝ `exploit_rate`, so the opponents that
+    /// beat the current policy are sampled more often and training focuses on its
+    /// weaknesses. Deterministic given `rng`. Returns an index into `members()`.
+    pub fn sample_opponent_index(&self, rng: &mut SeededRandom) -> Option<usize> {
+        if self.members.is_empty() {
+            return None;
+        }
+        let weights: Vec<f64> = self
+            .members
+            .iter()
+            .map(|member| member.exploit_rate().max(1e-3))
+            .collect();
+        let total: f64 = weights.iter().sum();
+        if !(total > 0.0) {
+            return Some(0);
+        }
+        let mut roll = rng.next_float() * total;
+        for (index, weight) in weights.iter().enumerate() {
+            roll -= weight;
+            if roll <= 0.0 {
+                return Some(index);
+            }
+        }
+        Some(self.members.len() - 1)
+    }
+
+    /// Record a finished game against league `member_index`.
+    pub fn record_result(&mut self, member_index: usize, member_beat_current: bool) {
+        if let Some(member) = self.members.get_mut(member_index) {
+            member.games = member.games.saturating_add(1);
+            if member_beat_current {
+                member.wins_vs_current = member.wins_vs_current.saturating_add(1);
+            }
+        }
+    }
+
+    /// Exploitability proxy in (0, 1): the worst-case exploit rate across the
+    /// league — how badly the best-known past opponent beats the current policy.
+    /// Trends down as the policy becomes robust to its own history.
+    pub fn exploitability(&self) -> f64 {
+        self.members
+            .iter()
+            .map(SoccerLeagueMember::exploit_rate)
+            .fold(0.0, f64::max)
+    }
+}
+
+/// Build the policy set for a league game: the **current** policy takes one side
+/// and the frozen league `member` the other, so the current policy trains against
+/// a fixed past opponent rather than its live mirror. `current_plays_home`
+/// chooses the side the learner occupies.
+pub fn soccer_league_matchup_policies(
+    current: &SoccerTeamQPolicies,
+    member: &SoccerLeagueMember,
+    current_plays_home: bool,
+) -> SoccerTeamQPolicies {
+    if current_plays_home {
+        SoccerTeamQPolicies {
+            home: current.home.clone(),
+            away: member.policies.away.clone(),
+        }
+    } else {
+        SoccerTeamQPolicies {
+            home: member.policies.home.clone(),
+            away: current.away.clone(),
+        }
+    }
 }
 
 pub fn merge_soccer_policy_deltas(
@@ -3659,6 +3807,71 @@ mod tests {
         PlayerRole, SoccerNeuralLayerSnapshot, SoccerNeuralLearningBackend,
         SoccerNeuralLearningConfig, TacticalPhase,
     };
+
+    fn league_policies_with_alpha(alpha: f64) -> SoccerTeamQPolicies {
+        let mut options = SoccerQPolicyOptions::default();
+        options.alpha = alpha;
+        SoccerTeamQPolicies::new(options)
+    }
+
+    #[test]
+    fn league_insert_evicts_the_least_exploiting_member_over_capacity() {
+        let mut league = SoccerPolicyLeague::new(2);
+        league.insert(1, league_policies_with_alpha(0.1));
+        league.insert(2, league_policies_with_alpha(0.2));
+        // gen 1 beats the current policy a lot; gen 2 barely does.
+        for _ in 0..10 {
+            league.record_result(0, true);
+            league.record_result(1, false);
+        }
+        // Adding a third snapshot evicts the weakest sparring partner (gen 2).
+        league.insert(3, league_policies_with_alpha(0.3));
+        let generations: Vec<u32> = league.members().iter().map(|m| m.generation).collect();
+        assert_eq!(league.len(), 2);
+        assert!(generations.contains(&1), "high-exploit member must survive");
+        assert!(generations.contains(&3), "fresh member must be retained");
+        assert!(!generations.contains(&2), "weakest sparring partner is evicted");
+    }
+
+    #[test]
+    fn league_pfsp_sampling_favors_members_that_beat_the_current_policy() {
+        let mut league = SoccerPolicyLeague::new(4);
+        league.insert(1, league_policies_with_alpha(0.1)); // strong exploiter
+        league.insert(2, league_policies_with_alpha(0.2)); // weak exploiter
+        for _ in 0..10 {
+            league.record_result(0, true);
+            league.record_result(1, false);
+        }
+        let mut rng = SeededRandom::new(99);
+        let mut counts = [0u32; 2];
+        for _ in 0..400 {
+            if let Some(index) = league.sample_opponent_index(&mut rng) {
+                counts[index] += 1;
+            }
+        }
+        assert!(
+            counts[0] > counts[1] * 2,
+            "the stronger exploiter should be sampled far more: {counts:?}"
+        );
+        // Exploitability is the worst-case exploit rate (gen 1 ≈ 11/12).
+        assert!(league.exploitability() > 0.8);
+    }
+
+    #[test]
+    fn league_matchup_pits_current_against_a_frozen_side() {
+        let current = league_policies_with_alpha(0.1);
+        let mut league = SoccerPolicyLeague::new(2);
+        league.insert(1, league_policies_with_alpha(0.9));
+        let member = &league.members()[0];
+        // Current plays home: home is current (α 0.1), away is the frozen member (α 0.9).
+        let home_side = soccer_league_matchup_policies(&current, member, true);
+        assert!((home_side.home.options.alpha - 0.1).abs() < 1e-9);
+        assert!((home_side.away.options.alpha - 0.9).abs() < 1e-9);
+        // Current plays away: the sides swap.
+        let away_side = soccer_league_matchup_policies(&current, member, false);
+        assert!((away_side.home.options.alpha - 0.9).abs() < 1e-9);
+        assert!((away_side.away.options.alpha - 0.1).abs() < 1e-9);
+    }
 
     fn test_state() -> SoccerQStateKey {
         serde_json::from_value(serde_json::json!({

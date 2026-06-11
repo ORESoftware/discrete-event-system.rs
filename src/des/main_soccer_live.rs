@@ -230,6 +230,13 @@ where
     ) {
         cfg.policy_autosave_interval_ticks = interval;
     }
+    if let Some(keep_best) = env_bool(
+        &lookup,
+        "SOCCER_LIVE_POLICY_KEEP_BEST",
+        "SOCCER_POLICY_KEEP_BEST",
+    ) {
+        cfg.policy_keep_best = keep_best;
+    }
     cfg
 }
 

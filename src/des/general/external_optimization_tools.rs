@@ -2305,6 +2305,14 @@ fn native_eval_nonlinear_expr(
     if value.is_finite() {
         Ok(value)
     } else {
+        // Reject the candidate point loudly (clamping would feed the optimizer a
+        // bogus finite value and corrupt convergence), but emit the same
+        // structured numeric-guard telemetry as the shared expr kernel so a
+        // divergent constraint/objective is observable across both evaluators.
+        crate::des::shared::precision::numeric_event(
+            "nonlinear_nonfinite",
+            format_args!("native nonlinear expression evaluated to {value}"),
+        );
         Err("non-finite nonlinear expression value".to_string())
     }
 }

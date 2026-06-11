@@ -4897,6 +4897,15 @@ window.addEventListener("keyup", e => {
     scheduleInputFlush(0);
   }
 });
+// Focus loss can swallow a keyup, which would leave the latched player running.
+// Release everything and send a zero-axis input so the server un-latches it.
+window.addEventListener("blur", () => {
+  keys.clear();
+  padPressed.clear();
+  document.querySelectorAll(".padbtn.lit").forEach(b => b.classList.remove("lit"));
+  pushControlAxis();
+  flushQueuedInputsToInputApi().catch(e => statusEl.textContent = e.message);
+});
 setInterval(() => {
   pulseLowLatencyControllerInput();
 }, LIVE_INPUT_FLUSH_INTERVAL_MS);

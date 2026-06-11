@@ -553,19 +553,19 @@ const LOOSE_BALL_COMMIT_RANGE_YARDS: f64 = 14.0;
 //
 // Carrier/retriever plus one supporter (== 2 total) may engage; everyone else holds.
 const BALL_CLUSTER_MAX_TEAMMATES: usize = 2;
-// A move-target within this radius of the ball counts as diving onto the ball.
-// Kept tight (genuine on-the-ball contesting distance) so the guard only breaks up
-// real ball-swarming and leaves legitimate attacking support, box runs, and
-// overlaps — which sit further out — untouched.
-const BALL_CLUSTER_RADIUS_YARDS: f64 = 7.0;
+// A move-target within this radius of the ball counts as diving into the cluster.
+// Tuned with the clearance below so the guard breaks up ball-swarming without
+// starving the carrier of a close outlet (a tighter radius regressed ball
+// circulation: the carrier was left with no nearby teammate to pass to).
+const BALL_CLUSTER_RADIUS_YARDS: f64 = 12.0;
 // Soft weight pulling an excess off-ball player's target back to its formation slot
 // (0 = ignore, 1 = snap to slot). Weighted so players still react, "more than not".
 const BALL_CONGESTION_POSITION_BIAS: f64 = 0.75;
 // Hard floor: after the soft positional bias, an excess off-ball player's target is
 // pushed out to at least this clearance from the ball, so it genuinely leaves the
-// swarm ("add space"). Slightly larger than BALL_CLUSTER_RADIUS_YARDS so the body
-// clears the contest but stays in supporting range rather than being banished.
-const EXCESS_MIN_BALL_CLEARANCE_YARDS: f64 = 9.0;
+// swarm ("add space") even when its formation slot sits near the ball, while still
+// staying in supporting range rather than being banished out of the play.
+const EXCESS_MIN_BALL_CLEARANCE_YARDS: f64 = 12.0;
 // Defensive recovery: a contestable ball within this many yards of our back line
 // (2nd-to-last defender) demands max sprint effort; above this recovery effort the
 // gait is forced to a sprint.
@@ -80410,7 +80410,6 @@ mod tests {
             .filter(|p| p.team == Team::Home && p.role != PlayerRole::Goalkeeper)
             .map(|p| p.id)
             .collect();
-        // Park every home outfielder well outside the cluster first.
         for &id in &home {
             sim.players[id].position = Vec2::new(5.0, 110.0);
             sim.players[id].controller_slot = None;
@@ -80427,16 +80426,9 @@ mod tests {
         let snapshot = WorldSnapshot::from_match_for_agent_decision(&sim);
         let on_ball = ball_pt + Vec2::new(0.5, 0.0);
 
-        // Carrier (ball holder) is never pulled off the ball.
-        assert_eq!(
-            snapshot.anti_bunchball_adjusted_target(carrier, on_ball),
-            on_ball
-        );
-        // Second engager (carrier + 1) is allowed to commit.
-        assert_eq!(
-            snapshot.anti_bunchball_adjusted_target(supporter, on_ball),
-            on_ball
-        );
+        // Carrier (holder) and the second engager (carrier + 1) may stay on the ball.
+        assert_eq!(snapshot.anti_bunchball_adjusted_target(carrier, on_ball), on_ball);
+        assert_eq!(snapshot.anti_bunchball_adjusted_target(supporter, on_ball), on_ball);
         // Third body is excess: pushed out to at least the clearance distance.
         let adjusted = snapshot.anti_bunchball_adjusted_target(excess, on_ball);
         assert!(
@@ -80444,18 +80436,15 @@ mod tests {
             "excess player not cleared from the ball: {adjusted:?}"
         );
         // Human-controlled player keeps control even while excess.
-        assert_eq!(
-            snapshot.anti_bunchball_adjusted_target(human, on_ball),
-            on_ball
-        );
+        assert_eq!(snapshot.anti_bunchball_adjusted_target(human, on_ball), on_ball);
     }
 
     #[test]
     fn anti_bunchball_caps_a_pile_up_at_two_engagers() {
         // Controlled, trajectory-free proof: pile every outfielder onto the ball,
         // each trying to move onto it, and confirm the guard leaves exactly two
-        // bodies (carrier + one supporter) targeting the cluster while pushing the
-        // rest out past the clearance distance.
+        // bodies (carrier + one supporter) inside the cluster while pushing the
+        // rest out to at least the clearance distance.
         let config = MatchConfig {
             duration_seconds: 1.0,
             seed: 5,
@@ -80473,22 +80462,23 @@ mod tests {
             .filter(|p| p.team == Team::Home && p.role != PlayerRole::Goalkeeper)
             .map(|p| p.id)
             .collect();
-        // Stack all ten outfielders in a line straight onto the ball.
         for (rank, &id) in home.iter().enumerate() {
             sim.players[id].position = ball_pt + Vec2::new(rank as f64, 0.0);
             sim.players[id].controller_slot = None;
         }
         sim.ball.position = ball_pt;
-        sim.ball.holder = Some(home[0]); // closest body carries it
+        sim.ball.holder = Some(home[0]);
 
         let snapshot = WorldSnapshot::from_match_for_agent_decision(&sim);
         let on_ball = ball_pt + Vec2::new(0.3, 0.0);
 
-        let mut still_in_cluster = 0usize;
+        let mut still_engaging = 0usize;
         for &id in &home {
             let adjusted = snapshot.anti_bunchball_adjusted_target(id, on_ball);
-            if adjusted.distance(ball_pt) <= BALL_CLUSTER_RADIUS_YARDS {
-                still_in_cluster += 1;
+            // Count strictly-inside the cluster as "engaging"; a body cleared to the
+            // cluster edge (clearance == radius) has left the swarm.
+            if adjusted.distance(ball_pt) < BALL_CLUSTER_RADIUS_YARDS - 1e-3 {
+                still_engaging += 1;
             } else {
                 assert!(
                     adjusted.distance(ball_pt) >= EXCESS_MIN_BALL_CLEARANCE_YARDS - 1e-3,
@@ -80497,8 +80487,8 @@ mod tests {
             }
         }
         assert_eq!(
-            still_in_cluster, BALL_CLUSTER_MAX_TEAMMATES,
-            "expected exactly {BALL_CLUSTER_MAX_TEAMMATES} engagers after the guard, got {still_in_cluster}"
+            still_engaging, BALL_CLUSTER_MAX_TEAMMATES,
+            "expected exactly {BALL_CLUSTER_MAX_TEAMMATES} engagers after the guard, got {still_engaging}"
         );
     }
 

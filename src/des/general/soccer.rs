@@ -70607,14 +70607,12 @@ mod tests {
     }
 
     #[test]
-    fn formation_lp_cold_solve_chains_basis_into_warm_path() {
-        // Drive the exact solver directly (it is not env-gated; only the choice
-        // to use it inside solve_tick is). The cold path solves from scratch and,
-        // when it reaches an optimum, hands a vertex basis to the warm path,
-        // which then re-solves the same problem to the same objective. The cold
-        // solve on the full formation LP is bounded by the iteration cap, so a
-        // budget-limited (non-optimal) result is a documented outcome, not a bug
-        // — the warm-path invariant is only asserted once a real basis exists.
+    fn formation_lp_cold_solve_is_optimal_via_sparse_ipm() {
+        // The formation LP (521 vars / 750 constraints) is solved by the sparse
+        // interior-point (Clarabel), which reaches optimality directly in a few ms.
+        // It returns an optimal *point*, not a vertex, so there is no basis to chain:
+        // re-solving each tick beats the IPM->simplex crossover/polish a basis would
+        // need on this degenerate LP. Assert it is optimal and deterministic.
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             duration_seconds: 1.0,
             seed: 7,
@@ -70627,29 +70625,20 @@ mod tests {
         let slots = soccer_formation_lp_slot_inputs(&snapshot, brain.team, &directive, &weights);
         brain.update_problem_for_tick(&snapshot, &directive, &weights, &slots);
 
-        assert!(brain.basis_start.is_none(), "starts cold");
-        let cold = brain.solve_exact_formation_lp();
-        if cold.status != LPStatus::Optimal {
-            // Bounded by the per-tick iteration cap; capture_solution degrades to
-            // formation anchors. Nothing to chain — the next tick re-solves cold.
-            assert!(brain.basis_start.is_none());
-            return;
-        }
-
-        // An optimal cold solve must hand a vertex basis to the warm path.
-        brain.basis_start = LPBasisWarmStart::from_solution(&cold);
-        assert!(
-            brain.basis_start.is_some(),
-            "an optimal cold solve must carry a basis the warm path can chain from"
+        let first = brain.solve_exact_formation_lp();
+        assert_eq!(
+            first.status,
+            LPStatus::Optimal,
+            "sparse IPM should converge on the formation LP: {first:?}"
         );
-
-        let warm = brain.solve_exact_formation_lp();
-        assert_eq!(warm.status, LPStatus::Optimal, "{warm:?}");
+        // Re-solving the unchanged problem yields the same optimum (deterministic).
+        let again = brain.solve_exact_formation_lp();
+        assert_eq!(again.status, LPStatus::Optimal, "{again:?}");
         assert!(
-            (warm.objective - cold.objective).abs() < 1e-4,
-            "warm objective {} drifted from cold {}",
-            warm.objective,
-            cold.objective
+            (again.objective - first.objective).abs() < 1e-4,
+            "re-solve objective {} drifted from {}",
+            again.objective,
+            first.objective
         );
     }
 

@@ -3188,11 +3188,61 @@ function drawBall(ball, r) {
   ctx.lineWidth = 1;
   ctx.stroke();
 }
-function render() {
-  maybeAutoAssignFirstController();
-  if (!state) return;
-  const f = state.frame;
-  const r = pitchRect();
+// --- Smooth 60fps field rendering via entity interpolation -------------------
+// Server frames arrive at ~10Hz (LIVE_STEP_INTERVAL_MS) and the /api/step
+// round-trip drops that further over a network, so drawing those discrete frames
+// directly is choppy. Instead a requestAnimationFrame loop draws the field at the
+// display refresh rate, lerping each entity's position between the previous and
+// latest server frame. Metrics/overlays still update per server frame in render().
+let interpPrevFrame = null;
+let interpTargetFrame = null;
+let interpStart = 0;
+let interpDuration = LIVE_STEP_INTERVAL_MS;
+let interpLastArrival = 0;
+
+function registerFrameForInterpolation(frame) {
+  if (!frame) return;
+  const now = performance.now();
+  if (interpTargetFrame && Number(frame.tick) === Number(interpTargetFrame.tick)) {
+    interpTargetFrame = frame; // same tick re-rendered (UI toggle); keep the lerp
+    return;
+  }
+  const measured = interpLastArrival ? now - interpLastArrival : LIVE_STEP_INTERVAL_MS;
+  // EMA of the real wall-clock gap between frames -> motion paced to actual
+  // arrivals (robust to network jitter), not the nominal step interval.
+  interpDuration = clamp(0.6 * interpDuration + 0.4 * clamp(measured, 30, 1500), 30, 1500);
+  interpLastArrival = now;
+  interpPrevFrame = interpTargetFrame || frame;
+  interpTargetFrame = frame;
+  interpStart = now;
+}
+
+function lerpPosition(a, b, t) {
+  if (!a || !b) return b || a;
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+function interpolatedFrame(prev, target, t) {
+  if (!prev || prev === target || t >= 1) return target;
+  const prevPlayers = new Map((prev.players || []).map(p => [p.id, p.position]));
+  const prevOfficials = new Map((prev.officials || []).map(o => [o.id, o.position]));
+  return {
+    ...target,
+    players: (target.players || []).map(p => {
+      const a = prevPlayers.get(p.id);
+      return a ? { ...p, position: lerpPosition(a, p.position, t) } : p;
+    }),
+    officials: (target.officials || []).map(o => {
+      const a = prevOfficials.get(o.id);
+      return a ? { ...o, position: lerpPosition(a, o.position, t) } : o;
+    }),
+    ball: prev.ball && target.ball
+      ? { ...target.ball, position: lerpPosition(prev.ball.position, target.ball.position, t) }
+      : target.ball,
+  };
+}
+
+function drawField(frame, r) {
   drawPitch(r);
   drawPitchGridOverlay(r);
   drawAssistantOffsideLines(r);
@@ -3203,9 +3253,32 @@ function render() {
   drawMovementTrails(r);
   drawSelectedVision(inspectedPlayer(), r);
   drawDecisionIntentTraces(r);
-  for (const o of f.officials) drawOfficial(o, r);
-  for (const p of f.players) drawPlayer(p, r);
-  drawBall(f.ball, r);
+  for (const o of frame.officials || []) drawOfficial(o, r);
+  for (const p of frame.players || []) drawPlayer(p, r);
+  if (frame.ball) drawBall(frame.ball, r);
+}
+
+function animateField() {
+  if (state && interpTargetFrame) {
+    const r = pitchRect();
+    const t = interpDuration > 0
+      ? clamp((performance.now() - interpStart) / interpDuration, 0, 1)
+      : 1;
+    drawField(interpolatedFrame(interpPrevFrame, interpTargetFrame, t), r);
+  }
+  requestAnimationFrame(animateField);
+}
+requestAnimationFrame(animateField);
+
+function render() {
+  maybeAutoAssignFirstController();
+  if (!state) return;
+  const f = state.frame;
+  const r = pitchRect();
+  // Field is drawn by the 60fps animateField() rAF loop (interpolated for smooth
+  // motion between ~10Hz server frames); just hand it the new target frame.
+  void r;
+  registerFrameForInterpolation(f);
   homeScore.textContent = f.scoreHome;
   awayScore.textContent = f.scoreAway;
   clock.textContent = fmtClock(f.clockSeconds);

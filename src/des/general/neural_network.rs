@@ -372,6 +372,170 @@ impl TrainableNeuralNetwork for FeedForwardNetwork {
     }
 }
 
+/// Outcome of a single [`FeedForwardNetwork::train_sample_clipped`] step.
+#[derive(Clone, Copy, Debug)]
+pub struct ClippedTrainResult {
+    /// Pre-update squared-error loss for the sample.
+    pub loss: f64,
+    /// Whether the weight update was applied (false ⇒ gradient was non-finite
+    /// and the step was dropped to avoid poisoning the network).
+    pub applied: bool,
+    /// Whether the gradient was rescaled to satisfy `max_grad_norm`.
+    pub clipped: bool,
+}
+
+impl FeedForwardNetwork {
+    /// Gradient-clipped, divergence-guarded SGD step.
+    ///
+    /// Unlike [`TrainableNeuralNetwork::train_sample`] (a faithful port that
+    /// mutates weights inline as it walks the layers), this accumulates the full
+    /// parameter gradient *before* applying it, which lets it:
+    ///   1. **drop the update entirely** when any gradient component is
+    ///      non-finite — so a single exploding sample can never permanently
+    ///      poison the weights (the network is a *value head* whose output is
+    ///      blended back into live decisions, so a NaN would otherwise propagate
+    ///      into play); and
+    ///   2. **rescale the gradient** by `max_grad_norm / ‖g‖₂` when its global
+    ///      L2 norm exceeds `max_grad_norm` (≤ 0 disables clipping).
+    ///
+    /// Returns the pre-update loss plus whether the step was applied/clipped.
+    pub fn train_sample_clipped(
+        &mut self,
+        input: &[f64],
+        target: &[f64],
+        learning_rate: f64,
+        max_grad_norm: f64,
+    ) -> ClippedTrainResult {
+        if learning_rate < 0.0 {
+            panic!("learningRate must be non-negative, got {learning_rate}");
+        }
+        self.assert_vector(input, self.input_dim, "input");
+        self.assert_vector(target, self.output_dim, "target");
+
+        let trace = self.forward(input);
+        let prediction = &trace.activations[self.layers.len()];
+        let mut loss = 0.0;
+        let mut d_a = vec![0.0; self.output_dim];
+        for i in 0..self.output_dim {
+            let e = prediction[i] - target[i];
+            loss += 0.5 * e * e;
+            d_a[i] = e;
+        }
+
+        // Accumulate per-layer gradients without mutating the network yet.
+        let mut weight_grads: Vec<Vec<Vec<f64>>> = self
+            .layers
+            .iter()
+            .map(|l| l.weights.iter().map(|row| vec![0.0; row.len()]).collect())
+            .collect();
+        let mut bias_grads: Vec<Vec<f64>> = self
+            .layers
+            .iter()
+            .map(|l| vec![0.0; l.biases.len()])
+            .collect();
+
+        for k in (0..self.layers.len()).rev() {
+            let activation = self.layers[k].activation;
+            let prev_a = &trace.activations[k];
+            let cur_a = &trace.activations[k + 1];
+            let cur_z = &trace.z[k];
+            let delta: Vec<f64> = (0..cur_a.len())
+                .map(|i| d_a[i] * activation_prime_from_output(activation, cur_a[i], cur_z[i]))
+                .collect();
+
+            let weights = &self.layers[k].weights;
+            let mut d_prev = vec![0.0; prev_a.len()];
+            for i in 0..weights.len() {
+                for j in 0..weights[i].len() {
+                    d_prev[j] += weights[i][j] * delta[i];
+                    weight_grads[k][i][j] = delta[i] * prev_a[j];
+                }
+                bias_grads[k][i] = delta[i];
+            }
+            d_a = d_prev;
+        }
+
+        // Global gradient L2 norm with a finite guard over every component.
+        let mut sum_sq = 0.0;
+        let mut finite = loss.is_finite();
+        if finite {
+            'scan: for k in 0..self.layers.len() {
+                for row in &weight_grads[k] {
+                    for &g in row {
+                        if !g.is_finite() {
+                            finite = false;
+                            break 'scan;
+                        }
+                        sum_sq += g * g;
+                    }
+                }
+                for &g in &bias_grads[k] {
+                    if !g.is_finite() {
+                        finite = false;
+                        break 'scan;
+                    }
+                    sum_sq += g * g;
+                }
+            }
+        }
+        if !finite {
+            // Divergent gradient — drop the step, leave the weights untouched.
+            return ClippedTrainResult {
+                loss,
+                applied: false,
+                clipped: false,
+            };
+        }
+
+        let grad_norm = sum_sq.sqrt();
+        let scale = if max_grad_norm > 0.0 && grad_norm > max_grad_norm {
+            max_grad_norm / grad_norm
+        } else {
+            1.0
+        };
+        let step = learning_rate * scale;
+        for k in 0..self.layers.len() {
+            let layer = &mut self.layers[k];
+            for i in 0..layer.weights.len() {
+                for j in 0..layer.weights[i].len() {
+                    layer.weights[i][j] -= step * weight_grads[k][i][j];
+                }
+                layer.biases[i] -= step * bias_grads[k][i];
+            }
+        }
+        ClippedTrainResult {
+            loss,
+            applied: true,
+            clipped: scale < 1.0,
+        }
+    }
+
+    /// Mean loss over a borrowed batch trained with [`train_sample_clipped`].
+    /// Samples whose gradient is non-finite are skipped (no update) and excluded
+    /// from the reported mean, so a poisoned sample neither corrupts the network
+    /// nor silently inflates the loss average.
+    pub fn train_batch_slices_clipped<'a, I>(
+        &mut self,
+        samples: I,
+        learning_rate: f64,
+        max_grad_norm: f64,
+    ) -> f64
+    where
+        I: IntoIterator<Item = (&'a [f64], &'a [f64])>,
+    {
+        let mut total = 0.0;
+        let mut count = 0usize;
+        for (input, target) in samples {
+            let result = self.train_sample_clipped(input, target, learning_rate, max_grad_norm);
+            if result.applied && result.loss.is_finite() {
+                total += result.loss;
+                count += 1;
+            }
+        }
+        total / (count.max(1) as f64)
+    }
+}
+
 fn activate(name: ActivationName, z: f64) -> f64 {
     match name {
         ActivationName::Linear => z,

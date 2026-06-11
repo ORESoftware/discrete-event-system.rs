@@ -27,6 +27,7 @@ use crate::des::general::general::fisher_yates_shuffle;
 use crate::des::general::lp::{
     solve_lp_internal, InternalSimplexOptions, LPBasisWarmStart, LPProblem, LPStatus, Sense,
 };
+use crate::des::general::des_base::neural_network::NeuralNetworkLike;
 use crate::des::general::neural_network::{
     ActivationName, DenseLayerConfig, FeedForwardNetwork, RandomNetworkSpec,
 };
@@ -739,6 +740,19 @@ const DEFAULT_SOCCER_NEURAL_REPLAY_CAPACITY: usize = 512;
 const DEFAULT_SOCCER_NEURAL_REPLAY_SAMPLES_PER_TICK: usize = 16;
 const DEFAULT_SOCCER_NEURAL_TARGET_CLIP: f64 = 3.0;
 const DEFAULT_SOCCER_NEURAL_SNAPSHOT_EVERY_BATCHES: usize = 16;
+/// Global L2 gradient-norm ceiling for the value-head SGD step. Targets are
+/// already bounded to ±`target_clip` (default 3.0) and the learning rate to
+/// ≤ 0.25, so a healthy gradient stays well under this; the clamp only engages
+/// when the network is diverging, keeping a single bad batch from blowing the
+/// weights up. Paired with the non-finite-gradient guard in
+/// `FeedForwardNetwork::train_sample_clipped`, which drops poisoned steps
+/// outright so the value blended back into live play can never go NaN.
+const SOCCER_NEURAL_GRAD_CLIP_NORM: f64 = 8.0;
+/// Sensitivity of the formation-LP forward-pull to the value head's per-team
+/// advance-vs-hold advantage (in Q units). The advantage is squashed through
+/// `tanh(advantage · this)` into a [0, 1] pull, so a modest scale keeps the LP
+/// nudge bounded and smooth.
+const SOCCER_NEURAL_FORMATION_INTENT_SCALE: f64 = 2.0;
 const MAX_SOCCER_NEURAL_LEARNING_RATE: f64 = 0.25;
 const MAX_SOCCER_NEURAL_BATCH_SIZE: usize = 1024;
 const MAX_SOCCER_NEURAL_MAX_BATCHES_PER_TICK: usize = 16;
@@ -14878,6 +14892,106 @@ impl SoccerNeuralLearningBackend {
     }
 }
 
+/// How the trained value head is combined with the tabular Q-policy at decision
+/// time. The value head learns the continuous interactions the discretised Q-key
+/// destroys (the "hidden variables" governing emergent shape); these modes pick
+/// how much it is trusted over the proven tabular brain. `Off` by default, so the
+/// net is trained but never consulted unless a run opts in — mirroring how
+/// `exploration_epsilon` defaults to 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SoccerNeuralBlendMode {
+    /// Decisions stay purely tabular; the value head is trained but not read.
+    #[default]
+    Off,
+    /// `Q_eff(s,a) = Q_tab(s,a) + λ·V_net(s,a)` (both in Q units). The net nudges;
+    /// the tabular value is the floor.
+    Additive,
+    /// The tabular ranking chooses; the net only re-orders candidates whose
+    /// tabular values sit within `tie_epsilon` of the best — never promotes a
+    /// clearly-worse action.
+    TieBreak,
+    /// Trust the net only where the tabular state-action is under-visited
+    /// (`visits < min_confidence_visits`) — it fills the generalisation gaps the
+    /// bins leave blank, tabular elsewhere.
+    ConfidenceGated,
+}
+
+/// Decision-time coupling of the neural value head to the tabular policy.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoccerNeuralBlendConfig {
+    #[serde(default)]
+    pub mode: SoccerNeuralBlendMode,
+    /// Peak weight on neural value (Q units) once the head is warmed up. Ramps
+    /// 0 → `lambda` over `warmup_steps` training steps.
+    #[serde(default = "default_soccer_neural_blend_lambda")]
+    pub lambda: f64,
+    /// Tabular-value window (Q units) treated as a tie in `TieBreak` mode.
+    #[serde(default = "default_soccer_neural_blend_tie_epsilon")]
+    pub tie_epsilon: f64,
+    /// State-action visit count below which `ConfidenceGated` defers to the net.
+    #[serde(default = "default_soccer_neural_blend_min_visits")]
+    pub min_confidence_visits: u32,
+    /// Top-N tabular candidates re-scored by the net per decision.
+    #[serde(default = "default_soccer_neural_blend_candidates")]
+    pub candidates: usize,
+    /// Training steps over which λ ramps from 0 to `lambda`, so a cold/half-trained
+    /// head can't yank decisions around before it has learned anything.
+    #[serde(default = "default_soccer_neural_blend_warmup_steps")]
+    pub warmup_steps: usize,
+}
+
+fn default_soccer_neural_blend_lambda() -> f64 {
+    0.5
+}
+fn default_soccer_neural_blend_tie_epsilon() -> f64 {
+    0.05
+}
+fn default_soccer_neural_blend_min_visits() -> u32 {
+    4
+}
+fn default_soccer_neural_blend_candidates() -> usize {
+    6
+}
+fn default_soccer_neural_blend_warmup_steps() -> usize {
+    200
+}
+
+impl Default for SoccerNeuralBlendConfig {
+    fn default() -> Self {
+        SoccerNeuralBlendConfig {
+            mode: SoccerNeuralBlendMode::Off,
+            lambda: default_soccer_neural_blend_lambda(),
+            tie_epsilon: default_soccer_neural_blend_tie_epsilon(),
+            min_confidence_visits: default_soccer_neural_blend_min_visits(),
+            candidates: default_soccer_neural_blend_candidates(),
+            warmup_steps: default_soccer_neural_blend_warmup_steps(),
+        }
+    }
+}
+
+impl SoccerNeuralBlendConfig {
+    /// Readiness in [0, 1]: how much of `lambda` to apply given how far the value
+    /// head has trained. 0 until the head has a finite loss and at least one step;
+    /// ramps linearly to 1 at `warmup_steps`. Keeps an untrained net out of play.
+    fn readiness(&self, training_steps: usize, average_loss: Option<f64>) -> f64 {
+        if !matches!(average_loss, Some(loss) if loss.is_finite()) {
+            return 0.0;
+        }
+        let warmup = self.warmup_steps.max(1) as f64;
+        (training_steps as f64 / warmup).clamp(0.0, 1.0)
+    }
+
+    /// Effective λ after the warm-up ramp.
+    fn effective_lambda(&self, training_steps: usize, average_loss: Option<f64>) -> f64 {
+        if !self.lambda.is_finite() || self.lambda <= 0.0 {
+            return 0.0;
+        }
+        self.lambda * self.readiness(training_steps, average_loss)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoccerNeuralLearningConfig {
@@ -15882,6 +15996,13 @@ pub struct SoccerSetPlayTrainingRequest {
     pub initial_neural_network: Option<SoccerNeuralNetworkSnapshot>,
     #[serde(default)]
     pub vector_hint: Option<SoccerSetPlayVectorHint>,
+    /// How the trained value head couples into decisions during these short,
+    /// repeated set-piece episodes. `Off` by default (pure tabular). Turning it on
+    /// here is the fast curriculum: a corner/free-kick restarts in ~seconds, so the
+    /// net gets many dense, comparable reps and the closed loop is exercised at
+    /// low variance before full matches.
+    #[serde(default)]
+    pub neural_blend: SoccerNeuralBlendConfig,
 }
 
 pub enum SoccerSetPlayTrainingEvent<'a> {
@@ -15907,6 +16028,7 @@ impl Default for SoccerSetPlayTrainingRequest {
             options: None,
             initial_neural_network: None,
             vector_hint: None,
+            neural_blend: SoccerNeuralBlendConfig::default(),
         }
     }
 }
@@ -16002,6 +16124,17 @@ pub struct TeamTacticalDirective {
     pub adversarial_embedding_defense_score: f64,
     #[serde(default)]
     pub adversarial_embedding_hits: usize,
+    /// Value-head forward-intent for this team's whole-field shape, in [0, 1]:
+    /// how much the trained neural net judges that pushing the formation forward
+    /// is worth right now. Folded into the formation-LP forward-pull coefficient,
+    /// exactly like `adversarial_embedding_attack_score`. Zero unless a run opts
+    /// into the neural blend and the value head has warmed up.
+    #[serde(default)]
+    pub neural_formation_attack_score: f64,
+    /// Value-head defensive-restraint intent in [0, 1]: how much the net judges
+    /// this team should hold shape / sit rather than commit forward.
+    #[serde(default)]
+    pub neural_formation_defense_score: f64,
 }
 
 impl TeamTacticalDirective {
@@ -16033,6 +16166,8 @@ impl TeamTacticalDirective {
             adversarial_embedding_attack_score: 0.0,
             adversarial_embedding_defense_score: 0.0,
             adversarial_embedding_hits: 0,
+            neural_formation_attack_score: 0.0,
+            neural_formation_defense_score: 0.0,
         }
     }
 }
@@ -16137,6 +16272,14 @@ pub struct SoccerFormationLpObjectiveWeights {
     pub adversarial_embedding_attack: f64,
     #[serde(default)]
     pub adversarial_embedding_defense: f64,
+    /// Value-head forward-intent pull on the whole-field shape (see
+    /// [`TeamTacticalDirective::neural_formation_attack_score`]). Enters the
+    /// per-slot forward-pull coefficient alongside `adversarial_embedding_attack`.
+    #[serde(default)]
+    pub neural_attack: f64,
+    /// Value-head defensive-restraint pull (holds the shape back).
+    #[serde(default)]
+    pub neural_defense: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -17161,6 +17304,8 @@ impl SoccerFormationLpBrain {
         let transition_risk = soccer_lp_unit(weights.transition_risk);
         let embedding_attack = soccer_lp_unit(weights.adversarial_embedding_attack);
         let embedding_defense = soccer_lp_unit(weights.adversarial_embedding_defense);
+        let neural_attack = soccer_lp_unit(weights.neural_attack);
+        let neural_defense = soccer_lp_unit(weights.neural_defense);
         if let (Some(lb), Some(ub)) = (self.problem.lb.as_mut(), self.problem.ub.as_mut()) {
             for (slot, vars) in self.player_vars.iter().enumerate() {
                 let input = slots[slot];
@@ -17312,8 +17457,10 @@ impl SoccerFormationLpBrain {
                 * (expected_goal * 0.010
                     + progression * role_attack * 0.012
                     + embedding_attack * role_attack * 0.008
+                    + neural_attack * role_attack * 0.008
                     - transition_risk * role_rest_defense * 0.006
-                    - embedding_defense * role_rest_defense * 0.006);
+                    - embedding_defense * role_rest_defense * 0.006
+                    - neural_defense * role_rest_defense * 0.006);
         }
 
         for (idx, pair) in self.pair_vars.iter().enumerate() {
@@ -17936,6 +18083,10 @@ fn soccer_formation_lp_objective_weights(
         * (0.55 + embedding_confidence * 0.45);
     let embedding_defense = soccer_lp_unit(directive.adversarial_embedding_defense_score)
         * (0.55 + embedding_confidence * 0.45);
+    // Value-head forward-intent enters the same forward-pull channel as the
+    // moment-store embedding. Zero unless a run opted into the neural blend.
+    let neural_attack = soccer_lp_unit(directive.neural_formation_attack_score);
+    let neural_defense = soccer_lp_unit(directive.neural_formation_defense_score);
     let central_pressure =
         pressure_from_nearest_distance(snapshot.nearest_opponent_distance_at(team, ball));
     let rest_defense = soccer_formation_lp_rest_defense_score(snapshot, team);
@@ -18028,6 +18179,8 @@ fn soccer_formation_lp_objective_weights(
         },
         adversarial_embedding_attack: embedding_attack,
         adversarial_embedding_defense: embedding_defense,
+        neural_attack,
+        neural_defense,
     };
     soccer_formation_lp_apply_strategy_profile(&mut weights, directive, has_ball, defending);
     weights
@@ -18812,6 +18965,37 @@ impl SoccerAdversarialEmbeddingSignals {
     }
 }
 
+/// Per-team value-head forward-intent applied to the formation LP each tick. The
+/// trained value head says, for each team, how much it judges advancing the whole
+/// shape is worth right now (`attack`) versus holding it back (`defense`); these
+/// land on the directive and feed the LP's forward-pull coefficient, so the net
+/// governs whole-field configuration through the LP — not just per-player action
+/// choice. All-zero (the default) leaves the LP untouched.
+#[derive(Clone, Copy, Debug, Default)]
+struct SoccerNeuralFormationIntent {
+    home_attack: f64,
+    home_defense: f64,
+    away_attack: f64,
+    away_defense: f64,
+}
+
+impl SoccerNeuralFormationIntent {
+    fn is_active(&self) -> bool {
+        self.home_attack > 1e-9
+            || self.home_defense > 1e-9
+            || self.away_attack > 1e-9
+            || self.away_defense > 1e-9
+    }
+
+    /// `(attack, defense)` intent for one team.
+    fn for_team(&self, team: Team) -> (f64, f64) {
+        match team {
+            Team::Home => (self.home_attack, self.home_defense),
+            Team::Away => (self.away_attack, self.away_defense),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CentralBrainTeamShapeTrace {
@@ -18890,6 +19074,11 @@ pub struct CentralBrain {
     home_formation_lp: SoccerFormationLpBrain,
     #[serde(skip, default = "default_away_formation_lp_brain")]
     away_formation_lp: SoccerFormationLpBrain,
+    /// Latest value-head forward-intent, set by the owning `SoccerMatch` each tick
+    /// before the brain runs. Transient (not serialized); zero leaves the LP shape
+    /// untouched.
+    #[serde(skip)]
+    neural_formation_intent: SoccerNeuralFormationIntent,
 }
 
 impl Default for CentralBrain {
@@ -18916,6 +19105,7 @@ impl Default for CentralBrain {
             away_attack_value: std::collections::HashMap::new(),
             home_formation_lp: default_home_formation_lp_brain(),
             away_formation_lp: default_away_formation_lp_brain(),
+            neural_formation_intent: SoccerNeuralFormationIntent::default(),
         }
     }
 }
@@ -19143,6 +19333,19 @@ impl CentralBrain {
                 snapshot.field_width,
                 snapshot.field_length,
             );
+        }
+        // Value-head forward-intent into the whole-field shape (set by the match
+        // before this tick). Lands on the directive so it flows into the formation
+        // LP objective; zero leaves the LP shape unchanged.
+        if self.neural_formation_intent.is_active() {
+            let (home_attack, home_defense) =
+                self.neural_formation_intent.for_team(Team::Home);
+            self.home_directive.neural_formation_attack_score = home_attack;
+            self.home_directive.neural_formation_defense_score = home_defense;
+            let (away_attack, away_defense) =
+                self.neural_formation_intent.for_team(Team::Away);
+            self.away_directive.neural_formation_attack_score = away_attack;
+            self.away_directive.neural_formation_defense_score = away_defense;
         }
         let formation_lp_operation = if snapshot.formation_lp_enabled {
             let home_directive = self.home_directive.clone();
@@ -26280,6 +26483,8 @@ fn tactical_directive_for_team(
         adversarial_embedding_attack_score: 0.0,
         adversarial_embedding_defense_score: 0.0,
         adversarial_embedding_hits: 0,
+        neural_formation_attack_score: 0.0,
+        neural_formation_defense_score: 0.0,
     }
 }
 
@@ -40008,6 +40213,12 @@ struct SoccerNeuralLearner {
     replay_cursor: usize,
     stats: SoccerNeuralLearningStatsState,
     last_network_snapshot: Option<SoccerNeuralNetworkSnapshot>,
+    /// Read-only network used to score live decisions on the `Threaded` backend,
+    /// where `inline_network` is `None` because the trainable weights live on the
+    /// worker thread. Rebuilt from each fresh worker snapshot. On the `Inline`
+    /// backend this stays `None` and prediction reads `inline_network` directly,
+    /// so the value blended into play is always the latest trained network.
+    prediction_network: Option<FeedForwardNetwork>,
 }
 
 impl SoccerNeuralLearner {
@@ -40034,10 +40245,16 @@ impl SoccerNeuralLearner {
                 replay_cursor: 0,
                 stats,
                 last_network_snapshot: Some(initial_snapshot),
+                prediction_network: None,
             },
             SoccerNeuralLearningBackend::Threaded => SoccerNeuralLearner {
                 backend: SoccerNeuralLearningBackend::Threaded,
                 inline_network: None,
+                // Seed the read-only prediction net from the same initial weights
+                // the worker starts with, so decisions can blend in neural value
+                // before the first worker snapshot lands.
+                prediction_network: build_soccer_neural_network_from_snapshot(&initial_snapshot)
+                    .ok(),
                 worker: Some(spawn_soccer_neural_learning_worker(
                     network,
                     neural_config.sanitized_learning_rate(),
@@ -40057,9 +40274,52 @@ impl SoccerNeuralLearner {
                 self.stats.record_result(result);
             }
             SoccerNeuralLearningWorkerResult::Snapshot(snapshot) => {
+                // Refresh the read-only prediction net from the fresh weights. A
+                // malformed snapshot leaves the previous net in place rather than
+                // dropping prediction entirely.
+                if let Ok(network) = build_soccer_neural_network_from_snapshot(&snapshot) {
+                    self.prediction_network = Some(network);
+                }
                 self.last_network_snapshot = Some(snapshot);
             }
         }
+    }
+
+    /// Forward-pass the latest trained network on a decision-time feature vector,
+    /// returning the scalar value estimate. Used to blend neural value into live
+    /// action selection. Returns `None` when no network is available, the feature
+    /// vector is non-finite or mis-dimensioned, or the output is non-finite — so
+    /// a degenerate net silently falls back to the tabular policy rather than
+    /// feeding a bogus value into play.
+    fn predict_value(&self, features: &[f64; SOCCER_NEURAL_FEATURE_DIM]) -> Option<f64> {
+        let network = self
+            .inline_network
+            .as_ref()
+            .or(self.prediction_network.as_ref())?;
+        if network.input_dim != SOCCER_NEURAL_FEATURE_DIM || network.output_dim != 1 {
+            return None;
+        }
+        if !features.iter().all(|value| value.is_finite()) {
+            return None;
+        }
+        let output = network.predict(&features[..]);
+        let value = *output.first()?;
+        value.is_finite().then_some(value)
+    }
+
+    /// Whether a network is available to score live decisions.
+    fn has_prediction_network(&self) -> bool {
+        self.inline_network.is_some() || self.prediction_network.is_some()
+    }
+
+    /// Completed training steps (used to ramp the decision-time blend weight).
+    fn training_steps(&self) -> usize {
+        self.stats.training_steps
+    }
+
+    /// Mean training loss so far, if any batches have completed.
+    fn average_loss(&self) -> Option<f64> {
+        self.stats.average_loss()
     }
 
     fn drain_results(&mut self) {
@@ -40252,11 +40512,12 @@ impl SoccerNeuralLearner {
             SoccerNeuralLearningBackend::Inline => {
                 if let Some(network) = &mut self.inline_network {
                     for batch in samples.chunks(batch_size).take(max_batches) {
-                        let loss = network.train_batch_slices(
+                        let loss = network.train_batch_slices_clipped(
                             batch.iter().map(|sample| {
                                 (&sample.input[..], std::slice::from_ref(&sample.target))
                             }),
                             learning_rate,
+                            SOCCER_NEURAL_GRAD_CLIP_NORM,
                         );
                         self.stats.record_result(SoccerNeuralTrainingResult {
                             batches: 1,
@@ -40406,11 +40667,12 @@ fn spawn_soccer_neural_learning_worker(
                             continue;
                         }
                         processed_any = true;
-                        let loss = network.train_batch_slices(
+                        let loss = network.train_batch_slices_clipped(
                             samples.iter().map(|sample| {
                                 (&sample.input[..], std::slice::from_ref(&sample.target))
                             }),
                             learning_rate,
+                            SOCCER_NEURAL_GRAD_CLIP_NORM,
                         );
                         if loss.is_finite() {
                             trained_batches = trained_batches.saturating_add(1);
@@ -41088,6 +41350,9 @@ pub struct SoccerMatch {
     pub learned_policy: Option<SoccerQPolicy>,
     pub team_policies: Option<SoccerTeamQPolicies>,
     neural_learner: Option<SoccerNeuralLearner>,
+    /// How the trained value head couples into live action selection. `Off` by
+    /// default, so play is unchanged unless a run opts in via `with_neural_blend`.
+    neural_blend: SoccerNeuralBlendConfig,
     pub human_inputs: SharedHumanInputs,
     /// Latched human movement per controller slot. Human input arrives intermittently
     /// (key events, one frame per /api/step) but the sim ticks many times between
@@ -41416,6 +41681,7 @@ impl SoccerMatch {
             } else {
                 None
             },
+            neural_blend: SoccerNeuralBlendConfig::default(),
             human_inputs: SharedHumanInputs::new(),
             latched_human_inputs: HashMap::new(),
             central_brain: CentralBrain::default(),
@@ -41491,6 +41757,23 @@ impl SoccerMatch {
 
     pub fn learned_policy_mut(&mut self) -> Option<&mut SoccerQPolicy> {
         self.learned_policy.as_mut()
+    }
+
+    /// Opt the match into blending the trained neural value head into live action
+    /// selection. Defaults to `Off`; see [`SoccerNeuralBlendMode`].
+    pub fn with_neural_blend(mut self, blend: SoccerNeuralBlendConfig) -> Self {
+        self.neural_blend = blend;
+        self
+    }
+
+    /// Set the neural blend policy on a running match.
+    pub fn set_neural_blend(&mut self, blend: SoccerNeuralBlendConfig) {
+        self.neural_blend = blend;
+    }
+
+    /// The active neural blend policy.
+    pub fn neural_blend(&self) -> SoccerNeuralBlendConfig {
+        self.neural_blend
     }
 
     pub fn with_team_policies(mut self, team_policies: SoccerTeamQPolicies) -> Self {
@@ -42465,6 +42748,17 @@ impl SoccerMatch {
             if let Some(action) = self
                 .exploration_action_for_player(policy, snapshot, player_id)
                 .or_else(|| {
+                    self.neural_blended_action(
+                        policy,
+                        snapshot,
+                        player_id,
+                        mdp_state,
+                        observation,
+                        player.team,
+                        player.role,
+                    )
+                })
+                .or_else(|| {
                     policy.best_action_for_state_observation(
                         snapshot,
                         player_id,
@@ -42481,12 +42775,222 @@ impl SoccerMatch {
         let learned_policy = self.learned_policy.as_ref()?;
         self.exploration_action_for_player(learned_policy, snapshot, player_id)
             .or_else(|| {
+                self.neural_blended_action(
+                    learned_policy,
+                    snapshot,
+                    player_id,
+                    mdp_state,
+                    observation,
+                    player.team,
+                    player.role,
+                )
+            })
+            .or_else(|| {
                 learned_policy
                     .best_action_for_state_observation(snapshot, player_id, mdp_state, observation)
             })
             .map(|action| {
                 Self::learned_plan_for_policy(learned_policy, snapshot, player_id, action)
             })
+    }
+
+    /// Build a feature-only decision-time transition: the player's real
+    /// state/observation/team/role, with neutral defaults for the post-action
+    /// fields the value-head feature builder reads (those sit at the same
+    /// fallbacks the training path uses when a field is absent). `action` is left
+    /// empty for the caller to set per candidate; `belief` and `next_*` are not
+    /// read by the feature builder and carry placeholders.
+    fn neural_decision_transition(
+        &self,
+        snapshot: &WorldSnapshot,
+        player_id: usize,
+        team: Team,
+        role: PlayerRole,
+        mdp_state: &SoccerMdpState,
+        observation: &SoccerPomdpObservation,
+    ) -> SoccerLearningTransition {
+        SoccerLearningTransition {
+            tick: snapshot.tick,
+            player_id,
+            team,
+            role,
+            state: mdp_state.clone(),
+            observation: observation.clone(),
+            belief: BeliefState {
+                possession_confidence: 0.0,
+                pressure: 0.0,
+                pass_lane_open: 0.0,
+                shot_quality: 0.0,
+            },
+            action: String::new(),
+            action_target: None,
+            decision_context: SoccerDecisionContext::default(),
+            tactical_trace: SoccerTacticalLearningTrace::default(),
+            reward: 0.0,
+            next_state: mdp_state.clone(),
+            next_observation: observation.clone(),
+            done: false,
+        }
+    }
+
+    /// Re-rank the top tabular candidates with the trained value head per
+    /// `neural_blend`, returning the chosen action label or `None` to fall back to
+    /// the tabular greedy pick. Always safe: candidates come from the tabular
+    /// legal-filtered ranking, the value head is only consulted once warmed up,
+    /// and any non-finite prediction degrades to the tabular value.
+    fn neural_blended_action(
+        &self,
+        policy: &SoccerQPolicy,
+        snapshot: &WorldSnapshot,
+        player_id: usize,
+        mdp_state: &SoccerMdpState,
+        observation: &SoccerPomdpObservation,
+        team: Team,
+        role: PlayerRole,
+    ) -> Option<String> {
+        let blend = self.neural_blend;
+        if blend.mode == SoccerNeuralBlendMode::Off {
+            return None;
+        }
+        let learner = self.neural_learner.as_ref()?;
+        if !learner.has_prediction_network() {
+            return None;
+        }
+        let lambda = blend.effective_lambda(learner.training_steps(), learner.average_loss());
+        if lambda <= 0.0 {
+            return None;
+        }
+        let (_state, ranked) =
+            policy.ranked_action_values_for_snapshot(snapshot, player_id, blend.candidates.max(2))?;
+        let legal: Vec<&SoccerLearnedActionTrace> =
+            ranked.iter().filter(|action| action.legal).collect();
+        if legal.len() < 2 {
+            // Nothing to re-rank — let the tabular greedy path decide.
+            return None;
+        }
+
+        // The value head trains on `(reward + γ·max_next) / target_scale`; undo the
+        // scale so neural value lands in the same Q units as the tabular values.
+        let target_scale = self.config.neural_learning.sanitized_target_scale();
+        let best_tabular = legal
+            .iter()
+            .map(|action| action.value)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let mut base =
+            self.neural_decision_transition(snapshot, player_id, team, role, mdp_state, observation);
+        let mut neural_q = |label: &str| -> Option<f64> {
+            base.action = label.to_string();
+            let features = soccer_neural_transition_features(&base);
+            learner.predict_value(&features).map(|v| v * target_scale)
+        };
+
+        let mut best_label: Option<&str> = None;
+        let mut best_score = f64::NEG_INFINITY;
+        for candidate in &legal {
+            let score = match blend.mode {
+                SoccerNeuralBlendMode::Off => candidate.value,
+                SoccerNeuralBlendMode::Additive => {
+                    candidate.value + lambda * neural_q(&candidate.label).unwrap_or(0.0)
+                }
+                SoccerNeuralBlendMode::TieBreak => {
+                    if best_tabular - candidate.value > blend.tie_epsilon {
+                        // Outside the tie window — not a candidate for re-ranking.
+                        continue;
+                    }
+                    candidate.value + lambda * neural_q(&candidate.label).unwrap_or(0.0)
+                }
+                SoccerNeuralBlendMode::ConfidenceGated => {
+                    if candidate.visits < blend.min_confidence_visits {
+                        // Tabular is blind here — blend toward the net's estimate.
+                        let weight = lambda.min(1.0);
+                        let nv = neural_q(&candidate.label).unwrap_or(candidate.value);
+                        (1.0 - weight) * candidate.value + weight * nv
+                    } else {
+                        candidate.value
+                    }
+                }
+            };
+            if score > best_score {
+                best_score = score;
+                best_label = Some(candidate.label.as_str());
+            }
+        }
+        best_label.map(|label| label.to_string())
+    }
+
+    /// Per-team value-head forward-intent for this tick: for each outfield player,
+    /// how much more value the net assigns to advancing (`dribble`) than to
+    /// holding shape (`hold`), averaged per team and squashed into opposing
+    /// attack/defense pulls in [0, 1]. This is how the gradient-learned value
+    /// governs *whole-field* configuration — it feeds the formation LP's
+    /// forward-pull coefficient, complementing the per-player action blend.
+    /// Returns all-zero (LP untouched) unless the blend is opted in and the value
+    /// head has warmed up.
+    fn neural_formation_intent(&self, snapshot: &WorldSnapshot) -> SoccerNeuralFormationIntent {
+        let mut intent = SoccerNeuralFormationIntent::default();
+        if self.neural_blend.mode == SoccerNeuralBlendMode::Off {
+            return intent;
+        }
+        let Some(learner) = self.neural_learner.as_ref() else {
+            return intent;
+        };
+        if !learner.has_prediction_network() {
+            return intent;
+        }
+        let readiness = self
+            .neural_blend
+            .readiness(learner.training_steps(), learner.average_loss());
+        if readiness <= 0.0 {
+            return intent;
+        }
+        let target_scale = self.config.neural_learning.sanitized_target_scale();
+        for team in [Team::Home, Team::Away] {
+            let mut advantage_sum = 0.0;
+            let mut count = 0u32;
+            for player in snapshot.players.iter().filter(|player| player.team == team) {
+                let mdp_state = snapshot.mdp_state_for_player(player.id);
+                let observation = snapshot.observation_for(player.id);
+                let mut base = self.neural_decision_transition(
+                    snapshot,
+                    player.id,
+                    team,
+                    player.role,
+                    &mdp_state,
+                    &observation,
+                );
+                base.action = "dribble".to_string();
+                let forward = learner.predict_value(&soccer_neural_transition_features(&base));
+                base.action = "hold".to_string();
+                let hold = learner.predict_value(&soccer_neural_transition_features(&base));
+                if let (Some(forward), Some(hold)) = (forward, hold) {
+                    advantage_sum += (forward - hold) * target_scale;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+            let advantage = (advantage_sum / count as f64) * readiness;
+            // Signed advantage → opposing attack/defense pulls in [0, 1].
+            let squashed = (advantage * SOCCER_NEURAL_FORMATION_INTENT_SCALE).tanh();
+            let (attack, defense) = if squashed >= 0.0 {
+                (squashed, 0.0)
+            } else {
+                (0.0, -squashed)
+            };
+            match team {
+                Team::Home => {
+                    intent.home_attack = attack;
+                    intent.home_defense = defense;
+                }
+                Team::Away => {
+                    intent.away_attack = attack;
+                    intent.away_defense = defense;
+                }
+            }
+        }
+        intent
     }
 
     /// Opt-in ε-greedy exploration for the decision path. Returns a randomly
@@ -42973,6 +43477,10 @@ impl SoccerMatch {
         let reward_event_start = self.reward_events.len();
         let phase_started = Instant::now();
         let adversarial_embedding_signals = self.adversarial_embedding_signals();
+        // Hand the value head's whole-field forward-intent to the brain so it
+        // feeds the formation LP this tick (zero unless the blend is opted in).
+        let neural_formation_intent = self.neural_formation_intent(&brain_input_snapshot);
+        self.central_brain.neural_formation_intent = neural_formation_intent;
         pre_field_adversarial_elapsed += phase_started.elapsed();
         let phase_started = Instant::now();
         self.central_brain
@@ -50540,20 +51048,35 @@ impl SoccerLiveServer {
             // Champion–challenger autoload: import the best-fitness version from the
             // append-only log (falls through to the plain file if the log is empty).
             let champion_log = soccer_champion_policy_log_path(&policy_path);
-            match soccer_load_best_champion_policy(&champion_log) {
-                Ok(Some((fitness, artifact))) => {
-                    if let Err(err) = session.sim.import_team_policy_artifact(artifact) {
-                        session
-                            .policy_autosave
-                            .record_error(format!("autoload champion: {err}"));
-                    } else {
-                        session.champion_fitness = fitness;
+            // Honour the same on-disk size cap as the plain policy autoload below: the
+            // current save path keeps the log to a single entry, but a stale/oversized
+            // log (an older plain-append build, or a hand-placed file) must not be read
+            // whole into memory at startup. Skip rather than slurp it unbounded.
+            let champion_max_bytes = config.policy_autoload_max_bytes;
+            let champion_len = fs::metadata(&champion_log).ok().map(|meta| meta.len());
+            if champion_max_bytes > 0 && champion_len.is_some_and(|len| len > champion_max_bytes) {
+                session.policy_autosave.record_error(format!(
+                    "autoload champion skipped: {} is {} bytes, above {} byte limit",
+                    champion_log.display(),
+                    champion_len.unwrap_or(0),
+                    champion_max_bytes
+                ));
+            } else {
+                match soccer_load_best_champion_policy(&champion_log) {
+                    Ok(Some((fitness, artifact))) => {
+                        if let Err(err) = session.sim.import_team_policy_artifact(artifact) {
+                            session
+                                .policy_autosave
+                                .record_error(format!("autoload champion: {err}"));
+                        } else {
+                            session.champion_fitness = fitness;
+                        }
                     }
+                    Ok(None) => {}
+                    Err(err) => session
+                        .policy_autosave
+                        .record_error(format!("read champion log: {err}")),
                 }
-                Ok(None) => {}
-                Err(err) => session
-                    .policy_autosave
-                    .record_error(format!("read champion log: {err}")),
             }
         }
         if config.autoload_team_policy && policy_path.exists() {

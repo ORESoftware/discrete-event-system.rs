@@ -12,9 +12,10 @@ use std::fmt::Write as _;
 use uuid::Uuid;
 
 use crate::des::general::soccer::{
-    MatchConfig, SoccerNeuralNetworkSnapshot, SoccerQEntry, SoccerQPolicy, SoccerQPolicyOptions,
-    SoccerQStateKey, SoccerQTargetEntry, SoccerSetPlayTrainingArtifact,
-    SoccerTacticalLearningWeights, SoccerTeamQPolicies, Team,
+    MatchConfig, SoccerMomentEmbeddingInsert, SoccerNeuralNetworkSnapshot, SoccerQEntry,
+    SoccerQPolicy, SoccerQPolicyOptions, SoccerQStateKey, SoccerQTargetEntry,
+    SoccerSetPlayTrainingArtifact, SoccerTacticalLearningWeights, SoccerTeamQPolicies, Team,
+    SOCCER_MOMENT_EMBEDDING_DIM,
 };
 use crate::des::soccer_learning::{
     soccer_learning_from_micros, soccer_learning_to_micros, soccer_team_label,
@@ -974,6 +975,115 @@ impl SoccerLearningPgStore {
         tx.commit()
             .map_err(|err| format!("commit soccer learning run: {err}"))?;
         Ok(run_id)
+    }
+
+    /// Persist moment embeddings (one fixed-width vector per transition) for
+    /// cross-game similarity retrieval (RAG). `run_id` / `experiment_id` are
+    /// optional provenance (validated as uuids by the cast). Embeddings whose
+    /// width != [`SOCCER_MOMENT_EMBEDDING_DIM`] are rejected, since the
+    /// `vector(N)` column is fixed. Returns the number of rows written.
+    pub fn insert_moment_embeddings(
+        &mut self,
+        run_id: Option<&str>,
+        experiment_id: Option<&str>,
+        moments: &[SoccerMomentEmbeddingInsert],
+    ) -> Result<usize, String> {
+        if moments.is_empty() {
+            return Ok(0);
+        }
+        for moment in moments {
+            if moment.embedding.len() != SOCCER_MOMENT_EMBEDDING_DIM {
+                return Err(format!(
+                    "moment embedding has {} dims, expected {SOCCER_MOMENT_EMBEDDING_DIM}",
+                    moment.embedding.len()
+                ));
+            }
+        }
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|err| format!("begin moment embedding transaction: {err}"))?;
+        ensure_soccer_moment_embedding_tables(&mut tx)?;
+        for moment in moments {
+            let team = soccer_team_label(moment.team);
+            let tick = checked_i64(moment.tick);
+            let reward = soccer_learning_to_micros(moment.reward);
+            let value = moment.value.map(soccer_learning_to_micros);
+            let embedding = pg_vector_text(&moment.embedding);
+            tx.execute(
+                "insert into des_soccer_moment_embeddings \
+                 (run_id, experiment_id, team, tick, action, reward_micros, value_micros, embedding) \
+                 values \
+                 ($1::text::uuid, $2::text::uuid, $3, $4, $5, $6, $7, $8::vector)",
+                &[
+                    &run_id,
+                    &experiment_id,
+                    &team,
+                    &tick,
+                    &moment.action,
+                    &reward,
+                    &value,
+                    &embedding,
+                ],
+            )
+            .map_err(|err| format!("insert soccer moment embedding: {err}"))?;
+        }
+        tx.commit()
+            .map_err(|err| format!("commit soccer moment embeddings: {err}"))?;
+        Ok(moments.len())
+    }
+
+    /// Approximate-nearest-neighbour retrieval over stored moments by cosine
+    /// distance to `query` (RAG read path). Optionally restrict to one `team`.
+    /// Returns up to `limit` neighbours ordered nearest-first, each with its
+    /// distance and the outcome metadata a consumer ranks on.
+    pub fn search_nearest_moments(
+        &mut self,
+        query: &[f64],
+        limit: usize,
+        team: Option<Team>,
+    ) -> Result<Vec<SoccerMomentNeighbor>, String> {
+        if query.len() != SOCCER_MOMENT_EMBEDDING_DIM {
+            return Err(format!(
+                "moment query has {} dims, expected {SOCCER_MOMENT_EMBEDDING_DIM}",
+                query.len()
+            ));
+        }
+        ensure_soccer_moment_embedding_tables(
+            &mut self
+                .client
+                .transaction()
+                .map_err(|err| format!("begin moment search schema tx: {err}"))?,
+        )
+        .ok();
+        let limit = limit.clamp(1, 1000) as i64;
+        let query_text = pg_vector_text(query);
+        let team_filter = team.map(soccer_team_label);
+        let rows = self
+            .client
+            .query(
+                "select team, action, reward_micros, value_micros, tick, \
+                 (embedding <=> $1::vector) as distance \
+                 from des_soccer_moment_embeddings \
+                 where ($2::text is null or team = $2) \
+                 order by embedding <=> $1::vector \
+                 limit $3",
+                &[&query_text, &team_filter, &limit],
+            )
+            .map_err(|err| format!("search soccer moment embeddings: {err}"))?;
+        Ok(rows
+            .iter()
+            .map(|row| SoccerMomentNeighbor {
+                team: row.get::<_, String>(0),
+                action: row.get::<_, String>(1),
+                reward: soccer_learning_from_micros(row.get::<_, i64>(2)),
+                value: row
+                    .get::<_, Option<i64>>(3)
+                    .map(soccer_learning_from_micros),
+                tick: row.get::<_, i64>(4),
+                distance: row.get::<_, f64>(5),
+            })
+            .collect())
     }
 
     pub fn insert_completed_runs(
@@ -2415,6 +2525,125 @@ fn prune_old_policy_entries_for_branch_tip(
     .map_err(|err| format!("prune old soccer policy branch entries: {err}"))
 }
 
+/// One retrieved neighbour from [`SoccerLearningPgStore::search_nearest_moments`].
+#[derive(Clone, Debug)]
+pub struct SoccerMomentNeighbor {
+    pub team: String,
+    pub action: String,
+    pub reward: f64,
+    /// Critic value of the neighbour moment (`None` if it was stored untrained).
+    pub value: Option<f64>,
+    pub tick: i64,
+    /// Cosine distance to the query (0 = identical, 1 = orthogonal, 2 = opposite).
+    pub distance: f64,
+}
+
+/// Serialize a float vector to pgvector's text input form `[v1,v2,...]`,
+/// scrubbing non-finite components to `0` so the cast never fails.
+fn pg_vector_text(values: &[f64]) -> String {
+    let mut text = String::with_capacity(values.len() * 8 + 2);
+    text.push('[');
+    for (index, &value) in values.iter().enumerate() {
+        if index > 0 {
+            text.push(',');
+        }
+        let value = if value.is_finite() { value } else { 0.0 };
+        let _ = write!(text, "{value}");
+    }
+    text.push(']');
+    text
+}
+
+/// Classify a (normalized) action label as attacking (`true`), defending
+/// (`false`), or neutral (`None`) for the retrieval-to-LP signal.
+fn soccer_moment_action_side(action: &str) -> Option<bool> {
+    let action = action.to_ascii_lowercase();
+    let defends = ["tackle", "defend", "clear", "block", "mark", "intercept"];
+    let attacks = [
+        "pass", "shoot", "shot", "dribble", "carry", "cross", "through", "run", "overlap",
+    ];
+    if defends.iter().any(|kind| action.contains(kind)) {
+        Some(false)
+    } else if attacks.iter().any(|kind| action.contains(kind)) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Reduce retrieved neighbours into the LP's `(attack, defense)` embedding
+/// signal: a similarity-weighted average of how *favourable* past moments like
+/// this one were, split by whether the neighbour's action was attacking or
+/// defending. Both outputs land in `[0, 1]`, matching the existing adversarial
+/// embedding channel the formation LP already consumes — so RAG retrieval can
+/// feed the same seam as the in-process moment index.
+pub fn soccer_moment_neighbors_attack_defense(neighbors: &[SoccerMomentNeighbor]) -> (f64, f64) {
+    let mut attack = (0.0_f64, 0.0_f64); // (weighted favourable sum, weight sum)
+    let mut defense = (0.0_f64, 0.0_f64);
+    for neighbor in neighbors {
+        // Cosine distance ∈ [0,2]; similarity = 1 - distance, kept ≥ 0.
+        let similarity = (1.0 - neighbor.distance).clamp(0.0, 1.0);
+        if similarity <= f64::EPSILON {
+            continue;
+        }
+        // Outcome: prefer the critic value, fall back to immediate reward;
+        // squash to (-1,1) and keep only the favourable (positive) half.
+        let favourable = neighbor.value.unwrap_or(neighbor.reward).tanh().max(0.0);
+        match soccer_moment_action_side(&neighbor.action) {
+            Some(true) => {
+                attack.0 += similarity * favourable;
+                attack.1 += similarity;
+            }
+            Some(false) => {
+                defense.0 += similarity * favourable;
+                defense.1 += similarity;
+            }
+            None => {}
+        }
+    }
+    let resolve = |(sum, weight): (f64, f64)| {
+        if weight > 0.0 {
+            (sum / weight).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    (resolve(attack), resolve(defense))
+}
+
+/// Schema for persisted moment embeddings. Requires the `vector` extension —
+/// `create extension if not exists vector` is a no-op when an admin has already
+/// enabled it (the RDS-allowlisted path), and only needs elevated privilege the
+/// first time. The `vector(N)` width is `SOCCER_MOMENT_EMBEDDING_DIM`.
+fn ensure_soccer_moment_embedding_tables(
+    tx: &mut postgres::Transaction<'_>,
+) -> Result<(), String> {
+    tx.batch_execute(&format!(
+        r#"
+        create extension if not exists vector;
+        create table if not exists des_soccer_moment_embeddings (
+          id uuid primary key default gen_random_uuid(),
+          run_id uuid,
+          experiment_id uuid,
+          team varchar(8) not null,
+          tick bigint not null,
+          action varchar(64) not null,
+          reward_micros bigint not null,
+          value_micros bigint,
+          embedding vector({dim}) not null,
+          created_at timestamptz not null default now(),
+          constraint des_soccer_moment_embeddings_team_chk check (team in ('home','away'))
+        );
+        create index if not exists des_soccer_moment_embeddings_hnsw
+          on des_soccer_moment_embeddings using hnsw (embedding vector_cosine_ops);
+        create index if not exists des_soccer_moment_embeddings_run_idx
+          on des_soccer_moment_embeddings (run_id);
+        "#,
+        dim = SOCCER_MOMENT_EMBEDDING_DIM
+    ))
+    .map_err(|err| format!("ensure soccer moment embedding tables: {err}"))
+}
+
 fn ensure_soccer_learning_set_play_tables(
     tx: &mut postgres::Transaction<'_>,
 ) -> Result<(), String> {
@@ -2992,6 +3221,72 @@ mod tests {
                 biases: vec![0.125],
             }],
         }
+    }
+
+    #[test]
+    fn pg_vector_text_serializes_pgvector_form_and_scrubs_non_finite() {
+        assert_eq!(pg_vector_text(&[1.0, 2.5, -3.0]), "[1,2.5,-3]");
+        assert_eq!(pg_vector_text(&[]), "[]");
+        // NaN/Inf must not break the `::vector` cast — scrubbed to 0.
+        assert_eq!(pg_vector_text(&[f64::NAN, 1.0, f64::INFINITY]), "[0,1,0]");
+    }
+
+    #[test]
+    fn moment_action_side_classifies_attack_vs_defense() {
+        assert_eq!(soccer_moment_action_side("pass-forward"), Some(true));
+        assert_eq!(soccer_moment_action_side("shoot"), Some(true));
+        assert_eq!(soccer_moment_action_side("protect-ball"), None);
+        assert_eq!(soccer_moment_action_side("tackle"), Some(false));
+        assert_eq!(soccer_moment_action_side("defend-shape"), Some(false));
+    }
+
+    #[test]
+    fn moment_neighbors_aggregate_favourable_outcomes_by_side() {
+        let neighbors = vec![
+            // Very similar, attacking, strongly favourable → drives attack up.
+            SoccerMomentNeighbor {
+                team: "home".to_string(),
+                action: "shoot".to_string(),
+                reward: 0.0,
+                value: Some(3.0),
+                tick: 10,
+                distance: 0.05,
+            },
+            // Similar, defending, favourable → drives defense up.
+            SoccerMomentNeighbor {
+                team: "home".to_string(),
+                action: "tackle".to_string(),
+                reward: 0.0,
+                value: Some(2.0),
+                tick: 11,
+                distance: 0.10,
+            },
+            // Orthogonal (distance ~1) → contributes ~nothing.
+            SoccerMomentNeighbor {
+                team: "home".to_string(),
+                action: "pass".to_string(),
+                reward: 0.0,
+                value: Some(3.0),
+                tick: 12,
+                distance: 1.0,
+            },
+        ];
+        let (attack, defense) = soccer_moment_neighbors_attack_defense(&neighbors);
+        assert!((0.0..=1.0).contains(&attack) && (0.0..=1.0).contains(&defense));
+        assert!(attack > 0.5, "favourable attacking neighbour should lift attack: {attack}");
+        assert!(defense > 0.5, "favourable defending neighbour should lift defense: {defense}");
+
+        // No neighbours / unfavourable outcomes ⇒ zero signal.
+        assert_eq!(soccer_moment_neighbors_attack_defense(&[]), (0.0, 0.0));
+        let unfavourable = vec![SoccerMomentNeighbor {
+            team: "home".to_string(),
+            action: "shoot".to_string(),
+            reward: 0.0,
+            value: Some(-5.0),
+            tick: 1,
+            distance: 0.0,
+        }];
+        assert_eq!(soccer_moment_neighbors_attack_defense(&unfavourable), (0.0, 0.0));
     }
 
     #[test]

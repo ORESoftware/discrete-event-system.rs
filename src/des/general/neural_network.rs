@@ -265,6 +265,30 @@ impl FeedForwardNetwork {
         ss.sqrt()
     }
 
+    /// Latent embedding of `input`: the activations of the **last hidden layer**
+    /// — the representation the output layer actually reads. For a value/critic
+    /// network this is a learned, lower-dimensional summary of the input, useful
+    /// as a similarity key for retrieval (RAG over states/moments). A
+    /// single-layer (no hidden) network has no learned latent, so it returns the
+    /// input itself. The result is always finite (the forward pass asserts it).
+    pub fn embed(&self, input: &[f64]) -> NumericVector {
+        let trace = self.forward(input);
+        // activations[0] = input; activations[layers.len()] = output. The last
+        // hidden layer is activations[layers.len() - 1] (== input when len == 1).
+        let hidden_index = self.layers.len().saturating_sub(1);
+        trace.activations[hidden_index].clone()
+    }
+
+    /// Dimension of the [`Self::embed`] latent (width of the last hidden layer,
+    /// or `input_dim` for a single-layer network).
+    pub fn embedding_dim(&self) -> usize {
+        if self.layers.len() <= 1 {
+            self.input_dim
+        } else {
+            self.layers[self.layers.len() - 2].biases.len()
+        }
+    }
+
     fn forward(&self, input: &[f64]) -> ForwardTrace {
         self.assert_vector(input, self.input_dim, "input");
         let mut activations: Vec<Vec<f64>> = vec![input.to_vec()];
@@ -1555,6 +1579,39 @@ mod tests {
         assert_eq!(net.output_dim, 2);
         assert_eq!(net.predict(&[3.0, 4.0]), vec![11.5, -3.0]);
         assert_eq!(net.num_parameters(), 6);
+    }
+
+    #[test]
+    fn embed_returns_last_hidden_layer_latent() {
+        // 2 -> 3 -> 1: the latent is the 3-wide hidden layer the output reads.
+        let mut rng = mulberry32(5);
+        let net = FeedForwardNetwork::random(
+            &RandomNetworkSpec {
+                input_dim: 2,
+                hidden_layers: vec![3],
+                output_dim: 1,
+                hidden_activation: ActivationName::Tanh,
+                output_activation: ActivationName::Linear,
+                weight_scale: None,
+            },
+            &mut rng,
+        );
+        assert_eq!(net.embedding_dim(), 3);
+        let z = net.embed(&[0.4, -0.2]);
+        assert_eq!(z.len(), 3);
+        assert!(z.iter().all(|v| v.is_finite()));
+        // The hidden latent must differ from both the input and the scalar output.
+        assert_ne!(z, vec![0.4, -0.2]);
+        assert_ne!(z.len(), net.predict(&[0.4, -0.2]).len());
+
+        // A single-layer (no hidden) network has no learned latent: embed == input.
+        let linear = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![1.0, 2.0]],
+            biases: vec![0.0],
+            activation: ActivationName::Linear,
+        }]);
+        assert_eq!(linear.embedding_dim(), 2);
+        assert_eq!(linear.embed(&[3.0, 4.0]), vec![3.0, 4.0]);
     }
 
     #[test]

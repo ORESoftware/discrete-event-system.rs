@@ -222,6 +222,38 @@ const STUCK_BALL_HOOF_ALTITUDE_YARDS: f64 = 2.6;
 // the pressure and someone hoofs it rather than letting the scrum fester.
 const STUCK_BALL_CONGESTION_COUNT: usize = 4;
 const STUCK_BALL_CONGESTED_TICKS_LIMIT: u32 = 12;
+// Possession-oscillation ("ping-pong") livelock breaker. The single-pair regain
+// grace (POSSESSION_REGAIN_GRACE_TICKS) stops the immediate tit-for-tat, but the
+// ball can still cycle A→B→A→B (or around 3–4 bodies) in a tight scrum for far
+// longer than is realistic. A short oscillation (≈3–6 real seconds) is fine; past
+// that a real match resolves it (a third player arrives, or the ball squirts
+// loose). We detect a confined cluster of rapid steals and break it by popping the
+// ball loose toward the nearest *uninvolved* player — the third man who comes in
+// to sort it out. The window/threshold are sized so the breaker fires only after
+// the acceptable 3–6s of contest, never on a normal duel.
+const LIVELOCK_WINDOW_TICKS: u64 = 60; // 6.0s at the 0.1s tick: the look-back span.
+const LIVELOCK_SWAP_THRESHOLD: usize = 6; // 6+ possession flips inside the window.
+const LIVELOCK_MAX_DISTINCT_PLAYERS: usize = 4; // confined to ≤4 bodies (a scrum, not open play).
+const LIVELOCK_CLUSTER_RADIUS_YARDS: f64 = 8.0; // all flips packed into one small zone.
+const LIVELOCK_SWAP_LOG_CAPACITY: usize = 16; // ring-buffer of recent flips to scan.
+const LIVELOCK_PERTURB_SPEED_YPS: f64 = 14.0; // loose-ball nudge toward the third man.
+const LIVELOCK_PERTURB_ALTITUDE_YARDS: f64 = 0.9; // a low scuffed deflection, not a hoof.
+const LIVELOCK_THIRD_MAN_MAX_DISTANCE_YARDS: f64 = 22.0; // how far out we look for an uninvolved player.
+// When the ball has been ping-ponging in a zone, each successive winner gets a
+// longer regain-protection window — the body-shielding defender is increasingly
+// likely to keep it rather than cough it straight back. Grace grows by this many
+// ticks per recent swap in the zone, capped so it never freezes possession.
+const POSSESSION_REGAIN_GRACE_ESCALATION_PER_SWAP: u64 = 2;
+const POSSESSION_REGAIN_GRACE_MAX_TICKS: u64 = 14;
+// Proactive defensive line push-up. When the ball is deep in the opponent's half a
+// defender/midfielder sitting back in their own half should advance to fill the
+// space in front and keep the block compact (run, not jog), rather than ball-watch
+// from deep. We blend the off-ball target toward an ideal high line (only ever
+// upfield) and sprint when the gap to it is large.
+const DEFENSIVE_PUSH_UP_BLEND: f64 = 0.5; // move halfway to the ideal line, never snapping.
+const DEFENSIVE_PUSH_UP_SPRINT_GAP_YARDS: f64 = 6.0; // gap above which it's a run, not a jog.
+const DEFENSIVE_PUSH_UP_DEFENDER_MAX_FRACTION: f64 = 0.46; // a defender holds up to ~46% upfield.
+const DEFENSIVE_PUSH_UP_MIDFIELDER_MAX_FRACTION: f64 = 0.60; // a midfielder pushes higher still.
 // Aerial header / flick reception: when a player meets a falling ball at head/chest
 // height (≈3–10 ft) under pressure, they head it away / flick it on instead of
 // settling it; with no opponent within the pressure radius they chest it down.
@@ -7905,31 +7937,59 @@ impl PlayerAgent {
         } else {
             1.0
         };
+        // Forward path blocked (a defender goal-side) ⇒ low forward space. Under
+        // pressure that calls for an ACTIVE escape: carry/side-step AWAY into space,
+        // dragging the ball out of the locking zone away from the defender, rather
+        // than holding still and feeding a ping-pong. `escape_urgency` scales those
+        // away-moves; it collapses to ~0 in open play so normal carrying is untouched.
+        let forward_blocked = (1.0 - observation.forward_dribble_space_yards / 6.0).clamp(0.0, 1.0);
+        let escape_urgency = (pressure_urgency.max(pressure) * forward_blocked).clamp(0.0, 1.0);
+        // Lift the away-carry ceiling under escape pressure so a decisive break into
+        // lateral space can outscore options that keep the holder pinned in the duel.
+        let carry_out_escape_ceiling = (0.96 + escape_urgency * 0.20).clamp(0.96, 1.16);
         let carry_out_left_score = (carry_out_score
             * flank_drive_multiplier
-            * (0.76 + (left_room / 18.0).clamp(0.0, 1.0) * 0.32))
-            .clamp(0.01, 0.96);
+            * (0.76 + (left_room / 18.0).clamp(0.0, 1.0) * 0.32)
+            * (1.0 + escape_urgency * (left_room / 12.0).clamp(0.0, 1.0) * 0.55))
+            .clamp(0.01, carry_out_escape_ceiling);
         let carry_out_right_score = (carry_out_score
             * flank_drive_multiplier
-            * (0.76 + (right_room / 18.0).clamp(0.0, 1.0) * 0.32))
-            .clamp(0.01, 0.96);
+            * (0.76 + (right_room / 18.0).clamp(0.0, 1.0) * 0.32)
+            * (1.0 + escape_urgency * (right_room / 12.0).clamp(0.0, 1.0) * 0.55))
+            .clamp(0.01, carry_out_escape_ceiling);
         let carry_out_left_legal = carry_out_legal && left_room > 2.0;
         let carry_out_right_legal = carry_out_legal && right_room > 2.0;
         let protect_ball_legal =
             observation.nearest_opponent_distance <= 5.2 || pressure_urgency.max(pressure) >= 0.24;
+        // Body-shield to SECURE possession when a defender is goal-side and the
+        // forward path is blocked (same `forward_blocked` signal as the escape
+        // carry above): with the opponent between you and goal you have few
+        // attacking options, so keeping the ball with your body beats forcing past
+        // them and coughing it up. Gated to genuine pressure (`goal_side_shield`)
+        // so it never dampens progression in open play, where it collapses to ~0.
+        let goal_side_shield = forward_blocked * pressure_urgency.max(pressure);
+        // When truly blocked-and-pressured (a livelock duel) lift the ceiling so the
+        // shield can outscore a now-suppressed forward dribble and the holder keeps
+        // it rather than feeding the ping-pong; otherwise it stays at the old cap.
+        let protect_ball_ceiling = (0.88 + goal_side_shield * 0.34).clamp(0.88, 1.22);
         let protect_ball_score = (dribble_score
             * (0.12
                 + pressure_urgency.max(pressure) * 0.76
                 + observation.immediate_dispossession_risk.clamp(0.0, 1.0) * 0.44
+                + goal_side_shield * 0.46
                 + (1.0 - observation.perceived_time_on_ball_seconds / 2.8).clamp(0.0, 1.0) * 0.24))
-            .clamp(0.01, 0.88);
+            .clamp(0.01, protect_ball_ceiling);
         let side_step_legal =
             observation.nearest_opponent_distance <= 4.6 && pressure_urgency.max(pressure) >= 0.28;
+        // The side-step is the dedicated evade — knock the ball away from the
+        // defender and step past. Under escape pressure it gets a real urgency boost
+        // (and a lifted ceiling) so a pinned holder breaks contact instead of dwelling.
         let side_step_score = (dribble_score
             * (0.30 + pressure_urgency.max(pressure) * 0.88)
             * (1.0
-                + (1.0 - observation.forward_dribble_space_yards / 14.0).clamp(0.0, 1.0) * 0.24))
-            .clamp(0.01, 0.82);
+                + (1.0 - observation.forward_dribble_space_yards / 14.0).clamp(0.0, 1.0) * 0.24
+                + escape_urgency * 0.55))
+            .clamp(0.01, (0.82 + escape_urgency * 0.26).clamp(0.82, 1.08));
         let feint_legal =
             observation.nearest_opponent_distance <= 5.2 && pressure_urgency.max(pressure) >= 0.34;
         let feint_score = (dribble_score
@@ -10553,6 +10613,10 @@ impl PlayerAgent {
         let possession_team = snapshot.controlled_possession_team();
         let mut order_names = Vec::new();
         let action_options;
+        // Mechanism 5: set when the off-ball target was lifted upfield far enough to
+        // warrant a sprint (run, not jog) into the space ahead. Read by the sprint
+        // resolver below for the "defend"/"hold" off-ball moves.
+        let mut push_up_sprint = false;
         let (action, action_label) = if possession_team == Some(self.team) {
             let support_context = self.support_action_context(snapshot);
             action_options = support_context.options.clone();
@@ -10747,6 +10811,10 @@ impl PlayerAgent {
                             }
                         };
                         let target = snapshot.goal_side_defensive_target_for(self.id, target);
+                        // Push up to fill the space ahead when the ball is far upfield.
+                        let (target, push_up) =
+                            snapshot.defensive_push_up_adjustment(self.id, target);
+                        push_up_sprint = push_up;
                         chosen = Some((SoccerAction::MoveTo(target), "defend".to_string()));
                         break;
                     }
@@ -10807,10 +10875,11 @@ impl PlayerAgent {
                     "recover".to_string(),
                 )
             } else {
-                (
-                    SoccerAction::MoveTo(snapshot.defensive_shape_for(self.id, self.home_position)),
-                    "hold".to_string(),
-                )
+                let shape = snapshot.defensive_shape_for(self.id, self.home_position);
+                // Push up to fill the space ahead when the ball is far upfield.
+                let (shape, push_up) = snapshot.defensive_push_up_adjustment(self.id, shape);
+                push_up_sprint = push_up;
+                (SoccerAction::MoveTo(shape), "hold".to_string())
             }
         };
 
@@ -10853,9 +10922,12 @@ impl PlayerAgent {
                         && self.position.distance(*target)
                             > GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS
                 } else {
-                    snapshot.defensive_tracking_sprint_active(self.team)
-                        && matches!(self.role, PlayerRole::Defender | PlayerRole::Midfielder)
-                        && self.position.distance(*target) > 2.5
+                    // Sprint to track a threat OR to proactively fill the space ahead
+                    // when the line is pushing up (mechanism 5) — run, not jog.
+                    push_up_sprint
+                        || (snapshot.defensive_tracking_sprint_active(self.team)
+                            && matches!(self.role, PlayerRole::Defender | PlayerRole::Midfielder)
+                            && self.position.distance(*target) > 2.5)
                 }
             }
             SoccerAction::MoveTo(target) if action_label == "recover" => {
@@ -10866,10 +10938,11 @@ impl PlayerAgent {
                         > GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS
             }
             SoccerAction::MoveTo(target) if action_label == "hold" => {
-                self.role == PlayerRole::Goalkeeper
-                    && snapshot.goalkeeper_line_recovery_sprint_active(self.id)
-                    && self.position.distance(*target)
-                        > GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS
+                push_up_sprint
+                    || (self.role == PlayerRole::Goalkeeper
+                        && snapshot.goalkeeper_line_recovery_sprint_active(self.id)
+                        && self.position.distance(*target)
+                            > GOALKEEPER_LINE_RECOVERY_SPRINT_DISTANCE_YARDS)
             }
             _ => false,
         };
@@ -25964,6 +26037,46 @@ impl WorldSnapshot {
             shape = shape.clamp_to_pitch(self.field_width, self.field_length);
         }
         shape
+    }
+
+    /// Mechanism 5 — proactive line push-up. When the ball is deep in the opponent's
+    /// half, a defender/midfielder still sitting in their own half should advance to
+    /// fill the space ahead and keep the team compact, instead of ball-watching from
+    /// deep. Returns the off-ball `base` target lifted toward an ideal high line
+    /// (only ever *upfield*, blended so the shape is preserved) together with whether
+    /// the remaining gap is big enough to sprint into — a run, not a jog. A no-op for
+    /// keepers/forwards, when the ball is in our own half, or when already high.
+    fn defensive_push_up_adjustment(&self, player_id: usize, base: Vec2) -> (Vec2, bool) {
+        let Some(me) = self.players.iter().find(|p| p.id == player_id) else {
+            return (base, false);
+        };
+        let max_fraction = match me.role {
+            PlayerRole::Defender => DEFENSIVE_PUSH_UP_DEFENDER_MAX_FRACTION,
+            PlayerRole::Midfielder => DEFENSIVE_PUSH_UP_MIDFIELDER_MAX_FRACTION,
+            _ => return (base, false),
+        };
+        let attack_dir = me.team.attack_dir();
+        let half = self.field_length * 0.5;
+        // 0 at halfway, ramping to 1 as the ball nears the opponent's goal line.
+        let ball_upfield =
+            (((self.ball.position.y - half) * attack_dir) / half.max(1.0)).clamp(0.0, 1.0);
+        if ball_upfield <= 0.0 {
+            return (base, false);
+        }
+        let own_goal_y = self.own_goal_y_for(me.team);
+        let ideal_line_y =
+            own_goal_y + attack_dir * self.field_length * max_fraction * ball_upfield;
+        // Component of (ideal - base) along the attacking direction: > 0 means the
+        // ideal line is upfield of the current target, so there is room to push up.
+        let lift = (ideal_line_y - base.y) * attack_dir;
+        if lift <= 0.5 {
+            return (base, false);
+        }
+        let pushed_y = base.y + (ideal_line_y - base.y) * DEFENSIVE_PUSH_UP_BLEND;
+        let target =
+            Vec2::new(base.x, pushed_y).clamp_to_pitch(self.field_width, self.field_length);
+        let gap = self.player_snapshot_position(me).distance(target);
+        (target, gap > DEFENSIVE_PUSH_UP_SPRINT_GAP_YARDS)
     }
 
     fn team_lateral_width_yards(&self, team: Team) -> f64 {
@@ -41804,6 +41917,34 @@ fn soccer_neural_extended_observation(
     }
 }
 
+/// A single moment (transition) embedding ready to persist for retrieval.
+#[derive(Clone, Debug)]
+pub struct SoccerMomentEmbeddingInsert {
+    pub team: Team,
+    pub tick: u64,
+    pub action: String,
+    pub reward: f64,
+    /// Critic value of the moment in target units (`None` when neural learning
+    /// is off or untrained). Lets a retrieval consumer rank neighbours by how
+    /// good the situation was, not just how similar.
+    pub value: Option<f64>,
+    /// Fixed-width (`SOCCER_MOMENT_EMBEDDING_DIM`) similarity vector.
+    pub embedding: Vec<f64>,
+}
+
+/// Project a (variable-length, possibly non-finite) feature vector into the
+/// fixed `SOCCER_MOMENT_EMBEDDING_DIM` moment-embedding space by pad/truncate,
+/// scrubbing any non-finite component to `0`. Stable across feature-count
+/// changes, so the persisted `vector(N)` column never needs a migration when
+/// new state features are added upstream.
+pub fn soccer_moment_embedding(features: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0_f64; SOCCER_MOMENT_EMBEDDING_DIM];
+    for (slot, &value) in out.iter_mut().zip(features.iter()) {
+        *slot = if value.is_finite() { value } else { 0.0 };
+    }
+    out
+}
+
 fn soccer_neural_transition_features(
     transition: &SoccerLearningTransition,
 ) -> [f64; SOCCER_NEURAL_FEATURE_DIM] {
@@ -42200,6 +42341,10 @@ pub struct SoccerMatch {
     /// the 1v1 duel livelock: the player who just lost the ball cannot
     /// immediately re-win it from the new holder for a short grace window.
     recent_dispossession: Option<RecentDispossession>,
+    /// Ring buffer of recent possession flips (steals), used by the ping-pong
+    /// livelock detector to spot a ball cycling among a confined cluster of
+    /// players and break it by squirting it loose to an uninvolved third man.
+    possession_swaps: VecDeque<PossessionSwap>,
 }
 
 /// A just-completed dispossession, retained only long enough to suppress an
@@ -42210,6 +42355,20 @@ struct RecentDispossession {
     tick: u64,
     winner: usize,
     loser: usize,
+    /// How long (ticks) the loser is blocked from winning it straight back. Starts
+    /// at POSSESSION_REGAIN_GRACE_TICKS and escalates when the ball has been
+    /// ping-ponging in this zone (a shielding winner holds it more securely).
+    grace_ticks: u64,
+}
+
+/// One possession flip (a completed defensive dispossession), logged for the
+/// ping-pong livelock detector: who won it from whom, when, and where.
+#[derive(Clone, Copy)]
+struct PossessionSwap {
+    tick: u64,
+    winner: usize,
+    loser: usize,
+    position: Vec2,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -42537,6 +42696,7 @@ impl SoccerMatch {
             controller_yield_stats: ControllerYieldStats::default(),
             step_timing_stats: SoccerStepTimingStats::default(),
             recent_dispossession: None,
+            possession_swaps: VecDeque::new(),
         };
         let center = Vec2::new(
             config.field_width_yards * 0.5,
@@ -44176,6 +44336,25 @@ impl SoccerMatch {
         let learner = self.neural_learner.as_ref()?;
         let features = soccer_neural_transition_features(transition);
         learner.predict_value(&features)
+    }
+
+    /// Build persistable **moment embeddings** from this match's recorded
+    /// transitions — one fixed-width vector per moment plus the metadata a
+    /// retrieval consumer needs (team, action, reward, critic value). These are
+    /// written to pgvector for cross-game similarity search (RAG over moments),
+    /// the durable, scalable successor to the in-process `SoccerMomentVectorIndex`.
+    pub fn moment_embeddings(&self) -> Vec<SoccerMomentEmbeddingInsert> {
+        self.episode_learning_transitions
+            .iter()
+            .map(|transition| SoccerMomentEmbeddingInsert {
+                team: transition.team,
+                tick: transition.tick,
+                action: normalize_soccer_action_label(&transition.action).to_string(),
+                reward: finite_metric(transition.reward),
+                value: self.neural_value_for_transition(transition),
+                embedding: soccer_moment_embedding(&soccer_neural_transition_features(transition)),
+            })
+            .collect()
     }
 
     /// State-only feature vector for the actor: the transition's features built
@@ -46487,12 +46666,29 @@ impl SoccerMatch {
         self.mark_ball_received(defender_id);
         self.record_reward_event(defender_id, DEFENSIVE_DISPOSSESSION_REWARD_POINTS);
         self.record_possession_touch(defender_id);
-        // Arm the anti-ping-pong grace: the player who just lost the ball cannot
-        // immediately win it straight back from this new holder.
+        // Log this flip for the ping-pong livelock detector, then arm the
+        // anti-ping-pong grace. The more the ball has just been oscillating in
+        // this zone, the longer the new (shielding) winner is protected from an
+        // instant return steal — escalating grace makes the body-shield hold.
+        let swap_position = self.ball.position;
+        let escalation = self.recent_zone_swap_count(swap_position) as u64
+            * POSSESSION_REGAIN_GRACE_ESCALATION_PER_SWAP;
+        let grace_ticks =
+            (POSSESSION_REGAIN_GRACE_TICKS + escalation).min(POSSESSION_REGAIN_GRACE_MAX_TICKS);
+        self.possession_swaps.push_back(PossessionSwap {
+            tick: self.tick,
+            winner: defender_id,
+            loser: attacker_id,
+            position: swap_position,
+        });
+        while self.possession_swaps.len() > LIVELOCK_SWAP_LOG_CAPACITY {
+            self.possession_swaps.pop_front();
+        }
         self.recent_dispossession = Some(RecentDispossession {
             tick: self.tick,
             winner: defender_id,
             loser: attacker_id,
+            grace_ticks,
         });
         self.events.push(MatchEvent {
             tick: self.tick,
@@ -46614,7 +46810,7 @@ impl SoccerMatch {
         // Anti-ping-pong grace: the defender cannot win the ball straight back
         // from the player who just took it from them.
         let regain_blocked = self.recent_dispossession.is_some_and(|recent| {
-            self.tick.saturating_sub(recent.tick) < POSSESSION_REGAIN_GRACE_TICKS
+            self.tick.saturating_sub(recent.tick) < recent.grace_ticks
                 && recent.winner == attacker_id
                 && recent.loser == defender_id
         });
@@ -47118,7 +47314,7 @@ impl SoccerMatch {
                     // grace window. Breaks the 1v1 duel livelock where the ball
                     // oscillates between two players every tick.
                     let regain_blocked = self.recent_dispossession.is_some_and(|recent| {
-                        self.tick.saturating_sub(recent.tick) < POSSESSION_REGAIN_GRACE_TICKS
+                        self.tick.saturating_sub(recent.tick) < recent.grace_ticks
                             && recent.winner == target_player
                             && recent.loser == player_id
                     });
@@ -47676,6 +47872,7 @@ impl SoccerMatch {
             self.config.dt_seconds,
         );
         self.update_stuck_ball_recovery();
+        self.detect_and_break_possession_livelock();
     }
 
     /// Aerial reception decision at the moment a player meets a falling ball. Under
@@ -47770,6 +47967,137 @@ impl SoccerMatch {
         self.hoof_stuck_ball_clear();
         self.ball_stationary_ticks = 0;
         self.ball_stuck_anchor = self.ball.position;
+    }
+
+    /// Number of recent possession flips (inside LIVELOCK_WINDOW_TICKS) packed into
+    /// the small zone around `position`. Drives both the escalating regain grace and
+    /// the livelock detector.
+    fn recent_zone_swap_count(&self, position: Vec2) -> usize {
+        self.possession_swaps
+            .iter()
+            .filter(|swap| self.tick.saturating_sub(swap.tick) < LIVELOCK_WINDOW_TICKS)
+            .filter(|swap| swap.position.distance(position) <= LIVELOCK_CLUSTER_RADIUS_YARDS)
+            .count()
+    }
+
+    /// Ping-pong livelock breaker. If the ball has changed hands ≥
+    /// LIVELOCK_SWAP_THRESHOLD times inside LIVELOCK_WINDOW_TICKS among only a
+    /// handful of players (≤ LIVELOCK_MAX_DISTINCT_PLAYERS) confined to one small
+    /// zone, the duel has become an unrealistic scrum. Break it the way a real match
+    /// does: squirt the ball loose toward the nearest *uninvolved* player — the third
+    /// man stepping in to sort it out — so a fresh body resolves possession.
+    fn detect_and_break_possession_livelock(&mut self) {
+        // Scan only the flips still inside the look-back window.
+        let tick = self.tick;
+        let recent: Vec<PossessionSwap> = self
+            .possession_swaps
+            .iter()
+            .filter(|swap| tick.saturating_sub(swap.tick) < LIVELOCK_WINDOW_TICKS)
+            .copied()
+            .collect();
+        if recent.len() < LIVELOCK_SWAP_THRESHOLD {
+            return;
+        }
+        // Confined to a handful of bodies?
+        let mut involved: Vec<usize> = Vec::new();
+        for swap in &recent {
+            for id in [swap.winner, swap.loser] {
+                if !involved.contains(&id) {
+                    involved.push(id);
+                }
+            }
+        }
+        if involved.len() > LIVELOCK_MAX_DISTINCT_PLAYERS {
+            return;
+        }
+        // Confined to one small zone? Use the centroid of the flip positions and
+        // require every flip to sit within the cluster radius of it.
+        let mut centroid = Vec2::zero();
+        for swap in &recent {
+            centroid = centroid + swap.position;
+        }
+        centroid = centroid * (1.0 / recent.len() as f64);
+        if recent
+            .iter()
+            .any(|swap| swap.position.distance(centroid) > LIVELOCK_CLUSTER_RADIUS_YARDS)
+        {
+            return;
+        }
+        // Livelock confirmed: bring in the third man. Find the nearest player NOT
+        // tangled in the scrum and nudge the ball loose toward them.
+        let ball = self.ball.position;
+        let third_man = self
+            .players
+            .iter()
+            .filter(|p| !involved.contains(&p.id))
+            .map(|p| (p.id, p.position.distance(ball)))
+            .filter(|(_, dist)| *dist <= LIVELOCK_THIRD_MAN_MAX_DISTANCE_YARDS)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let dir = if let Some((third_id, _)) = third_man {
+            // Toward the incoming third man so they collect it.
+            let target = self.players[third_id].position;
+            let to_third = target - ball;
+            if to_third.len() > 1e-6 {
+                to_third.normalized()
+            } else {
+                self.livelock_escape_direction(&involved, centroid)
+            }
+        } else {
+            // Nobody free nearby: just squirt it out of the cluster toward open play.
+            self.livelock_escape_direction(&involved, centroid)
+        };
+        self.ball.holder = None;
+        self.ball.velocity = dir * LIVELOCK_PERTURB_SPEED_YPS;
+        self.ball.altitude_yards = LIVELOCK_PERTURB_ALTITUDE_YARDS;
+        self.ball.curl_acceleration = Vec2::zero();
+        // The ball is genuinely loose now: clear pending intents, the regain grace,
+        // and the swap log so the breaker doesn't immediately re-fire.
+        self.pending_pass = None;
+        self.pending_shot = None;
+        self.recent_dispossession = None;
+        self.possession_swaps.clear();
+        self.ball_stationary_ticks = 0;
+        self.ball_stuck_anchor = self.ball.position;
+        self.events.push(MatchEvent {
+            tick: self.tick,
+            clock_seconds: self.clock_seconds,
+            kind: "livelock-break".to_string(),
+            team: None,
+            player_id: third_man.map(|(id, _)| id),
+            description: "possession livelock broken: ball played loose to a third man".to_string(),
+        });
+    }
+
+    /// Fallback escape direction when no third man is in range: out of the scrum
+    /// (away from the involved players' centroid) and biased toward the pitch centre
+    /// so the loose ball stays in play.
+    fn livelock_escape_direction(&self, involved: &[usize], cluster_centroid: Vec2) -> Vec2 {
+        let ball = self.ball.position;
+        let mut body_centroid = Vec2::zero();
+        let mut count = 0.0;
+        for &id in involved {
+            if let Some(p) = self.players.get(id) {
+                body_centroid = body_centroid + p.position;
+                count += 1.0;
+            }
+        }
+        let away = if count > 0.0 {
+            ball - body_centroid * (1.0 / count)
+        } else {
+            ball - cluster_centroid
+        };
+        let centre = Vec2::new(
+            self.config.field_width_yards * 0.5,
+            self.config.field_length_yards * 0.5,
+        );
+        let mut dir = away.normalized() + (centre - ball).normalized() * 0.5;
+        if dir.len() < 1e-6 {
+            dir = centre - ball;
+        }
+        if dir.len() < 1e-6 {
+            dir = Vec2::new(0.0, 1.0);
+        }
+        dir.normalized()
     }
 
     fn hoof_stuck_ball_clear(&mut self) {
@@ -66951,6 +67279,103 @@ mod tests {
         assert!(full_dribble.tick_probability > tenth_dribble.tick_probability);
         assert!(full_dribble.tick_probability <= 1.0);
         assert!(tenth_dribble.tick_probability >= 0.0);
+    }
+
+    #[test]
+    fn pinned_holder_favours_shield_and_escape_over_open_play() {
+        // A holder with a defender goal-side and on top of them (the livelock
+        // situation) should value body-shielding to keep the ball AND side-stepping
+        // away to escape far more than the same holder in open space — without those
+        // boosts firing in open play.
+        let score = |defender_pos: Vec2| -> (f64, f64) {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig {
+                duration_seconds: 0.1,
+                seed: 7,
+                ..Default::default()
+            });
+            let holder = 6; // Home, attacking toward +y
+            let defender = 16; // Away
+            park_players_except(&mut sim, &[holder, defender]);
+            sim.active_set_play = None;
+            sim.pending_pass = None;
+            sim.pending_shot = None;
+            sim.ball.holder = Some(holder);
+            sim.ball.position = Vec2::new(40.0, 58.0);
+            sim.ball.velocity = Vec2::zero();
+            sim.ball.last_touch_team = Some(Team::Home);
+            sim.players[holder].position = sim.ball.position;
+            sim.players[holder].home_position = sim.ball.position;
+            sim.players[holder].incoming_ball = None;
+            sim.players[defender].position = defender_pos;
+            sim.players[defender].home_position = defender_pos;
+
+            let snapshot = WorldSnapshot::from_match(&sim);
+            let observation = snapshot.observation_for(holder);
+            let directive = snapshot.tactical_directive(Team::Home);
+            let options = sim.players[holder].possession_action_options(
+                &observation,
+                &directive,
+                2,
+                1,
+                false,
+                sim.config.dt_seconds,
+                sim.config.field_width_yards,
+            );
+            (
+                action_option_score(&options, "protect-ball"),
+                action_option_score(&options, "side-step"),
+            )
+        };
+
+        // Defender 2 yards goal-side (higher y for Home) and right on top of the ball.
+        let (pinned_shield, pinned_escape) = score(Vec2::new(40.0, 60.0));
+        // Defender parked far away: open play.
+        let (open_shield, open_escape) = score(Vec2::new(8.0, 8.0));
+
+        assert!(
+            pinned_shield > open_shield + 0.15,
+            "a pinned holder must value the body-shield far more than in open play: \
+             pinned={pinned_shield} open={open_shield}"
+        );
+        assert!(
+            pinned_escape > open_escape + 0.10,
+            "a pinned holder must value side-stepping to escape more than in open play: \
+             pinned={pinned_escape} open={open_escape}"
+        );
+    }
+
+    #[test]
+    fn defender_pushes_up_and_sprints_when_ball_is_far_upfield() {
+        // A Home defender sitting deep should advance to fill the space ahead — and
+        // sprint into it — when the ball is deep in the opponent's half; with the
+        // ball in our own half the target is left untouched (hold the line).
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let defender = sim
+            .players
+            .iter()
+            .find(|p| p.team == Team::Home && p.role == PlayerRole::Defender)
+            .expect("home defender")
+            .id;
+        let deep = Vec2::new(40.0, 15.0);
+        sim.players[defender].position = deep;
+        sim.players[defender].home_position = deep;
+
+        // Ball far upfield (Home attacks toward +y): push up and sprint.
+        sim.ball.position = Vec2::new(40.0, 110.0);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let (pushed, sprint) = snapshot.defensive_push_up_adjustment(defender, deep);
+        assert!(
+            pushed.y > deep.y + 5.0,
+            "defender should push up toward the ball when it is far upfield: {pushed:?}"
+        );
+        assert!(sprint, "a large push-up gap must be covered at a sprint, not a jog");
+
+        // Ball in our own half: no push-up (hold the defensive line).
+        sim.ball.position = Vec2::new(40.0, 12.0);
+        let snapshot = WorldSnapshot::from_match(&sim);
+        let (held, sprint) = snapshot.defensive_push_up_adjustment(defender, deep);
+        assert_eq!(held, deep, "no push-up when the ball is in our own half");
+        assert!(!sprint);
     }
 
     #[test]
@@ -102643,6 +103068,82 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
                 && r.loser == loser
         });
         assert!(!blocked_after, "grace must expire so play is not frozen");
+    }
+
+    #[test]
+    fn possession_livelock_breaks_to_an_uninvolved_third_man() {
+        // A ball ping-ponging between two players in a tight zone for too long is
+        // unrealistic. After ≥LIVELOCK_SWAP_THRESHOLD flips confined to a small
+        // cluster the breaker must squirt it loose toward the nearest uninvolved
+        // player — the third man stepping in to resolve the scrum.
+        let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+        let home = sim.players.iter().find(|p| p.team == Team::Home).unwrap().id;
+        let away = sim.players.iter().find(|p| p.team == Team::Away).unwrap().id;
+        let third = sim
+            .players
+            .iter()
+            .find(|p| p.id != home && p.id != away)
+            .unwrap()
+            .id;
+        // Park everyone far away so the chosen third man is unambiguously the
+        // nearest uninvolved player to the contested zone.
+        for p in sim.players.iter_mut() {
+            p.position = Vec2::new(2.0, 2.0);
+            p.velocity = Vec2::zero();
+        }
+        sim.players[home].position = Vec2::new(40.0, 60.0);
+        sim.players[away].position = Vec2::new(42.0, 60.0);
+        sim.players[third].position = Vec2::new(40.0, 52.0);
+        sim.ball.holder = Some(away);
+        sim.ball.position = Vec2::new(41.0, 60.0);
+
+        // Four flips alternating between the same two players: not yet a livelock.
+        let pairs = [(home, away), (away, home), (home, away), (away, home)];
+        for (winner, loser) in pairs {
+            sim.complete_defensive_dispossession(winner, loser, "tackle");
+        }
+        sim.detect_and_break_possession_livelock();
+        assert!(
+            sim.ball.holder.is_some(),
+            "four flips is a normal duel, not a livelock — must not break yet"
+        );
+        // The escalating grace should have lengthened beyond the base window as the
+        // zone kept oscillating (a shielding winner holds it more securely).
+        let escalated = sim.recent_dispossession.expect("dispossession recorded");
+        assert!(
+            escalated.grace_ticks > POSSESSION_REGAIN_GRACE_TICKS,
+            "regain grace must escalate while the ball ping-pongs: got {}",
+            escalated.grace_ticks
+        );
+        assert!(escalated.grace_ticks <= POSSESSION_REGAIN_GRACE_MAX_TICKS);
+
+        // Two more flips pushes it past the threshold: now it is a livelock.
+        for (winner, loser) in [(home, away), (away, home)] {
+            sim.complete_defensive_dispossession(winner, loser, "tackle");
+        }
+        let ball_before = sim.ball.position;
+        sim.detect_and_break_possession_livelock();
+
+        assert_eq!(
+            sim.ball.holder, None,
+            "the livelock breaker must play the ball loose"
+        );
+        assert!(
+            sim.ball.velocity.len() > 1.0,
+            "the loose ball must be moving after the break"
+        );
+        // It should head toward the third man (positive dot with that direction).
+        let to_third = sim.players[third].position - ball_before;
+        assert!(
+            sim.ball.velocity.normalized().dot(to_third.normalized()) > 0.5,
+            "the loose ball must be nudged toward the uninvolved third man"
+        );
+        assert!(
+            sim.events.iter().any(|e| e.kind == "livelock-break"),
+            "a livelock-break event must be recorded"
+        );
+        // The swap log is cleared so the breaker cannot immediately re-fire.
+        assert!(sim.possession_swaps.is_empty());
     }
 
     #[test]

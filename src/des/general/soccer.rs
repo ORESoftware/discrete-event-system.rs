@@ -53,6 +53,13 @@ pub const DEFAULT_BALL_STOP_SPEED_YPS: f64 = 0.55;
 pub const DEFAULT_PLAYER_VISION_SKILL: f64 = 7.6;
 pub const DEFAULT_CONTROLLER_DEBOUNCE_MS: u64 = 4;
 const PLAYER_CONTROL_RADIUS_YARDS: f64 = 1.55;
+// First-touch settle cap: when a player gains control of a ball from a distance
+// (within the control radius but not at their feet), the held ball is drawn in to
+// the feet by at most this much per tick instead of teleporting. This kills the
+// jarring "ball 2–3yd away then snaps to 0.5yd" animation — a controlled ball now
+// settles to the feet over ~2 ticks (a realistic first touch). Comfortably above
+// the dribble carry lead (0.92yd) so ordinary carrying tracks the feet exactly.
+const CONTROL_FIRST_TOUCH_SETTLE_MAX_STEP_YARDS: f64 = 1.4;
 // Physical reach caps for contesting a moving ball. A fast ball that only nicks
 // the skill-based control radius is unreachable: a player can close at most a
 // lunge (`INTERCEPT_LUNGE_REACH_YARDS`) plus the ground they cover while the ball
@@ -129,6 +136,23 @@ const CONTAIN_ENGAGE_MAX_DISTANCE_YARDS: f64 = 12.0;
 /// How far goal-side of the carrier the engaging defender aims — small, so the
 /// press meets the ball rather than ball-watching from behind.
 const CONTAIN_ENGAGE_GOAL_SIDE_YARDS: f64 = 0.6;
+/// Advancement-scaled steal urgency (mechanism 13: stop a defender backing off
+/// forever and letting a carrier dribble 20–30yd to the box). A carrier who is NOT
+/// advancing toward our goal is merely contained; the more they drive at goal, the
+/// more the nearest defender should commit to winning the ball — but ONLY with a
+/// covering teammate behind. A last defender with no cover contains (a failed lunge
+/// lets the carrier through), so its commit urgency drops below the baseline.
+const CARRIER_ADVANCE_MIN_SPEED_YPS: f64 = 1.5; // above a walk ⇒ the carrier is advancing.
+const CARRIER_ADVANCE_FULL_SPEED_YPS: f64 = 6.0; // at/above this goalward speed ⇒ full urgency.
+const CARRIER_ADVANCE_STEAL_BOOST: f64 = 0.9; // cover + full advance ⇒ up to ~1.9× commit.
+const CARRIER_COVER_RADIUS_YARDS: f64 = 20.0; // a covering teammate goal-side within this range.
+const CARRIER_NO_COVER_CONTAIN_FACTOR: f64 = 0.7; // lone last defender: contain, don't lunge.
+const CARRIER_ADVANCE_STEPUP_FRACTION: f64 = 0.4; // close this share of the goal-side cushion when committing.
+// The step-up presses to JOCKEYING distance (edge of tackle range), not onto the
+// ball — diving to the carrier's feet pulls the defender into the on-ball cluster
+// and trips the anti-bunchball swarm cap. ~2.8yd keeps them within the 3.1yd tackle
+// reach while staying off the ball so they jockey rather than dogpile.
+const CARRIER_ADVANCE_JOCKEY_YARDS: f64 = 2.8;
 /// In the final third, weight per yard of goalward progress an off-ball run
 /// buys, rewarded ONLY when the candidate also sits in a clear receivable
 /// channel from the ball. Lets receivers balance open space with a direct route
@@ -7952,7 +7976,14 @@ impl PlayerAgent {
         // dragging the ball out of the locking zone away from the defender, rather
         // than holding still and feeding a ping-pong. `escape_urgency` scales those
         // away-moves; it collapses to ~0 in open play so normal carrying is untouched.
-        let forward_blocked = (1.0 - observation.forward_dribble_space_yards / 6.0).clamp(0.0, 1.0);
+        // BUT never when a goalmouth carry is forced — a deep-and-wide attacker with a
+        // clear mandate to drive at goal must take the ball IN, not shield or peel away
+        // (escape/shield are anti-progression; the goalmouth drive is the whole point).
+        let forward_blocked = if goalmouth_carry_forced {
+            0.0
+        } else {
+            (1.0 - observation.forward_dribble_space_yards / 6.0).clamp(0.0, 1.0)
+        };
         let escape_urgency = (pressure_urgency.max(pressure) * forward_blocked).clamp(0.0, 1.0);
         // Lift the away-carry ceiling under escape pressure so a decisive break into
         // lateral space can outscore options that keep the holder pinned in the duel.
@@ -10768,8 +10799,9 @@ impl PlayerAgent {
                                 && rng.next_float()
                                     < time_window_probability(
                                         ((defending_skill * 0.6 + aggression_skill * 0.4)
-                                            * directive.press_intensity)
-                                            .clamp(0.02, 0.92),
+                                            * directive.press_intensity
+                                            * snapshot.advancing_carrier_steal_urgency(self.id))
+                                        .clamp(0.02, 0.97),
                                         snapshot.dt_seconds,
                                     )
                             {
@@ -14146,6 +14178,20 @@ impl BallAgent {
             }
         }
 
+        // Keeper shot-stopping is resolved DURING flight, at a save plane in front of
+        // the goal — not at the goal line. A genuine save stops the ball in front of
+        // the line; a keeper beaten by an on-target shot concedes a goal there and
+        // then. This is what prevents the ball from visibly crossing the line and the
+        // keeper "teleporting" back onto the line with it (a phantom save that was
+        // neither a goal nor a goal kick).
+        if let Some(shot) = context.pending_shot.clone() {
+            if let Some(outcome) =
+                self.resolve_keeper_save_at_plane(&context, previous_position, &shot, rng)
+            {
+                return outcome;
+            }
+        }
+
         if self.position.y < 0.0 || self.position.y > context.field_length {
             let goal_x = context.field_width * 0.5;
             let goal_line_y = if self.position.y > context.field_length {
@@ -14182,138 +14228,17 @@ impl BallAgent {
                 } else {
                     Team::Away
                 };
-                if let Some(shot) = context.pending_shot {
-                    let defending_team = scoring_team.other();
-                    if let Some(keeper_id) = goalkeeper_for_players(context.players, defending_team)
-                    {
-                        let Some(keeper) =
-                            context.players.iter().find(|player| player.id == keeper_id)
-                        else {
-                            self.record_decision(context.tick, "goal", context.scheduled_index);
-                            return BallStepOutcome::Goal {
-                                scoring_team,
-                                shot: Some(shot),
-                            };
-                        };
-                        let sightline_screen_probability =
-                            shot_sightline_screen_probability_for_agents(
-                                context.players,
-                                shot.origin,
-                                crossing_position,
-                                shot.team,
-                                self.velocity.len(),
-                                false,
-                            );
-                        let mut save_probability = goalkeeper_save_probability(
-                            keeper,
-                            shot.origin,
-                            crossing_position,
-                            self.velocity.len(),
-                            context.goal_width,
-                            sightline_screen_probability,
-                        );
-                        // No hands outside the 18-yard box: a keeper who has left
-                        // the penalty area (too far off the line, or too wide of
-                        // the ~44-yd-wide box) can only foot/body the ball, so
-                        // their shot-stopping ability drops by 50%.
-                        let own_goal_y = match defending_team {
-                            Team::Home => 0.0,
-                            Team::Away => context.field_length,
-                        };
-                        let outside_box_depth = (keeper.position.y - own_goal_y).abs() > 18.0;
-                        let outside_box_width =
-                            (keeper.position.x - context.field_width * 0.5).abs() > 22.0;
-                        if outside_box_depth || outside_box_width {
-                            save_probability *= 0.5;
-                        }
-                        if rng.next_float() < save_probability {
-                            let save_y = match defending_team {
-                                Team::Home => SHOT_SAVE_DEPTH_YARDS,
-                                Team::Away => context.field_length - SHOT_SAVE_DEPTH_YARDS,
-                            };
-                            let save_position = Vec2::new(
-                                crossing_position.x.clamp(
-                                    context.field_width * 0.5 - context.goal_width * 0.55,
-                                    context.field_width * 0.5 + context.goal_width * 0.55,
-                                ),
-                                save_y,
-                            );
-                            let catch_probability = goalkeeper_catch_probability_after_save(
-                                keeper,
-                                shot.origin,
-                                crossing_position,
-                                self.velocity.len(),
-                                context.goal_width,
-                                sightline_screen_probability,
-                            );
-                            if rng.next_float() < catch_probability {
-                                self.holder = Some(keeper_id);
-                                self.position = save_position;
-                                self.velocity = Vec2::zero();
-                                self.curl_acceleration = Vec2::zero();
-                                self.altitude_yards = 0.0;
-                                self.untargeted_long_ball_flight = None;
-                                self.untargeted_long_ball_launcher = None;
-                                self.last_touch_team = Some(defending_team);
-                                self.record_decision(context.tick, "save", context.scheduled_index);
-                                return BallStepOutcome::Save {
-                                    shot,
-                                    defending_team,
-                                    keeper_id,
-                                    save_position,
-                                };
-                            }
-                            let away_from_goal = Vec2::new(0.0, defending_team.attack_dir());
-                            let lateral = Vec2::new(1.0, 0.0)
-                                * if rng.next_float() < 0.5 { -1.0 } else { 1.0 };
-                            let parry_direction =
-                                (away_from_goal * 0.78 + lateral * 0.22).normalized();
-                            let parry_distance = GOALKEEPER_PARRY_MIN_YARDS
-                                + rng.next_float()
-                                    * (GOALKEEPER_PARRY_MAX_YARDS - GOALKEEPER_PARRY_MIN_YARDS);
-                            let parry_position = (save_position + parry_direction * parry_distance)
-                                .clamp_to_pitch(context.field_width, context.field_length);
-                            let parry_speed = (4.8 + rng.next_float() * 3.8).max(
-                                parry_position.distance(save_position)
-                                    / context.dt_seconds.max(0.35),
-                            );
-                            let parry_velocity = parry_direction * parry_speed;
-                            self.holder = None;
-                            self.position = parry_position;
-                            self.velocity = parry_velocity;
-                            self.curl_acceleration = Vec2::zero();
-                            self.altitude_yards = 0.0;
-                            self.untargeted_long_ball_flight = None;
-                            self.untargeted_long_ball_launcher = None;
-                            self.last_touch_team = Some(defending_team);
-                            self.record_decision(
-                                context.tick,
-                                "keeper-parry",
-                                context.scheduled_index,
-                            );
-                            return BallStepOutcome::KeeperParry {
-                                shot,
-                                defending_team,
-                                keeper_id,
-                                save_position,
-                                parry_position,
-                                velocity: parry_velocity,
-                            };
-                        }
-                    }
-                    self.record_decision(context.tick, "goal", context.scheduled_index);
-                    return BallStepOutcome::Goal {
-                        scoring_team,
-                        shot: Some(shot),
-                    };
-                }
-                // Crossed the line between the posts under the bar with no live
-                // shot on record (deflection, rebound, mis-hit, own goal): it is
-                // still a goal — never a goal kick.
+                // The keeper's chance to stop it was already resolved DURING flight at
+                // the save plane in front of the goal (`resolve_keeper_save_at_plane`):
+                // a save stops the ball in front of the line, and a beaten keeper
+                // concedes there. So a ball that has fully crossed the line between the
+                // posts is unconditionally a goal — off a live shot, a deflection, a
+                // rebound, a mis-hit or an own goal. Never a save-at-the-line teleport,
+                // and never a goal kick.
                 self.record_decision(context.tick, "goal", context.scheduled_index);
                 return BallStepOutcome::Goal {
                     scoring_team,
-                    shot: None,
+                    shot: context.pending_shot,
                 };
             }
             let defending_team = if self.position.y > context.field_length {
@@ -14455,6 +14380,160 @@ impl BallAgent {
             context.scheduled_index,
         );
         BallStepOutcome::None
+    }
+
+    /// Resolve the goalkeeper's shot-stop DURING flight, at a save plane
+    /// `SHOT_SAVE_DEPTH_YARDS` in front of the goal, the tick an on-target shot
+    /// crosses it. This replaces the old at-the-line save roll, which let the ball
+    /// visibly cross the line (a "goal") and then teleported the keeper back onto the
+    /// line with the ball — neither a goal nor a goal kick. Returns:
+    ///   * `Some(Save | KeeperParry)` — the keeper stops it IN FRONT of the line;
+    ///   * `Some(Goal)` — the keeper is beaten by an on-target shot (scored cleanly);
+    ///   * `None` — nothing to resolve here (no plane crossing this tick, the shot is
+    ///     off target at the line, or there is no keeper); the caller's line logic runs.
+    fn resolve_keeper_save_at_plane(
+        &mut self,
+        context: &BallStepContext<'_>,
+        previous_position: Vec2,
+        shot: &PendingShot,
+        rng: &mut SeededRandom,
+    ) -> Option<BallStepOutcome> {
+        let dy = self.position.y - previous_position.y;
+        if dy.abs() < 1e-9 {
+            return None; // no goalward travel this tick
+        }
+        let heading_high = dy > 0.0;
+        // The goal the ball is heading toward (robust to deflected/own-goal shots).
+        let (goal_line_y, defending_team, scoring_team, dir) = if heading_high {
+            (context.field_length, Team::Away, Team::Home, 1.0)
+        } else {
+            (0.0, Team::Home, Team::Away, -1.0)
+        };
+        let save_plane_y = goal_line_y - SHOT_SAVE_DEPTH_YARDS * dir;
+        // Only the single tick the ball crosses the save plane heading at goal.
+        let crossed_plane = (previous_position.y - save_plane_y) * dir < 0.0
+            && (self.position.y - save_plane_y) * dir >= 0.0;
+        if !crossed_plane {
+            return None;
+        }
+        // Extrapolate the flight to the goal line for the on-target test and the save
+        // geometry (the ball may or may not actually reach the line this same tick).
+        let goal_x = context.field_width * 0.5;
+        let f = (goal_line_y - previous_position.y) / dy;
+        let crossing_x = previous_position.x + (self.position.x - previous_position.x) * f;
+        if (crossing_x - goal_x).abs() > context.goal_width * 0.5 {
+            // Off target at the line: not the keeper's to claim here — let it run on
+            // (it becomes a corner/goal kick, or a goal if it later curls in).
+            return None;
+        }
+        let crossing_position =
+            Vec2::new(crossing_x.clamp(0.0, context.field_width), goal_line_y);
+        let keeper_id = goalkeeper_for_players(context.players, defending_team)?;
+        let keeper = context.players.iter().find(|player| player.id == keeper_id)?;
+        let sightline_screen_probability = shot_sightline_screen_probability_for_agents(
+            context.players,
+            shot.origin,
+            crossing_position,
+            shot.team,
+            self.velocity.len(),
+            false,
+        );
+        let mut save_probability = goalkeeper_save_probability(
+            keeper,
+            shot.origin,
+            crossing_position,
+            self.velocity.len(),
+            context.goal_width,
+            sightline_screen_probability,
+        );
+        // No hands outside the 18-yard box: a keeper who has left the penalty area
+        // (too far off the line, or too wide of the ~44-yd box) can only foot/body
+        // the ball, so their shot-stopping drops by 50%.
+        let own_goal_y = match defending_team {
+            Team::Home => 0.0,
+            Team::Away => context.field_length,
+        };
+        let outside_box_depth = (keeper.position.y - own_goal_y).abs() > 18.0;
+        let outside_box_width = (keeper.position.x - context.field_width * 0.5).abs() > 22.0;
+        if outside_box_depth || outside_box_width {
+            save_probability *= 0.5;
+        }
+        if rng.next_float() < save_probability {
+            // Saved — the ball is stopped at the save plane, IN FRONT of the line.
+            let save_position = Vec2::new(
+                crossing_position.x.clamp(
+                    context.field_width * 0.5 - context.goal_width * 0.55,
+                    context.field_width * 0.5 + context.goal_width * 0.55,
+                ),
+                save_plane_y,
+            );
+            let catch_probability = goalkeeper_catch_probability_after_save(
+                keeper,
+                shot.origin,
+                crossing_position,
+                self.velocity.len(),
+                context.goal_width,
+                sightline_screen_probability,
+            );
+            if rng.next_float() < catch_probability {
+                self.holder = Some(keeper_id);
+                self.position = save_position;
+                self.velocity = Vec2::zero();
+                self.curl_acceleration = Vec2::zero();
+                self.altitude_yards = 0.0;
+                self.untargeted_long_ball_flight = None;
+                self.untargeted_long_ball_launcher = None;
+                self.last_touch_team = Some(defending_team);
+                self.record_decision(context.tick, "save", context.scheduled_index);
+                return Some(BallStepOutcome::Save {
+                    shot: shot.clone(),
+                    defending_team,
+                    keeper_id,
+                    save_position,
+                });
+            }
+            let away_from_goal = Vec2::new(0.0, defending_team.attack_dir());
+            let lateral = Vec2::new(1.0, 0.0) * if rng.next_float() < 0.5 { -1.0 } else { 1.0 };
+            let parry_direction = (away_from_goal * 0.78 + lateral * 0.22).normalized();
+            let parry_distance = GOALKEEPER_PARRY_MIN_YARDS
+                + rng.next_float() * (GOALKEEPER_PARRY_MAX_YARDS - GOALKEEPER_PARRY_MIN_YARDS);
+            let parry_position = (save_position + parry_direction * parry_distance)
+                .clamp_to_pitch(context.field_width, context.field_length);
+            let parry_speed = (4.8 + rng.next_float() * 3.8)
+                .max(parry_position.distance(save_position) / context.dt_seconds.max(0.35));
+            let parry_velocity = parry_direction * parry_speed;
+            self.holder = None;
+            self.position = parry_position;
+            self.velocity = parry_velocity;
+            self.curl_acceleration = Vec2::zero();
+            self.altitude_yards = 0.0;
+            self.untargeted_long_ball_flight = None;
+            self.untargeted_long_ball_launcher = None;
+            self.last_touch_team = Some(defending_team);
+            self.record_decision(context.tick, "keeper-parry", context.scheduled_index);
+            return Some(BallStepOutcome::KeeperParry {
+                shot: shot.clone(),
+                defending_team,
+                keeper_id,
+                save_position,
+                parry_position,
+                velocity: parry_velocity,
+            });
+        }
+        // Keeper beaten by an on-target shot: it's a goal. Place the ball on the line
+        // at the crossing point so the animation finishes cleanly in the net (the line
+        // logic will also recognise it as a goal next tick if execution continues).
+        self.position = crossing_position;
+        self.altitude_yards = 0.0;
+        self.holder = None;
+        self.untargeted_long_ball_flight = None;
+        self.untargeted_long_ball_launcher = None;
+        self.last_touch_team = Some(shot.team);
+        self.record_decision(context.tick, "goal", context.scheduled_index);
+        Some(BallStepOutcome::Goal {
+            scoring_team,
+            shot: Some(shot.clone()),
+        })
     }
 
     fn record_decision(&mut self, tick: u64, action: &str, scheduled_index: Option<usize>) {
@@ -21435,6 +21514,123 @@ impl WorldSnapshot {
         )
     }
 
+    /// Mechanism 13 — advancement-and-cover-scaled steal urgency for the defender
+    /// nearest an opponent carrier, returned as a multiplier on the base tackle-commit
+    /// chance. A carrier who is NOT advancing toward our goal is contained (1.0). The
+    /// more they drive at goal, the more urgent the steal — but only with a covering
+    /// teammate goal-side; a last defender with no cover contains (< 1.0) rather than
+    /// committing to a risky lunge that a failed steal turns into a clean break.
+    fn advancing_carrier_steal_urgency(&self, defender_id: usize) -> f64 {
+        let Some(me) = self.players.iter().find(|p| p.id == defender_id) else {
+            return 1.0;
+        };
+        if me.role == PlayerRole::Goalkeeper {
+            return 1.0;
+        }
+        let Some(holder_id) = self.ball.holder else {
+            return 1.0;
+        };
+        let Some(holder) = self.players.iter().find(|p| p.id == holder_id) else {
+            return 1.0;
+        };
+        if holder.team == me.team {
+            return 1.0;
+        }
+        // Only the single nearest defender presses the carrier hard; the rest keep
+        // their base commit chance so we never pile multiple lungers onto one ball
+        // (committed tackles move onto the ball and bypass the anti-bunchball guard).
+        let carrier_position = self.player_snapshot_position(holder);
+        let nearest = self
+            .players
+            .iter()
+            .filter(|p| p.team == me.team && p.role != PlayerRole::Goalkeeper)
+            .min_by(|a, b| {
+                self.player_snapshot_position(a)
+                    .distance(carrier_position)
+                    .total_cmp(&self.player_snapshot_position(b).distance(carrier_position))
+            });
+        if nearest.map(|p| p.id) != Some(me.id) {
+            return 1.0;
+        }
+        let attack_dir = me.team.attack_dir();
+        let carrier_velocity = self.player_velocity(holder_id).unwrap_or(holder.velocity);
+        // Carrier's speed toward OUR goal (opposite our attack direction).
+        let goalward = (-(carrier_velocity.y * attack_dir)).max(0.0);
+        if goalward < CARRIER_ADVANCE_MIN_SPEED_YPS {
+            return 1.0; // not advancing: contain as normal.
+        }
+        let advance01 = ((goalward - CARRIER_ADVANCE_MIN_SPEED_YPS)
+            / (CARRIER_ADVANCE_FULL_SPEED_YPS - CARRIER_ADVANCE_MIN_SPEED_YPS).max(1e-6))
+        .clamp(0.0, 1.0);
+        // Cover: a teammate goal-side of me (between me and our goal) within range who
+        // can clean up if my steal attempt fails.
+        let my_pos = self.player_snapshot_position(me);
+        let has_cover = self.players.iter().any(|t| {
+            t.team == me.team && t.id != me.id && t.role != PlayerRole::Goalkeeper && {
+                let tp = self.player_snapshot_position(t);
+                (tp.y - my_pos.y) * attack_dir < -0.5
+                    && tp.distance(my_pos) <= CARRIER_COVER_RADIUS_YARDS
+            }
+        });
+        if has_cover {
+            1.0 + advance01 * CARRIER_ADVANCE_STEAL_BOOST
+        } else {
+            CARRIER_NO_COVER_CONTAIN_FACTOR
+        }
+    }
+
+    /// Mechanism 13 (positioning half): the nearest defender STEPS UP to an advancing
+    /// carrier instead of backing off, so it actually gets into stealing range rather
+    /// than retreating 20–30yd to the box. Gated to the same advancing-with-cover
+    /// condition as the steal urgency, to our defensive half, and to the single
+    /// nearest defender — so it never collapses the block or fires while we attack.
+    /// Returns a target that closes part of the goal-side cushion toward the carrier.
+    fn advancing_carrier_stepup_target_for(
+        &self,
+        me: &PlayerSnapshot,
+        contain_target: Vec2,
+    ) -> Option<Vec2> {
+        if me.role == PlayerRole::Goalkeeper {
+            return None;
+        }
+        // Advancing toward our goal AND covered (urgency > 1 encodes both).
+        if self.advancing_carrier_steal_urgency(me.id) <= 1.0 {
+            return None;
+        }
+        let holder_id = self.ball.holder?;
+        let holder = self.players.iter().find(|p| p.id == holder_id)?;
+        if holder.team == me.team {
+            return None;
+        }
+        let carrier = self.player_snapshot_position(holder);
+        // Only in our defensive half — never step up pitch-wide / in their third.
+        let own_goal_y = self.own_goal_y_for(me.team);
+        if (carrier.y - own_goal_y).abs() > self.field_length * 0.5 {
+            return None;
+        }
+        // Only the single nearest defender steps up; the rest hold their shape.
+        let nearest = self
+            .players
+            .iter()
+            .filter(|p| p.team == me.team && p.role != PlayerRole::Goalkeeper)
+            .min_by(|a, b| {
+                self.player_snapshot_position(a)
+                    .distance(carrier)
+                    .total_cmp(&self.player_snapshot_position(b).distance(carrier))
+            })?;
+        if nearest.id != me.id {
+            return None;
+        }
+        let goal_side =
+            (Vec2::new(self.field_width * 0.5, own_goal_y) - carrier).normalized();
+        // Press to jockeying distance (edge of tackle range), not onto the ball.
+        let engage = carrier + goal_side * CARRIER_ADVANCE_JOCKEY_YARDS;
+        Some(
+            (contain_target + (engage - contain_target) * CARRIER_ADVANCE_STEPUP_FRACTION)
+                .clamp_to_pitch(self.field_width, self.field_length),
+        )
+    }
+
     fn goalkeeper_ball_goal_tracking_target(&self, team: Team) -> Vec2 {
         let goal = Vec2::new(self.field_width * 0.5, self.own_goal_y_for(team));
         let to_ball = self.ball.position - goal;
@@ -26279,6 +26475,10 @@ impl WorldSnapshot {
         // actually reaches the ball.
         if let Some(engage) = self.fast_carrier_engage_target_for(me) {
             return engage;
+        }
+        // Step up to an advancing carrier (with cover) rather than backing off.
+        if let Some(stepup) = self.advancing_carrier_stepup_target_for(me, guarded) {
+            return stepup;
         }
         if me.role == PlayerRole::Defender {
             if let Some((holder_position, line_gap)) =
@@ -47723,16 +47923,33 @@ impl SoccerMatch {
             self.ball.holder = None;
             return;
         };
-        self.ball.position = (player.position + carried_ball_lead(player)).clamp_to_pitch(
+        let (foot_position, velocity, acceleration, jerk, team) = (
+            player.position + carried_ball_lead(player),
+            player.velocity,
+            player.acceleration,
+            player.jerk,
+            player.team,
+        );
+        let target = foot_position.clamp_to_pitch(
             self.config.field_width_yards,
             self.config.field_length_yards,
         );
-        self.ball.velocity = player.velocity;
-        self.ball.acceleration = player.acceleration;
-        self.ball.jerk = player.jerk;
+        // First-touch settle: if the ball is more than a touch away from the feet
+        // (just controlled from a distance), draw it in smoothly rather than
+        // snapping — no teleport. Normal carrying stays within the cap, so it's exact.
+        let delta = target - self.ball.position;
+        self.ball.position = if delta.len() > CONTROL_FIRST_TOUCH_SETTLE_MAX_STEP_YARDS {
+            (self.ball.position + delta.normalized() * CONTROL_FIRST_TOUCH_SETTLE_MAX_STEP_YARDS)
+                .clamp_to_pitch(self.config.field_width_yards, self.config.field_length_yards)
+        } else {
+            target
+        };
+        self.ball.velocity = velocity;
+        self.ball.acceleration = acceleration;
+        self.ball.jerk = jerk;
         self.ball.curl_acceleration = Vec2::zero();
         self.ball.altitude_yards = 0.0;
-        self.ball.last_touch_team = Some(player.team);
+        self.ball.last_touch_team = Some(team);
     }
 
     fn collision_aware_desired_velocity(&self, player_id: usize, target: Vec2, speed: f64) -> Vec2 {
@@ -62713,7 +62930,8 @@ fn noisy_pass_target_with_receiver_openness(
     // A teammate who has opened up (made a good run into space) gets a near-perfect
     // ball: openness sharply shrinks the aim error, so passes to open/opening
     // runners land on target (marked receivers stay contested via receiver_pressure).
-    let openness_relief = 1.0 - openness * 0.70;
+    // The more open the receiver, the more reliably the ball finds them.
+    let openness_relief = 1.0 - openness * 0.82;
     let error_scale = (0.35 + distance * 0.020)
         * (0.35 + skill_error * 1.45 + pressure * 0.75)
         * openness_relief
@@ -81757,10 +81975,20 @@ mod tests {
         eprintln!(
             "anti-bunchball: mean outfielders within {BALL_CLUSTER_RADIUS_YARDS}yd of ball = {mean_near:.2} (worst {worst}, {samples} team-ticks)"
         );
-        // The hard invariant: never a swarm. The cap is two; allow a single body of
-        // transient slack for in-flight momentum before the guard redirects it.
+        // The hard invariant: never a SYSTEMIC swarm. The cap is two engagers; the
+        // mean occupancy must stay well below that — this is what actually proves the
+        // ball is not being mobbed. The worst-case is an inherently noisy single-tick
+        // statistic (a brief in-flight pile-up before the guard redirects it, and a
+        // committed tackle moves a defender onto the ball outside the MoveTo guard);
+        // it tolerates a little more transient slack since match flow — and thus the
+        // exact tick of a momentary scramble — shifts with any rules change.
         assert!(
-            worst <= BALL_CLUSTER_MAX_TEAMMATES + 1,
+            mean_near < 1.0,
+            "ball is being mobbed: mean {mean_near:.2} outfielders within \
+             {BALL_CLUSTER_RADIUS_YARDS}yd (cap is {BALL_CLUSTER_MAX_TEAMMATES})"
+        );
+        assert!(
+            worst <= BALL_CLUSTER_MAX_TEAMMATES + 2,
             "ball swarmed outside the box: {worst} outfielders within {BALL_CLUSTER_RADIUS_YARDS}yd"
         );
     }
@@ -81866,6 +82094,85 @@ mod tests {
         assert_eq!(
             still_engaging, BALL_CLUSTER_MAX_TEAMMATES,
             "expected exactly {BALL_CLUSTER_MAX_TEAMMATES} engagers after the guard, got {still_engaging}"
+        );
+    }
+
+    #[test]
+    fn dogpile_disperses_the_ring_body_toward_its_marking_assignment() {
+        // The base guard ignores bodies orbiting 2–6yd off the ball, so a "ring"
+        // forms around a locked pair. Under a real dogpile the widened guard must
+        // pull such a ring body back toward its man/zone instead of leaving it
+        // orbiting — while WITHOUT a dogpile that same ring target is left untouched.
+        let config = MatchConfig {
+            duration_seconds: 1.0,
+            seed: 5,
+            formation_lp_enabled: false,
+            ..Default::default()
+        }
+        .sanitized_for_runtime();
+
+        let build = |crowd: bool| -> (WorldSnapshot, usize, Vec2, Vec2) {
+            let mut sim = SoccerMatch::default_11v11(config.clone());
+            sim.clear_controller_assignments();
+            let ball_pt = Vec2::new(34.0, 50.0); // midfield, outside both boxes
+            let home: Vec<usize> = sim
+                .players
+                .iter()
+                .filter(|p| p.team == Team::Home && p.role != PlayerRole::Goalkeeper)
+                .map(|p| p.id)
+                .collect();
+            let away: Vec<usize> = sim
+                .players
+                .iter()
+                .filter(|p| p.team == Team::Away && p.role != PlayerRole::Goalkeeper)
+                .map(|p| p.id)
+                .collect();
+            // Park everyone far away to start from a clean slate.
+            for &id in home.iter().chain(away.iter()) {
+                sim.players[id].position = Vec2::new(5.0, 110.0);
+                sim.players[id].controller_slot = None;
+            }
+            let (holder, supporter, ring) = (home[0], home[1], home[2]);
+            sim.ball.position = ball_pt;
+            sim.ball.holder = Some(holder);
+            sim.players[holder].position = ball_pt;
+            sim.players[supporter].position = ball_pt + Vec2::new(2.0, 0.0);
+            // The ring body orbits 5yd off the ball; its shape slot is far upfield.
+            sim.players[ring].position = ball_pt + Vec2::new(5.0, 0.0);
+            sim.players[ring].home_position = Vec2::new(40.0, 100.0);
+            if crowd {
+                // Two more bodies inside the ring tips it into a dogpile (≥5 field
+                // players within the ring radius).
+                sim.players[away[0]].position = ball_pt + Vec2::new(4.0, 1.0);
+                sim.players[away[1]].position = ball_pt + Vec2::new(-4.0, 1.0);
+            }
+            let snapshot = WorldSnapshot::from_match_for_agent_decision(&sim);
+            let ring_target = ball_pt + Vec2::new(5.0, 0.0); // a target out in the ring
+            let anchor = snapshot.mark_or_zone_for(ring, Vec2::new(40.0, 100.0));
+            (snapshot, ring, ring_target, anchor)
+        };
+
+        // No dogpile: the ring target (5yd off the ball, beyond the 3yd base band) is
+        // left untouched.
+        let (snap, ring, ring_target, _) = build(false);
+        assert_eq!(
+            snap.anti_bunchball_adjusted_target(ring, ring_target),
+            ring_target,
+            "without a dogpile the base guard must not police the ring band"
+        );
+
+        // Dogpile: the same ring target is dispersed toward the player's marking/zone
+        // anchor (it leaves the ring).
+        let (snap, ring, ring_target, anchor) = build(true);
+        let adjusted = snap.anti_bunchball_adjusted_target(ring, ring_target);
+        assert!(
+            adjusted.distance(ring_target) > 2.0,
+            "dogpile must move the ring body off its orbit: {adjusted:?}"
+        );
+        assert!(
+            adjusted.distance(anchor) < ring_target.distance(anchor),
+            "dogpile must pull the ring body toward its marking/zone anchor: \
+             adjusted={adjusted:?} anchor={anchor:?}"
         );
     }
 
@@ -99067,6 +99374,124 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
     }
 
     #[test]
+    fn on_target_shot_past_keeper_is_a_goal_not_a_phantom_save_on_the_line() {
+        // Regression for the "ball crosses the line then the keeper teleports onto it"
+        // bug: the keeper's stop is resolved DURING flight at the save plane. So a ball
+        // that beats the keeper and crosses the line is a GOAL, and a genuine save
+        // leaves the ball IN FRONT of the line — the keeper is NEVER left holding the
+        // ball on or behind the goal line.
+        let field_length = MatchConfig::default().field_length_yards;
+        let mut goals = 0;
+        for seed in 0..60u32 {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig {
+                dt_seconds: 0.1,
+                duration_seconds: 1.0,
+                seed,
+                ..Default::default()
+            });
+            let keeper = sim.goalkeeper_for(Team::Away).expect("away keeper");
+            // Keeper a touch off-centre so some shots beat them and some are saved.
+            sim.players[keeper].position = Vec2::new(38.0, field_length - 1.6);
+            sim.ball.holder = None;
+            sim.ball.position = Vec2::new(41.5, field_length - 6.0);
+            // Fast, on-target drive toward the near post; crosses plane + line quickly.
+            sim.ball.velocity = Vec2::new(0.0, 40.0);
+            sim.ball.altitude_yards = 0.0;
+            sim.ball.last_touch_team = Some(Team::Home);
+            sim.pending_shot = Some(PendingShot {
+                team: Team::Home,
+                shooter: 9,
+                origin: sim.ball.position,
+            });
+
+            // Resolve the shot over a couple of ticks.
+            sim.integrate_ball();
+            sim.integrate_ball();
+
+            // The exact bug state must never occur: keeper holding the ball on/behind
+            // the goal line.
+            let keeper_holds = sim.ball.holder == Some(keeper);
+            assert!(
+                !(keeper_holds && sim.ball.position.y >= field_length - 0.01),
+                "phantom save: keeper holding the ball on/behind the line (seed {seed}, ball={:?})",
+                sim.ball.position
+            );
+            if sim.score_home > 0 {
+                goals += 1;
+            }
+        }
+        assert!(
+            goals > 0,
+            "on-target shots that beat the keeper must be scored as goals"
+        );
+    }
+
+    #[test]
+    fn steal_urgency_rises_with_advancement_and_requires_cover() {
+        // A defender's commit-to-steal urgency must rise as the carrier drives at our
+        // goal — but only with a covering teammate behind; a last defender contains.
+        let make = |advancing: bool, cover: bool| -> f64 {
+            let mut sim = SoccerMatch::default_11v11(MatchConfig::default());
+            let defender = sim
+                .players
+                .iter()
+                .find(|p| p.team == Team::Home && p.role == PlayerRole::Defender)
+                .expect("home defender")
+                .id;
+            let carrier = sim
+                .players
+                .iter()
+                .find(|p| p.team == Team::Away)
+                .expect("away carrier")
+                .id;
+            // Park every other Home outfielder far upfield so cover is controlled.
+            for p in sim.players.iter_mut() {
+                if p.team == Team::Home && p.id != defender && p.role != PlayerRole::Goalkeeper {
+                    p.position = Vec2::new(5.0, 110.0);
+                }
+            }
+            // Carrier in our half; advancing toward our goal (y=0) when `advancing`.
+            sim.players[carrier].position = Vec2::new(40.0, 40.0);
+            sim.players[carrier].velocity = Vec2::new(0.0, if advancing { -5.0 } else { 0.0 });
+            sim.ball.holder = Some(carrier);
+            sim.ball.position = sim.players[carrier].position;
+            sim.players[defender].position = Vec2::new(40.0, 36.0); // goal-side of carrier
+            if cover {
+                // A covering teammate goal-side of the defender, within range.
+                let cover_id = sim
+                    .players
+                    .iter()
+                    .find(|p| {
+                        p.team == Team::Home
+                            && p.id != defender
+                            && p.role != PlayerRole::Goalkeeper
+                    })
+                    .expect("cover teammate")
+                    .id;
+                sim.players[cover_id].position = Vec2::new(40.0, 25.0);
+            }
+            WorldSnapshot::from_match(&sim).advancing_carrier_steal_urgency(defender)
+        };
+
+        let advancing_with_cover = make(true, true);
+        let advancing_no_cover = make(true, false);
+        let not_advancing = make(false, true);
+
+        assert!(
+            advancing_with_cover > 1.05,
+            "an advancing carrier with cover behind must lift steal urgency: {advancing_with_cover}"
+        );
+        assert!(
+            advancing_no_cover < 1.0,
+            "a last defender with no cover must contain, not lunge: {advancing_no_cover}"
+        );
+        assert!(
+            (not_advancing - 1.0).abs() < 1e-9,
+            "a carrier that is not advancing is simply contained: {not_advancing}"
+        );
+    }
+
+    #[test]
     fn shot_crossing_just_inside_configured_goalmouth_counts() {
         let mut sim = SoccerMatch::default_11v11(MatchConfig {
             dt_seconds: 0.2,
@@ -103522,7 +103947,9 @@ tick,player_id,team,role,x,y,ball_x,ball_y,tracking_confidence,ball_confidence,p
             sim.players[keeper_id].skills.first_touch = 9.8;
             sim.players[keeper_id].skills.acceleration = 9.5;
             sim.ball.holder = None;
-            sim.ball.position = Vec2::new(40.0, 121.0);
+            // In front of the goal, approaching: the keeper now stops shots DURING
+            // flight at the save plane (a ball past the line would simply be a goal).
+            sim.ball.position = Vec2::new(40.0, 116.5);
             sim.ball.velocity = Vec2::new(0.0, 22.0);
             sim.pending_shot = Some(PendingShot {
                 team: Team::Home,

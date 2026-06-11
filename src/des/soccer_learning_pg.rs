@@ -1004,29 +1004,43 @@ impl SoccerLearningPgStore {
             .transaction()
             .map_err(|err| format!("begin moment embedding transaction: {err}"))?;
         ensure_soccer_moment_embedding_tables(&mut tx)?;
-        for moment in moments {
-            let team = soccer_team_label(moment.team);
-            let tick = checked_i64(moment.tick);
-            let reward = soccer_learning_to_micros(moment.reward);
-            let value = moment.value.map(soccer_learning_to_micros);
-            let embedding = pg_vector_text(&moment.embedding);
-            tx.execute(
+        // Chunked multi-row insert: one statement per chunk rather than a round
+        // trip per moment (a full game produces thousands). `run_id`/`experiment_id`
+        // are shared $1/$2 reused by every row, so each row adds only 6 params —
+        // `MOMENT_EMBEDDING_INSERT_CHUNK_ROWS` keeps the total far under Postgres's
+        // 65535-parameter ceiling.
+        for chunk in moments.chunks(MOMENT_EMBEDDING_INSERT_CHUNK_ROWS) {
+            // Own the per-row column data so the `&dyn ToSql` refs outlive execute.
+            let teams: Vec<&'static str> =
+                chunk.iter().map(|m| soccer_team_label(m.team)).collect();
+            let ticks: Vec<i64> = chunk.iter().map(|m| checked_i64(m.tick)).collect();
+            let rewards: Vec<i64> = chunk
+                .iter()
+                .map(|m| soccer_learning_to_micros(m.reward))
+                .collect();
+            let values: Vec<Option<i64>> = chunk
+                .iter()
+                .map(|m| m.value.map(soccer_learning_to_micros))
+                .collect();
+            let embeddings: Vec<String> =
+                chunk.iter().map(|m| pg_vector_text(&m.embedding)).collect();
+            let sql = format!(
                 "insert into des_soccer_moment_embeddings \
                  (run_id, experiment_id, team, tick, action, reward_micros, value_micros, embedding) \
-                 values \
-                 ($1::text::uuid, $2::text::uuid, $3, $4, $5, $6, $7, $8::vector)",
-                &[
-                    &run_id,
-                    &experiment_id,
-                    &team,
-                    &tick,
-                    &moment.action,
-                    &reward,
-                    &value,
-                    &embedding,
-                ],
-            )
-            .map_err(|err| format!("insert soccer moment embedding: {err}"))?;
+                 values {}",
+                moment_embedding_values_clause(chunk.len())
+            );
+            let mut params: Vec<&(dyn ToSql + Sync)> = vec![&run_id, &experiment_id];
+            for (i, moment) in chunk.iter().enumerate() {
+                params.push(&teams[i]);
+                params.push(&ticks[i]);
+                params.push(&moment.action);
+                params.push(&rewards[i]);
+                params.push(&values[i]);
+                params.push(&embeddings[i]);
+            }
+            tx.execute(&sql, &params)
+                .map_err(|err| format!("insert soccer moment embeddings: {err}"))?;
         }
         tx.commit()
             .map_err(|err| format!("commit soccer moment embeddings: {err}"))?;
@@ -1049,13 +1063,18 @@ impl SoccerLearningPgStore {
                 query.len()
             ));
         }
-        ensure_soccer_moment_embedding_tables(
-            &mut self
+        // Ensure the schema in a COMMITTED transaction (so the table actually
+        // exists if nothing has been written yet) — the previous form dropped the
+        // tx, silently rolling the `create table` back.
+        {
+            let mut tx = self
                 .client
                 .transaction()
-                .map_err(|err| format!("begin moment search schema tx: {err}"))?,
-        )
-        .ok();
+                .map_err(|err| format!("begin moment search schema tx: {err}"))?;
+            ensure_soccer_moment_embedding_tables(&mut tx)?;
+            tx.commit()
+                .map_err(|err| format!("commit moment search schema: {err}"))?;
+        }
         let limit = limit.clamp(1, 1000) as i64;
         let query_text = pg_vector_text(query);
         let team_filter = team.map(soccer_team_label);
@@ -2554,6 +2573,36 @@ fn pg_vector_text(values: &[f64]) -> String {
     text
 }
 
+/// Max moments per multi-row insert statement. Each row binds 6 params (plus the
+/// 2 shared run/experiment ids), so 512 rows = 3074 params — well under
+/// Postgres's 65535-parameter ceiling.
+const MOMENT_EMBEDDING_INSERT_CHUNK_ROWS: usize = 512;
+
+/// Build the `values (...),(...)` clause for a chunked moment-embedding insert.
+/// `$1`/`$2` are the shared run_id/experiment_id reused by every row; each row's
+/// 6 columns start at `$3 + 6*i`. Kept separate so the placeholder/offset
+/// arithmetic is unit-tested without a live database.
+fn moment_embedding_values_clause(rows: usize) -> String {
+    let mut clause = String::new();
+    for i in 0..rows {
+        if i > 0 {
+            clause.push(',');
+        }
+        let base = 3 + i * 6;
+        let _ = write!(
+            clause,
+            "($1::text::uuid,$2::text::uuid,${},${},${},${},${},${}::vector)",
+            base,
+            base + 1,
+            base + 2,
+            base + 3,
+            base + 4,
+            base + 5
+        );
+    }
+    clause
+}
+
 /// Classify a (normalized) action label as attacking (`true`), defending
 /// (`false`), or neutral (`None`) for the retrieval-to-LP signal.
 fn soccer_moment_action_side(action: &str) -> Option<bool> {
@@ -3229,6 +3278,23 @@ mod tests {
         assert_eq!(pg_vector_text(&[]), "[]");
         // NaN/Inf must not break the `::vector` cast — scrubbed to 0.
         assert_eq!(pg_vector_text(&[f64::NAN, 1.0, f64::INFINITY]), "[0,1,0]");
+    }
+
+    #[test]
+    fn moment_embedding_values_clause_offsets_and_param_limit() {
+        assert_eq!(moment_embedding_values_clause(0), "");
+        assert_eq!(
+            moment_embedding_values_clause(1),
+            "($1::text::uuid,$2::text::uuid,$3,$4,$5,$6,$7,$8::vector)"
+        );
+        assert_eq!(
+            moment_embedding_values_clause(2),
+            "($1::text::uuid,$2::text::uuid,$3,$4,$5,$6,$7,$8::vector),\
+             ($1::text::uuid,$2::text::uuid,$9,$10,$11,$12,$13,$14::vector)"
+        );
+        // A full chunk must stay under Postgres's 65535 bound-parameter limit.
+        let params = 2 + MOMENT_EMBEDDING_INSERT_CHUNK_ROWS * 6;
+        assert!(params < 65535, "chunk uses {params} params");
     }
 
     #[test]

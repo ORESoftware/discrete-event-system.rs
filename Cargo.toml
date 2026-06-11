@@ -1,11 +1,3 @@
-# Temporary extraction workspace: `des_engine` (this package, the generic engine)
-# plus the soccer domain crate being split out. `soccer_engine` lives under
-# `crates/` until it is promoted to its own repo (soccer-sim-game-engine.rs);
-# during the move it builds atomically alongside des_engine, staying green.
-[workspace]
-members = ["crates/soccer_engine"]
-resolver = "2"
-
 [package]
 name = "des_engine"
 version = "0.0.2"

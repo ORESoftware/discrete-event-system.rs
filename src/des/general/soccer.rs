@@ -24227,20 +24227,33 @@ impl WorldSnapshot {
             // Within the two-on-the-ball allowance: this body may engage.
             return target;
         }
-        // Excess body: softly bias back toward the formation slot (stay in
-        // position), then enforce a minimum ball clearance (add space) so it
-        // genuinely leaves the bunch even when its slot sits near the ball.
-        let slot = self.formation_slot_anchor_for(player_id, me.home_position);
-        let mut adjusted = target + (slot - target) * BALL_CONGESTION_POSITION_BIAS;
+        // Excess body: bias back toward its assigned position ("stay in position"),
+        // then enforce a minimum ball clearance (add space) so it genuinely leaves
+        // the bunch even when its slot sits near the ball. In a dogpile we pull
+        // harder and to the MARKING/zone target (pick up a man, hold the shape)
+        // rather than the bare formation slot, which both disperses the ring and
+        // improves man-to-man marking; otherwise it stays the gentler slot bias.
+        let (anchor, position_bias) = if dogpile {
+            (
+                self.mark_or_zone_for(player_id, me.home_position),
+                LIVELOCK_SHAPE_RECOVERY_BIAS,
+            )
+        } else {
+            (
+                self.formation_slot_anchor_for(player_id, me.home_position),
+                BALL_CONGESTION_POSITION_BIAS,
+            )
+        };
+        let mut adjusted = target + (anchor - target) * position_bias;
         let from_ball = adjusted - ball;
         let clearance = from_ball.len();
         if clearance < EXCESS_MIN_BALL_CLEARANCE_YARDS {
             let dir = if clearance > 1e-3 {
                 from_ball.normalized()
             } else {
-                // Degenerate (target on the ball): back out toward the formation
-                // slot, or, failing that, toward our own half.
-                let to_slot = slot - ball;
+                // Degenerate (target on the ball): back out toward the assigned
+                // anchor, or, failing that, toward our own half.
+                let to_slot = anchor - ball;
                 if to_slot.len() > 1e-3 {
                     to_slot.normalized()
                 } else {

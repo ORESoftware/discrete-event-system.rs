@@ -956,6 +956,13 @@ impl SoccerPolicyLeague {
 
     /// Snapshot the current policy into the league. When over capacity, evict the
     /// *least*-exploiting member — keep the opponents that still trouble us.
+    ///
+    /// The eviction scan deliberately **excludes the member just inserted**: a
+    /// fresh snapshot has `games = 0` so its Laplace-smoothed `exploit_rate` is
+    /// exactly 0.5, which would make it the global minimum (and self-evict on the
+    /// same call) once every incumbent already exploits the current policy at
+    /// > 0.5 — the healthy PFSP steady state. Without this guard the league would
+    /// silently freeze on its earliest generations and never admit newer policies.
     pub fn insert(&mut self, generation: u32, policies: SoccerTeamQPolicies) {
         self.members.push(SoccerLeagueMember {
             generation,
@@ -963,9 +970,10 @@ impl SoccerPolicyLeague {
             games: 0,
             wins_vs_current: 0,
         });
+        // `insert` adds exactly one member, so len exceeds capacity by at most 1.
         while self.members.len() > self.capacity {
-            let evict = self
-                .members
+            let last = self.members.len() - 1;
+            let evict = self.members[..last]
                 .iter()
                 .enumerate()
                 .min_by(|a, b| a.1.exploit_rate().total_cmp(&b.1.exploit_rate()))
@@ -3831,6 +3839,31 @@ mod tests {
         assert!(generations.contains(&1), "high-exploit member must survive");
         assert!(generations.contains(&3), "fresh member must be retained");
         assert!(!generations.contains(&2), "weakest sparring partner is evicted");
+    }
+
+    #[test]
+    fn league_insert_retains_a_fresh_snapshot_even_when_every_incumbent_dominates() {
+        // PFSP steady state: a full league where EVERY incumbent beats the current
+        // policy (exploit_rate > 0.5). A fresh snapshot (exploit_rate == 0.5) must
+        // still be admitted — an *old* member is evicted, not the newcomer.
+        let mut league = SoccerPolicyLeague::new(2);
+        league.insert(1, league_policies_with_alpha(0.1));
+        league.insert(2, league_policies_with_alpha(0.2));
+        for _ in 0..10 {
+            league.record_result(0, true); // gen 1 → 11/12 ≈ 0.92
+            league.record_result(1, true); // gen 2 → 11/12 ≈ 0.92
+        }
+        league.insert(3, league_policies_with_alpha(0.3));
+        let generations: Vec<u32> = league.members().iter().map(|m| m.generation).collect();
+        assert_eq!(league.len(), 2);
+        assert!(
+            generations.contains(&3),
+            "fresh snapshot must survive even when all incumbents dominate: {generations:?}"
+        );
+        assert!(
+            generations.iter().filter(|&&g| g == 1 || g == 2).count() == 1,
+            "exactly one old generation should have been evicted: {generations:?}"
+        );
     }
 
     #[test]

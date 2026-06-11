@@ -864,6 +864,12 @@ const SOCCER_POLICY_LEARNING_RATE: f64 = 0.05;
 const SOCCER_POLICY_ENTROPY_COEFF: f64 = 0.01;
 /// GAE(λ) trace decay for advantage estimation along an agent's trajectory.
 const SOCCER_POLICY_GAE_LAMBDA: f64 = 0.95;
+/// Max tick gap between an agent's *consecutive decisions* that still counts as a
+/// real successor for bootstrapping/transition pairs. A larger gap (the agent was
+/// idle, or play reset after a goal/restart) is treated as a trajectory break.
+/// Note: the full-game replay overloads `transition.done` (sets it on every row),
+/// so terminals are derived from this gap + trajectory ends, never from `done`.
+const SOCCER_TRAJECTORY_MAX_DECISION_GAP_TICKS: u64 = 3;
 /// Gradient-norm ceiling for the actor's SGD step (same guard family as the critic).
 const SOCCER_POLICY_GRAD_CLIP_NORM: f64 = 5.0;
 /// Decision-time weight on the actor's log-probability when it biases action
@@ -15287,6 +15293,11 @@ pub struct SoccerNeuralBlendConfig {
     /// biases action selection on top of the value blend. Off by default.
     #[serde(default)]
     pub actor_critic: bool,
+    /// Train the learned **world model** `P̂(s'|s,a)` on the episode replay. Off
+    /// by default. (Used for model-based value look-ahead / diagnostics; it does
+    /// not alter action selection on its own.)
+    #[serde(default)]
+    pub world_model: bool,
 }
 
 fn default_soccer_neural_blend_lambda() -> f64 {
@@ -15315,6 +15326,7 @@ impl Default for SoccerNeuralBlendConfig {
             candidates: default_soccer_neural_blend_candidates(),
             warmup_steps: default_soccer_neural_blend_warmup_steps(),
             actor_critic: false,
+            world_model: false,
         }
     }
 }
@@ -42192,9 +42204,20 @@ pub fn soccer_moment_embedding(features: &[f64]) -> Vec<f64> {
 fn soccer_neural_transition_features(
     transition: &SoccerLearningTransition,
 ) -> [f64; SOCCER_NEURAL_FEATURE_DIM] {
+    soccer_neural_transition_features_with_action(transition, &transition.action)
+}
+
+/// As [`soccer_neural_transition_features`], but with the action channels computed
+/// from `action` instead of `transition.action`. Lets the policy head build
+/// state-only features (a null action) from a *borrowed* transition without
+/// cloning the (heavy) transition just to blank its action string.
+fn soccer_neural_transition_features_with_action(
+    transition: &SoccerLearningTransition,
+    action: &str,
+) -> [f64; SOCCER_NEURAL_FEATURE_DIM] {
     let state = SoccerQStateKey::from_transition(transition);
     let (action_attack, action_defense, action_support) =
-        soccer_neural_action_family_features(&transition.action);
+        soccer_neural_action_family_features(action);
     let context = &transition.decision_context;
     let nearest_defender = context.nearest_defenders.first();
     let features = [
@@ -42242,7 +42265,7 @@ fn soccer_neural_transition_features(
         soccer_neural_bin(state.skill_dribbling_bin, 5.0),
         soccer_neural_bin(state.skill_defending_bin, 5.0),
         soccer_neural_bin(state.skill_vision_bin, 5.0),
-        soccer_neural_action_hash(&transition.action),
+        soccer_neural_action_hash(action),
         action_attack,
         action_defense,
         action_support,
@@ -42538,6 +42561,9 @@ pub struct SoccerMatch {
     /// from the critic (the value head). Present only when the run opts into
     /// actor-critic (`neural_blend.actor_critic` + neural learning enabled).
     policy_head: Option<SoccerPolicyHead>,
+    /// The learned **world model** `P̂(s'|s,a)` over the feature space, trained on
+    /// consecutive transitions. Present only when `neural_blend.world_model` is on.
+    world_model: Option<SoccerWorldModel>,
     pub human_inputs: SharedHumanInputs,
     /// Latched human movement per controller slot. Human input arrives intermittently
     /// (key events, one frame per /api/step) but the sim ticks many times between
@@ -42900,6 +42926,7 @@ impl SoccerMatch {
             },
             neural_blend: SoccerNeuralBlendConfig::default(),
             policy_head: None,
+            world_model: None,
             human_inputs: SharedHumanInputs::new(),
             latched_human_inputs: HashMap::new(),
             central_brain: CentralBrain::default(),
@@ -44609,9 +44636,12 @@ impl SoccerMatch {
         &self,
         transition: &SoccerLearningTransition,
     ) -> [f64; SOCCER_NEURAL_FEATURE_DIM] {
-        let mut state_only = transition.clone();
-        state_only.action = String::new();
-        soccer_neural_transition_features(&state_only)
+        // Null action ⇒ pure state features, with no per-row clone of the (heavy)
+        // transition. NOTE (wm-2): a handful of channels are still derived from
+        // `decision_context` geometry that the realised action shaped, so this is
+        // "state-dominant", not perfectly action-independent — adequate as the
+        // policy/world-model state encoding, and identical at train and inference.
+        soccer_neural_transition_features_with_action(transition, "")
     }
 
     /// Build actor-critic training samples from a replay: opponent-centered reward
@@ -44630,11 +44660,15 @@ impl SoccerMatch {
             return Vec::new();
         }
         let target_scale = self.config.neural_learning.sanitized_target_scale();
-        let gamma = self
-            .team_policies
-            .as_ref()
-            .map(|tp| soccer_q_sanitized_gamma(tp.home.options.gamma))
-            .unwrap_or_else(|| soccer_q_sanitized_gamma(SoccerQPolicyOptions::default().gamma));
+        // Per-team discount: the critic bootstraps each team's value with that
+        // team's own gamma, so the advantage must discount with the same gamma
+        // (home and away can carry independent policy options).
+        let team_gamma = |team: Team| -> f64 {
+            self.team_policies
+                .as_ref()
+                .map(|tp| soccer_q_sanitized_gamma(tp.policy(team).options.gamma))
+                .unwrap_or_else(|| soccer_q_sanitized_gamma(SoccerQPolicyOptions::default().gamma))
+        };
 
         // Per-tick team reward aggregation for the zero-sum opponent centering.
         let mut tick_rewards: HashMap<u64, (f64, u32, f64, u32)> = HashMap::new();
@@ -44695,17 +44729,36 @@ impl SoccerMatch {
                 .push(index);
         }
         let mut advantages = vec![0.0f64; replay.len()];
-        for (_, mut indices) in by_agent {
+        for ((team, _player), mut indices) in by_agent {
+            let gamma = team_gamma(team);
             indices.sort_by_key(|&i| replay[i].tick);
-            let mut next_value = 0.0; // V(s_{t+1}); 0 at the trajectory tail (treated terminal)
+            // `values[i]` is the critic on the realised action ≈ Q(sᵢ,aᵢ); used as
+            // the bootstrap/baseline (an on-policy/SARSA-style advantage). 0 at the
+            // trajectory tail (terminal).
+            let mut next_value = 0.0;
             let mut next_advantage = 0.0;
+            let mut next_tick: Option<u64> = None;
             for &i in indices.iter().rev() {
-                let nonterminal = if replay[i].done { 0.0 } else { 1.0 };
+                // Bootstrap only when the next decision is a real, immediate
+                // successor. Terminal = trajectory end (`next_tick` is None) or a
+                // large decision gap (idle / post-goal reset). The `done` flag is
+                // unusable here — the full-game replay sets it on every row.
+                let nonterminal = match next_tick {
+                    Some(tick)
+                        if tick.saturating_sub(replay[i].tick)
+                            <= SOCCER_TRAJECTORY_MAX_DECISION_GAP_TICKS =>
+                    {
+                        1.0
+                    }
+                    _ => 0.0,
+                };
                 let delta = reward_adv[i] + gamma * next_value * nonterminal - values[i];
-                let advantage = delta + gamma * SOCCER_POLICY_GAE_LAMBDA * next_advantage * nonterminal;
+                let advantage =
+                    delta + gamma * SOCCER_POLICY_GAE_LAMBDA * next_advantage * nonterminal;
                 advantages[i] = advantage;
                 next_value = values[i];
                 next_advantage = advantage;
+                next_tick = Some(replay[i].tick);
             }
         }
 
@@ -44728,6 +44781,80 @@ impl SoccerMatch {
         if self.policy_head.is_none() {
             self.policy_head = Some(SoccerPolicyHead::new(self.config.seed));
         }
+    }
+
+    fn ensure_world_model(&mut self) {
+        if self.world_model.is_none() {
+            self.world_model = Some(SoccerWorldModel::new(self.config.seed));
+        }
+    }
+
+    /// `(features_t, next_state_features)` training pairs for the world model:
+    /// consecutive transitions of the *same* agent, input = `(s_t ⊕ a_t)` features
+    /// (the real action), target = `s_{t+1}` features (built with a null action so
+    /// the model predicts the next *state*, independent of the next action). Pairs
+    /// are dropped across a `done` boundary (no real successor) and where features
+    /// are non-finite.
+    fn neural_world_model_training_pairs(
+        &self,
+        replay: &[SoccerLearningTransition],
+    ) -> Vec<(
+        [f64; SOCCER_NEURAL_FEATURE_DIM],
+        [f64; SOCCER_NEURAL_FEATURE_DIM],
+    )> {
+        if replay.len() < 2 {
+            return Vec::new();
+        }
+        let mut by_agent: HashMap<(Team, usize), Vec<usize>> = HashMap::new();
+        for (index, transition) in replay.iter().enumerate() {
+            by_agent
+                .entry((transition.team, transition.player_id))
+                .or_default()
+                .push(index);
+        }
+        let mut pairs = Vec::new();
+        for (_, mut indices) in by_agent {
+            indices.sort_by_key(|&i| replay[i].tick);
+            for window in indices.windows(2) {
+                let (current, next) = (window[0], window[1]);
+                // Only pair real, immediate successors. A zero or large decision
+                // gap (idle / post-goal reset) is not a valid 1-step transition.
+                // `done` is unusable here (the full-game replay sets it everywhere).
+                let gap = replay[next].tick.saturating_sub(replay[current].tick);
+                if gap == 0 || gap > SOCCER_TRAJECTORY_MAX_DECISION_GAP_TICKS {
+                    continue;
+                }
+                let input = soccer_neural_transition_features(&replay[current]);
+                let target = self.policy_state_features(&replay[next]);
+                if input.iter().all(|v| v.is_finite()) && target.iter().all(|v| v.is_finite()) {
+                    pairs.push((input, target));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// One-step model-based value estimate: roll the world model forward one step
+    /// from `(s, a)` and score the predicted next state with the critic, returning
+    /// it in reward units. `None` when no model/critic is available or the rollout
+    /// is degenerate.
+    ///
+    /// Approximation (MBV-PARITY-01): the world model predicts *next-state* (null
+    /// action) features, but the critic was trained on action-inclusive features —
+    /// so the 4 action-family channels are off-distribution here (constant 0 / the
+    /// empty-action hash) relative to critic training. The other 149 channels match.
+    /// This is a diagnostic look-ahead signal and does **not** drive action
+    /// selection, so the small mismatch is acceptable; revisit if it ever feeds
+    /// decisions (e.g. score with each candidate action's channels instead).
+    pub fn model_based_value(&self, transition: &SoccerLearningTransition) -> Option<f64> {
+        let world_model = self.world_model.as_ref()?;
+        let learner = self.neural_learner.as_ref()?;
+        let predicted_next = world_model
+            .predict_next(&soccer_neural_transition_features(transition))?;
+        let target_scale = self.config.neural_learning.sanitized_target_scale();
+        learner
+            .predict_value(&predicted_next)
+            .map(|value| value * target_scale)
     }
 
     fn apply_full_game_learning_if_ready(&mut self) {
@@ -44785,11 +44912,25 @@ impl SoccerMatch {
         } else {
             Vec::new()
         };
+        // World model: predict-next-state pairs from the *current* features
+        // (built before the value update, like the actor's advantages).
+        let world_model_pairs = if self.neural_blend.world_model && self.config.neural_learning.enabled
+        {
+            self.neural_world_model_training_pairs(&replay)
+        } else {
+            Vec::new()
+        };
         self.train_neural_value_model(neural_samples);
         if !policy_samples.is_empty() {
             self.ensure_policy_head();
             if let Some(policy_head) = &mut self.policy_head {
                 policy_head.train(&policy_samples);
+            }
+        }
+        if !world_model_pairs.is_empty() {
+            self.ensure_world_model();
+            if let Some(world_model) = &mut self.world_model {
+                world_model.train(&world_model_pairs);
             }
         }
     }
@@ -82998,6 +83139,44 @@ mod tests {
         assert!(head.training_steps > 0);
         let sum: f64 = after.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9 && after.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn world_model_trains_and_predicts_a_finite_next_state() {
+        let mut config = MatchConfig {
+            duration_seconds: 2.0,
+            seed: 5_151,
+            ..Default::default()
+        };
+        config.learning_enabled = true;
+        config.full_game_learning_enabled = true;
+        config.neural_learning.enabled = true;
+        config.neural_learning.backend = SoccerNeuralLearningBackend::Inline;
+        config.neural_learning.hidden_units = 8;
+
+        let blend = SoccerNeuralBlendConfig {
+            world_model: true,
+            ..Default::default()
+        };
+        let mut sim = SoccerMatch::default_11v11(config)
+            .with_team_policies(SoccerTeamQPolicies::new(SoccerQPolicyOptions::default()))
+            .with_neural_blend(blend);
+        let total_ticks = sim.config.total_ticks();
+        for _ in 0..total_ticks {
+            sim.run_time_step();
+        }
+        let world_model = sim
+            .world_model
+            .as_ref()
+            .expect("world-model run should create a model");
+        assert!(world_model.training_steps > 0, "world model should have trained");
+        // It predicts a finite, correctly-dimensioned next-state feature vector.
+        let features = [0.1f64; SOCCER_NEURAL_FEATURE_DIM];
+        let next = world_model
+            .predict_next(&features)
+            .expect("finite next-state prediction");
+        assert_eq!(next.len(), SOCCER_NEURAL_FEATURE_DIM);
+        assert!(next.iter().all(|v| v.is_finite()));
     }
 
     #[test]

@@ -576,6 +576,14 @@ impl FeedForwardNetwork {
             "policy action index {action} out of range for {} outputs",
             self.output_dim
         );
+        // The outputs are treated as logits — softmax is applied here, so the
+        // output layer must be Linear or the gradient is wrong. Enforce the
+        // contract (debug builds / tests) rather than silently miscomputing.
+        debug_assert_eq!(
+            self.layers.last().map(|layer| layer.activation),
+            Some(ActivationName::Linear),
+            "train_policy_gradient_sample requires a Linear output layer"
+        );
         self.assert_vector(input, self.input_dim, "input");
         if !advantage.is_finite() {
             // Nothing to learn from a non-finite advantage; skip cleanly.

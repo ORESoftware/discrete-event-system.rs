@@ -254,6 +254,16 @@ const DEFENSIVE_PUSH_UP_BLEND: f64 = 0.5; // move halfway to the ideal line, nev
 const DEFENSIVE_PUSH_UP_SPRINT_GAP_YARDS: f64 = 6.0; // gap above which it's a run, not a jog.
 const DEFENSIVE_PUSH_UP_DEFENDER_MAX_FRACTION: f64 = 0.46; // a defender holds up to ~46% upfield.
 const DEFENSIVE_PUSH_UP_MIDFIELDER_MAX_FRACTION: f64 = 0.60; // a midfielder pushes higher still.
+// Anti-dogpile / anti-ring discipline during a scrum (e.g. a possession livelock).
+// The base anti-bunchball guard only polices targets diving inside 3yd of the ball,
+// so excess bodies can still hover in a 2–6yd "ring" around a locked pair. When the
+// ball area is genuinely crowded we widen the policed band to that ring and pull
+// excess bodies hard back to their MARKING/zone assignment (track a man, hold the
+// shape) instead of orbiting the contest. Gated on real congestion so ordinary
+// support/overlap play (and the base-guard unit tests) are untouched.
+const LIVELOCK_RING_DISPERSAL_RADIUS_YARDS: f64 = 7.0; // outer edge of the ring we disperse.
+const LIVELOCK_DOGPILE_FIELD_COUNT: usize = 5; // field players within the ring that flags a dogpile.
+const LIVELOCK_SHAPE_RECOVERY_BIAS: f64 = 0.85; // stronger pull to the marking slot during a dogpile.
 // Aerial header / flick reception: when a player meets a falling ball at head/chest
 // height (≈3–10 ft) under pressure, they head it away / flick it on instead of
 // settling it; with no opponent within the pressure radius they chest it down.
@@ -24166,9 +24176,30 @@ impl WorldSnapshot {
         if self.point_in_either_penalty_area(ball) {
             return target;
         }
-        // Only intervene when the target actually dives onto the ball; a run into
-        // space away from the ball is exactly what we want, so leave it.
-        if target.distance(ball) > BALL_CLUSTER_RADIUS_YARDS {
+        // Dogpile detection: a genuinely crowded ball area (a scrum / possession
+        // livelock). When crowded we widen the policed band to the surrounding ring
+        // and disperse excess bodies hard back to their man/zone — this is what stops
+        // the unrealistic 2–6yd semicircle forming around a locked pair. In normal
+        // play this is false, so the guard behaves exactly as before.
+        let dogpile = self
+            .players
+            .iter()
+            .filter(|p| {
+                p.role != PlayerRole::Goalkeeper
+                    && self.player_snapshot_position(p).distance(ball)
+                        <= LIVELOCK_RING_DISPERSAL_RADIUS_YARDS
+            })
+            .count()
+            >= LIVELOCK_DOGPILE_FIELD_COUNT;
+        let police_radius = if dogpile {
+            LIVELOCK_RING_DISPERSAL_RADIUS_YARDS
+        } else {
+            BALL_CLUSTER_RADIUS_YARDS
+        };
+        // Only intervene when the target dives onto the ball (or, in a dogpile, into
+        // the ring around it); a run into space away from the ball is exactly what we
+        // want, so leave it.
+        if target.distance(ball) > police_radius {
             return target;
         }
         // Count same-team field players already ON the ball (inside the radius) that

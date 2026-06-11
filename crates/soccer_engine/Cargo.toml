@@ -1,0 +1,42 @@
+# soccer-sim-game-engine — the agnostic soccer simulation + learning library.
+#
+# Depends on `des_engine` for the generic optimization/learning primitives
+# (LP/IP-MIP/Clarabel, neural-network MLP + policy-gradient, MDP/POMDP, PRNG,
+# animation framework). Contains NO HTTP server by default so a desktop game can
+# import it clean; the web request→reply bridge and the legacy embedded socket
+# server are gated behind opt-in features.
+#
+# During the extraction this is a workspace member of discrete-event-system.rs;
+# it is promoted to its own repo (soccer-sim-game-engine.rs) at P4, at which
+# point `des_engine` becomes `{ path = "../discrete-event-system.rs" }`.
+[package]
+name = "soccer_engine"
+version = "0.0.1"
+edition = "2021"
+description = "Agnostic 2D soccer simulation + reinforcement-learning game engine, built on des_engine."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "soccer_engine"
+
+[dependencies]
+des_engine = { path = "../.." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+# Postgres-backed learning persistence (soccer_learning_pg). Off by default so
+# the desktop-game / pure-sim build needs no DB stack.
+postgres = { version = "0.19", features = ["with-serde_json-1"], optional = true }
+native-tls = { version = "0.2", optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
+
+[features]
+default = []
+# Postgres learning persistence.
+postgres-learning = ["dep:postgres", "dep:native-tls", "dep:postgres-native-tls"]
+# Transport-agnostic web request→reply bridge + HTML page generators (consumed by
+# the axum servers; NOT a socket server).
+web-bridge = []
+# Legacy standalone TcpListener server (local-dev `main_soccer_live` only).
+embedded-http-server = ["web-bridge"]

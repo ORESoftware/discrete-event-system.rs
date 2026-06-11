@@ -893,6 +893,16 @@ impl EvolutionSearchSample {
     }
 }
 
+/// Resident set size in MB (Linux `/proc/self/statm`), 0 if unavailable. Feeds the
+/// per-game `soccer_mem_diag` line so we can locate unbounded growth in the learner.
+fn process_rss_mb() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1).and_then(|pages| pages.parse::<u64>().ok()))
+        .map(|pages| pages.saturating_mul(4096) / (1024 * 1024))
+        .unwrap_or(0)
+}
+
 fn push_evolution_search_samples(
     samples: &mut VecDeque<EvolutionSearchSample>,
     completed_games: &[CompletedGame],
@@ -2952,6 +2962,22 @@ fn run() -> Result<(), Box<dyn Error>> {
                 write_episode_log(episode_log, &game.episode_summary)?;
             }
             episode_summaries.push(game.episode_summary.clone());
+            // Per-game memory diagnostic: locate the unbounded structure behind the
+            // 122GB OOM (every other accumulator audited as bounded). Grep
+            // `soccer_mem_diag` in the pod logs and watch which column climbs.
+            eprintln!(
+                "soccer_mem_diag episode={} rss_mb={} home_q={} home_t={} away_q={} away_t={} pg_completed_buf={} evo_samples={} episode_summaries={} manifest_games={}",
+                game.episode_summary.episode,
+                process_rss_mb(),
+                policies.home.q_values.len(),
+                policies.home.target_values.len(),
+                policies.away.q_values.len(),
+                policies.away.target_values.len(),
+                pg_completed_buffer.len(),
+                evolution_search_samples.len(),
+                episode_summaries.len(),
+                manifest_games.len()
+            );
             if let Some(episode_log) = episode_log.as_mut() {
                 if episode_log_flush_interval_games > 0
                     && episode_summaries.len() % episode_log_flush_interval_games == 0

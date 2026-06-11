@@ -48,6 +48,12 @@ postgres-native-tls = "0.5"
 # graph specs below derive JsonSchema, so the schema and serde surface cannot
 # drift silently.
 schemars = { version = "1.2.1", features = ["derive"] }
+# Clarabel: production-grade pure-Rust primal-dual INTERIOR-POINT conic solver
+# (no BLAS/C deps by default). The internal simplex cannot solve the realtime
+# formation LP (521 vars / 750 constraints) — it hits iter-limit at hundreds of
+# ms and falls back to heuristic anchors. Clarabel solves that size in single-
+# digit ms, making an exact realtime formation solve viable.
+clarabel = "0.11"
 
 [features]
 # Enables the GpuBatchBackend registration hook (no external GPU crate bundled).

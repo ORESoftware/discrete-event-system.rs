@@ -69,8 +69,8 @@ spec:
               require_value SOCCER_NEURAL_LEARNING_ENABLED true
               require_value SOCCER_NEURAL_LEARNING_BACKEND threaded
               require_value SOCCER_PARALLEL_GAMES 3
-              require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 5
-              require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 5
+              require_value SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES 1
+              require_value SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES 1
               require_value SOCCER_POSTGRES_TACTICAL_LEARNING_AUTHORITATIVE true
               require_value SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT true
               require_value SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM true
@@ -201,9 +201,9 @@ spec:
             - name: SOCCER_NEURAL_DRAIN_TIMEOUT_MS
               value: "60000"
             - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
-              value: "5"
+              value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES
-              value: "5"
+              value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_RETENTION_GAMES
               value: "500"
             - name: SOCCER_POSTGRES_ASYNC_BATCH_QUEUE

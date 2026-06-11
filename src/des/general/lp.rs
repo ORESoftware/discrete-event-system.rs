@@ -663,6 +663,75 @@ impl LPBasisWarmStart {
             primal_start: (solution.x.len() > 0).then_some(solution.x.clone()),
         })
     }
+
+    /// Best-effort **crossover** from an interior point to a simplex basis.
+    ///
+    /// An interior-point solve returns a near-optimal primal vector `x` but no
+    /// basis (it lives in the interior, not at a vertex), so [`from_solution`]
+    /// cannot warm-start a simplex from it. This infers a candidate basis by
+    /// complementary-slackness rounding of `x`: a variable strictly inside its
+    /// bounds is taken **basic**, one sitting on a bound **nonbasic at that
+    /// bound**; an inequality row with positive slack has its **slack basic**,
+    /// a tight row is nonbasic; equality rows are tight. Handing the result to
+    /// [`solve_lp_internal`] as `basis_start` lets the simplex pivot to the true
+    /// vertex in a few steps instead of solving cold — the standard IPM→simplex
+    /// crossover. Returns `None` if `x` is the wrong length or non-finite (the
+    /// caller then falls back to a cold solve).
+    pub fn from_primal_point(p: &LPProblem, x: &[f64], tol: f64) -> Option<Self> {
+        let n = p.c.len();
+        if x.len() != n || x.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        // Default lower bound is 0; `Some(vec)` with a `None` entry means −∞.
+        let lower = |i: usize| -> Option<f64> {
+            match &p.lb {
+                None => Some(0.0),
+                Some(v) => v.get(i).copied().flatten(),
+            }
+        };
+        let upper = |i: usize| -> Option<f64> {
+            match &p.ub {
+                None => None,
+                Some(v) => v.get(i).copied().flatten(),
+            }
+        };
+
+        let mut var_basis = Vec::with_capacity(n);
+        for (i, &xi) in x.iter().enumerate() {
+            let at_upper = upper(i).is_some_and(|u| (xi - u).abs() <= tol);
+            let at_lower = lower(i).is_some_and(|l| (xi - l).abs() <= tol);
+            var_basis.push(
+                if at_upper {
+                    "at_upper"
+                } else if at_lower {
+                    "at_lower"
+                } else {
+                    "basic"
+                }
+                .to_string(),
+            );
+        }
+
+        let a_ub: &[Vec<f64>] = p.a_ub.as_deref().unwrap_or(&[]);
+        let b_ub: &[f64] = p.b_ub.as_deref().unwrap_or(&[]);
+        let a_eq: &[Vec<f64>] = p.a_eq.as_deref().unwrap_or(&[]);
+        let mut row_basis = Vec::with_capacity(a_ub.len() + a_eq.len());
+        for (r, row) in a_ub.iter().enumerate() {
+            let ax: f64 = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
+            let slack = b_ub.get(r).copied().unwrap_or(0.0) - ax;
+            // Loose row ⇒ its slack is basic; a tight row is nonbasic at bound.
+            row_basis.push(if slack > tol { "basic" } else { "at_lower" }.to_string());
+        }
+        for _ in 0..a_eq.len() {
+            row_basis.push("at_lower".to_string()); // equalities are always tight
+        }
+
+        Some(LPBasisWarmStart {
+            var_basis,
+            row_basis,
+            primal_start: Some(x.to_vec()),
+        })
+    }
 }
 
 /// Configuration for the internal simplex. TS `interface InternalSimplexOptions`.
@@ -3608,6 +3677,169 @@ pub fn solve_lp_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions)
     run_internal_ipm(p, opts)
 }
 
+/// Solve a standard-form `LPProblem` with the Clarabel sparse interior-point
+/// conic solver. Conversion: `min q'x  s.t. Ax + s = b, s in K`, with
+///   - equalities (`a_eq x = b_eq`)        -> ZeroCone rows,
+///   - inequalities (`a_ub x <= b_ub`) and
+///     variable bounds (`lb <= x <= ub`)   -> NonnegativeCone rows.
+/// LP has no quadratic term, so `P = 0`. `Sense::Max` is handled by negating
+/// the linear objective and reporting the original `c'x`.
+pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
+    use clarabel::algebra::CscMatrix;
+    use clarabel::solver::{
+        DefaultSettingsBuilder, DefaultSolver, IPSolver, SolverStatus, SupportedConeT,
+    };
+    let t0 = Instant::now();
+    let n = p.c.len();
+    let maximize = matches!(p.sense, Sense::Max);
+    let q: Vec<f64> = p
+        .c
+        .iter()
+        .map(|&ci| if maximize { -ci } else { ci })
+        .collect();
+    // Equalities first (ZeroCone), then inequalities + bounds (NonnegativeCone).
+    let mut a_rows: Vec<Vec<f64>> = Vec::new();
+    let mut b: Vec<f64> = Vec::new();
+    let mut n_eq = 0usize;
+    if let (Some(a_eq), Some(b_eq)) = (p.a_eq.as_ref(), p.b_eq.as_ref()) {
+        for (r, row) in a_eq.iter().enumerate() {
+            a_rows.push(row.clone());
+            b.push(b_eq.get(r).copied().unwrap_or(0.0));
+            n_eq += 1;
+        }
+    }
+    let mut n_ineq = 0usize;
+    if let (Some(a_ub), Some(b_ub)) = (p.a_ub.as_ref(), p.b_ub.as_ref()) {
+        for (r, row) in a_ub.iter().enumerate() {
+            a_rows.push(row.clone());
+            b.push(b_ub.get(r).copied().unwrap_or(0.0));
+            n_ineq += 1;
+        }
+    }
+    if let Some(lb) = p.lb.as_ref() {
+        for (j, bound) in lb.iter().enumerate().take(n) {
+            if let Some(l) = bound {
+                let mut row = vec![0.0; n];
+                row[j] = -1.0;
+                a_rows.push(row);
+                b.push(-*l);
+                n_ineq += 1;
+            }
+        }
+    }
+    if let Some(ub) = p.ub.as_ref() {
+        for (j, bound) in ub.iter().enumerate().take(n) {
+            if let Some(u) = bound {
+                let mut row = vec![0.0; n];
+                row[j] = 1.0;
+                a_rows.push(row);
+                b.push(*u);
+                n_ineq += 1;
+            }
+        }
+    }
+    let m = a_rows.len();
+    let p_mat = CscMatrix::<f64>::zeros((n, n));
+    let a_mat = lp_dense_rows_to_csc(&a_rows, m, n);
+    let mut cones: Vec<SupportedConeT<f64>> = Vec::new();
+    if n_eq > 0 {
+        cones.push(SupportedConeT::ZeroConeT(n_eq));
+    }
+    if n_ineq > 0 {
+        cones.push(SupportedConeT::NonnegativeConeT(n_ineq));
+    }
+    let settings = DefaultSettingsBuilder::<f64>::default()
+        .verbose(false)
+        .max_iter(200)
+        .build()
+        .expect("clarabel default settings build");
+    let mut solver = match DefaultSolver::new(&p_mat, &q, &a_mat, &b, &cones, settings) {
+        Ok(s) => s,
+        Err(_) => {
+            return empty_lp_solution(
+                LPStatus::NumericalError,
+                "clarabel",
+                t0,
+                Some("clarabel solver construction failed".to_string()),
+            )
+        }
+    };
+    solver.solve();
+    let solution = &solver.solution;
+    let status = match solution.status {
+        SolverStatus::Solved | SolverStatus::AlmostSolved => LPStatus::Optimal,
+        SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
+            LPStatus::Infeasible
+        }
+        SolverStatus::DualInfeasible | SolverStatus::AlmostDualInfeasible => LPStatus::Unbounded,
+        SolverStatus::MaxIterations => LPStatus::IterLimit,
+        _ => LPStatus::NumericalError,
+    };
+    let x = if status == LPStatus::Optimal {
+        solution.x.clone()
+    } else {
+        Vec::new()
+    };
+    let objective = match status {
+        LPStatus::Optimal => p.c.iter().zip(x.iter()).map(|(&c, &xi)| c * xi).sum(),
+        LPStatus::Unbounded => {
+            if maximize {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            }
+        }
+        _ => f64::NAN,
+    };
+    LPSolution {
+        status,
+        x,
+        objective,
+        dual_ub: None,
+        dual_eq: None,
+        reduced_costs: None,
+        var_basis: None,
+        row_basis: None,
+        unbounded_ray: None,
+        infeasibility_certificate: None,
+        iters: Some(solution.iterations as usize),
+        solver: "clarabel".to_string(),
+        elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        message: None,
+    }
+}
+
+/// Convert dense constraint rows to a Clarabel CSC matrix (column-major).
+fn lp_dense_rows_to_csc(rows: &[Vec<f64>], m: usize, n: usize) -> clarabel::algebra::CscMatrix<f64> {
+    let mut colptr = vec![0usize; n + 1];
+    for row in rows {
+        for (j, slot) in colptr.iter_mut().enumerate().skip(1).take(n) {
+            if row.get(j - 1).copied().unwrap_or(0.0) != 0.0 {
+                *slot += 1;
+            }
+        }
+    }
+    for j in 0..n {
+        colptr[j + 1] += colptr[j];
+    }
+    let nnz = colptr[n];
+    let mut rowval = vec![0usize; nnz];
+    let mut nzval = vec![0.0f64; nnz];
+    let mut next = colptr.clone();
+    for (i, row) in rows.iter().enumerate() {
+        for j in 0..n {
+            let v = row.get(j).copied().unwrap_or(0.0);
+            if v != 0.0 {
+                let pos = next[j];
+                rowval[pos] = i;
+                nzval[pos] = v;
+                next[j] += 1;
+            }
+        }
+    }
+    clarabel::algebra::CscMatrix::new(m, n, colptr, rowval, nzval)
+}
+
 // Pivoting machinery. Bland's rule for entering / leaving to guarantee
 // finite termination on small problems.
 struct SimplexResult {
@@ -5455,6 +5687,43 @@ mod tests {
     }
 
     #[test]
+    fn ipm_crossover_to_simplex_basis_reaches_same_optimum() {
+        // The interior-point solve returns a point but no basis; the crossover
+        // must round it to a basis the simplex can polish to the true vertex.
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 1.0], vec![1.0, 3.0]]),
+            b_ub: Some(vec![4.0, 6.0]),
+            ..Default::default()
+        };
+        let cold = solve_lp_internal(&p, &opts());
+        assert_eq!(cold.status, LPStatus::Optimal, "{cold:?}");
+
+        let ipm = solve_lp_internal_ipm(&p, &InternalInteriorPointOptions::default());
+        assert_eq!(ipm.status, LPStatus::Optimal, "{ipm:?}");
+        // IPM yields an interior point with no basis to warm-start from directly.
+        assert!(ipm.var_basis.is_none());
+        assert!(LPBasisWarmStart::from_solution(&ipm).is_none());
+
+        // Crossover the interior point, then polish with the simplex.
+        let crossover =
+            LPBasisWarmStart::from_primal_point(&p, &ipm.x, 1e-6).expect("crossover basis");
+        let polished = solve_lp_internal(
+            &p,
+            &InternalSimplexOptions {
+                max_iter: Some(50),
+                tol: None,
+                basis_start: Some(crossover),
+            },
+        );
+        assert_eq!(polished.status, LPStatus::Optimal, "{polished:?}");
+        assert_close(polished.objective, cold.objective);
+        // The polished solve carries a basis, so it can chain into the warm path.
+        assert!(LPBasisWarmStart::from_solution(&polished).is_some());
+    }
+
+    #[test]
     fn internal_simplex_reports_equality_dual() {
         let p = LPProblem {
             sense: Sense::Max,
@@ -5846,6 +6115,56 @@ mod tests {
         assert!((sol.objective - 11.0).abs() < 1e-5, "obj={}", sol.objective);
         assert!((sol.x[0] - 3.0).abs() < 1e-5, "x0={}", sol.x[0]);
         assert!((sol.x[1] - 1.0).abs() < 1e-5, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_formation_scale_ipm_vs_simplex() {
+        // Formation LP scale: ~66 decision vars (11 players x6), ~88 dynamics rows.
+        let n = 66usize;
+        let m = 88usize;
+        let c: Vec<f64> = (0..n).map(|i| (((i * 7 + 3) % 17) as f64) - 8.0).collect();
+        let mut a = vec![vec![0.0f64; n]; m];
+        let mut b = vec![0.0f64; m];
+        for i in 0..m {
+            for j in 0..n {
+                a[i][j] = (((i * 5 + j * 11 + 1) % 9) as f64) - 4.0;
+            }
+            b[i] = 60.0;
+        }
+        let p = LPProblem {
+            sense: Sense::Min,
+            c,
+            a_ub: Some(a),
+            b_ub: Some(b),
+            lb: Some(vec![Some(-10.0f64); n]),
+            ub: Some(vec![Some(10.0f64); n]),
+            ..Default::default()
+        };
+        let ipm_opts = InternalInteriorPointOptions::default();
+        let splx_opts = InternalSimplexOptions {
+            max_iter: Some(12_000),
+            tol: Some(1e-8),
+            basis_start: None,
+        };
+        // warm + measure
+        let reps_ipm = 50u128;
+        let t = std::time::Instant::now();
+        let mut ipm = LPStatus::Optimal;
+        for _ in 0..reps_ipm {
+            ipm = solve_lp_internal_ipm(&p, &ipm_opts).status;
+        }
+        let ipm_us = t.elapsed().as_micros() / reps_ipm;
+        let reps_splx = 5u128;
+        let t = std::time::Instant::now();
+        let mut splx = LPStatus::Optimal;
+        for _ in 0..reps_splx {
+            splx = solve_lp_internal(&p, &splx_opts).status;
+        }
+        let splx_us = t.elapsed().as_micros() / reps_splx;
+        eprintln!(
+            "BENCH_FORMATION_LP interior_point_avg={ipm_us}us ({ipm:?}) simplex_avg={splx_us}us ({splx:?}) realtime_budget=1500us"
+        );
     }
 
     #[test]

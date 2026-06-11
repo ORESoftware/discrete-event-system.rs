@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::des::general::general::fisher_yates_shuffle;
 use crate::des::general::lp::{
-    solve_lp_internal, InternalSimplexOptions, LPBasisWarmStart, LPProblem, LPStatus, Sense,
+    solve_lp_clarabel, solve_lp_internal, InternalSimplexOptions, LPBasisWarmStart, LPProblem,
+    LPStatus, Sense,
 };
 use crate::des::general::des_base::neural_network::NeuralNetworkLike;
 use crate::des::general::neural_network::{
@@ -659,7 +660,7 @@ const SOCCER_FORMATION_LP_PRESS_DISTANCE_YARDS: f64 = 2.8;
 const SOCCER_FORMATION_LP_INTERNAL_SIMPLEX_MAX_ITER: usize = 12_000;
 // Per-solve wall-clock budget; over it the iteration cap halves (down to MIN) so
 // the next solve bails within time, recovering toward the max when solves are fast.
-const SOCCER_FORMATION_LP_SOLVE_BUDGET_MICROS: u128 = 1_500;
+const SOCCER_FORMATION_LP_SOLVE_BUDGET_MICROS: u128 = 10_000;
 const SOCCER_FORMATION_LP_MIN_ITER: usize = 800;
 const SOCCER_FORMATION_LP_ITER_RECOVER_STEP: usize = 1_500;
 // Consecutive over-budget solves before the circuit trips to the heuristic fallback.
@@ -17357,6 +17358,30 @@ impl SoccerFormationLpBrain {
         // is both faster on this problem and yields the basis the warm path
         // chains from. See `LPBasisWarmStart::from_primal_point` for the
         // crossover that would apply if a sparse IPM is added later.)
+        // Cold (first solve / discontinuity cleared the basis): the dense internal
+        // simplex iter-limits on this 521-var/750-constraint LP, so solve with the
+        // SPARSE interior-point (Clarabel) — it converges reliably — then crossover
+        // to a candidate basis the simplex polishes to the true vertex, establishing
+        // the basis future ticks warm-start from. If the polish misses optimality the
+        // interior point is returned (never worse than a pure IPM solve).
+        let ipm = solve_lp_clarabel(&self.problem);
+        if ipm.status == LPStatus::Optimal {
+            if let Some(basis) = LPBasisWarmStart::from_primal_point(&self.problem, &ipm.x, 1e-7) {
+                let polished = solve_lp_internal(
+                    &self.problem,
+                    &InternalSimplexOptions {
+                        max_iter: Some(self.adaptive_max_iter),
+                        tol: Some(1e-8),
+                        basis_start: Some(basis),
+                    },
+                );
+                if polished.status == LPStatus::Optimal {
+                    return polished;
+                }
+            }
+            return ipm;
+        }
+        // Clarabel did not converge (rare): last-resort cold simplex.
         solve_lp_internal(
             &self.problem,
             &InternalSimplexOptions {

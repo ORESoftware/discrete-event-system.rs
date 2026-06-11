@@ -6118,6 +6118,43 @@ mod tests {
     }
 
     #[test]
+    fn clarabel_maximize_box_matches_known_optimum() {
+        // max x + y  s.t.  x <= 4, y <= 3  ->  7 at (4,3)
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0, 1.0],
+            a_ub: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            b_ub: Some(vec![4.0, 3.0]),
+            ..Default::default()
+        };
+        let sol = solve_lp_clarabel(&p);
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective - 7.0).abs() < 1e-4, "obj={}", sol.objective);
+        assert!((sol.x[0] - 4.0).abs() < 1e-4, "x0={}", sol.x[0]);
+        assert!((sol.x[1] - 3.0).abs() < 1e-4, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn clarabel_equalities_and_bounds_match_known_optimum() {
+        // max 3x + 2y  s.t.  x + y = 4, x <= 3, x,y >= 0  ->  11 at (3,1)
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![3.0, 2.0],
+            a_ub: Some(vec![vec![1.0, 0.0]]),
+            b_ub: Some(vec![3.0]),
+            a_eq: Some(vec![vec![1.0, 1.0]]),
+            b_eq: Some(vec![4.0]),
+            lb: Some(vec![Some(0.0), Some(0.0)]),
+            ..Default::default()
+        };
+        let sol = solve_lp_clarabel(&p);
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.objective - 11.0).abs() < 1e-4, "obj={}", sol.objective);
+        assert!((sol.x[0] - 3.0).abs() < 1e-4, "x0={}", sol.x[0]);
+        assert!((sol.x[1] - 1.0).abs() < 1e-4, "x1={}", sol.x[1]);
+    }
+
+    #[test]
     #[ignore = "perf benchmark; run explicitly with --ignored --nocapture"]
     fn bench_formation_scale_ipm_vs_simplex() {
         // Formation LP scale: ~66 decision vars (11 players x6), ~88 dynamics rows.
@@ -6162,8 +6199,14 @@ mod tests {
             splx = solve_lp_internal(&p, &splx_opts).status;
         }
         let splx_us = t.elapsed().as_micros() / reps_splx;
+        let t = std::time::Instant::now();
+        let mut clb = LPStatus::Optimal;
+        for _ in 0..reps_ipm {
+            clb = solve_lp_clarabel(&p).status;
+        }
+        let clb_us = t.elapsed().as_micros() / reps_ipm;
         eprintln!(
-            "BENCH_FORMATION_LP interior_point_avg={ipm_us}us ({ipm:?}) simplex_avg={splx_us}us ({splx:?}) realtime_budget=1500us"
+            "BENCH_FORMATION_LP clarabel_avg={clb_us}us ({clb:?}) interior_point_avg={ipm_us}us ({ipm:?}) simplex_avg={splx_us}us ({splx:?}) realtime_budget=1500us"
         );
     }
 
